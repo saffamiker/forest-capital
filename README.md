@@ -1,6 +1,6 @@
 # Forest Capital Portfolio Intelligence System
 
-MSFA FNA 667 Graduate Practicum — Queens University of Charlotte  
+MSFA FNA 670 Graduate Practicum — Queens University of Charlotte  
 Partner: Forest Capital
 
 ## Research Question
