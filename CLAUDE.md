@@ -3923,6 +3923,101 @@ At the start of each new sprint, Michael will prompt:
 
 Never skip ahead to a later sprint without explicit instruction.
 
+─────────────────────────────────────────────────────────────────────────────
+SPRINT COMPLETION RULES — NON-NEGOTIABLE
+─────────────────────────────────────────────────────────────────────────────
+
+A sprint is NOT complete until ALL of the following are true:
+
+  1. All sprint steps are implemented and running locally
+  2. All Sprint [N] test cases from Section 16b are implemented
+  3. pytest runs locally with zero failures
+  4. npm run test runs locally with zero failures
+  5. Code is committed and pushed to GitHub
+  6. GitHub Actions shows all three jobs GREEN ✅
+  7. tests/MANIFEST.md is updated with sprint test summary
+
+Claude Code must never declare a sprint done before CI is green.
+If CI fails, fix the failures before closing the sprint.
+"It works locally" is not sufficient — CI green is the standard.
+
+─────────────────────────────────────────────────────────────────────────────
+STANDARD SPRINT PROMPT TEMPLATE
+─────────────────────────────────────────────────────────────────────────────
+
+Michael uses this exact prompt to start every sprint:
+
+  "Begin Sprint [N]. Complete all Sprint [N] steps from CLAUDE.md.
+   Before declaring the sprint complete:
+   (a) Implement all Sprint [N] tests specified in Section 16b
+   (b) Run pytest and npm run test locally — both must pass
+   (c) Commit and push to GitHub
+   (d) Confirm GitHub Actions is green on all three jobs
+   (e) Update tests/MANIFEST.md with the Sprint [N] test summary
+   Do not declare Sprint [N] done until all five conditions are met."
+
+─────────────────────────────────────────────────────────────────────────────
+TEST MANIFEST (tests/MANIFEST.md) — UPDATED EACH SPRINT
+─────────────────────────────────────────────────────────────────────────────
+
+Claude Code creates and maintains tests/MANIFEST.md.
+Updated at the close of every sprint. Format:
+
+# Forest Capital — Test Manifest
+
+## Sprint 1 ✅ COMPLETE
+Backend:
+  test_config.py         — all constants correct types and values
+  test_auth.py           — magic link generate, expire, single-use
+  test_mock_data.py      — 10 strategies, valid schemas
+  test_health.py         — /api/health returns 200
+Frontend:
+  LoginPage.test.tsx     — renders, validates queens.edu email
+  BrandContext.test.tsx  — mode toggle switches correctly
+  Dashboard.test.tsx     — renders with mock data
+  StrategyCard.test.tsx  — displays metrics correctly
+E2E:
+  login.spec.ts          — full login flow
+  navigation.spec.ts     — all tabs navigate
+
+## Sprint 2 ⏳ PENDING
+Backend:
+  test_data_fetcher.py   — yfinance fetch, FRED, cache hit/miss
+  test_risk_metrics.py   — Sharpe, Sortino, drawdown calculations
+  test_backtester.py     — walk-forward, no lookahead assertion
+Frontend:
+  Dashboard.test.tsx     — real data replaces mock (update existing)
+
+## Sprint 3 ⏳ PENDING
+Backend:
+  test_statistical_tests.py  — all 12 tests, p-value correctness
+  test_cross_validation.py   — 6 CV methods
+  test_optimizer.py          — 6 optimization methods
+  test_regime_detector.py    — threshold and HMM classification
+
+## Sprint 4 ⏳ PENDING
+Backend:
+  test_scope_guard.py    — in-scope pass, out-of-scope reject
+  test_agents.py         — agent response schema validation
+  test_qa_agent.py       — 30-point checklist execution
+
+## Sprint 5 ⏳ PENDING
+Backend:
+  test_rate_limiting.py  — rate limit enforcement
+  test_credit_cap.py     — daily spend cap
+  test_explainer.py      — Explainer Agent response schema
+Frontend:
+  ChartCommentStrip.test.tsx — strip renders, expands, collapses
+  ExplainableText.test.tsx   — hover and click behaviour
+
+## Sprint 6 ⏳ PENDING
+  Full regression suite
+  Performance benchmarks (API response times)
+  Accessibility audit (axe-core)
+  Print stylesheet test
+
+
+
 
 =============================================================================
 SECTION 18: MAGIC LINK AUTHENTICATION
