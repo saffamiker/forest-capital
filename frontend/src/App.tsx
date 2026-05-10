@@ -49,7 +49,7 @@ function AuthProvider({ children }: { children: ReactNode }) {
   const logout = async () => {
     const token = session?.token
     if (token) {
-      try { await axios.post('/api/auth/logout', { session_token: token }) } catch (_) {}
+      try { await axios.post('/api/auth/logout', { session_token: token }) } catch (_) { /* logout errors are safe to ignore */ }
     }
     localStorage.removeItem('fc_session_token')
     localStorage.removeItem('fc_email')
