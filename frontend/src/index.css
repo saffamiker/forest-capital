@@ -1,0 +1,73 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    background-color: #0a0e1a;
+    color: #e2e8f0;
+    font-family: 'Inter', system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Number values always in JetBrains Mono */
+  .tabular-nums,
+  [data-metric] {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Thin scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0d1424;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1e2d47;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #3b82f6;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-navy-800 border border-border rounded-lg;
+  }
+
+  .badge-pass {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-2xs font-mono font-semibold bg-success/10 text-success border border-success/20;
+  }
+
+  .badge-fail {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-2xs font-mono font-semibold bg-danger/10 text-danger border border-danger/20;
+  }
+
+  .badge-warn {
+    @apply inline-flex items-center px-2 py-0.5 rounded text-2xs font-mono font-semibold bg-warning/10 text-warning border border-warning/20;
+  }
+
+  .metric-value {
+    @apply font-mono text-sm tabular-nums;
+  }
+
+  .section-header {
+    @apply text-xs font-semibold tracking-widest uppercase text-muted;
+  }
+}

@@ -1,0 +1,208 @@
+import { useState, useEffect } from 'react'
+import { CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
+import axios from 'axios'
+import type { Verdict, QACheck, QAAuditResult } from '../types/agents'
+
+interface VerdictStyle {
+  Icon: LucideIcon
+  color: string
+  bg: string
+  border: string
+  badge: string
+}
+
+const VERDICT_CONFIG: Record<Verdict, VerdictStyle> = {
+  PASS: { Icon: CheckCircle,   color: 'text-success', bg: 'bg-success/10', border: 'border-success/20', badge: 'badge-pass' },
+  FAIL: { Icon: XCircle,       color: 'text-danger',  bg: 'bg-danger/10',  border: 'border-danger/20',  badge: 'badge-fail' },
+  WARN: { Icon: AlertTriangle, color: 'text-warning', bg: 'bg-warning/10', border: 'border-warning/20', badge: 'badge-warn' },
+}
+
+function VerdictBadge({ verdict }: { verdict: Verdict }) {
+  const cfg = VERDICT_CONFIG[verdict]
+  return <span className={cfg.badge}>{verdict}</span>
+}
+
+interface CheckRowProps {
+  check: QACheck
+  open: boolean
+  onToggle: () => void
+}
+
+function CheckRow({ check, open, onToggle }: CheckRowProps) {
+  const cfg = VERDICT_CONFIG[check.verdict]
+  const { Icon } = cfg
+  return (
+    <div className={`border rounded-lg overflow-hidden mb-1.5 ${cfg.border}`}>
+      <button
+        onClick={onToggle}
+        className={`w-full flex items-center gap-3 px-3 py-2.5 text-left hover:opacity-90 transition-opacity ${cfg.bg}`}
+      >
+        <Icon className={`w-4 h-4 shrink-0 ${cfg.color}`} />
+        <span className="font-mono text-2xs text-muted w-5 shrink-0">{String(check.id).padStart(2, '0')}</span>
+        <span className="text-white text-xs flex-1">{check.label}</span>
+        <VerdictBadge verdict={check.verdict} />
+        {open ? (
+          <ChevronUp className="w-3.5 h-3.5 text-muted ml-1 shrink-0" />
+        ) : (
+          <ChevronDown className="w-3.5 h-3.5 text-muted ml-1 shrink-0" />
+        )}
+      </button>
+      {open && (
+        <div className="px-3 py-2 border-t border-border/50 bg-navy-900">
+          <p className="text-slate-300 text-xs">{check.detail}</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function QAAuditPanel() {
+  const [audit, setAudit] = useState<QAAuditResult | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [openChecks, setOpenChecks] = useState<Set<number>>(new Set())
+  const [activeCategory, setActiveCategory] = useState('ALL')
+
+  const fetchAudit = async () => {
+    setLoading(true)
+    try {
+      const res = await axios.post<QAAuditResult>('/api/qa/audit')
+      setAudit(res.data)
+    } catch {
+      // handled by parent state
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => { void fetchAudit() }, [])
+
+  const toggleCheck = (id: number) => {
+    setOpenChecks((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) { next.delete(id) } else { next.add(id) }
+      return next
+    })
+  }
+
+  if (!audit && !loading) return (
+    <div className="p-6 text-center text-muted text-sm">
+      <button onClick={() => void fetchAudit()} className="text-electric underline">Load QA Audit</button>
+    </div>
+  )
+
+  if (loading && !audit) return (
+    <div className="p-6 flex items-center gap-2 text-muted text-sm">
+      <RefreshCw className="w-4 h-4 animate-spin" />
+      Running 30-point audit…
+    </div>
+  )
+
+  if (!audit) return null
+
+  const checks = audit.checks
+  const categories = ['ALL', ...new Set(checks.map((c) => c.category))]
+  const filtered = activeCategory === 'ALL' ? checks : checks.filter((c) => c.category === activeCategory)
+
+  const overallCfg = VERDICT_CONFIG[audit.overall_verdict]
+  const { Icon: OverallIcon } = overallCfg
+
+  return (
+    <div className="p-4 md:p-6 max-w-4xl mx-auto space-y-5">
+      {/* Summary card */}
+      <div className={`card p-5 border ${overallCfg.border} ${overallCfg.bg}`}>
+        <div className="flex items-center gap-4">
+          <OverallIcon className={`w-8 h-8 ${overallCfg.color}`} />
+          <div className="flex-1">
+            <div className="flex items-center gap-3">
+              <h2 className="text-white font-bold text-lg">QA Audit Report</h2>
+              <VerdictBadge verdict={audit.overall_verdict} />
+            </div>
+            <p className="text-muted text-sm mt-0.5">
+              30-point methodology checklist · Sprint 1 results
+            </p>
+          </div>
+          <div className="text-right shrink-0">
+            <div className="text-3xl font-mono font-bold text-white">
+              {audit.passed}<span className="text-muted text-xl">/30</span>
+            </div>
+            <div className="text-xs text-muted mt-0.5">checks passed</div>
+          </div>
+        </div>
+
+        {/* Mini breakdown */}
+        <div className="flex gap-3 mt-4 pt-4 border-t border-border/50">
+          <div className="flex items-center gap-1.5">
+            <CheckCircle className="w-3.5 h-3.5 text-success" />
+            <span className="font-mono text-sm text-success">{audit.passed}</span>
+            <span className="text-muted text-xs">passed</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+            <span className="font-mono text-sm text-warning">{audit.warned}</span>
+            <span className="text-muted text-xs">warned</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <XCircle className="w-3.5 h-3.5 text-danger" />
+            <span className="font-mono text-sm text-danger">{audit.failed}</span>
+            <span className="text-muted text-xs">failed</span>
+          </div>
+          <button
+            onClick={() => void fetchAudit()}
+            disabled={loading}
+            className="ml-auto flex items-center gap-1.5 text-muted hover:text-white text-xs transition-colors"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+            Re-run audit
+          </button>
+        </div>
+      </div>
+
+      {/* Category filter */}
+      <div className="flex gap-1.5 flex-wrap">
+        {categories.map((cat) => (
+          <button
+            key={cat}
+            onClick={() => setActiveCategory(cat)}
+            className={`text-xs px-2.5 py-1 rounded border transition-colors ${
+              activeCategory === cat
+                ? 'border-electric bg-electric/10 text-electric'
+                : 'border-border text-muted hover:text-white hover:border-border/80'
+            }`}
+          >
+            {cat}
+          </button>
+        ))}
+      </div>
+
+      {/* Checklist */}
+      <div>
+        {filtered.map((check) => (
+          <CheckRow
+            key={check.id}
+            check={check}
+            open={openChecks.has(check.id)}
+            onToggle={() => toggleCheck(check.id)}
+          />
+        ))}
+      </div>
+
+      {/* Legend */}
+      <div className="card p-4">
+        <div className="section-header mb-3">Verdict Definitions</div>
+        <div className="space-y-2">
+          {([
+            { v: 'PASS' as Verdict, d: 'Methodology is sound on this dimension.' },
+            { v: 'WARN' as Verdict, d: 'Should be addressed or explicitly disclosed as a limitation.' },
+            { v: 'FAIL' as Verdict, d: 'Must be fixed before presenting. A professional quant would catch and criticise this.' },
+          ]).map(({ v, d }) => (
+            <div key={v} className="flex items-start gap-2">
+              <VerdictBadge verdict={v} />
+              <span className="text-muted text-xs">{d}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
+}
