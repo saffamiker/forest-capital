@@ -34,7 +34,7 @@ jobs:
           GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
           ENVIRONMENT: test
           ALLOWED_EMAILS: ruurdsm@queens.edu,thaob@queens.edu,murdockm@queens.edu,panttserk@queens.edu
-          SECRET_KEY: test_secret_key_for_ci
+          SECRET_KEY: test_secret_key_for_ci_at_least_32_chars
           MASTER_API_KEY: test_master_key
 
   # ── FRONTEND TESTS ─────────────────────────────────────────────────────
@@ -101,7 +101,7 @@ jobs:
         env:
           ENVIRONMENT: test
           ALLOWED_EMAILS: ruurdsm@queens.edu,thaob@queens.edu,murdockm@queens.edu,panttserk@queens.edu
-          SECRET_KEY: test_secret_key_for_ci
+          SECRET_KEY: test_secret_key_for_ci_at_least_32_chars
           MASTER_API_KEY: test_master_key
 
       - name: Start frontend

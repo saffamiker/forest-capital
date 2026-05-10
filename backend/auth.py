@@ -113,14 +113,14 @@ def invalidate_session(token: str) -> None:
 async def send_magic_link(email: str, token: str) -> None:
     magic_url = f"{FRONTEND_URL}/auth/verify?token={token}"
 
-    if ENVIRONMENT == "development":
+    if ENVIRONMENT in ("development", "test"):
         border = "=" * 64
         print(f"\n{border}")
-        print(f"  [DEV] Magic link for {email}")
+        print(f"  [{ENVIRONMENT.upper()}] Magic link for {email}")
         print(f"  URL: {magic_url}")
         print(f"  Expires in {MAGIC_LINK_EXPIRY_MINUTES} minutes")
         print(f"{border}\n")
-        log.info("magic_link_dev_printed", email=email)
+        log.info("magic_link_dev_printed", email=email, environment=ENVIRONMENT)
         return
 
     # Production: send via SendGrid
