@@ -164,3 +164,67 @@ def test_serial_date_36529_parses_to_2000_01_04():
     assert result.year == 2000
     assert result.month == 1
     assert result.day == 4
+
+
+# ── LQD bridge ─────────────────────────────────────────────────────────────────
+
+def test_build_monthly_returns_extends_back_with_lqd():
+    """
+    When supplemental data includes lqd_bridge_daily, build_monthly_returns()
+    must produce more rows and an earlier start date than BND-only coverage.
+
+    BND in the Excel file starts April 2007 → first aligned month ~May 2007.
+    LQD launched 2002-07-26, so the bridge should push the start to ~2002-07,
+    adding roughly 57 months of additional IG history.
+    """
+    import numpy as np
+    import pandas as pd
+    from tools.data_fetcher import build_monthly_returns, load_provided_data
+
+    provided = load_provided_data()
+
+    # Build without LQD bridge to get the BND-only baseline
+    baseline = build_monthly_returns(provided)
+    baseline_rows = len(baseline)
+    baseline_start = baseline.index.min()
+
+    # Synthetic LQD daily returns spanning 2002-08 to 2007-04
+    np.random.seed(77)
+    n_lqd = 1200
+    lqd_daily = pd.Series(
+        np.random.normal(0.0002, 0.004, n_lqd),
+        index=pd.bdate_range("2002-08-01", periods=n_lqd),
+        name="ig_return",
+    )
+    supplemental = {"lqd_bridge_daily": lqd_daily}
+
+    extended = build_monthly_returns(provided, supplemental)
+
+    # The extended series must start earlier than BND-only
+    assert extended.index.min() < baseline_start, (
+        f"LQD bridge did not extend the start date: {extended.index.min()} vs {baseline_start}"
+    )
+    # And must have more rows
+    assert len(extended) > baseline_rows, (
+        f"LQD bridge added no rows: {len(extended)} vs {baseline_rows}"
+    )
+    # No NaN in core columns after splicing
+    for col in ["equity_return", "ig_return", "hy_return"]:
+        n_nan = extended[col].isna().sum()
+        assert n_nan == 0, f"Column '{col}' has {n_nan} NaN after LQD splice"
+
+
+def test_build_monthly_returns_without_supplemental_unchanged():
+    """
+    build_monthly_returns() with no supplemental must behave identically
+    to the original signature — backward compatibility for any callers that
+    pass provided_data only.
+    """
+    from tools.data_fetcher import build_monthly_returns, load_provided_data
+
+    provided = load_provided_data()
+    df_no_supp = build_monthly_returns(provided, supplemental=None)
+    df_default = build_monthly_returns(provided)
+
+    assert len(df_no_supp) == len(df_default)
+    assert df_no_supp.index.min() == df_default.index.min()

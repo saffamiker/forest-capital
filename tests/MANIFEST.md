@@ -126,6 +126,45 @@ Infrastructure:
 Test counts: 352 passed, 10 skipped (HMM), 0 failed
 Frontend: 47 tests pass (unchanged from Sprint 2)
 
+## LQD Bridge (post-Sprint 3, 2026-05-11)
+Extended IG bond coverage from ~2007-05 back to ~2002-07 using LQD (iShares iBoxx $
+Investment Grade Corporate Bond ETF) as a pre-BND bridge fetched from yfinance.
+
+Backend — new/updated tests:
+  test_supplemental_fetcher.py (2 new) — test_supplemental_fetcher_has_lqd_bridge_daily:
+                           lqd_bridge_daily key present in result, is pd.Series, values
+                           are decimal returns not price levels (abs max < 0.15);
+                           test_supplemental_fetcher_lqd_bnd_hyg_not_in_bond_fetches:
+                           BND and HYG never passed to yfinance (LQD-only exception confirmed)
+  test_data_loader.py (2 new) — test_build_monthly_returns_extends_back_with_lqd:
+                           with synthetic LQD daily (2002-08 to ~2006-12), extended series
+                           starts earlier than BND-only baseline, has more rows, no NaN
+                           in core columns after splice;
+                           test_build_monthly_returns_without_supplemental_unchanged:
+                           build_monthly_returns(provided, supplemental=None) identical to
+                           build_monthly_returns(provided) — backward compatibility confirmed
+  test_data_provenance.py (updated) — test_provenance_matches_actual_source updated to
+                           allow ticker in ("SPY", "LQD") for yfinance series; LQD is the
+                           only permitted non-SPY yfinance ticker (pre-BND IG bridge)
+
+Backend — implementation changes (no new test files; covered by updated tests):
+  tools/data_fetcher.py — fetch_supplemental_data() fetches LQD 2002-01-01 to 2007-05-31,
+                           stores as lqd_bridge_daily (daily decimal returns);
+                           build_daily_returns(provided_data=None, supplemental=None) splices
+                           LQD returns before BND start date (backward-compatible default);
+                           build_monthly_returns(provided_data=None, supplemental=None) splices
+                           LQD monthly compound returns before BND monthly start;
+                           get_full_history() passes supplemental to both build functions;
+                           _build_registry_entries() / _write_provenance() add ig_lqd_bridge
+                           entry (source_type=yfinance, ticker=LQD);
+                           _upsert_monthly() sets ig_source=ig_lqd_bridge for pre-BND months,
+                           ig_source=ig_monthly_bnd for post-BND months;
+                           _run_sanity_assertions() assert 5 updated: <220 warns (underpowered),
+                           220-287 logs acceptable (LQD IPO 2002-07 limits coverage to ~268
+                           months), ≥288 logs pass
+
+Test counts: 356 passed, 10 skipped (HMM on Windows), 0 failed
+
 ## Sprint 4 ⏳ PENDING
 Backend:
   test_scope_guard.py    — in-scope pass, out-of-scope reject, injection pre-screening

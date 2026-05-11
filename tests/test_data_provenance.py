@@ -75,8 +75,13 @@ def test_provenance_matches_actual_source():
     for series in yfinance_series:
         detail = series["source_detail"]
         ticker = detail.get("ticker", "")
-        assert ticker == "SPY", (
-            f"yfinance series '{series['series_id']}' has ticker '{ticker}' — only SPY is permitted"
+        # SPY is the primary yfinance ticker (equity daily).
+        # LQD is the pre-BND IG bridge (2002-07 to 2007-04); it is the only
+        # permitted exception to the SPY-only rule because no Excel series covers
+        # the 2002-2007 IG gap and LQD tracks the same benchmark family as BND.
+        assert ticker in ("SPY", "LQD"), (
+            f"yfinance series '{series['series_id']}' has ticker '{ticker}' — "
+            "only SPY (equity daily) and LQD (pre-BND IG bridge) are permitted"
         )
 
     # BND and HYG must NEVER appear as yfinance-sourced series

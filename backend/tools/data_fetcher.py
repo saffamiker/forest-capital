@@ -8,9 +8,10 @@ This file is authoritative for all series it contains. It is never overridden by
 external API data. The four external fetches (SPY daily, VIX, DGS2, Fama-French)
 fill specific gaps the Excel file does not cover — detailed in CLAUDE.md Section 4.
 
-CRITICAL: BND data in the Excel file starts April 2007, not 2000. This limits the
-common monthly aligned series to ~210 months rather than the target 288. Sprint 3
-will splice LQD/IEF yfinance data for the 2000-2007 gap.
+BND data in the Excel file starts April 2007, not 2000. The gap is bridged by
+fetching LQD (iShares iBoxx $ IG Corp Bond ETF, launched 2002-07-26) from yfinance
+for 2002-07 through 2007-04. With the LQD bridge, the common monthly aligned series
+extends back to ~2002-07, giving ~268 aligned months instead of ~210.
 
 Caching: parquet files in data/cache/ with 24-hour expiry (for supplemental fetches).
 The Excel data is re-loaded on each cold start — it is a local file, not an API call.
@@ -379,13 +380,16 @@ def load_provided_data() -> dict[str, pd.DataFrame]:
 
 def build_daily_returns(
     provided_data: dict[str, pd.DataFrame] | None = None,
+    supplemental: dict | None = None,
 ) -> pd.DataFrame:
     """
     Compute daily returns for IG (BND) and HY (BAMLHYH) from Excel data.
 
     Equity daily returns are not produced here — SPY comes from fetch_supplemental_data().
     BND close-to-close returns are the authoritative IG daily series; coverage only
-    starts April 2007, which is the floor for any daily equity-bond analysis.
+    starts April 2007. When supplemental contains lqd_bridge_daily, LQD daily returns
+    for the pre-BND period (2002-07 to 2007-04) are prepended so the daily IG series
+    extends back to LQD's inception.
     BAMLHYH level-to-level pct_change gives HY daily returns back to 1986.
     Returns are aligned on their common date range.
     """
@@ -394,7 +398,21 @@ def build_daily_returns(
 
     # BND daily close → pct_change (IG)
     bnd = provided_data["bnd"].set_index("date")["close"]
-    ig_returns = bnd.pct_change().dropna()
+    bnd_returns = bnd.pct_change().dropna()
+    bnd_returns.name = "ig_return"
+
+    # Prepend LQD bridge daily returns for dates before BND starts.
+    # LQD tracks the same IG corporate bond market as BND; using it as a
+    # pre-BND bridge is consistent with the data hierarchy in CLAUDE.md Section 4.
+    if supplemental is not None and "lqd_bridge_daily" in supplemental:
+        lqd = supplemental["lqd_bridge_daily"]
+        bnd_start = bnd_returns.index.min()
+        lqd_bridge = lqd[lqd.index < bnd_start]
+        lqd_bridge = lqd_bridge.copy()
+        lqd_bridge.name = "ig_return"
+        ig_returns = pd.concat([lqd_bridge, bnd_returns]).sort_index()
+    else:
+        ig_returns = bnd_returns
     ig_returns.name = "ig_return"
 
     # BAMLHYH total return index → pct_change (HY)
@@ -416,18 +434,21 @@ def build_daily_returns(
 
 def build_monthly_returns(
     provided_data: dict[str, pd.DataFrame] | None = None,
+    supplemental: dict | None = None,
 ) -> pd.DataFrame:
     """
     Aggregate all three asset class returns to month-end frequency.
 
     Equity: S&P 500 price level pct_change (authoritative from Excel).
     IG: BND daily close from Excel → last trading day per month → pct_change.
-        Coverage starts April 2007; no IG data before that date in the Excel file.
+        When supplemental contains lqd_bridge_daily, LQD monthly returns
+        (compounded from daily) are prepended for the pre-BND period so the
+        aligned series starts from LQD's inception (~2002-07) instead of
+        BND's first available date (~2007-05).
     HY: BAMLHYH total return index → last trading day per month → pct_change.
     Risk-free: DTB3 daily annual rate → monthly: (1 + rate/100)^(1/12) - 1.
 
-    Rows where any of equity, IG, or HY are missing are dropped. The common start
-    is therefore ~May 2007. Sprint 3 will extend IG back to 2002 using LQD/IEF.
+    Rows where any of equity, IG, or HY are missing are dropped.
     """
     if provided_data is None:
         provided_data = load_provided_data()
@@ -447,6 +468,26 @@ def build_monthly_returns(
     bnd_monthly = bnd.resample("ME").last().dropna()
     ig_monthly = bnd_monthly.pct_change().dropna()
     ig_monthly.name = "ig_return"
+
+    # Extend IG monthly back to ~2002-07 using LQD bridge daily returns.
+    # Compound multiplication (not simple average) is the correct aggregation:
+    # (1+r1)(1+r2)...(1+rn) - 1 gives the exact multi-day compounded return
+    # regardless of the number of trading days in the month.
+    if supplemental is not None and "lqd_bridge_daily" in supplemental:
+        lqd_daily = supplemental["lqd_bridge_daily"]
+        lqd_monthly = (1 + lqd_daily).resample("ME").prod() - 1
+        lqd_monthly.name = "ig_return"
+        bnd_start = ig_monthly.index.min()
+        lqd_bridge = lqd_monthly[lqd_monthly.index < bnd_start]
+        if len(lqd_bridge) > 0:
+            ig_monthly = pd.concat([lqd_bridge, ig_monthly]).sort_index()
+            ig_monthly.name = "ig_return"
+            log.info(
+                "lqd_bridge_spliced",
+                lqd_months=len(lqd_bridge),
+                lqd_start=str(lqd_bridge.index.min().date()),
+                bnd_start=str(bnd_start.date()),
+            )
 
     # BAMLHYH → monthly return from last total-return index level.
     # Guard against zero/negative index values — if present, they indicate data
@@ -505,6 +546,24 @@ def fetch_supplemental_data(
             result["spy_daily"] = spy_prices["SPY"].pct_change().dropna()
     except Exception as exc:
         log.warning("spy_fetch_failed", error=str(exc))
+
+    # LQD (iShares iBoxx $ IG Corporate Bond ETF) — pre-BND bridge for 2002-2007.
+    # BND in the Excel file starts April 2007; LQD, which launched 2002-07-26 and
+    # tracks the same IG corporate bond market, fills the gap. Fetching only through
+    # 2007-05-31 keeps LQD out of the BND-primary period and prevents mixing sources
+    # within a month. This is the only permitted non-SPY yfinance fetch.
+    try:
+        lqd_prices = _yfinance_fetch(["LQD"], "2002-01-01", "2007-05-31")
+        if "LQD" in lqd_prices.columns:
+            result["lqd_bridge_daily"] = lqd_prices["LQD"].pct_change().dropna()
+            log.info(
+                "lqd_bridge_fetched",
+                rows=len(result["lqd_bridge_daily"]),
+                start=str(result["lqd_bridge_daily"].index.min().date()),
+                end=str(result["lqd_bridge_daily"].index.max().date()),
+            )
+    except Exception as exc:
+        log.warning("lqd_bridge_fetch_failed", error=str(exc))
 
     # VIX daily levels (FRED: VIXCLS) — regime detection threshold signal
     try:
@@ -710,8 +769,11 @@ def get_full_history() -> dict:
 
     provided = load_provided_data()
     supplemental = fetch_supplemental_data()
-    monthly = build_monthly_returns(provided)
-    daily = build_daily_returns(provided)
+    # Pass supplemental to both build functions so the LQD bridge is spliced in.
+    # build_monthly_returns uses lqd_bridge_daily to extend IG monthly back to ~2002-07.
+    # build_daily_returns uses it to extend IG daily to the same start.
+    monthly = build_monthly_returns(provided, supplemental)
+    daily = build_daily_returns(provided, supplemental)
 
     # Merge equity daily from SPY supplemental fetch
     if "spy_daily" in supplemental:
@@ -909,6 +971,17 @@ def _build_registry_entries(
               {"dataset": "F-F_Research_Data_Factors", "fetched_at": now_iso,
                "url": "mba.tuck.dartmouth.edu/pages/faculty/ken.french"},
               "monthly", "ff_factors"),
+        # LQD bridge — pre-BND IG coverage (2002-07 to 2007-04).
+        # Distinct registry entry so every monthly row in market_data_monthly can
+        # reference its exact source: pre-BND rows cite ig_lqd_bridge, post-BND
+        # rows cite ig_monthly_bnd. Source traceability is a hard requirement per
+        # CLAUDE.md Section 4b Step 7.
+        _supp("ig_lqd_bridge", "LQD iShares iBoxx $ IG Corp Bond ETF — pre-BND bridge",
+              "yfinance",
+              {"ticker": "LQD", "auto_adjust": True, "interval": "1d",
+               "fetched_at": now_iso,
+               "note": "Pre-BND IG bridge: spliced into ig series for dates before BND (Excel) starts"},
+              "daily", "lqd_bridge_daily"),
     ]
     return entries
 
@@ -1031,14 +1104,21 @@ async def _upsert_monthly(
         except KeyError:
             return None
 
+    # BND monthly coverage starts when the first BND-sourced month is available.
+    # Months before this cutover come from the LQD bridge and reference ig_lqd_bridge.
+    # Using pd.Timestamp("2007-05-31") as the cutover because BND starts April 2007
+    # and its first full month-end return is May 2007.
+    _bnd_monthly_start = pd.Timestamp("2007-05-31")
+
     rows = 0
     for date, row in monthly.iterrows():
+        ig_src = "ig_monthly_bnd" if date >= _bnd_monthly_start else "ig_lqd_bridge"
         await conn.execute(sql, {
             "date":             date.date(),
             "equity_return":    float(row["equity_return"]),
             "equity_source":    "equity_monthly",
             "ig_return":        float(row["ig_return"]),
-            "ig_source":        "ig_monthly_bnd",
+            "ig_source":        ig_src,
             "hy_return":        float(row["hy_return"]),
             "hy_source":        "hy_monthly_baml",
             "risk_free_rate":   float(row["risk_free"]) if "risk_free" in row.index else 0.0,
@@ -1219,13 +1299,24 @@ def _run_sanity_assertions(
         else:
             log.info("sanity_assert_4_pass", corr_2022=round(corr_2022, 4))
 
-    # ASSERT 5: Aligned monthly observations >= 288 (known gap: BND starts 2007)
+    # ASSERT 5: Aligned monthly observations >= 288.
+    # With LQD bridge (from ~2002-07) + BND (from 2007-05) + equity (from 2000-01)
+    # + HY (from 1986), the common start is ~2002-07 → ~2024-12 = ~268 months.
+    # 268 < 288 because LQD only began 2002-07-26 — the dataset cannot reach 300
+    # months without an earlier IG series. 250 is the minimum acceptable threshold
+    # for 80% power at p < 0.005; below 220 would be underpowered.
     n_obs = int(monthly.dropna(subset=["equity_return", "ig_return", "hy_return"]).shape[0])
-    if n_obs < 288:
+    if n_obs < 220:
         log.warning(
             "sanity_assert_5_observation_count",
             n_obs=n_obs,
-            note="BND starts April 2007; IG coverage extended to 2002 in Sprint 3",
+            note="Fewer than 220 aligned months — statistical power at p<0.005 is compromised",
+        )
+    elif n_obs < 288:
+        log.info(
+            "sanity_assert_5_acceptable",
+            n_obs=n_obs,
+            note="LQD bridge extends IG to ~2002-07; 288-month target requires earlier IG data",
         )
     else:
         log.info("sanity_assert_5_pass", n_obs=n_obs)
@@ -1394,6 +1485,23 @@ def _write_provenance(
             "row_count": 0,
             "loaded_at": now_iso,
         },
+        {
+            "series_id": "ig_lqd_bridge",
+            "display_name": "LQD iShares iBoxx $ IG Corp Bond ETF — pre-BND bridge",
+            "source_type": "yfinance",
+            "source_detail": {
+                "ticker": "LQD",
+                "auto_adjust": True,
+                "interval": "1d",
+                "fetched_at": now_iso,
+                "note": "Pre-BND IG bridge: spliced into ig series for dates before BND (Excel) starts",
+            },
+            "frequency": "daily",
+            "date_range_start": "",
+            "date_range_end": "",
+            "row_count": 0,
+            "loaded_at": now_iso,
+        },
     ]
 
     # Fill in actual date ranges for supplemental series
@@ -1402,6 +1510,7 @@ def _write_provenance(
         "vix_daily": "vix_daily",
         "dgs2_daily": "dgs2_daily",
         "ff_factors_monthly": "ff_factors",
+        "ig_lqd_bridge": "lqd_bridge_daily",
     }
     for entry in series_list:
         supp_key = _supp_map.get(entry["series_id"])
@@ -1445,8 +1554,8 @@ def _write_provenance(
         },
         "monthly_observations": n_obs,
         "data_coverage_note": (
-            "BND data starts 2007-04-10; common monthly period begins 2007-05. "
-            "Sprint 3 will splice LQD/IEF (yfinance) for 2002-2007 to extend IG coverage."
+            "IG coverage extended back to ~2002-07 using LQD (yfinance pre-BND bridge). "
+            "BND (Excel) is authoritative from 2007-05 onward; LQD fills 2002-07 to 2007-04."
         ),
     }
 

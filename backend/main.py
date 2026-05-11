@@ -190,13 +190,14 @@ async def run_backtest(
 
     log.info("backtest_run", strategy=body.strategy, user=session["email"])
 
-    # Sprint 2: real BENCHMARK computation. Fall back to mock in test env or on error.
+    # Sprint 3: real BENCHMARK computation via the pre-loaded history dict.
+    # get_full_history() owns all data fetching; run_benchmark only computes returns.
     if body.strategy == "100% Equity (Benchmark)" and ENVIRONMENT != "test":
         try:
+            from tools.data_fetcher import get_full_history
             from tools.backtester import run_benchmark
-            start = body.start or "2000-01-01"
-            end = body.end or "2024-12-31"
-            return run_benchmark(start=start, end=end)
+            history = get_full_history()
+            return run_benchmark(history)
         except Exception as exc:
             log.warning("backtest_run_fallback", strategy=body.strategy, error=str(exc))
 
@@ -208,11 +209,14 @@ async def run_backtest(
 @limiter.limit("30/minute")
 async def compare_strategies(request: Request, session: dict = Depends(require_auth)):
     # Sprint 3: all 10 strategies computed from real data.
+    # get_full_history() is called once; run_all_strategies receives the pre-loaded dict.
     # Falls back to mock data in test environment or on individual strategy failures.
     if ENVIRONMENT != "test":
         try:
+            from tools.data_fetcher import get_full_history
             from tools.backtester import run_all_strategies
-            results = run_all_strategies(start="2000-01-01", end="2024-12-31")
+            history = get_full_history()
+            results = run_all_strategies(history)
             return {"strategies": results, "ranked_by": "sharpe_ratio"}
         except Exception as exc:
             log.warning("compare_all_strategies_fallback", error=str(exc))

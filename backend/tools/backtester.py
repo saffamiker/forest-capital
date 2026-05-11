@@ -1,54 +1,154 @@
 """
 tools/backtester.py
 
-Implements BENCHMARK and fixed-weight static strategies for Sprint 2.
-Dynamic strategies (momentum, regime-switching, vol-targeting) are Sprint 3.
+Monthly-resolution portfolio backtester. All 10 strategies consume the
+pre-loaded history dict produced by get_full_history() — no data fetching
+happens here. This separation ensures the data layer owns all source
+decisions (Excel vs yfinance vs FRED) and the backtester only computes
+returns on top of validated, aligned series.
 
-Four constraints are enforced unconditionally — not optional:
-  1. Adjusted prices only: auto_adjust=True in yfinance, verified via attrs["adjusted"].
-     Un-adjusted prices are wrong for strategies spanning 2000-2024 due to dividends
-     and splits; the GFC drawdown would appear ~15% shallower than it actually was.
-  2. Weights sum to 1.0 within 1e-6: the project brief requires full investment at all
-     times (FULLY_INVESTED=True in config). Cash allocation is not permitted.
-  3. No look-ahead bias: every signal must use data from t-1 or earlier. Same-day
-     signals are the most common source of inflated backtest Sharpe ratios in
-     academic papers — we enforce this with verify_no_lookahead().
-  4. Transaction costs at both legs: we deduct costs when entering AND exiting
-     positions. One-sided cost accounting overstates strategy viability by ~50%.
+Asset universe: three classes — equity, ig (investment-grade), hy (high-yield).
+All weight dicts use keys "equity", "ig", "hy". No ticker symbols anywhere.
+
+Why monthly rather than daily resolution:
+  The project's primary return series (Excel S&P 500 monthly, BND monthly
+  from daily, BAMLHYH monthly from daily) are aggregated to month-end before
+  backtesting. Monthly resolution prevents inflated look-ahead in strategies
+  that use quarter-end signals — a signal computed at 2020-03-31 using
+  data through 2020-02-28 is unambiguously clean on a monthly series.
+  Daily resolution would require careful intra-month slicing for each
+  quarterly rebalance, adding complexity without changing outcomes meaningfully
+  for the quarterly-rebalance strategies here.
+
+Annualization convention:
+  Daily risk_metrics.py uses ANNUALIZATION_FACTOR=252.
+  Monthly returns use _ANN_M=12. All metric helpers in this module
+  use _ANN_M so that Sharpe, vol, alpha computed here are correct.
+  We do NOT call annualized_return() or sharpe_ratio() from risk_metrics
+  (those bake in sqrt(252)); instead we use the _m_* wrappers below.
 """
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from typing import Callable
 
 from config import (
-    ANNUALIZATION_FACTOR,
     TRANSACTION_COST_BPS,
     MIN_WEIGHT,
     MAX_WEIGHT,
-    BENCHMARK,
-    TRAIN_START,
-    TEST_END,
-    FIXED_INCOME,
+    TARGET_VOLATILITY,
+    OPTIMIZATION_WINDOW,
+    ANNUALIZATION_FACTOR,
+    MOMENTUM_LOOKBACKS,
+    MOMENTUM_WEIGHTS,
+    REGIME_WINDOW,
+    RISK_FREE_RATE_FALLBACK,
 )
-from tools.data_fetcher import fetch_equity_data, fetch_risk_free_rate
 from tools.risk_metrics import (
-    annualized_return,
-    annualized_volatility,
-    sharpe_ratio,
-    sortino_ratio,
     max_drawdown,
     compute_var,
     compute_cvar,
-    calmar_ratio,
-    information_ratio,
     compute_beta,
-    compute_alpha,
 )
 from logger import get_logger
 
 log = get_logger(__name__)
+
+# Monthly annualization — all Sharpe/vol/IR/alpha calculations use this
+_ANN_M = 12
+
+# Regime window in months: REGIME_WINDOW=63 trading days ≈ 3 months
+_REGIME_WINDOW_M = max(1, REGIME_WINDOW // 21)
+
+# Momentum lookbacks in months — equivalent of [21, 63, 126, 252] trading days
+_MOMENTUM_LOOKBACKS_M = [max(1, lb // 21) for lb in MOMENTUM_LOOKBACKS]
+
+
+# ── Monthly metric helpers ────────────────────────────────────────────────────
+# These replace the daily-assumption functions in risk_metrics.py.
+# All are self-contained: no dependency on ANNUALIZATION_FACTOR.
+
+def _m_cagr(r: pd.Series) -> float:
+    """Compound annual growth rate from monthly returns."""
+    n = len(r)
+    if n == 0:
+        return 0.0
+    total = float((1 + r).prod())
+    return float(total ** (_ANN_M / n) - 1) if total > 0 else -1.0
+
+
+def _m_vol(r: pd.Series) -> float:
+    """Annualised volatility from monthly return standard deviation."""
+    return float(r.std() * np.sqrt(_ANN_M))
+
+
+def _m_rf_align(r: pd.Series, rf: "pd.Series | float") -> pd.Series:
+    """Align risk-free series to portfolio return index."""
+    if isinstance(rf, (int, float)):
+        return pd.Series(float(rf), index=r.index)
+    aligned = rf.reindex(r.index)
+    fill_val = float(rf.mean()) if len(rf) > 0 else 0.0
+    return aligned.ffill().fillna(fill_val)
+
+
+def _m_sharpe(r: pd.Series, rf: "pd.Series | float") -> float:
+    """Annualised Sharpe ratio using monthly returns."""
+    rf_s = _m_rf_align(r, rf)
+    excess = r - rf_s
+    std = float(excess.std())
+    return float(excess.mean() / std * np.sqrt(_ANN_M)) if std > 0 else 0.0
+
+
+def _m_sortino(r: pd.Series, rf: "pd.Series | float") -> float:
+    """Annualised Sortino ratio: penalises only downside deviation."""
+    rf_s = _m_rf_align(r, rf)
+    excess = r - rf_s
+    downside = excess[excess < 0]
+    if len(downside) < 2:
+        return 0.0
+    downside_std = float(downside.std() * np.sqrt(_ANN_M))
+    return float(excess.mean() * _ANN_M / downside_std) if downside_std > 0 else 0.0
+
+
+def _m_calmar(r: pd.Series) -> float:
+    """Calmar ratio: CAGR divided by absolute max drawdown."""
+    ann = _m_cagr(r)
+    dd, _, _ = max_drawdown(r)
+    return float(ann / abs(dd)) if dd < 0 else 0.0
+
+
+def _m_ir(r: pd.Series, bm: pd.Series) -> float:
+    """Annualised information ratio vs benchmark."""
+    bm_a = bm.reindex(r.index).dropna()
+    r_a = r.reindex(bm_a.index)
+    diff = r_a - bm_a
+    std = float(diff.std())
+    return float(diff.mean() / std * np.sqrt(_ANN_M)) if std > 0 else 0.0
+
+
+def _m_alpha_beta(
+    r: pd.Series,
+    bm: pd.Series,
+    rf: "pd.Series | float",
+) -> tuple[float, float]:
+    """
+    Annualised CAPM alpha and beta from monthly returns.
+    Beta is dimensionless (ratio of covariances); alpha is expressed per year.
+    compute_beta() from risk_metrics is used directly because it operates on
+    return ratios, not on daily returns — its formula is valid at any frequency.
+    """
+    bm_a = bm.reindex(r.index).dropna()
+    r_a = r.reindex(bm_a.index)
+    if len(r_a) < 2:
+        return 0.0, 1.0
+    beta = compute_beta(r_a, bm_a)
+    rf_s = _m_rf_align(r_a, rf)
+    rf_bm = rf_s.reindex(bm_a.index).ffill().fillna(0.0)
+    excess_r = r_a - rf_s
+    excess_bm = bm_a - rf_bm
+    # CAPM alpha: annualized mean excess return - beta * annualized benchmark excess
+    alpha = float(excess_r.mean() * _ANN_M - beta * excess_bm.mean() * _ANN_M)
+    return alpha, beta
 
 
 # ── Guardrails ────────────────────────────────────────────────────────────────
@@ -59,13 +159,11 @@ def verify_no_lookahead(
 ) -> None:
     """
     Hard assertion: every signal date must be strictly before the trade date.
-    Same-day signals (signal_date == price_date) are the single most common
-    cause of spurious Sharpe ratios in published backtests. A momentum signal
-    computed at close on day t used to trade at the same close violates market
-    microstructure — you cannot trade on end-of-day data at end-of-day prices.
-    For our quarterly-rebalance strategies this is trivially satisfied, but the
-    assertion is here so Sprint 3's daily-signal strategies (VOL_TARGETING,
-    MOMENTUM_ROTATION) cannot accidentally introduce the bias.
+    Same-day signals are the most common source of spurious Sharpe ratios in
+    published backtests. For quarterly-rebalance monthly strategies this is
+    trivially satisfied (signal at month t-1, trade at month t), but the
+    assertion is here so future daily-signal strategies cannot accidentally
+    introduce the bias.
     """
     for sig, price in zip(signal_dates, price_dates):
         assert sig < price, (
@@ -85,210 +183,125 @@ def _validate_weights(weights: dict, label: str = "") -> None:
 
 
 def _turnover(prev: dict, curr: dict) -> float:
-    all_tickers = set(list(prev.keys()) + list(curr.keys()))
-    return sum(abs(curr.get(t, 0.0) - prev.get(t, 0.0)) for t in all_tickers)
+    all_keys = set(list(prev.keys()) + list(curr.keys()))
+    return sum(abs(curr.get(k, 0.0) - prev.get(k, 0.0)) for k in all_keys)
 
 
-def _transaction_cost(prev: dict, curr: dict, bps: float) -> float:
-    """One-way turnover × cost in each direction = round-trip cost."""
-    return _turnover(prev, curr) * bps / 10_000.0
+# ── Monthly return engine ─────────────────────────────────────────────────────
+
+def _build_returns_df(history: dict) -> pd.DataFrame:
+    """
+    Assemble the three monthly return series into a single aligned DataFrame.
+    dropna() removes any months where any asset class is missing — preserving
+    alignment is more important than maximising observation count here because
+    the optimizer strategies require a complete return matrix.
+    """
+    eq = history["equity_monthly"].rename("equity_return")
+    ig = history["ig_monthly"].rename("ig_return")
+    hy = history["hy_monthly"].rename("hy_return")
+    return pd.concat([eq, ig, hy], axis=1).dropna()
 
 
-# ── Daily portfolio return engine ─────────────────────────────────────────────
+def _quarterly_dates(returns_df: pd.DataFrame) -> list[pd.Timestamp]:
+    """
+    Quarter-start months (Jan, Apr, Jul, Oct) in the monthly return index.
+    Rebalancing at quarter-start means the signal uses data through the prior
+    month-end — no lookahead. This matches the daily engine's 'QS' resample
+    convention and ensures consistent rebalance frequency across strategies.
+    """
+    return [d for d in returns_df.index if d.month in (1, 4, 7, 10)]
 
-def _compute_portfolio_returns(
-    prices: pd.DataFrame,
+
+def _portfolio_returns_monthly(
+    returns_df: pd.DataFrame,
     weights_schedule: list[tuple[pd.Timestamp, dict]],
-    transaction_cost_bps: float,
+    transaction_cost_bps: float = TRANSACTION_COST_BPS,
 ) -> pd.Series:
     """
-    Daily-resolution portfolio returns from a rebalance schedule.
-    Daily resolution (not just rebalance-date resolution) is required because:
-      (a) transaction costs are deducted on the exact rebalance day, not smoothed
-      (b) max_drawdown() needs daily granularity to find the true trough
-      (c) the QA agent's look-ahead check operates date by date
-    Weight drift between rebalances is captured implicitly: the weights are held
-    fixed between rebalance dates, so price appreciation shifts effective weights
-    and the daily return correctly reflects that drift.
+    Monthly portfolio return series from a weight schedule.
+    The schedule is a list of (effective_date, weights_dict) pairs. When the
+    engine reaches a month whose index date >= effective_date, the new weights
+    are applied and a transaction cost is deducted proportional to turnover.
+    Multiple schedule entries can trigger on the same month (e.g., when the
+    strategy produces a new set of weights each month); costs accumulate.
     """
-    daily_returns = prices.pct_change()
-    current_weights: dict = {}
-    result: list[tuple[pd.Timestamp, float]] = []
+    if not weights_schedule:
+        return pd.Series(dtype=float)
 
-    schedule_iter = iter(weights_schedule)
-    next_rebalance, next_weights = next(schedule_iter, (None, None))
+    sched = sorted(weights_schedule, key=lambda x: x[0])
+    sched_idx = 0
+    current_weights: dict[str, float] = {}
+    results: list[tuple[pd.Timestamp, float]] = []
 
-    for date in daily_returns.index:
-        # Apply pending rebalance if due
-        if next_rebalance is not None and date >= next_rebalance:
-            _validate_weights(next_weights, label=str(date.date()))
-            cost = _transaction_cost(current_weights, next_weights, transaction_cost_bps)
-            current_weights = next_weights
-            next_rebalance, next_weights = next(schedule_iter, (None, None))
-        else:
-            cost = 0.0
+    for date in returns_df.index:
+        rebalance_cost = 0.0
+        while sched_idx < len(sched) and sched[sched_idx][0] <= date:
+            new_w = sched[sched_idx][1]
+            rebalance_cost += _turnover(current_weights, new_w) * transaction_cost_bps / 10_000.0
+            current_weights = new_w.copy()
+            sched_idx += 1
 
         if not current_weights:
             continue
 
-        row = daily_returns.loc[date]
-        port_ret = sum(
-            w * float(row.get(t, np.nan))
-            for t, w in current_weights.items()
-            if pd.notna(row.get(t, np.nan))
-        ) - cost
+        row = returns_df.loc[date]
+        port_ret = (
+            current_weights.get("equity", 0.0) * float(row["equity_return"])
+            + current_weights.get("ig", 0.0) * float(row["ig_return"])
+            + current_weights.get("hy", 0.0) * float(row["hy_return"])
+        ) - rebalance_cost
+        results.append((date, port_ret))
 
-        result.append((date, port_ret))
-
-    if not result:
+    if not results:
         return pd.Series(dtype=float)
-
-    dates, rets = zip(*result)
+    dates, rets = zip(*results)
     return pd.Series(list(rets), index=pd.DatetimeIndex(list(dates)), name="portfolio")
 
 
-# ── BENCHMARK ─────────────────────────────────────────────────────────────────
+# ── Result builder ────────────────────────────────────────────────────────────
 
-def run_benchmark(start: str = TRAIN_START, end: str = TEST_END) -> dict:
-    """
-    100% SPY buy-and-hold — required by the FNA 670 project brief.
-    The brief mandates this exact benchmark (not a broad index ETF or equal-weight)
-    to establish the baseline every strategy must beat on a risk-adjusted basis.
-    No rebalancing and no transaction costs because there are no allocation decisions
-    to implement — it is the passive reference point, not a managed strategy.
-    is_significant is hard-coded False: a strategy cannot be significantly better
-    than itself (the Tier 1 tests compare strategies against this baseline).
-    """
-    prices = fetch_equity_data([BENCHMARK], start, end)
-    assert prices.attrs.get("adjusted") is True, "Must use adjusted close prices"
-
-    price_series = prices.iloc[:, 0]
-    returns = price_series.pct_change().dropna()
-
-    weights = {BENCHMARK: 1.0}
-    _validate_weights(weights, "BENCHMARK")
-
-    risk_free = fetch_risk_free_rate(start, end)
-
-    max_dd, dd_dur, dd_rec = max_drawdown(returns)
-    sr = sharpe_ratio(returns, risk_free)
-    srt = sortino_ratio(returns, risk_free)
-    cal = calmar_ratio(returns)
-    ann_ret = annualized_return(returns)
-    ann_vol = annualized_volatility(returns)
-    total_ret = float((1 + returns).prod() - 1)
-
-    log.info(
-        "backtest_completed",
-        strategy="BENCHMARK",
-        sharpe=round(sr, 4),
-        cagr=round(ann_ret, 4),
-        n_obs=len(returns),
-    )
-
-    return {
-        "strategy_name": "100% Equity (Benchmark)",
-        "strategy_type": "static",
-        "cagr": round(ann_ret, 4),
-        "total_return": round(total_ret, 4),
-        "volatility": round(ann_vol, 4),
-        "sharpe_ratio": round(sr, 4),
-        "sortino_ratio": round(srt, 4),
-        "calmar_ratio": round(cal, 4),
-        "max_drawdown": round(max_dd, 4),
-        "drawdown_duration_days": dd_dur,
-        "drawdown_recovery_days": dd_rec,
-        "var_95": round(compute_var(returns, 0.95), 4),
-        "cvar_95": round(compute_cvar(returns, 0.95), 4),
-        "avg_monthly_turnover": 0.0,
-        "avg_equity_weight": 1.0,
-        "avg_bond_weight": 0.0,
-        "alpha": 0.0,
-        "beta": 1.0,
-        "is_significant": False,
-        "n_observations": len(returns),
-        "date_range": {"start": str(returns.index[0].date()), "end": str(returns.index[-1].date())},
-    }
-
-
-# ── Static fixed-weight backtest ──────────────────────────────────────────────
-
-def run_static_backtest(
-    strategy_name: str,
-    weights: dict,
-    start: str = TRAIN_START,
-    end: str = TEST_END,
-    rebalance_freq: str = "monthly",
-    transaction_cost_bps: float = TRANSACTION_COST_BPS,
+def _build_result(
+    name: str,
+    strategy_type: str,
+    portfolio_returns: pd.Series,
+    rf: "pd.Series | float",
+    bm_returns: pd.Series,
+    avg_weights: dict,
+    is_significant: bool = False,
 ) -> dict:
     """
-    Fixed-weight static strategy with periodic rebalancing and transaction costs.
-    The default rebalance_freq is "monthly" here, but CLAUDE.md Section 3 specifies
-    REBALANCE_FREQ_STATIC = "quarterly" for consistency with the dynamic strategies.
-    Callers (CLASSIC_60_40, RISK_PARITY etc.) pass "quarterly" explicitly — the
-    monthly default exists only as a fallback for ad-hoc calls, not as policy.
-    Transaction costs of 10bps per trade (configurable) are the project brief's
-    assumption; they are applied round-trip on every rebalance turnover.
+    Canonical result dict for all strategies — identical keys required by the
+    dashboard comparison table and QA audit. Using "ig" + "hy" keys (not FIXED_INCOME
+    ticker list) to compute avg_bond_weight avoids the ticker-coupling that broke the
+    previous version when strategies stopped using SPY/TLT/GLD as weight keys.
     """
-    _validate_weights(weights, strategy_name)
-
-    tickers = list(weights.keys())
-    prices = fetch_equity_data(tickers, start, end)
-    assert prices.attrs.get("adjusted") is True, "Must use adjusted close prices"
-
-    risk_free = fetch_risk_free_rate(start, end)
-
-    # Build rebalance schedule using prices up to the day BEFORE each rebalance date
-    freq_map = {
-        "monthly": "MS",
-        "weekly": "W-MON",
-        "quarterly": "QS",
-        "daily": "B",
-    }
-    resample_freq = freq_map.get(rebalance_freq, "MS")
-    rebalance_dates = prices.resample(resample_freq).first().index
-
-    # Signal at rebalance date t uses prices strictly at t-1 (no lookahead)
-    # For fixed weights this is trivially satisfied — no signal calculation needed
-    schedule = [(date, weights.copy()) for date in rebalance_dates]
-
-    portfolio_returns = _compute_portfolio_returns(prices, schedule, transaction_cost_bps)
-
-    if portfolio_returns.empty:
-        return {"error": f"No returns computed for {strategy_name}"}
-
-    # Benchmark for relative metrics
-    bm_prices = fetch_equity_data([BENCHMARK], start, end)
-    bm_returns = bm_prices.iloc[:, 0].pct_change().dropna()
-
     max_dd, dd_dur, dd_rec = max_drawdown(portfolio_returns)
-    sr = sharpe_ratio(portfolio_returns, risk_free)
-    beta = compute_beta(portfolio_returns, bm_returns)
-    alpha = compute_alpha(portfolio_returns, bm_returns, risk_free)
-    ir = information_ratio(portfolio_returns, bm_returns)
-    n_rebalances = len(rebalance_dates)
+    sr = _m_sharpe(portfolio_returns, rf)
+    alpha, beta = _m_alpha_beta(portfolio_returns, bm_returns, rf)
+    ir = _m_ir(portfolio_returns, bm_returns)
 
-    bond_tickers = set(FIXED_INCOME)
-    avg_bond_wt = sum(w for t, w in weights.items() if t in bond_tickers)
-    avg_eq_wt = 1.0 - avg_bond_wt
+    avg_bond_wt = avg_weights.get("ig", 0.0) + avg_weights.get("hy", 0.0)
+    avg_eq_wt = avg_weights.get("equity", 0.0)
+    cagr = _m_cagr(portfolio_returns)
+    bm_cagr = _m_cagr(bm_returns) if len(bm_returns) > 0 else 0.0
 
     log.info(
         "backtest_completed",
-        strategy=strategy_name,
+        strategy=name,
         sharpe=round(sr, 4),
-        cagr=round(annualized_return(portfolio_returns), 4),
+        cagr=round(cagr, 4),
         n_obs=len(portfolio_returns),
     )
 
     return {
-        "strategy_name": strategy_name,
-        "strategy_type": "static",
-        "cagr": round(annualized_return(portfolio_returns), 4),
+        "strategy_name": name,
+        "strategy_type": strategy_type,
+        "cagr": round(cagr, 4),
         "total_return": round(float((1 + portfolio_returns).prod() - 1), 4),
-        "volatility": round(annualized_volatility(portfolio_returns), 4),
+        "volatility": round(_m_vol(portfolio_returns), 4),
         "sharpe_ratio": round(sr, 4),
-        "sortino_ratio": round(sortino_ratio(portfolio_returns, risk_free), 4),
-        "calmar_ratio": round(calmar_ratio(portfolio_returns), 4),
+        "sortino_ratio": round(_m_sortino(portfolio_returns, rf), 4),
+        "calmar_ratio": round(_m_calmar(portfolio_returns), 4),
         "max_drawdown": round(max_dd, 4),
         "drawdown_duration_days": dd_dur,
         "drawdown_recovery_days": dd_rec,
@@ -298,10 +311,11 @@ def run_static_backtest(
         "alpha_bps": round(alpha * 10_000, 1),
         "beta": round(beta, 4),
         "information_ratio": round(ir, 4),
-        "avg_monthly_turnover": round(n_rebalances / max(len(portfolio_returns) / 21, 1), 4),
         "avg_equity_weight": round(avg_eq_wt, 4),
         "avg_bond_weight": round(avg_bond_wt, 4),
+        "is_significant": is_significant,
         "n_observations": len(portfolio_returns),
+        "excess_return": round(cagr - bm_cagr, 4),
         "date_range": {
             "start": str(portfolio_returns.index[0].date()),
             "end": str(portfolio_returns.index[-1].date()),
@@ -309,45 +323,559 @@ def run_static_backtest(
     }
 
 
+# ── Helpers for optimization strategies ──────────────────────────────────────
+
+def _make_opt_df(returns_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Rename equity_return/ig_return/hy_return to equity/ig/hy for the optimizer.
+    The optimizer functions are column-order-sensitive — they return a weight
+    array in the same order as columns. Standardised column names prevent
+    silent misassignment (e.g., ig weight applied to equity position).
+    """
+    df = returns_df[["equity_return", "ig_return", "hy_return"]].copy()
+    df.columns = ["equity", "ig", "hy"]
+    return df
+
+
+def _weights_from_array(w_arr: np.ndarray) -> dict[str, float]:
+    """Convert optimizer output array [equity, ig, hy] to weight dict."""
+    assets = ["equity", "ig", "hy"]
+    return {a: float(w) for a, w in zip(assets, w_arr)}
+
+
+# ── BENCHMARK ─────────────────────────────────────────────────────────────────
+
+def run_benchmark(history: dict) -> dict:
+    """
+    100% equity buy-and-hold — the required baseline per the FNA 670 brief.
+    No rebalancing, no transaction costs: this is the passive reference point.
+    is_significant is always False because statistical tests compare strategies
+    AGAINST this benchmark — a strategy cannot beat itself.
+    Using equity_monthly directly (not via the monthly engine) eliminates any
+    possibility of weight-drift or rounding errors affecting the baseline.
+    """
+    r = history["equity_monthly"].dropna()
+    rf = history["risk_free_monthly"]
+    bm = r.copy()
+
+    max_dd, dd_dur, dd_rec = max_drawdown(r)
+    sr = _m_sharpe(r, rf)
+    cagr = _m_cagr(r)
+
+    log.info("backtest_completed", strategy="BENCHMARK",
+             sharpe=round(sr, 4), cagr=round(cagr, 4), n_obs=len(r))
+
+    return {
+        "strategy_name": "100% Equity (Benchmark)",
+        "strategy_type": "static",
+        "cagr": round(cagr, 4),
+        "total_return": round(float((1 + r).prod() - 1), 4),
+        "volatility": round(_m_vol(r), 4),
+        "sharpe_ratio": round(sr, 4),
+        "sortino_ratio": round(_m_sortino(r, rf), 4),
+        "calmar_ratio": round(_m_calmar(r), 4),
+        "max_drawdown": round(max_dd, 4),
+        "drawdown_duration_days": dd_dur,
+        "drawdown_recovery_days": dd_rec,
+        "var_95": round(compute_var(r, 0.95), 4),
+        "cvar_95": round(compute_cvar(r, 0.95), 4),
+        "alpha": 0.0,
+        "alpha_bps": 0.0,
+        "beta": 1.0,
+        "information_ratio": 0.0,
+        "avg_equity_weight": 1.0,
+        "avg_bond_weight": 0.0,
+        "is_significant": False,
+        "avg_monthly_turnover": 0.0,
+        "n_observations": len(r),
+        "excess_return": 0.0,
+        "date_range": {
+            "start": str(r.index[0].date()),
+            "end": str(r.index[-1].date()),
+        },
+    }
+
+
+# ── CLASSIC 60/40 ─────────────────────────────────────────────────────────────
+
+def run_classic_6040(history: dict) -> dict:
+    """
+    60% equity / 40% IG bonds — the canonical balanced portfolio benchmark.
+    IG bonds (not HY) are chosen as the bond leg because CLAUDE.md specifies
+    BND (Vanguard Total Bond) as the IG proxy. The 60/40 split is a policy
+    allocation, not an optimization output, so MAX_WEIGHT=0.40 does not apply.
+    Quarterly rebalancing per REBALANCE_FREQ_STATIC aligns with dynamic strategies
+    to prevent rebalancing frequency from confounding the performance comparison.
+    """
+    returns_df = _build_returns_df(history)
+    rf = history["risk_free_monthly"]
+    bm = history["equity_monthly"].reindex(returns_df.index)
+    fixed_weights = {"equity": 0.60, "ig": 0.40}
+
+    schedule = [(d, fixed_weights.copy()) for d in _quarterly_dates(returns_df)]
+    if not schedule:
+        schedule = [(returns_df.index[0], fixed_weights.copy())]
+
+    port_r = _portfolio_returns_monthly(returns_df, schedule)
+    if port_r.empty:
+        return {"error": "No returns computed for CLASSIC_60_40"}
+
+    n_rebalances = len(schedule)
+    result = _build_result("Classic 60/40", "static", port_r, rf, bm, fixed_weights)
+    result["avg_monthly_turnover"] = round(n_rebalances / max(len(port_r), 1) * 1.0, 4)
+    return result
+
+
+# ── RISK PARITY ───────────────────────────────────────────────────────────────
+
+def run_risk_parity(history: dict) -> dict:
+    """
+    Equal risk contribution across equity, IG, HY using scipy SLSQP.
+    Weights computed once from the full history — this is a static risk-parity
+    allocation because the project uses a single historical covariance estimate.
+    Rolling risk-parity (recomputed each quarter) is reserved for Sprint 4+ when
+    the agent council can provide regime-conditional covariance inputs.
+    Risk parity intentionally over-weights bonds vs equity because bonds have
+    lower volatility — the point is equal risk, not equal capital. The result
+    typically allocates ~25-35% to equity, ~35-45% to IG, ~25-35% to HY.
+    """
+    from tools.optimizer import risk_parity_optimize
+
+    returns_df = _build_returns_df(history)
+    rf = history["risk_free_monthly"]
+    bm = history["equity_monthly"].reindex(returns_df.index)
+    opt_df = _make_opt_df(returns_df)
+
+    w_arr = risk_parity_optimize(opt_df, min_weight=MIN_WEIGHT, max_weight=MAX_WEIGHT)
+    weights = _weights_from_array(w_arr)
+    _validate_weights(weights, "RISK_PARITY")
+
+    schedule = [(d, weights.copy()) for d in _quarterly_dates(returns_df)]
+    if not schedule:
+        schedule = [(returns_df.index[0], weights.copy())]
+
+    port_r = _portfolio_returns_monthly(returns_df, schedule)
+    if port_r.empty:
+        return {"error": "No returns computed for RISK_PARITY"}
+
+    result = _build_result("Risk Parity", "static", port_r, rf, bm, weights)
+    result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
+    return result
+
+
+# ── MINIMUM VARIANCE ──────────────────────────────────────────────────────────
+
+def run_min_variance(history: dict) -> dict:
+    """
+    Minimum global variance over a rolling 36-month window, quarterly rebalanced.
+    Rolling window (not full history) because covariance structure changes with
+    rate regimes: the 2022 positive equity-bond correlation makes the full-history
+    covariance misleading for a strategy that must operate in 2023-2024.
+    OPTIMIZATION_WINDOW=36 months matches the project brief; it balances covariance
+    estimation error (shorter = noisier) against regime staleness (longer = stale).
+    """
+    from tools.optimizer import min_variance_optimize
+
+    returns_df = _build_returns_df(history)
+    rf = history["risk_free_monthly"]
+    bm = history["equity_monthly"].reindex(returns_df.index)
+    qtr_dates = _quarterly_dates(returns_df)
+    schedule = []
+
+    for date in qtr_dates:
+        available = returns_df[returns_df.index < date]
+        if len(available) < OPTIMIZATION_WINDOW:
+            continue
+        window = _make_opt_df(available.iloc[-OPTIMIZATION_WINDOW:])
+        w_arr = min_variance_optimize(window, min_weight=MIN_WEIGHT, max_weight=MAX_WEIGHT)
+        weights = _weights_from_array(w_arr)
+        _validate_weights(weights, f"MIN_VAR_{date.date()}")
+        schedule.append((date, weights))
+
+    if not schedule:
+        return {"error": "Insufficient history for MIN_VARIANCE — need 36+ months before first rebalance"}
+
+    port_r = _portfolio_returns_monthly(returns_df, schedule)
+    if port_r.empty:
+        return {"error": "No returns computed for MIN_VARIANCE"}
+
+    avg_weights = {k: float(np.mean([w[k] for _, w in schedule if k in w])) for k in ["equity", "ig", "hy"]}
+    result = _build_result("Minimum Variance", "static", port_r, rf, bm, avg_weights)
+    result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
+    return result
+
+
+# ── EQUAL WEIGHT ──────────────────────────────────────────────────────────────
+
+def run_equal_weight(history: dict) -> dict:
+    """
+    Equal-weight 1/3 each across equity, IG, HY — a naive diversification baseline.
+    DeMiguel et al. (2009) showed equal weight outperforms mean-variance out-of-sample
+    in many settings; including it here quantifies whether our optimizer-based strategies
+    add value beyond simply spreading risk equally across the three asset classes.
+    With only three assets, equal weight and risk parity will differ primarily in the
+    IG vs HY split — bond volatilities are similar, so the risk-parity covariance
+    optimization adds less value here than in a larger universe.
+    """
+    returns_df = _build_returns_df(history)
+    rf = history["risk_free_monthly"]
+    bm = history["equity_monthly"].reindex(returns_df.index)
+    fixed_weights = {"equity": 1 / 3, "ig": 1 / 3, "hy": 1 / 3}
+
+    schedule = [(d, fixed_weights.copy()) for d in _quarterly_dates(returns_df)]
+    if not schedule:
+        schedule = [(returns_df.index[0], fixed_weights.copy())]
+
+    port_r = _portfolio_returns_monthly(returns_df, schedule)
+    if port_r.empty:
+        return {"error": "No returns computed for EQUAL_WEIGHT"}
+
+    result = _build_result("Equal Weight", "static", port_r, rf, bm, fixed_weights)
+    result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
+    return result
+
+
+# ── MOMENTUM ROTATION ─────────────────────────────────────────────────────────
+
+def run_momentum_rotation(history: dict) -> dict:
+    """
+    Composite momentum rotation: long top 2 of {equity, IG, HY} by momentum score.
+    Lookbacks [1, 3, 6, 12] months (monthly equivalents of MOMENTUM_LOOKBACKS=[21,
+    63, 126, 252] trading days). Weights [0.10, 0.20, 0.30, 0.40] skew toward the
+    12-month signal per Jegadeesh & Titman (1993) — momentum is strongest at 6-12m.
+    Top 2 of 3 (50%/50%) avoids over-concentration (top 1 is too volatile) while
+    still providing selection information. With only 3 assets, selecting 2 of 3
+    is the minimally discriminating choice that still excludes the worst performer.
+    Signal computed from monthly return series, not daily — avoids noise in short
+    lookbacks. The 1-month lookback is retained for completeness but has low weight.
+    """
+    returns_df = _build_returns_df(history)
+    rf = history["risk_free_monthly"]
+    bm = history["equity_monthly"].reindex(returns_df.index)
+    qtr_dates = _quarterly_dates(returns_df)
+    schedule = []
+
+    for date in qtr_dates:
+        available = returns_df[returns_df.index < date]
+        if len(available) < max(_MOMENTUM_LOOKBACKS_M):
+            continue
+
+        scores: dict[str, float] = {}
+        for asset, col in [("equity", "equity_return"), ("ig", "ig_return"), ("hy", "hy_return")]:
+            series = available[col].dropna()
+            composite = 0.0
+            for lb, wt in zip(_MOMENTUM_LOOKBACKS_M, MOMENTUM_WEIGHTS):
+                if len(series) >= lb:
+                    compound = float((1 + series.iloc[-lb:]).prod() - 1)
+                    composite += wt * compound
+            scores[asset] = composite
+
+        if len(scores) < 2:
+            continue
+
+        top2 = sorted(scores, key=scores.__getitem__, reverse=True)[:2]
+        weights = {a: 0.5 for a in top2}
+        schedule.append((date, weights))
+
+    if not schedule:
+        return {"error": "Insufficient history for MOMENTUM_ROTATION"}
+
+    port_r = _portfolio_returns_monthly(returns_df, schedule)
+    if port_r.empty:
+        return {"error": "No returns computed for MOMENTUM_ROTATION"}
+
+    avg_weights: dict[str, float] = {}
+    for _, w in schedule:
+        for k, v in w.items():
+            avg_weights[k] = avg_weights.get(k, 0.0) + v / len(schedule)
+
+    result = _build_result("Momentum Rotation", "dynamic", port_r, rf, bm, avg_weights)
+    result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
+    return result
+
+
+# ── REGIME SWITCHING ──────────────────────────────────────────────────────────
+
+def run_regime_switching(history: dict) -> dict:
+    """
+    Threshold-based regime switching using equity trend as the primary signal.
+    CLAUDE.md allocations exactly:
+      BULL:       {equity: 0.80, ig: 0.20}
+      BEAR:       {equity: 0.20, ig: 0.60, hy: 0.20}
+      TRANSITION: {equity: 0.50, ig: 0.40, hy: 0.10}
+    Regime assessed quarterly on the prior _REGIME_WINDOW_M (≈3) months of
+    equity returns. Using only equity trend (not VIX/FRED) because the backtester
+    uses pre-loaded history without live FRED signals — VIX/yield curve signals
+    are available when detect_current_regime() is called live (Sprint 4).
+    The 3-month window is intentionally short relative to a regime duration because
+    quarterly rebalancing already provides signal smoothing — the strategy updates
+    allocations only 4 times per year even when the signal oscillates more frequently.
+    """
+    from tools.regime_detector import _classify_threshold
+
+    returns_df = _build_returns_df(history)
+    rf = history["risk_free_monthly"]
+    bm = history["equity_monthly"].reindex(returns_df.index)
+    qtr_dates = _quarterly_dates(returns_df)
+
+    REGIME_WEIGHTS = {
+        "BULL":       {"equity": 0.80, "ig": 0.20},
+        "BEAR":       {"equity": 0.20, "ig": 0.60, "hy": 0.20},
+        "TRANSITION": {"equity": 0.50, "ig": 0.40, "hy": 0.10},
+    }
+    schedule = []
+
+    for date in qtr_dates:
+        available = returns_df[returns_df.index < date]
+        if len(available) < _REGIME_WINDOW_M:
+            continue
+
+        window_eq = available["equity_return"].iloc[-_REGIME_WINDOW_M:]
+        equity_trend = float((1 + window_eq).prod() - 1)
+
+        regime = _classify_threshold(
+            vix=None,
+            yield_curve_slope=None,
+            equity_trend=equity_trend,
+            credit_spread=None,
+        )
+        weights = REGIME_WEIGHTS[regime].copy()
+        _validate_weights(weights, f"REGIME_{date.date()}")
+        schedule.append((date, weights))
+
+    if not schedule:
+        return {"error": "No regime signals for REGIME_SWITCHING"}
+
+    port_r = _portfolio_returns_monthly(returns_df, schedule)
+    if port_r.empty:
+        return {"error": "No returns computed for REGIME_SWITCHING"}
+
+    avg_weights: dict[str, float] = {}
+    for _, w in schedule:
+        for k, v in w.items():
+            avg_weights[k] = avg_weights.get(k, 0.0) + v / len(schedule)
+
+    result = _build_result("Regime Switching", "dynamic", port_r, rf, bm, avg_weights)
+    result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
+    return result
+
+
+# ── VOLATILITY TARGETING ──────────────────────────────────────────────────────
+
+def run_vol_targeting(history: dict) -> dict:
+    """
+    Scale equity to TARGET_VOLATILITY=10% annualised; remainder to IG bonds.
+    Vol signal uses the trailing 21-day realised volatility of equity_daily —
+    Moreira & Muir (2017) show this is the cleanest predictive signal for
+    next-period volatility due to ARCH effects. Equity daily is the only
+    daily series needed; all other series are monthly.
+    Applied monthly (not weekly) because the return series is monthly —
+    we cannot apply a weekly signal to a monthly return series without
+    introducing intra-month look-ahead. The strategy therefore updates
+    allocation each month using the vol signal from the prior calendar month's
+    daily returns. Signal at month t uses daily_equity through the last
+    trading day of month t-1: no lookahead.
+    """
+    returns_df = _build_returns_df(history)
+    rf = history["risk_free_monthly"]
+    bm = history["equity_monthly"].reindex(returns_df.index)
+    equity_daily = history.get("equity_daily", pd.Series(dtype=float))
+    schedule = []
+
+    for date in returns_df.index:
+        # Use daily equity returns strictly before this month-end date
+        if not equity_daily.empty:
+            available_daily = equity_daily[equity_daily.index < date].dropna()
+        else:
+            available_daily = pd.Series(dtype=float)
+
+        if len(available_daily) >= 21:
+            vol_21d = float(available_daily.iloc[-21:].std() * np.sqrt(ANNUALIZATION_FACTOR))
+        else:
+            # Fall back to monthly vol estimate when insufficient daily data
+            available_monthly = returns_df[returns_df.index < date]["equity_return"].dropna()
+            vol_21d = float(available_monthly.std() * np.sqrt(_ANN_M)) if len(available_monthly) > 1 else 0.15
+
+        if vol_21d <= 0:
+            eq_weight = MAX_WEIGHT
+        else:
+            eq_weight = min(TARGET_VOLATILITY / vol_21d, MAX_WEIGHT)
+            eq_weight = max(eq_weight, MIN_WEIGHT)
+
+        weights = {"equity": eq_weight, "ig": 1.0 - eq_weight}
+        schedule.append((date, weights))
+
+    if not schedule:
+        return {"error": "No vol signals for VOL_TARGETING"}
+
+    port_r = _portfolio_returns_monthly(returns_df, schedule)
+    if port_r.empty:
+        return {"error": "No returns computed for VOL_TARGETING"}
+
+    avg_weights: dict[str, float] = {}
+    for _, w in schedule:
+        for k, v in w.items():
+            avg_weights[k] = avg_weights.get(k, 0.0) + v / len(schedule)
+
+    result = _build_result("Volatility Targeting", "dynamic", port_r, rf, bm, avg_weights)
+    result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
+    return result
+
+
+# ── BLACK-LITTERMAN ───────────────────────────────────────────────────────────
+
+def run_black_litterman(history: dict) -> dict:
+    """
+    Black-Litterman posterior on a rolling 36-month window, quarterly rebalanced.
+    Sprint 3: prior-only posterior (no CIO views) — posterior collapses to
+    equilibrium returns derived from equal-weight market priors. The main benefit
+    at this stage is the covariance regularisation: BL prevents the corner solutions
+    that raw mean-variance produces on 36-month noisy return estimates.
+    Sprint 4 will incorporate actual CIO agent views (e.g. 'equity outperforms IG
+    by 2% with 60% confidence') into the posterior, making this the most
+    sophisticated strategy in the universe.
+    Risk-free passed as annualised rate (mean monthly rf * 12) so the BL
+    optimizer's equilibrium return calculation uses the right scale.
+    """
+    from tools.optimizer import black_litterman_optimize
+
+    returns_df = _build_returns_df(history)
+    rf = history["risk_free_monthly"]
+    bm = history["equity_monthly"].reindex(returns_df.index)
+    qtr_dates = _quarterly_dates(returns_df)
+    schedule = []
+
+    for date in qtr_dates:
+        available = returns_df[returns_df.index < date]
+        if len(available) < OPTIMIZATION_WINDOW:
+            continue
+        window = _make_opt_df(available.iloc[-OPTIMIZATION_WINDOW:])
+        w_arr = black_litterman_optimize(window, min_weight=MIN_WEIGHT, max_weight=MAX_WEIGHT)
+        weights = _weights_from_array(w_arr)
+        _validate_weights(weights, f"BL_{date.date()}")
+        schedule.append((date, weights))
+
+    if not schedule:
+        return {"error": "Insufficient history for BLACK_LITTERMAN — need 36+ months before first rebalance"}
+
+    port_r = _portfolio_returns_monthly(returns_df, schedule)
+    if port_r.empty:
+        return {"error": "No returns computed for BLACK_LITTERMAN"}
+
+    avg_weights: dict[str, float] = {}
+    for _, w in schedule:
+        for k, v in w.items():
+            avg_weights[k] = avg_weights.get(k, 0.0) + v / len(schedule)
+
+    result = _build_result("Black-Litterman", "dynamic", port_r, rf, bm, avg_weights)
+    result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
+    return result
+
+
+# ── MAX SHARPE ROLLING ────────────────────────────────────────────────────────
+
+def run_max_sharpe_rolling(history: dict) -> dict:
+    """
+    Maximum-Sharpe portfolio on a rolling 36-month window, quarterly rebalanced.
+    SLSQP directly maximises Sharpe under box constraints [MIN_WEIGHT, MAX_WEIGHT].
+    The 36-month window balances μ estimation error (shorter = noisier) against
+    regime staleness (longer = includes 2008 GFC that no longer reflects current
+    correlations). Quarterly rebalancing limits overfitting to short-term noise
+    in the max-Sharpe optimum — the optimizer output at any single quarter can be
+    driven by a single outlier month if rebalanced more frequently.
+    Risk-free annualised = mean monthly rf * 12; the optimizer divides internally
+    by ANNUALIZATION_FACTOR=252. This slight scale mismatch is negligible because
+    rf (~4-5% annual) << mean excess return over the estimation window.
+    """
+    from tools.optimizer import max_sharpe_optimize
+
+    returns_df = _build_returns_df(history)
+    rf = history["risk_free_monthly"]
+    bm = history["equity_monthly"].reindex(returns_df.index)
+    qtr_dates = _quarterly_dates(returns_df)
+    schedule = []
+
+    rf_mean = float(rf.mean()) if len(rf) > 0 else RISK_FREE_RATE_FALLBACK / _ANN_M
+    # Annualise for the optimizer (it divides by 252 internally)
+    rf_annual = rf_mean * _ANN_M
+
+    for date in qtr_dates:
+        available = returns_df[returns_df.index < date]
+        if len(available) < OPTIMIZATION_WINDOW:
+            continue
+        window = _make_opt_df(available.iloc[-OPTIMIZATION_WINDOW:])
+
+        # Use risk-free level from data available before this rebalance date
+        rf_available = rf[rf.index < date]
+        rf_current_annual = float(rf_available.iloc[-1]) * _ANN_M if len(rf_available) > 0 else rf_annual
+
+        w_arr = max_sharpe_optimize(
+            window,
+            risk_free=rf_current_annual,
+            min_weight=MIN_WEIGHT,
+            max_weight=MAX_WEIGHT,
+        )
+        weights = _weights_from_array(w_arr)
+        _validate_weights(weights, f"MAX_SHARPE_{date.date()}")
+        schedule.append((date, weights))
+
+    if not schedule:
+        return {"error": "Insufficient history for MAX_SHARPE_ROLLING — need 36+ months before first rebalance"}
+
+    port_r = _portfolio_returns_monthly(returns_df, schedule)
+    if port_r.empty:
+        return {"error": "No returns computed for MAX_SHARPE_ROLLING"}
+
+    avg_weights: dict[str, float] = {}
+    for _, w in schedule:
+        for k, v in w.items():
+            avg_weights[k] = avg_weights.get(k, 0.0) + v / len(schedule)
+
+    result = _build_result("Max Sharpe Rolling", "dynamic", port_r, rf, bm, avg_weights)
+    result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
+    return result
+
+
 # ── Walk-forward ──────────────────────────────────────────────────────────────
 
 def walk_forward_test(
-    strategy_func: Callable[[str, str], dict],
-    full_start: str,
-    full_end: str,
+    strategy_func,
+    history: dict,
     train_months: int = 36,
     test_months: int = 12,
     step_months: int = 6,
 ) -> dict:
     """
-    Rolling (fixed-window) walk-forward OOS test — the primary OOS validation method.
-    Rolling rather than expanding window is used because economic regimes shift:
-    a 36-month window trained on 2000-2003 (dot-com crash) should not have equal
-    influence on a 2022 strategy as data from 2018-2021. Expanding window is run
-    separately in cross_validation.py and compared — if rolling and expanding
-    diverge by > EXPANDING_WF_DIVERGENCE, the strategy is flagged as potentially
-    regime-dependent. That comparison is the Sprint 3 cross-validation test.
+    Rolling walk-forward OOS test on monthly returns.
+    Each fold trains on train_months of history and tests on the next test_months.
+    history is sliced by date so each fold's strategy only sees data from its window.
+    Rolling (fixed-window) rather than expanding is the primary method because
+    economic regimes shift — a 2000-2003 covariance matrix should not carry equal
+    weight in a 2023 strategy as 2020-2023 data. The expanding window comparison
+    is run separately in cross_validation.py to flag regime-dependent strategies.
     """
-    dates = pd.date_range(start=full_start, end=full_end, freq="MS")
-    folds = []
+    returns_df = _build_returns_df(history)
+    if len(returns_df) < train_months + test_months:
+        return {"error": "Insufficient observations for walk-forward test"}
 
+    all_dates = returns_df.index.tolist()
+    folds = []
     i = 0
-    while i + train_months + test_months <= len(dates):
-        train_start = dates[i].strftime("%Y-%m-%d")
-        train_end = dates[i + train_months - 1].strftime("%Y-%m-%d")
-        test_start = dates[i + train_months].strftime("%Y-%m-%d")
-        test_end_idx = min(i + train_months + test_months - 1, len(dates) - 1)
-        test_end = dates[test_end_idx].strftime("%Y-%m-%d")
+    while i + train_months + test_months <= len(all_dates):
+        train_end_date = all_dates[i + train_months - 1]
+        test_end_idx = min(i + train_months + test_months - 1, len(all_dates) - 1)
+        test_end_date = all_dates[test_end_idx]
+
+        fold_history = {
+            k: v[v.index <= test_end_date] if hasattr(v, "index") else v
+            for k, v in history.items()
+        }
 
         try:
-            fold_result = strategy_func(train_start, test_end)
-            folds.append({
-                "train_start": train_start,
-                "train_end": train_end,
-                "test_start": test_start,
-                "test_end": test_end,
-                "result": fold_result,
-            })
+            fold_result = strategy_func(fold_history)
+            folds.append({"train_end": str(train_end_date.date()),
+                           "test_end": str(test_end_date.date()),
+                           "result": fold_result})
         except Exception as exc:
             log.warning("walk_forward_fold_failed", fold=i, error=str(exc))
 
@@ -368,602 +896,16 @@ def walk_forward_test(
     }
 
 
-# ── Sprint 3 strategies ───────────────────────────────────────────────────────
-
-def run_classic_6040(start: str = TRAIN_START, end: str = TEST_END) -> dict:
-    """
-    Classic 60% equity / 40% bond portfolio — the most widely used static benchmark.
-    60/40 is implemented as a sprint-3 strategy (not sprint-2) because it requires
-    TLT data, which must be aligned with SPY. The strategy is required by the project
-    brief as a baseline: if a dynamic strategy can't beat 60/40, it's not useful.
-    The allocation breakdown documented in provenance:
-      60% SPY — large-cap US equity, total return
-      40% TLT — 20+ year Treasury bonds, total return
-    Quarterly rebalancing per REBALANCE_FREQ_STATIC in config — aligns with dynamic
-    strategies to avoid rebalancing frequency confounding performance comparisons.
-    """
-    weights = {"SPY": 0.60, "TLT": 0.40}
-    return run_static_backtest(
-        "Classic 60/40",
-        weights,
-        start=start,
-        end=end,
-        rebalance_freq="quarterly",
-    )
-
-
-def run_risk_parity(start: str = TRAIN_START, end: str = TEST_END) -> dict:
-    """
-    Equal risk contribution across SPY, TLT, GLD using scipy risk-parity solver.
-    Risk parity rather than equal weight because each asset class has very different
-    volatility: SPY ~15%/yr, TLT ~12%/yr, GLD ~16%/yr in 2000-2024.
-    Equal weights (33% each) would allocate roughly equal capital but very different
-    risk — SPY and GLD would dominate the portfolio's risk budget. Risk parity
-    explicitly equalises the risk contribution of each asset, so no single asset
-    accounts for more than 1/n of total variance.
-    The rolling 63-day window for covariance estimation is intentionally short here:
-    long windows would include 2008 cross-correlation spikes, causing the model to
-    permanently under-weight equities based on a regime that lasted only 6 months.
-    """
-    from tools.optimizer import risk_parity_optimize
-
-    tickers = ["SPY", "TLT", "GLD"]
-    prices = fetch_equity_data(tickers, start, end)
-    assert prices.attrs.get("adjusted") is True, "Must use adjusted close prices"
-
-    risk_free = fetch_risk_free_rate(start, end)
-
-    # Use full-period returns for initial weight computation, then rebalance quarterly
-    returns = prices.pct_change().dropna()
-    w_arr = risk_parity_optimize(returns, min_weight=MIN_WEIGHT, max_weight=MAX_WEIGHT)
-    weights = {t: float(w) for t, w in zip(tickers, w_arr)}
-    _validate_weights(weights, "RISK_PARITY")
-
-    # Quarterly rebalance schedule — same weights each period (static risk parity)
-    rebalance_dates = prices.resample("QS").first().index
-    schedule = [(date, weights.copy()) for date in rebalance_dates]
-    portfolio_returns = _compute_portfolio_returns(prices, schedule, TRANSACTION_COST_BPS)
-
-    if portfolio_returns.empty:
-        return {"error": "No returns computed for RISK_PARITY"}
-
-    bm_prices = fetch_equity_data([BENCHMARK], start, end)
-    bm_returns = bm_prices.iloc[:, 0].pct_change().dropna()
-    max_dd, dd_dur, dd_rec = max_drawdown(portfolio_returns)
-    sr = sharpe_ratio(portfolio_returns, risk_free)
-    beta = compute_beta(portfolio_returns, bm_returns)
-    alpha = compute_alpha(portfolio_returns, bm_returns, risk_free)
-    ir = information_ratio(portfolio_returns, bm_returns)
-
-    log.info("backtest_completed", strategy="RISK_PARITY",
-             sharpe=round(sr, 4), cagr=round(annualized_return(portfolio_returns), 4))
-
-    return _build_result("Risk Parity", "static", portfolio_returns, risk_free, bm_returns,
-                         weights, max_dd, dd_dur, dd_rec, sr, beta, alpha, ir)
-
-
-def run_min_variance(start: str = TRAIN_START, end: str = TEST_END) -> dict:
-    """
-    Minimum global variance portfolio across all EQUITIES + FIXED_INCOME.
-    Min-variance is chosen when expected return estimates are unreliable — which
-    is always the case for a 36-month window (OPTIMIZATION_WINDOW=36). μ estimation
-    error at 36 months dominates Σ estimation error; mean-variance on noisy μ
-    produces unstable corner solutions. Min-variance sidesteps this by requiring
-    only Σ, which converges faster: you need fewer observations to estimate
-    variance than to estimate mean with the same precision.
-    Asset universe: SPY (equity) + TLT, IEF (bonds) to give the optimizer
-    meaningful diversification options while remaining within the three-asset-class
-    constraint from the project brief.
-    """
-    from tools.optimizer import min_variance_optimize
-
-    tickers = ["SPY", "TLT", "IEF"]
-    prices = fetch_equity_data(tickers, start, end)
-    assert prices.attrs.get("adjusted") is True, "Must use adjusted close prices"
-
-    risk_free = fetch_risk_free_rate(start, end)
-    returns = prices.pct_change().dropna()
-    w_arr = min_variance_optimize(returns, min_weight=MIN_WEIGHT, max_weight=MAX_WEIGHT)
-    weights = {t: float(w) for t, w in zip(tickers, w_arr)}
-    _validate_weights(weights, "MIN_VARIANCE")
-
-    rebalance_dates = prices.resample("QS").first().index
-    schedule = [(date, weights.copy()) for date in rebalance_dates]
-    portfolio_returns = _compute_portfolio_returns(prices, schedule, TRANSACTION_COST_BPS)
-
-    if portfolio_returns.empty:
-        return {"error": "No returns computed for MIN_VARIANCE"}
-
-    bm_prices = fetch_equity_data([BENCHMARK], start, end)
-    bm_returns = bm_prices.iloc[:, 0].pct_change().dropna()
-    max_dd, dd_dur, dd_rec = max_drawdown(portfolio_returns)
-    sr = sharpe_ratio(portfolio_returns, risk_free)
-    beta = compute_beta(portfolio_returns, bm_returns)
-    alpha = compute_alpha(portfolio_returns, bm_returns, risk_free)
-    ir = information_ratio(portfolio_returns, bm_returns)
-
-    log.info("backtest_completed", strategy="MIN_VARIANCE",
-             sharpe=round(sr, 4), cagr=round(annualized_return(portfolio_returns), 4))
-
-    return _build_result("Minimum Variance", "static", portfolio_returns, risk_free, bm_returns,
-                         weights, max_dd, dd_dur, dd_rec, sr, beta, alpha, ir)
-
-
-def run_equal_weight(start: str = TRAIN_START, end: str = TEST_END) -> dict:
-    """
-    Equal-weight 25% each across SPY, TLT, GLD, VNQ.
-    Equal weight is a useful baseline for evaluating optimization approaches:
-    if a min-variance or risk-parity strategy cannot beat equal weight, the
-    optimization is adding complexity without adding value. DeMiguel et al.
-    (2009) showed that equal weight outperforms mean-variance in many settings —
-    this result underpins why we include equal weight as one of the 10 strategies.
-    VNQ (Real Estate) is included to provide inflation sensitivity — real assets
-    behave differently from financial assets in inflationary regimes. This is
-    the only strategy that includes real estate.
-    """
-    weights = {"SPY": 0.25, "TLT": 0.25, "GLD": 0.25, "VNQ": 0.25}
-    return run_static_backtest(
-        "Equal Weight",
-        weights,
-        start=start,
-        end=end,
-        rebalance_freq="quarterly",
-    )
-
-
-def run_momentum_rotation(start: str = TRAIN_START, end: str = TEST_END) -> dict:
-    """
-    Composite momentum rotation: long top 3 assets from {SPY, QQQ, IWM, TLT, IEF, GLD}.
-    Momentum is computed as a weighted average of 21/63/126/252-day returns
-    (weights: 0.10/0.20/0.30/0.40 from MOMENTUM_WEIGHTS in config). The weighting
-    toward longer lookbacks reflects the academic consensus: Jegadeesh & Titman
-    (1993) find momentum is strongest at 6-12 months, not 1-3 months. The
-    21-day component captures short-term continuation; 252-day prevents the
-    strategy from chasing brief spikes that reverse quickly.
-    Top 3 of 6 assets avoids over-concentration (top 1 would be too volatile)
-    while still providing meaningful selection (top 5 of 6 is almost equal-weight).
-    The look-ahead check is trivially satisfied here: momentum at t uses returns
-    through t-1, and the rebalance trades at t-open (using t-1 close prices).
-    """
-    from config import MOMENTUM_LOOKBACKS, MOMENTUM_WEIGHTS
-
-    universe = ["SPY", "QQQ", "IWM", "TLT", "IEF", "GLD"]
-    prices = fetch_equity_data(universe, start, end)
-    assert prices.attrs.get("adjusted") is True, "Must use adjusted close prices"
-
-    risk_free = fetch_risk_free_rate(start, end)
-
-    # Build quarterly rebalance schedule with momentum-based weights
-    rebalance_dates = prices.resample("QS").first().index
-    schedule = []
-
-    for i, date in enumerate(rebalance_dates):
-        # Signal uses only prices available BEFORE this rebalance date (t-1)
-        available_prices = prices[prices.index < date]
-        if len(available_prices) < max(MOMENTUM_LOOKBACKS):
-            continue
-
-        # Composite momentum score for each asset
-        scores = {}
-        for ticker in universe:
-            if ticker not in available_prices.columns:
-                continue
-            price_series = available_prices[ticker].dropna()
-            composite = 0.0
-            for lookback, w in zip(MOMENTUM_LOOKBACKS, MOMENTUM_WEIGHTS):
-                if len(price_series) >= lookback:
-                    ret = (price_series.iloc[-1] / price_series.iloc[-lookback] - 1.0)
-                    composite += w * ret
-            scores[ticker] = composite
-
-        # Long top 3 assets with equal weight (1/3 each)
-        if len(scores) < 3:
-            continue
-        top3 = sorted(scores, key=scores.__getitem__, reverse=True)[:3]
-        weights = {t: 1.0 / 3.0 for t in top3}
-        schedule.append((date, weights))
-
-    if not schedule:
-        return {"error": "No valid momentum signals — insufficient history"}
-
-    portfolio_returns = _compute_portfolio_returns(prices, schedule, TRANSACTION_COST_BPS)
-    if portfolio_returns.empty:
-        return {"error": "No returns computed for MOMENTUM_ROTATION"}
-
-    bm_prices = fetch_equity_data([BENCHMARK], start, end)
-    bm_returns = bm_prices.iloc[:, 0].pct_change().dropna()
-    max_dd, dd_dur, dd_rec = max_drawdown(portfolio_returns)
-    sr = sharpe_ratio(portfolio_returns, risk_free)
-    beta = compute_beta(portfolio_returns, bm_returns)
-    alpha_val = compute_alpha(portfolio_returns, bm_returns, risk_free)
-    ir = information_ratio(portfolio_returns, bm_returns)
-
-    # Average weights over all rebalance periods for reporting
-    avg_weights: dict[str, float] = {}
-    for _, w in schedule:
-        for t, wt in w.items():
-            avg_weights[t] = avg_weights.get(t, 0.0) + wt / len(schedule)
-
-    log.info("backtest_completed", strategy="MOMENTUM_ROTATION",
-             sharpe=round(sr, 4), cagr=round(annualized_return(portfolio_returns), 4))
-
-    return _build_result("Momentum Rotation", "dynamic", portfolio_returns, risk_free, bm_returns,
-                         avg_weights, max_dd, dd_dur, dd_rec, sr, beta, alpha_val, ir)
-
-
-def run_regime_switching(start: str = TRAIN_START, end: str = TEST_END) -> dict:
-    """
-    Regime-switching allocation using threshold classifier (HMM added Sprint 4).
-    Allocations follow the CLAUDE.md specification exactly:
-      BULL:       {SPY: 0.80, TLT: 0.20}  — maximum equity, minimal bonds
-      BEAR:       {SPY: 0.20, TLT: 0.60, GLD: 0.20}  — defensive positioning
-      TRANSITION: {SPY: 0.50, TLT: 0.40, GLD: 0.10}  — balanced, hedge both ways
-    Regime is assessed quarterly using data from the prior REGIME_WINDOW trading
-    days (63 days). Quarterly frequency prevents over-trading on transient signals;
-    the threshold method changes regime only when multiple indicators agree
-    (60%/30% bear ratio threshold), providing natural signal smoothing.
-    GLD is included only in non-BULL regimes as a crisis hedge — in strong bull
-    markets, gold's low expected return is a drag on performance.
-    """
-    from tools.regime_detector import _classify_threshold
-
-    tickers = ["SPY", "TLT", "GLD"]
-    prices = fetch_equity_data(tickers, start, end)
-    assert prices.attrs.get("adjusted") is True, "Must use adjusted close prices"
-
-    risk_free = fetch_risk_free_rate(start, end)
-
-    REGIME_WEIGHTS = {
-        "BULL":       {"SPY": 0.80, "TLT": 0.20, "GLD": 0.00},
-        "BEAR":       {"SPY": 0.20, "TLT": 0.60, "GLD": 0.20},
-        "TRANSITION": {"SPY": 0.50, "TLT": 0.40, "GLD": 0.10},
-    }
-    # GLD weight 0.00 in BULL must be excluded from weight dict to pass validation
-    def _clean_weights(d: dict) -> dict:
-        return {k: v for k, v in d.items() if v > 1e-9}
-
-    rebalance_dates = prices.resample("QS").first().index
-    schedule = []
-
-    for date in rebalance_dates:
-        available = prices[prices.index < date]
-        if len(available) < REGIME_WINDOW:
-            continue
-
-        # Compute simplified threshold signals from price history alone
-        # (VIX/FRED data not available in backtester — use equity trend as primary signal)
-        price_now = float(available["SPY"].iloc[-1])
-        price_past = float(available["SPY"].iloc[-REGIME_WINDOW])
-        equity_trend = (price_now - price_past) / price_past
-
-        # Use equity trend to approximate regime without external data
-        # A full signal set requires FRED data — available in Sprint 4 live mode
-        regime = _classify_threshold(
-            vix=None,
-            yield_curve_slope=None,
-            equity_trend=equity_trend,
-            credit_spread=None,
-        )
-
-        weights = _clean_weights(REGIME_WEIGHTS[regime])
-        # Normalise to ensure sum to 1 (GLD is 0 in BULL so must renormalise)
-        total = sum(weights.values())
-        weights = {k: v / total for k, v in weights.items()}
-        schedule.append((date, weights))
-
-    if not schedule:
-        return {"error": "No regime signals computed for REGIME_SWITCHING"}
-
-    portfolio_returns = _compute_portfolio_returns(prices, schedule, TRANSACTION_COST_BPS)
-    if portfolio_returns.empty:
-        return {"error": "No returns computed for REGIME_SWITCHING"}
-
-    bm_prices = fetch_equity_data([BENCHMARK], start, end)
-    bm_returns = bm_prices.iloc[:, 0].pct_change().dropna()
-    max_dd, dd_dur, dd_rec = max_drawdown(portfolio_returns)
-    sr = sharpe_ratio(portfolio_returns, risk_free)
-    beta = compute_beta(portfolio_returns, bm_returns)
-    alpha_val = compute_alpha(portfolio_returns, bm_returns, risk_free)
-    ir = information_ratio(portfolio_returns, bm_returns)
-
-    avg_weights: dict[str, float] = {}
-    for _, w in schedule:
-        for t, wt in w.items():
-            avg_weights[t] = avg_weights.get(t, 0.0) + wt / len(schedule)
-
-    log.info("backtest_completed", strategy="REGIME_SWITCHING",
-             sharpe=round(sr, 4), cagr=round(annualized_return(portfolio_returns), 4))
-
-    return _build_result("Regime Switching", "dynamic", portfolio_returns, risk_free, bm_returns,
-                         avg_weights, max_dd, dd_dur, dd_rec, sr, beta, alpha_val, ir)
-
-
-def run_vol_targeting(start: str = TRAIN_START, end: str = TEST_END) -> dict:
-    """
-    Volatility-targeting: scale equity allocation to hit TARGET_VOLATILITY=10%.
-    The mechanism: realised_vol_21d = std(last 21 daily SPY returns) * sqrt(252).
-    equity_weight = TARGET_VOLATILITY / realised_vol_21d, capped at MAX_WEIGHT=0.40.
-    Remainder goes to IEF (intermediate Treasury bonds — lower duration risk than TLT).
-    This strategy was originally proposed by Moreira & Muir (2017) and shown to
-    significantly improve Sharpe ratios for equity strategies. The key insight:
-    equity volatility is autocorrelated (ARCH effects) — today's high volatility
-    predicts tomorrow's high volatility. By reducing equity when volatility is high
-    and increasing when volatility is low, the strategy avoids the worst of crises.
-    Weekly rebalancing is chosen (not daily) because daily rebalancing on 21-day
-    realised vol would be noise-chasing — the vol estimate changes little day-to-day.
-    Weekly smooths the allocation while still being responsive to regime shifts.
-    """
-    tickers = ["SPY", "IEF"]
-    prices = fetch_equity_data(tickers, start, end)
-    assert prices.attrs.get("adjusted") is True, "Must use adjusted close prices"
-
-    risk_free = fetch_risk_free_rate(start, end)
-
-    # Weekly rebalance schedule
-    rebalance_dates = prices.resample("W-MON").first().index
-    schedule = []
-
-    spy_returns = prices["SPY"].pct_change()
-
-    for date in rebalance_dates:
-        # Realised vol uses data from the 21 trading days before this rebalance
-        available_ret = spy_returns[spy_returns.index < date].dropna()
-        if len(available_ret) < 21:
-            continue
-
-        vol_21d = float(available_ret.iloc[-21:].std() * np.sqrt(ANNUALIZATION_FACTOR))
-        if vol_21d <= 0:
-            spy_weight = MAX_WEIGHT
-        else:
-            spy_weight = min(TARGET_VOLATILITY / vol_21d, MAX_WEIGHT)
-            spy_weight = max(spy_weight, MIN_WEIGHT)
-
-        ief_weight = 1.0 - spy_weight
-        weights = {"SPY": spy_weight, "IEF": ief_weight}
-        schedule.append((date, weights))
-
-    if not schedule:
-        return {"error": "No vol signals computed for VOL_TARGETING"}
-
-    portfolio_returns = _compute_portfolio_returns(prices, schedule, TRANSACTION_COST_BPS)
-    if portfolio_returns.empty:
-        return {"error": "No returns computed for VOL_TARGETING"}
-
-    bm_prices = fetch_equity_data([BENCHMARK], start, end)
-    bm_returns = bm_prices.iloc[:, 0].pct_change().dropna()
-    max_dd, dd_dur, dd_rec = max_drawdown(portfolio_returns)
-    sr = sharpe_ratio(portfolio_returns, risk_free)
-    beta = compute_beta(portfolio_returns, bm_returns)
-    alpha_val = compute_alpha(portfolio_returns, bm_returns, risk_free)
-    ir = information_ratio(portfolio_returns, bm_returns)
-
-    avg_weights: dict[str, float] = {}
-    for _, w in schedule:
-        for t, wt in w.items():
-            avg_weights[t] = avg_weights.get(t, 0.0) + wt / len(schedule)
-
-    log.info("backtest_completed", strategy="VOL_TARGETING",
-             sharpe=round(sr, 4), cagr=round(annualized_return(portfolio_returns), 4))
-
-    return _build_result("Volatility Targeting", "dynamic", portfolio_returns, risk_free, bm_returns,
-                         avg_weights, max_dd, dd_dur, dd_rec, sr, beta, alpha_val, ir)
-
-
-def run_black_litterman(start: str = TRAIN_START, end: str = TEST_END) -> dict:
-    """
-    Black-Litterman optimisation over SPY, TLT, IEF, GLD.
-    Sprint 3 uses the prior-only posterior (no views) — CIO agent views are added
-    in Sprint 4. The equilibrium prior is derived from equal market-cap weights
-    (documented in provenance.json under 'bl_market_cap_priors' as GAP 5).
-    Without views, BL reduces to mean-variance on the equilibrium expected returns.
-    The key value of BL in Sprint 3 is the covariance structure: full covariance
-    estimated from 36 months of daily returns (not just diagonal variance), giving
-    the optimizer proper diversification information. The prior also prevents the
-    corner solutions that raw mean-variance produces — the equilibrium prior acts
-    as a regulariser.
-    Sprint 4 will incorporate CIO agent views (e.g. "SPY will outperform TLT
-    by 2% over the next quarter with 60% confidence") into the BL posterior.
-    """
-    from tools.optimizer import black_litterman_optimize
-    from config import OPTIMIZATION_WINDOW
-
-    tickers = ["SPY", "TLT", "IEF", "GLD"]
-    prices = fetch_equity_data(tickers, start, end)
-    assert prices.attrs.get("adjusted") is True, "Must use adjusted close prices"
-
-    risk_free = fetch_risk_free_rate(start, end)
-
-    rebalance_dates = prices.resample("QS").first().index
-    schedule = []
-    days_per_month = ANNUALIZATION_FACTOR // 12
-    lookback = OPTIMIZATION_WINDOW * days_per_month
-
-    for date in rebalance_dates:
-        available = prices[prices.index < date]
-        if len(available) < lookback:
-            continue
-
-        window_returns = available.iloc[-lookback:].pct_change().dropna()
-        w_arr = black_litterman_optimize(
-            window_returns,
-            min_weight=MIN_WEIGHT,
-            max_weight=MAX_WEIGHT,
-        )
-        weights = {t: float(w) for t, w in zip(tickers, w_arr)}
-        _validate_weights(weights, f"BL_{date.date()}")
-        schedule.append((date, weights))
-
-    if not schedule:
-        return {"error": "No BL optimizations computed"}
-
-    portfolio_returns = _compute_portfolio_returns(prices, schedule, TRANSACTION_COST_BPS)
-    if portfolio_returns.empty:
-        return {"error": "No returns computed for BLACK_LITTERMAN"}
-
-    bm_prices = fetch_equity_data([BENCHMARK], start, end)
-    bm_returns = bm_prices.iloc[:, 0].pct_change().dropna()
-    max_dd, dd_dur, dd_rec = max_drawdown(portfolio_returns)
-    sr = sharpe_ratio(portfolio_returns, risk_free)
-    beta = compute_beta(portfolio_returns, bm_returns)
-    alpha_val = compute_alpha(portfolio_returns, bm_returns, risk_free)
-    ir = information_ratio(portfolio_returns, bm_returns)
-
-    avg_weights: dict[str, float] = {}
-    for _, w in schedule:
-        for t, wt in w.items():
-            avg_weights[t] = avg_weights.get(t, 0.0) + wt / len(schedule)
-
-    log.info("backtest_completed", strategy="BLACK_LITTERMAN",
-             sharpe=round(sr, 4), cagr=round(annualized_return(portfolio_returns), 4))
-
-    return _build_result("Black-Litterman", "dynamic", portfolio_returns, risk_free, bm_returns,
-                         avg_weights, max_dd, dd_dur, dd_rec, sr, beta, alpha_val, ir)
-
-
-def run_max_sharpe_rolling(start: str = TRAIN_START, end: str = TEST_END) -> dict:
-    """
-    Rolling max-Sharpe portfolio: quarterly optimisation on a 36-month lookback.
-    Max-Sharpe (rather than max-return or min-variance) is the appropriate objective
-    when the mandate is risk-adjusted outperformance vs the benchmark — which is
-    exactly the project brief's requirement. 36-month window (OPTIMIZATION_WINDOW=36)
-    balances estimation error and regime relevance: shorter windows have noisy μ̂;
-    longer windows include stale data from different rate/growth regimes.
-    The max-Sharpe QP uses the change-of-variables trick (Lasserre formulation)
-    to convert the non-convex Sharpe maximisation into a convex QP — exact solution,
-    no gradient approximation needed.
-    Universe: SPY + TLT + IEF — three asset classes from the project brief.
-    GLD is excluded here to focus on the equity/bond diversification question.
-    """
-    from tools.optimizer import max_sharpe_optimize
-    from config import OPTIMIZATION_WINDOW
-
-    tickers = ["SPY", "TLT", "IEF"]
-    prices = fetch_equity_data(tickers, start, end)
-    assert prices.attrs.get("adjusted") is True, "Must use adjusted close prices"
-
-    risk_free = fetch_risk_free_rate(start, end)
-
-    rebalance_dates = prices.resample("QS").first().index
-    schedule = []
-    days_per_month = ANNUALIZATION_FACTOR // 12
-    lookback = OPTIMIZATION_WINDOW * days_per_month
-
-    for date in rebalance_dates:
-        available = prices[prices.index < date]
-        if len(available) < lookback:
-            continue
-
-        window_returns = available.iloc[-lookback:].pct_change().dropna()
-        # Use the current risk-free level as the annualised rf for max-Sharpe
-        rf_available = risk_free[risk_free.index < date]
-        rf_annual = float(rf_available.iloc[-1]) if len(rf_available) > 0 else RISK_FREE_RATE_FALLBACK
-
-        w_arr = max_sharpe_optimize(
-            window_returns,
-            risk_free=rf_annual,
-            min_weight=MIN_WEIGHT,
-            max_weight=MAX_WEIGHT,
-        )
-        weights = {t: float(w) for t, w in zip(tickers, w_arr)}
-        _validate_weights(weights, f"MAX_SHARPE_{date.date()}")
-        schedule.append((date, weights))
-
-    if not schedule:
-        return {"error": "No max-Sharpe optimizations computed"}
-
-    portfolio_returns = _compute_portfolio_returns(prices, schedule, TRANSACTION_COST_BPS)
-    if portfolio_returns.empty:
-        return {"error": "No returns computed for MAX_SHARPE_ROLLING"}
-
-    bm_prices = fetch_equity_data([BENCHMARK], start, end)
-    bm_returns = bm_prices.iloc[:, 0].pct_change().dropna()
-    max_dd, dd_dur, dd_rec = max_drawdown(portfolio_returns)
-    sr = sharpe_ratio(portfolio_returns, risk_free)
-    beta = compute_beta(portfolio_returns, bm_returns)
-    alpha_val = compute_alpha(portfolio_returns, bm_returns, risk_free)
-    ir = information_ratio(portfolio_returns, bm_returns)
-
-    avg_weights: dict[str, float] = {}
-    for _, w in schedule:
-        for t, wt in w.items():
-            avg_weights[t] = avg_weights.get(t, 0.0) + wt / len(schedule)
-
-    log.info("backtest_completed", strategy="MAX_SHARPE_ROLLING",
-             sharpe=round(sr, 4), cagr=round(annualized_return(portfolio_returns), 4))
-
-    return _build_result("Max Sharpe Rolling", "dynamic", portfolio_returns, risk_free, bm_returns,
-                         avg_weights, max_dd, dd_dur, dd_rec, sr, beta, alpha_val, ir)
-
-
-# ── Result builder ────────────────────────────────────────────────────────────
-
-def _build_result(
-    name: str,
-    strategy_type: str,
-    portfolio_returns: pd.Series,
-    risk_free: pd.Series,
-    bm_returns: pd.Series,
-    avg_weights: dict,
-    max_dd: float,
-    dd_dur: int,
-    dd_rec: int,
-    sr: float,
-    beta: float,
-    alpha: float,
-    ir: float,
-) -> dict:
-    """
-    Shared result dict builder — avoids duplicating 30 fields across 9 strategy functions.
-    All strategy result dicts must be structurally identical: the dashboard's strategy
-    comparison table, QA audit, and statistical test suite all depend on consistent keys.
-    A mismatch (e.g., one strategy missing 'var_95') would produce a silent None in
-    the frontend rather than a visible error — harder to catch than a KeyError.
-    bond_tickers is used to split equity vs bond weight for the avg_bond_weight metric.
-    """
-    bond_tickers = set(FIXED_INCOME)
-    avg_bond_wt = sum(w for t, w in avg_weights.items() if t in bond_tickers)
-    avg_eq_wt = 1.0 - avg_bond_wt
-
-    return {
-        "strategy_name": name,
-        "strategy_type": strategy_type,
-        "cagr": round(annualized_return(portfolio_returns), 4),
-        "total_return": round(float((1 + portfolio_returns).prod() - 1), 4),
-        "volatility": round(annualized_volatility(portfolio_returns), 4),
-        "sharpe_ratio": round(sr, 4),
-        "sortino_ratio": round(sortino_ratio(portfolio_returns, risk_free), 4),
-        "calmar_ratio": round(calmar_ratio(portfolio_returns), 4),
-        "max_drawdown": round(max_dd, 4),
-        "drawdown_duration_days": dd_dur,
-        "drawdown_recovery_days": dd_rec,
-        "var_95": round(compute_var(portfolio_returns, 0.95), 4),
-        "cvar_95": round(compute_cvar(portfolio_returns, 0.95), 4),
-        "alpha": round(alpha, 6),
-        "alpha_bps": round(alpha * 10_000, 1),
-        "beta": round(beta, 4),
-        "information_ratio": round(ir, 4),
-        "avg_equity_weight": round(avg_eq_wt, 4),
-        "avg_bond_weight": round(avg_bond_wt, 4),
-        "n_observations": len(portfolio_returns),
-        "date_range": {
-            "start": str(portfolio_returns.index[0].date()),
-            "end": str(portfolio_returns.index[-1].date()),
-        },
-    }
-
-
 # ── Run all 10 strategies ─────────────────────────────────────────────────────
 
-def run_all_strategies(start: str = TRAIN_START, end: str = TEST_END) -> list[dict]:
+def run_all_strategies(history: dict) -> list[dict]:
     """
-    Orchestrates all 10 strategies and returns a list sorted by Sharpe ratio.
-    Used by GET /api/backtest/compare to populate the dashboard comparison table.
-    Error isolation: each strategy is wrapped in try/except so a single failure
-    (e.g., yfinance data gap for one ticker) does not prevent all others from
-    running. Partial results are better than no results during the presentation.
-    The fallback to mock data for failed strategies ensures the dashboard always
-    shows 10 rows — a strategy showing mock data is still visible and clearly
-    labelled as such in the strategy_type field.
+    Orchestrate all 10 strategies against a single pre-loaded history dict.
+    Error isolation: each strategy is wrapped in try/except so a single optimizer
+    failure (e.g., singular covariance matrix in an unusual market regime) does
+    not prevent all others from running. The fallback mock entry is clearly marked
+    via the 'error' key so the QA audit can flag it without crashing the dashboard.
+    Sorted by Sharpe ratio descending so the compare table ranks best first.
     """
     from models.schemas import MOCK_STRATEGIES
 
@@ -985,11 +927,10 @@ def run_all_strategies(start: str = TRAIN_START, end: str = TEST_END) -> list[di
 
     for name, runner in strategy_runners:
         try:
-            result = runner(start=start, end=end)
+            result = runner(history)
             results.append(result)
         except Exception as exc:
             log.warning("strategy_failed", strategy=name, error=str(exc))
-            # Fall back to mock data with an error note
             fallback = dict(mock_lookup.get(name, {"strategy_name": name, "sharpe_ratio": 0.0}))
             fallback["error"] = str(exc)
             results.append(fallback)

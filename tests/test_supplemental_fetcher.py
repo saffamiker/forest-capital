@@ -200,3 +200,72 @@ def test_supplemental_fetcher_ff_factors_are_decimals(tmp_path, monkeypatch):
     assert len(non_nan) > 0, "All Mkt-RF values are NaN after conversion"
     max_val = non_nan.abs().max()
     assert max_val < 1.0, f"Mkt-RF max {max_val:.3f} — factors may not be divided by 100"
+
+
+# ── LQD bridge ─────────────────────────────────────────────────────────────────
+
+def _make_lqd_prices(n: int = 1000, seed: int = 99) -> pd.DataFrame:
+    """Synthetic LQD prices spanning 2002-07 to 2006-12 (pre-BND period)."""
+    np.random.seed(seed)
+    prices = np.cumprod(1 + np.random.normal(0.0002, 0.005, n)) * 90.0
+    return pd.DataFrame(
+        {"LQD": prices},
+        index=pd.bdate_range("2002-08-01", periods=n),
+    )
+
+
+def test_supplemental_fetcher_has_lqd_bridge_daily(tmp_path, monkeypatch):
+    """
+    fetch_supplemental_data() must include lqd_bridge_daily.
+    LQD (pre-BND IG bridge) is the only permitted non-SPY yfinance fetch —
+    it fills the gap between LQD's 2002 launch and BND's Excel coverage (2007).
+    """
+    spy_prices = _make_spy_prices()
+    lqd_prices = _make_lqd_prices()
+
+    def mock_yfinance(tickers: list[str], s: str, e: str) -> pd.DataFrame:
+        if "SPY" in tickers:
+            return spy_prices
+        if "LQD" in tickers:
+            return lqd_prices
+        return pd.DataFrame()
+
+    monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
+    monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", mock_yfinance)
+    monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
+    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+
+    from tools.data_fetcher import fetch_supplemental_data
+    result = fetch_supplemental_data("2000-01-01", "2024-12-31")
+
+    assert "lqd_bridge_daily" in result, "Missing lqd_bridge_daily key"
+    assert isinstance(result["lqd_bridge_daily"], pd.Series)
+    # LQD bridge should be returns (small decimals), not price levels
+    bridge = result["lqd_bridge_daily"]
+    assert bridge.abs().max() < 0.15, "lqd_bridge_daily looks like prices, not returns"
+
+
+def test_supplemental_fetcher_lqd_bnd_hyg_not_in_bond_fetches(tmp_path, monkeypatch):
+    """
+    BND and HYG must never be fetched from yfinance — they come from the Excel file.
+    LQD is the only permitted non-SPY yfinance fetch.
+    """
+    yfinance_calls: list[list[str]] = []
+
+    def mock_yfinance(tickers: list[str], s: str, e: str) -> pd.DataFrame:
+        yfinance_calls.append(tickers)
+        n = 252
+        prices = np.cumprod(1 + np.random.normal(0.0004, 0.01, n)) * 100.0
+        return pd.DataFrame({t: prices for t in tickers}, index=pd.bdate_range("2002-08-01", periods=n))
+
+    monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
+    monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", mock_yfinance)
+    monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
+    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+
+    from tools.data_fetcher import fetch_supplemental_data
+    fetch_supplemental_data("2000-01-01", "2024-12-31")
+
+    all_tickers = [t for call in yfinance_calls for t in call]
+    assert "BND" not in all_tickers, "BND fetched from yfinance — must come from Excel"
+    assert "HYG" not in all_tickers, "HYG fetched from yfinance — must come from Excel"
