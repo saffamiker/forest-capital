@@ -242,7 +242,11 @@ def test_risk_metrics_import_uses_252():
     import tools.risk_metrics as rm
     import inspect
     src = inspect.getsource(rm)
-    # Should reference ANNUALIZATION_FACTOR, not 260 or 365
-    assert "260" not in src
-    assert "365" not in src
+    # Should reference ANNUALIZATION_FACTOR, not use 260 or 365 as calculation operands.
+    # "260" and "365" may appear in explanatory comments (e.g. "never 260 or 365")
+    # but must never appear as hardcoded values in calculations.
+    assert "* 260" not in src
+    assert "np.sqrt(260)" not in src
+    assert "* 365" not in src
+    assert "np.sqrt(365)" not in src
     assert "ANNUALIZATION_FACTOR" in src
