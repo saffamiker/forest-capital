@@ -190,68 +190,171 @@ PRIMARY DATA SOURCE: Dr. Panttser's Excel file
 
 This file contains all historical series with actual values. It is the
 authoritative data source for the project. Process it first in Sprint 2
-before building any yfinance/FRED fetchers.
+before building any supplemental fetchers.
 
-EXCEL FILE SHEETS (confirmed):
-  High Yield Effective Yield     — BAMLH0A0HYM2EY (FRED daily, from ~1997)
-  High Yield Total Return        — BAMLHYH0A0HYM2TRIV (FRED daily, from ~1986)
-  S&P 500 HY                     — S&P 500 HY Corp Bond Index (daily, from 2016)
-  S&P 500 Investment Grade       — IG Corporate Bond Index daily (from 2025)
-  iShares 10+ Yr IG              — ETF daily OHLCV (from 2019)
-  US Corporate Effective Yield   — BAMLC0A0CMEY (FRED daily, from ~1997)
-  Vanguard Total Bond            — BND daily OHLCV (from ~2019)
-  Vanguard ETF                   — VYM (Vanguard High Dividend) daily
-  S&P 500 Monthly Returns        — Monthly from 2000-01-01
-  SP 500 PE Ratio                — Quarterly from ~1988
-  Market Yield on US Treasury    — DGS10 daily (from ~1962)
-  3-Month Treasury               — DTB3 daily (from ~1954)
-  Real GDP                       — GDPC1 quarterly (from ~1947)
-  GDP Deflator                   — GDPDEF quarterly (from ~1947)
+CRITICAL FREQUENCY NOTE:
+  The vast majority of series in the Excel file are DAILY.
+  Only S&P 500 returns are monthly. Macro indicators are quarterly.
+  This means daily bond, yield, and spread data is already provided —
+  yfinance is only needed for SPY daily (equity). Do not fetch BND or
+  HYG from yfinance — the Excel file provides superior daily bond data.
+
+EXCEL FILE SHEETS — FREQUENCY AND USE:
+  High Yield Effective Yield     — BAMLH0A0HYM2EY    daily  signal
+  High Yield Total Return        — BAMLHYH0A0HYM2TRIV daily  HY returns (primary)
+  S&P 500 HY Corp Bond Index     — daily OHLCV               HY proxy (from 2016)
+  S&P 500 Investment Grade       — daily OHLCV               IG proxy (from 2025)
+  iShares 10+ Yr IG Corp Bond    — daily OHLCV               IG proxy (from 2019)
+  US Corporate Effective Yield   — BAMLC0A0CMEY      daily  signal
+  Vanguard Total Bond (BND)      — daily OHLCV               IG returns (primary)
+  Vanguard High Dividend (VYM)   — daily OHLCV               not used in portfolio
+  S&P 500 Monthly Returns        — MONTHLY                   equity returns (primary)
+  S&P 500 P/E Ratio              — quarterly                 regime signal
+  10Y Treasury (DGS10)           — daily                     signal + yield curve
+  3M T-bill (DTB3)               — daily                     risk-free rate
+  Real GDP (GDPC1)               — quarterly                 macro signal
+  GDP Deflator (GDPDEF)          — quarterly                 macro signal
 
 DATE FORMAT NOTE:
   All dates in Excel file are Excel serial numbers (integer days since 1900).
   Convert with: pd.Timestamp('1899-12-30') + pd.Timedelta(days=serial_number)
   or: pd.to_datetime(serial_number, unit='D', origin='1899-12-30')
+  Verify: serial 45839 parses to approximately 2025-07-01
 
-PRIMARY RETURN SERIES FOR PORTFOLIO CONSTRUCTION:
-  Equities:       S&P 500 Monthly Returns (Y-charts) → monthly returns
-                  Supplement with SPY daily from yfinance for recent data
-  IG Bonds:       BND daily from Excel / yfinance for price returns
-                  BAMLC0A0CMEY as yield signal
-  HY Bonds:       BAMLHYH0A0HYM2TRIV total return index (primary)
-                  HYG from yfinance as supplement
-  Risk-free:      DTB3 (3-month T-bill) from Excel / FRED
+─── PRIMARY RETURN SERIES FOR PORTFOLIO CONSTRUCTION ────────────────────────
 
-DATA HIERARCHY (use in this order):
-  1. Dr. Panttser's Excel file (authoritative, provided)
-  2. FRED API (for any gaps or updates)
-  3. yfinance (for ETF price data supplements)
-  4. Fallback constants (only if APIs unavailable)
+  Equities (monthly):   S&P 500 Monthly Returns from Excel — authoritative
+  Equities (daily):     SPY from yfinance — needed for momentum and vol models
+                        Cross-validated against Excel monthly (see Section 4b)
 
-CRITICAL: All returns must use TOTAL RETURN (adjusted close for ETFs).
-Verify yfinance auto_adjust=True on every fetch.
-For index series (BAMLHYH0A0HYM2TRIV), compute returns from index levels.
+  IG Bonds (monthly):   BND daily from Excel aggregated to month-end
+  IG Bonds (daily):     BND daily OHLCV from Excel — do NOT use yfinance BND
+                        Use adjusted close (compute from OHLCV)
 
-Implement:
-- load_provided_data()          -> dict of DataFrames from Excel file
-  Loads all sheets, converts serial dates, returns clean DataFrames
-- compute_returns(df, freq)     -> pd.DataFrame
-  Monthly or quarterly returns from price/index levels
-- fetch_fred_series(series_id, start, end) -> pd.Series
-- fetch_equity_data(tickers, start, end)   -> pd.DataFrame (supplement only)
-- fetch_risk_free_rate(start, end)         -> pd.Series (DTB3 from Excel/FRED)
-- get_full_history()            -> dict
-  Assembles longest possible history per asset class using all sources
-  Returns: {'equity': Series, 'ig_bonds': Series, 'hy_bonds': Series,
-            'risk_free': Series, 'signals': dict}
+  HY Bonds (monthly):   BAMLHYH0A0HYM2TRIV daily from Excel → month-end
+  HY Bonds (daily):     BAMLHYH0A0HYM2TRIV daily from Excel — do NOT use HYG
+                        HYG is a tradeable ETF with tracking error vs the index
+                        BAMLHYH0A0HYM2TRIV is the true total return index
+
+  Risk-free (daily):    DTB3 from Excel — daily rate
+  Risk-free (monthly):  DTB3 aggregated — convert to monthly:
+                        (1 + annual_rate/100)^(1/12) - 1
+
+  Yield curve (daily):  DGS10 (Excel) minus DGS2 (FRED) — 10Y-2Y spread
+  HY spread (daily):    BAMLH0A0HYM2EY from Excel
+  IG spread (daily):    BAMLC0A0CMEY from Excel
+
+─── SUPPLEMENTAL DATA — EXTERNAL SOURCES REQUIRED ──────────────────────────
+
+Only four external fetches are required. Everything else comes from Excel.
+
+  GAP 1 — SPY daily equity prices
+    Needed by: MOMENTUM_ROTATION, VOL_TARGETING, HMM regime detection
+    Why not in Excel: S&P 500 provided monthly only, no daily equity series
+    Fix: yfinance.download('SPY', auto_adjust=True, start='2000-01-01')
+    Cross-validate: aggregate to monthly, compare against Excel monthly
+    Tolerance: WARN 0.5% / ERROR 1.0% per month (see Section 4b)
+    DO NOT fetch BND or HYG from yfinance — Excel data is superior
+
+  GAP 2 — VIX (VIXCLS)
+    Needed by: REGIME_SWITCHING threshold classifier
+    Fix: FRED API — series VIXCLS, daily, 2000-01-01 to present
+    Note: VIX is not a return series — store raw level, not return
+
+  GAP 3 — 2-Year Treasury yield (DGS2)
+    Needed by: yield curve signal = DGS10 (Excel) minus DGS2 (FRED)
+    Fix: FRED API — series DGS2, daily, 2000-01-01 to present
+    Note: DGS10 is already in Excel — only DGS2 is missing
+
+  GAP 4 — Fama-French factors (Mkt-RF, SMB, HML, Mom)
+    Needed by: Factor Exposure Heatmap on Regime Analysis dashboard
+    Fix: pandas-datareader — pdr.get_data_famafrench('F-F_Research_Data_Factors')
+    Frequency: monthly — aligns directly with portfolio return series
+    Fallback: direct download from Ken French data library if datareader fails
+
+  GAP 5 — Black-Litterman equilibrium weights
+    Not a fetch — hardcoded prior: equity=0.60, ig=0.30, hy=0.10
+    Document in provenance.json under "bl_market_cap_priors"
+
+─── DATA HIERARCHY ───────────────────────────────────────────────────────────
+
+  1. Excel file  — authoritative for all series it contains. Never overridden.
+  2. FRED API    — VIX and DGS2 only
+  3. yfinance    — SPY daily only. No other tickers.
+  4. datareader  — Fama-French monthly factors only
+  5. Constants   — BL priors only, always documented in provenance.json
+
+CRITICAL: All returns use TOTAL RETURN.
+  BND: compute from adjusted close (use OHLCV close, no dividend adjustment
+       needed as BND OHLCV from Y-charts is already adjusted)
+  BAMLHYH0A0HYM2TRIV: total return index — returns from level changes
+  SPY: yfinance auto_adjust=True ensures total return
+
+─── FUNCTION SIGNATURES ──────────────────────────────────────────────────────
+
+Implement all in tools/data_fetcher.py:
+
+- load_provided_data() -> dict[str, pd.DataFrame]
+  Loads all 14 sheets from Excel file, converts serial dates,
+  returns clean DataFrames keyed by sheet name.
+  Immediately available: all daily bond, yield, spread, rate series.
+
+- build_daily_returns() -> pd.DataFrame
+  Computes daily returns for all three asset classes from Excel:
+    equity_daily:  not available from Excel — set to NaN, filled by SPY
+    ig_daily:      BND close-to-close daily return from Excel OHLCV
+    hy_daily:      BAMLHYH0A0HYM2TRIV level-to-level daily return
+  Returns DataFrame with columns: date, ig_return, hy_return
+  (equity_daily column added after SPY supplemental fetch)
+
+- build_monthly_returns() -> pd.DataFrame
+  Aggregates daily series to month-end:
+    equity_monthly:  from Excel S&P 500 Monthly Returns (authoritative)
+    ig_monthly:      BND daily from Excel → last trading day of month
+    hy_monthly:      BAMLHYH0A0HYM2TRIV daily → last trading day of month
+    risk_free:       DTB3 daily → monthly rate conversion
+
+- fetch_supplemental_data() -> dict[str, pd.Series | pd.DataFrame]
+  Fetches only: SPY daily (yfinance), VIX (FRED), DGS2 (FRED), FF (datareader)
+  Caches to PostgreSQL table: market_data_supplemental
+  Does NOT fetch BND or HYG — those come from Excel
+
+- cross_validate_equity() -> CrossValidationResult
+  Compares Excel monthly equity vs SPY daily aggregated to monthly
+  See Section 4b for full specification
+
+- compute_signals() -> dict[str, pd.Series]
+  Assembles all regime and allocation signals:
+    hy_spread:     BAMLH0A0HYM2EY (Excel daily)
+    ig_spread:     BAMLC0A0CMEY (Excel daily)
+    yield_curve:   DGS10 (Excel) minus DGS2 (FRED)
+    vix:           VIXCLS (FRED)
+    pe_ratio:      S&P 500 PE (Excel quarterly, forward-filled)
+    gdp_growth:    GDPC1 (Excel quarterly, forward-filled)
+
+- get_full_history() -> dict
+  Orchestrates all loads, builds, fetches, and cross-validation.
+  Returns unified dataset:
+  {
+    'equity_monthly':    pd.Series,   # Excel authoritative
+    'ig_monthly':        pd.Series,   # BND from Excel → monthly
+    'hy_monthly':        pd.Series,   # BAMLHYH index from Excel → monthly
+    'risk_free_monthly': pd.Series,   # DTB3 from Excel → monthly rate
+    'equity_daily':      pd.Series,   # SPY from yfinance
+    'ig_daily':          pd.Series,   # BND from Excel daily
+    'hy_daily':          pd.Series,   # BAMLHYH index from Excel daily
+    'risk_free_daily':   pd.Series,   # DTB3 from Excel daily
+    'signals':           dict,        # all signals from compute_signals()
+    'ff_factors':        pd.DataFrame # Fama-French monthly
+  }
 
 HISTORY COVERAGE TARGET:
-  Use longest available for each series:
-  HY Total Return:  ~1986 (BAMLHYH0A0HYM2TRIV)
-  IG Bonds:         ~1997 (BAMLC0A0CMEY, BND from 2007)
-  S&P 500:          2000 (monthly from Excel)
-  Common start:     2000-01-01 (all three asset classes available)
-  This gives ~25 years monthly = 300 observations (well above power threshold)
+  HY Total Return daily:  ~1986 (BAMLHYH0A0HYM2TRIV from Excel)
+  BND daily:              ~2019 (Vanguard Total Bond from Excel)
+  S&P 500 monthly:        2000-01-01 (from Excel)
+  Common start for all three: 2000-01-01
+  Monthly observations:   ~300 (Jan 2000 to Dec 2024)
+  Daily observations:     ~6,500 trading days
 
 
 
@@ -328,48 +431,361 @@ FRED_SERIES = {
 SECTION 4b: DATA VALIDATION
 =============================================================================
 
-CRITICAL VALIDATION STEPS (Sprint 2):
+All validation runs automatically inside get_full_history() on every
+cold start. Results logged to provenance.json and stored in PostgreSQL
+table: data_validation_log (run_id, timestamp, check_name, status, detail).
 
-1. EXCEL DATE CONVERSION
-   All dates in FNA_670_Project_Sources.xlsx are Excel serial integers.
-   Convert BEFORE any calculations:
-     pd.to_datetime(serial, unit='D', origin='1899-12-30')
-   Verify: serial 45839 should parse to approximately 2025-07-01
+─── STEP 1: EXCEL DATE CONVERSION ───────────────────────────────────────────
+  Convert all serial integers before any calculations:
+    pd.to_datetime(serial, unit='D', origin='1899-12-30')
+  Assert: serial 45839 parses to 2025-07-01 (±1 day)
+  Assert: serial 36494 parses to 2000-01-04 (first trading day of 2000)
+  Raises: DateConversionError if assertions fail
 
-2. RETURN CALCULATION
-   From price/index levels: return_t = (price_t / price_t-1) - 1
-   For monthly data: use end-of-month prices only
-   For BND/HYG ETFs: use adjusted close (total return)
-   For BAMLHYH0A0HYM2TRIV: compute from index level changes
+─── STEP 2: RETURN CALCULATION ──────────────────────────────────────────────
+  From price/index levels: return_t = (price_t / price_{t-1}) - 1
+  Monthly data: use last available price of each calendar month
+  BND/HYG ETFs: use adjusted close only (auto_adjust=True in yfinance)
+  BAMLHYH0A0HYM2TRIV: compute returns from index level changes
+  Assert: no monthly return outside [-0.40, +0.40] (flag as outlier if so)
+  Assert: no consecutive identical prices > 5 days (stale data check)
 
-3. ALIGNMENT
-   All series must share a common monthly date index
-   Use month-end dates (pd.offsets.MonthEnd)
-   Forward-fill quarterly macro data to monthly frequency
-   Drop any month where ANY of the three asset classes has no data
+─── STEP 3: SERIES ALIGNMENT ────────────────────────────────────────────────
+  All three asset class return series must share a common monthly index
+  Use pd.offsets.MonthEnd(0) to snap all dates to month-end
+  Forward-fill quarterly macro data (GDP, deflator, PE) to monthly
+  Drop any month where ANY of equity, IG, HY has no data
+  Assert: aligned series length ≥ 288 months (power threshold)
+  Assert: no NaN values remain after alignment
 
-4. SANITY CHECKS (add as assertions in load_provided_data()):
-   - S&P 500 2000-2024 CAGR should be ~10% annually
-   - HY spread (BAMLH0A0HYM2EY) should spike above 15% in 2008-09
-   - BND total return 2022 should be approximately -13%
-   - Equity-bond correlation should turn positive in 2022
-   If any assertion fails, raise DataValidationError with details.
+─── STEP 4: CROSS-VALIDATION ─────────────────────────────────────────────────
 
-5. STORE IN DATABASE
-   Once validated, store clean monthly returns in PostgreSQL:
-   table: market_data_monthly
-   columns: date, equity_return, ig_return, hy_return, risk_free_rate
-   This ensures Sprint 3+ never re-processes raw data.
+EQUITY CROSS-VALIDATION (external comparison):
+  Purpose: Excel monthly S&P 500 (Y-charts) is authoritative.
+  SPY daily from yfinance is used for momentum and vol models.
+  Aggregating SPY daily to monthly must match the Excel series.
+  Any material disagreement means one source has a data error.
+
+  cross_validate_equity():
+    source_a = Excel 'S&P 500 Monthly Returns'   ← authoritative
+    source_b = SPY daily (yfinance) → last-day-of-month aggregation
+    diff     = source_a - source_b per month
+    WARN if abs(diff) > 0.005 any month
+    ERROR if abs(diff) > 0.010 any month → DataValidationError, halt
+
+  Expected outcome: agreement within 0.1-0.3% on most months.
+  Both series should be total return (Y-charts and yfinance auto_adjust).
+  If systematic bias > 0.2% mean, check: one may be price return only.
+
+  Known AMBER months (document, do not fail):
+    January 2000 (dot-com peak, index vs ETF divergence)
+    March 2020 (extreme intraday volatility, end-of-month sensitivity)
+
+BOND CROSS-VALIDATION (internal consistency — no external benchmark):
+  BND and BAMLHYH0A0HYM2TRIV are both provided daily in the Excel file.
+  There is no separate monthly bond series to compare against.
+  Monthly bond returns are derived by aggregating the Excel daily series.
+  The Excel daily data IS the authoritative bond source.
+
+  cross_validate_bonds():
+    For BND daily (Excel OHLCV):
+      Check: no gaps > 5 consecutive trading days
+      Check: all close prices positive
+      Check: no single-day return outside [-10%, +10%]
+      Check: monthly aggregated returns within [-8%, +8%] range
+    For BAMLHYH0A0HYM2TRIV (Excel total return index):
+      Check: index level strictly positive throughout
+      Check: no single-day change > 5% in absolute terms
+      Check: GFC 2008-2009 drawdown visible (cumulative loss > 20%)
+    Log results to provenance.json under "bond_internal_validation"
+
+CROSS-VALIDATION RESULTS — stored in provenance.json:
+  {
+    "cross_validation": {
+      "equity": {
+        "series_a":            "S&P 500 Monthly Returns (Y-charts, Excel)",
+        "series_b":            "SPY daily → monthly (yfinance)",
+        "n_months_compared":   300,
+        "n_green":             ...,
+        "n_amber":             ...,
+        "n_red":               ...,
+        "max_discrepancy_pct": ...,
+        "mean_discrepancy_pct": ...,
+        "worst_month":         "...",
+        "status":              "PASS | WARN | FAIL",
+        "authoritative":       "Excel (Y-charts)"
+      },
+      "bond_internal": {
+        "bnd_gaps_found":      ...,
+        "bnd_outliers_found":  ...,
+        "hy_index_positive":   true,
+        "hy_gfc_drawdown_pct": ...,
+        "status":              "PASS | WARN | FAIL"
+      }
+    }
+  }
+
+─── STEP 5: SUPPLEMENTAL DATA VALIDATION ────────────────────────────────────
+  After fetching VIX, DGS2, SPY daily, FF factors:
+  VIX:        Assert peak value > 70 exists (March 2020 — COVID spike)
+              Assert peak value > 80 exists (Oct 2008 — GFC peak)
+  DGS2:       Assert values exist for full 2000-2024 range
+              Assert 2023 average between 4.0-5.5%
+  SPY daily:  Assert 2008 drawdown between -48% and -58%
+              Assert returns start from 2000-01-03 (first SPY trading day)
+  FF factors: Assert Mkt-RF factor exists for all months 2000-2024
+              Assert HML factor shows positive values pre-2007 (value premium)
+
+─── STEP 6: FIVE SANITY ASSERTIONS ──────────────────────────────────────────
+  These are hard assertions — any failure raises DataValidationError.
+  Run on the final assembled dataset before storing to PostgreSQL.
+
+  ASSERT 1: S&P 500 2000-2024 CAGR between 8% and 12%
+  ASSERT 2: HY yield (BAMLH0A0HYM2EY) exceeds 15% at some point 2008-2009
+  ASSERT 3: BND or IG proxy return in 2022 between -10% and -18%
+  ASSERT 4: Equity-bond monthly correlation in 2022 is positive (> 0)
+  ASSERT 5: Total aligned monthly observations ≥ 288
+
+─── STEP 7: STORE TO POSTGRESQL — WITH RUNTIME PROVENANCE ───────────────────
+
+CRITICAL PRINCIPLE:
+  Provenance is a runtime property of data, not a frontend constant.
+  Every value stored in the database carries the source it actually came from.
+  The frontend NEVER declares provenance — it only displays what the API returns.
+  If the source displayed in the UI disagrees with the database, the database wins.
+  This makes it impossible for a hardcoded label to misrepresent actual data origin.
+
+─── data_series_registry ────────────────────────────────────────────────────
+  One row per distinct data series loaded in the pipeline.
+  Created once on first load. Updated if source changes.
+
+  CREATE TABLE data_series_registry (
+    series_id        VARCHAR PRIMARY KEY,  -- e.g. "equity_monthly"
+    display_name     VARCHAR NOT NULL,     -- e.g. "S&P 500 Monthly Returns"
+    source_type      VARCHAR NOT NULL,     -- "excel_provided" | "yfinance" |
+                                           -- "fred_api" | "ken_french" | "constant"
+    source_detail    JSONB   NOT NULL,     -- see source_detail schema below
+    frequency        VARCHAR NOT NULL,     -- "daily" | "monthly" | "quarterly"
+    date_range_start DATE,
+    date_range_end   DATE,
+    row_count        INTEGER,
+    loaded_at        TIMESTAMPTZ NOT NULL,
+    last_validated   TIMESTAMPTZ,
+    validation_status VARCHAR             -- "pass" | "warn" | "fail"
+  );
+
+  source_detail schema by source_type:
+
+    excel_provided:
+      { "file": "FNA_670_Project_Sources.xlsx",
+        "sheet": "Vanguard Total Bond",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "Y-charts" }
+
+    yfinance:
+      { "ticker": "SPY",
+        "auto_adjust": true,
+        "interval": "1d",
+        "fetched_at": "2026-05-11T14:23:08Z" }
+
+    fred_api:
+      { "series_id": "VIXCLS",
+        "fetched_at": "2026-05-11T14:23:12Z",
+        "fred_url": "https://fred.stlouisfed.org/series/VIXCLS" }
+
+    ken_french:
+      { "dataset": "F-F_Research_Data_Factors",
+        "fetched_at": "2026-05-11T14:23:15Z",
+        "url": "mba.tuck.dartmouth.edu/pages/faculty/ken.french" }
+
+    constant:
+      { "value": {"equity": 0.60, "ig": 0.30, "hy": 0.10},
+        "justification": "approximate global multi-asset market cap split",
+        "used_by": "BLACK_LITTERMAN strategy equilibrium prior" }
+
+─── market_data_monthly ──────────────────────────────────────────────────────
+  Every value column paired with a source column.
+  Source column stores the series_id from data_series_registry.
+  No ambiguity possible — every number traceable to its origin.
+
+  CREATE TABLE market_data_monthly (
+    date              DATE    PRIMARY KEY,
+    -- Return series
+    equity_return     FLOAT   NOT NULL,
+    equity_source     VARCHAR NOT NULL REFERENCES data_series_registry(series_id),
+    ig_return         FLOAT   NOT NULL,
+    ig_source         VARCHAR NOT NULL REFERENCES data_series_registry(series_id),
+    hy_return         FLOAT   NOT NULL,
+    hy_source         VARCHAR NOT NULL REFERENCES data_series_registry(series_id),
+    risk_free_rate    FLOAT   NOT NULL,
+    risk_free_source  VARCHAR NOT NULL REFERENCES data_series_registry(series_id),
+    -- Signal series
+    vix_month_avg     FLOAT,
+    vix_source        VARCHAR REFERENCES data_series_registry(series_id),
+    yield_curve       FLOAT,
+    yield_curve_source VARCHAR REFERENCES data_series_registry(series_id),
+    hy_spread         FLOAT,
+    hy_spread_source  VARCHAR REFERENCES data_series_registry(series_id),
+    ig_spread         FLOAT,
+    ig_spread_source  VARCHAR REFERENCES data_series_registry(series_id),
+    gdp_growth        FLOAT,
+    gdp_source        VARCHAR REFERENCES data_series_registry(series_id),
+    pe_ratio          FLOAT,
+    pe_source         VARCHAR REFERENCES data_series_registry(series_id)
+  );
+
+  Expected source values for a correctly loaded dataset:
+    equity_source:      "equity_monthly"       → excel_provided
+    ig_source:          "ig_monthly_bnd"       → excel_provided
+    hy_source:          "hy_monthly_baml"      → excel_provided
+    risk_free_source:   "risk_free_dtb3"       → excel_provided
+    vix_source:         "vix_daily"            → fred_api
+    yield_curve_source: "yield_curve_10y2y"    → excel_provided + fred_api
+    hy_spread_source:   "hy_spread_baml"       → excel_provided
+    ig_spread_source:   "ig_spread_baml"       → excel_provided
+    gdp_source:         "gdp_real_gdpc1"       → excel_provided
+    pe_source:          "sp500_pe_ratio"       → excel_provided
+
+─── market_data_daily ───────────────────────────────────────────────────────
+
+  CREATE TABLE market_data_daily (
+    date          DATE    PRIMARY KEY,
+    equity_return FLOAT,
+    equity_source VARCHAR REFERENCES data_series_registry(series_id),
+    ig_return     FLOAT,
+    ig_source     VARCHAR REFERENCES data_series_registry(series_id),
+    hy_return     FLOAT,
+    hy_source     VARCHAR REFERENCES data_series_registry(series_id),
+    vix           FLOAT,
+    vix_source    VARCHAR REFERENCES data_series_registry(series_id),
+    dgs2          FLOAT,
+    dgs2_source   VARCHAR REFERENCES data_series_registry(series_id)
+  );
+
+  Expected source values:
+    equity_source:  "equity_daily_spy"    → yfinance (only daily equity source)
+    ig_source:      "ig_daily_bnd"        → excel_provided
+    hy_source:      "hy_daily_baml"       → excel_provided
+    vix_source:     "vix_daily"           → fred_api
+    dgs2_source:    "dgs2_daily"          → fred_api
+
+─── data_validation_log ────────────────────────────────────────────────────
+
+  CREATE TABLE data_validation_log (
+    run_id        UUID         DEFAULT gen_random_uuid(),
+    timestamp     TIMESTAMPTZ  DEFAULT now(),
+    check_name    VARCHAR      NOT NULL,
+    series_id     VARCHAR      REFERENCES data_series_registry(series_id),
+    status        VARCHAR      NOT NULL,  -- "pass" | "warn" | "fail"
+    detail        JSONB        NOT NULL   -- full discrepancy data
+  );
+
+─── API ENDPOINT — PROVENANCE ───────────────────────────────────────────────
+
+  GET /api/v1/provenance
+  Returns the full data_series_registry as JSON.
+  Frontend uses this to populate every Sources line and the Data Sources panel.
+  Never hardcoded in the frontend — always fetched from this endpoint.
+
+  Response shape:
+  {
+    "series": [
+      {
+        "series_id":       "equity_monthly",
+        "display_name":    "S&P 500 Monthly Returns",
+        "source_type":     "excel_provided",
+        "source_detail":   { "file": "FNA_670_Project_Sources.xlsx",
+                             "sheet": "S&P 500 Monthly Returns",
+                             "provided_by": "Dr. Panttser (FNA 670)",
+                             "original_source": "Y-charts" },
+        "frequency":       "monthly",
+        "date_range_start": "2000-01-31",
+        "date_range_end":   "2024-12-31",
+        "row_count":        300,
+        "loaded_at":        "2026-05-11T14:23:01Z",
+        "validation_status": "pass"
+      },
+      ...
+    ],
+    "cross_validation": { ... },  -- from data_validation_log
+    "last_pipeline_run": "2026-05-11T14:23:20Z"
+  }
+
+─── FRONTEND PROVENANCE STORE ───────────────────────────────────────────────
+
+  frontend/src/stores/provenanceStore.ts (Zustand)
+
+  Fetches /api/v1/provenance on app load.
+  Stored in provenanceStore.series — keyed by series_id.
+  ChartCommentStrip reads from this store, never from a hardcoded constant.
+
+  ChartProvenanceRegistry (frontend/src/types/provenance.ts):
+    Maps chart_id → series_id[] (which series appear in that chart)
+    This is the ONLY thing hardcoded in the frontend regarding provenance —
+    which charts use which series. The series metadata itself comes from the API.
+
+  Example:
+    CHART_PROVENANCE_REGISTRY = {
+      "cumulative_returns": [
+        "equity_monthly", "ig_monthly_bnd",
+        "hy_monthly_baml", "risk_free_dtb3"
+      ],
+      "regime_timeline": [
+        "vix_daily", "yield_curve_10y2y",
+        "hy_spread_baml", "gdp_real_gdpc1"
+      ],
+      ...
+    }
+
+  Sources line generation (automatic):
+    const sources = CHART_PROVENANCE_REGISTRY[chartId]
+      .map(id => provenanceStore.series[id])
+      .map(s => `${s.display_name}: ${formatSource(s.source_type, s.source_detail)}`)
+      .join('  ·  ')
+
+  formatSource():
+    "excel_provided" → "Excel (provided by Dr. Panttser)"
+    "yfinance"       → "yfinance — SPY"
+    "fred_api"       → "FRED API — VIXCLS"
+    "ken_french"     → "Ken French data library"
+    "constant"       → "Fixed assumption (documented)"
+
+─── SPRINT 2 ASSERTION — PROVENANCE INTEGRITY ───────────────────────────────
+
+  Add to test_data_provenance.py:
+
+  def test_provenance_matches_actual_source():
+    """
+    Verifies that every source_type in data_series_registry matches
+    the actual origin of the data. Queries the database and checks
+    that series marked excel_provided were not populated by yfinance
+    calls, and vice versa.
+    """
+    registry = get_data_series_registry()
+
+    excel_series = [s for s in registry if s.source_type == "excel_provided"]
+    for series in excel_series:
+        assert series.source_detail["file"] == "FNA_670_Project_Sources.xlsx"
+        assert series.source_detail["sheet"] is not None
+
+    yfinance_series = [s for s in registry if s.source_type == "yfinance"]
+    for series in yfinance_series:
+        assert series.source_detail["ticker"] in ["SPY"]  # only SPY from yfinance
+        assert "BND" not in [s.source_detail.get("ticker") for s in yfinance_series]
+        assert "HYG" not in [s.source_detail.get("ticker") for s in yfinance_series]
+
+    fred_series = [s for s in registry if s.source_type == "fred_api"]
+    fred_ids = [s.source_detail["series_id"] for s in fred_series]
+    assert "VIXCLS" in fred_ids
+    assert "DGS2" in fred_ids
+    assert "DGS10" not in fred_ids   # DGS10 comes from Excel, not FRED
+
+  Sprint 2 does not close until this test passes.
+
+  Sprint 3+: read only from market_data_monthly and market_data_daily.
+  Never re-process raw data. Never re-fetch if database is populated.
 
 
-- validate_data(df) -> ValidationResult
-  Checks: no NaN gaps > 5 days, prices positive,
-  returns within [-0.5, +0.5] daily (flag outliers),
-  first available date for each ticker (survivorship check)
-
-Cache all data as parquet in data/cache/.
-Refresh if older than CACHE_EXPIRY_HOURS.
-Log every fetch with ticker, date range, rows returned, source.
 
 =============================================================================
 SECTION 5: AGENT DEFINITIONS
@@ -1785,6 +2201,123 @@ ChartCommentStrip props:
   current_results: dict   — full strategy results
   accent_color:    str    — left border colour (screen-specific)
   default_open:    bool   — start expanded (default: false)
+  data_provenance: DataProvenanceRecord[]  — sources for this chart
+
+─── DATA PROVENANCE — EVERY CHART ───────────────────────────────────────────
+
+Every chart carries a dataProvenance array defining which series
+are shown and exactly where each came from. This appears as a
+"SOURCES" line in the ChartCommentStrip — always visible in all
+three modes, never hidden, never behind a hover.
+
+PURPOSE:
+  Tooltips and the Sources line answer: "where did this number come from?"
+  The Data Sources panel (Statistical Evidence screen) answers the full
+  provenance question for the Analytical Appendix.
+  These two work together — tooltip for quick reference, panel for depth.
+
+DataProvenanceRecord type (frontend/src/types/provenance.ts):
+  interface DataProvenanceRecord {
+    series:      string   // human-readable series name
+    source:      string   // e.g. "Excel (Y-charts, provided)" | "FRED API"
+    frequency:   string   // "daily" | "monthly" | "quarterly"
+    dateRange:   string   // e.g. "Jan 2000 – Dec 2024"
+    notes?:      string   // optional caveat e.g. "aggregated to month-end"
+  }
+
+SOURCES LINE IN ChartCommentStrip:
+  Always rendered at the bottom of the strip — collapsed and expanded states.
+  Format: "SOURCES  Equity: Y-charts (provided)  ·  Bonds: FRED (provided)  ·  ..."
+  Font: 10px, mid-grey, all-caps label, normal-weight values
+  Visible in ALL three modes (Analyst, Commentary, Present)
+  This is the only element of the strip visible in Analyst mode by default.
+  In Present mode: slightly larger (11px) for readability on projected screen.
+
+DATA PROVENANCE PER CHART — complete registry:
+
+  cumulative_returns:
+    [
+      { series: "S&P 500 (Equity)",   source: "Excel — Y-charts (provided)",
+        frequency: "monthly",          dateRange: "Jan 2000 – Dec 2024" },
+      { series: "IG Bonds",           source: "Excel — BND daily (provided)",
+        frequency: "daily → monthly",  dateRange: "Jan 2000 – Dec 2024",
+        notes: "aggregated to month-end" },
+      { series: "HY Bonds",           source: "Excel — BAMLHYH0A0HYM2TRIV (provided)",
+        frequency: "daily → monthly",  dateRange: "Jan 2000 – Dec 2024",
+        notes: "total return index, aggregated to month-end" },
+      { series: "Risk-free rate",     source: "Excel — DTB3 (provided)",
+        frequency: "daily → monthly",  dateRange: "Jan 2000 – Dec 2024" }
+    ]
+
+  regime_timeline:
+    [
+      { series: "VIX",               source: "FRED API — VIXCLS",
+        frequency: "daily",           dateRange: "Jan 2000 – Dec 2024" },
+      { series: "Yield curve",       source: "Excel — DGS10 (provided) minus FRED — DGS2",
+        frequency: "daily",           dateRange: "Jan 2000 – Dec 2024" },
+      { series: "HY spread",         source: "Excel — BAMLH0A0HYM2EY (provided)",
+        frequency: "daily",           dateRange: "Jan 1997 – Dec 2024" },
+      { series: "GDP growth",        source: "Excel — GDPC1 (provided)",
+        frequency: "quarterly → monthly", dateRange: "Jan 2000 – Dec 2024",
+        notes: "forward-filled to monthly" }
+    ]
+
+  factor_exposure_heatmap:
+    [
+      { series: "Mkt-RF, SMB, HML, Mom", source: "Ken French data library (datareader)",
+        frequency: "monthly",              dateRange: "Jan 2000 – Dec 2024" },
+      { series: "Strategy returns",       source: "as cumulative_returns above" }
+    ]
+
+  stress_test_comparison:
+    [ same as cumulative_returns ]
+
+  correlation_breakdown:
+    [ same as cumulative_returns — computed from same return series ]
+
+  significance_journey_matrix:
+    [
+      { series: "Strategy returns",   source: "as cumulative_returns above" },
+      { series: "Statistical tests",  source: "computed — no external source" }
+    ]
+
+─── TOOLTIP PROVENANCE (chart data points) ───────────────────────────────────
+
+Individual data points in line charts show provenance on hover:
+  Default tooltip: date, value, strategy name
+  Extended tooltip (Commentary mode): add provenance line below value
+    "Source: Excel — Y-charts S&P 500 monthly (provided)"
+    "Source: Excel — BAMLHYH0A0HYM2TRIV daily → monthly"
+
+Implementation: tooltip formatter receives the dataProvenance array
+for that series and appends the source string when Commentary mode is active.
+In Analyst and Present modes: standard tooltip only (no provenance line).
+
+─── DATA SOURCES PANEL (Statistical Evidence screen) ────────────────────────
+
+Populated from provenance.json. Already in spec — now extended:
+
+Panel sections:
+  1. PROVIDED DATA (from Excel file)
+     Table: Series | Sheet | Frequency | Date range | Rows loaded
+     Row per sheet loaded from the Excel file.
+
+  2. SUPPLEMENTAL DATA (external fetches)
+     Table: Series | Source | Frequency | Date range | Last fetched
+     Rows: SPY (yfinance), VIXCLS (FRED), DGS2 (FRED), FF factors (datareader)
+
+  3. CROSS-VALIDATION RESULTS
+     Equity: n_green / n_amber / n_red months, max discrepancy, status badge
+     Bonds:  internal consistency check results, status badge
+     Click any row: shows monthly diff chart (equity) or gap chart (bonds)
+
+  4. DATA QUALITY SUMMARY
+     Total monthly observations in aligned dataset
+     Date range of full analysis
+     Any AMBER warnings from cross-validation
+     "Export for Appendix" button → CSV of full provenance log
+
+
 
 ─── USAGE PATTERN ────────────────────────────────────────────────────────────
 
@@ -2128,18 +2661,23 @@ Sprint 2 (May 11-17):
   ─ load_provided_data() — process FNA_670_Project_Sources.xlsx
   ─ Excel serial date conversion (documented in Section 4)
   ─ compute_returns() — monthly returns for all three asset classes
-  ─ get_full_history() — assembles 2000-2024 aligned dataset
-  ─ fetch_risk_free_rate() — DTB3 from Excel/FRED
-  ─ data provenance module — provenance.json auto-generated on load
-  ─ Data validation assertions (5 sanity checks documented in Section 4b)
-  ─ Store clean monthly returns in PostgreSQL (market_data_monthly)
+  ─ fetch_supplemental_data() — VIX (VIXCLS), 2Y Treasury (DGS2),
+    SPY/BND/HYG daily (yfinance), Fama-French factors (datareader)
+  ─ cross_validate_daily_vs_monthly() — equity AND bond cross-validation
+    Tolerance WARN 0.5% / ERROR 1.0% per month
+    Results logged to provenance.json and data_validation_log table
+  ─ get_full_history() — unified dataset: monthly + daily + signals
+  ─ fetch_risk_free_rate() — DTB3 from Excel/FRED, converted to monthly
+  ─ Data provenance module — provenance.json auto-generated on load
+  ─ All 7 validation steps from Section 4b
+  ─ Store to PostgreSQL: market_data_monthly, market_data_daily,
+    data_validation_log
   BENCHMARK STRATEGY LIVE
   ─ BENCHMARK (100% SPY) strategy implemented
-  ─ All 5 metrics computed: total return, excess return, volatility,
-    Sharpe, max drawdown
+  ─ All 5 metrics: total return, excess return, volatility, Sharpe, max DD
   ─ Dashboard replaces mock data with real results for BENCHMARK only
   ─ Data Sources panel on Statistical Evidence dashboard
-    (provenance.json rendered as formatted table)
+    (provenance.json + cross-validation results rendered as table)
   E2E CI FIX
   ─ Debug backend startup in GitHub Actions Linux environment
   ─ Remove continue-on-error: true once fixed
@@ -3111,6 +3649,8 @@ All API response schemas mirrored as TypeScript interfaces in:
   frontend/src/types/strategies.ts
   frontend/src/types/agents.ts
   frontend/src/types/glossary.ts
+  frontend/src/types/provenance.ts  — DataProvenanceRecord, CrossValidationResult,
+                                      DataSourcesPanel, ChartProvenanceRegistry
 
 ─────────────────────────────────────────────────────────────────────────────
 BACKEND: PYTHON QUALITY STANDARDS
@@ -3195,12 +3735,20 @@ DATABASE TABLES:
   audit_logs           — all 30-point QA audit results by sprint
   credit_usage         — per-user API call log with cost estimates
   magic_link_tokens    — issued tokens with expiry + used flag
-  user_sessions        — active JWT sessions
+  user_sessions           — active JWT sessions
+  data_series_registry    — every data series with runtime source metadata
+  market_data_monthly     — aligned monthly returns with per-value source tags
+  market_data_daily       — daily returns with per-value source tags
+  data_validation_log     — all validation checks, timestamped, with detail
+  council_sessions        — AI council runs, agents, tokens, cost
 
 ALEMBIC MIGRATIONS:
   All schema changes through Alembic migrations — never ALTER TABLE manually.
   migrations/ folder in backend.
   Every migration reviewed before applying to production.
+  Sprint 2 migration: data_series_registry, market_data_monthly,
+    market_data_daily, data_validation_log (in that order —
+    registry must exist before tables that reference it)
 
 ADD to .env:
   DATABASE_URL=postgresql+asyncpg://user:pass@host/dbname
@@ -3352,25 +3900,179 @@ Reduced motion: respect prefers-reduced-motion.
   @media (prefers-reduced-motion: reduce) { transition: none }
 
 ─────────────────────────────────────────────────────────────────────────────
+CODE COMMENTARY STANDARD — EVERY SPRINT
+─────────────────────────────────────────────────────────────────────────────
+
+PURPOSE OF THIS STANDARD:
+The Analytical Appendix (35% of the grade) is assessed on transparency and
+rigour. The code IS the appendix. Graders and the team must be able to read
+any function and understand not just what it does, but why the team made the
+choices they made. During the midpoint meetup and final presentation, any
+team member may be asked to explain any piece of the implementation.
+Commentary must support that — not substitute for it.
+
+THE CORE PRINCIPLE:
+Every comment must contain a DECISION or a REASON, not a description.
+Describing what the code does is redundant — the code already shows that.
+The comment earns its place by explaining what the code cannot show:
+why this approach was chosen, what the alternative was, and what
+project-specific context shaped the decision.
+
+─── WHAT COMMENTS MUST NOT LOOK LIKE ────────────────────────────────────────
+
+BANNED — descriptive, restates the code, adds no information:
+  # Calculate the Sharpe ratio
+  # Loop through each strategy
+  # Return the results
+  # This function computes the portfolio weights using mean-variance
+  #   optimization by solving the quadratic program with the covariance
+  #   matrix and expected returns vector.
+
+These comments will be flagged in the sprint-end review and rewritten.
+
+─── WHAT COMMENTS MUST LOOK LIKE ────────────────────────────────────────────
+
+REQUIRED — contains a decision, a tradeoff, or project-specific context:
+
+MODULE LEVEL (one block at the top of every .py and .tsx file):
+  """
+  tools/data_fetcher.py
+
+  Loads and validates all return series used in the backtest.
+  Primary source is Dr. Panttser's Excel file — this is the authoritative
+  dataset for the project and is never overridden by API data.
+  Supplemental fetches (yfinance, FRED) fill gaps the Excel file doesn't
+  cover: daily data for momentum signals, VIX for regime detection,
+  DGS2 for the yield curve spread, and Fama-French factors for attribution.
+
+  Cross-validation between Excel monthly returns and yfinance daily
+  aggregated to monthly runs automatically on every cold start.
+  If any month disagrees by more than 1%, the pipeline halts — a wrong
+  equity return series would invalidate the entire backtest.
+  """
+
+FUNCTION LEVEL — explain the decision, not the mechanics:
+
+  # We use the actual monthly DTB3 rate rather than a fixed constant.
+  # The project spans 2000-2024: near-zero rates (2011-2015), negative
+  # real rates (2020-2021), and 5%+ rates (2023). A fixed 4.5% assumption
+  # would overstate Sharpe ratios in the low-rate period and understate
+  # them in 2023 — making cross-strategy comparisons misleading.
+  def compute_sharpe(returns: pd.Series, risk_free: pd.Series) -> float:
+
+  # Quarterly rebalancing is required by the project brief (not a choice).
+  # Monthly rebalancing would generate more signal-following but also more
+  # transaction costs and data-snooping risk given our quarterly signals.
+  # The brief constraint actually works in our favour statistically.
+  def rebalance(weights: np.ndarray, freq: str = "Q") -> pd.DataFrame:
+
+  # We use CPCV (Combinatorial Purged Cross-Validation) rather than
+  # standard k-fold because financial time series have serial correlation.
+  # Standard k-fold would leak future information into training folds.
+  # CPCV generates multiple test paths and estimates the full backtest
+  # distribution — detecting overfitting that walk-forward alone misses.
+  # See López de Prado (2018) Ch.12 for the theoretical justification.
+  def run_cpcv(returns: pd.Series, n_splits: int = 6) -> CPCVResult:
+
+  # Black-Litterman uses fixed market cap priors (60/30/10) because
+  # reliable time-varying market cap data for all three asset classes
+  # isn't in the provided dataset. Fixed priors are standard BL practice
+  # for simplified asset class models. Documented in provenance.json.
+  def compute_bl_weights(views: np.ndarray) -> np.ndarray:
+
+INLINE — only where a non-obvious implementation choice needs flagging:
+
+  # annualise with sqrt(12) not sqrt(252) — monthly series, not daily
+  sharpe = (mean_excess / std_excess) * np.sqrt(12)
+
+  # forward-fill quarterly GDP to monthly — no interpolation, avoids
+  # look-ahead: we only know Q1 GDP at Q1 end, not mid-quarter
+  gdp_monthly = gdp_quarterly.resample('M').ffill()
+
+  # drop month if ANY asset class is missing — partial data would
+  # distort correlations and make the alignment period appear shorter
+  aligned = aligned.dropna(how='any')
+
+─── COMMENT DENSITY TARGET ──────────────────────────────────────────────────
+
+Every module:               1 module-level docstring (always)
+Every public function:      1 decision comment above the signature (always)
+Every private function:     1 decision comment if non-trivial (judgement call)
+Inline comments:            Sparingly — only for genuinely non-obvious lines
+No function should be:      Completely uncommented
+
+Target ratio: approximately 1 comment line per 5-8 lines of code.
+Over-commenting is as bad as under-commenting — it buries the decisions.
+
+─── COMMENTARY REVIEW — SPRINT-END STEP (6th condition) ─────────────────────
+
+This runs AFTER all five existing sprint completion conditions are met,
+before the sprint is declared complete and the next begins.
+
+Add this as condition (f) to every sprint completion prompt:
+
+  (f) Review all code committed in this sprint for commentary quality.
+      For every module and every public function, check:
+      — Does the module docstring explain WHY this module exists and
+        what analytical decision it embodies?
+      — Does each function comment contain a decision or reason,
+        not just a description of what the code does?
+      — Are there any purely descriptive comments that restate the code?
+      Flag all violations. Rewrite flagged comments to meet the standard
+      before declaring the sprint complete.
+
+WHAT THE REVIEWER LOOKS FOR:
+
+  RED FLAG — rewrite required:
+    Any comment that could be generated by reading the function signature
+    Any comment that starts with "This function..." or "This calculates..."
+    Any comment that describes the algorithm without explaining the choice
+    Any TODO without a GitHub issue number
+
+  GREEN — acceptable:
+    Comment references the project brief, Dr. Panttser's requirements,
+      or a specific data characteristic discovered during development
+    Comment names a tradeoff (we chose X over Y because...)
+    Comment cites a source (López de Prado, Sharpe 1994, etc.)
+    Comment explains what happens if this assumption is wrong
+    Comment references a known data limitation or caveat
+
+HUMAN REVIEW STEP:
+  After the automated commentary review, Bob reads through the flagged
+  functions for that sprint — not all code, just the flagged ones.
+  Bob rewrites or approves each comment in his own words.
+  This is the step that makes the commentary genuinely defensible.
+  Target time: 20-30 minutes per sprint. Non-negotiable.
+
+─────────────────────────────────────────────────────────────────────────────
 CODE REVIEW STANDARDS — BEFORE EACH SPRINT CLOSES
 ─────────────────────────────────────────────────────────────────────────────
 
-Before marking any sprint complete, run this checklist:
+Before marking any sprint complete, run this checklist.
+All conditions (a) through (f) must pass — not (a) through (e) only.
 
-  □ mypy --strict passes with zero errors
-  □ ruff passes with zero warnings
-  □ prettier --check passes
-  □ All new functions have docstrings (Google style)
-  □ All new API endpoints have OpenAPI descriptions
-  □ No hardcoded values that belong in config.py
-  □ No print() statements — all logging via structlog
-  □ No commented-out code committed
-  □ No TODO comments without a GitHub issue number
-  □ All secrets in .env — none in code
-  □ Coverage thresholds maintained
-  □ Security headers present in all responses
-  □ All new Pydantic models have field descriptions
-  □ API versioning applied to all new endpoints (/api/v1/)
+  □ (a) mypy --strict passes with zero errors
+  □ (a) ruff passes with zero warnings
+  □ (a) prettier --check passes
+  □ (b) pytest passes locally — coverage thresholds maintained
+  □ (b) npm run test passes locally
+  □ (c) committed and pushed to GitHub
+  □ (d) GitHub Actions green on all three jobs
+  □ (e) tests/MANIFEST.md updated
+  □ (f) Commentary review complete — all public functions meet standard
+  □ (f) Bob has read and approved flagged comments in his own words
+  □     All new functions have docstrings (Google style)
+  □     All new API endpoints have OpenAPI descriptions
+  □     No hardcoded values that belong in config.py
+  □     No print() statements — all logging via structlog
+  □     No commented-out code committed
+  □     No TODO comments without a GitHub issue number
+  □     All secrets in .env — none in code
+  □     Security headers present in all responses
+  □     All new Pydantic models have field descriptions
+  □     API versioning applied to all new endpoints (/api/v1/)
+
+
 
 ─────────────────────────────────────────────────────────────────────────────
 DOCUMENTATION STANDARDS
@@ -4413,7 +5115,14 @@ Michael uses this exact prompt to start every sprint:
    (c) Commit and push to GitHub
    (d) Confirm GitHub Actions is green on all three jobs
    (e) Update tests/MANIFEST.md with the Sprint [N] test summary
-   Do not declare Sprint [N] done until all five conditions are met."
+   (f) Run the commentary review: for every module and public function
+       built this sprint, verify that comments contain decisions and
+       reasons — not descriptions. Flag and rewrite any comment that
+       merely restates what the code does. See the Code Commentary
+       Standard in Section 15b for examples of what is and is not
+       acceptable. Do not declare the sprint complete until all
+       flagged comments are rewritten to standard.
+   Do not declare Sprint [N] done until all six conditions are met."
 
 ─────────────────────────────────────────────────────────────────────────────
 TEST MANIFEST (tests/MANIFEST.md) — UPDATED EACH SPRINT
@@ -4441,14 +5150,26 @@ E2E:
 
 ## Sprint 2 ⏳ PENDING
 Backend:
-  test_data_loader.py     — load_provided_data(), date conversion, alignment
-  test_data_provenance.py — provenance.json generation, all fields present
-  test_risk_metrics.py    — Sharpe, Sortino, drawdown, excess return
-  test_backtester.py      — walk-forward, no lookahead, transaction costs
-  test_sanity_checks.py   — all 5 data validation assertions pass
+  test_data_loader.py          — load_provided_data(), date conversion,
+                                 all 14 sheets load, serial date assertion
+  test_supplemental_fetcher.py — VIX, DGS2, SPY/BND/HYG daily, FF factors
+                                 all fetch successfully and cache to DB
+  test_cross_validation.py     — equity daily vs monthly: PASS status,
+                                 all months within 0.5% tolerance,
+                                 AMBER logging for known edge months,
+                                 DataValidationError raised on RED month
+                                 bond cross-validation: same checks
+  test_data_provenance.py      — provenance.json generated, all fields present,
+                                 cross_validation block populated correctly
+  test_data_alignment.py       — aligned series: no NaN, ≥ 288 months,
+                                 monthly index snapped to month-end
+  test_sanity_assertions.py    — all 5 hard assertions pass on real data
+  test_risk_metrics.py         — Sharpe, Sortino, drawdown, excess return
+  test_backtester.py           — walk-forward, no lookahead, transaction costs
 Frontend:
-  Dashboard.test.tsx      — real BENCHMARK data replaces mock (update)
-  DataSources.test.tsx    — provenance panel renders correctly
+  Dashboard.test.tsx           — real BENCHMARK data replaces mock (update)
+  DataSources.test.tsx         — provenance panel renders cross-validation
+                                 status table with GREEN/AMBER/RED counts
 
 ## Sprint 3 ⏳ PENDING
 Backend:
