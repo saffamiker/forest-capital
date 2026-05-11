@@ -216,8 +216,9 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
             from tools.data_fetcher import get_full_history
             from tools.backtester import run_all_strategies
             history = get_full_history()
-            results = run_all_strategies(history)
-            return {"strategies": results, "ranked_by": "sharpe_ratio"}
+            results_dict = run_all_strategies(history)
+            ranked = sorted(results_dict.values(), key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
+            return {"strategies": ranked, "ranked_by": "sharpe_ratio"}
         except Exception as exc:
             log.warning("compare_all_strategies_fallback", error=str(exc))
     sorted_strategies = sorted(MOCK_STRATEGIES, key=lambda s: s["sharpe_ratio"], reverse=True)

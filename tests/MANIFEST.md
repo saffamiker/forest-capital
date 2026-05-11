@@ -99,6 +99,27 @@ Backend — new/updated:
                            transition matrix rows sum to 1, VIX branch runs) — 8 tests run,
                            10 HMM tests SKIP on Windows (hmmlearn requires C++ build tools;
                            run in CI on Linux where hmmlearn installs via pre-built wheel)
+  test_numerical_accuracy.py — deterministic arithmetic contracts (no network/Excel):
+                           portfolio_return_additive (0.6×eq + 0.4×ig arithmetic, not geometric),
+                           cagr_constant_1pct_12months ((1.01^12-1) to 4dp),
+                           cagr_constant_2pct_60months (annualisation uses len/12 not 252),
+                           sharpe_known_series (μ-rf)/σ×√12 to 4dp with np.random.seed(0)),
+                           max_drawdown_known_path ([-0.5,0.3,0.2]→-0.50 exactly),
+                           max_drawdown_no_drawdown (monotone increasing → 0.0),
+                           equal_weight_one_third (avg_equity_weight=1/3 to 6dp),
+                           risk_parity_sum_to_one (avg_eq+avg_bond=1.0 to 6dp),
+                           risk_parity_equity_below_benchmark (w_eq < 1/3 with σ_eq > σ_bond),
+                           run_all_strategies_returns_dict, _has_expected_keys (10 identifiers),
+                           _benchmark_accessible_by_key (dict["BENCHMARK"]["sharpe_ratio"]),
+                           portfolio_returns_arithmetic_not_geometric (_portfolio_returns_monthly)
+  test_splice_integrity.py — LQD-to-BND join validation (Excel-dependent, skips in CI):
+                           no_missing_months_at_join (2007-03 to 2007-07 all present, gaps 25-35d),
+                           no_outlier_at_join (z-score ≤ 3.0 vs ±6-month window),
+                           spliced_ig_no_nan (zero NaN across full series),
+                           spliced_ig_cagr_plausible (3%–7% annually);
+                           DB-provenance tests (additionally skip if Postgres not reachable):
+                           pre_cutover_rows_cite_lqd_bridge (ig_source="ig_lqd_bridge" before 2007-05-31),
+                           post_cutover_rows_cite_ig_monthly_bnd (ig_source="ig_monthly_bnd" from 2007-05-31)
 
 Backend — new implementation files (no new tests required, covered by above):
   tools/optimizer.py     — 6 methods: MEAN_VARIANCE (cvxpy CLARABEL QP), RISK_PARITY
@@ -118,12 +139,16 @@ Backend — new implementation files (no new tests required, covered by above):
                            (transition matrix with VIX feature support)
 
 Infrastructure:
-  main.py — /api/backtest/compare now calls run_all_strategies() (all 10, real data)
+  main.py — /api/backtest/compare now calls run_all_strategies() (all 10, real data);
+             run_all_strategies() now returns dict[str, dict] keyed by strategy identifier
+             (BENCHMARK, CLASSIC_60_40, …); compare endpoint converts to ranked list for API
              /api/optimize/weights now calls real optimizer + efficient frontier
              /api/health sprint field updated to "3"
   cvxpy installed in venv (CLARABEL solver; ECOS not available on Windows without C++ tools)
 
-Test counts: 352 passed, 10 skipped (HMM), 0 failed
+Test counts: 356 passed, 10 skipped (HMM), 0 failed  ← pre close-out
+             ~369 passed (adds 13 new tests in test_numerical_accuracy.py +
+             test_splice_integrity.py; splice tests skip without Excel file)
 Frontend: 47 tests pass (unchanged from Sprint 2)
 
 ## LQD Bridge (post-Sprint 3, 2026-05-11)

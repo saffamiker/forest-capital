@@ -898,41 +898,42 @@ def walk_forward_test(
 
 # ── Run all 10 strategies ─────────────────────────────────────────────────────
 
-def run_all_strategies(history: dict) -> list[dict]:
+def run_all_strategies(history: dict) -> dict[str, dict]:
     """
     Orchestrate all 10 strategies against a single pre-loaded history dict.
+    Returns a dict keyed by strategy identifier (e.g. "BENCHMARK", "CLASSIC_60_40")
+    so callers can do results["BENCHMARK"]["sharpe_ratio"] without scanning a list.
     Error isolation: each strategy is wrapped in try/except so a single optimizer
     failure (e.g., singular covariance matrix in an unusual market regime) does
     not prevent all others from running. The fallback mock entry is clearly marked
     via the 'error' key so the QA audit can flag it without crashing the dashboard.
-    Sorted by Sharpe ratio descending so the compare table ranks best first.
     """
     from models.schemas import MOCK_STRATEGIES
 
+    # (key, display_name, runner) — key is the stable identifier used by callers
     strategy_runners = [
-        ("100% Equity (Benchmark)", run_benchmark),
-        ("Classic 60/40",           run_classic_6040),
-        ("Risk Parity",             run_risk_parity),
-        ("Minimum Variance",        run_min_variance),
-        ("Equal Weight",            run_equal_weight),
-        ("Momentum Rotation",       run_momentum_rotation),
-        ("Regime Switching",        run_regime_switching),
-        ("Volatility Targeting",    run_vol_targeting),
-        ("Black-Litterman",         run_black_litterman),
-        ("Max Sharpe Rolling",      run_max_sharpe_rolling),
+        ("BENCHMARK",          "100% Equity (Benchmark)", run_benchmark),
+        ("CLASSIC_60_40",      "Classic 60/40",           run_classic_6040),
+        ("RISK_PARITY",        "Risk Parity",             run_risk_parity),
+        ("MIN_VARIANCE",       "Minimum Variance",        run_min_variance),
+        ("EQUAL_WEIGHT",       "Equal Weight",            run_equal_weight),
+        ("MOMENTUM_ROTATION",  "Momentum Rotation",       run_momentum_rotation),
+        ("REGIME_SWITCHING",   "Regime Switching",        run_regime_switching),
+        ("VOL_TARGETING",      "Volatility Targeting",    run_vol_targeting),
+        ("BLACK_LITTERMAN",    "Black-Litterman",         run_black_litterman),
+        ("MAX_SHARPE_ROLLING", "Max Sharpe Rolling",      run_max_sharpe_rolling),
     ]
 
-    results = []
+    results: dict[str, dict] = {}
     mock_lookup = {s["strategy_name"]: s for s in MOCK_STRATEGIES}
 
-    for name, runner in strategy_runners:
+    for key, name, runner in strategy_runners:
         try:
-            result = runner(history)
-            results.append(result)
+            results[key] = runner(history)
         except Exception as exc:
             log.warning("strategy_failed", strategy=name, error=str(exc))
             fallback = dict(mock_lookup.get(name, {"strategy_name": name, "sharpe_ratio": 0.0}))
             fallback["error"] = str(exc)
-            results.append(fallback)
+            results[key] = fallback
 
-    return sorted(results, key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
+    return results
