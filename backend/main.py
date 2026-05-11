@@ -1,6 +1,6 @@
 """
 Forest Capital Portfolio Intelligence System — FastAPI backend.
-Sprint 1: skeleton with full auth + mock data responses.
+Sprint 2: real BENCHMARK backtest + threshold-based regime detection.
 """
 from __future__ import annotations
 import os
@@ -124,7 +124,7 @@ async def get_me(session: dict = Depends(require_auth)):
 async def health():
     return {
         "status": "ok",
-        "sprint": "1",
+        "sprint": "2",
         "environment": ENVIRONMENT,
         "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
         "gemini": bool(os.getenv("GOOGLE_API_KEY")),
@@ -155,9 +155,24 @@ async def run_backtest(
 ):
     valid_strategies = {s["strategy_name"] for s in MOCK_STRATEGIES}
     if body.strategy not in valid_strategies:
-        raise HTTPException(status_code=422, detail=f"Unknown strategy '{body.strategy}'. Valid: {sorted(valid_strategies)}")
-    result = next(s for s in MOCK_STRATEGIES if s["strategy_name"] == body.strategy)
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown strategy '{body.strategy}'. Valid: {sorted(valid_strategies)}",
+        )
+
     log.info("backtest_run", strategy=body.strategy, user=session["email"])
+
+    # Sprint 2: real BENCHMARK computation. Fall back to mock in test env or on error.
+    if body.strategy == "100% Equity (Benchmark)" and ENVIRONMENT != "test":
+        try:
+            from tools.backtester import run_benchmark
+            start = body.start or "2000-01-01"
+            end = body.end or "2024-12-31"
+            return run_benchmark(start=start, end=end)
+        except Exception as exc:
+            log.warning("backtest_run_fallback", strategy=body.strategy, error=str(exc))
+
+    result = next(s for s in MOCK_STRATEGIES if s["strategy_name"] == body.strategy)
     return result
 
 
@@ -172,6 +187,13 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
 
 @app.get("/api/regime/current")
 async def get_current_regime(session: dict = Depends(require_auth)):
+    # Sprint 2: real threshold-based regime. Fall back to mock in test env or on error.
+    if ENVIRONMENT != "test":
+        try:
+            from tools.regime_detector import detect_current_regime
+            return detect_current_regime()
+        except Exception as exc:
+            log.warning("regime_detection_fallback", error=str(exc))
     return MOCK_REGIME
 
 
