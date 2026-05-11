@@ -137,40 +137,123 @@ TEST_START               = "2022-01-01"
 TEST_END                 = "2024-12-31"
 
 # ── ASSET UNIVERSE ────────────────────────────────────────────────────────
-EQUITIES                 = ["SPY", "QQQ", "IWM"]
-SECTORS                  = ["XLK","XLF","XLE","XLV","XLY",
-                             "XLP","XLI","XLB","XLU"]
-FIXED_INCOME             = ["TLT","IEF","SHY","BND","HYG","LQD","TIP","AGG"]
-ALTERNATIVES             = ["GLD","VNQ"]
-BENCHMARK                = "SPY"
+# Per FNA 670 project brief: EXACTLY three asset classes.
+# No other asset classes permitted as portfolio holdings.
+# Additional series below are SIGNAL inputs only — not portfolio weights.
+
+BENCHMARK                = "SPY"           # 100% S&P 500 — required by brief
+
+# Portfolio asset classes (three only):
+EQUITIES                 = ["SPY"]         # S&P 500 only
+INVESTMENT_GRADE_BONDS   = ["BND"]         # Vanguard Total Bond (provided data)
+HIGH_YIELD_BONDS         = ["HYG"]         # iShares HY (proxy for BAMLHYH index)
+
+# Alternative IG proxies (use if BND unavailable for full history):
+IG_ALTERNATIVES          = ["LQD", "IEF"]
+
+# Signal-only series (NOT portfolio holdings):
+SIGNAL_SERIES = {
+    "hy_yield":           "BAMLH0A0HYM2EY",     # HY effective yield (FRED)
+    "hy_total_return":    "BAMLHYH0A0HYM2TRIV",  # HY total return index (FRED)
+    "ig_yield":           "BAMLC0A0CMEY",         # IG effective yield (FRED)
+    "treasury_10y":       "DGS10",                # 10Y Treasury (FRED)
+    "treasury_3m":        "DTB3",                 # 3M T-bill (FRED)
+    "real_gdp":           "GDPC1",                # Real GDP quarterly (FRED)
+    "gdp_deflator":       "GDPDEF",               # GDP deflator quarterly (FRED)
+    "sp500_pe":           "SP500_PE",             # P/E ratio from Y-charts
+    "vix":                "VIXCLS",               # VIX (FRED)
+    "sp500_monthly":      "SP500_MONTHLY",        # S&P 500 monthly from Y-charts
+}
 
 # ── PORTFOLIO CONSTRUCTION ────────────────────────────────────────────────
-REBALANCE_FREQ           = "monthly"
+REBALANCE_FREQ_STATIC    = "quarterly"     # Consistent with dynamic
+REBALANCE_FREQ_DYNAMIC   = "quarterly"     # REQUIRED by project brief
 TRANSACTION_COST_BPS     = 10
 MIN_WEIGHT               = 0.00
 MAX_WEIGHT               = 0.40
-RISK_FREE_RATE_FALLBACK  = 0.045        # Used only if FRED unavailable
-USE_DYNAMIC_RISK_FREE    = True         # Fetch actual DFF from FRED daily
+FULLY_INVESTED           = True           # No cash — required by brief
+RISK_FREE_RATE_FALLBACK  = 0.045         # Used only if FRED unavailable
+USE_DYNAMIC_RISK_FREE    = True          # Fetch actual DFF from FRED
 TARGET_VOLATILITY        = 0.10
 BL_TAU                   = 0.05
 RISK_AVERSION            = 3.0
 REBALANCE_BAND           = 0.05
 OPTIMIZATION_WINDOW      = 36
-ANNUALIZATION_FACTOR     = 252          # ALWAYS use 252 — never 260 or 365
+ANNUALIZATION_FACTOR     = 252           # ALWAYS use 252 — never 260 or 365
 
-# ── MOMENTUM SIGNALS ─────────────────────────────────────────────────────
-MOMENTUM_LOOKBACKS       = [21, 63, 126, 252]
-MOMENTUM_WEIGHTS         = [0.10, 0.20, 0.30, 0.40]
-SIGNAL_SMOOTHING         = 5
+=============================================================================
+SECTION 4: DATA LAYER (tools/data_fetcher.py)
+=============================================================================
 
-# ── REGIME DETECTION ─────────────────────────────────────────────────────
-VIX_LOW_THRESHOLD        = 18
-VIX_HIGH_THRESHOLD       = 28
-BEAR_MARKET_THRESHOLD    = -0.20
-YIELD_CURVE_INVERSION    = 0.00
-REGIME_WINDOW            = 63
-CREDIT_SPREAD_WIDE       = 4.50
-HMM_N_STATES             = 3            # Hidden Markov Model states
+PRIMARY DATA SOURCE: Dr. Panttser's Excel file
+  backend/data/FNA_670_Project_Sources.xlsx
+
+This file contains all historical series with actual values. It is the
+authoritative data source for the project. Process it first in Sprint 2
+before building any yfinance/FRED fetchers.
+
+EXCEL FILE SHEETS (confirmed):
+  High Yield Effective Yield     — BAMLH0A0HYM2EY (FRED daily, from ~1997)
+  High Yield Total Return        — BAMLHYH0A0HYM2TRIV (FRED daily, from ~1986)
+  S&P 500 HY                     — S&P 500 HY Corp Bond Index (daily, from 2016)
+  S&P 500 Investment Grade       — IG Corporate Bond Index daily (from 2025)
+  iShares 10+ Yr IG              — ETF daily OHLCV (from 2019)
+  US Corporate Effective Yield   — BAMLC0A0CMEY (FRED daily, from ~1997)
+  Vanguard Total Bond            — BND daily OHLCV (from ~2019)
+  Vanguard ETF                   — VYM (Vanguard High Dividend) daily
+  S&P 500 Monthly Returns        — Monthly from 2000-01-01
+  SP 500 PE Ratio                — Quarterly from ~1988
+  Market Yield on US Treasury    — DGS10 daily (from ~1962)
+  3-Month Treasury               — DTB3 daily (from ~1954)
+  Real GDP                       — GDPC1 quarterly (from ~1947)
+  GDP Deflator                   — GDPDEF quarterly (from ~1947)
+
+DATE FORMAT NOTE:
+  All dates in Excel file are Excel serial numbers (integer days since 1900).
+  Convert with: pd.Timestamp('1899-12-30') + pd.Timedelta(days=serial_number)
+  or: pd.to_datetime(serial_number, unit='D', origin='1899-12-30')
+
+PRIMARY RETURN SERIES FOR PORTFOLIO CONSTRUCTION:
+  Equities:       S&P 500 Monthly Returns (Y-charts) → monthly returns
+                  Supplement with SPY daily from yfinance for recent data
+  IG Bonds:       BND daily from Excel / yfinance for price returns
+                  BAMLC0A0CMEY as yield signal
+  HY Bonds:       BAMLHYH0A0HYM2TRIV total return index (primary)
+                  HYG from yfinance as supplement
+  Risk-free:      DTB3 (3-month T-bill) from Excel / FRED
+
+DATA HIERARCHY (use in this order):
+  1. Dr. Panttser's Excel file (authoritative, provided)
+  2. FRED API (for any gaps or updates)
+  3. yfinance (for ETF price data supplements)
+  4. Fallback constants (only if APIs unavailable)
+
+CRITICAL: All returns must use TOTAL RETURN (adjusted close for ETFs).
+Verify yfinance auto_adjust=True on every fetch.
+For index series (BAMLHYH0A0HYM2TRIV), compute returns from index levels.
+
+Implement:
+- load_provided_data()          -> dict of DataFrames from Excel file
+  Loads all sheets, converts serial dates, returns clean DataFrames
+- compute_returns(df, freq)     -> pd.DataFrame
+  Monthly or quarterly returns from price/index levels
+- fetch_fred_series(series_id, start, end) -> pd.Series
+- fetch_equity_data(tickers, start, end)   -> pd.DataFrame (supplement only)
+- fetch_risk_free_rate(start, end)         -> pd.Series (DTB3 from Excel/FRED)
+- get_full_history()            -> dict
+  Assembles longest possible history per asset class using all sources
+  Returns: {'equity': Series, 'ig_bonds': Series, 'hy_bonds': Series,
+            'risk_free': Series, 'signals': dict}
+
+HISTORY COVERAGE TARGET:
+  Use longest available for each series:
+  HY Total Return:  ~1986 (BAMLHYH0A0HYM2TRIV)
+  IG Bonds:         ~1997 (BAMLC0A0CMEY, BND from 2007)
+  S&P 500:          2000 (monthly from Excel)
+  Common start:     2000-01-01 (all three asset classes available)
+  This gives ~25 years monthly = 300 observations (well above power threshold)
+
+
 
 # ── STATISTICAL TESTING — TIERED THRESHOLDS ──────────────────────────────
 #
@@ -242,22 +325,43 @@ FRED_SERIES = {
 }
 
 =============================================================================
-SECTION 4: DATA LAYER (tools/data_fetcher.py)
+SECTION 4b: DATA VALIDATION
 =============================================================================
 
-CRITICAL: All returns must use TOTAL RETURN (adjusted close).
-Verify yfinance auto_adjust=True on every fetch.
+CRITICAL VALIDATION STEPS (Sprint 2):
 
-Implement:
-- fetch_equity_data(tickers, start, end) -> pd.DataFrame
-- fetch_bond_data(tickers, start, end) -> pd.DataFrame
-- fetch_fred_series(series_id, start, end) -> pd.Series
-- fetch_risk_free_rate(start, end) -> pd.Series
-  Returns daily risk-free rate from FRED DFF.
-  Falls back to RISK_FREE_RATE_FALLBACK if FRED unavailable.
-  This is used in ALL Sharpe ratio calculations — never a fixed constant.
-- get_market_data(tickers, start, end) -> dict
-  Orchestrates all fetches, checks cache, returns clean data
+1. EXCEL DATE CONVERSION
+   All dates in FNA_670_Project_Sources.xlsx are Excel serial integers.
+   Convert BEFORE any calculations:
+     pd.to_datetime(serial, unit='D', origin='1899-12-30')
+   Verify: serial 45839 should parse to approximately 2025-07-01
+
+2. RETURN CALCULATION
+   From price/index levels: return_t = (price_t / price_t-1) - 1
+   For monthly data: use end-of-month prices only
+   For BND/HYG ETFs: use adjusted close (total return)
+   For BAMLHYH0A0HYM2TRIV: compute from index level changes
+
+3. ALIGNMENT
+   All series must share a common monthly date index
+   Use month-end dates (pd.offsets.MonthEnd)
+   Forward-fill quarterly macro data to monthly frequency
+   Drop any month where ANY of the three asset classes has no data
+
+4. SANITY CHECKS (add as assertions in load_provided_data()):
+   - S&P 500 2000-2024 CAGR should be ~10% annually
+   - HY spread (BAMLH0A0HYM2EY) should spike above 15% in 2008-09
+   - BND total return 2022 should be approximately -13%
+   - Equity-bond correlation should turn positive in 2022
+   If any assertion fails, raise DataValidationError with details.
+
+5. STORE IN DATABASE
+   Once validated, store clean monthly returns in PostgreSQL:
+   table: market_data_monthly
+   columns: date, equity_return, ig_return, hy_return, risk_free_rate
+   This ensures Sprint 3+ never re-processes raw data.
+
+
 - validate_data(df) -> ValidationResult
   Checks: no NaN gaps > 5 days, prices positive,
   returns within [-0.5, +0.5] daily (flag outliers),
@@ -2004,16 +2108,282 @@ When Commentary Mode is ACTIVE, the banner now reads:
 
 
 
-Sprint 1 (complete):  all shell components with mock data
-Sprint 2:             real data replaces mock in Dashboard
-Sprint 3:             all strategies + stats populate Dashboard fully
-Sprint 4:             Council agents live
-Sprint 5:             Statistical Evidence + Regime Analysis dashboards
-                      ExplainableText + LearnMode + glossaryStore
-                      Explainer Agent + all three explain endpoints
-                      QA commentary mode
-                      QA score over time chart
-Sprint 6:             Final polish, demo rehearsal, presentation prep
+
+
+─── SPRINT ASSIGNMENTS — COMPLETE BUILD PLAN ────────────────────────────────
+
+Sprint 1 (COMPLETE):
+  ✅ Shell components with mock data
+  ✅ TypeScript strict mode, zero errors
+  ✅ Design tokens (tokens.ts)
+  ✅ Three-mode selector (Analyst / Commentary / Present)
+  ✅ Magic link auth (dev mode)
+  ✅ Pre-commit hooks
+  ✅ pyproject.toml
+  ✅ GitHub Actions CI/CD (backend + frontend green, E2E non-blocking)
+  ✅ CLAUDE.md in repo
+
+Sprint 2 (May 11-17):
+  DATA FOUNDATION
+  ─ load_provided_data() — process FNA_670_Project_Sources.xlsx
+  ─ Excel serial date conversion (documented in Section 4)
+  ─ compute_returns() — monthly returns for all three asset classes
+  ─ get_full_history() — assembles 2000-2024 aligned dataset
+  ─ fetch_risk_free_rate() — DTB3 from Excel/FRED
+  ─ data provenance module — provenance.json auto-generated on load
+  ─ Data validation assertions (5 sanity checks documented in Section 4b)
+  ─ Store clean monthly returns in PostgreSQL (market_data_monthly)
+  BENCHMARK STRATEGY LIVE
+  ─ BENCHMARK (100% SPY) strategy implemented
+  ─ All 5 metrics computed: total return, excess return, volatility,
+    Sharpe, max drawdown
+  ─ Dashboard replaces mock data with real results for BENCHMARK only
+  ─ Data Sources panel on Statistical Evidence dashboard
+    (provenance.json rendered as formatted table)
+  E2E CI FIX
+  ─ Debug backend startup in GitHub Actions Linux environment
+  ─ Remove continue-on-error: true once fixed
+  SPRINT 2 TESTS (per MANIFEST.md)
+
+Sprint 3 (May 18-24):
+  ALL 10 STRATEGIES + FULL STATISTICAL SUITE
+  ─ All 5 static strategies implemented
+  ─ All 5 dynamic strategies implemented (quarterly rebalancing)
+  ─ All 12 statistical tests
+  ─ All 6 cross-validation methods including CPCV
+  ─ Tier 1 gate logic (is_significant flag)
+  ─ Walk-forward OOS results
+  ─ Dashboard fully populated with all 10 strategies
+  ─ Regime detection (threshold + HMM) live
+  SPRINT 3 TESTS
+
+Sprint 4 (May 25-Jun 1):
+  ALL AGENTS + COUNCIL LIVE
+  ─ Equity Analyst (Sonnet)
+  ─ Fixed Income Analyst (Sonnet)
+  ─ Risk Manager (Sonnet)
+  ─ Quant/Backtester (Sonnet)
+  ─ Independent Analyst (Gemini Pro)
+  ─ CIO (Opus)
+  ─ QA Agent (Opus)
+  ─ Explainer Agent (Haiku)
+  ─ All agent schemas include summary + layman_explanation fields
+  ─ Council endpoint + WebSocket streaming
+  ─ QA audit endpoint + 30-point checklist
+  ─ Scope guard live
+  ─ Rate limiting + credit cap enforced
+  AI USAGE LOGGER
+  ─ council_sessions table populated on every council run
+  ─ Logs: query, agents called, CIO recommendation, Gemini dissent,
+    corrections made, tokens, cost
+  ─ AI Usage Log screen (dev + team only, not shown to Forest Capital)
+  LIMITATIONS GENERATOR
+  ─ QA Agent generates: limitations[], data_caveats[], model_assumptions[]
+  ─ Risk Manager generates: tail_risks[], regime_caveats[]
+  ─ Limitations Panel on QA Audit screen (Commentary mode)
+  DEPLOYMENT
+  ─ Render (backend) + Vercel (frontend) live
+  ─ Magic link via SendGrid production
+  ─ All four team emails can log in to live URL
+  ─ Upgrade Render to paid tier ($7/mo)
+  SPRINT 4 TESTS
+
+Sprint 5 (Jun 2-21):
+  STATISTICAL EVIDENCE + REGIME ANALYSIS DASHBOARDS
+  ─ All 6 charts on Statistical Evidence (SignificanceJourneyMatrix,
+    CPCVSharpePlot, CVStabilityRadar, ProbabilisticSharpeChart,
+    MultipleComparisonTable, WalkForwardChart)
+  ─ All 6 charts on Regime Analysis (RegimeConditionalPerformance,
+    RegimeTimeline, CorrelationBreakdownChart, FactorExposureHeatmap,
+    PerformanceAttributionWaterfall, RegimeTransitionMatrix)
+  COMMENTARY MODE + EXPLAINABILITY
+  ─ ExplainableText.jsx (hover + click for terms and parameters)
+  ─ ChartCommentStrip.jsx (annotation strip below every chart)
+  ─ LearnModeToggle.jsx + LearnModeBanner.jsx
+  ─ glossaryStore.js (Zustand runtime store)
+  ─ All explain endpoints live (/terms, /parameter, /persona, /qa, /chart)
+  ─ QA commentary mode (hover/click on all 30 checklist items)
+  ─ QA score over time chart
+  EXPORT INFRASTRUCTURE
+  ─ ChartExportButton.tsx (PNG + SVG download on every chart)
+  ─ TableExportButton.tsx (CSV export on strategy table + stats tables)
+  ─ PresentationPackage button (Present mode only)
+    Exports all key visuals as ZIP — Molly's one-click slide pack:
+    cumulative_returns.png, regime_timeline.png, stress_test.png,
+    significance_matrix.png, correlation_breakdown.png,
+    strategy_table.csv, statistical_results.csv
+  SANITY CHECK PANEL
+  ─ New tab within QA Audit screen: "Sanity Check"
+  ─ 10 headline numbers with expected ranges (see spec below)
+  ─ Green / Amber / Red status per metric
+  ─ Exportable as formatted table for Analytical Appendix
+  ─ Commentary mode: Explainer Agent explains each check
+  SPRINT 5 TESTS
+
+Sprint 6 (Jun 22-Jul 1):
+  REPORT GENERATORS
+  ─ POST /api/reports/analytical-appendix
+    Structured HTML/PDF export — all sections documented in spec
+  ─ POST /api/reports/executive-brief-template
+    Pre-populated Word doc structure from system outputs
+  ─ POST /api/reports/midpoint-template
+    Pre-populated 3-page structure for May 27 submission
+  FINAL POLISH
+  ─ UI/UX Agent sprint review — Big 4 standards check
+  ─ WCAG AA accessibility audit (axe-core)
+  ─ Performance benchmarks (p95 response times)
+  ─ Print stylesheet (@media print)
+  ─ Full regression suite
+  ─ Demo rehearsal — present mode end-to-end test
+  ─ Forest Capital branding toggle reviewed and approved
+  ─ Final git tag: v1.0.0-presentation
+
+─── SANITY CHECK PANEL (Sprint 5 — QA Audit, "Sanity Check" tab) ────────────
+
+Purpose: Live accuracy verification. Every number validated against
+known values from academic literature and market history.
+Serves as accuracy evidence for the Analytical Appendix.
+Demonstrates professional rigour during the presentation.
+
+10 headline checks — all dynamically computed from system data:
+
+  CHECK 1: S&P 500 2000-2024 CAGR
+    Expected range: 8-12% annualised
+    Actual: [computed]
+    Status: GREEN if 8-12%, AMBER if 6-14%, RED otherwise
+
+  CHECK 2: S&P 500 2008 drawdown
+    Expected range: -48% to -55%
+    Actual: [computed]
+    Status: GREEN if in range
+
+  CHECK 3: BND 2022 total return
+    Expected range: -12% to -16%
+    Actual: [computed]
+    Status: GREEN if in range — critical test of bond data accuracy
+
+  CHECK 4: HY spread spike — GFC peak
+    Expected range: 15-22% (BAMLH0A0HYM2EY peak 2008-2009)
+    Actual: [computed from provided data]
+    Status: GREEN if in range
+
+  CHECK 5: Equity-bond correlation 2000-2021
+    Expected range: -0.40 to -0.20 (historical negative)
+    Actual: [computed rolling average pre-2022]
+    Status: GREEN if negative
+
+  CHECK 6: Equity-bond correlation 2022
+    Expected range: +0.30 to +0.60 (known breakdown)
+    Actual: [computed]
+    Status: GREEN if positive — confirms central project finding
+
+  CHECK 7: BENCHMARK (SPY) Sharpe 2000-2024
+    Expected range: 0.45-0.75
+    Actual: [computed]
+    Status: GREEN if in range
+
+  CHECK 8: CLASSIC_60_40 max drawdown
+    Expected range: -25% to -35%
+    Actual: [computed]
+    Status: GREEN if in range
+
+  CHECK 9: Risk-free rate — 2023 average
+    Expected range: 4.5-5.5% (Fed funds cycle peak)
+    Actual: [computed from DTB3]
+    Status: GREEN if in range
+
+  CHECK 10: Total monthly observations
+    Expected: ≥ 288 (Jan 2000 to Dec 2024 = 300 months)
+    Actual: [count of aligned monthly rows]
+    Status: GREEN if ≥ 288 — confirms adequate statistical power
+
+UI: Table layout. Columns: Check | Expected | Actual | Status.
+RED items trigger a warning banner: "Review required before submission."
+All 10 green = "Data integrity confirmed" banner in green.
+Export button: "Download for Appendix" → formatted CSV/PDF.
+
+Commentary mode: Explainer Agent generates one sentence per check
+explaining what it validates and why it matters.
+
+─── EXPORT INFRASTRUCTURE SPEC (Sprint 5) ────────────────────────────────────
+
+ChartExportButton.tsx:
+  Appears top-right of every chart in all modes (subtle camera icon)
+  Click: dropdown → Download PNG / Download SVG
+  PNG: 2x resolution for print quality
+  SVG: vector, scalable for Molly's presentation software
+  Filename: chart_id + timestamp (e.g. cumulative_returns_20260601.png)
+
+TableExportButton.tsx:
+  Appears top-right of every data table
+  Click: Download CSV / Download Excel (.xlsx)
+  Includes column headers, all visible rows
+  Filename: table_id + timestamp
+
+PresentationPackage (Present mode only, nav bar right):
+  Button: "⬇ Export Pack"
+  Generates ZIP containing:
+    cumulative_returns.png (2x)
+    regime_timeline.png (2x)
+    stress_test_comparison.png (2x)
+    significance_journey_matrix.png (2x)
+    correlation_breakdown.png (2x)
+    factor_exposure_heatmap.png (2x)
+    strategy_comparison.csv (all 10 strategies, all metrics)
+    statistical_results.csv (all p-values, gates, CV scores)
+    sanity_check_results.csv
+    README.txt (filenames and descriptions)
+  Download triggers immediately — no server round trip
+  Uses JSZip + html2canvas client-side
+
+─── REPORT GENERATOR SPEC (Sprint 6) ────────────────────────────────────────
+
+POST /api/reports/analytical-appendix
+  Returns: downloadable HTML file (self-contained, printable)
+  Sections:
+    1. Data Sources and Provenance
+       — provenance.json rendered as formatted table
+       — Date ranges, sources, cleaning steps, validation results
+    2. Portfolio Construction Methodology
+       — Each strategy's rules in plain English
+       — Mathematical specification for each
+    3. Statistical Results
+       — All metrics for all 10 strategies
+       — All 12 test results with p-values and thresholds
+       — CPCV Sharpe distributions
+       — CV stability scores
+    4. Sensitivity Analysis
+       — Key parameters tested at ±20%
+       — Impact on Sharpe ratio and max drawdown
+       — Table format: parameter | base | -20% | +20% | impact
+    5. Sanity Check Results
+       — All 10 checks with actual vs expected
+    6. Reproducibility Notes
+       — How to rerun: git clone, pip install, python run_backtest.py
+       — Random seed, data file, all config parameters
+
+POST /api/reports/executive-brief-template
+  Returns: .docx file (Word format, Bob edits directly)
+  Pre-populated from system outputs:
+    [Executive Summary] — 2 paragraphs from CIO synthesis
+    [Methodology] — QA audit plain English summary
+    [Key Findings] — Top 3 significant strategies with metrics
+    [Limitations] — Limitations generator output
+    [Recommendations] — CIO final recommendation
+    [Appendix: Charts] — 5 key charts embedded
+  Bob fills: interpretation, context, academic references, transitions
+  Format: 5 pages, double-spaced, 12pt — matches brief requirements
+
+POST /api/reports/midpoint-template
+  Returns: .docx file pre-populated for May 27 submission
+  Section 1 (Data & Methodology): provenance + strategy descriptions
+  Section 2 (Preliminary Results): current system results for BENCHMARK
+    plus whichever strategies are live at time of generation
+  Section 3 (Roles): Michael/Bob/Molly division from CLAUDE.md
+  Section 4 (Next Steps): remaining sprints listed as planned work
+  Bob fills: interpretation, academic justification, open questions
+
+
 
 
 
@@ -3234,7 +3604,73 @@ INPUTS:
   Font: Inter 14px, text_primary
 
 ─────────────────────────────────────────────────────────────────────────────
-MOTION AND ANIMATION
+LAYOUT — FIXED CHROME, SCROLLABLE CONTENT
+─────────────────────────────────────────────────────────────────────────────
+
+PRINCIPLE: Navigation and header are always accessible regardless of
+scroll position. Content scrolls within a bounded pane. The user
+never loses access to the mode selector, nav tabs, or sign-out.
+
+IMPLEMENTATION:
+
+  App shell layout (MainLayout.tsx):
+    height: 100vh
+    display: flex
+    flex-direction: column
+    overflow: hidden             ← prevents full page scroll
+
+  Navigation bar:
+    position: fixed or flex-shrink: 0
+    height: 48px
+    z-index: 50
+    Never scrolls out of view
+
+  Page content area:
+    flex: 1
+    overflow-y: auto             ← scrolls independently
+    overflow-x: hidden
+    Scrollbar styled to match dark theme:
+      scrollbar-width: thin
+      scrollbar-color: #1e3a5c #0a0e1a
+
+  Side panels (if any):
+    position: sticky top: 0
+    height: 100vh
+    overflow-y: auto             ← side panel scrolls independently
+
+  Dashboard specifically:
+    Two-column layout on wide screens:
+      Left: main content (scrollable)
+      Right: strategy table or summary (scrollable independently)
+
+  Strategy comparison table:
+    Sticky header row — column labels always visible while scrolling
+    tbody scrolls within fixed height container
+    Max height: calc(100vh - 280px) — adjusts to viewport
+
+  Chart comment strips:
+    Remain attached to their chart as content scrolls
+    Never detach or float independently
+
+CSS utility classes to add to tokens:
+  .scroll-container:
+    height: calc(100vh - 48px)   ← full height minus nav bar
+    overflow-y: auto
+    overflow-x: hidden
+
+  .sticky-header:
+    position: sticky
+    top: 0
+    z-index: 10
+    background: var(--bg-primary)  ← prevents content bleeding through
+
+NOTE FOR UI/UX AGENT:
+  Verify fixed layout on every sprint review.
+  Test: scroll any page to the bottom — nav bar must remain fully visible.
+  Test: strategy table header must remain visible while scrolling rows.
+  Test: no horizontal scrollbar on any screen at 1280px width minimum.
+
+
 ─────────────────────────────────────────────────────────────────────────────
 
 PRINCIPLES:
@@ -4005,39 +4441,52 @@ E2E:
 
 ## Sprint 2 ⏳ PENDING
 Backend:
-  test_data_fetcher.py   — yfinance fetch, FRED, cache hit/miss
-  test_risk_metrics.py   — Sharpe, Sortino, drawdown calculations
-  test_backtester.py     — walk-forward, no lookahead assertion
+  test_data_loader.py     — load_provided_data(), date conversion, alignment
+  test_data_provenance.py — provenance.json generation, all fields present
+  test_risk_metrics.py    — Sharpe, Sortino, drawdown, excess return
+  test_backtester.py      — walk-forward, no lookahead, transaction costs
+  test_sanity_checks.py   — all 5 data validation assertions pass
 Frontend:
-  Dashboard.test.tsx     — real data replaces mock (update existing)
+  Dashboard.test.tsx      — real BENCHMARK data replaces mock (update)
+  DataSources.test.tsx    — provenance panel renders correctly
 
 ## Sprint 3 ⏳ PENDING
 Backend:
   test_statistical_tests.py  — all 12 tests, p-value correctness
-  test_cross_validation.py   — 6 CV methods
-  test_optimizer.py          — 6 optimization methods
+  test_cross_validation.py   — 6 CV methods, CPCV paths
+  test_optimizer.py          — 6 optimization methods, weight constraints
   test_regime_detector.py    — threshold and HMM classification
 
 ## Sprint 4 ⏳ PENDING
 Backend:
   test_scope_guard.py    — in-scope pass, out-of-scope reject
   test_agents.py         — agent response schema validation
-  test_qa_agent.py       — 30-point checklist execution
+  test_qa_agent.py       — 30-point checklist, limitations output
+  test_ai_usage_log.py   — council session logging, all fields stored
+  test_limitations.py    — QA + Risk Manager generate required fields
 
 ## Sprint 5 ⏳ PENDING
 Backend:
   test_rate_limiting.py  — rate limit enforcement
   test_credit_cap.py     — daily spend cap
   test_explainer.py      — Explainer Agent response schema
+  test_sanity_panel.py   — all 10 checks compute correctly, status logic
 Frontend:
-  ChartCommentStrip.test.tsx — strip renders, expands, collapses
-  ExplainableText.test.tsx   — hover and click behaviour
+  ChartCommentStrip.test.tsx   — strip renders, expands, collapses
+  ExplainableText.test.tsx     — hover and click behaviour
+  ChartExportButton.test.tsx   — PNG download triggers correctly
+  TableExportButton.test.tsx   — CSV export correct headers and rows
+  SanityCheckPanel.test.tsx    — green/amber/red status rendering
 
 ## Sprint 6 ⏳ PENDING
+Backend:
+  test_report_appendix.py      — all 6 sections present, no empty fields
+  test_report_brief.py         — docx generated, all sections populated
+  test_report_midpoint.py      — docx generated, sections match brief reqs
   Full regression suite
-  Performance benchmarks (API response times)
-  Accessibility audit (axe-core)
-  Print stylesheet test
+  Performance benchmarks (API response times per Section 15b)
+  Accessibility audit (axe-core, WCAG AA)
+
 
 
 
@@ -4252,7 +4701,91 @@ GITHUB REPOSITORY:
   which shows variable names but never actual key values.
   Invite Bob and Molly as collaborators (read access only).
 
+=============================================================================
+PROJECT DELIVERABLES — GRADING BREAKDOWN
+=============================================================================
+
+All four deliverables confirmed from FNA 670 project brief.
+
+─── DELIVERABLE 1: FINAL PRESENTATION (35%) ─────────────────────────────────
+18-20 minutes. Executive-level. July 1, 6pm, McEwen 120.
+Audience: Forest Capital, MSFA Board members, McColl faculty.
+
+Required content:
+  - Portfolio construction and rationale
+  - Key analytical results (all 5 metrics per strategy)
+  - Comparison to the 100% S&P 500 benchmark
+  - Interpretation of performance across regimes
+  - Strategic conclusions and recommendations
+  - AI usage discussion (REQUIRED — see below)
+
+AI USAGE SECTION (required in final presentation):
+  Dedicated 2-3 minute segment covering:
+  → How the team leveraged AI (council architecture, Explainer Agent etc.)
+  → What worked — where AI added genuine analytical value
+  → What didn't work — limitations, errors, corrections needed
+  → What we learned — insights about AI in financial analysis
+  → How the agent council differed from a single model
+  This is graded. It is also a major differentiator from other teams.
+
+Owner: Molly (slide deck) with Michael and Bob input on AI section.
+
+─── DELIVERABLE 2: ANALYTICAL APPENDIX (35%) ────────────────────────────────
+Excel / Python. Due July 1 before 6pm.
+Graded on: accuracy, transparency, and analytical rigor.
+
+Required content:
+  - Data sources and assumptions (document every source)
+  - Portfolio construction methodology (each of the 10 strategies)
+  - All calculations and models (reproducible Python)
+  - Performance metrics and visualisations
+  - Sensitivity or robustness analysis
+
+THIS IS THE SYSTEM ITSELF — but documented for a grader:
+  The Python backtester, statistical tests, and visualisations ARE the appendix.
+  Add to Sprint 5 scope: generate a downloadable PDF/HTML report from the system.
+  This report must be readable independently of the web application.
+  Format: Jupyter notebook OR structured HTML export from the dashboard.
+
+Key requirement: ACCURACY. Sanity check every number against the raw data.
+  "A single wrong number can lead to exponentially wrong results." (Dr. Panttser)
+
+Owner: Michael (system generates it), Bob (interprets and narratives).
+
+─── DELIVERABLE 3: EXECUTIVE BRIEF (20%) ────────────────────────────────────
+5 pages, double-spaced. Written for a senior investment audience.
+Due July 1 before 6pm.
+
+Required sections:
+  - Executive summary
+  - Methodology overview
+  - Key findings and insights
+  - Limitations and risks
+  - Final recommendations
+  - Visuals from the analysis
+
+Owner: Bob (primary), with charts/screenshots from Michael's system.
+Note: The system's Commentary mode generates analyst-register text.
+Bob can use the AI-generated narratives as drafting material — but
+must review, verify, and add his own analytical interpretation.
+
+─── DELIVERABLE 4: MIDPOINT CHECK (10%) ─────────────────────────────────────
+Three-page paper (double-spaced, 12-point). Due May 27, end of day.
+Meetup: June 3, 6-8:45pm, Sykes 326.
+Peer review: each student reviews one other group (3-4 min + 2 min Q&A).
+
+Required sections:
+  1. Data & Methodology (1 page)
+  2. Preliminary Results (1 page — MUST include actual output, not plans)
+  3. Roles and Division of Labor (½ page)
+  4. Next Steps and Open Questions (½ page)
+
+For section 2, Michael must have Sprint 2 complete by May 18 so Bob
+has real results to write about before the May 27 deadline.
+
 >>>END
+
+
 
 =============================================================================
 SETUP GUIDE — FROM COLAB TO CLAUDE CODE
