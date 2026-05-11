@@ -17,17 +17,21 @@ The Excel data is re-loaded on each cold start — it is a local file, not an AP
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import hashlib
+import io
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import Optional
-
-import io
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from config import (
     CACHE_DIR,
@@ -151,11 +155,12 @@ def _fred_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
     response = requests.get(url, timeout=30)
     response.raise_for_status()
 
-    df = pd.read_csv(
-        io.StringIO(response.text),
-        parse_dates=["DATE"],
-        index_col="DATE",
-    )
+    # index_col=0 sets DATE as index directly; parse manually afterward.
+    # Using index_col + parse_dates with the same column name fails in pandas
+    # because index_col removes the column before parse_dates can act on it.
+    df = pd.read_csv(io.StringIO(response.text), index_col=0)
+    df.index = pd.to_datetime(df.index)
+    df.index.name = "DATE"
     # FRED uses "." as a missing-value sentinel in CSV output
     df.replace(".", np.nan, inplace=True)
     df = df.astype(float)
@@ -676,11 +681,10 @@ def get_full_history() -> dict:
     Orchestrate the complete data pipeline and return the unified dataset.
 
     Loads Excel data, fetches supplemental series, cross-validates equity,
-    runs Section 4b sanity assertions, generates provenance.json, and returns
-    aligned monthly and daily series for all three asset classes.
+    runs Section 4b sanity assertions, writes provenance.json, writes
+    all four PostgreSQL tables, and returns aligned monthly and daily series.
 
-    Sprint 3+ should read from market_data_monthly and market_data_daily
-    PostgreSQL tables rather than calling this function on every request.
+    Sprint 3+ reads from market_data_monthly / market_data_daily directly.
     Cold-start computation takes ~30s on a free-tier server.
     """
     log.info("get_full_history_start")
@@ -707,6 +711,11 @@ def get_full_history() -> dict:
     _run_sanity_assertions(monthly, signals)
     _write_provenance(provided, supplemental, cv_result, monthly)
 
+    # Persist all pipeline outputs to PostgreSQL (idempotent upserts).
+    # DB writes run in a new thread so they don't conflict with any
+    # running async event loop in the FastAPI process.
+    _persist_to_db(provided, supplemental, monthly, daily, signals, cv_result)
+
     result = {
         "equity_monthly":    monthly["equity_return"],
         "ig_monthly":        monthly["ig_return"],
@@ -724,6 +733,414 @@ def get_full_history() -> dict:
 
     log.info("get_full_history_complete", monthly_rows=len(monthly))
     return result
+
+
+# ── PostgreSQL persistence ────────────────────────────────────────────────────
+
+def _persist_to_db(
+    provided: dict[str, pd.DataFrame],
+    supplemental: dict,
+    monthly: pd.DataFrame,
+    daily: pd.DataFrame,
+    signals: dict[str, pd.Series],
+    cv_result: CrossValidationResult,
+) -> None:
+    """
+    Write the full pipeline output to all four PostgreSQL tables.
+
+    Runs async SQLAlchemy in a dedicated thread so this sync function can
+    be called from within FastAPI's running event loop without deadlocking.
+    All writes use INSERT ... ON CONFLICT DO UPDATE — safe to re-run.
+    Failures are logged as warnings; the pipeline continues without DB.
+    """
+    from database import engine  # import here to avoid circular at module level
+
+    if engine is None:
+        log.warning("db_persist_skipped", reason="engine is None (DATABASE_URL not set)")
+        return
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(
+                asyncio.run,
+                _async_persist_all(provided, supplemental, monthly, daily, signals, cv_result),
+            )
+            future.result(timeout=120)
+        log.info("db_persist_complete")
+    except Exception as exc:
+        log.warning("db_persist_failed", error=str(exc))
+
+
+async def _async_persist_all(
+    provided: dict[str, pd.DataFrame],
+    supplemental: dict,
+    monthly: pd.DataFrame,
+    daily: pd.DataFrame,
+    signals: dict[str, pd.Series],
+    cv_result: CrossValidationResult,
+) -> None:
+    """Top-level async coordinator — all four tables written in a single transaction."""
+    from sqlalchemy import text
+    from database import engine
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    series_list = _build_registry_entries(provided, supplemental, daily, now_iso)
+
+    async with engine.begin() as conn:  # type: ignore[union-attr]
+        await _upsert_registry(conn, series_list, text)
+        await _upsert_monthly(conn, monthly, signals, text)
+        await _upsert_daily(conn, daily, supplemental, text)
+        await _insert_validation_log(conn, cv_result, text)
+
+
+def _build_registry_entries(
+    provided: dict[str, pd.DataFrame],
+    supplemental: dict,
+    daily: pd.DataFrame,
+    now_iso: str,
+) -> list[dict]:
+    """
+    Build the full data_series_registry row list.
+
+    Extends the provenance JSON series list with daily-specific entries for
+    BND and BAMLHYH — the daily table uses different series_ids from the
+    monthly table because the aggregation step changes frequency.
+    """
+    excel_detail: dict = {
+        "file": "FNA_670_Project_Sources.xlsx",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "Y-charts / FRED",
+    }
+
+    def _date_range(df: pd.DataFrame, col: str = "date") -> tuple[str | None, str | None]:
+        d = df[col].dropna()
+        return (
+            str(d.min().date()) if len(d) > 0 else None,
+            str(d.max().date()) if len(d) > 0 else None,
+        )
+
+    def _excel(sid: str, name: str, sheet: str, freq: str, df: pd.DataFrame,
+               orig: str = "Y-charts / FRED") -> dict:
+        s, e = _date_range(df)
+        return {
+            "series_id": sid, "display_name": name,
+            "source_type": "excel_provided",
+            "source_detail": {**excel_detail, "sheet": sheet, "original_source": orig},
+            "frequency": freq,
+            "date_range_start": s, "date_range_end": e,
+            "row_count": len(df), "loaded_at": now_iso, "validation_status": "pass",
+        }
+
+    def _supp(sid: str, name: str, src_type: str, detail: dict, freq: str,
+              key: str) -> dict:
+        s_data = supplemental.get(key)
+        s = str(s_data.index.min().date()) if s_data is not None and len(s_data) > 0 else None
+        e = str(s_data.index.max().date()) if s_data is not None and len(s_data) > 0 else None
+        n = int(len(s_data)) if s_data is not None else 0
+        return {
+            "series_id": sid, "display_name": name,
+            "source_type": src_type, "source_detail": detail,
+            "frequency": freq,
+            "date_range_start": s, "date_range_end": e,
+            "row_count": n, "loaded_at": now_iso, "validation_status": "pass",
+        }
+
+    entries = [
+        _excel("equity_monthly", "S&P 500 Monthly Returns",
+               "S&P 500 Monthly Returns", "monthly", provided["sp500_monthly"], "Y-charts"),
+        _excel("ig_monthly_bnd", "Vanguard Total Bond (BND) — daily aggregated to monthly",
+               "Vanguard Total Bond ", "monthly", provided["bnd"], "Y-charts"),
+        _excel("hy_monthly_baml", "ICE BofA HY Total Return Index (BAMLHYH0A0HYM2TRIV)",
+               "High Yield Total Return", "monthly", provided["hy_total_return"], "FRED / ICE BofA"),
+        _excel("risk_free_dtb3", "3-Month T-bill Rate (DTB3)",
+               "3-Month Treasury", "daily", provided["dtb3"], "FRED"),
+        # Daily series used only in market_data_daily
+        _excel("ig_daily_bnd", "Vanguard Total Bond (BND) — daily close-to-close returns",
+               "Vanguard Total Bond ", "daily", provided["bnd"], "Y-charts"),
+        _excel("hy_daily_baml", "ICE BofA HY Total Return Index — daily level changes",
+               "High Yield Total Return", "daily", provided["hy_total_return"], "FRED / ICE BofA"),
+        # Signal series
+        _excel("hy_spread_baml", "ICE BofA HY Effective Yield (BAMLH0A0HYM2EY)",
+               "High Yield Effective Yield", "daily", provided["hy_effective_yield"], "FRED / ICE BofA"),
+        _excel("ig_spread_baml", "ICE BofA IG Effective Yield (BAMLC0A0CMEY)",
+               "US Corporate Effective Yield", "daily", provided["ig_effective_yield"], "FRED / ICE BofA"),
+        _excel("yield_curve_10y2y", "Yield Curve (DGS10 from Excel, DGS2 from FRED)",
+               "Market Yield on U.S. Treasury", "daily", provided["dgs10"], "FRED"),
+        _excel("gdp_real_gdpc1", "Real GDP (GDPC1)",
+               "Real GDP", "quarterly", provided["gdp"], "FRED / BEA"),
+        _excel("sp500_pe_ratio", "S&P 500 P/E Ratio",
+               "SP 500 PE Ratio", "quarterly", provided["sp500_pe"], "Y-charts"),
+        # Supplemental (external)
+        _supp("equity_daily_spy", "SPY Daily Equity Prices (yfinance)",
+              "yfinance",
+              {"ticker": "SPY", "auto_adjust": True, "interval": "1d", "fetched_at": now_iso},
+              "daily", "spy_daily"),
+        _supp("vix_daily", "VIX Volatility Index (VIXCLS)",
+              "fred_api",
+              {"series_id": "VIXCLS", "fetched_at": now_iso,
+               "fred_url": "https://fred.stlouisfed.org/series/VIXCLS"},
+              "daily", "vix_daily"),
+        _supp("dgs2_daily", "2-Year Treasury Yield (DGS2)",
+              "fred_api",
+              {"series_id": "DGS2", "fetched_at": now_iso,
+               "fred_url": "https://fred.stlouisfed.org/series/DGS2"},
+              "daily", "dgs2_daily"),
+        _supp("ff_factors_monthly", "Fama-French 3-Factor Monthly Returns",
+              "ken_french",
+              {"dataset": "F-F_Research_Data_Factors", "fetched_at": now_iso,
+               "url": "mba.tuck.dartmouth.edu/pages/faculty/ken.french"},
+              "monthly", "ff_factors"),
+    ]
+    return entries
+
+
+async def _upsert_registry(conn: Any, series_list: list[dict], text: Any) -> None:
+    """INSERT ... ON CONFLICT DO UPDATE for data_series_registry."""
+    sql = text("""
+        INSERT INTO data_series_registry
+            (series_id, display_name, source_type, source_detail, frequency,
+             date_range_start, date_range_end, row_count, loaded_at, validation_status)
+        VALUES
+            (:series_id, :display_name, :source_type, :source_detail, :frequency,
+             :date_range_start, :date_range_end, :row_count, :loaded_at,
+             :validation_status)
+        ON CONFLICT (series_id) DO UPDATE SET
+            display_name      = EXCLUDED.display_name,
+            source_type       = EXCLUDED.source_type,
+            source_detail     = EXCLUDED.source_detail,
+            frequency         = EXCLUDED.frequency,
+            date_range_start  = EXCLUDED.date_range_start,
+            date_range_end    = EXCLUDED.date_range_end,
+            row_count         = EXCLUDED.row_count,
+            loaded_at         = EXCLUDED.loaded_at,
+            validation_status = EXCLUDED.validation_status
+    """)
+    from datetime import date as date_type
+
+    def _to_date(v: str | None) -> date_type | None:
+        # asyncpg expects datetime.date for DATE columns, not a plain string.
+        if not v:
+            return None
+        try:
+            return date_type.fromisoformat(v)
+        except ValueError:
+            return None
+
+    def _to_dt(v: str | None) -> datetime | None:
+        # asyncpg expects datetime for TIMESTAMPTZ columns, not a plain string.
+        if not v:
+            return None
+        try:
+            return datetime.fromisoformat(v)
+        except ValueError:
+            return None
+
+    for s in series_list:
+        await conn.execute(sql, {
+            "series_id":        s["series_id"],
+            "display_name":     s["display_name"],
+            "source_type":      s["source_type"],
+            "source_detail":    json.dumps(s["source_detail"]),
+            "frequency":        s["frequency"],
+            "date_range_start": _to_date(s.get("date_range_start")),
+            "date_range_end":   _to_date(s.get("date_range_end")),
+            "row_count":        s.get("row_count") or 0,
+            "loaded_at":        _to_dt(s.get("loaded_at")),
+            "validation_status": s.get("validation_status", "pass"),
+        })
+    log.info("registry_upserted", count=len(series_list))
+
+
+async def _upsert_monthly(
+    conn: Any, monthly: pd.DataFrame, signals: dict[str, pd.Series], text: Any
+) -> None:
+    """INSERT ... ON CONFLICT DO UPDATE for market_data_monthly."""
+    sql = text("""
+        INSERT INTO market_data_monthly
+            (date, equity_return, equity_source,
+             ig_return, ig_source,
+             hy_return, hy_source,
+             risk_free_rate, risk_free_source,
+             vix_month_avg, vix_source,
+             yield_curve, yield_curve_source,
+             hy_spread, hy_spread_source,
+             ig_spread, ig_spread_source,
+             gdp_growth, gdp_source,
+             pe_ratio, pe_source)
+        VALUES
+            (:date, :equity_return, :equity_source,
+             :ig_return, :ig_source,
+             :hy_return, :hy_source,
+             :risk_free_rate, :risk_free_source,
+             :vix_month_avg, :vix_source,
+             :yield_curve, :yield_curve_source,
+             :hy_spread, :hy_spread_source,
+             :ig_spread, :ig_spread_source,
+             :gdp_growth, :gdp_source,
+             :pe_ratio, :pe_source)
+        ON CONFLICT (date) DO UPDATE SET
+            equity_return    = EXCLUDED.equity_return,
+            ig_return        = EXCLUDED.ig_return,
+            hy_return        = EXCLUDED.hy_return,
+            risk_free_rate   = EXCLUDED.risk_free_rate,
+            vix_month_avg    = EXCLUDED.vix_month_avg,
+            yield_curve      = EXCLUDED.yield_curve,
+            hy_spread        = EXCLUDED.hy_spread,
+            ig_spread        = EXCLUDED.ig_spread,
+            gdp_growth       = EXCLUDED.gdp_growth,
+            pe_ratio         = EXCLUDED.pe_ratio
+    """)
+
+    # Aggregate daily signals to monthly averages for signal columns
+    def _monthly_avg(key: str) -> pd.Series | None:
+        s = signals.get(key)
+        return s.resample("ME").mean() if s is not None else None
+
+    vix_monthly = _monthly_avg("vix")
+    yc_monthly = _monthly_avg("yield_curve")
+    hy_spread_monthly = _monthly_avg("hy_spread")
+    ig_spread_monthly = _monthly_avg("ig_spread")
+    gdp_monthly = signals.get("gdp_growth")      # already monthly
+    pe_monthly = _monthly_avg("pe_ratio")
+
+    def _val(series: pd.Series | None, idx: Any) -> float | None:
+        if series is None:
+            return None
+        try:
+            v = series.loc[idx]
+            return None if (v is None or (isinstance(v, float) and np.isnan(v))) else float(v)
+        except KeyError:
+            return None
+
+    rows = 0
+    for date, row in monthly.iterrows():
+        await conn.execute(sql, {
+            "date":             date.date(),
+            "equity_return":    float(row["equity_return"]),
+            "equity_source":    "equity_monthly",
+            "ig_return":        float(row["ig_return"]),
+            "ig_source":        "ig_monthly_bnd",
+            "hy_return":        float(row["hy_return"]),
+            "hy_source":        "hy_monthly_baml",
+            "risk_free_rate":   float(row["risk_free"]) if "risk_free" in row.index else 0.0,
+            "risk_free_source": "risk_free_dtb3",
+            "vix_month_avg":    _val(vix_monthly, date),
+            "vix_source":       "vix_daily" if vix_monthly is not None else None,
+            "yield_curve":      _val(yc_monthly, date),
+            "yield_curve_source": "yield_curve_10y2y" if yc_monthly is not None else None,
+            "hy_spread":        _val(hy_spread_monthly, date),
+            "hy_spread_source": "hy_spread_baml" if hy_spread_monthly is not None else None,
+            "ig_spread":        _val(ig_spread_monthly, date),
+            "ig_spread_source": "ig_spread_baml" if ig_spread_monthly is not None else None,
+            "gdp_growth":       _val(gdp_monthly, date),
+            "gdp_source":       "gdp_real_gdpc1" if gdp_monthly is not None else None,
+            "pe_ratio":         _val(pe_monthly, date),
+            "pe_source":        "sp500_pe_ratio" if pe_monthly is not None else None,
+        })
+        rows += 1
+    log.info("monthly_upserted", rows=rows)
+
+
+async def _upsert_daily(
+    conn: Any,
+    daily: pd.DataFrame,
+    supplemental: dict,
+    text: Any,
+) -> None:
+    """INSERT ... ON CONFLICT DO UPDATE for market_data_daily."""
+    sql = text("""
+        INSERT INTO market_data_daily
+            (date, equity_return, equity_source,
+             ig_return, ig_source,
+             hy_return, hy_source,
+             vix, vix_source,
+             dgs2, dgs2_source)
+        VALUES
+            (:date, :equity_return, :equity_source,
+             :ig_return, :ig_source,
+             :hy_return, :hy_source,
+             :vix, :vix_source,
+             :dgs2, :dgs2_source)
+        ON CONFLICT (date) DO UPDATE SET
+            equity_return = EXCLUDED.equity_return,
+            ig_return     = EXCLUDED.ig_return,
+            hy_return     = EXCLUDED.hy_return,
+            vix           = EXCLUDED.vix,
+            dgs2          = EXCLUDED.dgs2
+    """)
+
+    vix_s = supplemental.get("vix_daily")
+    dgs2_s = supplemental.get("dgs2_daily")
+
+    def _float(v: Any) -> float | None:
+        if v is None:
+            return None
+        try:
+            f = float(v)
+            return None if np.isnan(f) else f
+        except (TypeError, ValueError):
+            return None
+
+    def _lookup(series: pd.Series | None, idx: Any) -> float | None:
+        if series is None:
+            return None
+        try:
+            return _float(series.loc[idx])
+        except KeyError:
+            return None
+
+    rows = 0
+    # Build all daily dates as the union of equity and bond return dates
+    all_dates = daily.index
+    for date in all_dates:
+        r = daily.loc[date]
+        eq_ret = _float(r.get("equity_return") if hasattr(r, "get") else r["equity_return"] if "equity_return" in daily.columns else None)
+        ig_ret = _float(r.get("ig_return") if hasattr(r, "get") else r["ig_return"] if "ig_return" in daily.columns else None)
+        hy_ret = _float(r.get("hy_return") if hasattr(r, "get") else r["hy_return"] if "hy_return" in daily.columns else None)
+
+        await conn.execute(sql, {
+            "date":          date.date(),
+            "equity_return": eq_ret,
+            "equity_source": "equity_daily_spy" if eq_ret is not None else None,
+            "ig_return":     ig_ret,
+            "ig_source":     "ig_daily_bnd" if ig_ret is not None else None,
+            "hy_return":     hy_ret,
+            "hy_source":     "hy_daily_baml" if hy_ret is not None else None,
+            "vix":           _lookup(vix_s, date),
+            "vix_source":    "vix_daily" if vix_s is not None else None,
+            "dgs2":          _lookup(dgs2_s, date),
+            "dgs2_source":   "dgs2_daily" if dgs2_s is not None else None,
+        })
+        rows += 1
+    log.info("daily_upserted", rows=rows)
+
+
+async def _insert_validation_log(
+    conn: Any, cv_result: CrossValidationResult, text: Any
+) -> None:
+    """Write cross-validation and sanity check results to data_validation_log."""
+    sql = text("""
+        INSERT INTO data_validation_log (check_name, series_id, status, detail)
+        VALUES (:check_name, :series_id, :status, :detail)
+    """)
+
+    # Cross-validation equity result
+    await conn.execute(sql, {
+        "check_name": "cross_validate_equity",
+        "series_id":  "equity_monthly",
+        "status":     cv_result.status.lower(),
+        "detail":     json.dumps({
+            "n_months_compared":    cv_result.n_months_compared,
+            "n_green":              cv_result.n_green,
+            "n_amber":              cv_result.n_amber,
+            "n_red":                cv_result.n_red,
+            "max_discrepancy_pct":  cv_result.max_discrepancy_pct,
+            "mean_discrepancy_pct": cv_result.mean_discrepancy_pct,
+            "worst_month":          cv_result.worst_month,
+            "issues":               cv_result.issues,
+        }),
+    })
+    log.info("validation_log_written")
 
 
 # ── Section 4b sanity assertions ─────────────────────────────────────────────

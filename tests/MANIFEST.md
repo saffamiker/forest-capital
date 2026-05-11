@@ -42,6 +42,13 @@ Backend — new/updated:
                            provenance.json structure tests; API endpoint tests
   test_provenance_api.py — GET /api/v1/provenance returns 200 with/without file,
                            returns series list, no auth required, required fields
+  test_database_writes.py — data_series_registry ≥13 rows; BND/BAMLHYH are
+                           excel_provided, SPY is yfinance, VIX/DGS2 are fred_api,
+                           DGS10 NOT in fred_api; market_data_monthly ≥100 rows
+                           with source columns populated; market_data_daily ≥1000
+                           rows with correct source columns; data_validation_log
+                           has cross_validate_equity entry; idempotency confirmed
+                           (skips automatically when Postgres is not reachable)
 Backend — existing (unchanged):
   test_data_fetcher.py   — all 15 tests passing (mocked yfinance/FRED wrappers)
   test_risk_metrics.py   — all 21 tests passing

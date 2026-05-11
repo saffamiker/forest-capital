@@ -19,7 +19,7 @@ import os
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
-DATABASE_URL=postgresql+asyncpg://postgres:770519@localhost:5432/forestcapital
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:770519@localhost:5432/forestcapital")
 
 # Swap postgres:// → postgresql+asyncpg:// if Render provides the legacy scheme.
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
