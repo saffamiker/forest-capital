@@ -1,6 +1,7 @@
 """
 Forest Capital Portfolio Intelligence System — FastAPI backend.
-Sprint 2: real BENCHMARK backtest, provenance endpoint, threshold regime detection.
+Sprint 3: all 10 strategies live, full statistical suite, HMM regime detection,
+          real portfolio optimizer, cross-validation results in compare endpoint.
 """
 from __future__ import annotations
 import json
@@ -126,7 +127,7 @@ async def get_me(session: dict = Depends(require_auth)):
 async def health():
     return {
         "status": "ok",
-        "sprint": "2",
+        "sprint": "3",
         "environment": ENVIRONMENT,
         "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
         "gemini": bool(os.getenv("GOOGLE_API_KEY")),
@@ -206,20 +207,16 @@ async def run_backtest(
 @app.get("/api/backtest/compare")
 @limiter.limit("30/minute")
 async def compare_strategies(request: Request, session: dict = Depends(require_auth)):
-    # Replace the mock BENCHMARK entry with real computed metrics when available.
-    # Other strategies remain mock until Sprint 3 implements them.
-    strategies = list(MOCK_STRATEGIES)
+    # Sprint 3: all 10 strategies computed from real data.
+    # Falls back to mock data in test environment or on individual strategy failures.
     if ENVIRONMENT != "test":
         try:
-            from tools.backtester import run_benchmark
-            real_bm = run_benchmark(start="2000-01-01", end="2024-12-31")
-            strategies = [
-                real_bm if s["strategy_name"] == "100% Equity (Benchmark)" else s
-                for s in strategies
-            ]
+            from tools.backtester import run_all_strategies
+            results = run_all_strategies(start="2000-01-01", end="2024-12-31")
+            return {"strategies": results, "ranked_by": "sharpe_ratio"}
         except Exception as exc:
-            log.warning("compare_benchmark_fallback", error=str(exc))
-    sorted_strategies = sorted(strategies, key=lambda s: s["sharpe_ratio"], reverse=True)
+            log.warning("compare_all_strategies_fallback", error=str(exc))
+    sorted_strategies = sorted(MOCK_STRATEGIES, key=lambda s: s["sharpe_ratio"], reverse=True)
     return {"strategies": sorted_strategies, "ranked_by": "sharpe_ratio"}
 
 
@@ -244,11 +241,38 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
     valid_methods = {"MEAN_VARIANCE", "RISK_PARITY", "MIN_VARIANCE", "BLACK_LITTERMAN", "MAX_SHARPE", "MIN_DRAWDOWN"}
     if body.method not in valid_methods:
         raise HTTPException(status_code=422, detail=f"Unknown method '{body.method}'")
+
+    # Sprint 3: real optimizer backed by historical returns.
+    if ENVIRONMENT != "test":
+        try:
+            from tools.data_fetcher import fetch_equity_data
+            from tools.optimizer import optimize_weights as _optimize, efficient_frontier as _frontier
+            import pandas as pd
+
+            assets = body.assets or ["SPY", "TLT", "IEF", "GLD"]
+            start = body.start or "2000-01-01"
+            end = body.end or "2024-12-31"
+
+            prices = fetch_equity_data(assets, start, end)
+            returns = prices.pct_change().dropna()
+
+            result = _optimize(body.method, returns, assets=assets)
+            frontier = _frontier(returns, n_points=100, assets=assets)
+
+            return {
+                "method": body.method,
+                "weights": result["weights"],
+                "sum_check": result["sum_check"],
+                "efficient_frontier": frontier,
+            }
+        except Exception as exc:
+            log.warning("optimize_weights_fallback", method=body.method, error=str(exc))
+
     return {
         "method": body.method,
         "weights": {"SPY": 0.40, "TLT": 0.30, "IEF": 0.15, "GLD": 0.15},
         "efficient_frontier": MOCK_EFFICIENT_FRONTIER,
-        "note": "Sprint 1 mock — real optimisation in Sprint 2",
+        "note": "Fallback mock — real optimisation failed or test environment",
     }
 
 

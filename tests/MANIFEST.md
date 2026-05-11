@@ -68,13 +68,63 @@ Infrastructure:
     wait-on timeout doubled to 120s, log capture on failure added
     (continue-on-error: true remains until issue #1 is resolved)
 
-## Sprint 3 ⏳ PENDING
-Backend:
-  test_optimizer.py      — 6 optimization methods, weight constraints
-  test_cross_validation.py — walk-forward, expanding window, purged k-fold, CPCV
-  test_regime_detector.py  — threshold classification (VIX, yield curve, equity trend),
-                             HMM states, regime agreement flag
-  All 10 strategy backtests with real results
+## Sprint 3 ✅ COMPLETE (2026-05-11)
+
+Backend — new/updated:
+  test_optimizer.py      — optimize_weights dispatcher (6 methods), parametrised weight
+                           constraint checks (sum=1±1e-4, within [MIN, MAX], non-negative),
+                           method-specific properties (MV concentration, RP equal risk,
+                           MV vol < equal-weight, BL equilibrium prior, max-Sharpe fallback,
+                           min-drawdown valid), efficient frontier (list, keys, vol ordering)
+  test_cross_validation.py (Sprint 3 additions) — walk_forward_cv dict structure, fold keys
+                           (oos_sharpe, n_test_obs), expanding_window_cv divergence metric,
+                           purged_kfold_cv (embargo gap, fold structure), cpcv paths
+                           (C(6,2)=15 paths, CI tuple, pct_positive in [0,1]),
+                           permutation_test (fast path, passed key, known-edge strategy,
+                           no-edge series with p>0.05), regime_stratified_cv (4 regimes),
+                           compute_cv_summary (stability score in [0,1], all required keys)
+  test_statistical_tests.py (Sprint 3 additions) — deflated_sharpe_ratio (required keys,
+                           high Sharpe passes, low Sharpe fails at sr_star≈0.096,
+                           more trials raises sr_star, non-normal affects result, p in [0,1]),
+                           probabilistic_sharpe_ratio (required keys, psr in [0,1],
+                           above benchmark gives high PSR, equal gives ≈0.5, CI width,
+                           larger n tighter CI), spa_test (required keys, p in [0,1],
+                           identifies best strategy, reproducible with seed, random strategy
+                           p>0.05, 10 skipped when hmmlearn absent — expected)
+  test_regime_detector.py — _classify_threshold (bull/bear/transition/all-None/partial),
+                           _check_agreement (same agrees, BULL vs BEAR disagrees, TRANSITION
+                           neutral with both, None HMM trivially agrees), classify_hmm_regime
+                           (dict, required keys, valid regime label, probs sum to 1, labels
+                           length, insufficient data error), fit_hmm_historical (dict,
+                           transition matrix rows sum to 1, VIX branch runs) — 8 tests run,
+                           10 HMM tests SKIP on Windows (hmmlearn requires C++ build tools;
+                           run in CI on Linux where hmmlearn installs via pre-built wheel)
+
+Backend — new implementation files (no new tests required, covered by above):
+  tools/optimizer.py     — 6 methods: MEAN_VARIANCE (cvxpy CLARABEL QP), RISK_PARITY
+                           (scipy SLSQP), MIN_VARIANCE (cvxpy), BLACK_LITTERMAN
+                           (He & Litterman 1999 closed-form), MAX_SHARPE (SLSQP with box
+                           constraints — CLARABEL doesn't enforce bounds after change-of-vars),
+                           MIN_DRAWDOWN (CVaR LP via cvxpy); efficient_frontier 100-point sweep
+  tools/cross_validation.py — 7 CV methods: walk_forward, expanding_window, purged_kfold
+                           (Lopez de Prado 252-day embargo), CPCV C(6,2)=15 paths,
+                           monte_carlo_permutation (block bootstrap, seed=42),
+                           regime_stratified, compute_cv_summary (5-component stability score)
+  tools/statistical_tests.py (Sprint 3 additions) — deflated_sharpe_ratio (Lopez de Prado,
+                           expected-max of K Sharpes), probabilistic_sharpe_ratio (95% CI
+                           via delta method), spa_test (Hansen SPA, block bootstrap)
+  tools/regime_detector.py (Sprint 3 additions) — classify_hmm_regime (GaussianHMM
+                           3-state, state labelling by mean return), fit_hmm_historical
+                           (transition matrix with VIX feature support)
+
+Infrastructure:
+  main.py — /api/backtest/compare now calls run_all_strategies() (all 10, real data)
+             /api/optimize/weights now calls real optimizer + efficient frontier
+             /api/health sprint field updated to "3"
+  cvxpy installed in venv (CLARABEL solver; ECOS not available on Windows without C++ tools)
+
+Test counts: 352 passed, 10 skipped (HMM), 0 failed
+Frontend: 47 tests pass (unchanged from Sprint 2)
 
 ## Sprint 4 ⏳ PENDING
 Backend:

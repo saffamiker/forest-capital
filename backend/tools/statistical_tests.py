@@ -456,3 +456,239 @@ def power_check(
         "recommended_threshold": recommended_threshold,
         "threshold_tier": tier,
     }
+
+
+# ── Deflated Sharpe Ratio (Lopez de Prado & Bailey 2014) ──────────────────────
+
+def deflated_sharpe_ratio(
+    sharpe: float,
+    n_obs: int,
+    n_trials: int,
+    skewness: float = 0.0,
+    kurtosis: float = 3.0,
+) -> dict:
+    """
+    Deflated Sharpe Ratio corrects for the multiple-testing bias in Sharpe ratios.
+    When 10 strategies are tested, the best Sharpe is selected — its observed value
+    is inflated by the selection process (same mechanism as p-hacking). DSR asks:
+    what is the minimum Sharpe ratio that should be deemed significant given that
+    n_trials strategies were evaluated?
+    The formula (Bailey & López de Prado 2014, Equation 4):
+      SR* = sqrt(V[SR]) * [(1 - γ) * Φ^{-1}(1 - 1/n_trials) + γ * Φ^{-1}(1 - 1/(n_trials * e))]
+    where V[SR] = (1 + (1 - skew*SR + (kurt-1)/4 * SR²)) / (n-1)
+    is the variance of the Sharpe ratio estimator under non-normality.
+    n_trials=10 throughout because we always test all 10 strategies.
+    Changing n_trials changes the minimum required Sharpe — more trials → higher bar.
+    """
+    from scipy.stats import norm
+
+    # Variance of the Sharpe ratio estimator under non-normality
+    # kurtosis here is excess kurtosis; the formula uses excess kurtosis (kurt - 3)
+    excess_kurt = kurtosis - 3.0
+    var_sr = (
+        1.0
+        + 0.5 * sharpe ** 2 * (excess_kurt + 1.0)
+        - sharpe * skewness
+        + sharpe ** 2 * skewness ** 2 / 4.0
+    ) / max(n_obs - 1, 1)
+    std_sr = float(np.sqrt(max(var_sr, 0.0)))
+
+    # DSR threshold: minimum SR to be significant given n_trials strategies tested
+    euler_gamma = 0.5772156649
+    if n_trials > 1:
+        z1 = norm.ppf(1.0 - 1.0 / n_trials)
+        z2 = norm.ppf(1.0 - 1.0 / (n_trials * np.e))
+        sr_star = std_sr * ((1.0 - euler_gamma) * z1 + euler_gamma * z2)
+    else:
+        sr_star = std_sr * norm.ppf(1.0 - 0.5)  # n_trials=1 → standard z-test
+
+    # DSR p-value: P(observed SR > SR* under H0)
+    if std_sr > 0:
+        z = (sharpe - sr_star) / std_sr
+        p_value = float(1.0 - norm.cdf(z))
+    else:
+        z, p_value = 0.0, 1.0
+
+    from config import P_THRESHOLD_DSR
+    log.info("stat_test", test="deflated_sharpe_ratio", sharpe=round(sharpe, 4), p_value=round(p_value, 6))
+
+    return {
+        "test": "deflated_sharpe_ratio",
+        "observed_sharpe": sharpe,
+        "sr_star": round(float(sr_star), 6),
+        "std_sr": round(std_sr, 6),
+        "z_stat": round(float(z), 4),
+        "p_value": round(p_value, 6),
+        "n_obs": n_obs,
+        "n_trials": n_trials,
+        "skewness": skewness,
+        "excess_kurtosis": excess_kurt,
+        "threshold": P_THRESHOLD_DSR,
+        "threshold_tier": "tier1",
+        "passed": bool(p_value < P_THRESHOLD_DSR),
+    }
+
+
+# ── Probabilistic Sharpe Ratio ────────────────────────────────────────────────
+
+def probabilistic_sharpe_ratio(
+    sharpe: float,
+    benchmark_sharpe: float,
+    n_obs: int,
+    skewness: float = 0.0,
+    kurtosis: float = 3.0,
+) -> dict:
+    """
+    Probabilistic Sharpe Ratio: P(true SR > benchmark SR) (Bailey & López de Prado 2012).
+    The observed Sharpe ratio is an estimate of the true Sharpe — it has sampling
+    uncertainty that standard reporting ignores. PSR reports the probability that
+    the true Sharpe ratio (the population parameter) exceeds a benchmark Sharpe
+    ratio, accounting for non-normality via the Cornish-Fisher correction.
+    PSR is strictly more informative than the point estimate because it reveals
+    whether the observed outperformance is precise (high PSR even at small
+    advantage) or uncertain (low PSR even at large apparent advantage).
+    benchmark_sharpe=0.0 by default (test against zero); in practice, pass the
+    benchmark strategy's Sharpe for head-to-head comparison.
+    """
+    from scipy.stats import norm
+
+    excess_kurt = kurtosis - 3.0
+    # Variance of the SR estimator (same as DSR)
+    var_sr = (
+        1.0
+        + 0.5 * sharpe ** 2 * (excess_kurt + 1.0)
+        - sharpe * skewness
+        + sharpe ** 2 * skewness ** 2 / 4.0
+    ) / max(n_obs - 1, 1)
+    std_sr = float(np.sqrt(max(var_sr, 0.0)))
+
+    if std_sr > 0:
+        z = (sharpe - benchmark_sharpe) / std_sr
+        psr = float(norm.cdf(z))
+        p_value = float(1.0 - psr)
+    else:
+        psr = 1.0 if sharpe > benchmark_sharpe else 0.0
+        p_value = 0.0 if sharpe > benchmark_sharpe else 1.0
+
+    # 95% confidence interval on the Sharpe estimate
+    ci_low = sharpe - 1.96 * std_sr
+    ci_high = sharpe + 1.96 * std_sr
+
+    return {
+        "test": "probabilistic_sharpe_ratio",
+        "observed_sharpe": sharpe,
+        "benchmark_sharpe": benchmark_sharpe,
+        "psr": round(psr, 6),           # P(true SR > benchmark SR)
+        "p_value": round(p_value, 6),   # 1 - PSR (for significance testing)
+        "sharpe_ci_95": (round(ci_low, 4), round(ci_high, 4)),
+        "std_sr": round(std_sr, 6),
+        "n_obs": n_obs,
+    }
+
+
+# ── SPA test (Hansen 2005) ────────────────────────────────────────────────────
+
+def spa_test(
+    all_strategy_returns: dict[str, pd.Series],
+    benchmark_returns: pd.Series,
+    n_boot: int = BOOTSTRAP_SAMPLES,
+    seed: int = RANDOM_SEED,
+) -> dict:
+    """
+    Hansen's (2005) Superior Predictive Ability test — guards against data snooping.
+    When testing k strategies and reporting the best, the winner's Sharpe is
+    inflated by the selection process (data snooping bias). The SPA test asks:
+    given that we evaluated k strategies and selected the best, is the best
+    strategy's outperformance genuinely superior to the benchmark, or could it
+    have arisen from chance selection among strategies with no skill?
+    Method: bootstrap the active return series, resample, compute the maximum
+    Sharpe difference across all strategies in each bootstrap sample (building the
+    null distribution of the maximum), then compare the observed maximum against it.
+    p_spa < 0.005 (Tier 1) means the best strategy survives data-snooping correction.
+    block bootstrap preserves autocorrelation structure in active returns.
+    """
+    np.random.seed(seed)
+
+    # Align all strategies to benchmark
+    aligned = {}
+    b = benchmark_returns.dropna()
+    for name, rets in all_strategy_returns.items():
+        s, bm = rets.align(b, join="inner")
+        aligned[name] = (s - bm).dropna()  # active returns
+
+    if not aligned:
+        return {"error": "no_aligned_strategies", "passed": False}
+
+    # Observed Sharpe differences (strategy Sharpe - benchmark Sharpe)
+    b_sharpe = float(b.mean() / b.std() * np.sqrt(ANNUALIZATION_FACTOR)) if b.std() > 0 else 0.0
+    obs_diffs = {}
+    for name, active in aligned.items():
+        if len(active) > 5:
+            sr = float(active.mean() / active.std() * np.sqrt(ANNUALIZATION_FACTOR)) if active.std() > 0 else 0.0
+            obs_diffs[name] = sr
+
+    if not obs_diffs:
+        return {"error": "no_valid_strategies", "passed": False}
+
+    best_strategy = max(obs_diffs, key=obs_diffs.__getitem__)
+    obs_max = obs_diffs[best_strategy]
+
+    # Bootstrap null distribution using block bootstrap on active returns
+    from config import BLOCK_SIZE
+    block_size = BLOCK_SIZE
+
+    # Use all strategies' active returns concatenated for bootstrap consistency
+    active_arrays = {n: v.values for n, v in aligned.items() if len(v) > block_size}
+    if not active_arrays:
+        return {"error": "insufficient_data", "passed": False}
+
+    # Reference active return series (use best strategy for bootstrapping)
+    ref = active_arrays.get(best_strategy, list(active_arrays.values())[0])
+    n = len(ref)
+
+    null_maxima = []
+    for _ in range(n_boot):
+        n_blocks = int(np.ceil(n / block_size))
+        starts = np.random.randint(0, max(n - block_size + 1, 1), size=n_blocks)
+        boot_idx = np.concatenate([np.arange(s, min(s + block_size, n)) for s in starts])[:n]
+
+        # Compute Sharpe for each strategy on this bootstrap sample (demeaned — H0)
+        boot_max = -np.inf
+        for name, arr in active_arrays.items():
+            boot_arr = arr[boot_idx] - arr.mean()  # demean to enforce H0
+            if len(boot_arr) > 2 and boot_arr.std() > 0:
+                boot_sr = float(np.mean(boot_arr) / np.std(boot_arr) * np.sqrt(ANNUALIZATION_FACTOR))
+                if boot_sr > boot_max:
+                    boot_max = boot_sr
+        if boot_max > -np.inf:
+            null_maxima.append(boot_max)
+
+    if not null_maxima:
+        return {"error": "bootstrap_failed", "passed": False}
+
+    null_array = np.array(null_maxima)
+    p_spa = float(np.mean(null_array >= obs_max))
+
+    from config import P_THRESHOLD_PRIMARY
+    log.info(
+        "stat_test",
+        test="spa",
+        best_strategy=best_strategy,
+        obs_max_sharpe=round(obs_max, 4),
+        p_value=round(p_spa, 6),
+    )
+
+    return {
+        "test": "spa",
+        "best_strategy": best_strategy,
+        "best_strategy_sharpe_diff": round(obs_max, 4),
+        "all_sharpe_diffs": {k: round(v, 4) for k, v in obs_diffs.items()},
+        "n_strategies": len(obs_diffs),
+        "n_bootstrap": n_boot,
+        "p_spa": round(p_spa, 6),
+        "null_mean": round(float(null_array.mean()), 4),
+        "null_std": round(float(null_array.std()), 4),
+        "threshold": P_THRESHOLD_PRIMARY,
+        "threshold_tier": "tier1",
+        "passes_spa": bool(p_spa < P_THRESHOLD_PRIMARY),
+    }
