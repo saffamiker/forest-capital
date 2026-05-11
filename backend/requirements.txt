@@ -29,6 +29,12 @@ numpy>=1.26.0
 pandas-datareader>=0.10.0
 fredapi>=0.5.1
 pyarrow>=14.0.0
+openpyxl>=3.1.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+asyncpg>=0.29.0
+sqlalchemy[asyncio]>=2.0.0
+alembic>=1.13.0
 
 # ── Statistics & ML ───────────────────────────────────────────────────────────
 scipy>=1.11.0

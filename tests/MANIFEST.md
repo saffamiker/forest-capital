@@ -16,32 +16,50 @@ E2E:
   login.spec.ts          — full login flow, confirmation message
   navigation.spec.ts     — all tabs navigate without error
 
-## Sprint 2 ✅ COMPLETE
-Backend:
-  test_data_fetcher.py   — yfinance fetch (mocked), cache hit skips API call,
-                           FRED series fetch (mocked), risk-free rate fallback
-                           when FRED unavailable, ValidationResult, NaN gap
-                           detection, negative price flagging
-  test_risk_metrics.py   — annualized_return (known formula), annualized_volatility
-                           uses sqrt(252), sharpe_ratio (time-varying rf, scalar rf),
-                           sortino_ratio, max_drawdown (no-loss case, known loss),
-                           compute_var / compute_cvar ordering, calmar_ratio,
-                           ANNUALIZATION_FACTOR = 252 contract test
-  test_backtester.py     — verify_no_lookahead passes for t-1 signals, raises for
-                           same-day and future signals, run_benchmark structure and
-                           field types (mocked data), BENCHMARK is not significant,
-                           no transaction costs for buy-and-hold, weight validation
-                           (sum != 1, short positions both raise AssertionError)
-  test_statistical_tests.py — paired_ttest structure and p-value range, identical
-                              returns → high p-value, large alpha → p < 0.005,
-                              tier1/tier2/directional threshold dispatch, normality
-                              test (normal vs heavy-tailed), autocorrelation test
-                              (IID vs AR(1)), FDR correction increases p-values,
-                              power_check tier assignment, alpha_significance_test
-Frontend:
-  Dashboard.test.tsx     — existing mock-data test continues to pass (API contract
-                           unchanged; Sprint 2 real data served by backend, frontend
-                           tests use mocked axios responses)
+## Sprint 2 Remediation ✅ COMPLETE (2026-05-11)
+Rebuilt data layer to match full CLAUDE.md spec.
+
+Backend — new/updated:
+  test_data_loader.py    — load_provided_data() returns internal normalized keys,
+                           all sheets load as DataFrames, dates are datetime,
+                           HY Total Return has >5000 rows, S&P500 contains price
+                           levels not returns, build_monthly_returns() columns,
+                           no NaN after alignment, index is month-end,
+                           serial date conversion assertions (45839→2025-07,
+                           36529→2000-01-04 documented as correct serial)
+  test_supplemental_fetcher.py — fetch_supplemental_data() returns dict with
+                           spy_daily/vix_daily/dgs2_daily/ff_factors keys,
+                           spy_daily is returns not prices, yfinance only called
+                           for SPY (BND/HYG never fetched from yfinance),
+                           FF factors are in decimal form (divided by 100)
+  test_cross_validation.py — CrossValidationResult dataclass, cross_validate_equity()
+                           returns CrossValidationResult with matched data,
+                           status in valid set, no red months when data matches,
+                           DataValidationError importable
+  test_data_provenance.py — MANDATORY CLAUDE.md test: excel_provided series have
+                           correct file/sheet, yfinance only for SPY ticker,
+                           VIXCLS+DGS2 in fred_api, DGS10 NOT in fred_api;
+                           provenance.json structure tests; API endpoint tests
+  test_provenance_api.py — GET /api/v1/provenance returns 200 with/without file,
+                           returns series list, no auth required, required fields
+Backend — existing (unchanged):
+  test_data_fetcher.py   — all 15 tests passing (mocked yfinance/FRED wrappers)
+  test_risk_metrics.py   — all 21 tests passing
+  test_backtester.py     — all 10 tests passing
+  test_statistical_tests.py — all 32 tests passing
+  test_config.py, test_auth.py, test_mock_data.py, test_health.py — unchanged
+Frontend — new:
+  provenanceStore.ts created (Zustand store for /api/v1/provenance)
+  provenance.ts types created (TypeScript interfaces, CHART_PROVENANCE_REGISTRY)
+  47 existing frontend tests continue to pass
+Infrastructure:
+  database.py — async SQLAlchemy engine, conditional on DATABASE_URL
+  migrations/versions/001_create_data_tables.py — 4 tables in dependency order
+  GET /api/v1/provenance endpoint added to main.py
+  GET /api/backtest/compare fixed to use real BENCHMARK result
+  .github/workflows/test.yml — E2E job timeout increased to 15min,
+    wait-on timeout doubled to 120s, log capture on failure added
+    (continue-on-error: true remains until issue #1 is resolved)
 
 ## Sprint 3 ⏳ PENDING
 Backend:

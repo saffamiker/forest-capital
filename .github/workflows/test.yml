@@ -65,11 +65,14 @@ jobs:
         run: npm run lint
 
   # ── E2E TESTS ──────────────────────────────────────────────────────────
+  # TODO(issue #1): uvicorn health-check times out on GitHub Linux runners.
+  # continue-on-error: true until fixed. See: E2E: uvicorn health-check
+  # times out in GitHub Actions Linux CI (Sprint 2 remediation).
   e2e-tests:
     name: E2E Tests (Playwright)
     runs-on: ubuntu-latest
     needs: [backend-tests, frontend-tests]
-    timeout-minutes: 10
+    timeout-minutes: 15
     continue-on-error: true
 
     steps:
@@ -115,8 +118,14 @@ jobs:
 
       - name: Wait for services
         run: |
-          npx wait-on http://localhost:8000/api/health --timeout 60000
-          npx wait-on http://localhost:5173 --timeout 60000
+          npx wait-on http://localhost:8000/api/health --timeout 120000
+          npx wait-on http://localhost:5173 --timeout 120000
+
+      - name: Dump backend logs on failure
+        if: failure()
+        run: |
+          echo "=== Backend health check ===" && curl -s http://localhost:8000/api/health || true
+          echo "=== Process list ===" && ps aux | grep uvicorn || true
 
       - name: Run Playwright E2E tests
         working-directory: frontend

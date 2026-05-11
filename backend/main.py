@@ -1,10 +1,12 @@
 """
 Forest Capital Portfolio Intelligence System — FastAPI backend.
-Sprint 2: real BENCHMARK backtest + threshold-based regime detection.
+Sprint 2: real BENCHMARK backtest, provenance endpoint, threshold regime detection.
 """
 from __future__ import annotations
+import json
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
@@ -132,6 +134,31 @@ async def health():
     }
 
 
+# ── Provenance ───────────────────────────────────────────────────────────────
+
+_PROVENANCE_PATH = Path(__file__).parent / "data" / "provenance.json"
+
+
+@app.get("/api/v1/provenance")
+async def get_provenance():
+    """
+    Returns the full data_series_registry as JSON.
+
+    Reads from provenance.json rather than PostgreSQL so the endpoint works
+    in CI (no DB) and on cold starts before the pipeline has run.
+    The frontend never hardcodes provenance — it always fetches from here.
+    """
+    if not _PROVENANCE_PATH.exists():
+        # Pipeline hasn't run yet — return empty registry rather than 500.
+        return {"series": [], "last_pipeline_run": None, "cross_validation": {}}
+    try:
+        data = json.loads(_PROVENANCE_PATH.read_text(encoding="utf-8"))
+        return data
+    except Exception as exc:
+        log.warning("provenance_read_error", error=str(exc))
+        raise HTTPException(status_code=500, detail="Could not read provenance data.")
+
+
 # ── Strategies ────────────────────────────────────────────────────────────────
 
 @app.get("/api/strategies/list")
@@ -179,7 +206,20 @@ async def run_backtest(
 @app.get("/api/backtest/compare")
 @limiter.limit("30/minute")
 async def compare_strategies(request: Request, session: dict = Depends(require_auth)):
-    sorted_strategies = sorted(MOCK_STRATEGIES, key=lambda s: s["sharpe_ratio"], reverse=True)
+    # Replace the mock BENCHMARK entry with real computed metrics when available.
+    # Other strategies remain mock until Sprint 3 implements them.
+    strategies = list(MOCK_STRATEGIES)
+    if ENVIRONMENT != "test":
+        try:
+            from tools.backtester import run_benchmark
+            real_bm = run_benchmark(start="2000-01-01", end="2024-12-31")
+            strategies = [
+                real_bm if s["strategy_name"] == "100% Equity (Benchmark)" else s
+                for s in strategies
+            ]
+        except Exception as exc:
+            log.warning("compare_benchmark_fallback", error=str(exc))
+    sorted_strategies = sorted(strategies, key=lambda s: s["sharpe_ratio"], reverse=True)
     return {"strategies": sorted_strategies, "ranked_by": "sharpe_ratio"}
 
 
