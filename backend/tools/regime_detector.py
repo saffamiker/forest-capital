@@ -220,9 +220,12 @@ def detect_current_regime() -> dict:
 
 def _check_agreement(threshold: str, hmm: str | None) -> bool:
     """
-    Two methods agree when they classify the same primary direction.
-    TRANSITION is treated as neutral — it agrees with neither BULL nor BEAR
-    but does not trigger UNCERTAIN when paired with TRANSITION from the other method.
+    TRANSITION is treated as neutral — it already signals ambiguity, so pairing
+    it with a definitive BULL or BEAR from the other method is not an additional
+    contradiction; it is consistent with the ambiguity already flagged.
+    Only BULL vs BEAR is a genuine disagreement: the two methods are making
+    mutually exclusive directional claims, and the UNCERTAIN flag should surface
+    this to the council so that REGIME_SWITCHING uses its balanced allocation.
     """
     if hmm is None:
         return True  # Only one method available — no disagreement possible
