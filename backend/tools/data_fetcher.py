@@ -24,6 +24,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+import io
+
 import numpy as np
 import pandas as pd
 
@@ -135,17 +137,39 @@ def _yfinance_fetch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
 
 def _fred_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
     """
-    Internal FRED wrapper via pandas_datareader — patched in tests.
+    Internal FRED wrapper using FRED's public CSV endpoint — patched in tests.
+    No API key required; FRED serves CSV files at a stable public URL.
     Only used for VIXCLS, DGS2, and DFF (fed funds). DGS10 comes from the
-    Excel file; fetching it here would duplicate and potentially contradict
+    Excel file — fetching it here would duplicate and potentially contradict
     the authoritative Excel source.
     """
-    import pandas_datareader.data as web
+    import requests
 
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
     log.info("fred_fetch", series_id=series_id, start=start, end=end)
-    df = web.DataReader(series_id, "fred", start, end)
+
+    response = requests.get(url, timeout=30)
+    response.raise_for_status()
+
+    df = pd.read_csv(
+        io.StringIO(response.text),
+        parse_dates=["DATE"],
+        index_col="DATE",
+    )
+    # FRED uses "." as a missing-value sentinel in CSV output
+    df.replace(".", np.nan, inplace=True)
+    df = df.astype(float)
+
+    if start:
+        df = df[df.index >= start]
+    if end:
+        df = df[df.index <= end]
+
+    df = df.dropna()
+
     if df.empty:
         raise ValueError(f"FRED returned no data for {series_id}")
+
     log.info("fred_fetch_complete", series_id=series_id, rows=len(df))
     return df
 
@@ -821,6 +845,7 @@ def _write_provenance(
             "date_range_start": start,
             "date_range_end": end,
             "row_count": len(df),
+            "loaded_at": now_iso,
         }
 
     series_list = [
@@ -830,14 +855,14 @@ def _write_provenance(
             provided["sp500_monthly"], "Y-charts",
         ),
         _excel_series(
-            "ig_monthly_bnd", "Vanguard Total Bond (BND) — daily → monthly",
-            "Vanguard Total Bond ", "daily → monthly",
+            "ig_monthly_bnd", "Vanguard Total Bond (BND) — daily aggregated to monthly",
+            "Vanguard Total Bond ", "monthly",
             provided["bnd"], "Y-charts",
         ),
         _excel_series(
             "hy_monthly_baml",
             "ICE BofA HY Total Return Index (BAMLHYH0A0HYM2TRIV)",
-            "High Yield Total Return", "daily → monthly",
+            "High Yield Total Return", "monthly",
             provided["hy_total_return"], "FRED / ICE BofA",
         ),
         _excel_series(
@@ -886,6 +911,7 @@ def _write_provenance(
             "date_range_start": "",
             "date_range_end": "",
             "row_count": 0,
+            "loaded_at": now_iso,
         },
         {
             "series_id": "vix_daily",
@@ -900,6 +926,7 @@ def _write_provenance(
             "date_range_start": "",
             "date_range_end": "",
             "row_count": 0,
+            "loaded_at": now_iso,
         },
         {
             "series_id": "dgs2_daily",
@@ -914,6 +941,7 @@ def _write_provenance(
             "date_range_start": "",
             "date_range_end": "",
             "row_count": 0,
+            "loaded_at": now_iso,
         },
         {
             "series_id": "ff_factors_monthly",
@@ -928,6 +956,7 @@ def _write_provenance(
             "date_range_start": "",
             "date_range_end": "",
             "row_count": 0,
+            "loaded_at": now_iso,
         },
     ]
 

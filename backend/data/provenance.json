@@ -1,0 +1,232 @@
+{
+  "generated_at": "2026-05-11T15:54:30.191363",
+  "series": [
+    {
+      "series_id": "equity_monthly",
+      "display_name": "S&P 500 Monthly Returns",
+      "source_type": "excel_provided",
+      "source_detail": {
+        "file": "FNA_670_Project_Sources.xlsx",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "Y-charts",
+        "sheet": "S&P 500 Monthly Returns"
+      },
+      "frequency": "monthly",
+      "date_range_start": "1999-11-30",
+      "date_range_end": "2025-12-31",
+      "row_count": 314,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "ig_monthly_bnd",
+      "display_name": "Vanguard Total Bond (BND) — daily aggregated to monthly",
+      "source_type": "excel_provided",
+      "source_detail": {
+        "file": "FNA_670_Project_Sources.xlsx",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "Y-charts",
+        "sheet": "Vanguard Total Bond "
+      },
+      "frequency": "monthly",
+      "date_range_start": "2007-04-10",
+      "date_range_end": "2026-01-27",
+      "row_count": 4731,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "hy_monthly_baml",
+      "display_name": "ICE BofA HY Total Return Index (BAMLHYH0A0HYM2TRIV)",
+      "source_type": "excel_provided",
+      "source_detail": {
+        "file": "FNA_670_Project_Sources.xlsx",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "FRED / ICE BofA",
+        "sheet": "High Yield Total Return"
+      },
+      "frequency": "monthly",
+      "date_range_start": "1986-08-31",
+      "date_range_end": "2026-01-27",
+      "row_count": 9296,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "risk_free_dtb3",
+      "display_name": "3-Month T-bill Rate (DTB3)",
+      "source_type": "excel_provided",
+      "source_detail": {
+        "file": "FNA_670_Project_Sources.xlsx",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "FRED",
+        "sheet": "3-Month Treasury"
+      },
+      "frequency": "daily",
+      "date_range_start": "1954-01-04",
+      "date_range_end": "2026-01-26",
+      "row_count": 18006,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "hy_spread_baml",
+      "display_name": "ICE BofA HY Effective Yield (BAMLH0A0HYM2EY)",
+      "source_type": "excel_provided",
+      "source_detail": {
+        "file": "FNA_670_Project_Sources.xlsx",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "FRED / ICE BofA",
+        "sheet": "High Yield Effective Yield"
+      },
+      "frequency": "daily",
+      "date_range_start": "1996-12-31",
+      "date_range_end": "2026-01-27",
+      "row_count": 7684,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "ig_spread_baml",
+      "display_name": "ICE BofA IG Effective Yield (BAMLC0A0CMEY)",
+      "source_type": "excel_provided",
+      "source_detail": {
+        "file": "FNA_670_Project_Sources.xlsx",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "FRED / ICE BofA",
+        "sheet": "US Corporate Effective Yield"
+      },
+      "frequency": "daily",
+      "date_range_start": "1996-12-31",
+      "date_range_end": "2026-01-27",
+      "row_count": 7589,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "yield_curve_10y2y",
+      "display_name": "Yield Curve (DGS10 from Excel, DGS2 from FRED)",
+      "source_type": "excel_provided",
+      "source_detail": {
+        "file": "FNA_670_Project_Sources.xlsx",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "FRED",
+        "sheet": "Market Yield on U.S. Treasury"
+      },
+      "frequency": "daily",
+      "date_range_start": "1962-01-02",
+      "date_range_end": "2026-01-26",
+      "row_count": 16000,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "gdp_real_gdpc1",
+      "display_name": "Real GDP (GDPC1)",
+      "source_type": "excel_provided",
+      "source_detail": {
+        "file": "FNA_670_Project_Sources.xlsx",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "FRED / BEA",
+        "sheet": "Real GDP"
+      },
+      "frequency": "quarterly",
+      "date_range_start": "1947-01-01",
+      "date_range_end": "2025-07-01",
+      "row_count": 315,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "sp500_pe_ratio",
+      "display_name": "S&P 500 P/E Ratio",
+      "source_type": "excel_provided",
+      "source_detail": {
+        "file": "FNA_670_Project_Sources.xlsx",
+        "provided_by": "Dr. Panttser (FNA 670)",
+        "original_source": "Y-charts",
+        "sheet": "SP 500 PE Ratio"
+      },
+      "frequency": "quarterly",
+      "date_range_start": "1988-12-31",
+      "date_range_end": "2025-09-30",
+      "row_count": 148,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "equity_daily_spy",
+      "display_name": "SPY Daily Equity Prices (yfinance)",
+      "source_type": "yfinance",
+      "source_detail": {
+        "ticker": "SPY",
+        "auto_adjust": true,
+        "interval": "1d",
+        "fetched_at": "2026-05-11T15:54:30.191363"
+      },
+      "frequency": "daily",
+      "date_range_start": "2000-01-04",
+      "date_range_end": "2024-12-30",
+      "row_count": 6287,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "vix_daily",
+      "display_name": "VIX Volatility Index (VIXCLS)",
+      "source_type": "fred_api",
+      "source_detail": {
+        "series_id": "VIXCLS",
+        "fetched_at": "2026-05-11T15:54:30.191363",
+        "fred_url": "https://fred.stlouisfed.org/series/VIXCLS"
+      },
+      "frequency": "daily",
+      "date_range_start": "",
+      "date_range_end": "",
+      "row_count": 0,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "dgs2_daily",
+      "display_name": "2-Year Treasury Yield (DGS2)",
+      "source_type": "fred_api",
+      "source_detail": {
+        "series_id": "DGS2",
+        "fetched_at": "2026-05-11T15:54:30.191363",
+        "fred_url": "https://fred.stlouisfed.org/series/DGS2"
+      },
+      "frequency": "daily",
+      "date_range_start": "",
+      "date_range_end": "",
+      "row_count": 0,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    },
+    {
+      "series_id": "ff_factors_monthly",
+      "display_name": "Fama-French 3-Factor Monthly Returns",
+      "source_type": "ken_french",
+      "source_detail": {
+        "dataset": "F-F_Research_Data_Factors",
+        "fetched_at": "2026-05-11T15:54:30.191363",
+        "url": "mba.tuck.dartmouth.edu/pages/faculty/ken.french"
+      },
+      "frequency": "monthly",
+      "date_range_start": "",
+      "date_range_end": "",
+      "row_count": 0,
+      "loaded_at": "2026-05-11T15:54:30.191363"
+    }
+  ],
+  "cross_validation": {
+    "equity": {
+      "series_a": "S&P 500 Monthly Returns (Y-charts, Excel)",
+      "series_b": "SPY daily → monthly (yfinance)",
+      "n_months_compared": 300,
+      "n_green": 175,
+      "n_amber": 123,
+      "n_red": 2,
+      "max_discrepancy_pct": 0.010695637100173627,
+      "mean_discrepancy_pct": 0.002129941898993813,
+      "worst_month": "2001-05-31",
+      "status": "WARN",
+      "authoritative": "Excel (Y-charts)"
+    },
+    "bond_internal": {
+      "bnd_start_date": "2007-04-10",
+      "hy_index_positive": true,
+      "status": "PASS"
+    }
+  },
+  "monthly_observations": 224,
+  "data_coverage_note": "BND data starts 2007-04-10; common monthly period begins 2007-05. Sprint 3 will splice LQD/IEF (yfinance) for 2002-2007 to extend IG coverage."
+}
