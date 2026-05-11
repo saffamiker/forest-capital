@@ -219,7 +219,15 @@ def fetch_equity_data(tickers: list[str], start: str, end: str) -> pd.DataFrame:
 
 
 def fetch_fred_series(series_id: str, start: str, end: str) -> pd.Series:
-    """Fetch a FRED series via pandas_datareader with 24-hour parquet caching."""
+    """
+    Fetch a FRED daily series with 24-hour parquet caching.
+    24-hour TTL is the right cache window for FRED data: FRED updates series
+    daily (VIX and DGS2 are end-of-day), so anything shorter would hammer FRED's
+    servers unnecessarily. Anything longer risks stale data during a fast-moving
+    market (VIX jumped from 25 to 80 over three days in March 2020 — a 72-hour
+    cache would have missed the peak entirely). 24 hours balances freshness and
+    server politeness without needing an API key.
+    """
     key = _cache_key("fred", [series_id], start, end)
     cache = _cache_file(key)
 
@@ -431,20 +439,31 @@ def build_monthly_returns(
     equity_monthly = sp500.pct_change().dropna()
     equity_monthly.name = "equity_return"
 
-    # IG monthly from BND daily close → resample to month-end last price → pct_change
+    # BND → monthly return from last trading-day close, not average.
+    # Last price is the right aggregation: monthly return = (P_end / P_start) - 1.
+    # Averaging intra-month prices would distort returns for months with strong
+    # trends (2022: BND fell nearly every day — the average would understate the loss).
     bnd = provided_data["bnd"].set_index("date")["close"]
     bnd_monthly = bnd.resample("ME").last().dropna()
     ig_monthly = bnd_monthly.pct_change().dropna()
     ig_monthly.name = "ig_return"
 
-    # HY monthly from total return index → resample to month-end last → pct_change
+    # BAMLHYH → monthly return from last total-return index level.
+    # Guard against zero/negative index values — if present, they indicate data
+    # corruption (the HY total return index is strictly positive by construction).
+    # Dropping them rather than filling avoids propagating a bad reading forward.
     hy_idx = provided_data["hy_total_return"].set_index("date")["hy_total_return_index"]
-    hy_idx = hy_idx[hy_idx > 0]  # guard against zero/negative index corruption
+    hy_idx = hy_idx[hy_idx > 0]
     hy_monthly_price = hy_idx.resample("ME").last().dropna()
     hy_monthly = hy_monthly_price.pct_change().dropna()
     hy_monthly.name = "hy_return"
 
-    # Risk-free monthly from DTB3 daily annualised % → monthly rate
+    # DTB3 → monthly rate via compound conversion, not simple averaging.
+    # (1 + r_annual/100)^(1/12) - 1 is the correct monthly compounding of
+    # an annualised rate. Simple division by 12 understates the monthly rate
+    # when rates are high (at 5%, the difference is ~2bps/month — small but
+    # it accumulates over the 2022-2023 high-rate period that is central to
+    # this project's findings).
     dtb3 = provided_data["dtb3"].set_index("date")["dtb3"]
     dtb3_monthly_avg = dtb3.resample("ME").mean().dropna()
     rf_monthly = ((1 + dtb3_monthly_avg / 100) ** (1 / 12) - 1)

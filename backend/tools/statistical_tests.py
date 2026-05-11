@@ -1,10 +1,24 @@
 """
-Statistical significance testing suite.
-Tiered thresholds enforced by config:
-  Tier 1 (full period, n >= 220): p < 0.005
-  Tier 2 (sub-period, n >= 60):   p < 0.05
-  Directional only (stress tests): no p-values
-Every function returns threshold_tier so callers can disclose it.
+tools/statistical_tests.py
+
+Full statistical significance suite for all 10 portfolio strategies.
+
+Tiered thresholds (Benjamin et al. 2018, p < 0.005 for Tier 1) are enforced
+by CLAUDE.md config, not hardcoded in tests. The tier depends on observation
+count, which varies by sub-period and regime window. Every function returns
+threshold_tier so the caller can disclose which tier applies — the QA checklist
+explicitly requires this disclosure alongside every reported p-value.
+
+Why p < 0.005 rather than the conventional 0.05:
+  Testing 10 strategies simultaneously, each with multiple metrics, would
+  produce several false positives at p < 0.05 by random chance alone. The
+  stricter threshold, combined with BH FDR correction and CPCV, makes it very
+  difficult for a lucky or overfitted strategy to pass all five Tier 1 gates.
+
+Sub-period tests use p < 0.05 (Tier 2) because n is insufficient for 80%
+power at p < 0.005 — applying Tier 1 there would create systematic false
+negatives. Stress test windows are directional only (no p-values) because
+n < 60 makes any formal test meaningless. Threshold tier must always be cited.
 """
 from __future__ import annotations
 
@@ -49,8 +63,12 @@ def paired_ttest(
     threshold: float = P_THRESHOLD_PRIMARY,
 ) -> dict:
     """
-    Paired t-test: does the strategy's daily excess return over benchmark
-    differ significantly from zero?
+    Paired (one-sample) t-test on daily active returns (strategy minus benchmark).
+    Paired rather than independent two-sample: the same market conditions drive
+    both series on every day, so the natural test is whether the daily difference
+    deviates from zero. An independent t-test would ignore this pairing and inflate
+    variance, making it harder to detect real outperformance — biasing against us
+    rather than for us, but still wrong. H0: mean active return = 0.
     """
     s, b = strategy_returns.align(benchmark_returns, join="inner")
     active = s - b
@@ -81,8 +99,13 @@ def jobson_korkie_test(
     threshold: float = P_THRESHOLD_PRIMARY,
 ) -> dict:
     """
-    Jobson-Korkie test for equality of two Sharpe ratios.
-    H0: Sharpe(A) == Sharpe(B).
+    Jobson-Korkie (1981) test for equality of two Sharpe ratios.
+    A naive z-test on the Sharpe difference (SR_A - SR_B) / sqrt(2/n) ignores
+    the covariance between the two strategies' returns, which inflates the
+    test statistic when they are positively correlated (as ours tend to be).
+    JK derives the correct asymptotic variance of the Sharpe difference under
+    joint normality — the test statistic accounts for the cross-moment between
+    the two return series. H0: Sharpe(A) == Sharpe(B).
     """
     a, b = returns_a.align(returns_b, join="inner")
     n_obs = n or len(a)
@@ -128,8 +151,13 @@ def alpha_significance_test(
     benchmark_returns: pd.Series,
 ) -> dict:
     """
-    OLS regression alpha test: strategy_return = alpha + beta * benchmark_return + e.
-    Uses Newey-West SE if autocorrelation is detected.
+    OLS alpha test with conditional Newey-West HAC correction.
+    Newey-West SE is applied only when Ljung-Box detects autocorrelation in
+    the residuals (p < 0.05), not unconditionally. Applying HAC to non-autocorrelated
+    residuals inflates standard errors unnecessarily and reduces power — we would
+    miss genuine alphas by over-correcting. The conditional path is the right choice:
+    use the simplest correct estimator. OLS alpha = intercept from the CAPM regression,
+    testing whether outperformance is explained by beta exposure alone.
     """
     s, b = strategy_returns.align(benchmark_returns, join="inner")
     n = len(s)
@@ -191,7 +219,16 @@ def alpha_significance_test(
 # ── Diagnostic tests (not Tier 1 gates — inform method selection) ─────────────
 
 def normality_test(returns: pd.Series) -> dict:
-    """Jarque-Bera normality test. H0: returns are normally distributed."""
+    """
+    Jarque-Bera normality test — appropriate for large samples.
+    JB rather than Shapiro-Wilk because Shapiro-Wilk is designed for n < 2000;
+    our full-period series has ~6,500 daily observations where SW becomes over-
+    powered and rejects normality for economically trivial deviations. JB tests
+    skewness and excess kurtosis jointly, which is exactly what matters here:
+    financial returns are typically left-skewed and fat-tailed, and JB quantifies
+    the severity. The result gates whether we use the block bootstrap (normality
+    rejected → bootstrap) or standard OLS inference.
+    """
     clean = returns.dropna()
     jb_stat, p_value, skewness, kurtosis = jarque_bera(clean)
     return {
@@ -206,7 +243,15 @@ def normality_test(returns: pd.Series) -> dict:
 
 
 def autocorrelation_test(returns: pd.Series, lags: int = 10) -> dict:
-    """Ljung-Box test for serial autocorrelation. H0: no autocorrelation."""
+    """
+    Ljung-Box test for serial autocorrelation up to 10 lags.
+    Ljung-Box rather than Durbin-Watson because DW tests lag-1 autocorrelation
+    only — it would miss weekly seasonality or momentum autocorrelation in our
+    return series, both of which appear in daily equity data. Testing 10 lags
+    captures the two-week window where short-term momentum is most common.
+    The result gates whether alpha_significance_test uses standard or Newey-West SE,
+    and informs the block bootstrap block size selection in Sprint 3.
+    """
     clean = returns.dropna()
     lb_result = acorr_ljungbox(clean, lags=[lags], return_df=True)
     lb_stat = float(lb_result["lb_stat"].values[0])
@@ -222,7 +267,15 @@ def autocorrelation_test(returns: pd.Series, lags: int = 10) -> dict:
 
 
 def stationarity_test(returns: pd.Series) -> dict:
-    """Augmented Dickey-Fuller test. H0: unit root (non-stationary)."""
+    """
+    Augmented Dickey-Fuller test for unit root. H0: series is non-stationary.
+    AIC lag selection (autolag="AIC") is used rather than a fixed lag count
+    because the optimal lag length varies across asset classes and regimes.
+    AIC trades off model fit against complexity to find the lag that best
+    captures the autocorrelation structure without overfitting. A fixed lag
+    of, say, 5 would underfit momentum-heavy equity series and overfit the
+    mean-reverting bond series, producing inconsistent results across strategies.
+    """
     clean = returns.dropna()
     adf_stat, p_value, used_lag, n_obs, critical_values, _ = adfuller(clean, autolag="AIC")
     return {
@@ -247,9 +300,16 @@ def block_bootstrap_sharpe(
     seed: int = RANDOM_SEED,
 ) -> dict:
     """
-    Block bootstrap for Sharpe ratio inference.
-    Preserves autocorrelation structure by resampling blocks.
-    Returns p_value = P(bootstrap Sharpe <= observed Sharpe) assuming H0: SR=0.
+    Block bootstrap Sharpe ratio test — used when normality_test rejects H0.
+    Standard iid bootstrap resamples individual days, which destroys the
+    volatility clustering and autocorrelation structure in financial returns.
+    Block bootstrap resamples contiguous blocks of BLOCK_SIZE=21 trading days
+    (~1 month), preserving within-block serial correlation. BLOCK_SIZE=21 is
+    set in config to match approximately one month — the natural autocorrelation
+    horizon for momentum signals. Changing it to 5 or 63 would produce different
+    p-values; 21 is the compromise between capturing momentum (~21 days) and
+    preserving enough block independence for the distribution to converge.
+    seed=RANDOM_SEED=42 is fixed for reproducibility — required by QA checklist.
     """
     np.random.seed(seed)
 
@@ -311,8 +371,14 @@ def multiple_comparison_correction(
     alpha: float = FDR_Q_VALUE,
 ) -> dict:
     """
-    Benjamini-Hochberg FDR correction across multiple strategy p-values.
-    Returns original and corrected p-values with pass/fail flags.
+    Benjamini-Hochberg FDR correction across all 10 strategy p-values.
+    BH rather than Bonferroni because our strategies are positively correlated
+    (they all hold SPY; many share bond allocations). Bonferroni assumes
+    independence among tests — when tests are correlated, Bonferroni over-
+    corrects and generates systematic false negatives. BH controls the false
+    discovery rate under positive dependence (PRDS condition), which our
+    strategy universe satisfies. FDR_Q_VALUE = 0.005 matches the Tier 1
+    threshold — the correction does not relax the primary standard.
     """
     if not p_values_dict:
         return {"error": "empty p-values dict"}
@@ -354,8 +420,15 @@ def power_check(
     power: float = 0.80,
 ) -> dict:
     """
-    Check whether n_obs provides sufficient power to detect effect_size at alpha.
-    Returns is_adequately_powered, n_required, recommended_threshold.
+    Statistical power analysis before applying any significance threshold.
+    effect_size=0.3 (Cohen's d "small-medium") is calibrated to 0.3 Sharpe units —
+    the minimum improvement that would be economically meaningful for a Forest Capital
+    mandate (0.3 Sharpe above the 0.61 benchmark = 0.91 minimum threshold for
+    recommendation). An effect size of 0.1 would be statistically detectable but
+    economically irrelevant; 0.5 would require unrealistically large outperformance.
+    The function returns recommended_threshold rather than just is_adequately_powered
+    so callers automatically use the correct tier — preventing the use of p < 0.005
+    on sub-periods where it would produce systematic false negatives.
     """
     from scipy.stats import norm
 

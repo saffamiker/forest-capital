@@ -1,7 +1,22 @@
 """
-Portfolio risk and performance metrics.
-Always uses ANNUALIZATION_FACTOR = 252.
-sharpe_ratio() requires a pd.Series risk-free rate — never a fixed float constant.
+tools/risk_metrics.py
+
+Risk and performance metrics for all 10 portfolio strategies.
+
+ANNUALIZATION_FACTOR = 252 throughout — never 260 or 365. The project brief
+requires consistency; mixing factors across functions would make Sharpe ratios
+incomparable between strategies. 252 is the industry standard for trading-day
+annualisation.
+
+All Sharpe calculations require a pd.Series risk-free rate rather than a scalar.
+Our backtest spans 2000-2024: near-zero rates (2011-2015) through 5%+ rates (2023).
+A fixed 4.5% would overstate Sharpe in the low-rate period and understate it in
+2023, making cross-strategy rankings misleading for precisely the years that matter.
+
+Simple returns throughout (not log). Simple returns are additive across assets,
+which is required for the weighted-sum portfolio return calculation. Log returns
+are additive over time but not across assets; using them here would require
+geometric recombination that complicates the backtester without benefit.
 """
 from __future__ import annotations
 
@@ -17,7 +32,13 @@ log = get_logger(__name__)
 # ── Return series helpers ─────────────────────────────────────────────────────
 
 def compute_returns(prices: pd.DataFrame | pd.Series) -> pd.DataFrame | pd.Series:
-    """Convert prices to simple returns."""
+    """
+    Simple (not log) returns from prices.
+    Portfolio return = Σ(weight × asset return) requires returns that are additive
+    across assets. Log returns are additive over time, not across assets — using
+    them here would require geometric recombination at every rebalance, adding
+    complexity with no benefit for our monthly frequency.
+    """
     return prices.pct_change().dropna()
 
 
@@ -45,7 +66,14 @@ def _align_rf(returns: pd.Series, risk_free_rate: pd.Series | float) -> pd.Serie
 # ── Core metrics ─────────────────────────────────────────────────────────────
 
 def annualized_return(returns: pd.Series) -> float:
-    """CAGR from a daily simple-return series."""
+    """
+    CAGR (geometric annualised return), not arithmetic mean return.
+    CAGR compounds daily returns to a single annual rate, which correctly
+    accounts for the compounding effect over multi-year backtests. Arithmetic
+    mean overstates long-run performance whenever returns are volatile — a
+    -50% followed by +50% averages to 0% but produces a -25% compound loss.
+    For a 25-year backtest the difference is material.
+    """
     n = len(returns)
     if n == 0:
         return 0.0
@@ -56,16 +84,25 @@ def annualized_return(returns: pd.Series) -> float:
 
 
 def annualized_volatility(returns: pd.Series) -> float:
-    """Annualised standard deviation using 252 trading-day factor."""
+    """
+    Annualised standard deviation — 252 trading-day factor, not 260 or 365.
+    252 is the convention in quantitative finance (standard equity trading days
+    per year). 365 conflates calendar and trading days; 260 includes holidays
+    that markets are closed. Using 252 here is required by CLAUDE.md config
+    to keep Sharpe ratios comparable across all 10 strategies.
+    """
     return float(returns.std() * np.sqrt(ANNUALIZATION_FACTOR))
 
 
 def sharpe_ratio(returns: pd.Series, risk_free_rate: pd.Series | float) -> float:
     """
-    Annualised Sharpe ratio.
-    risk_free_rate must be a pd.Series of daily decimal rates aligned to returns,
-    or a scalar annual rate (converted internally to daily — provided only as
-    a fallback, never as the primary path).
+    Annualised Sharpe ratio with time-varying risk-free rate.
+    The pd.Series path is the required primary path; the scalar float path
+    exists only as a fallback for edge cases. Our backtest spans 2000-2024:
+    near-zero rates (2011-2015), negative real rates (2020-2021), and 5%+
+    rates (2023). A fixed scalar would under/overstate Sharpe for every
+    sub-period, making cross-strategy comparisons misleading for exactly the
+    years that determine whether dynamic strategies beat static ones.
     """
     rf = _align_rf(returns, risk_free_rate)
     excess = returns - rf
@@ -76,7 +113,15 @@ def sharpe_ratio(returns: pd.Series, risk_free_rate: pd.Series | float) -> float
 
 
 def sortino_ratio(returns: pd.Series, risk_free_rate: pd.Series | float) -> float:
-    """Sortino ratio using downside deviation below the risk-free rate."""
+    """
+    Sortino ratio — penalises only downside deviation, not total volatility.
+    Reported alongside Sharpe to surface strategies that generate upside
+    variance (which Sharpe penalises equally to downside variance). If a
+    strategy's Sortino >> Sharpe, its volatility is predominantly upside —
+    a positive characteristic that Sharpe alone would obscure. In 2008 and
+    2022, the strategies with the best Sharpe/Sortino spread are the ones
+    worth recommending to Forest Capital for drawdown-sensitive mandates.
+    """
     rf = _align_rf(returns, risk_free_rate)
     excess = returns - rf
     downside = excess[excess < 0]
@@ -128,7 +173,15 @@ def max_drawdown(returns: pd.Series) -> tuple[float, int, int]:
 
 
 def calmar_ratio(returns: pd.Series) -> float:
-    """Calmar = annualised return / abs(max drawdown)."""
+    """
+    Calmar ratio: annualised return per unit of maximum drawdown.
+    Captures a different failure mode than Sharpe. A strategy can have a
+    high Sharpe (low daily volatility) but a catastrophic drawdown if losses
+    are autocorrelated into a prolonged decline. Calmar is the primary metric
+    for Forest Capital's drawdown tolerance question: "how much could we lose
+    in the worst case, and was the return worth it?" The 2008 GFC is the key
+    stress test — strategies with Calmar < 0.3 there are effectively unacceptable.
+    """
     ann_ret = annualized_return(returns)
     max_dd, _, _ = max_drawdown(returns)
     if max_dd == 0:
@@ -137,12 +190,23 @@ def calmar_ratio(returns: pd.Series) -> float:
 
 
 def compute_var(returns: pd.Series, confidence_level: float = 0.95) -> float:
-    """Value-at-Risk at confidence_level (negative number = loss)."""
+    """
+    Historical (non-parametric) VaR — quantile of the empirical return distribution.
+    Non-parametric because financial returns have fat tails; parametric (normal)
+    VaR systematically underestimates tail losses. The QA agent checks that 2008
+    drawdowns are visible in VaR — a parametric model would smooth over them.
+    """
     return float(np.percentile(returns.dropna(), (1 - confidence_level) * 100))
 
 
 def compute_cvar(returns: pd.Series, confidence_level: float = 0.95) -> float:
-    """Conditional VaR (Expected Shortfall) at confidence_level."""
+    """
+    CVaR (Expected Shortfall) — mean of returns beyond the VaR threshold.
+    Reported alongside VaR because VaR answers "what is the threshold loss at
+    p% confidence" while CVaR answers "given that we exceed VaR, how bad is it?"
+    CVaR is coherent (subadditive); VaR is not. The pair together characterise
+    the entire left tail, which matters for the 2008 GFC stress test analysis.
+    """
     clean = returns.dropna()
     var = compute_var(clean, confidence_level)
     tail = clean[clean <= var]
@@ -150,7 +214,15 @@ def compute_cvar(returns: pd.Series, confidence_level: float = 0.95) -> float:
 
 
 def compute_tail_risk(returns: pd.Series) -> dict:
-    """Skewness, kurtosis, and drawdown distribution summary."""
+    """
+    Tail risk profile: skewness, kurtosis, and VaR/CVaR at two confidence levels.
+    This bundle is used downstream by the QA agent to decide whether to use the
+    block bootstrap (when normality is rejected) and by the statistical tests module
+    for the Deflated Sharpe Ratio correction (which requires skewness and kurtosis
+    to adjust the Sharpe significance threshold). Negative skewness in a strategy
+    that looks good on Sharpe is a red flag — it means gains are frequent and small
+    but losses are rare and large, which is exactly what fails in a crisis.
+    """
     clean = returns.dropna()
     return {
         "skewness": float(clean.skew()),
@@ -165,7 +237,15 @@ def compute_tail_risk(returns: pd.Series) -> dict:
 def information_ratio(
     strategy_returns: pd.Series, benchmark_returns: pd.Series
 ) -> float:
-    """Annualised information ratio vs benchmark."""
+    """
+    Annualised information ratio: active return divided by tracking error.
+    Distinct from alpha in that IR uses tracking error (consistency of
+    outperformance) rather than benchmark volatility as the denominator.
+    A strategy with high alpha but inconsistent active returns has a low IR —
+    it only outperformed in certain regimes, which makes it fragile. Forest
+    Capital needs strategies that beat the benchmark consistently, not
+    occasionally by large amounts. IR captures that consistency criterion.
+    """
     aligned_s, aligned_b = strategy_returns.align(benchmark_returns, join="inner")
     active = aligned_s - aligned_b
     std = active.std()
@@ -177,7 +257,14 @@ def information_ratio(
 def compute_beta(
     strategy_returns: pd.Series, benchmark_returns: pd.Series
 ) -> float:
-    """OLS beta of strategy vs benchmark."""
+    """
+    OLS market beta vs benchmark. The 30-observation floor before returning
+    the neutral 1.0 default is intentional: OLS covariance estimates are
+    unreliable with fewer than ~30 data points and can produce extreme or
+    negative betas that misrepresent a strategy's actual market exposure.
+    Returning 1.0 is honest — it signals "we don't have enough data to estimate
+    this" rather than producing a spurious number that looks precise but isn't.
+    """
     aligned_s, aligned_b = strategy_returns.align(benchmark_returns, join="inner")
     if len(aligned_s) < 30:
         return 1.0
@@ -193,7 +280,16 @@ def compute_alpha(
     benchmark_returns: pd.Series,
     risk_free_rate: pd.Series | float,
 ) -> float:
-    """Jensen's alpha (annualised)."""
+    """
+    Jensen's alpha: excess return unexplained by benchmark exposure.
+    Jensen's (alpha = excess_strategy - beta × excess_benchmark) is the right
+    definition here because the project asks whether diversification adds
+    return beyond what you'd get by simply scaling up or down equity exposure.
+    Raw outperformance vs benchmark would conflate skill with leverage;
+    Jensen's controls for beta so only genuine allocation skill is captured.
+    Annualised by multiplying daily alpha × 252 — consistent with the rest of
+    the metric suite and with how CLAUDE.md requires metrics to be reported.
+    """
     rf = _align_rf(strategy_returns, risk_free_rate)
     aligned_s, aligned_b = strategy_returns.align(benchmark_returns, join="inner")
     rf_aligned = rf.reindex(aligned_s.index, method="ffill")

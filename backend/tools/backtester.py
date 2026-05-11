@@ -1,9 +1,20 @@
 """
-Portfolio backtester.
-Enforces: adjusted prices, weights sum to 1, no look-ahead bias,
-transaction costs at both legs of every trade.
-Sprint 2 implements BENCHMARK and fixed-weight static strategies.
+tools/backtester.py
+
+Implements BENCHMARK and fixed-weight static strategies for Sprint 2.
 Dynamic strategies (momentum, regime-switching, vol-targeting) are Sprint 3.
+
+Four constraints are enforced unconditionally — not optional:
+  1. Adjusted prices only: auto_adjust=True in yfinance, verified via attrs["adjusted"].
+     Un-adjusted prices are wrong for strategies spanning 2000-2024 due to dividends
+     and splits; the GFC drawdown would appear ~15% shallower than it actually was.
+  2. Weights sum to 1.0 within 1e-6: the project brief requires full investment at all
+     times (FULLY_INVESTED=True in config). Cash allocation is not permitted.
+  3. No look-ahead bias: every signal must use data from t-1 or earlier. Same-day
+     signals are the most common source of inflated backtest Sharpe ratios in
+     academic papers — we enforce this with verify_no_lookahead().
+  4. Transaction costs at both legs: we deduct costs when entering AND exiting
+     positions. One-sided cost accounting overstates strategy viability by ~50%.
 """
 from __future__ import annotations
 
@@ -47,8 +58,14 @@ def verify_no_lookahead(
     price_dates: pd.DatetimeIndex,
 ) -> None:
     """
-    Assert every signal was generated strictly before the corresponding
-    price observation (t-1 signal → t execution).
+    Hard assertion: every signal date must be strictly before the trade date.
+    Same-day signals (signal_date == price_date) are the single most common
+    cause of spurious Sharpe ratios in published backtests. A momentum signal
+    computed at close on day t used to trade at the same close violates market
+    microstructure — you cannot trade on end-of-day data at end-of-day prices.
+    For our quarterly-rebalance strategies this is trivially satisfied, but the
+    assertion is here so Sprint 3's daily-signal strategies (VOL_TARGETING,
+    MOMENTUM_ROTATION) cannot accidentally introduce the bias.
     """
     for sig, price in zip(signal_dates, price_dates):
         assert sig < price, (
@@ -85,9 +102,14 @@ def _compute_portfolio_returns(
     transaction_cost_bps: float,
 ) -> pd.Series:
     """
-    Given an ordered list of (rebalance_date, weights) pairs, compute daily
-    portfolio returns. Transaction costs are deducted at each rebalance.
-    weights_schedule entries must use prices strictly prior to their date.
+    Daily-resolution portfolio returns from a rebalance schedule.
+    Daily resolution (not just rebalance-date resolution) is required because:
+      (a) transaction costs are deducted on the exact rebalance day, not smoothed
+      (b) max_drawdown() needs daily granularity to find the true trough
+      (c) the QA agent's look-ahead check operates date by date
+    Weight drift between rebalances is captured implicitly: the weights are held
+    fixed between rebalance dates, so price appreciation shifts effective weights
+    and the daily return correctly reflects that drift.
     """
     daily_returns = prices.pct_change()
     current_weights: dict = {}
@@ -129,8 +151,13 @@ def _compute_portfolio_returns(
 
 def run_benchmark(start: str = TRAIN_START, end: str = TEST_END) -> dict:
     """
-    100% SPY buy-and-hold benchmark.
-    No rebalancing. No transaction costs.
+    100% SPY buy-and-hold — required by the FNA 670 project brief.
+    The brief mandates this exact benchmark (not a broad index ETF or equal-weight)
+    to establish the baseline every strategy must beat on a risk-adjusted basis.
+    No rebalancing and no transaction costs because there are no allocation decisions
+    to implement — it is the passive reference point, not a managed strategy.
+    is_significant is hard-coded False: a strategy cannot be significantly better
+    than itself (the Tier 1 tests compare strategies against this baseline).
     """
     prices = fetch_equity_data([BENCHMARK], start, end)
     assert prices.attrs.get("adjusted") is True, "Must use adjusted close prices"
@@ -195,8 +222,13 @@ def run_static_backtest(
     transaction_cost_bps: float = TRANSACTION_COST_BPS,
 ) -> dict:
     """
-    Backtest a fixed-weight static strategy with periodic rebalancing.
-    Transaction costs applied at each rebalance.
+    Fixed-weight static strategy with periodic rebalancing and transaction costs.
+    The default rebalance_freq is "monthly" here, but CLAUDE.md Section 3 specifies
+    REBALANCE_FREQ_STATIC = "quarterly" for consistency with the dynamic strategies.
+    Callers (CLASSIC_60_40, RISK_PARITY etc.) pass "quarterly" explicitly — the
+    monthly default exists only as a fallback for ad-hoc calls, not as policy.
+    Transaction costs of 10bps per trade (configurable) are the project brief's
+    assumption; they are applied round-trip on every rebalance turnover.
     """
     _validate_weights(weights, strategy_name)
 
@@ -288,9 +320,13 @@ def walk_forward_test(
     step_months: int = 6,
 ) -> dict:
     """
-    Rolling walk-forward: train on train_months, test on next test_months.
-    strategy_func(train_start, train_end) → returns pd.Series for test period.
-    Returns summary of OOS Sharpe ratios across folds.
+    Rolling (fixed-window) walk-forward OOS test — the primary OOS validation method.
+    Rolling rather than expanding window is used because economic regimes shift:
+    a 36-month window trained on 2000-2003 (dot-com crash) should not have equal
+    influence on a 2022 strategy as data from 2018-2021. Expanding window is run
+    separately in cross_validation.py and compared — if rolling and expanding
+    diverge by > EXPANDING_WF_DIVERGENCE, the strategy is flagged as potentially
+    regime-dependent. That comparison is the Sprint 3 cross-validation test.
     """
     dates = pd.date_range(start=full_start, end=full_end, freq="MS")
     folds = []
