@@ -252,11 +252,107 @@ Backend — new/updated test files:
 Test counts: 111 passed, 0 failed, 12 warnings (pandas/asyncpg deprecation only)
              Excel-dependent tests (10): skip in CI without FNA_670_Project_Sources.xlsx
 
-## Sprint 4 ⏳ PENDING
-Backend:
-  test_scope_guard.py    — in-scope pass, out-of-scope reject, injection pre-screening
-  test_agents.py         — agent response schema validation (updated stubs → real tests)
-  test_qa_agent.py       — 30-point checklist execution
+## Sprint 4 ✅ COMPLETE (2026-05-12)
+All 8 agents, council endpoint, QA audit, scope guard, AI usage logger,
+and academic writer scaffold operational. 576 tests passing, 10 skipped (HMM on Windows).
+
+Backend — new test files:
+  test_scope_guard.py (18 tests)
+    TestInScopeQueries (7): portfolio strategy, Sharpe ratio, regime, 2022 correlation,
+      comparison, QA methodology, risk metrics — all allowed, confidence ≥ 0.80;
+    TestOutOfScopeQueries (2): general knowledge (Python history) and crypto (off-scope);
+    TestInjectionPrescreen (6): "ignore previous instructions", "forget instructions",
+      "you are now", "act as", "pretend you are", "reveal your instructions"
+      all detected by regex pre-screen before API call;
+    TestScopeGuardResultSchema (3): allowed/category/confidence fields present, confidence
+      in [0, 1], rejection_message None for in-scope queries
+
+  test_agents.py (coverage of all 8 agent response schemas)
+    Tests schema fields across: EquityAnalyst, FixedIncomeAnalyst, RiskManager,
+      QuantBacktester, IndependentAnalyst, QAAgent, CIO, ExplainerAgent;
+    Every agent response must include: technical_findings (dict), summary (non-empty str),
+      layman_explanation (dict with what_we_found/why_it_matters/for_our_portfolio/confidence);
+    QA-specific: limitations (non-empty list), data_caveats (non-empty list),
+      model_assumptions (non-empty list);
+    Gemini-specific: gemini_challenge (non-empty str), alternative_metrics (dict);
+    CIO-specific: final_recommendation (non-empty str), consensus_reached (bool),
+      corrections_made (list), agents_consulted (list)
+
+  test_council_deliberation.py (13 tests)
+    TestCouncilQueryEndpoint (5): 200 for in-scope portfolio query, query field in response,
+      501+ character queries rejected (rate limit), unauthenticated rejected (401/422),
+      mock_council_session structure valid (all required fields);
+    TestCouncilQAEndpoint (4): POST /api/qa/audit returns 200, checks_passed key present,
+      POST /api/qa/ask returns 200, answer field present;
+    TestScopeGuardIntegration (2): in-scope passes, out-of-scope returns 422 with out_of_scope error;
+    TestCouncilSignificanceConsistency (2): n_significant ≤ 10, all significant strategies
+      present in strategy_results
+
+  test_qa_agent.py (22 tests)
+    TestQADeterministicChecks (8): _run_deterministic_checks() has keys for weights_sum,
+      no_negative_weights, has_benchmark, has_dynamic_strategies, has_significant_strategies,
+      has_oos_results, uses_risk_free_rate, annualisation_correct — all return status/evidence dicts;
+    TestQAAuditStructure (4): run_audit() returns 30 items, n_pass+n_warn+n_fail=30,
+      verdict one of PASS/WARN/FAIL, items have required keys (check_id/check/description/
+      status/category/evidence);
+    TestQALimitationsGeneration (6): limitations non-empty, contains known strings
+      ("structural regime changes", "LQD bridge"), data_caveats non-empty, contains BND start
+      and BAMLHYH strings, model_assumptions non-empty, contains BL priors string;
+    TestQAChecklist (4): all 7 category prefixes present (D/P/S/C/O/E/PR),
+      exactly 30 items, all items have check_id+category+description+status+evidence,
+      no duplicate check_ids
+
+  test_ai_usage_log.py (13 tests)
+    TestCouncilSessionLogging (3): _log_council_session() doesn't raise (in-memory path),
+      silent skip when no DB configured, log record is a dict;
+    TestHealthEndpointSprintLabel (3): GET /api/health sprint field = "4",
+      anthropic and gemini are bool fields, db_connected is bool;
+    TestAcademicWriterScaffold (5): AcademicWriter importable from agents.academic_writer,
+      references.json loads as valid JSON, required entries present (sharpe_1994,
+      black_litterman_1992, lopez_de_prado_2018, benjamin_2018, markowitz_1952),
+      each entry has apa/author/year/title/source/use_for fields,
+      write_references() only outputs keys from provided list (no hallucinated sources);
+    TestLimitationsFields (2): QAAgent().run_audit() result has limitations/data_caveats/
+      model_assumptions as non-empty lists
+
+  test_guardrails.py
+    Backend guardrail assertions: weight sum enforcement, no-negative-weight enforcement,
+      scope guard integration, credit cap configuration, rate limit configuration
+
+  test_mock_data.py (12 test functions updated — Sprint 1 file)
+    All 12 QA audit tests updated from old field names (passed/warned/failed/checks/id/label/verdict)
+    to new field names matching QAAgent output schema:
+      checks_passed, checks_warned, checks_failed, verdict, items, check_id, description, status
+    test_qa_audit_ids_are_sequential updated: check_id values are category-prefixed strings
+      (D01, P01, etc.) not integers 1-30 — non-empty string validation replaces range check
+
+Backend — new implementation files:
+  agents/base.py            — BaseAgent with call_claude() + build_agent_response() helpers
+  agents/equity_analyst.py  — EquityAnalyst (Sonnet), pre-computed summaries before LLM call
+  agents/fixed_income_analyst.py — FixedIncomeAnalyst (Sonnet), correlation arithmetic before LLM
+  agents/risk_manager.py    — RiskManager (Sonnet), risk arithmetic + significance tallies before LLM
+  agents/quant_backtester.py — QuantBacktester (Sonnet), OOS degradation pre-computed
+  agents/independent_analyst.py — IndependentAnalyst (Gemini), challenge_consensus()
+  agents/qa_agent.py        — QAAgent (Opus), 30-point audit, deterministic overrides
+  agents/cio.py             — CIO (Opus), 10-step council flow, Gemini integration
+  agents/explainer_agent.py — ExplainerAgent (Haiku), 5 explain endpoints
+  agents/academic_writer.py — AcademicWriter scaffold (endpoints deferred to Sprint 6)
+  scope_guard.py            — ScopeGuard with regex pre-screen + Haiku classifier
+  main.py additions:        — /api/council/query, /api/qa/audit, /api/qa/ask,
+                              /api/explain/terms, /api/explain/chart, /api/explain/qa,
+                              /api/health sprint="4", council_sessions logging
+
+Commentary review (Sprint 4 — all modules pass standard):
+  All public methods across all 8 agent files, scope_guard.py, and main.py reviewed.
+  Decision comments added to: analyse() × 4 agents, _build_context() × 4 agents,
+  _fallback_response() × 4 agents, _parse_response() (quant), _extract_summary() (equity),
+  _parse_challenge() (Gemini), _build_audit_context(), _build_report(),
+  _generate_limitations/data_caveats/model_assumptions() (QA agent).
+  Pattern: all comments explain WHY arithmetic runs before LLM call (anti-hallucination),
+  or WHY a particular fallback/format choice was made.
+
+Test counts: 576 passed, 10 skipped (HMM on Windows), 0 failed
+  Frontend: 47 tests pass (unchanged from Sprint 3)
 
 ## Sprint 5 ⏳ PENDING
 Backend:

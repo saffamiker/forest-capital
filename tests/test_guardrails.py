@@ -11,7 +11,7 @@ def test_scope_guard_allows_portfolio_query():
 
     guard = ScopeGuard()
     result = asyncio.run(guard.check("What is the Sharpe ratio of REGIME_SWITCHING?"))
-    assert result.allowed is True
+    assert result["allowed"] is True
 
 
 def test_weights_sum_assertion():

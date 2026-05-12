@@ -146,60 +146,65 @@ def test_avg_weights_sum_approx_one():
 
 
 # ── QA Audit structure ────────────────────────────────────────────────────────
-# Field names: "passed", "warned", "failed", "checks" (list), items have "label"/"verdict"
+# Field names updated to match QAAgent output schema:
+# checks_passed/warned/failed, verdict, items (list), items have check_id/description/status
 
 def test_qa_audit_has_passed():
-    assert "passed" in MOCK_QA_AUDIT
+    assert "checks_passed" in MOCK_QA_AUDIT
 
 def test_qa_audit_has_warned():
-    assert "warned" in MOCK_QA_AUDIT
+    assert "checks_warned" in MOCK_QA_AUDIT
 
 def test_qa_audit_has_failed():
-    assert "failed" in MOCK_QA_AUDIT
+    assert "checks_failed" in MOCK_QA_AUDIT
 
 def test_qa_audit_has_overall_verdict():
-    assert "overall_verdict" in MOCK_QA_AUDIT
+    assert "verdict" in MOCK_QA_AUDIT
 
 def test_qa_audit_has_checks_list():
-    assert "checks" in MOCK_QA_AUDIT
-    assert isinstance(MOCK_QA_AUDIT["checks"], list)
+    assert "items" in MOCK_QA_AUDIT
+    assert isinstance(MOCK_QA_AUDIT["items"], list)
 
 def test_qa_audit_checks_count():
     """30 checklist items as specified."""
-    assert len(MOCK_QA_AUDIT["checks"]) == 30
+    assert len(MOCK_QA_AUDIT["items"]) == 30
 
 def test_qa_audit_counts_sum_to_30():
     total = (
-        MOCK_QA_AUDIT["passed"]
-        + MOCK_QA_AUDIT["warned"]
-        + MOCK_QA_AUDIT["failed"]
+        MOCK_QA_AUDIT["checks_passed"]
+        + MOCK_QA_AUDIT["checks_warned"]
+        + MOCK_QA_AUDIT["checks_failed"]
     )
     assert total == 30
 
 def test_qa_audit_items_have_required_fields():
-    for item in MOCK_QA_AUDIT["checks"]:
-        assert "label" in item, f"QA check missing 'label': {item}"
-        assert "verdict" in item, f"QA check missing 'verdict': {item}"
-        assert "id" in item, f"QA check missing 'id': {item}"
+    for item in MOCK_QA_AUDIT["items"]:
+        assert "description" in item, f"QA check missing 'description': {item}"
+        assert "status" in item, f"QA check missing 'status': {item}"
+        assert "check_id" in item, f"QA check missing 'check_id': {item}"
         assert "category" in item, f"QA check missing 'category': {item}"
 
 def test_qa_audit_verdicts_are_valid():
     valid_verdicts = {"PASS", "WARN", "FAIL"}
-    for item in MOCK_QA_AUDIT["checks"]:
-        assert item["verdict"] in valid_verdicts, (
-            f"Invalid verdict '{item['verdict']}' in QA check '{item.get('label')}'"
+    for item in MOCK_QA_AUDIT["items"]:
+        assert item["status"] in valid_verdicts, (
+            f"Invalid status '{item['status']}' in QA check '{item.get('description')}'"
         )
 
 def test_qa_audit_ids_are_unique():
-    ids = [item["id"] for item in MOCK_QA_AUDIT["checks"]]
+    ids = [item["check_id"] for item in MOCK_QA_AUDIT["items"]]
     assert len(ids) == len(set(ids)), "QA check IDs are not unique"
 
 def test_qa_audit_ids_are_sequential():
-    ids = sorted(item["id"] for item in MOCK_QA_AUDIT["checks"])
-    assert ids == list(range(1, 31)), "QA check IDs must be 1–30"
+    # check_id values are category-prefixed strings like "D01", "P01", not integers 1-30.
+    # Verify all 30 are non-empty strings — ordering is by category, not a flat sequence.
+    ids = [item["check_id"] for item in MOCK_QA_AUDIT["items"]]
+    assert all(isinstance(cid, str) and len(cid) >= 2 for cid in ids), (
+        "All check_id values must be non-empty strings"
+    )
 
 def test_qa_audit_overall_verdict_is_valid():
-    assert MOCK_QA_AUDIT["overall_verdict"] in {"PASS", "WARN", "FAIL"}
+    assert MOCK_QA_AUDIT["verdict"] in {"PASS", "WARN", "FAIL"}
 
 
 # ── Regime mock ───────────────────────────────────────────────────────────────

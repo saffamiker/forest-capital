@@ -1,0 +1,114 @@
+{
+  "sharpe_1994": {
+    "author": "Sharpe, W. F.",
+    "year": 1994,
+    "title": "The Sharpe Ratio",
+    "source": "Journal of Portfolio Management, 21(1), 49-58",
+    "apa": "Sharpe, W. F. (1994). The Sharpe Ratio. Journal of Portfolio Management, 21(1), 49-58.",
+    "use_for": ["sharpe ratio methodology", "risk-adjusted performance"]
+  },
+  "black_litterman_1992": {
+    "author": "Black, F., & Litterman, R.",
+    "year": 1992,
+    "title": "Global Portfolio Optimization",
+    "source": "Financial Analysts Journal, 48(5), 28-43",
+    "apa": "Black, F., & Litterman, R. (1992). Global Portfolio Optimization. Financial Analysts Journal, 48(5), 28-43.",
+    "use_for": ["Black-Litterman strategy", "portfolio optimization"]
+  },
+  "lopez_de_prado_2018": {
+    "author": "López de Prado, M.",
+    "year": 2018,
+    "title": "Advances in Financial Machine Learning",
+    "source": "Wiley",
+    "apa": "López de Prado, M. (2018). Advances in Financial Machine Learning. Wiley.",
+    "use_for": ["CPCV", "walk-forward", "purged cross-validation", "deflated Sharpe"]
+  },
+  "bailey_lopez_de_prado_2012": {
+    "author": "Bailey, D. H., & López de Prado, M.",
+    "year": 2012,
+    "title": "The Sharpe Ratio Efficient Frontier",
+    "source": "Journal of Risk, 15(2), 3-44",
+    "apa": "Bailey, D. H., & López de Prado, M. (2012). The Sharpe Ratio Efficient Frontier. Journal of Risk, 15(2), 3-44.",
+    "use_for": ["deflated Sharpe ratio", "DSR", "multiple testing"]
+  },
+  "benjamin_2018": {
+    "author": "Benjamin, D. J., et al.",
+    "year": 2018,
+    "title": "Redefine Statistical Significance",
+    "source": "Nature Human Behaviour, 2(1), 6-10",
+    "apa": "Benjamin, D. J., et al. (2018). Redefine Statistical Significance. Nature Human Behaviour, 2(1), 6-10.",
+    "use_for": ["p < 0.005 threshold", "statistical significance standard"]
+  },
+  "markowitz_1952": {
+    "author": "Markowitz, H.",
+    "year": 1952,
+    "title": "Portfolio Selection",
+    "source": "Journal of Finance, 7(1), 77-91",
+    "apa": "Markowitz, H. (1952). Portfolio Selection. Journal of Finance, 7(1), 77-91.",
+    "use_for": ["mean-variance optimization", "efficient frontier", "modern portfolio theory"]
+  },
+  "maillard_roncalli_teiletche_2010": {
+    "author": "Maillard, S., Roncalli, T., & Teïletche, J.",
+    "year": 2010,
+    "title": "The Properties of Equally Weighted Risk Contribution Portfolios",
+    "source": "Journal of Portfolio Management, 36(4), 60-70",
+    "apa": "Maillard, S., Roncalli, T., & Teïletche, J. (2010). The Properties of Equally Weighted Risk Contribution Portfolios. Journal of Portfolio Management, 36(4), 60-70.",
+    "use_for": ["risk parity", "equal risk contribution"]
+  },
+  "harvey_liu_2015": {
+    "author": "Harvey, C. R., & Liu, Y.",
+    "year": 2015,
+    "title": "Backtesting",
+    "source": "Journal of Portfolio Management, 42(1), 13-28",
+    "apa": "Harvey, C. R., & Liu, Y. (2015). Backtesting. Journal of Portfolio Management, 42(1), 13-28.",
+    "use_for": ["multiple comparison problem", "FDR correction", "overfitting"]
+  },
+  "fama_french_1993": {
+    "author": "Fama, E. F., & French, K. R.",
+    "year": 1993,
+    "title": "Common risk factors in the returns on stocks and bonds",
+    "source": "Journal of Financial Economics, 33(1), 3-56",
+    "apa": "Fama, E. F., & French, K. R. (1993). Common risk factors in the returns on stocks and bonds. Journal of Financial Economics, 33(1), 3-56.",
+    "use_for": ["Fama-French factors", "factor exposure", "performance attribution"]
+  },
+  "brinson_hood_beebower_1986": {
+    "author": "Brinson, G. P., Hood, L. R., & Beebower, G. L.",
+    "year": 1986,
+    "title": "Determinants of Portfolio Performance",
+    "source": "Financial Analysts Journal, 42(4), 39-44",
+    "apa": "Brinson, G. P., Hood, L. R., & Beebower, G. L. (1986). Determinants of Portfolio Performance. Financial Analysts Journal, 42(4), 39-44.",
+    "use_for": ["performance attribution", "Brinson-Hood-Beebower", "allocation vs selection"]
+  },
+  "benjamini_hochberg_1995": {
+    "author": "Benjamini, Y., & Hochberg, Y.",
+    "year": 1995,
+    "title": "Controlling the false discovery rate: A practical and powerful approach to multiple testing",
+    "source": "Journal of the Royal Statistical Society: Series B, 57(1), 289-300",
+    "apa": "Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate: A practical and powerful approach to multiple testing. Journal of the Royal Statistical Society: Series B, 57(1), 289-300.",
+    "use_for": ["FDR correction", "Benjamini-Hochberg", "multiple comparison correction"]
+  },
+  "jobson_korkie_1981": {
+    "author": "Jobson, J. D., & Korkie, B. M.",
+    "year": 1981,
+    "title": "Performance hypothesis testing with the Sharpe and Treynor measures",
+    "source": "Journal of Finance, 36(4), 889-908",
+    "apa": "Jobson, J. D., & Korkie, B. M. (1981). Performance hypothesis testing with the Sharpe and Treynor measures. Journal of Finance, 36(4), 889-908.",
+    "use_for": ["Jobson-Korkie test", "Sharpe ratio significance", "comparative performance"]
+  },
+  "newey_west_1987": {
+    "author": "Newey, W. K., & West, K. D.",
+    "year": 1987,
+    "title": "A simple, positive semi-definite, heteroskedasticity and autocorrelation consistent covariance matrix",
+    "source": "Econometrica, 55(3), 703-708",
+    "apa": "Newey, W. K., & West, K. D. (1987). A simple, positive semi-definite, heteroskedasticity and autocorrelation consistent covariance matrix. Econometrica, 55(3), 703-708.",
+    "use_for": ["Newey-West standard errors", "autocorrelation correction", "heteroskedasticity"]
+  },
+  "hansen_2005": {
+    "author": "Hansen, P. R.",
+    "year": 2005,
+    "title": "A test for superior predictive ability",
+    "source": "Journal of Business & Economic Statistics, 23(4), 365-380",
+    "apa": "Hansen, P. R. (2005). A test for superior predictive ability. Journal of Business & Economic Statistics, 23(4), 365-380.",
+    "use_for": ["SPA test", "Hansen SPA", "data snooping", "superior predictive ability"]
+  }
+}

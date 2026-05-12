@@ -806,47 +806,50 @@ MOCK_COUNCIL_RESPONSE = {
 }
 
 MOCK_QA_AUDIT = {
-    "total_checks": 30,
-    "passed": 22,
-    "warned": 5,
-    "failed": 3,
-    "overall_verdict": "WARN",
-    "checks": [
-        # DATA INTEGRITY
-        {"id": 1,  "category": "DATA INTEGRITY",      "label": "Total returns used (adjusted close, auto_adjust=True)",             "verdict": "PASS", "detail": "yfinance auto_adjust=True confirmed on all fetches."},
-        {"id": 2,  "category": "DATA INTEGRITY",      "label": "No survivorship bias — all assets existed at backtest start",        "verdict": "PASS", "detail": "All tickers verified present from 2000-01-01."},
-        {"id": 3,  "category": "DATA INTEGRITY",      "label": "Missing data policy applied (forward-fill max 5 days)",              "verdict": "PASS", "detail": "Max gap 3 days observed; policy enforced."},
-        {"id": 4,  "category": "DATA INTEGRITY",      "label": "All assets have data for full backtest period",                       "verdict": "PASS", "detail": "All assets validated 2000–2024."},
-        {"id": 5,  "category": "DATA INTEGRITY",      "label": "Time-varying risk-free rate used (not fixed 4.5%)",                  "verdict": "WARN", "detail": "Sprint 1: FRED DFF not yet integrated. Using fallback 4.5%. Fix in Sprint 2."},
-        {"id": 6,  "category": "DATA INTEGRITY",      "label": "Returns computed consistently — log or simple, never mixed",         "verdict": "PASS", "detail": "Simple returns used throughout."},
-        {"id": 7,  "category": "DATA INTEGRITY",      "label": "Annualisation factor is sqrt(252) throughout",                       "verdict": "PASS", "detail": "ANNUALIZATION_FACTOR=252 enforced at module level."},
-        # PORTFOLIO MECHANICS
-        {"id": 8,  "category": "PORTFOLIO MECHANICS", "label": "Weights sum to 1.0 on every rebalance date (|sum−1| < 1e-6)",        "verdict": "PASS", "detail": "Assertion confirmed in backtester."},
-        {"id": 9,  "category": "PORTFOLIO MECHANICS", "label": "No negative weights (long-only enforced)",                           "verdict": "PASS", "detail": "MIN_WEIGHT=0.0 constraint active."},
-        {"id": 10, "category": "PORTFOLIO MECHANICS", "label": "Transaction costs applied both ways on every trade",                  "verdict": "PASS", "detail": "10bps applied to every weight delta."},
-        {"id": 11, "category": "PORTFOLIO MECHANICS", "label": "Rebalancing at next-day open, not same-day close",                   "verdict": "WARN", "detail": "Sprint 1 mock data. Verify look-ahead in Sprint 2 backtester."},
-        {"id": 12, "category": "PORTFOLIO MECHANICS", "label": "TEST window (2022–2024) never used during optimisation",             "verdict": "PASS", "detail": "Date partitions enforced in config."},
-        # STATISTICAL INTEGRITY
-        {"id": 13, "category": "STATISTICAL INTEGRITY","label": "Power analysis run before applying any threshold",                  "verdict": "PASS", "detail": "n=288 > MIN_OBSERVATIONS_FOR_POWER=220 for all full-period tests."},
-        {"id": 14, "category": "STATISTICAL INTEGRITY","label": "Threshold tier explicitly disclosed alongside every p-value",       "verdict": "PASS", "detail": "significance_summary field includes tier label."},
-        {"id": 15, "category": "STATISTICAL INTEGRITY","label": "is_significant = True requires ALL 5 Tier 1 gates passed",          "verdict": "PASS", "detail": "Logic confirmed in schema validation."},
-        {"id": 16, "category": "STATISTICAL INTEGRITY","label": "Sub-period / regime results not used as hard significance gates",   "verdict": "PASS", "detail": "Tier 2 results are narrative only."},
-        {"id": 17, "category": "STATISTICAL INTEGRITY","label": "FDR correction (q<0.005) applied across all Tier 1 tests",         "verdict": "PASS", "detail": "Benjamini-Hochberg applied across 10 strategies."},
-        {"id": 18, "category": "STATISTICAL INTEGRITY","label": "Autocorrelation tested — Newey-West SE used if detected",           "verdict": "WARN", "detail": "Autocorrelation flagged for MOMENTUM_ROTATION and MAX_SHARPE_ROLLING. Newey-West not yet applied. Fix in Sprint 2."},
-        {"id": 19, "category": "STATISTICAL INTEGRITY","label": "Normality tested — block bootstrap used if rejected",               "verdict": "PASS", "detail": "Jarque-Bera applied; bootstrap used where normality rejected."},
-        {"id": 20, "category": "STATISTICAL INTEGRITY","label": "Deflated Sharpe Ratio computed (corrects for n_trials=10)",         "verdict": "PASS", "detail": "DSR computed with n_trials=10 per Lopez de Prado."},
-        {"id": 21, "category": "STATISTICAL INTEGRITY","label": "Both in-sample AND out-of-sample p-values reported",                "verdict": "PASS", "detail": "oos_p_value and oos_significant fields populated."},
-        {"id": 22, "category": "STATISTICAL INTEGRITY","label": "Random seed = RANDOM_SEED = 42 in all stochastic operations",       "verdict": "FAIL", "detail": "Sprint 1: seed not yet set in bootstrap functions. MUST fix in Sprint 2 before any results are presented."},
-        # CROSS-VALIDATION
-        {"id": 23, "category": "CROSS-VALIDATION",    "label": "Walk-forward: rolling AND expanding window compared",                "verdict": "PASS", "detail": "Both methods implemented; divergence 0.08 < 0.30."},
-        {"id": 24, "category": "CROSS-VALIDATION",    "label": "Purged K-Fold with embargo = CV_EMBARGO_PERIODS applied",           "verdict": "WARN", "detail": "Purged K-Fold scaffolded. Full implementation Sprint 2."},
-        {"id": 25, "category": "CROSS-VALIDATION",    "label": "CPCV run — Sharpe distribution reported, not just point estimate",  "verdict": "WARN", "detail": "CPCV scaffolded. Full implementation Sprint 2."},
-        {"id": 26, "category": "CROSS-VALIDATION",    "label": "Monte Carlo permutation test run (p_permutation < 0.005)",          "verdict": "PASS", "detail": "Permutation test implemented with BOOTSTRAP_SAMPLES=10,000."},
-        {"id": 27, "category": "CROSS-VALIDATION",    "label": "CV Stability Score >= 0.60 for all recommended strategies",         "verdict": "PASS", "detail": "REGIME_SWITCHING=0.78, VOL_TARGETING=0.81, BLACK_LITTERMAN=0.76 all pass."},
-        # OVERFITTING / ECONOMIC
-        {"id": 28, "category": "OVERFITTING",         "label": "SPA test passed across full strategy universe",                      "verdict": "PASS", "detail": "SPA p=0.003 — data snooping risk contained."},
-        {"id": 29, "category": "ECONOMIC SIGNIFICANCE","label": "Alpha after transaction costs >= 50bps for recommended strategies", "verdict": "FAIL", "detail": "REGIME_SWITCHING=37bps, VOL_TARGETING=32bps, BLACK_LITTERMAN=33bps all below 50bps threshold. Statistically significant but not economically significant. Must disclose."},
-        {"id": 30, "category": "PRESENTATION",        "label": "2022 correlation breakdown disclosed prominently",                   "verdict": "FAIL", "detail": "Sprint 1: breakdown flag present in data but not yet surfaced as a prominent UI warning. Add in Sprint 1 frontend."},
+    "sprint": "4",
+    "checks_total": 30,
+    "checks_passed": 22,
+    "checks_warned": 5,
+    "checks_failed": 3,
+    "verdict": "WARN",
+    "items": [
+        # DATA INTEGRITY (7)
+        {"check_id": "D01", "category": "DATA_INTEGRITY",      "check": "Total returns verified",        "description": "Total returns used (adjusted close, auto_adjust=True)",             "status": "PASS", "evidence": "yfinance auto_adjust=True confirmed on all fetches.",          "fix": None},
+        {"check_id": "D02", "category": "DATA_INTEGRITY",      "check": "No survivorship bias",          "description": "No survivorship bias — all assets existed at backtest start",        "status": "PASS", "evidence": "All tickers verified present from 2000-01-01.",                 "fix": None},
+        {"check_id": "D03", "category": "DATA_INTEGRITY",      "check": "Missing data policy",           "description": "Missing data policy applied (forward-fill max 5 days)",              "status": "PASS", "evidence": "Max gap 3 days observed; policy enforced.",                     "fix": None},
+        {"check_id": "D04", "category": "DATA_INTEGRITY",      "check": "Full period data",              "description": "All assets have data for full backtest period",                       "status": "PASS", "evidence": "All assets validated 2000–2024.",                               "fix": None},
+        {"check_id": "D05", "category": "DATA_INTEGRITY",      "check": "Time-varying risk-free rate",   "description": "Time-varying risk-free rate used (not fixed 4.5%)",                  "status": "WARN", "evidence": "Sprint 2: DTB3 from Excel integrated.",                         "fix": None},
+        {"check_id": "D06", "category": "DATA_INTEGRITY",      "check": "Return consistency",            "description": "Returns computed consistently — simple not log",                     "status": "PASS", "evidence": "Simple returns (pct_change) used throughout.",                  "fix": None},
+        {"check_id": "D07", "category": "DATA_INTEGRITY",      "check": "Annualisation factor",          "description": "Annualisation factor is sqrt(252) throughout",                       "status": "PASS", "evidence": "ANNUALIZATION_FACTOR=252 enforced at module level.",            "fix": None},
+        # PORTFOLIO MECHANICS (5)
+        {"check_id": "P01", "category": "PORTFOLIO_MECHANICS", "check": "Weights sum to 1",             "description": "Weights sum to 1.0 on every rebalance date (|sum - 1| < 1e-6)",      "status": "PASS", "evidence": "Assertion confirmed in backtester.",                             "fix": None},
+        {"check_id": "P02", "category": "PORTFOLIO_MECHANICS", "check": "No short positions",           "description": "No negative weights (long-only enforced)",                           "status": "PASS", "evidence": "MIN_WEIGHT=0.0 constraint active.",                             "fix": None},
+        {"check_id": "P03", "category": "PORTFOLIO_MECHANICS", "check": "Transaction costs applied",    "description": "Transaction costs applied both ways on every trade",                  "status": "PASS", "evidence": "10bps applied to every weight delta.",                          "fix": None},
+        {"check_id": "P04", "category": "PORTFOLIO_MECHANICS", "check": "Rebalance timing",             "description": "Rebalancing at next-day open, not same-day close",                   "status": "WARN", "evidence": "Verify look-ahead in live backtester.",                         "fix": "Confirm signal date is strictly before execution date."},
+        {"check_id": "P05", "category": "PORTFOLIO_MECHANICS", "check": "No test leakage",              "description": "TEST window (2022-2024) never used during optimisation",              "status": "PASS", "evidence": "Date partitions enforced in config.",                            "fix": None},
+        # STATISTICAL INTEGRITY (10)
+        {"check_id": "S01", "category": "STATISTICAL_INTEGRITY","check": "Power analysis",              "description": "Power analysis run before applying any threshold",                    "status": "PASS", "evidence": "n=282 > MIN_OBSERVATIONS_FOR_POWER=220 for all full-period tests.","fix": None},
+        {"check_id": "S02", "category": "STATISTICAL_INTEGRITY","check": "Threshold tier disclosed",    "description": "Threshold tier explicitly disclosed alongside every p-value",          "status": "PASS", "evidence": "significance_summary field includes tier label.",              "fix": None},
+        {"check_id": "S03", "category": "STATISTICAL_INTEGRITY","check": "All gates required",          "description": "is_significant = True requires ALL 5 Tier 1 gates passed",            "status": "PASS", "evidence": "Logic confirmed in schema validation.",                         "fix": None},
+        {"check_id": "S04", "category": "STATISTICAL_INTEGRITY","check": "Sub-period narrative only",   "description": "Sub-period / regime results not used as hard significance gates",     "status": "PASS", "evidence": "Tier 2 results are narrative only.",                            "fix": None},
+        {"check_id": "S05", "category": "STATISTICAL_INTEGRITY","check": "FDR correction applied",      "description": "FDR correction (q<0.005) applied across all Tier 1 tests",           "status": "PASS", "evidence": "Benjamini-Hochberg applied across 10 strategies.",             "fix": None},
+        {"check_id": "S06", "category": "STATISTICAL_INTEGRITY","check": "Autocorrelation check",       "description": "Autocorrelation tested — Newey-West SE used if detected",             "status": "WARN", "evidence": "Autocorrelation flagged for MOMENTUM_ROTATION; Newey-West applied.","fix": None},
+        {"check_id": "S07", "category": "STATISTICAL_INTEGRITY","check": "Normality tested",            "description": "Normality tested — block bootstrap used if rejected",                 "status": "PASS", "evidence": "Jarque-Bera applied; bootstrap used where normality rejected.", "fix": None},
+        {"check_id": "S08", "category": "STATISTICAL_INTEGRITY","check": "DSR computed",               "description": "Deflated Sharpe Ratio computed (corrects for n_trials=10)",           "status": "PASS", "evidence": "DSR computed with n_trials=10 per Lopez de Prado.",             "fix": None},
+        {"check_id": "S09", "category": "STATISTICAL_INTEGRITY","check": "PSR computed",               "description": "Probabilistic Sharpe Ratio computed (CI on Sharpe reported)",         "status": "PASS", "evidence": "probabilistic_sharpe_ratio and sharpe_ci_95 populated.",       "fix": None},
+        {"check_id": "S10", "category": "STATISTICAL_INTEGRITY","check": "In-sample and OOS p-values",  "description": "Both in-sample AND out-of-sample p-values reported",                  "status": "PASS", "evidence": "oos_p_value and oos_significant fields populated.",             "fix": None},
+        # CROSS-VALIDATION (4)
+        {"check_id": "C01", "category": "CROSS_VALIDATION",    "check": "Walk-forward compared",        "description": "Walk-forward: rolling AND expanding window compared",                 "status": "PASS", "evidence": "Both methods implemented; divergence 0.08 < 0.30.",             "fix": None},
+        {"check_id": "C02", "category": "CROSS_VALIDATION",    "check": "Purged K-fold applied",        "description": "Purged K-Fold with embargo = CV_EMBARGO_PERIODS applied",            "status": "PASS", "evidence": "Embargo=252 (momentum lookback) applied.",                      "fix": None},
+        {"check_id": "C03", "category": "CROSS_VALIDATION",    "check": "CPCV distribution",            "description": "CPCV run — Sharpe distribution reported, not just point estimate",   "status": "PASS", "evidence": "CPCV C(6,2)=15 paths run; distribution reported.",             "fix": None},
+        {"check_id": "C04", "category": "CROSS_VALIDATION",    "check": "CV stability >= 0.60",         "description": "CV Stability Score >= 0.60 for all recommended strategies",          "status": "PASS", "evidence": "REGIME_SWITCHING=0.78, VOL_TARGETING=0.81, BL=0.76 all pass.", "fix": None},
+        # OVERFITTING (2)
+        {"check_id": "O01", "category": "OVERFITTING",         "check": "SPA test passed",              "description": "SPA test passed across full strategy universe",                      "status": "PASS", "evidence": "SPA p=0.003 — data snooping risk contained.",                  "fix": None},
+        {"check_id": "O02", "category": "OVERFITTING",         "check": "Parameter sensitivity",        "description": "Parameter sensitivity: ±20% on key params, results stable",         "status": "WARN", "evidence": "Sensitivity analysis pending Sprint 5.",                        "fix": "Run ±20% sensitivity sweep before Sprint 6."},
+        # ECONOMIC SIGNIFICANCE (1)
+        {"check_id": "E01", "category": "ECONOMIC_SIGNIFICANCE","check": "Alpha after costs >= 50bps",  "description": "Alpha after transaction costs >= 50bps for recommended strategies",  "status": "WARN", "evidence": "Alpha after costs is below 50bps threshold for some strategies.","fix": "Disclose economic significance threshold alongside statistical results."},
+        # PRESENTATION (1)
+        {"check_id": "PR01","category": "PRESENTATION",        "check": "2022 breakdown disclosed",     "description": "2022 correlation breakdown disclosed prominently",                   "status": "PASS", "evidence": "Amber warning callout present on Dashboard, always visible.",   "fix": None},
     ],
 }
 

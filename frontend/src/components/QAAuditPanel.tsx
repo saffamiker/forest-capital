@@ -30,7 +30,7 @@ interface CheckRowProps {
 }
 
 function CheckRow({ check, open, onToggle }: CheckRowProps) {
-  const cfg = VERDICT_CONFIG[check.verdict]
+  const cfg = VERDICT_CONFIG[check.status]
   const { Icon } = cfg
   return (
     <div className={`border rounded-lg overflow-hidden mb-1.5 ${cfg.border}`}>
@@ -39,9 +39,9 @@ function CheckRow({ check, open, onToggle }: CheckRowProps) {
         className={`w-full flex items-center gap-3 px-3 py-2.5 text-left hover:opacity-90 transition-opacity ${cfg.bg}`}
       >
         <Icon className={`w-4 h-4 shrink-0 ${cfg.color}`} />
-        <span className="font-mono text-2xs text-muted w-5 shrink-0">{String(check.id).padStart(2, '0')}</span>
-        <span className="text-white text-xs flex-1">{check.label}</span>
-        <VerdictBadge verdict={check.verdict} />
+        <span className="font-mono text-2xs text-muted w-7 shrink-0">{check.check_id}</span>
+        <span className="text-white text-xs flex-1">{check.description}</span>
+        <VerdictBadge verdict={check.status} />
         {open ? (
           <ChevronUp className="w-3.5 h-3.5 text-muted ml-1 shrink-0" />
         ) : (
@@ -50,7 +50,10 @@ function CheckRow({ check, open, onToggle }: CheckRowProps) {
       </button>
       {open && (
         <div className="px-3 py-2 border-t border-border/50 bg-navy-900">
-          <p className="text-slate-300 text-xs">{check.detail}</p>
+          <p className="text-slate-300 text-xs">{check.evidence}</p>
+          {check.fix && (
+            <p className="text-warning text-xs mt-1"><strong>Fix:</strong> {check.fix}</p>
+          )}
         </div>
       )}
     </div>
@@ -60,7 +63,7 @@ function CheckRow({ check, open, onToggle }: CheckRowProps) {
 export default function QAAuditPanel() {
   const [audit, setAudit] = useState<QAAuditResult | null>(null)
   const [loading, setLoading] = useState(false)
-  const [openChecks, setOpenChecks] = useState<Set<number>>(new Set())
+  const [openChecks, setOpenChecks] = useState<Set<string>>(new Set())
   const [activeCategory, setActiveCategory] = useState('ALL')
 
   const fetchAudit = async () => {
@@ -77,7 +80,7 @@ export default function QAAuditPanel() {
 
   useEffect(() => { void fetchAudit() }, [])
 
-  const toggleCheck = (id: number) => {
+  const toggleCheck = (id: string) => {
     setOpenChecks((prev) => {
       const next = new Set(prev)
       if (next.has(id)) { next.delete(id) } else { next.add(id) }
@@ -100,11 +103,11 @@ export default function QAAuditPanel() {
 
   if (!audit) return null
 
-  const checks = audit.checks
-  const categories = ['ALL', ...new Set(checks.map((c) => c.category))]
-  const filtered = activeCategory === 'ALL' ? checks : checks.filter((c) => c.category === activeCategory)
+  const items = audit.items
+  const categories = ['ALL', ...new Set(items.map((c) => c.category))]
+  const filtered = activeCategory === 'ALL' ? items : items.filter((c) => c.category === activeCategory)
 
-  const overallCfg = VERDICT_CONFIG[audit.overall_verdict]
+  const overallCfg = VERDICT_CONFIG[audit.verdict]
   const { Icon: OverallIcon } = overallCfg
 
   return (
@@ -116,15 +119,15 @@ export default function QAAuditPanel() {
           <div className="flex-1">
             <div className="flex items-center gap-3">
               <h2 className="text-white font-bold text-lg">QA Audit Report</h2>
-              <VerdictBadge verdict={audit.overall_verdict} />
+              <VerdictBadge verdict={audit.verdict} />
             </div>
             <p className="text-muted text-sm mt-0.5">
-              30-point methodology checklist · Sprint 1 results
+              30-point methodology checklist · Sprint {audit.sprint ?? '4'} results
             </p>
           </div>
           <div className="text-right shrink-0">
             <div className="text-3xl font-mono font-bold text-white">
-              {audit.passed}<span className="text-muted text-xl">/30</span>
+              {audit.checks_passed}<span className="text-muted text-xl">/{audit.checks_total}</span>
             </div>
             <div className="text-xs text-muted mt-0.5">checks passed</div>
           </div>
@@ -134,17 +137,17 @@ export default function QAAuditPanel() {
         <div className="flex gap-3 mt-4 pt-4 border-t border-border/50">
           <div className="flex items-center gap-1.5">
             <CheckCircle className="w-3.5 h-3.5 text-success" />
-            <span className="font-mono text-sm text-success">{audit.passed}</span>
+            <span className="font-mono text-sm text-success">{audit.checks_passed}</span>
             <span className="text-muted text-xs">passed</span>
           </div>
           <div className="flex items-center gap-1.5">
             <AlertTriangle className="w-3.5 h-3.5 text-warning" />
-            <span className="font-mono text-sm text-warning">{audit.warned}</span>
+            <span className="font-mono text-sm text-warning">{audit.checks_warned}</span>
             <span className="text-muted text-xs">warned</span>
           </div>
           <div className="flex items-center gap-1.5">
             <XCircle className="w-3.5 h-3.5 text-danger" />
-            <span className="font-mono text-sm text-danger">{audit.failed}</span>
+            <span className="font-mono text-sm text-danger">{audit.checks_failed}</span>
             <span className="text-muted text-xs">failed</span>
           </div>
           <button
@@ -179,10 +182,10 @@ export default function QAAuditPanel() {
       <div>
         {filtered.map((check) => (
           <CheckRow
-            key={check.id}
+            key={check.check_id}
             check={check}
-            open={openChecks.has(check.id)}
-            onToggle={() => toggleCheck(check.id)}
+            open={openChecks.has(check.check_id)}
+            onToggle={() => toggleCheck(check.check_id)}
           />
         ))}
       </div>

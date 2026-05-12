@@ -79,9 +79,9 @@ export default function MainLayout() {
   const isMcColl = brand === BRANDS.MCCOLL
 
   return (
-    <div className="min-h-screen bg-navy-900 flex flex-col">
-      {/* Top nav */}
-      <header className="h-14 border-b border-border flex items-center px-6 shrink-0 bg-navy-800">
+    <div className="h-screen bg-navy-900 flex flex-col overflow-hidden">
+      {/* Top nav — shrink-0 ensures it never scrolls out of view */}
+      <header className="h-14 border-b border-border flex items-center px-6 shrink-0 bg-navy-800 z-50">
         {/* Brand */}
         <div className="flex items-center gap-2.5 mr-8">
           {isMcColl ? <QuLogo /> : <FcLogo />}
@@ -180,8 +180,8 @@ export default function MainLayout() {
         </div>
       </header>
 
-      {/* Page content */}
-      <main className="flex-1 overflow-auto">
+      {/* Page content — scrolls independently; nav never moves */}
+      <main className="flex-1 overflow-y-auto overflow-x-hidden">
         <Outlet />
       </main>
     </div>

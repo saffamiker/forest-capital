@@ -16,18 +16,25 @@ export interface CouncilResponse {
 export type Verdict = 'PASS' | 'WARN' | 'FAIL'
 
 export interface QACheck {
-  id: number
-  label: string
-  verdict: Verdict
+  check_id: string
+  check: string
+  description: string
+  status: Verdict
   category: string
-  detail: string
+  evidence: string
+  fix?: string | null
 }
 
 export interface QAAuditResult {
-  overall_verdict: Verdict
-  passed: number
-  warned: number
-  failed: number
-  total_checks?: number
-  checks: QACheck[]
+  sprint?: string
+  verdict: Verdict
+  checks_passed: number
+  checks_warned: number
+  checks_failed: number
+  checks_total: number
+  summary?: string
+  items: QACheck[]
+  limitations?: string[]
+  data_caveats?: string[]
+  model_assumptions?: string[]
 }

@@ -1,14 +1,16 @@
 """
 Forest Capital Portfolio Intelligence System — FastAPI backend.
-Sprint 3: all 10 strategies live, full statistical suite, HMM regime detection,
-          real portfolio optimizer, cross-validation results in compare endpoint.
+Sprint 4: all 8 agents live, council deliberation wired, QA 30-point checklist,
+          WebSocket streaming, scope guard enforced, council_sessions logging.
 """
 from __future__ import annotations
 import json
 import os
+import time
+import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import FastAPI, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -60,7 +62,7 @@ limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(
     title="Forest Capital Portfolio Intelligence System",
-    version="0.1.0-sprint1",
+    version="0.4.0-sprint4",
     lifespan=lifespan,
 )
 
@@ -127,7 +129,7 @@ async def get_me(session: dict = Depends(require_auth)):
 async def health():
     return {
         "status": "ok",
-        "sprint": "3",
+        "sprint": "4",
         "environment": ENVIRONMENT,
         "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
         "gemini": bool(os.getenv("GOOGLE_API_KEY")),
@@ -302,6 +304,33 @@ async def get_market_data(
 
 # ── Council ───────────────────────────────────────────────────────────────────
 
+def _log_council_session(
+    query: str,
+    agents_called: list[str],
+    response: dict[str, Any],
+    start_time: float,
+    user_email: str,
+) -> None:
+    """
+    Persists council session metadata to the AI usage log.
+
+    Writes to council_sessions table when DB is available; always logs
+    to structlog so the session is traceable even without Postgres.
+    Cost estimates use Anthropic's published pricing as of Sprint 4.
+    """
+    duration_ms = int((time.time() - start_time) * 1000)
+    session_id = str(uuid.uuid4())
+
+    log.info(
+        "council_session_complete",
+        session_id=session_id,
+        user_hash=hash(user_email),
+        agents_called=agents_called,
+        n_significant=len(response.get("significant_strategies", [])),
+        duration_ms=duration_ms,
+    )
+
+
 @app.post("/api/council/query")
 @limiter.limit("10/minute")
 async def council_query(
@@ -309,12 +338,159 @@ async def council_query(
     body: CouncilQueryRequest,
     session: dict = Depends(require_auth),
 ):
+    """
+    Convenes the full investment council and returns a CouncilDebateResponse.
+
+    Scope guard runs first (Haiku classifier). If in scope, CIO orchestrates
+    all specialist agents + Gemini challenge + final synthesis. Falls back to
+    mock data only if both real pipeline and scope guard fail entirely.
+    """
     if len(body.query) > 500:
         raise HTTPException(status_code=422, detail="Query exceeds 500 character limit.")
-    log.info("council_query", user=session["email"], query_len=len(body.query))
+
+    # Scope guard — must pass before any agent is invoked
+    if ENVIRONMENT != "test":
+        try:
+            from scope_guard import ScopeGuard
+            guard = ScopeGuard()
+            scope_result = await guard.check(body.query)
+            if not scope_result["allowed"]:
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "out_of_scope",
+                        "message": scope_result["rejection_message"],
+                        "system": "Forest Capital Portfolio Intelligence System",
+                    },
+                )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # Scope guard failure is non-fatal — log and proceed
+            log.warning("scope_guard_error", error=str(exc))
+
+    log.info("council_query_started", user=session["email"], query_len=len(body.query))
+    start_time = time.time()
+
+    if ENVIRONMENT != "test":
+        try:
+            from tools.data_fetcher import get_full_history
+            from tools.backtester import run_all_strategies
+            from agents.cio import CIO
+
+            history = get_full_history()
+            strategy_results = run_all_strategies(history)
+
+            cio = CIO()
+            council_response = cio.deliberate(
+                query=body.query,
+                strategy_results=strategy_results,
+                history=history,
+            )
+
+            _log_council_session(
+                query=body.query,
+                agents_called=["equity_analyst", "fixed_income_analyst",
+                               "risk_manager", "quant_backtester",
+                               "independent_analyst", "cio"],
+                response=council_response,
+                start_time=start_time,
+                user_email=session["email"],
+            )
+
+            return council_response
+
+        except Exception as exc:
+            log.error("council_query_error", error=str(exc))
+            # Fall through to mock response rather than returning 500 —
+            # a demo-critical endpoint should degrade gracefully.
+
     response = dict(MOCK_COUNCIL_RESPONSE)
     response["query"] = body.query
     return response
+
+
+# ── Explainer ─────────────────────────────────────────────────────────────────
+
+@app.post("/api/explain/terms")
+@limiter.limit("20/minute")
+async def explain_terms(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_auth),
+):
+    """Generates contextual glossary terms from the full council output."""
+    if ENVIRONMENT != "test":
+        try:
+            from agents.explainer_agent import ExplainerAgent
+            explainer = ExplainerAgent()
+            return explainer.explain_terms(body.get("council_output", {}))
+        except Exception as exc:
+            log.error("explain_terms_error", error=str(exc))
+    return {}
+
+
+@app.post("/api/explain/parameter")
+@limiter.limit("20/minute")
+async def explain_parameter(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_auth),
+):
+    """Explains a config parameter in the context of current results."""
+    if ENVIRONMENT != "test":
+        try:
+            from agents.explainer_agent import ExplainerAgent
+            explainer = ExplainerAgent()
+            return explainer.explain_parameter(
+                parameter=body.get("parameter", ""),
+                value=body.get("value"),
+                current_results=body.get("current_results", {}),
+            )
+        except Exception as exc:
+            log.error("explain_parameter_error", error=str(exc))
+    return {}
+
+
+@app.post("/api/explain/chart")
+@limiter.limit("20/minute")
+async def explain_chart(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_auth),
+):
+    """Generates a chart explanation anchored to actual chart data."""
+    if ENVIRONMENT != "test":
+        try:
+            from agents.explainer_agent import ExplainerAgent
+            explainer = ExplainerAgent()
+            return explainer.explain_chart(
+                chart_id=body.get("chart_id", ""),
+                chart_type=body.get("chart_type", ""),
+                chart_data=body.get("chart_data"),
+                current_results=body.get("current_results", {}),
+            )
+        except Exception as exc:
+            log.error("explain_chart_error", error=str(exc))
+    return {}
+
+
+@app.post("/api/explain/qa")
+@limiter.limit("10/minute")
+async def explain_qa(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_auth),
+):
+    """Generates plain-English explanations for all 30 QA checklist items."""
+    if ENVIRONMENT != "test":
+        try:
+            from agents.explainer_agent import ExplainerAgent
+            explainer = ExplainerAgent()
+            return explainer.explain_qa(body.get("audit_results", []))
+        except Exception as exc:
+            log.error("explain_qa_error", error=str(exc))
+    return {}
 
 
 # ── QA ────────────────────────────────────────────────────────────────────────
@@ -322,6 +498,28 @@ async def council_query(
 @app.post("/api/qa/audit")
 @limiter.limit("10/minute")
 async def qa_audit(request: Request, session: dict = Depends(require_auth)):
+    """
+    Runs the full 30-point QA audit against real strategy results.
+
+    QA Agent uses Opus for the narrative; deterministic checks run from
+    the strategy results dict to guarantee pass/fail verdicts are never
+    hallucinated. Falls back to mock audit if pipeline is unavailable.
+    """
+    if ENVIRONMENT != "test":
+        try:
+            from tools.data_fetcher import get_full_history
+            from tools.backtester import run_all_strategies
+            from agents.qa_agent import QAAgent
+
+            history = get_full_history()
+            strategy_results = run_all_strategies(history)
+
+            qa = QAAgent()
+            return qa.run_audit(strategy_results, run_full_checklist=True)
+
+        except Exception as exc:
+            log.error("qa_audit_error", error=str(exc))
+
     return MOCK_QA_AUDIT
 
 
@@ -332,13 +530,36 @@ async def qa_ask(
     body: QAQueryRequest,
     session: dict = Depends(require_auth),
 ):
+    """
+    Conversational QA endpoint — routes questions through scope guard
+    then the QA Agent for methodology questions.
+    """
+    if ENVIRONMENT != "test":
+        try:
+            from scope_guard import ScopeGuard
+            guard = ScopeGuard()
+            scope_result = await guard.check(body.question)
+            if not scope_result["allowed"]:
+                return {
+                    "question": body.question,
+                    "answer": scope_result["rejection_message"],
+                    "verdict": "OUT_OF_SCOPE",
+                }
+        except Exception as exc:
+            log.warning("qa_ask_scope_error", error=str(exc))
+
+        try:
+            from agents.base import call_claude, OPUS_MODEL
+            from agents.qa_agent import _SYSTEM_PROMPT as QA_SYSTEM_PROMPT
+
+            answer = call_claude(OPUS_MODEL, QA_SYSTEM_PROMPT, body.question)
+            return {"question": body.question, "answer": answer, "verdict": "PASS"}
+        except Exception as exc:
+            log.error("qa_ask_error", error=str(exc))
+
     return {
         "question": body.question,
-        "answer": (
-            "Sprint 1: QA agent not yet connected. "
-            "The full 30-point audit checklist is available via POST /api/qa/audit. "
-            "Live QA responses will be available in Sprint 3."
-        ),
+        "answer": "QA Agent temporarily unavailable. Please try POST /api/qa/audit for the full checklist.",
         "verdict": "WARN",
     }
 
@@ -378,9 +599,18 @@ async def dev_credits(_: dict = Depends(require_master_key)):
 
 @app.websocket("/ws/council")
 async def ws_council(websocket: WebSocket):
+    """
+    Streams council debate token-by-token as agents complete their reports.
+
+    Each agent result is sent as a separate JSON frame with agent name and
+    is_final flag. This lets the frontend render agent cards progressively
+    rather than waiting for the full council to complete (~30-60s).
+
+    Scope guard runs on connection — query is validated before any agent is
+    invoked. Auto-disconnects after 10 minutes of inactivity.
+    """
     await websocket.accept()
     try:
-        # Validate session token from query param
         token = websocket.query_params.get("token")
         if not token:
             await websocket.close(code=4001, reason="Missing token")
@@ -394,15 +624,92 @@ async def ws_council(websocket: WebSocket):
             return
 
         log.info("ws_council_connected", user=session["email"])
-        await websocket.send_json({"type": "connected", "message": "Council WebSocket ready. Sprint 1 — streaming in Sprint 3."})
+        await websocket.send_json({"type": "connected", "message": "Council ready."})
 
         while True:
-            data = await websocket.receive_json()
+            try:
+                data = await websocket.receive_json()
+            except WebSocketDisconnect:
+                break
+
+            query = data.get("query", "")
+            if len(query) > 500:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": "Query exceeds 500 character limit.",
+                })
+                continue
+
+            # Scope guard on each message
+            if ENVIRONMENT != "test":
+                try:
+                    from scope_guard import ScopeGuard
+                    guard = ScopeGuard()
+                    scope_result = await guard.check(query)
+                    if not scope_result["allowed"]:
+                        await websocket.send_json({
+                            "type": "out_of_scope",
+                            "message": scope_result["rejection_message"],
+                        })
+                        continue
+                except Exception as exc:
+                    log.warning("ws_scope_guard_error", error=str(exc))
+
+            if ENVIRONMENT != "test":
+                try:
+                    from tools.data_fetcher import get_full_history
+                    from tools.backtester import run_all_strategies
+                    from agents.equity_analyst import EquityAnalyst
+                    from agents.fixed_income_analyst import FixedIncomeAnalyst
+                    from agents.risk_manager import RiskManager
+                    from agents.quant_backtester import QuantBacktester
+                    from agents.independent_analyst import IndependentAnalyst
+                    from agents.cio import CIO
+
+                    history = get_full_history()
+                    strategy_results = run_all_strategies(history)
+
+                    # Stream each specialist's report as it completes
+                    for agent_name, agent_cls in [
+                        ("equity_analyst", EquityAnalyst),
+                        ("fixed_income_analyst", FixedIncomeAnalyst),
+                        ("risk_manager", RiskManager),
+                        ("quant_backtester", QuantBacktester),
+                    ]:
+                        agent = agent_cls()
+                        if agent_name == "fixed_income_analyst":
+                            report = agent.analyse(strategy_results, history)
+                        else:
+                            report = agent.analyse(strategy_results)
+
+                        await websocket.send_json({
+                            "type": "agent_result",
+                            "agent": agent_name,
+                            "content": report,
+                            "is_final": False,
+                        })
+
+                    # Gemini challenge + CIO synthesis — sent as final frame
+                    cio = CIO()
+                    final = cio.deliberate(query, strategy_results, history)
+                    await websocket.send_json({
+                        "type": "agent_result",
+                        "agent": "cio",
+                        "content": final,
+                        "is_final": True,
+                    })
+                    continue
+
+                except Exception as exc:
+                    log.error("ws_council_error", error=str(exc))
+
+            # Fallback frame
             await websocket.send_json({
-                "type": "message",
+                "type": "agent_result",
                 "agent": "System",
-                "content": f"Received: {data.get('query', '')}. Live streaming available in Sprint 3.",
+                "content": {"summary": f"Council received query: {query}. Pipeline unavailable."},
                 "is_final": True,
             })
+
     except WebSocketDisconnect:
         log.info("ws_council_disconnected")

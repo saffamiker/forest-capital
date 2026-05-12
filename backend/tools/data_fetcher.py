@@ -420,7 +420,7 @@ def build_daily_returns(
     hy_returns = hy.pct_change().dropna()
     hy_returns.name = "hy_return"
 
-    df = pd.concat([ig_returns, hy_returns], axis=1).sort_index()
+    df = pd.concat([ig_returns, hy_returns], axis=1, sort=False).sort_index()
     df.index.name = "date"
 
     log.info(

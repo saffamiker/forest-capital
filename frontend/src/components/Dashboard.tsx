@@ -287,9 +287,9 @@ export default function Dashboard() {
               Tier 1 significance: p &lt; 0.005 · FDR corrected · All 5 gates must pass for SIGNIFICANT
             </p>
           </div>
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: 'calc(100vh - 380px)' }}>
             <table className="w-full text-left">
-              <thead>
+              <thead className="sticky top-0 z-10 bg-navy-800">
                 <tr className="border-b border-border">
                   {['#', 'Strategy', 'CAGR', 'Sharpe [95% CI]', 'Max DD', 'DSR', 'p (FDR)', 'CV Score', 'Tier 1'].map((h) => (
                     <th key={h} className="px-3 py-2 text-2xs text-muted uppercase tracking-wide font-medium whitespace-nowrap">{h}</th>

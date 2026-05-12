@@ -1190,9 +1190,168 @@ Developer Tools tab shows:
   Each card: issue, suggestion, copy-paste code diff
   "Mark resolved" to track which suggestions have been applied
 
-=============================================================================
-SECTION 6: PORTFOLIO STRATEGIES
-=============================================================================
+─────────────────────────────────────────────────────────────────────────────
+AGENT 9: Academic Writer — Claude Sonnet (agents/academic_writer.py)
+─────────────────────────────────────────────────────────────────────────────
+
+Model: claude-sonnet-4-20250514
+
+PURPOSE:
+Generates APA 7th edition academic drafts for all three written deliverables.
+All output is labeled "AI DRAFT — REQUIRES HUMAN REVIEW" and is designed
+to be edited and owned by Bob, not submitted verbatim.
+
+CRITICAL CONSTRAINTS:
+Every number, statistic, and finding cited in the output MUST be passed
+explicitly as input. The agent NEVER fabricates statistics, p-values,
+or citations. It draws citations ONLY from references.json. If a number
+is not in the input, it does not appear in the output.
+
+System prompt:
+"You are an academic writer specialising in quantitative finance research
+for graduate-level coursework. You write in APA 7th edition format.
+
+STYLE REQUIREMENTS:
+- Past tense throughout: 'The analysis examined...' not 'The analysis examines...'
+- Third person: 'The study' or 'the research team' not 'we' or 'I'
+- Hedged language: 'results suggest' not 'results prove', 'appeared to' not 'did'
+- Precise statistical reporting: t(282) = 2.14, p = .003, d = 0.43
+- Every claim supported by a specific number from the input data
+- No unsupported generalisations
+
+APA FORMATTING:
+- In-text citations: (Author, Year) or (Author, Year, p. X) for quotes
+- Reference list: hanging indent, alphabetical by author surname
+- Tables: APA Table format with number, title, and notes
+- Figures: Figure N. Caption below in italics
+- Statistics: italicise t, F, p, r, M, SD
+
+ABSOLUTE PROHIBITIONS:
+- Never cite a source not in the provided references list
+- Never report a statistic not in the provided input data
+- Never claim statistical significance beyond what is_significant shows
+- Never use first person
+- Never omit the 'AI DRAFT — REQUIRES HUMAN REVIEW' label"
+
+Tools:
+- write_methodology(data_sources, strategies, statistical_tests) -> str
+  Generates Data & Methodology section (~1 page, APA format)
+  Cites: data hierarchy, provenance, statistical framework,
+  tiered p-value thresholds, CPCV, block bootstrap, DSR
+
+- write_results(strategy_results, significance_flags, stress_tests) -> str
+  Generates Results and Analysis section (~1.5 pages, APA format)
+  Formats all metrics as APA statistical reporting
+  Includes strategy comparison table in APA Table format
+  References stress test periods with specific return figures
+
+- write_discussion(limitations, regime_analysis, recommendations) -> str
+  Generates Discussion and Limitations section (~0.5 pages)
+  Draws from QA Agent limitations[] and Risk Manager regime_caveats[]
+  Frames limitations honestly — no minimising
+
+- write_abstract(all_sections) -> str
+  Generates 150-word abstract after all sections complete
+  Structured: purpose, method, findings, implications
+
+- write_references(citations_used) -> str
+  Generates APA reference list from references.json
+  Only includes works actually cited in the output
+
+- format_apa_table(data, caption, notes) -> str
+  Formats a pandas DataFrame as an APA-compliant table
+
+Endpoints:
+  POST /api/reports/analytical-appendix       — Bob: full APA appendix
+  POST /api/reports/executive-brief-template  — Bob: 5-page brief draft
+  POST /api/reports/midpoint-template         — Bob: 3-page midpoint draft
+  POST /api/reports/storyboard-draft          — Molly: initial AI storyboard
+  POST /api/reports/generate-from-storyboard/:id — Molly: deck + Q&A from
+                                                    her edited storyboard
+  PATCH /api/reports/storyboard/:id           — Molly: save storyboard edits
+
+ALL OUTPUTS: prepend "AI DRAFT — REQUIRES HUMAN REVIEW" banner to every
+generated document. Display prominently in the UI before any generated
+text. This label must appear in the downloaded file, not just the UI.
+
+─────────────────────────────────────────────────────────────────────────────
+REFERENCES.JSON — CURATED CITATION DATABASE
+─────────────────────────────────────────────────────────────────────────────
+
+File: backend/data/references.json
+Purpose: Academic Writer Agent draws citations ONLY from this file.
+         Prevents hallucinated references entirely.
+
+Required entries (minimum — add more as needed):
+
+{
+  "sharpe_1994": {
+    "author": "Sharpe, W. F.",
+    "year": 1994,
+    "title": "The Sharpe Ratio",
+    "source": "Journal of Portfolio Management, 21(1), 49-58",
+    "apa": "Sharpe, W. F. (1994). The Sharpe Ratio. Journal of Portfolio Management, 21(1), 49-58.",
+    "use_for": ["sharpe ratio methodology", "risk-adjusted performance"]
+  },
+  "black_litterman_1992": {
+    "author": "Black, F., & Litterman, R.",
+    "year": 1992,
+    "title": "Global Portfolio Optimization",
+    "source": "Financial Analysts Journal, 48(5), 28-43",
+    "apa": "Black, F., & Litterman, R. (1992). Global Portfolio Optimization. Financial Analysts Journal, 48(5), 28-43.",
+    "use_for": ["Black-Litterman strategy", "portfolio optimization"]
+  },
+  "lopez_de_prado_2018": {
+    "author": "López de Prado, M.",
+    "year": 2018,
+    "title": "Advances in Financial Machine Learning",
+    "source": "Wiley",
+    "apa": "López de Prado, M. (2018). Advances in Financial Machine Learning. Wiley.",
+    "use_for": ["CPCV", "walk-forward", "purged cross-validation", "deflated Sharpe"]
+  },
+  "bailey_lopez_de_prado_2012": {
+    "author": "Bailey, D. H., & López de Prado, M.",
+    "year": 2012,
+    "title": "The Sharpe Ratio Efficient Frontier",
+    "source": "Journal of Risk, 15(2), 3-44",
+    "apa": "Bailey, D. H., & López de Prado, M. (2012). The Sharpe Ratio Efficient Frontier. Journal of Risk, 15(2), 3-44.",
+    "use_for": ["deflated Sharpe ratio", "DSR", "multiple testing"]
+  },
+  "benjamin_2018": {
+    "author": "Benjamin, D. J., et al.",
+    "year": 2018,
+    "title": "Redefine Statistical Significance",
+    "source": "Nature Human Behaviour, 2(1), 6-10",
+    "apa": "Benjamin, D. J., et al. (2018). Redefine Statistical Significance. Nature Human Behaviour, 2(1), 6-10.",
+    "use_for": ["p < 0.005 threshold", "statistical significance standard"]
+  },
+  "markowitz_1952": {
+    "author": "Markowitz, H.",
+    "year": 1952,
+    "title": "Portfolio Selection",
+    "source": "Journal of Finance, 7(1), 77-91",
+    "apa": "Markowitz, H. (1952). Portfolio Selection. Journal of Finance, 7(1), 77-91.",
+    "use_for": ["mean-variance optimization", "efficient frontier", "modern portfolio theory"]
+  },
+  "maillard_roncalli_teiletche_2010": {
+    "author": "Maillard, S., Roncalli, T., & Teïletche, J.",
+    "year": 2010,
+    "title": "The Properties of Equally Weighted Risk Contribution Portfolios",
+    "source": "Journal of Portfolio Management, 36(4), 60-70",
+    "apa": "Maillard, S., Roncalli, T., & Teïletche, J. (2010). The Properties of Equally Weighted Risk Contribution Portfolios. Journal of Portfolio Management, 36(4), 60-70.",
+    "use_for": ["risk parity", "equal risk contribution"]
+  },
+  "harvey_liu_2015": {
+    "author": "Harvey, C. R., & Liu, Y.",
+    "year": 2015,
+    "title": "Backtesting",
+    "source": "Journal of Portfolio Management, 42(1), 13-28",
+    "apa": "Harvey, C. R., & Liu, Y. (2015). Backtesting. Journal of Portfolio Management, 42(1), 13-28.",
+    "use_for": ["multiple comparison problem", "FDR correction", "overfitting"]
+  }
+}
+
+
 
 All 10 strategies. Each supports walk-forward, transaction costs,
 time-varying risk-free rate, and the full statistical and CV suite.
@@ -2743,6 +2902,11 @@ Sprint 4 (May 11-12):
   ─ Render (backend) + Vercel (frontend) live
   ─ Magic link via SendGrid production
   ─ All four team emails can log in to live URL
+  ACADEMIC WRITER AGENT (scaffold only in Sprint 4)
+  ─ agents/academic_writer.py created with system prompt
+  ─ backend/data/references.json created with all required entries
+  ─ Agent registered but report endpoints deferred to Sprint 6
+  ─ This ensures the agent exists for council integration in Sprint 5
   UI FIX — FIXED NAVIGATION AND SIDE PANELS
   ─ Top navigation bar must be position: fixed (sticky) — never scrolls
     away. Currently disappears on scroll in all dashboard views.
@@ -2789,19 +2953,100 @@ Sprint 5 (Jun 2-21):
   SPRINT 5 TESTS
 
 Sprint 6 (Jun 22-Jul 1):
-  REPORT GENERATORS
+  ACADEMIC WRITER AGENT + REPORT GENERATORS
+  ─ agents/academic_writer.py — Agent 9 (Sonnet)
+  ─ backend/data/references.json — curated citation database
+  ─ All output labeled "AI DRAFT — REQUIRES HUMAN REVIEW"
+  BOB'S DELIVERABLES
   ─ POST /api/reports/analytical-appendix
-    Structured HTML/PDF export — all sections documented in spec
+    APA-formatted HTML — Academic Writer + data provenance
   ─ POST /api/reports/executive-brief-template
-    Pre-populated Word doc structure from system outputs
+    .docx — full APA draft, Bob edits
   ─ POST /api/reports/midpoint-template
-    Pre-populated 3-page structure for May 27 submission
+    .docx — pre-populated 3-page structure
+  MOLLY'S DELIVERABLES — STORYBOARD EDITOR + GENERATION
+  ─ Storyboard Editor UI component (React, Sprint 6)
+    Slide cards with drag-to-reorder, owner assignment,
+    timing controls, chart dropdown, headline + speaker note editing
+    Running timing bar (GREEN ≤20min, AMBER 20-21min, RED >21min)
+  ─ POST /api/documents/storyboard/draft
+    AI generates initial 15-slide storyboard from strategy results
+  ─ PATCH /api/documents/:id/draft
+    Auto-saves working copy every 30 seconds
+  ─ POST /api/documents/:id/versions
+    Saves named immutable version snapshot
+  ─ POST /api/documents/:id/restore/:ver_id
+    Restores prior version as new working draft
+  ─ POST /api/reports/generate-from-storyboard/:id
+    Generates .pptx deck OR Q&A .docx from Molly's current version
+    Deck biased by her slide order, chart choices, timing
+    Q&A biased by her emphasis (timing allocation per slide)
+  ─ [ Regenerate speaker note ] per slide — re-calls Academic Writer
+  ─ All outputs: AI DRAFT — REQUIRES HUMAN REVIEW footer/banner
+  PRESENTATION SCRIPT WRITER
+  ─ output_type: "script" added to generate-from-storyboard
+  ─ Reads slide.owner directly — no new data model needed
+  ─ Three outputs: full team script, individual scripts (×3),
+    rehearsal guide with timing cues and audience reaction notes
+  ─ Voice differentiation: Molly (presentation), Michael (technical),
+    Bob (academic, mirrors his section editor prose style)
+  ─ 130 words/min timing guidance, word count per paragraph
+  ─ AMBER/RED highlights if paragraph exceeds timing target
+  ─ Script editor with Gemini assistant inline
+  ─ Version controlled in document_versions table
+
+  ─ POST /api/documents/:id/assistant (Gemini Pro)
+  ─ Natural language editing for Molly's storyboard
+    and Bob's section editor
+  ─ Diff display before accepting any change
+    (per-paragraph accept/reject, not all-at-once)
+  ─ Multi-turn conversation within session
+  ─ Scope guard prevents off-topic requests
+  ─ Citations restricted to references.json only
+  ─ Numbers restricted to strategy_results context
+  ─ All calls logged to council_sessions table
+  ─ Gemini assistant panel (purple accent, collapsible)
+    Context-aware: updates when slide/section changes
+
+  VERSION CONTROL — SHARED INFRASTRUCTURE
+  ─ documents table — one row per document
+  ─ document_versions table — immutable named snapshots
+  ─ document_drafts table — mutable working copy
+  ─ VersionHistory UI component — shared between storyboard and docs
+    Shows named versions + auto-saves, preview any version,
+    restore any version, save named version with optional notes
+    Change summary auto-generated on each named save
+  UI/UX DESIGN — ALL SPRINT 6 COMPONENTS
+  ─ Read frontend-design SKILL.md before every component
+  ─ Bloomberg Terminal aesthetic throughout — no consumer styling
+  ─ Editing surfaces: bg_elevated, border_medium on focus
+  ─ Diff display: dark red removed / dark green added
+  ─ Timing indicators: peripheral, amber/red highlights only
+  ─ Version History panel: 280px right sidebar, subdued
+  ─ Gemini Assistant panel: purple accent, conversational but formal
+  ─ AI DRAFT banner: amber, sticky, full-width, never dismissable
+  ─ Reports screen: two-column card grid, accent_blue generate buttons
+  ─ UI/UX Agent sprint review before declaring Sprint 6 complete
+  FRONTEND TESTS — all new Sprint 6 components:
+  ─ ReportsScreen.test.tsx
+  ─ StoryboardEditor.test.tsx
+  ─ SectionEditor.test.tsx
+  ─ ScriptEditor.test.tsx
+  ─ VersionHistory.test.tsx (shared component)
+  ─ GeminiAssistant.test.tsx (shared component)
+  ─ Full test specs in MANIFEST.md Sprint 6 section
+  ─ Accessibility: all interactive elements keyboard navigable
+    all panels have correct ARIA roles and labels
+    diff colours pass WCAG AA contrast ratio
+
   FINAL POLISH
   ─ UI/UX Agent sprint review — Big 4 standards check
   ─ WCAG AA accessibility audit (axe-core)
   ─ Performance benchmarks (p95 response times)
   ─ Print stylesheet (@media print)
   ─ Full regression suite
+  ─ test_reproducibility.py — pipeline determinism
+  ─ test_report_accuracy.py — every number traceable to DB
   ─ Demo rehearsal — present mode end-to-end test
   ─ Forest Capital branding toggle reviewed and approved
   ─ Final git tag: v1.0.0-presentation
@@ -2904,52 +3149,779 @@ PresentationPackage (Present mode only, nav bar right):
   Download triggers immediately — no server round trip
   Uses JSZip + html2canvas client-side
 
+─── AI DRAFT LABELING — ALL GENERATED DOCUMENTS ─────────────────────────────
+
+Every document generated by the Academic Writer Agent or any report
+endpoint must carry this label prominently:
+
+  Banner text:  "AI DRAFT — REQUIRES HUMAN REVIEW"
+  Colour:       Amber (#f59e0b) background, dark text
+  Position:     Top of every page in the downloaded file
+                Top of the preview panel in the UI
+  Font:         Bold, 11pt, all caps
+  Sub-text:     "This document was generated by an AI system using data
+                 from the Forest Capital Analytics Platform. All statistics,
+                 citations, and findings must be verified by a team member
+                 before submission. Do not submit without human review."
+
+This label appears in:
+  — The UI preview before downloading
+  — The downloaded .docx file (header on every page)
+  — The downloaded .html file (sticky banner)
+  — The downloaded .pptx file (footer on every slide)
+
 ─── REPORT GENERATOR SPEC (Sprint 6) ────────────────────────────────────────
+
+─── BOB'S DELIVERABLES ──────────────────────────────────────────────────────
 
 POST /api/reports/analytical-appendix
   Returns: downloadable HTML file (self-contained, printable)
+  Generated by: Academic Writer Agent (write_methodology + write_results)
+  Label: AI DRAFT — REQUIRES HUMAN REVIEW on every page
   Sections:
-    1. Data Sources and Provenance
-       — provenance.json rendered as formatted table
+    1. Abstract (150 words, APA format)
+    2. Data Sources and Provenance
+       — provenance.json as APA-formatted table
        — Date ranges, sources, cleaning steps, validation results
-    2. Portfolio Construction Methodology
-       — Each strategy's rules in plain English
+       — Cross-validation results with disclosed WARN status
+    3. Portfolio Construction Methodology (APA academic prose)
+       — Each strategy described with citation to source paper
        — Mathematical specification for each
-    3. Statistical Results
-       — All metrics for all 10 strategies
-       — All 12 test results with p-values and thresholds
+    4. Statistical Results (APA statistical reporting format)
+       — All metrics for all 10 strategies in APA Table format
+       — All 12 test results: t(282) = x.xx, p = .xxx format
        — CPCV Sharpe distributions
        — CV stability scores
-    4. Sensitivity Analysis
+    5. Sensitivity Analysis
        — Key parameters tested at ±20%
        — Impact on Sharpe ratio and max drawdown
-       — Table format: parameter | base | -20% | +20% | impact
-    5. Sanity Check Results
+    6. Sanity Check Results
        — All 10 checks with actual vs expected
-    6. Reproducibility Notes
-       — How to rerun: git clone, pip install, python run_backtest.py
+    7. Limitations (from QA Agent + Risk Manager output)
+    8. References (APA reference list from references.json)
+    9. Reproducibility Notes
        — Random seed, data file, all config parameters
 
 POST /api/reports/executive-brief-template
   Returns: .docx file (Word format, Bob edits directly)
+  Generated by: Academic Writer Agent (full brief draft)
+  Label: AI DRAFT — REQUIRES HUMAN REVIEW header on every page
   Pre-populated from system outputs:
+    [Abstract] — 150-word summary from Academic Writer
     [Executive Summary] — 2 paragraphs from CIO synthesis
-    [Methodology] — QA audit plain English summary
-    [Key Findings] — Top 3 significant strategies with metrics
-    [Limitations] — Limitations generator output
+    [Methodology] — Academic prose from write_methodology()
+    [Key Findings] — Top 3 significant strategies, APA stats format
+    [Discussion] — From write_discussion() with limitations
     [Recommendations] — CIO final recommendation
+    [References] — APA reference list from references.json
     [Appendix: Charts] — 5 key charts embedded
-  Bob fills: interpretation, context, academic references, transitions
   Format: 5 pages, double-spaced, 12pt — matches brief requirements
+  Bob fills: personal analytical interpretation, transitions, refinement
 
 POST /api/reports/midpoint-template
   Returns: .docx file pre-populated for May 27 submission
-  Section 1 (Data & Methodology): provenance + strategy descriptions
-  Section 2 (Preliminary Results): current system results for BENCHMARK
-    plus whichever strategies are live at time of generation
+  Generated by: Academic Writer Agent
+  Label: AI DRAFT — REQUIRES HUMAN REVIEW header on every page
+  Section 1 (Data & Methodology): write_methodology() output
+  Section 2 (Preliminary Results): write_results() for available strategies
   Section 3 (Roles): Michael/Bob/Molly division from CLAUDE.md
   Section 4 (Next Steps): remaining sprints listed as planned work
   Bob fills: interpretation, academic justification, open questions
+
+─── MOLLY'S DELIVERABLES — HUMAN-DIRECTED STORYBOARD ARCHITECTURE ───────────
+
+DESIGN PRINCIPLE:
+Molly edits the structure first. Detailed outputs flow from her decisions.
+The AI serves her creative direction — it does not substitute for it.
+Three steps: AI draft → Molly edits → AI generates from her outline.
+
+─── STEP 1: STORYBOARD DRAFT GENERATION ─────────────────────────────────────
+
+POST /api/reports/storyboard-draft
+  Called when Molly clicks "Create Storyboard" on the Reports screen.
+  Returns: storyboard JSON stored in PostgreSQL (not a document).
+  Generated by: Academic Writer Agent + CIO synthesis + strategy results.
+  Displayed immediately in the Storyboard Editor (see UI spec below).
+  Label: AI DRAFT — REQUIRES HUMAN REVIEW banner at top of editor.
+
+  Initial storyboard: 15 slides pre-populated from actual system data.
+  Each slide object:
+  {
+    id:           uuid,
+    order:        int,
+    owner:        "Molly" | "Michael" | "Bob",
+    timing_mins:  float,
+    headline:     string,        ← AI-suggested, Molly edits
+    key_point:    string,        ← AI-suggested from real metrics
+    chart_ref:    string | null, ← filename from export pack
+    speaker_note: string,        ← AI-drafted, Molly edits
+    live_demo:    bool,          ← show Live Demo button on this slide?
+    transition:   string,        ← suggested transition to next slide
+    ai_draft:     true           ← always true on initial generation
+  }
+
+  Default 15-slide structure (populated with real data):
+    1.  Title + research question           Molly   0:30
+    2.  System architecture                 Molly   1:00
+    3.  Data sources and provenance         Molly   1:00
+    4.  Portfolio strategies overview       Molly   1:30
+    5.  Cumulative returns — 23 years       Molly   2:00
+    6.  Risk-adjusted performance           Molly   1:30
+    7.  Regime analysis                     Molly   2:00
+    8.  2008 GFC stress test                Molly   1:00
+    9.  2022 rate hike stress test          Molly   1:30
+    10. Statistical significance            Molly   1:00
+    11. AI council architecture             Michael 1:30
+    12. What we learned from AI             Michael 1:30
+    13. Limitations and risks               Bob     1:30
+    14. Strategic recommendations           Molly   1:00
+    15. Q&A                                 All     remaining
+    Total: 19:30 / 20:00
+
+─── STEP 2: STORYBOARD EDITOR (UI component) ─────────────────────────────────
+
+New screen: Storyboard Editor
+Route: /reports/storyboard
+Accessible from Reports screen → "Molly's Deliverables" section.
+Auth: all three modes (Analyst / Commentary / Present).
+
+Layout:
+  Left panel (320px):   Slide list — all 15 cards in order
+                        Drag handles for reordering
+                        Running timing bar (updates live)
+                        "Add slide" button at bottom
+  Right panel (flex):   Expanded editor for selected slide
+
+Running timing bar (top of left panel):
+  ████████████████████░  19:30 / 20:00
+  GREEN if ≤ 20:00, AMBER if 20:00-21:00, RED if > 21:00
+  Updates immediately as timing values change
+
+Slide card (collapsed, left panel):
+  ┌─────────────────────────────────────┐
+  │ ≡  Slide 5  ·  Molly  ·  2:00      │
+  │ Cumulative returns outperform...    │
+  │ 📊 cumulative_returns.png           │
+  └─────────────────────────────────────┘
+
+Slide editor (expanded, right panel):
+  ┌─────────────────────────────────────────────────┐
+  │  AI DRAFT — REQUIRES HUMAN REVIEW               │  ← amber banner
+  │─────────────────────────────────────────────────│
+  │  SLIDE 5                    Owner: [Molly ▼]    │
+  │─────────────────────────────────────────────────│
+  │  HEADLINE                                        │
+  │  ┌───────────────────────────────────────────┐  │
+  │  │ Regime Switching outperformed benchmark   │  │  ← text input
+  │  │ by 2.52% annually over 23 years           │  │
+  │  └───────────────────────────────────────────┘  │
+  │─────────────────────────────────────────────────│
+  │  CHART                      Timing: [2:00 ▼]   │
+  │  [cumulative_returns.png ▼]                     │  ← dropdown
+  │  ┌─ preview thumbnail ──────────────────────┐  │
+  │  │  [chart preview image]                   │  │
+  │  └──────────────────────────────────────────┘  │
+  │─────────────────────────────────────────────────│
+  │  KEY DATA POINT                                  │
+  │  ┌───────────────────────────────────────────┐  │
+  │  │ Sharpe 0.629 vs 0.522 benchmark           │  │  ← text input
+  │  └───────────────────────────────────────────┘  │
+  │─────────────────────────────────────────────────│
+  │  SPEAKER NOTE                                    │
+  │  ┌───────────────────────────────────────────┐  │
+  │  │ The regime switching strategy identifies  │  │  ← expandable
+  │  │ macro regimes using VIX and yield curve   │  │    textarea
+  │  │ signals. Its 7.74% CAGR vs 8.58% for     │  │
+  │  │ pure equity suggests...                   │  │
+  │  └───────────────────────────────────────────┘  │
+  │  [ Regenerate speaker note ]                    │  ← AI re-draft
+  │─────────────────────────────────────────────────│
+  │  Live Demo on this slide:  [OFF ▼]              │
+  │  Transition to next:  "Move to risk metrics..." │
+  │─────────────────────────────────────────────────│
+  │                    [ Remove slide ]             │
+  └─────────────────────────────────────────────────┘
+
+Controls:
+  Reorder:    drag handles on left panel cards
+  Owner:      dropdown — Molly / Michael / Bob
+  Timing:     dropdown — 0:30 / 1:00 / 1:30 / 2:00 / 2:30 / 3:00
+  Chart:      dropdown — all files from export pack + "None"
+  Headline:   free text input
+  Key point:  free text input
+  Speaker note: textarea, expandable
+  [ Regenerate speaker note ]: re-calls Academic Writer with
+    updated headline and key point as context
+  [ Add slide after ]: inserts blank slide at that position
+  [ Remove slide ]: deletes with confirmation
+
+Auto-save: every 30 seconds via PATCH /api/reports/storyboard/:id
+Manual save: "Save" button (top right)
+Last saved timestamp shown at top of editor
+
+─── STEP 3: GENERATE FROM STORYBOARD ────────────────────────────────────────
+
+Once Molly is satisfied with her edited storyboard, she clicks:
+  [ Generate Presentation Deck ]
+  [ Generate Q&A Preparation ]
+
+Both read her saved storyboard as authoritative input.
+The AI generates downstream from her decisions, not from raw data.
+
+POST /api/reports/generate-from-storyboard/:storyboard_id
+  Body: { output_type: "deck" | "qa" | "script" }
+
+  For "deck":
+    Reads Molly's edited slide structure
+    Generates .pptx using pptx skill:
+      — One slide per storyboard entry, in her order
+      — Her headline as the slide title
+      — Her chosen chart embedded at 2x resolution
+      — Her speaker note in the notes pane
+      — Owner tag visible in presenter view
+      — Timing shown in presenter view
+      — Forest Capital branding throughout
+      — "AI DRAFT — REQUIRES HUMAN REVIEW" footer every slide
+    Returns: downloadable .pptx
+
+  For "qa":
+    Reads her storyboard to understand emphasis:
+      — Which slides she spent most time on (timing)
+      — Which stress tests she featured
+      — Which strategies she highlighted
+      — Which owner sections exist (Michael, Bob, Molly)
+    Generates Q&A document biased toward her chosen emphasis:
+      — More 2022 questions if she gave it 2 slides
+      — More AI questions if Michael has 3+ minutes
+      — Owner assignment matches storyboard owners
+    Returns: downloadable .docx
+    Label: AI DRAFT — REQUIRES HUMAN REVIEW
+
+  For "script":
+    See full spec below.
+
+─── PRESENTATION SCRIPT WRITER ───────────────────────────────────────────────
+
+PURPOSE:
+Generates a full spoken presentation script from the storyboard.
+Three presenters, three voices, one document.
+Each presenter gets their own section to edit independently.
+Ownership is read directly from slide.owner — no new data needed.
+
+OUTPUTS — three distinct documents:
+
+  1. Full Team Script (.docx)
+     All slides in order, grouped by presenter section.
+     Each presenter's section clearly labelled.
+     Used for team rehearsal and timing review.
+
+  2. Individual Scripts (.docx × 3)
+     Molly's slides only — her script.
+     Michael's slides only — his script.
+     Bob's slides only — his script.
+     Each person gets only what they need to rehearse.
+
+  3. Rehearsal Guide (.docx)
+     Full script + slide cues + transition phrases
+     + anticipated audience reactions per section.
+     Includes timing markers every 2 minutes.
+
+All outputs: AI DRAFT — REQUIRES HUMAN REVIEW
+All outputs: versioned in document_versions table
+All outputs: Gemini assistant available for inline editing
+
+SCRIPT GENERATION — how it works:
+
+  Reads from storyboard:
+    slide.owner, slide.timing_mins, slide.headline,
+    slide.key_point, slide.speaker_note, slide.chart_ref,
+    slide.transition
+
+  Reads from strategy results:
+    Actual metrics for any slide that references data
+    (Gemini cannot introduce numbers not in these results)
+
+  Reads from Bob's document versions (if available):
+    Bob's prose style from the section editor informs
+    the voice of his script sections — Gemini mirrors
+    his vocabulary and sentence structure
+
+  Per slide, generates:
+    Opening sentence    — hooks the audience
+    Core paragraph      — delivers the key point in spoken prose
+    Data reference      — if chart_ref is set, narrates what to look at
+    Closing sentence    — lands the point before transitioning
+    Transition phrase   — bridges to the next slide's owner/topic
+
+TIMING GUIDANCE:
+  130 words per minute — measured professional delivery pace
+  Each slide paragraph word count = timing_mins × 130
+  Word count shown per paragraph in the editor
+  Paragraph highlighted AMBER if >10% over target word count
+  Paragraph highlighted RED if >25% over target word count
+
+VOICE DIFFERENTIATION:
+  Molly's sections:
+    Presentation voice — confident, clear, data-forward
+    Leads with the visual: "What you're seeing here is..."
+    Connects findings to the research question explicitly
+
+  Michael's sections:
+    Technical voice — precise, enthusiastic about the architecture
+    First person acceptable: "When we built the council..."
+    Honest about what worked and what didn't
+
+  Bob's sections:
+    Academic voice — mirrors his prose from section editor
+    Hedged where appropriate: "The results suggest..."
+    Connects methodology to findings directly
+
+SCRIPT DOCUMENT STRUCTURE (full team script):
+
+  ────────────────────────────────────────────────
+  FOREST CAPITAL PORTFOLIO INTELLIGENCE SYSTEM
+  FNA 670 MSFA Practicum — Queens University
+  Presentation Script  ·  AI DRAFT — REQUIRES HUMAN REVIEW
+  Total time: 19:30  ·  Generated: [timestamp]
+  ────────────────────────────────────────────────
+
+  MOLLY — Slides 1-6, 9-10, 14  (approx. 10:00)
+  ────────────────────────────────────────────────
+
+  [SLIDE 1 — Title]  0:30  ·  Molly
+  ▶ Good evening. The question we set out to answer...
+    [full spoken paragraph, ~65 words]
+  → TRANSITION TO SLIDE 2: "Let me show you what we built..."
+
+  [SLIDE 2 — Architecture]  1:00  ·  Molly
+  ▶ At its core, this system compares ten portfolio...
+    [full spoken paragraph, ~130 words]
+  → TRANSITION TO SLIDE 3: "Before we get to results..."
+
+  ...
+
+  MICHAEL — Slides 11-12  (approx. 3:00)
+  ────────────────────────────────────────────────
+
+  [SLIDE 11 — AI Council]  1:30  ·  Michael
+  ▶ What makes this system unusual is what happens...
+    [full spoken paragraph, ~195 words]
+  → TRANSITION TO SLIDE 12: "And what did we learn..."
+
+  ...
+
+  BOB — Slide 13  (approx. 1:30)
+  ────────────────────────────────────────────────
+
+  [SLIDE 13 — Limitations]  1:30  ·  Bob
+  ▶ Every analytical framework has boundaries...
+    [full spoken paragraph, ~195 words]
+  → TRANSITION TO SLIDE 14: "With those caveats in mind..."
+
+  ────────────────────────────────────────────────
+  MOLLY — Slide 14  (approx. 1:00)
+  ...
+
+REHEARSAL GUIDE — additional content per slide:
+
+  [SLIDE 5 — Cumulative Returns]  2:00  ·  Molly
+  ▶ [spoken paragraph]
+  → TRANSITION
+  ⏱ TIMING CUE: should be at 7:30 total when this slide ends
+  👁 VISUAL CUE: click to advance chart animation before speaking
+  💡 AUDIENCE REACTION: Forest Capital may ask about the 2022 dip
+     here — acknowledge it, say "we address this directly in a moment"
+  ⚠ AVOID: don't cite the Sharpe ratio on this slide — save for slide 6
+
+SCRIPT EDITOR UI:
+  Same editor layout as Bob's section editor
+  Each slide's script is a section
+  Gemini assistant available:
+    "Make my opening line more commanding"
+    "The transition to Michael's section feels abrupt — fix it"
+    "Cut slide 3 script by 20 seconds"
+    "I keep stumbling on this sentence — simplify it"
+  Version control: same document_versions infrastructure
+  Individual scripts generated on demand from the full script
+    by filtering to owner = "Molly" / "Michael" / "Bob"
+
+UI ENTRY POINTS — added to Reports screen, Molly's Deliverables:
+
+  ┌─────────────────────────────────────────────────────┐
+  │  From your storyboard (v3):                         │
+  │  [ Generate Presentation Deck (.pptx)  ]            │
+  │  [ Generate Presentation Script (.docx)]            │
+  │  [ Generate Individual Scripts (3×.docx)]           │
+  │  [ Generate Rehearsal Guide (.docx)    ]            │
+  │  [ Generate Q&A Preparation (.docx)   ]             │
+  └─────────────────────────────────────────────────────┘
+
+
+
+─── VERSION CONTROL — SHARED ARCHITECTURE (Molly + Bob) ─────────────────────
+
+Same versioning model for both storyboard and academic documents.
+Iteration is the core workflow: AI draft → human edits → save version →
+regenerate or refine → iterate to final. Rollback gives confidence to
+experiment without losing good work.
+
+VERSIONING MODEL:
+  Draft       — mutable working copy, auto-saved every 30 seconds
+  Version     — immutable named snapshot created by user
+  Restore     — loads any prior version as new working draft,
+                records the rollback in history (never deletes)
+
+DATABASE SCHEMA:
+
+  CREATE TABLE documents (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    doc_type        VARCHAR NOT NULL,
+      -- "storyboard" | "analytical_appendix" | "executive_brief"
+      -- | "midpoint_paper" | "qa_preparation"
+    owner_email     VARCHAR NOT NULL,
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    strategy_hash   VARCHAR,   -- hash of results when first generated
+    is_finalised    BOOLEAN DEFAULT false
+  );
+
+  CREATE TABLE document_versions (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_id     UUID REFERENCES documents(id),
+    version_number  INT NOT NULL,
+    version_name    VARCHAR,   -- user-named or auto: "v1", "v2"...
+    content         JSONB NOT NULL,  -- full immutable snapshot
+    change_summary  VARCHAR,   -- auto-diff or user note
+    created_at      TIMESTAMPTZ DEFAULT now(),
+    created_by      VARCHAR,   -- email
+    strategy_hash   VARCHAR,   -- hash of results at time of save
+    is_auto_save    BOOLEAN DEFAULT false,
+    restored_from   UUID REFERENCES document_versions(id)
+    -- set if this version was created by restoring a prior version
+  );
+
+  CREATE TABLE document_drafts (
+    document_id     UUID PRIMARY KEY REFERENCES documents(id),
+    content         JSONB NOT NULL,
+    last_saved_at   TIMESTAMPTZ DEFAULT now(),
+    based_on_version UUID REFERENCES document_versions(id)
+  );
+
+API ENDPOINTS:
+  POST   /api/documents/:doc_type/draft      — create new document + AI draft
+  GET    /api/documents/:id/draft            — load current working draft
+  PATCH  /api/documents/:id/draft            — auto-save working draft
+  POST   /api/documents/:id/versions         — save named version snapshot
+  GET    /api/documents/:id/versions         — list all versions
+  GET    /api/documents/:id/versions/:ver_id — load specific version (preview)
+  POST   /api/documents/:id/restore/:ver_id  — restore prior version as new draft
+  DELETE /api/documents/:id                  — soft delete (is_finalised = false)
+
+VERSION HISTORY UI COMPONENT (shared, used in both editors):
+
+  Version History panel (right sidebar, collapsible):
+
+  ● Draft  Tue 10:23am  (unsaved changes)    [ Save Version ]
+
+  ─ Named versions ──────────────────────────────────────
+  v3  Tue 9:08am  "After team review"
+      3 sections edited, 847 words added
+                            [Preview]  [Restore]
+
+  v2  Mon 4:31pm  "Reordered after discussion"
+      Restored from v1, timing adjusted
+                            [Preview]  [Restore]
+
+  v1  Mon 2:14pm  "Initial AI draft"
+      Generated from strategy results 2026-05-12
+                            [Preview]  [Restore]
+
+  ─ Auto-saves ──────────────────────────────────────────
+  Auto  Tue 10:20am        [Preview]  [Restore]
+  Auto  Tue 10:17am        [Preview]  [Restore]
+  [ Show all auto-saves ]
+
+  [ Save Version ] dialog:
+    Version name: [After team review    ]  (optional)
+    Notes:        [                     ]  (optional)
+    [ Save ]  [ Cancel ]
+
+  [ Restore ] confirmation:
+    "Restore v1? This creates v4 with v1 content.
+     Your current draft will be saved as an auto-save first."
+    [ Restore ]  [ Cancel ]
+
+CHANGE SUMMARY — auto-generated on each named save:
+  Storyboard: diff slide arrays — "3 headlines edited, slide 8
+    moved to position 6, slide 12 removed, timing -1:30"
+  Documents: word count delta + section names changed —
+    "Section 2 expanded (+412 words), Section 4 replaced"
+
+─── MOLLY'S STORYBOARD EDITOR — VERSION CONTROL SPECIFICS ───────────────────
+
+Content stored per version: full slide JSON array
+  Each slide: id, order, owner, timing_mins, headline, key_point,
+              chart_ref, speaker_note, live_demo, transition, ai_draft
+
+Diff between versions: computed from slide arrays
+  Detects: slide added, removed, reordered, field edited
+  Shown in change_summary column
+
+Regenerate AI Draft:
+  Creates a new document (not a new version of the old one)
+  Old storyboard with all its versions remains intact
+  Molly can have multiple storyboards — picks the one to generate from
+
+Generate deck / Q&A:
+  Always generates from the current named version (not the draft)
+  Requires at least one named version to exist
+  Records which version was used in generated_reports table
+
+─── BOB'S DOCUMENT EDITOR — VERSION CONTROL SPECIFICS ───────────────────────
+
+In-browser section editor. Each document broken into discrete sections
+so Bob can edit section by section rather than a single prose block.
+Word export compiles all sections at any named version.
+
+Content stored per version: JSONB with section array
+  {
+    "sections": [
+      {
+        "id":          "abstract",
+        "title":       "Abstract",
+        "ai_draft":    "...",   ← original AI text, immutable
+        "content":     "...",   ← Bob's current text
+        "word_count":  int,
+        "last_edited": timestamp
+      },
+      ...
+    ]
+  }
+
+Section editor UI (per section):
+  ┌─────────────────────────────────────────────────────┐
+  │  SECTION 2 — METHODOLOGY              [Edit ✏]     │
+  │─────────────────────────────────────────────────────│
+  │  The study employed a quantitative backtesting...   │  ← Bob's text
+  │  [rich text area when editing]                      │
+  │─────────────────────────────────────────────────────│
+  │  [ View AI Draft ]  [ Regenerate AI ]  [ Revert ]  │
+  │  Word count: 412  ·  Last edited: 10:14am           │
+  └─────────────────────────────────────────────────────┘
+
+  [ View AI Draft ]    — shows original AI text in a side panel
+                         for reference without overwriting
+  [ Regenerate AI ]    — calls Academic Writer with updated results,
+                         places new draft alongside Bob's text
+  [ Revert ]           — replaces Bob's text with AI draft for this
+                         section only (with confirmation)
+
+Word export at any version:
+  GET /api/documents/:id/versions/:ver_id/export?format=docx
+  Compiles all sections from that version snapshot into Word format
+  Labels export: "AI DRAFT — REQUIRES HUMAN REVIEW" if any section
+  still matches the original AI draft
+
+─── GEMINI EMBEDDED ASSISTANT — BOTH EDITORS ────────────────────────────────
+
+Both the Storyboard Editor (Molly) and the Section Editor (Bob) include
+an embedded Gemini Pro assistant panel for natural language editing.
+
+WHY GEMINI:
+  The council already uses Gemini Pro as an independent voice precisely
+  because it thinks differently from Claude. As an embedded editor it
+  won't simply restate what the Academic Writer generated — it will
+  genuinely challenge and improve it. Bob gets a second analytical voice
+  on his prose. Molly gets a creative collaborator who didn't write the
+  original storyboard. The Gemini integration from Sprint 4 is reused.
+
+CRITICAL CONSTRAINT — same rule as all agents:
+  Gemini can only reference numbers explicitly present in the document
+  or passed from the strategy results context.
+  Gemini cannot introduce new statistics not in the input.
+  Gemini cannot cite sources not in references.json.
+  Every suggested change shown as a diff before accepting.
+  Scope guard fires if query goes outside the document/presentation domain.
+
+ENDPOINT:
+  POST /api/documents/:id/assistant
+  Body:
+    {
+      message:        str,          — Molly or Bob's natural language request
+      context_type:   "slide" | "section",
+      context_id:     str,          — slide id or section id
+      context_content: str,         — current text of that slide/section
+      strategy_results: dict,       — current strategy metrics (read-only)
+      doc_type:       str           — for scope guard context
+    }
+  Model: Gemini Pro (google-generativeai)
+  Returns:
+    {
+      suggestion:     str,          — Gemini's proposed replacement text
+      diff:           object,       — structured diff (removed/added spans)
+      explanation:    str,          — why Gemini made this suggestion
+      confidence:     float,        — 0-1
+      citations_used: list[str]     — references.json keys cited, if any
+    }
+
+WHAT GEMINI CAN DO:
+  Rewrite for tone:
+    "Make this more confident"
+    "This is too technical — simplify for investment professionals"
+    "Make the 2022 slide more dramatic"
+  Restructure:
+    "Swap slides 5 and 6 and update the transitions"
+    "Lead with the worst drawdown number"
+    "Cut 2 minutes without losing the key findings"
+  Strengthen:
+    "Add a sentence comparing CPCV to standard k-fold, cite López de Prado"
+    "The limitations section sounds defensive — make it sound planned"
+  Shorten/expand:
+    "Cut this section by 30%"
+    "Expand the methodology to explain why we chose block bootstrap"
+  Check:
+    "Does this slide tell a clear story?"
+    "Is this section consistent with the results in Section 3?"
+
+WHAT GEMINI CANNOT DO (scope guard rejects):
+  Introduce statistics not in strategy_results
+  Cite sources not in references.json
+  Recommend specific investment actions
+  Comment on real-world securities outside the study
+  Generate content unrelated to the document
+
+DIFF DISPLAY — before accepting any change:
+  Shows side-by-side comparison:
+    LEFT:  current text (Bob's or Molly's)
+    RIGHT: Gemini's suggestion
+  Highlighted changes:
+    RED background   — removed text
+    GREEN background — added text
+  Per-change accept/reject:
+    Bob and Molly accept individual paragraphs or sentences
+    Not forced to accept the entire suggestion at once
+  Accepted changes auto-saved to draft immediately
+
+CONVERSATION HISTORY:
+  Gemini maintains context within a session for each document
+  Bob can say "actually, revert that last change" — Gemini understands
+  Multi-turn refinement: "make it shorter" → "now more formal" → "good"
+  Conversation cleared when editor is closed (not persisted)
+
+AI USAGE LOGGING:
+  Every Gemini assistant call logged to council_sessions table
+  Fields: query, document_id, context_type, tokens, cost_usd
+  Appears in AI Usage Log screen (Michael's section)
+  Contributes to the AI Usage presentation section
+
+GEMINI ASSISTANT UI (identical panel in both editors):
+
+  ┌─────────────────────────────────────────────────┐
+  │  ✦ Gemini Assistant                       [×]  │
+  │─────────────────────────────────────────────────│
+  │  Context: Slide 9 — 2022 stress test            │  ← active context
+  │─────────────────────────────────────────────────│
+  │  [Gemini]  Here's a more impactful headline     │
+  │  based on your actual 2022 drawdown figures:    │
+  │                                                 │
+  │  ┌─────────────────────────────────────────┐   │
+  │  │ "-18.4%: The Year Bonds Failed"         │   │
+  │  └─────────────────────────────────────────┘   │
+  │  Sharpe dropped from 0.52 (benchmark) to        │
+  │  0.08 for Classic 60/40 — Regime Switching      │
+  │  held at 0.41. Leading with the worst number    │
+  │  makes the contrast sharper.                    │
+  │                                                 │
+  │  [ Apply ]  [ Edit Before Applying ]  [ Skip ]  │
+  │─────────────────────────────────────────────────│
+  │  [Gemini]  I can also update the speaker note   │
+  │  to match the new headline. Want me to?         │
+  │  [ Yes ]  [ No thanks ]                         │
+  │─────────────────────────────────────────────────│
+  │  ┌─────────────────────────────────────────┐   │
+  │  │  Ask Gemini...                    [→]   │   │
+  │  └─────────────────────────────────────────┘   │
+  └─────────────────────────────────────────────────┘
+
+Panel behaviour:
+  Default: collapsed (toggle button in editor header)
+  Remembers open/closed state per session
+  Context updates automatically when user selects a different
+    slide or section — Gemini sees what Bob/Molly is working on
+  Accent colour: purple (#7c3aed) — distinct from other agent colours
+
+
+
+─── UI ENTRY POINTS ──────────────────────────────────────────────────────────
+
+Reports screen → Molly's Deliverables:
+
+  ┌─────────────────────────────────────────────────────┐
+  │  MOLLY'S DELIVERABLES                               │
+  │─────────────────────────────────────────────────────│
+  │  Presentation Storyboard                            │
+  │  v3 saved Tue 9:08am  ·  19:30 total               │
+  │                                                     │
+  │  [ Continue Editing ]  [ New Storyboard ]           │
+  │─────────────────────────────────────────────────────│
+  │  Generate from current storyboard (v3):             │
+  │  [ Generate Presentation Deck (.pptx) ]             │
+  │  [ Generate Q&A Preparation (.docx)  ]              │
+  └─────────────────────────────────────────────────────┘
+
+Reports screen → Bob's Deliverables:
+
+  ┌─────────────────────────────────────────────────────┐
+  │  BOB'S DELIVERABLES                                 │
+  │─────────────────────────────────────────────────────│
+  │  Analytical Appendix   v2 · Mon 3:14pm  [ Edit ]   │
+  │  Executive Brief       v1 · Mon 2:08pm  [ Edit ]   │
+  │  Midpoint Paper        draft · unsaved  [ Edit ]   │
+  │─────────────────────────────────────────────────────│
+  │  Start new:                                         │
+  │  [ + Analytical Appendix ]                          │
+  │  [ + Executive Brief     ]                          │
+  │  [ + Midpoint Paper      ]                          │
+  └─────────────────────────────────────────────────────┘
+
+Each document card shows:
+  — Document type and latest named version
+  — Timestamp of last save
+  — Word count (Bob's documents)
+  — [ Edit ] → opens section editor with version history panel
+  — [ Download ] → exports latest named version as .docx
+
+─── Q&A PREPARATION SPEC ────────────────────────────────────────────────────
+
+POST (via generate-from-storyboard) → .docx
+Generated by: Council (all agents contribute likely questions)
+Biased by: Molly's storyboard emphasis (timing allocation per slide)
+Label: AI DRAFT — REQUIRES HUMAN REVIEW on every page
+Versioned: stored as a document with full version history
+
+Structure:
+  Section 1: Questions from Forest Capital (investment focus)
+    Generated from strategy results Molly emphasised
+    Each question:
+      — Question text
+      — Suggested answer (2-3 sentences, real metrics only)
+      — Which chart or metric to reference
+      — Confidence: HIGH / MEDIUM
+      — Owner: Michael / Bob / Molly
+      — Follow-up to anticipate
+
+  Section 2: Questions from MSFA Board (academic focus)
+    Statistical methodology questions — each question as above
+
+  Section 3: AI usage questions (Michael)
+    Based on AI Usage Log contents — each question as above
+
+  Minimum 20 questions total across all three sections.
+
+
+
+
+
+
 
 
 
@@ -5420,19 +6392,192 @@ Backend:
     — Document generated without error
     — All 4 required sections present
     — Preliminary results section contains real metrics not placeholders
-  test_reproducibility.py         ← NEW: critical for Analytical Appendix
+  test_reproducibility.py
     — Running get_full_history() twice produces identical monthly returns
-    — Running run_all_strategies() twice with same history produces
-      identical results to 6 decimal places (RANDOM_SEED=42 enforced)
+    — Running run_all_strategies() twice produces identical results to 6dp
     — Running statistical tests twice produces identical p-values
     — No non-deterministic behaviour anywhere in the pipeline
-  test_report_accuracy.py         ← NEW: verify report numbers match system
-    — Every metric in the Analytical Appendix report matches the
-      corresponding value in market_data_monthly or strategy results
-    — No number in the report that cannot be traced to a database row
+  test_report_accuracy.py
+    — Every metric in the report matches the corresponding database value
+    — No number in any report that cannot be traced to a database row
+  test_storyboard_api.py
+    — POST /api/documents/storyboard/draft returns 15-slide JSON
+    — PATCH /api/documents/:id/draft saves working copy
+    — POST /api/documents/:id/versions creates immutable snapshot
+    — POST /api/documents/:id/restore/:ver_id creates new draft from snapshot
+    — GET /api/documents/:id/versions returns full version history
+    — generate-from-storyboard returns .pptx for output_type="deck"
+    — generate-from-storyboard returns .docx for output_type="script"
+    — generate-from-storyboard returns .docx for output_type="qa"
+    — Individual scripts contain only slides matching owner field
+  test_document_assistant.py
+    — POST /api/documents/:id/assistant returns suggestion + diff
+    — Scope guard rejects off-topic queries
+    — Citations restricted to references.json keys
+    — Numbers not in strategy_results cannot appear in suggestion
+    — Diff object contains removed and added spans
+  test_version_control.py
+    — Restore creates new version, never deletes history
+    — Auto-save updates draft without creating a version
+    — Change summary correctly diffs two slide arrays
+    — Word count delta correct for section content changes
   Full regression suite
   Performance benchmarks (API p95 response times per Section 15b)
   Accessibility audit (axe-core, WCAG AA)
+
+Frontend — Reports screen and all editors:
+  All Sprint 6 components must read the frontend-design SKILL.md
+  before implementation. Bloomberg Terminal aesthetic applies to
+  all editing interfaces — professional, not consumer-app.
+
+  ReportsScreen.test.tsx
+    — Bob's Deliverables section renders all three document cards
+    — Molly's Deliverables section renders storyboard card + buttons
+    — Generate buttons disabled until storyboard has a named version
+    — Loading state shown during generation (30-90s expected)
+    — AI DRAFT banner visible on every preview before download
+    — Download triggers file save with correct filename
+    — Regenerate button appears when strategy results have been updated
+
+  StoryboardEditor.test.tsx
+    — 15 slides render as cards in correct order on initial load
+    — Drag-to-reorder updates slide order and re-numbers correctly
+    — Timing bar updates immediately when any slide timing changes
+    — Timing bar GREEN ≤20:00, AMBER 20:00-21:00, RED >21:00
+    — Headline field is editable and saves to draft on blur
+    — Chart dropdown shows all export pack filenames + "None"
+    — Chart thumbnail updates when dropdown selection changes
+    — Speaker note textarea expands on click
+    — [ Regenerate speaker note ] triggers Gemini and streams response
+    — Owner dropdown cycles Molly / Michael / Bob correctly
+    — [ Add slide after ] inserts blank slide at correct position
+    — [ Remove slide ] shows confirmation dialog before deleting
+    — Auto-save fires after 30 seconds of inactivity (mock timer)
+    — [ Save Version ] dialog accepts optional name and note
+    — Named version appears in Version History panel after save
+    — Version History panel renders list of named versions + auto-saves
+    — [ Preview ] in Version History loads that version read-only
+    — [ Restore ] confirmation dialog appears before restoring
+    — Restore creates a new version entry noting the rollback
+
+  SectionEditor.test.tsx
+    — All document sections render in correct order
+    — [ Edit ] button opens rich text area for that section
+    — Editing auto-saves to draft on blur
+    — [ View AI Draft ] opens side panel without overwriting Bob's text
+    — [ Regenerate AI ] streams new Academic Writer draft into side panel
+    — [ Revert ] confirmation dialog appears before replacing Bob's text
+    — Word count updates live while editing
+    — Version History panel works identically to StoryboardEditor
+    — [ Save Version ] creates snapshot of all sections
+    — Word count delta shown in change summary after save
+    — Download triggers .docx export of current named version
+    — AI DRAFT label absent from download if all sections human-edited
+
+  ScriptEditor.test.tsx
+    — Full team script renders slides grouped by presenter section
+    — Each slide paragraph shows word count and target word count
+    — AMBER highlight when paragraph >10% over target word count
+    — RED highlight when paragraph >25% over target word count
+    — Transition phrases render between every slide
+    — Timing cues render at 2-minute intervals in rehearsal guide
+    — [ Individual Scripts ] generates three separate downloads
+    — Michael's script contains only slides where owner="Michael"
+    — Bob's script contains only slides where owner="Bob"
+    — Molly's script contains only slides where owner="Molly"
+    — Version History panel works identically to other editors
+
+  VersionHistory.test.tsx (shared component)
+    — Named versions listed in reverse chronological order
+    — Auto-saves listed separately, collapsed by default
+    — [ Show all auto-saves ] expands the auto-save list
+    — Each version entry shows number, name, timestamp, summary
+    — [ Preview ] renders version content in read-only mode
+    — [ Restore ] fires confirmation dialog
+    — Confirmation dialog shows which version will be restored
+    — After restore: new version entry appears at top of list
+      with "Restored from v{n}" in change summary
+    — Current draft indicator (●) shown at top of list
+    — [ Save Version ] button in panel header opens name dialog
+    — Empty name field auto-names as "v{n}" on save
+
+  GeminiAssistant.test.tsx (shared component)
+    — Panel renders collapsed by default
+    — Toggle button opens and closes panel smoothly
+    — Context label updates when active slide/section changes
+    — Input field accepts text and submits on Enter or [ → ]
+    — Loading state shown while Gemini responds
+    — Suggestion renders with diff highlighting (red/green)
+    — [ Apply ] replaces current content with suggestion
+    — [ Edit Before Applying ] opens suggestion in editable field
+    — [ Skip ] dismisses suggestion without applying
+    — Multi-turn: second message maintains conversation context
+    — Scope guard rejection renders as inline error message
+    — Citations-only-from-references enforced: test with a prompt
+      that would naturally cite an external source — verify it uses
+      references.json entry or says it cannot cite that source
+    — Numbers-from-context enforced: test with prompt asking for
+      a statistic not in strategy_results — verify refusal
+
+  UI/UX DESIGN STANDARDS — SPRINT 6 COMPONENTS:
+
+  All Sprint 6 editors use the Bloomberg Terminal aesthetic from
+  Section 15c. Additional standards specific to editing interfaces:
+
+  EDITING SURFACES:
+    Rich text areas: bg_elevated (#1a2438), border_medium on focus
+    Placeholder text: text_muted (#64748b)
+    Active editing state: left border 2px accent colour (screen-specific)
+    No consumer-app styling (no rounded-2xl bubbles, no pastel colours)
+
+  DIFF DISPLAY (Gemini suggestions):
+    Removed text: bg #7f1d1d (dark red), text #fca5a5
+    Added text:   bg #14532d (dark green), text #86efac
+    Unchanged:    normal text colour
+    Font: monospace for diff view, prose for normal editing
+
+  TIMING INDICATORS:
+    Word count: text_muted, small (11px), right-aligned
+    On-target:  text_muted
+    AMBER:      accent_amber (#f59e0b), subtle background
+    RED:        accent_red (#ef4444), subtle background
+    Never distracting — peripheral, not prominent
+
+  VERSION HISTORY PANEL:
+    Width: 280px fixed, right sidebar
+    Background: bg_surface (#111827)
+    Border left: 1px border_subtle
+    Version entries: subtle separator, no heavy borders
+    Current draft indicator: accent_blue dot (●)
+    Named versions: text_primary
+    Auto-saves: text_muted (de-emphasised)
+
+  GEMINI ASSISTANT PANEL:
+    Accent colour: accent_purple (#8b5cf6)
+    Panel header border-bottom: 1px solid purple at 30% opacity
+    User messages: right-aligned, bg_elevated
+    Gemini responses: left-aligned, bg_surface, subtle purple left border
+    Suggestion card: bg_elevated, border accent_purple
+    Apply/Skip/Edit buttons: standard button tokens
+
+  AI DRAFT BANNER:
+    Background: accent_amber (#f59e0b)
+    Text: #0a0e1a (darkest background — high contrast)
+    Font: bold, 11px, uppercase
+    Position: sticky top of editor, full width
+    Height: 32px
+    Never dismissable — always visible while AI content present
+
+  REPORTS SCREEN LAYOUT:
+    Two-column card grid on desktop (1440px)
+    Single column on laptop (1280px)
+    Card style: bg_surface, border_subtle, hover border_medium
+    Section headers: text_secondary, small caps, letter-spaced
+    Generate buttons: full width within card, accent_blue
+    Disabled state: text_disabled, no hover effect
+    Loading state: subtle pulse animation on button text
+
+
 
 
 
