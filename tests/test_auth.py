@@ -178,6 +178,80 @@ def test_invalidate_session_bad_token_does_not_raise():
     auth.invalidate_session("not.a.real.token")  # should not raise
 
 
+# ── Single-use magic link (redeem_magic_token) ────────────────────────────────
+
+def test_redeem_magic_token_returns_session_token():
+    email = "ruurdsm@queens.edu"
+    magic = auth.generate_magic_token(email)
+    # Clear any prior use of this jti to avoid cross-test interference
+    payload = jwt.decode(magic, SECRET_KEY, algorithms=[ALGORITHM])
+    auth._used_magic_jtis.pop(payload["jti"], None)
+
+    session = auth.redeem_magic_token(magic)
+    assert isinstance(session, str)
+    # The returned token must be a valid session
+    result = auth.verify_session_token(session)
+    assert result["email"] == email
+
+def test_redeem_magic_token_second_call_returns_same_session():
+    """
+    Email security scanners pre-fetch magic links. The second presentation of
+    the same token must return the existing active session, not a new one, so
+    the user's real click is not invalidated.
+    """
+    email = "ruurdsm@queens.edu"
+    magic = auth.generate_magic_token(email)
+    payload = jwt.decode(magic, SECRET_KEY, algorithms=[ALGORITHM])
+    auth._used_magic_jtis.pop(payload["jti"], None)
+
+    first = auth.redeem_magic_token(magic)
+    second = auth.redeem_magic_token(magic)
+    assert first == second
+
+def test_redeem_magic_token_after_session_invalidated_raises_401():
+    """
+    If the session from the first redemption has been invalidated (logged out),
+    a repeated token presentation must raise 401 — the link is genuinely used up.
+    """
+    email = "ruurdsm@queens.edu"
+    magic = auth.generate_magic_token(email)
+    payload = jwt.decode(magic, SECRET_KEY, algorithms=[ALGORITHM])
+    auth._used_magic_jtis.pop(payload["jti"], None)
+
+    session = auth.redeem_magic_token(magic)
+    auth.invalidate_session(session)
+
+    with pytest.raises(HTTPException) as exc_info:
+        auth.redeem_magic_token(magic)
+    assert exc_info.value.status_code == 401
+
+def test_redeem_magic_token_expired_raises_401():
+    from datetime import datetime, timedelta, timezone
+    payload = {
+        "sub": "ruurdsm@queens.edu",
+        "type": "magic_link",
+        "jti": "expired-test-jti",
+        "iat": datetime.now(timezone.utc) - timedelta(minutes=30),
+        "exp": datetime.now(timezone.utc) - timedelta(minutes=1),
+    }
+    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    with pytest.raises(HTTPException) as exc_info:
+        auth.redeem_magic_token(token)
+    assert exc_info.value.status_code == 401
+
+def test_redeem_magic_token_wrong_type_raises_401():
+    from datetime import datetime, timedelta, timezone
+    payload = {
+        "sub": "ruurdsm@queens.edu",
+        "type": "session",
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=15),
+    }
+    token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+    with pytest.raises(HTTPException) as exc_info:
+        auth.redeem_magic_token(token)
+    assert exc_info.value.status_code == 401
+
+
 # ── Master API key ────────────────────────────────────────────────────────────
 
 def test_require_auth_accepts_master_key():

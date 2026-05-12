@@ -1,5 +1,5 @@
-import { Routes, Route, Navigate, useLocation } from 'react-router-dom'
-import { useState, useEffect, createContext, useContext } from 'react'
+import { Routes, Route, Navigate, useLocation, useNavigate } from 'react-router-dom'
+import { useState, useEffect, useRef, useCallback, createContext, useContext } from 'react'
 import type { ReactNode } from 'react'
 import axios from 'axios'
 import LoginPage from './pages/LoginPage'
@@ -33,11 +33,21 @@ export function useAuth(): AuthContextType {
 }
 
 function AuthProvider({ children }: { children: ReactNode }) {
+  const navigate = useNavigate()
   const [session, setSession] = useState<Session | null>(() => {
     const token = localStorage.getItem('fc_session_token')
     const email = localStorage.getItem('fc_email')
     return token && email ? { token, email } : null
   })
+
+  // Stable helper that clears all session state without calling the logout endpoint
+  // — used by the 401 interceptor where we can't await an API call
+  const clearSession = useCallback(() => {
+    localStorage.removeItem('fc_session_token')
+    localStorage.removeItem('fc_email')
+    delete axios.defaults.headers.common['X-API-Key']
+    setSession(null)
+  }, [])
 
   const login = (token: string, email: string) => {
     localStorage.setItem('fc_session_token', token)
@@ -51,15 +61,40 @@ function AuthProvider({ children }: { children: ReactNode }) {
     if (token) {
       try { await axios.post('/api/auth/logout', { session_token: token }) } catch (_) { /* logout errors are safe to ignore */ }
     }
-    localStorage.removeItem('fc_session_token')
-    localStorage.removeItem('fc_email')
-    delete axios.defaults.headers.common['X-API-Key']
-    setSession(null)
+    clearSession()
   }
 
+  // Refs so the interceptor closure always calls the latest function without
+  // re-registering the interceptor on every render
+  const clearSessionRef = useRef(clearSession)
+  clearSessionRef.current = clearSession
+  const navigateRef = useRef(navigate)
+  navigateRef.current = navigate
+
+  // Restore axios header on mount (session persists across page refreshes)
   useEffect(() => {
     const token = localStorage.getItem('fc_session_token')
     if (token) axios.defaults.headers.common['X-API-Key'] = token
+  }, [])
+
+  // 401 interceptor — redirect to /login when the backend rejects a session.
+  // Auth endpoints (/api/auth/*) are excluded: their 401 responses are handled
+  // by the AuthVerify page (expired/invalid magic link) and must not trigger a redirect.
+  useEffect(() => {
+    const interceptorId = axios.interceptors.response.use(
+      (response) => response,
+      (error: unknown) => {
+        if (axios.isAxiosError(error) && error.response?.status === 401) {
+          const url = error.config?.url ?? ''
+          if (!url.includes('/api/auth/')) {
+            clearSessionRef.current()
+            navigateRef.current('/login?expired=1', { replace: true })
+          }
+        }
+        return Promise.reject(error)
+      }
+    )
+    return () => axios.interceptors.response.eject(interceptorId)
   }, [])
 
   return (

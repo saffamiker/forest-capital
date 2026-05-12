@@ -1,10 +1,13 @@
 import { useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import axios from 'axios'
 import { TrendingUp, Mail, ArrowRight, AlertCircle } from 'lucide-react'
 
 type LoginStatus = 'idle' | 'loading' | 'sent' | 'error'
 
 export default function LoginPage() {
+  const [searchParams] = useSearchParams()
+  const sessionExpired = searchParams.get('expired') === '1'
   const [email, setEmail] = useState('')
   const [status, setStatus] = useState<LoginStatus>('idle')
   const [errorMsg, setErrorMsg] = useState('')
@@ -49,6 +52,13 @@ export default function LoginPage() {
             <p className="text-muted text-sm mb-6">
               Enter your authorised email address. A magic link will be sent to you.
             </p>
+
+            {sessionExpired && (
+              <div className="flex items-start gap-2 p-3 rounded-md bg-amber-500/10 border border-amber-500/20 mb-4">
+                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <p className="text-amber-400 text-xs">Your session has expired. Please log in again.</p>
+              </div>
+            )}
 
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>

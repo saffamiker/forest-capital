@@ -28,6 +28,12 @@ log = get_logger(__name__)
 # In-memory session store — replace with Redis for production
 _sessions: dict[str, dict] = {}
 
+# Tracks redeemed magic-link JTIs so that a second presentation of the same token
+# (e.g. an email security scanner pre-fetching the link) returns the existing active
+# session rather than creating a new one and invalidating the user's real session.
+# Maps jti → session_token that was issued on first redemption.
+_used_magic_jtis: dict[str, str] = {}
+
 ALGORITHM = "HS256"
 
 
@@ -78,6 +84,53 @@ def verify_magic_token(token: str) -> str:
     if payload.get("type") != "magic_link":
         raise HTTPException(status_code=401, detail="Invalid token type.")
     return payload["sub"]
+
+
+def redeem_magic_token(token: str) -> str:
+    """
+    Single-use magic-link redemption.
+
+    On first call: validates the token, creates a session, records the jti.
+    On repeat call with the same token (email security scanner pre-fetch):
+      returns the existing session token if still active, so the user's real
+      click is not invalidated. Raises 401 only if the existing session has
+      already expired or been invalidated.
+    """
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Magic link has expired. Please request a new one.")
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid magic link token.")
+
+    if payload.get("type") != "magic_link":
+        raise HTTPException(status_code=401, detail="Invalid token type.")
+
+    email: str = payload["sub"]
+    jti: str = payload.get("jti", "")
+
+    if jti and jti in _used_magic_jtis:
+        existing_token = _used_magic_jtis[jti]
+        try:
+            existing_payload = jwt.decode(existing_token, SECRET_KEY, algorithms=[ALGORITHM])
+            existing_session_id = existing_payload.get("session_id", "")
+            if existing_session_id in _sessions:
+                log.info("magic_link_reuse_returning_existing_session",
+                         email=email, jti=jti[:8],
+                         note="Token already redeemed — returning existing active session")
+                return existing_token
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=401,
+            detail="This link has already been used. Please request a new one.",
+        )
+
+    # First redemption — issue a session and record the jti to detect future reuse
+    session_token = generate_session_token(email)
+    if jti:
+        _used_magic_jtis[jti] = session_token
+    return session_token
 
 
 def verify_session_token(token: str) -> dict:

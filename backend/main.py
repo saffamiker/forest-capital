@@ -27,6 +27,8 @@ from auth import (
     generate_magic_token,
     generate_session_token,
     verify_magic_token,
+    verify_session_token,
+    redeem_magic_token,
     invalidate_session,
     send_magic_link,
 )
@@ -102,8 +104,11 @@ async def request_magic_link(body: MagicLinkRequest, request: Request):
 
 @app.get("/api/auth/verify")
 async def verify_magic_link(token: str = Query(...)):
-    email = verify_magic_token(token)
-    session_token = generate_session_token(email)
+    # redeem_magic_token enforces single-use: a second request with the same token
+    # (e.g. from an email security scanner) returns the existing active session
+    # rather than creating a new one and invalidating the user's real click.
+    session_token = redeem_magic_token(token)
+    email = verify_session_token(session_token)["email"]
     log.info("auth_success", email=email)
     return SessionResponse(
         session_token=session_token,
