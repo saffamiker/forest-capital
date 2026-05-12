@@ -1,4 +1,3 @@
-/// <reference types="vite/client" />
 /**
  * frontend/src/stores/provenanceStore.ts
  *
@@ -7,6 +6,10 @@
  * never from a hardcoded constant — so a label can never misrepresent the actual
  * origin of a number.  This is the runtime provenance integrity guarantee from
  * CLAUDE.md Section 4b.
+ *
+ * Uses a relative path (/api/v1/provenance) so the same bundle works in both
+ * dev (proxied by Vite to localhost:8000) and production (proxied by Vercel
+ * rewrites to the Render backend).  No VITE_API_URL env var needed.
  */
 
 import { create } from "zustand";
@@ -25,11 +28,9 @@ interface ProvenanceState {
   error: string | null;
 
   // Actions
-  fetchProvenance: (apiBase?: string) => Promise<void>;
+  fetchProvenance: () => Promise<void>;
   getSeriesForChart: (chartId: string, registry: Record<string, string[]>) => DataSeriesRecord[];
 }
-
-const API_BASE = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
 
 export const useProvenanceStore = create<ProvenanceState>((set, get) => ({
   series: {},
@@ -38,10 +39,10 @@ export const useProvenanceStore = create<ProvenanceState>((set, get) => ({
   loading: false,
   error: null,
 
-  fetchProvenance: async (apiBase = API_BASE) => {
+  fetchProvenance: async () => {
     set({ loading: true, error: null });
     try {
-      const res = await fetch(`${apiBase}/api/v1/provenance`);
+      const res = await fetch("/api/v1/provenance");
       if (!res.ok) {
         throw new Error(`Provenance fetch failed: ${res.status}`);
       }
