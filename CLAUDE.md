@@ -3038,6 +3038,29 @@ Sprint 5 (May 13):
   ─ Increase FRED fetch timeout from 30s to 60s
   ─ Pass FRED_API_KEY to all FRED API requests
   ─ Verify VIX and DGS2 fetch successfully in production logs
+  POSTGRESQL CACHING — STRATEGY RESULTS + REGIME SIGNALS
+  ─ strategy_results_cache table
+    Stores all 10 strategy results with strategy_hash
+    Hit: returns in ~200ms, skips run_all_strategies()
+    Miss: recomputes, updates cache, returns
+    Survives Render restarts — no recompute on redeploy
+  ─ regime_signals_cache table
+    Stores VIX, DGS10, DGS2, credit_spread, HMM state
+    Expires after 15 minutes — only then calls FRED
+    Fixes 3-minute dashboard load on FRED outage days
+    regime_cache_hit / regime_cache_miss log events
+  ─ Frontend renders independently:
+    Dashboard renders on compare response — no waiting for regime
+    Regime indicator shows loading state until resolved
+  INCREMENTAL DATA INGESTION
+  ─ On pipeline run: check last date in market_data_monthly
+  ─ If stale (> 35 days behind): fetch delta only from
+    yFinance and FRED, append new rows to PostgreSQL
+  ─ If current: skip all API calls, serve from DB
+  ─ Re-run strategies only when new rows were appended
+  ─ Historical data (2002-2024) never re-fetched
+  ─ Log: incremental_update_rows_added / no_new_data
+
   STATISTICAL EVIDENCE + REGIME ANALYSIS DASHBOARDS
   ─ All 6 charts on Statistical Evidence (SignificanceJourneyMatrix,
     CPCVSharpePlot, CVStabilityRadar, ProbabilisticSharpeChart,
@@ -3073,21 +3096,65 @@ Sprint 5 (May 13):
   ─ strategiesStore.ts (Zustand) — persists strategy results
     for entire session, never re-fetches if already loaded
     loaded flag prevents blank charts on navigation
-  ─ Database-first cache with strategy_hash validation
-    On every request: compare input hash vs stored hash
-    If match: serve from PostgreSQL (fast path)
-    If mismatch: re-run pipeline, update hash, return fresh data
+  ─ Frontend renders independently:
+    Dashboard renders as soon as /api/backtest/compare returns
+    Regime indicator loads separately with its own loading state
+    Never block chart rendering on regime detection
+  ─ Skeleton loading states on all charts and tables
+    Never blank — always loading skeleton or real data
+    Error state with retry for failed fetches
   ─ Data freshness indicator on dashboard header:
     "Data as of: [timestamp] · [n] months · [ Refresh ]"
     AMBER if data older than 24 hours
     WARNING icon if last pipeline run had failures
-  ─ Skeleton loading states on all charts and tables
-    Never blank — always loading skeleton or real data
-    Error state with retry for failed fetches
+
+  POSTGRESQL CACHING — PERSISTENT ACROSS RESTARTS
+  PURPOSE: Historical data never restates. Fetch once, store
+  forever, append incrementally. Never re-fetch what's already
+  in the database. Regime signals are legitimately live but
+  should be cached for 15 minutes to survive FRED outages.
+
+  ─ strategy_results_cache table (NEW):
+    strategy_name, all metrics, all statistical results,
+    computed_at TIMESTAMPTZ, strategy_hash VARCHAR
+    On /api/backtest/compare:
+      Check if strategy_hash matches current data hash
+      Match → return from DB in ~200ms (skip recompute)
+      Mismatch → recompute, update DB, return
+    Log: strategy_cache_hit / strategy_cache_miss
+    Survives Render restarts — no recompute on redeploy
+
+  ─ regime_signals_cache table (NEW):
+    vix_current, dgs10, dgs2, credit_spread,
+    hmm_state, threshold_state, fetched_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ (fetched_at + 15 minutes)
+    On /api/regime/current:
+      Check expires_at — if not expired return from DB
+      If expired (or missing) → fetch from FRED, update DB
+    Log: regime_cache_hit / regime_cache_miss
+    Effect: FRED gateway outages cause < 1s delay not 3 minutes
+    FRED is only called once per 15 minutes maximum
+
+  ─ Incremental data ingestion (NEW):
+    Historical data (2002-2024) never restates — fetch once only
+    On pipeline run, check last date in market_data_monthly
+    If last date < today - 35 days → fetch only the delta
+      yFinance: fetch SPY/LQD from last_date to today
+      FRED: fetch VIX/DGS2 from last_date to today
+      Append new rows to market_data_monthly/daily
+      Re-run strategies only if new rows were appended
+    If last date >= today - 35 days → no fetch needed
+    Log: incremental_update_rows_added / no_new_data
+    Effect: monthly data updates automatically as new
+    months close, without re-fetching 23 years of history
+
   ─ GET /api/v1/admin/data-health includes:
     last_pipeline_run timestamp
     strategy_hash (current vs stored)
     cache_status: "hit" | "miss" | "stale"
+    regime_cache_expires_at
+    last_incremental_update
+    next_incremental_due (estimated)
 
   ─ GET /api/v1/admin/force-refresh — triggers pipeline re-run
     (requires MASTER_API_KEY header)
@@ -6520,6 +6587,21 @@ Backend:
     — DGS2 fetch succeeds within 60s timeout
     — FRED_API_KEY passed to all requests
     — Fallback behaviour when FRED unavailable
+  test_cache_layer.py        ← NEW: PostgreSQL cache tests
+    — strategy_results_cache hit returns in <500ms
+    — strategy_results_cache miss triggers recompute
+    — strategy_hash mismatch invalidates cache correctly
+    — regime_signals_cache hit skips FRED calls
+    — regime_signals_cache expires after 15 minutes
+    — regime_signals_cache miss triggers fresh FRED fetch
+    — Cache survives simulated server restart (reads from DB)
+  test_incremental_ingestion.py ← NEW: incremental data tests
+    — No new rows added when last date is recent (< 35 days)
+    — New rows appended when last date is stale
+    — Incremental fetch only calls yFinance/FRED for delta
+    — Full pipeline not re-run when no new data arrives
+    — strategy_hash updates after new rows appended
+
   test_admin_screen.py       ← NEW: admin data health endpoint
     — GET /api/v1/admin/data-health returns 200
     — Response contains all required sections
