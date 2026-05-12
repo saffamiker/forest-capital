@@ -284,6 +284,53 @@ def test_spliced_ig_series_no_nan():
     assert n_nan == 0, f"Found {n_nan} NaN values in spliced ig_return series"
 
 
+# ── TEST (e2): Cumulative price index is continuous at splice ─────────────────
+
+def test_cumulative_price_index_continuous_at_splice():
+    """
+    The cumulative price index must be smooth at the LQD-to-BND join.
+    Specifically: index_level[2007-05-31] / index_level[2007-04-30] - 1
+    must equal the stated monthly return for 2007-05-31 to 4 decimal places.
+
+    A jump or gap in the price index at the splice would mean the return for
+    that month was computed from a discontinuous base — producing a spurious
+    return that distorts every subsequent cumulative performance chart.
+    """
+    _skip_if_no_excel()
+    from tools.data_fetcher import build_monthly_returns, load_provided_data
+
+    provided = load_provided_data()
+    supplemental = _make_lqd_supplemental()
+    df = build_monthly_returns(provided, supplemental)
+
+    ig = df["ig_return"]
+
+    # Find April 2007 (last LQD month) and May 2007 (first BND month)
+    apr_candidates = ig.index[(ig.index.year == 2007) & (ig.index.month == 4)]
+    may_candidates = ig.index[(ig.index.year == 2007) & (ig.index.month == 5)]
+
+    if len(apr_candidates) == 0 or len(may_candidates) == 0:
+        pytest.skip("April or May 2007 not present in spliced series")
+
+    apr_date = apr_candidates[0]
+    may_date = may_candidates[0]
+
+    # Build cumulative price index from the start of the series
+    cumulative = (1 + ig).cumprod()
+
+    apr_level = float(cumulative.loc[apr_date])
+    may_level = float(cumulative.loc[may_date])
+    may_return = float(ig.loc[may_date])
+
+    # The ratio of consecutive index levels must equal 1 + the stated return
+    implied_return = (may_level / apr_level) - 1
+    assert abs(implied_return - may_return) < 1e-4, (
+        f"Price index discontinuity at splice: "
+        f"implied return {implied_return:.4%} ≠ stated return {may_return:.4%}. "
+        f"April level={apr_level:.6f}, May level={may_level:.6f}"
+    )
+
+
 # ── TEST (f): CAGR of full spliced series within 3%–7% ────────────────────────
 
 def test_spliced_ig_cagr_in_plausible_range():

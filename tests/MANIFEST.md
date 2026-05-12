@@ -190,6 +190,68 @@ Backend — implementation changes (no new test files; covered by updated tests)
 
 Test counts: 356 passed, 10 skipped (HMM on Windows), 0 failed
 
+## Sprint 3 Addendum ✅ COMPLETE (2026-05-11)
+Numerical accuracy, data transformation, and strategy constraint tests.
+All 111 new tests pass; 0 failed; 12 warnings (deprecation only).
+
+Backend — new/updated test files:
+  test_numerical_accuracy.py (rewritten, 5 new tests added)
+                           make_history(seed=42) promoted to primary fixture
+                           (make_random_history = alias for backward compat);
+                           test_sortino_geq_sharpe_positive_mean_excess (Sortino≥Sharpe
+                           when mean excess > 0 — confirmed by downside std ≤ total std);
+                           test_returns_are_simple_not_log (pct_change not log diff —
+                           verified via np.log comparison, gap > 0.001 on 10% return);
+                           test_pct_change_drops_first_row (len-1 after dropna, correct
+                           values); test_monthly_annualisation_uses_sqrt_12 (vol from
+                           sqrt(12) differs from sqrt(252) by > 0.05 — measurable gap);
+                           test_run_all_strategies_regression_constants (_EXPECTED_RESULTS
+                           dict for all 10 strategies, tolerance 5e-4 — catches any
+                           arithmetic change in the pipeline)
+  test_data_transformations.py (new, 17 tests)
+                           Group 1 — serial dates: 36526→2000-01-01, 39448→2008-01-01,
+                           tz-naive, vectorised conversion matches scalar;
+                           Group 2 — month-end snapping: mid-month, already-end, Feb leap;
+                           Group 3 — simple returns: pct_change=+0.10/−0.50 exactly,
+                           log comparison confirms not log, first row dropped;
+                           Group 4 — DTB3 compound conversion: 5%→0.004074 (not 0.004167),
+                           zero rate →0.0, source-code inspection confirms (1/12) exponent
+                           present and simple-division pattern absent;
+                           Groups 5–6 — Excel-dependent (skip in CI): aligned dataset
+                           no NaN, shared index, 2023 rf in [0.004,0.005], Oct 2008
+                           equity return in [−20%,−14%]
+  test_splice_integrity.py (1 new test added)
+                           test_cumulative_price_index_continuous_at_splice: builds
+                           cumprod index, verifies implied return at 2007-05-31 matches
+                           stated return to 1e-4; detects any jump or base discontinuity
+                           at the LQD→BND join
+  test_strategy_constraints.py (new, 14 tests)
+                           TestWeightsSumToOne — parametrised over 10 strategies:
+                           avg_equity_weight + avg_bond_weight ≈ 1.0 (tolerance 5e-3);
+                           TestNoNegativeWeights — parametrised over 10 strategies:
+                           both weights ≥ 0.0;
+                           test_momentum_rotation_uses_lookback_window (n_observations ≤ 48
+                           from 60 months — 12-month lookback consumed);
+                           test_vol_targeting_uses_rolling_window (n_observations > 0,
+                           avg_equity_weight in [0, 0.40] — vol-cap enforced; note: VOL
+                           uses 21 daily returns not 21 monthly, so n_obs = n_months is
+                           correct and expected);
+                           test_min_variance_uses_optimization_window (n_observations ≤ 24
+                           from 60 months — 36-month optimizer window consumed);
+                           test_transaction_costs_reduce_classic_6040_cagr (avg_monthly_
+                           turnover > 0, CAGR is finite float in (−1, 1))
+  test_benchmark_plausibility.py (new, 45 tests)
+                           Historical range checks (5 tests, Excel-dependent, skip in CI):
+                           BENCHMARK CAGR 7–11%, Sharpe 0.35–0.75, max_drawdown −45% to
+                           −58%, 2022 equity return −18% to −22%, 2009 equity return
+                           +20% to +30%;
+                           TestImplausibilityGuards (40 parametrised tests, synthetic data,
+                           always run): Sharpe ≤ 2.0, CAGR ≤ 20%, max_drawdown ≤ 0,
+                           all 4 core metrics finite (no NaN/Inf) — for all 10 strategies
+
+Test counts: 111 passed, 0 failed, 12 warnings (pandas/asyncpg deprecation only)
+             Excel-dependent tests (10): skip in CI without FNA_670_Project_Sources.xlsx
+
 ## Sprint 4 ⏳ PENDING
 Backend:
   test_scope_guard.py    — in-scope pass, out-of-scope reject, injection pre-screening
