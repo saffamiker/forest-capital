@@ -65,3 +65,6 @@ testpaths = ["../tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+markers = [
+  "deployment: marks tests that hit live production URLs (run with -m deployment, skipped in normal CI)",
+]

@@ -354,6 +354,69 @@ Commentary review (Sprint 4 — all modules pass standard):
 Test counts: 576 passed, 10 skipped (HMM on Windows), 0 failed
   Frontend: 47 tests pass (unchanged from Sprint 3)
 
+## Sprint 4 Remediation + Deployment Tests ✅ COMPLETE (2026-05-12)
+
+### Sprint 4 Remediation (commit 69758e6)
+Four bugs fixed after Sprint 4 initial completion:
+
+  FixedIncomeAnalyst fallback schema fix:
+    _fallback_response() was not mapping breakdown_detected and
+    diversification_effective to the top-level of technical_findings.
+    Tests that read those keys directly were receiving KeyError in the
+    fallback path. Fixed by explicitly mapping them in fallback.
+
+  RiskManager fallback key mismatch:
+    Internal risk_summary uses key "n_significant"; the schema and tests
+    expect "n_strategies_significant" in technical_findings.
+    _fallback_response() now maps explicitly — both paths now produce
+    identical schemas.
+
+  Async event loop affinity error in _persist_to_db():
+    asyncio.run() called inside an already-running event loop. Fixed by
+    using asyncio.get_event_loop().run_until_complete() with a new loop
+    when required, or by restructuring the call to avoid nesting.
+
+  MOCK_STRATEGIES used as primary data path:
+    main.py was serving MOCK_STRATEGIES as the primary response to
+    /api/backtest/compare rather than only as a fallback when the
+    database is unavailable. Fixed — real run_all_strategies() results
+    are primary; mock is fallback only.
+
+### Deployment Testing Infrastructure (2026-05-12)
+
+  tests/conftest.py  — pytest marker registration via pytest_configure hook
+    Problem solved: pytest resolves rootdir as forest-capital/ (repo root)
+    when invoked as `python -m pytest ../tests/` from backend/. With
+    rootdir at the repo root, backend/pyproject.toml is not loaded and
+    marker definitions in [tool.pytest.ini_options] are invisible to pytest.
+    This causes PytestUnknownMarkWarning for @pytest.mark.deployment.
+    Fix: conftest.py at tests/ root uses pytest_configure() hook which is
+    always loaded regardless of rootdir. Belt-and-braces: pyproject.toml
+    also defines the marker so both invocation styles are covered.
+
+  tests/test_deployment.py  — three live-URL tests (@pytest.mark.deployment)
+    Run selectively: pytest -m deployment
+    Skipped in normal CI (live URLs, Render cold-start latency up to 30s)
+    TIMEOUT = 60s to accommodate Render free-tier cold starts
+
+    test_render_health_endpoint:
+      GET https://forest-capital.onrender.com/api/health
+      Asserts: HTTP 200, environment="production", anthropic=True, gemini=True
+
+    test_vercel_frontend_serves:
+      GET https://forest-capital.vercel.app
+      Asserts: HTTP 200 (React app is served)
+
+    test_vercel_api_rewrite:
+      GET https://forest-capital.vercel.app/api/health
+      Asserts: HTTP 200
+      Purpose: verifies frontend/vercel.json /api/:path* rewrite is active
+      and proxying correctly to the Render backend. If this fails while
+      test_render_health_endpoint passes, the rewrite rule is broken.
+
+  These 3 tests are NOT counted in the 576 total — they are excluded from
+  normal CI runs and must be invoked explicitly with -m deployment.
+
 ## Sprint 5 ⏳ PENDING
 Backend:
   test_rate_limiting.py  — rate limit enforcement per endpoint
