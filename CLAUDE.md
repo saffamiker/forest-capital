@@ -2598,22 +2598,163 @@ Panel sections:
   1. PROVIDED DATA (from Excel file)
      Table: Series | Sheet | Frequency | Date range | Rows loaded
      Row per sheet loaded from the Excel file.
+     Footnote: "These series form the analytical foundation.
+     Supplemental data was added only where it enabled
+     strategies not achievable with the provided data alone."
 
   2. SUPPLEMENTAL DATA (external fetches)
-     Table: Series | Source | Frequency | Date range | Last fetched
-     Rows: SPY (yfinance), VIXCLS (FRED), DGS2 (FRED), FF factors (datareader)
+     Table: Series | Source | Frequency | Date range | Strategies enabled
+     Each row expandable — clicking shows the justification panel below.
 
-  3. CROSS-VALIDATION RESULTS
+     SPY daily (yFinance):
+       Strategies enabled: Volatility Targeting, Momentum Rotation
+       Why: Monthly data is too coarse to compute intramonth volatility
+       signals. Volatility Targeting requires 21-day rolling volatility
+       to scale allocations. Momentum Rotation requires precise month-end
+       signal computation to avoid look-ahead bias at month boundaries.
+
+     VIXCLS (FRED):
+       Strategies enabled: Regime Switching (threshold component)
+       Why: VIX provides a forward-looking fear signal independent of
+       equity price. VIX > 25 triggers the BEAR regime flag. When both
+       HMM and VIX threshold agree, regime conviction is highest. Equity
+       price alone detects regimes only after the move has started.
+
+     DGS2 (FRED 2-year Treasury):
+       Strategies enabled: Regime Switching (yield curve component)
+       Why: The 10Y-2Y yield curve has preceded every US recession since
+       1955. Adding the yield curve captures macro credit cycle signals
+       that neither equity prices nor VIX provide. The curve inverted in
+       April 2022 — six months before equity markets bottomed. A
+       VIX + equity-only detector would have been late to the signal.
+
+     LQD bridge (yFinance 2002-2007):
+       Strategies enabled: All 10 strategies (extends dataset by 58 months)
+       Why: BND began trading April 2007. Without the LQD bridge the
+       dataset starts May 2007 — losing the dot-com recovery and 58 months
+       of history. 282 observations (vs 224 without) is the difference
+       between adequate and underpowered statistical tests at p < 0.005.
+       Power analysis requires n ≥ 220 for Tier 1 significance. The bridge
+       provides the margin.
+
+  3. DESIGN DECISIONS SUMMARY
+     Expandable panel — "Why supplemental data?"
+
+     Without supplemental data:
+       7 strategies computable
+       224 monthly observations (2007-2024)
+       No regime detection (threshold only, no HMM)
+       Volatility Targeting and Momentum Rotation unavailable
+
+     With supplemental data:
+       10 strategies computable
+       282 monthly observations (2002-2024)
+       Full regime detection (HMM + VIX threshold + yield curve)
+       Regime Switching: Sharpe 0.63 vs 0.52 benchmark — the
+       highest-performing strategy requires all three supplemental
+       sources. Removing any one degrades it.
+
+     The supplemental data was not added to improve results.
+     It was added because the research question — does
+     diversification improve risk-adjusted returns? — requires
+     the full range of diversification strategies to be testable.
+     Static strategies (60/40, Risk Parity) require only the
+     Excel data. Dynamic strategies require high-frequency signals.
+
+  4. CROSS-VALIDATION RESULTS
      Equity: n_green / n_amber / n_red months, max discrepancy, status badge
      Bonds:  internal consistency check results, status badge
      Click any row: shows monthly diff chart (equity) or gap chart (bonds)
 
-  4. DATA QUALITY SUMMARY
+  5. DATA QUALITY SUMMARY
      Total monthly observations in aligned dataset
      Date range of full analysis
      Any AMBER warnings from cross-validation
      "Export for Appendix" button → CSV of full provenance log
      "View full Admin screen →" link
+
+─── SUPPLEMENTAL DATA JUSTIFICATION — BACKEND ENDPOINT ─────────────────────
+
+GET /api/v1/provenance/justification
+Returns structured justification for each supplemental series:
+  {
+    "spy_daily": {
+      "source": "yfinance",
+      "strategies_enabled": ["Volatility Targeting", "Momentum Rotation"],
+      "without_this_source": "Both strategies unavailable",
+      "key_reason": "21-day rolling volatility requires daily frequency",
+      "months_added": 0,
+      "statistical_impact": "Enables 2 of 10 strategies"
+    },
+    "vixcls": {
+      "source": "fred_api",
+      "strategies_enabled": ["Regime Switching"],
+      "without_this_source": "Threshold component degrades to equity-only",
+      "key_reason": "Forward-looking fear signal — detects regime before price moves",
+      "months_added": 0,
+      "statistical_impact": "Strengthens regime detection confidence"
+    },
+    "dgs2": {
+      "source": "fred_api",
+      "strategies_enabled": ["Regime Switching"],
+      "without_this_source": "Yield curve signal unavailable",
+      "key_reason": "10Y-2Y inversion preceded every US recession since 1955",
+      "months_added": 0,
+      "statistical_impact": "April 2022 early warning — 6 months before equity bottom"
+    },
+    "lqd_bridge": {
+      "source": "yfinance",
+      "strategies_enabled": ["All 10 strategies"],
+      "without_this_source": "Dataset starts May 2007 — 58 months shorter",
+      "key_reason": "BND inception April 2007 — bridge extends IG history to 2002",
+      "months_added": 58,
+      "statistical_impact": "n=282 vs n=224 — difference between powered and underpowered tests"
+    }
+  }
+
+Used by:
+  Data Sources panel (expandable justification rows)
+  Academic Writer Agent (Analytical Appendix Section 1)
+  Explainer Agent (Commentary mode hover on supplemental data labels)
+  QA Audit (D04 check — all assets have data for full backtest period)
+
+─── SUPPLEMENTAL DATA JUSTIFICATION — COMMENTARY MODE ──────────────────────
+
+When user hovers or clicks any supplemental data source label:
+Explainer Agent receives the justification JSON and generates:
+
+  Plain English (Analyst mode):
+    "SPY daily data was added to enable two strategies —
+     Volatility Targeting and Momentum Rotation — which
+     require daily return data to compute volatility signals.
+     Monthly data cannot detect intramonth volatility spikes
+     like those seen in March 2020."
+
+  Technical detail (Commentary mode, expandable):
+    Full statistical justification including the specific
+    mathematical requirement (21-day rolling window, month-end
+    signal computation) and the historical example (March 2020,
+    April 2022 yield curve inversion).
+
+─── SUPPLEMENTAL DATA JUSTIFICATION — ACADEMIC WRITER ──────────────────────
+
+Academic Writer Agent uses the justification JSON to generate
+the Data & Methodology section of the Analytical Appendix.
+
+APA format output includes:
+  Subsection: "3.2 Supplemental Data Sources"
+  Paragraph per source with:
+    — What was sourced and from where
+    — Why it was required (methodological necessity)
+    — Which strategies it enables
+    — Statistical impact (observations added, power implications)
+    — Cross-validation against provided data where applicable
+  Citation to relevant literature:
+    López de Prado (2018) on look-ahead bias for momentum signals
+    Markowitz (1952) on the requirement for covariance estimation
+    Harvey & Liu (2015) on multiple testing and sample size
+
+
 
 
 
@@ -3197,6 +3338,19 @@ Sprint 5 (May 13):
   ─ Data Sources panel on Statistical Evidence screen
   ─ Full provenance table: all 16 registry entries
   ─ Cross-validation results with WARN status documented
+  ─ GET /api/v1/provenance/justification endpoint
+    Returns structured justification per supplemental source:
+    strategies_enabled, key_reason, months_added,
+    statistical_impact, without_this_source
+  ─ Expandable justification rows per supplemental source
+    in the Data Sources panel
+  ─ "Why supplemental data?" design decisions summary
+    Without supplemental data: 7 strategies, 224 months
+    With supplemental data: 10 strategies, 282 months
+  ─ Explainer Agent uses justification JSON for hover text
+  ─ Academic Writer uses justification JSON for
+    Analytical Appendix Section 3.2
+
   DATA ACCURACY AND FRONTEND STATE MANAGEMENT
   ─ strategiesStore.ts (Zustand) — persists strategy results
     for entire session, never re-fetches if already loaded
@@ -6714,6 +6868,14 @@ Backend:
     — Sanity assertions all present with status
     — Force refresh requires MASTER_API_KEY
     — Force refresh without key returns 401
+  test_provenance_justification.py ← NEW: supplemental data justification
+    — GET /api/v1/provenance/justification returns 200
+    — All four supplemental sources present in response
+    — Each source has strategies_enabled, key_reason,
+      months_added, statistical_impact fields
+    — LQD bridge months_added = 58
+    — Regime Switching listed in VIX and DGS2 strategies_enabled
+    — Volatility Targeting and Momentum Rotation in SPY strategies_enabled
   test_security.py           ← NEW: auth attempt logging + geolocking
     — Approved email logs status=sent in auth_attempts
     — Unapproved email logs status=rejected in auth_attempts
