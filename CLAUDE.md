@@ -276,11 +276,29 @@ Only four external fetches are required. Everything else comes from Excel.
     Not a fetch — hardcoded prior: equity=0.60, ig=0.30, hy=0.10
     Document in provenance.json under "bl_market_cap_priors"
 
+  GAP 6 — LQD bridge (IG bond history extension 2002-2007)
+    Needed by: all strategies — extends IG monthly series from 2007 back to 2002
+    Why: BND (Vanguard Total Bond) only starts April 2007 in the Excel file.
+         Without a bridge, the aligned dataset starts May 2007 (224 months).
+         LQD (iShares IG Corporate Bond ETF) starts July 2002 and provides
+         57 additional months, extending coverage to 282 monthly observations.
+    Fix: yfinance.download('LQD', start='2002-01-01', end='2007-05-31',
+         auto_adjust=True)
+    Splice: LQD monthly returns used for 2002-07-31 to 2007-04-30
+            BND monthly returns used from 2007-05-31 onwards
+    Provenance: two separate registry entries
+      series_id: "ig_monthly_lqd_bridge"  source_type: "yfinance"
+      series_id: "ig_monthly_bnd"         source_type: "excel_provided"
+    Per-row source tracking: market_data_monthly.ig_source set to the
+      correct series_id for each month — grader can verify exact splice point
+    Splice validation: test_splice_integrity.py verifies no gap at join,
+      no outlier at boundary, correct provenance tags, no NaN in 2002-2025
+
 ─── DATA HIERARCHY ───────────────────────────────────────────────────────────
 
   1. Excel file  — authoritative for all series it contains. Never overridden.
   2. FRED API    — VIX and DGS2 only
-  3. yfinance    — SPY daily only. No other tickers.
+  3. yfinance    — SPY daily + LQD bridge (2002-2007) only. No other tickers.
   4. datareader  — Fama-French monthly factors only
   5. Constants   — BL priors only, always documented in provenance.json
 
@@ -2683,19 +2701,21 @@ Sprint 2 (May 11-17):
   ─ Remove continue-on-error: true once fixed
   SPRINT 2 TESTS (per MANIFEST.md)
 
-Sprint 3 (May 18-24):
-  ALL 10 STRATEGIES + FULL STATISTICAL SUITE
-  ─ All 5 static strategies implemented
-  ─ All 5 dynamic strategies implemented (quarterly rebalancing)
-  ─ All 12 statistical tests
-  ─ All 6 cross-validation methods including CPCV
-  ─ Tier 1 gate logic (is_significant flag)
-  ─ Walk-forward OOS results
-  ─ Dashboard fully populated with all 10 strategies
-  ─ Regime detection (threshold + HMM) live
-  SPRINT 3 TESTS
+Sprint 3 (COMPLETE — commit 366dd54):
+  ✅ All 10 strategies implemented and returning real metrics
+  ✅ Full statistical suite — 12 tests including DSR, PSR, SPA
+  ✅ CPCV C(6,2)=15 paths cross-validation
+  ✅ HMM 3-state regime detection (alongside threshold classifier)
+  ✅ LQD bridge — extends IG coverage to July 2002 (282 monthly obs)
+  ✅ run_all_strategies() returns dict[str, dict]
+  ✅ /api/backtest/compare serves real results in non-test environments
+  ✅ test_numerical_accuracy.py — deterministic metric checks
+  ✅ test_splice_integrity.py — LQD-to-BND join validation
+  ✅ README updated — Sprint 3 status
+  ✅ 356 tests passing, 10 skipped (HMM on Windows)
+  ✅ Commentary review complete across all Sprint 3 modules
 
-Sprint 4 (May 25-Jun 1):
+Sprint 4 (May 11-12):
   ALL AGENTS + COUNCIL LIVE
   ─ Equity Analyst (Sonnet)
   ─ Fixed Income Analyst (Sonnet)
@@ -2723,7 +2743,17 @@ Sprint 4 (May 25-Jun 1):
   ─ Render (backend) + Vercel (frontend) live
   ─ Magic link via SendGrid production
   ─ All four team emails can log in to live URL
-  ─ Upgrade Render to paid tier ($7/mo)
+  UI FIX — FIXED NAVIGATION AND SIDE PANELS
+  ─ Top navigation bar must be position: fixed (sticky) — never scrolls
+    away. Currently disappears on scroll in all dashboard views.
+  ─ Any side panels (filters, strategy selectors, mode toggles) must
+    also be position: sticky so they remain visible while chart content
+    scrolls independently within the main content area.
+  ─ Content area scrolls independently inside its own overflow container.
+  ─ This applies to all four screens: Dashboard, Statistical Evidence,
+    Regime Analysis, QA Audit.
+  ─ Verify in all three modes (Analyst, Commentary, Present).
+  ─ Verify on both desktop (1440px) and laptop (1280px) viewport widths.
   SPRINT 4 TESTS
 
 Sprint 5 (Jun 2-21):
@@ -5171,42 +5201,240 @@ Frontend:
   DataSources.test.tsx         — provenance panel renders cross-validation
                                  status table with GREEN/AMBER/RED counts
 
-## Sprint 3 ⏳ PENDING
+## Sprint 3 ✅ COMPLETE (commit 366dd54)
 Backend:
-  test_statistical_tests.py  — all 12 tests, p-value correctness
-  test_cross_validation.py   — 6 CV methods, CPCV paths
-  test_optimizer.py          — 6 optimization methods, weight constraints
-  test_regime_detector.py    — threshold and HMM classification
+  test_statistical_tests.py  — all 12 tests + DSR/PSR/SPA, p-value correctness
+  test_cross_validation.py   — 7 CV methods including CPCV C(6,2)=15 paths
+  test_optimizer.py          — 6 optimization methods, weight constraints (30 tests)
+  test_regime_detector.py    — threshold and HMM classification (18 tests)
+  test_numerical_accuracy.py — deterministic input/output checks for all metrics
+                               and strategy weight calculations (≥10 tests)
+                               Verifies: portfolio return additivity, CAGR
+                               compounding, Sharpe calculation, max drawdown,
+                               equal weight 1/3 allocation, risk parity sum=1
+  test_splice_integrity.py   — LQD-to-BND join validation
+                               Verifies: no gap at 2007-04-30/2007-05-31,
+                               no outlier at boundary, correct provenance tags
+                               (ig_monthly_lqd_bridge pre-2007, ig_monthly_bnd
+                               post-2007), no NaN in 2002-2025 range, CAGR 3-7%
+Results: 356 passed, 10 skipped (HMM requires C++ build tools on Windows — passes in CI on Linux)
+
+run_all_strategies() return type: dict[str, dict]
+  Keys: strategy name strings
+  Values: dict with sharpe_ratio, cagr, max_drawdown, volatility,
+          excess_return, n_obs, is_significant, strategy_type
+
+Confirmed strategy results (282 monthly observations, 2002-07 to 2025-12):
+  BENCHMARK:         Sharpe=0.522  CAGR=8.58%
+  Classic 60/40:     Sharpe=0.481  CAGR=5.88%
+  Risk Parity:       Sharpe=0.559  CAGR=5.41%
+  Min Variance:      Sharpe=0.443  CAGR=4.59%
+  Equal Weight:      Sharpe=0.567  CAGR=5.97%
+  Momentum Rotation: Sharpe=0.580  CAGR=6.42%
+  Regime Switching:  Sharpe=0.629  CAGR=7.74%
+  Vol Targeting:     Sharpe=0.540  CAGR=5.06%
+  Black-Litterman:   Sharpe=0.483  CAGR=5.36%
+  Max Sharpe Roll:   Sharpe=0.523  CAGR=5.58%
+
+## Sprint 3 Addendum ⏳ PENDING (run before Sprint 4)
+Backend — numerical accuracy and data integrity:
+  test_numerical_accuracy.py
+    deterministic input/output checks using make_history(seed=42) fixture:
+    — CLASSIC_60_40 month return = 0.6×eq + 0.4×ig to 6 decimal places
+    — CAGR of constant 1% monthly return over 12 months = (1.01^12)-1
+    — Sharpe matches manual numpy calculation to 6 decimal places
+    — Sortino >= Sharpe for positively skewed return series
+    — Max drawdown of [0.1, -0.5, 0.3] = -0.5 exactly
+    — Equal weight assigns 1/3 to each asset to 6 decimal places
+    — Risk parity weights sum to 1.0 to 6 decimal places
+    — Simple returns used not log (pct_change not log diff)
+    — Monthly annualisation uses sqrt(12) not sqrt(252)
+    — End-to-end regression: run_all_strategies(make_history(seed=42))
+      produces exact known values for all 10 strategies (stored as
+      constants in the test file — any pipeline change breaks this test)
+    — Sharpe cross-check: manual (mean-rf)/std*sqrt(12) matches
+      sharpe_ratio() output to 6 decimal places
+
+  test_data_transformations.py
+    Group 1 — date conversion:
+    — Serial 36526 → 2000-01-01 exactly
+    — Serial 39448 → 2008-01-01 exactly
+    — All converted dates are timezone-naive
+    — Month-end snapping: 2007-05-14 → 2007-05-31
+    Group 2 — return calculation:
+    — pct_change([100, 110]) = 0.10 exactly (not log)
+    — pct_change([100, 50]) = -0.50 exactly
+    — First row dropped after pct_change
+    — No real-data return outside [-0.50, +0.50]
+    Group 3 — monthly aggregation:
+    — Last trading day of month used, not average
+    — No month has more than one observation after aggregation
+    — Quarterly GDP forward-fill: identical within quarter,
+      changes only at quarter boundaries
+    Group 4 — risk-free rate conversion:
+    — DTB3 5.0% annual → compound monthly: (1.05)^(1/12)-1 = 0.004074
+      NOT simple division 0.05/12 = 0.004167
+    — Compound conversion used, not simple division (verify explicitly)
+    — 2023 average monthly risk-free between 0.004 and 0.005
+    Group 5 — alignment:
+    — Aligned dataset has zero NaN values
+    — All three asset series share identical date index
+    — Aligned row count equals min of individual series
+    Group 6 — known historical values:
+    — October 2008 equity return between -14% and -20% (GFC month)
+    — 2022 full-year equity return between -18% and -22%
+    — 2023-07-31 DTB3 between 5.0% and 5.5% annualised
+
+  test_splice_integrity.py
+    — No missing months at 2007-04-30 to 2007-05-31 boundary
+    — Return at boundary within 3 std devs of surrounding 12 months
+    — Rows before 2007-05-31: ig_source = ig_monthly_lqd_bridge
+    — Rows from 2007-05-31: ig_source = ig_monthly_bnd
+    — No NaN in spliced series 2002-2025
+    — Spliced series CAGR between 3% and 7%
+    — Cumulative price index has no jump at splice:
+      index_level[2007-05-31] / index_level[2007-04-30] - 1
+      equals stated return for 2007-05-31 to 4 decimal places
+    — LQD and BND dividend treatment consistent:
+      no systematic bias in returns at the join month
+
+  test_strategy_constraints.py
+    Four unconditional constraints verified for all 10 strategies:
+    — Fully invested: weights sum to 1.0 at every rebalance date
+    — Long only: no weight < 0 at any rebalance date
+    — No lookahead: signal at date t uses only data from t-1 or earlier
+      (verify for each dynamic strategy explicitly)
+    — Transaction costs: gross - costs = net for a known rebalancing event
+
+  test_benchmark_plausibility.py
+    Known historical values (flag if system diverges):
+    — BENCHMARK CAGR 2002-2025 between 7% and 11%
+    — BENCHMARK Sharpe between 0.35 and 0.75
+    — BENCHMARK max drawdown between -45% and -58%
+    — BENCHMARK 2022 return between -18% and -22%
+    — BENCHMARK 2009 return between +20% and +30%
+    Implausibility guards (catch calculation errors before presentation):
+    — No strategy Sharpe > 2.0 (would indicate lookahead or error)
+    — No strategy CAGR > 20% (implausible for long-only diversified)
+    — No strategy max drawdown > 0 (drawdown must be negative)
+    — All strategy Sharpe values are finite (no inf or NaN)
+    — All strategy CAGR values are finite
 
 ## Sprint 4 ⏳ PENDING
-Backend:
-  test_scope_guard.py    — in-scope pass, out-of-scope reject
-  test_agents.py         — agent response schema validation
-  test_qa_agent.py       — 30-point checklist, limitations output
-  test_ai_usage_log.py   — council session logging, all fields stored
-  test_limitations.py    — QA + Risk Manager generate required fields
+Backend — agents and deployment:
+  test_scope_guard.py
+    — In-scope query passes without rejection
+    — Out-of-scope query (stock pick, crypto) rejected with reason
+    — Borderline query handled consistently
+  test_agents.py
+    — Every agent response includes required schema fields
+    — summary field is non-empty string
+    — layman_explanation field is non-empty string
+    — confidence field is float between 0 and 1
+    — All 6 agent schemas validated
+  test_council_deliberation.py    ← NEW: verify council logic
+    — Council produces CIO recommendation for every valid query
+    — Gemini dissent field populated when agents disagree
+    — is_significant flag in council output matches statistical tests
+    — Council result references actual strategy metrics, not hallucinated numbers
+    — Scope guard fires before council convenes on out-of-scope query
+  test_qa_agent.py
+    — 30-point checklist runs without error
+    — limitations[] field non-empty
+    — data_caveats[] field non-empty
+    — model_assumptions[] field non-empty
+    — Overall verdict is one of: PASS / WARN / FAIL
+  test_ai_usage_log.py
+    — council_sessions table populated after every council run
+    — All required fields stored: query, agents_called, cio_recommendation,
+      gemini_dissent, tokens, cost_usd, timestamp
+    — Cost_usd is positive float
+    — Session is idempotent: re-running same query creates new row
+  test_limitations.py
+    — QA Agent generates limitations[], data_caveats[], model_assumptions[]
+    — Risk Manager generates tail_risks[], regime_caveats[]
+    — All fields are non-empty lists
+  test_deployment.py              ← NEW: verify Render deployment
+    — GET https://[render-url]/api/health returns 200
+    — Health response confirms database connected
+    — All environment variables present (ANTHROPIC_API_KEY,
+      GOOGLE_API_KEY, DATABASE_URL, SECRET_KEY)
+    — Alembic migrations applied: all Sprint 2-4 tables exist in Render DB
 
 ## Sprint 5 ⏳ PENDING
 Backend:
-  test_rate_limiting.py  — rate limit enforcement
-  test_credit_cap.py     — daily spend cap
-  test_explainer.py      — Explainer Agent response schema
-  test_sanity_panel.py   — all 10 checks compute correctly, status logic
+  test_rate_limiting.py
+    — Rate limit enforced after threshold exceeded
+    — Rate limit resets after window expires
+  test_credit_cap.py
+    — Daily spend cap enforced at $5.00
+    — Spend tracked correctly across multiple requests
+  test_explainer.py
+    — Explainer Agent response schema validated
+    — Terms glossary populated for all known terms
+    — Chart explanation generated for all 6 dashboard charts
+  test_sanity_panel.py
+    — All 10 checks compute without error
+    — GREEN/AMBER/RED status logic correct for known inputs
+    — Export produces valid CSV with all 10 rows
 Frontend:
-  ChartCommentStrip.test.tsx   — strip renders, expands, collapses
-  ExplainableText.test.tsx     — hover and click behaviour
-  ChartExportButton.test.tsx   — PNG download triggers correctly
-  TableExportButton.test.tsx   — CSV export correct headers and rows
-  SanityCheckPanel.test.tsx    — green/amber/red status rendering
+  ChartCommentStrip.test.tsx
+    — Strip renders in collapsed state by default
+    — Expands on click, collapses on re-click
+    — Sources line visible in all three modes
+  ExplainableText.test.tsx
+    — Hover triggers tooltip
+    — Click opens expanded explanation
+  ChartExportButton.test.tsx
+    — PNG download triggers on click
+    — Filename includes chart_id and timestamp
+  TableExportButton.test.tsx
+    — CSV export contains correct headers
+    — All visible rows exported
+  SanityCheckPanel.test.tsx
+    — GREEN status renders green indicator
+    — RED status renders red indicator and warning banner
+  test_chart_data_consistency.tsx ← NEW: verify charts match backtester
+    — Cumulative returns chart data matches run_all_strategies() output
+    — Strategy comparison table values match backtester to 2 decimal places
+    — No chart renders mock data when real data is available
+  test_provenance_display.tsx     ← NEW: verify Sources line accuracy
+    — Sources line for cumulative_returns chart matches
+      data_series_registry for equity_monthly, ig_monthly, hy_monthly
+    — Sources line updates if registry changes
+    — No hardcoded source strings in any component
 
 ## Sprint 6 ⏳ PENDING
 Backend:
-  test_report_appendix.py      — all 6 sections present, no empty fields
-  test_report_brief.py         — docx generated, all sections populated
-  test_report_midpoint.py      — docx generated, sections match brief reqs
+  test_report_appendix.py
+    — All 6 sections present and non-empty
+    — Strategy metrics in report match backtester output exactly
+    — Data provenance section lists all 16 registry entries
+    — Sensitivity analysis table has all key parameters
+  test_report_brief.py
+    — Word document generated without error
+    — All 5 required sections present
+    — Charts embedded as images
+    — Page count approximately 5 (within ±1)
+  test_report_midpoint.py
+    — Document generated without error
+    — All 4 required sections present
+    — Preliminary results section contains real metrics not placeholders
+  test_reproducibility.py         ← NEW: critical for Analytical Appendix
+    — Running get_full_history() twice produces identical monthly returns
+    — Running run_all_strategies() twice with same history produces
+      identical results to 6 decimal places (RANDOM_SEED=42 enforced)
+    — Running statistical tests twice produces identical p-values
+    — No non-deterministic behaviour anywhere in the pipeline
+  test_report_accuracy.py         ← NEW: verify report numbers match system
+    — Every metric in the Analytical Appendix report matches the
+      corresponding value in market_data_monthly or strategy results
+    — No number in the report that cannot be traced to a database row
   Full regression suite
-  Performance benchmarks (API response times per Section 15b)
+  Performance benchmarks (API p95 response times per Section 15b)
   Accessibility audit (axe-core, WCAG AA)
+
+
 
 
 
