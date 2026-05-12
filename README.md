@@ -132,3 +132,4 @@ Sprint 4 (targeting May 25 – Jun 1) will deliver:
 | Dr. Panttser | Professor / Reviewer |
 
 Key dates: Mid-checkpoint June 3 @ 6pm · Final presentation July 1 @ 6pm · McEwen 120
+
