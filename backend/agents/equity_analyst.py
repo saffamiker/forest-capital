@@ -5,7 +5,7 @@ Quantitative equity analyst — Sprint 4.
 Analyses equity market conditions, momentum signals, and factor exposure
 using only numbers returned by the backtester tools in this session.
 
-Model: claude-sonnet-4-20250514 (sufficient depth, cost-effective for specialist).
+Model: claude-sonnet-4-6 (sufficient depth, cost-effective for specialist).
 """
 from __future__ import annotations
 

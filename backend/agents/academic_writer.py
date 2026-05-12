@@ -1,7 +1,7 @@
 """
 agents/academic_writer.py
 
-Academic Writer Agent — Claude Sonnet (claude-sonnet-4-20250514).
+Academic Writer Agent — Claude Sonnet (claude-sonnet-4-6).
 Sprint 4: scaffold only. Report generation endpoints deferred to Sprint 6.
 
 Generates APA 7th edition academic drafts for all three written deliverables.

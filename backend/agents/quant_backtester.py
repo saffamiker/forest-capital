@@ -6,7 +6,7 @@ Presents walk-forward OOS results, transaction cost analysis, and
 cross-validation stability scores from the backtester output.
 Never reports gross returns. All signals use only data available at t-1.
 
-Model: claude-sonnet-4-20250514.
+Model: claude-sonnet-4-6.
 """
 from __future__ import annotations
 

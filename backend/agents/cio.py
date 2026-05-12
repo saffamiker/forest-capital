@@ -1,7 +1,7 @@
 """
 agents/cio.py
 
-Chief Investment Officer — Claude Opus (claude-opus-4-20250514).
+Chief Investment Officer — Claude Opus (claude-opus-4-6).
 
 Orchestrates the full council deliberation:
   1. Briefs four Claude Sonnet specialists in parallel

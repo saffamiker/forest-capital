@@ -182,7 +182,7 @@ export default function CouncilDebate() {
           {loading && !result && agentOrder.map((name) => (
             <AgentCard
               key={name}
-              message={{ agent: name, role: 'specialist', model: AGENT_STYLE[name]?.note ?? 'claude-sonnet-4-20250514', content: '', is_final: name === 'CIO' }}
+              message={{ agent: name, role: 'specialist', model: AGENT_STYLE[name]?.note ?? 'claude-sonnet-4-6', content: '', is_final: name === 'CIO' }}
               streaming
             />
           ))}

@@ -707,7 +707,7 @@ MOCK_COUNCIL_RESPONSE = {
         {
             "agent": "Equity Analyst",
             "role": "specialist",
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-6",
             "content": (
                 "Equity regime analysis complete. SPY momentum composite scores: 21d +0.41, 63d +0.38, 252d +0.31. "
                 "HMM and threshold both classify current regime as BULL (agreement confirmed). "
@@ -720,7 +720,7 @@ MOCK_COUNCIL_RESPONSE = {
         {
             "agent": "Fixed Income Analyst",
             "role": "specialist",
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-6",
             "content": (
                 "CRITICAL FINDING — equity-bond correlation breakdown confirmed. "
                 "Pre-2022 rolling 252d correlation: −0.31. Post-2022 correlation: +0.48. "
@@ -734,7 +734,7 @@ MOCK_COUNCIL_RESPONSE = {
         {
             "agent": "Risk Manager",
             "role": "specialist",
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-6",
             "content": (
                 "FDR correction applied across all 10 strategies (Benjamini-Hochberg, q<0.005). "
                 "4 strategies survive FDR: REGIME_SWITCHING, VOL_TARGETING, BLACK_LITTERMAN, MAX_SHARPE_ROLLING. "
@@ -748,7 +748,7 @@ MOCK_COUNCIL_RESPONSE = {
         {
             "agent": "Quant Backtester",
             "role": "specialist",
-            "model": "claude-sonnet-4-20250514",
+            "model": "claude-sonnet-4-6",
             "content": (
                 "Walk-forward OOS results (rolling 36m train / 12m test): "
                 "REGIME_SWITCHING OOS Sharpe 0.89, p=0.004. VOL_TARGETING OOS Sharpe 0.96, p=0.003. "
@@ -778,7 +778,7 @@ MOCK_COUNCIL_RESPONSE = {
         {
             "agent": "CIO",
             "role": "cio",
-            "model": "claude-opus-4-20250514",
+            "model": "claude-opus-4-6",
             "content": (
                 "FINAL RECOMMENDATION — after full council deliberation including Gemini's challenge. "
                 "\n\n"

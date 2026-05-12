@@ -6,7 +6,7 @@ Core responsibility: test whether fixed income is actually providing
 diversification benefit, with explicit focus on the 2022 correlation breakdown.
 Never assumes diversification is present — proves or disproves it with data.
 
-Model: claude-sonnet-4-20250514.
+Model: claude-sonnet-4-6.
 """
 from __future__ import annotations
 

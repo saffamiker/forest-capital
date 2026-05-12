@@ -6,7 +6,7 @@ Enforces FDR correction, runs stress test comparisons, and flags any
 strategy that fails on any single statistical dimension.
 The council's last line of defence against overfitting and false positives.
 
-Model: claude-sonnet-4-20250514.
+Model: claude-sonnet-4-6.
 """
 from __future__ import annotations
 
