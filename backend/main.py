@@ -377,6 +377,64 @@ def _log_council_session(
     )
 
 
+# Maps cio.deliberate() agent keys to the display name/role/model the frontend expects.
+# The frontend's AGENT_STYLE dict in CouncilDebate.tsx is keyed by these exact display names.
+_AGENT_META: dict[str, tuple[str, str, str]] = {
+    "equity_analyst":       ("Equity Analyst",               "specialist", "claude-sonnet-4-6"),
+    "fixed_income_analyst": ("Fixed Income Analyst",          "specialist", "claude-sonnet-4-6"),
+    "risk_manager":         ("Risk Manager",                  "specialist", "claude-sonnet-4-6"),
+    "quant_backtester":     ("Quant Backtester",              "specialist", "claude-sonnet-4-6"),
+    "independent_analyst":  ("Independent Analyst (Gemini)",  "dissenter",  "gemini-2.0-flash"),
+    "cio":                  ("CIO",                           "cio",        "claude-opus-4-6"),
+}
+
+
+def _deliberate_to_frontend(query: str, council_response: dict[str, Any]) -> dict[str, Any]:
+    """
+    Converts cio.deliberate() output to the CouncilDebateResponse shape the frontend expects.
+
+    cio.deliberate() returns {"agents": {snake_case_key: report_dict, ...}, ...}.
+    The frontend's CouncilResponse type expects {"messages": [AgentMessage, ...], ...}.
+    This conversion runs inside the council_query endpoint so the raw backend
+    structure never reaches the client.
+    """
+    agents = council_response.get("agents", {})
+    messages = []
+    for key, (display_name, role, model) in _AGENT_META.items():
+        report = agents.get(key, {})
+        if not report:
+            continue
+        # CIO: use the full synthesised narrative; Gemini: use the full challenge text.
+        # Specialists: summary is purpose-built for display (1-2 sentences + key finding).
+        if key == "cio":
+            content = (
+                report.get("technical_findings", {}).get("final_synthesis_text")
+                or report.get("summary", "")
+            )
+        elif key == "independent_analyst":
+            content = (
+                report.get("technical_findings", {}).get("full_challenge")
+                or report.get("summary", "")
+            )
+        else:
+            content = report.get("summary", "")
+        if not content:
+            continue
+        messages.append({
+            "agent":    display_name,
+            "role":     role,
+            "model":    model,
+            "content":  content,
+            "is_final": key == "cio",
+        })
+    return {
+        "query":                query,
+        "messages":             messages,
+        "final_recommendation": council_response.get("final_recommendation", ""),
+        "consensus_reached":    True,
+    }
+
+
 @app.post("/api/council/query")
 @limiter.limit("10/minute")
 async def council_query(
@@ -444,7 +502,7 @@ async def council_query(
                 user_email=session["email"],
             )
 
-            return council_response
+            return _deliberate_to_frontend(body.query, council_response)
 
         except Exception as exc:
             log.error("council_query_error", error=str(exc))

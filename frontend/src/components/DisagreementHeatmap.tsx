@@ -1,3 +1,16 @@
+const STRATEGY_TYPES: Record<string, 'dynamic' | 'static'> = {
+  BENCHMARK:          'static',
+  CLASSIC_60_40:      'static',
+  RISK_PARITY:        'static',
+  MIN_VARIANCE:       'static',
+  EQUAL_WEIGHT:       'static',
+  MOMENTUM_ROTATION:  'dynamic',
+  REGIME_SWITCHING:   'dynamic',
+  VOL_TARGETING:      'dynamic',
+  BLACK_LITTERMAN:    'dynamic',
+  MAX_SHARPE_ROLLING: 'dynamic',
+}
+
 interface AgentConfig {
   key: string
   label: string
@@ -122,10 +135,19 @@ export default function DisagreementHeatmap({ sentiments = MOCK_SENTIMENTS }: Di
                 className={`border-t border-border/50 ${isGeminiDivergent ? 'bg-purple-500/5' : ''}`}
               >
                 <td className="py-1.5 pr-4">
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="text-white text-2xs font-medium">
                       {strat.replace(/_/g, ' ')}
                     </span>
+                    {STRATEGY_TYPES[strat] === 'dynamic' ? (
+                      <span className="text-2xs px-1 py-0.5 rounded border border-electric/30 bg-electric/10 text-electric font-medium">
+                        DYNAMIC
+                      </span>
+                    ) : STRATEGY_TYPES[strat] === 'static' ? (
+                      <span className="text-2xs px-1 py-0.5 rounded border border-border bg-navy-700 text-muted font-medium">
+                        STATIC
+                      </span>
+                    ) : null}
                     {isGeminiDivergent && (
                       <span className="text-2xs text-purple-400 border border-purple-400/20 rounded px-1 bg-purple-400/10">
                         ≠
