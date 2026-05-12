@@ -4,6 +4,8 @@ import { MemoryRouter } from 'react-router-dom'
 import axios from 'axios'
 import Dashboard from '../components/Dashboard'
 import type { StrategyResult } from '../types/strategies'
+import { useStrategiesStore } from '../stores/strategiesStore'
+import { useRegimeStore } from '../stores/regimeStore'
 
 vi.mock('axios')
 const mockedAxios = vi.mocked(axios, true)
@@ -85,6 +87,8 @@ const MOCK_REGIME = {
   yield_curve_slope: 0.42,
   credit_spread: 3.21,
   equity_trend: 0.08,
+  pre_2022_avg_correlation: -0.31,
+  post_2022_avg_correlation: 0.48,
 }
 
 const MOCK_FRONTIER = {
@@ -104,6 +108,10 @@ function renderDashboard() {
 describe('Dashboard', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    // Reset stores between tests — stores are singletons; without reset,
+    // load() is a no-op once loaded=true and tests can't observe loading state
+    useStrategiesStore.setState({ strategies: [], loading: false, error: null, loaded: false, lastFetchedAt: null })
+    useRegimeStore.setState({ regime: null, loading: false, error: null, fetchedAt: null })
     mockedAxios.get = vi.fn()
       .mockImplementation((url: string) => {
         if (url === '/api/backtest/compare') return Promise.resolve({ data: { strategies: MOCK_STRATEGIES } })
@@ -118,9 +126,14 @@ describe('Dashboard', () => {
     await waitFor(() => expect(screen.queryByText(/loading portfolio data/i)).not.toBeInTheDocument())
   })
 
-  it('shows loading state initially', () => {
+  it('shows loading state while fetch is in-flight', async () => {
+    // Use a never-resolving promise so we can observe the loading state
+    // before the axios mock settles
+    mockedAxios.get = vi.fn().mockReturnValue(new Promise(() => {}))
     renderDashboard()
-    expect(screen.getByText(/loading portfolio data/i)).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByText(/loading portfolio data/i)).toBeInTheDocument()
+    )
   })
 
   it('renders strategy table with 10 rows after load', async () => {

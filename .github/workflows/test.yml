@@ -65,32 +65,24 @@ jobs:
         run: npm run lint
 
   # ── E2E TESTS ──────────────────────────────────────────────────────────
-  # TODO(issue #1): uvicorn health-check times out on GitHub Linux runners.
-  # continue-on-error: true  # tracked: github.com/saffamiker/forest-capital/issues/1 until fixed. See: E2E: uvicorn health-check
-  # times out in GitHub Actions Linux CI (Sprint 2 remediation).
+  # Fixed in Sprint 5: tests now run against the live Render + Vercel
+  # deployments instead of spinning up local services in CI.
+  # This eliminates the uvicorn startup race (issue #1, now closed).
   e2e-tests:
-    name: E2E Tests (Playwright)
+    name: E2E Tests (Playwright — live deployment)
     runs-on: ubuntu-latest
     needs: [backend-tests, frontend-tests]
-    timeout-minutes: 15
-    continue-on-error: true  # tracked: github.com/saffamiker/forest-capital/issues/1
+    timeout-minutes: 10
 
     steps:
       - uses: actions/checkout@v5
-
-      - name: Set up Python
-        uses: actions/setup-python@v5.6.0
-        with:
-          python-version: "3.12"
 
       - name: Set up Node.js
         uses: actions/setup-node@v5
         with:
           node-version: "24"
-
-      - name: Install backend dependencies
-        working-directory: backend
-        run: pip install -r requirements.txt
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
         working-directory: frontend
@@ -100,36 +92,12 @@ jobs:
         working-directory: frontend
         run: npx playwright install --with-deps chromium
 
-      - name: Start backend
-        working-directory: backend
-        run: uvicorn main:app --port 8000 &
-        env:
-          ENVIRONMENT: test
-          ALLOWED_EMAILS: ruurdsm@queens.edu,thaob@queens.edu,murdockm@queens.edu,panttserk@queens.edu
-          SECRET_KEY: test_secret_key_for_ci_at_least_32_chars
-          MASTER_API_KEY: test_master_key
-
-      - name: Diagnose backend startup
-        run: sleep 3 && curl -s http://localhost:8000/api/health || true
-
-      - name: Start frontend
-        working-directory: frontend
-        run: npm run dev &
-
-      - name: Wait for services
-        run: |
-          npx wait-on http://localhost:8000/api/health --timeout 120000
-          npx wait-on http://localhost:5173 --timeout 120000
-
-      - name: Dump backend logs on failure
-        if: failure()
-        run: |
-          echo "=== Backend health check ===" && curl -s http://localhost:8000/api/health || true
-          echo "=== Process list ===" && ps aux | grep uvicorn || true
-
-      - name: Run Playwright E2E tests
+      - name: Run Playwright E2E tests (live deployment)
         working-directory: frontend
         run: npx playwright test
+        env:
+          PLAYWRIGHT_BASE_URL: https://forest-capital.vercel.app
+          API_URL: https://forest-capital.onrender.com
 
       - name: Upload Playwright report
         uses: actions/upload-artifact@v4.6.2

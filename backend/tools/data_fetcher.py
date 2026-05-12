@@ -759,6 +759,180 @@ def compute_signals(
     return signals
 
 
+# ── Incremental data ingestion ────────────────────────────────────────────────
+
+_INCREMENTAL_STALE_DAYS = 35  # Re-fetch only when last daily date is older than this
+
+
+def _db_last_daily_date() -> "datetime | None":
+    """
+    Return the most recent date in market_data_daily, or None.
+
+    Historical daily data (2002-2024) is stored permanently after the first
+    pipeline run. This function tells us where that data ends so we can
+    fetch only the delta from that point forward.
+    """
+    from database import DATABASE_URL
+    if not DATABASE_URL:
+        return None
+
+    async def _query() -> "datetime | None":
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                row = await conn.execute(
+                    text("SELECT MAX(date) FROM market_data_daily")
+                )
+                val = row.scalar()
+                return val
+        except Exception:
+            return None
+        finally:
+            await engine.dispose()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(_query())).result(timeout=15)
+    except Exception:
+        return None
+
+
+def _append_incremental_daily(from_date: str, to_date: str) -> int:
+    """
+    Fetch new SPY, VIX, DGS2 rows from from_date to to_date and upsert
+    into market_data_daily. Returns the number of rows appended.
+
+    Only the three externally-fetched daily series are updated here:
+      equity_return — SPY via yfinance (equity_daily_spy)
+      vix           — VIXCLS via FRED  (vix_daily)
+      dgs2          — DGS2 via FRED    (dgs2_daily)
+
+    Bond daily data (ig_return, hy_return) comes from the Excel file
+    which is a static committed asset and cannot auto-update.
+    """
+    from database import DATABASE_URL
+    if not DATABASE_URL:
+        return 0
+
+    try:
+        spy = _yfinance_fetch("SPY", from_date, to_date)
+        if spy is not None and not spy.empty:
+            spy_ret = spy["Close"].pct_change().dropna()
+        else:
+            spy_ret = pd.Series(dtype=float)
+
+        vix_series = _fred_fetch("VIXCLS", from_date, to_date)
+        if vix_series is not None and not vix_series.empty:
+            vix_s = vix_series.set_index("date")["value"]
+        else:
+            vix_s = pd.Series(dtype=float)
+
+        dgs2_series = _fred_fetch("DGS2", from_date, to_date)
+        if dgs2_series is not None and not dgs2_series.empty:
+            dgs2_s = dgs2_series.set_index("date")["value"]
+        else:
+            dgs2_s = pd.Series(dtype=float)
+
+        all_dates = sorted(
+            set(spy_ret.index) | set(vix_s.index) | set(dgs2_s.index)
+        )
+        if not all_dates:
+            log.info("incremental_no_new_data", from_date=from_date, to_date=to_date)
+            return 0
+
+        rows_added = 0
+
+        async def _upsert() -> int:
+            from sqlalchemy import text
+            from sqlalchemy.ext.asyncio import create_async_engine
+            from sqlalchemy.pool import NullPool
+            engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+            count = 0
+            try:
+                async with engine.begin() as conn:
+                    for d in all_dates:
+                        eq = float(spy_ret[d]) if d in spy_ret.index else None
+                        vx = float(vix_s[d]) if d in vix_s.index else None
+                        d2 = float(dgs2_s[d]) if d in dgs2_s.index else None
+                        await conn.execute(
+                            text(
+                                "INSERT INTO market_data_daily "
+                                "(date, equity_return, equity_source, vix, vix_source, "
+                                " dgs2, dgs2_source) "
+                                "VALUES (:d, :eq, 'equity_daily_spy', :vx, 'vix_daily', "
+                                "        :d2, 'dgs2_daily') "
+                                "ON CONFLICT (date) DO UPDATE SET "
+                                "  equity_return = COALESCE(EXCLUDED.equity_return, market_data_daily.equity_return), "
+                                "  vix = COALESCE(EXCLUDED.vix, market_data_daily.vix), "
+                                "  dgs2 = COALESCE(EXCLUDED.dgs2, market_data_daily.dgs2)"
+                            ),
+                            {"d": d, "eq": eq, "vx": vx, "d2": d2},
+                        )
+                        count += 1
+            finally:
+                await engine.dispose()
+            return count
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            rows_added = pool.submit(lambda: asyncio.run(_upsert())).result(timeout=60)
+
+        log.info(
+            "incremental_update_rows_added",
+            rows=rows_added,
+            from_date=from_date,
+            to_date=to_date,
+        )
+        return rows_added
+
+    except Exception as exc:
+        log.warning("incremental_update_error", error=str(exc))
+        return 0
+
+
+def check_and_run_incremental_update() -> dict:
+    """
+    After the DB-first path confirms historical data is present, check whether
+    the daily data is stale (> 35 days old) and if so fetch the delta.
+
+    Returns {"rows_added": int, "updated": bool} so get_full_history can
+    decide whether to invalidate the strategy_results_cache.
+
+    Historical data (2002-2024) is never re-fetched — only new rows are added.
+    """
+    last_date = _db_last_daily_date()
+    if last_date is None:
+        log.info("incremental_skip_no_last_date")
+        return {"rows_added": 0, "updated": False}
+
+    # Normalise to a date object regardless of whether the DB returned a datetime
+    if hasattr(last_date, "date"):
+        last_date = last_date.date()
+
+    today = datetime.now(timezone.utc).date()
+    days_behind = (today - last_date).days
+
+    if days_behind <= _INCREMENTAL_STALE_DAYS:
+        log.info("no_new_data", last_date=str(last_date), days_behind=days_behind)
+        return {"rows_added": 0, "updated": False}
+
+    from_date = (
+        last_date + timedelta(days=1)
+    ).strftime("%Y-%m-%d")
+    to_date = today.strftime("%Y-%m-%d")
+
+    log.info(
+        "incremental_update_start",
+        from_date=from_date,
+        to_date=to_date,
+        days_behind=days_behind,
+    )
+    rows_added = _append_incremental_daily(from_date, to_date)
+    return {"rows_added": rows_added, "updated": rows_added > 0}
+
+
 # ── Database-first read helpers ───────────────────────────────────────────────
 
 def _db_monthly_row_count() -> int:
@@ -927,6 +1101,15 @@ def get_full_history() -> dict:
             monthly_rows=row_count,
             note="Returning from PostgreSQL — skipping Excel/yfinance/FRED pipeline",
         )
+        # After serving from DB, check if daily data needs a delta update.
+        # This keeps SPY/VIX/DGS2 current without re-running the full pipeline.
+        incremental = check_and_run_incremental_update()
+        if incremental["updated"]:
+            log.info(
+                "incremental_update_complete",
+                rows_added=incremental["rows_added"],
+                note="Strategy cache will be invalidated on next /compare call",
+            )
         result = _read_history_from_db()
         log.info("get_full_history_complete", monthly_rows=row_count, source="db_cache")
         return result

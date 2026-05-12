@@ -17,6 +17,10 @@ export interface RegimeData {
   yield_curve_slope: number | null
   credit_spread: number | null
   equity_trend?: number | null
+  // Computed from market_data_monthly — never hardcoded in frontend.
+  // Null when build_monthly_returns() is unavailable (cold start / test env).
+  pre_2022_avg_correlation: number | null
+  post_2022_avg_correlation: number | null
   as_of?: string
 }
 

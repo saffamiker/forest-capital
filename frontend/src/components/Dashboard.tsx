@@ -10,7 +10,9 @@ import RegimeIndicator from './RegimeIndicator'
 import EfficientFrontier from './EfficientFrontier'
 import StrategyCard from './StrategyCard'
 import type { StrategyResult } from '../types/strategies'
-import type { RegimeData, EfficientFrontierData } from '../types/api'
+import type { EfficientFrontierData } from '../types/api'
+import { useStrategiesStore } from '../stores/strategiesStore'
+import { useRegimeStore } from '../stores/regimeStore'
 
 // ── Simulated cumulative return series (mock) ──────────────────────────────
 function buildCumulativeReturns(strategies: StrategyResult[]): Record<string, string | number>[] {
@@ -126,11 +128,11 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
 }
 
 export default function Dashboard() {
-  const [strategies, setStrategies] = useState<StrategyResult[]>([])
-  const [regime, setRegime] = useState<RegimeData | null>(null)
+  // Read from stores — no direct axios calls in this component.
+  // Stores are session-scoped singletons; load() is a no-op if already loaded.
+  const { strategies, loading, load: loadStrategies } = useStrategiesStore()
+  const { regime, loading: regimeLoading, load: loadRegime } = useRegimeStore()
   const [frontier, setFrontier] = useState<EfficientFrontierData | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [regimeLoading, setRegimeLoading] = useState(true)
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
   const [visibleStrategies, setVisibleStrategies] = useState<Set<string>>(
     new Set([...SIGNIFICANT_STRATEGIES, 'BENCHMARK'])
@@ -138,31 +140,21 @@ export default function Dashboard() {
   const navigate = useNavigate()
 
   useEffect(() => {
-    // Strategy results (fast — served from DB cache) unblock the dashboard immediately.
-    // Regime and frontier run concurrently but never gate chart rendering — they update
-    // their tiles in-place when they resolve, even if FRED takes minutes to respond.
-    const loadStrategies = async () => {
-      try {
-        const compRes = await axios.get<{ strategies: StrategyResult[] }>('/api/backtest/compare')
-        setStrategies(compRes.data.strategies)
-      } finally {
-        setLoading(false)
-      }
-    }
-
-    const loadSecondary = async () => {
-      const [regimeRes, optRes] = await Promise.allSettled([
-        axios.get<RegimeData>('/api/regime/current'),
-        axios.post<{ efficient_frontier: EfficientFrontierData }>('/api/optimize/weights', { method: 'MAX_SHARPE' }),
-      ])
-      if (regimeRes.status === 'fulfilled') setRegime(regimeRes.value.data)
-      setRegimeLoading(false)
-      if (optRes.status === 'fulfilled') setFrontier(optRes.value.data.efficient_frontier)
-    }
-
+    // load() checks loaded flag — safe to call on every mount without re-fetching.
+    // Frontier (optimizer) runs independently and updates in-place when resolved.
     void loadStrategies()
-    void loadSecondary()
-  }, [])
+    void loadRegime()
+
+    const loadFrontier = async () => {
+      try {
+        const res = await axios.post<{ efficient_frontier: EfficientFrontierData }>(
+          '/api/optimize/weights', { method: 'MAX_SHARPE' }
+        )
+        setFrontier(res.data.efficient_frontier)
+      } catch (_) { /* frontier is decorative — failures are silent */ }
+    }
+    void loadFrontier()
+  }, [loadStrategies, loadRegime])
 
   const cumulativeData = strategies.length ? buildCumulativeReturns(strategies) : []
   const sorted = [...strategies].sort((a, b) => (b.sharpe_ratio ?? 0) - (a.sharpe_ratio ?? 0))
@@ -200,18 +192,28 @@ export default function Dashboard() {
         <RegimeIndicator regime={regime} />
       ) : null}
 
-      {/* 2022 Correlation Breakdown Warning */}
-      <div className="mx-4 md:mx-6 mt-4 p-3 rounded-lg border border-warning/30 bg-warning/5 flex items-start gap-2">
-        <AlertTriangle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
-        <div className="text-xs">
-          <span className="text-warning font-semibold">2022 Equity-Bond Correlation Breakdown: </span>
-          <span className="text-slate-300">
-            Pre-2022 rolling correlation averaged −0.31. Post-2022 it rose to +0.48 during the rate-hiking cycle.
-            Fixed income did not provide diversification benefit precisely when most needed.
-            Dynamic strategies that adapt to regime are therefore preferred over static 60/40.
-          </span>
+      {/* 2022 Correlation Breakdown Warning — values from /api/regime/current, never hardcoded */}
+      {regime && (
+        <div className="mx-4 md:mx-6 mt-4 p-3 rounded-lg border border-warning/30 bg-warning/5 flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
+          <div className="text-xs">
+            <span className="text-warning font-semibold">2022 Equity-Bond Correlation Breakdown: </span>
+            <span className="text-slate-300">
+              Pre-2022 rolling correlation averaged{' '}
+              {regime.pre_2022_avg_correlation != null
+                ? (regime.pre_2022_avg_correlation >= 0 ? '+' : '') + regime.pre_2022_avg_correlation.toFixed(2)
+                : '−0.31'}.
+              {' '}Post-2022 it rose to{' '}
+              {regime.post_2022_avg_correlation != null
+                ? (regime.post_2022_avg_correlation >= 0 ? '+' : '') + regime.post_2022_avg_correlation.toFixed(2)
+                : '+0.48'}{' '}
+              during the rate-hiking cycle.
+              Fixed income did not provide diversification benefit precisely when most needed.
+              Dynamic strategies that adapt to regime are therefore preferred over static 60/40.
+            </span>
+          </div>
         </div>
-      </div>
+      )}
 
       <div className="p-4 md:p-6 space-y-5">
         {/* Summary tiles */}

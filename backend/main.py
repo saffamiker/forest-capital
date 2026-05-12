@@ -253,17 +253,36 @@ async def run_backtest(
 @app.get("/api/backtest/compare")
 @limiter.limit("30/minute")
 async def compare_strategies(request: Request, session: dict = Depends(require_auth)):
-    # Sprint 3: all 10 strategies computed from real data.
-    # get_full_history() is called once; run_all_strategies receives the pre-loaded dict.
-    # Falls back to mock data in test environment or on individual strategy failures.
+    # Sprint 5: strategy_results_cache checked before calling run_all_strategies().
+    # Cache key = SHA-256 of (n_monthly_rows, last_date, n_strategies=10).
+    # On a cache hit: ~200ms response.  On a miss: recompute (~30s) then cache.
+    # Cache survives Render restarts because it lives in PostgreSQL, not memory.
     if ENVIRONMENT != "test":
         try:
             from tools.data_fetcher import get_full_history
             from tools.backtester import run_all_strategies
+            from tools.cache import get_strategy_cache, set_strategy_cache, _compute_data_hash
+
             history = get_full_history()
+
+            # Build a stable hash from pipeline metadata to detect new data
+            monthly = history.get("equity_monthly")
+            n_rows = len(monthly) if monthly is not None else 0
+            last_date = str(monthly.index[-1]) if monthly is not None and len(monthly) > 0 else "unknown"
+            strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
+
+            cached = await get_strategy_cache(strategy_hash)
+            if cached:
+                ranked = sorted(cached.values(), key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
+                return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": "hit"}
+
             results_dict = run_all_strategies(history)
             ranked = sorted(results_dict.values(), key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
-            return {"strategies": ranked, "ranked_by": "sharpe_ratio"}
+
+            # Write-through: persist for next cold start or Render restart
+            await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
+
+            return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": "miss"}
         except Exception as exc:
             log.warning("compare_all_strategies_fallback", error=str(exc))
     # Fallback: MOCK_STRATEGIES used only in test environment or when the real
@@ -277,11 +296,21 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
 
 @app.get("/api/regime/current")
 async def get_current_regime(session: dict = Depends(require_auth)):
-    # Sprint 2: real threshold-based regime. Fall back to mock in test env or on error.
+    # Sprint 5: regime_signals_cache checked before calling FRED.
+    # DB cache TTL = 15 minutes — matches in-process dict in regime_detector.py.
+    # On a Render restart the DB row is still valid; the in-process dict is gone.
+    # This prevents FRED timeout (30-60s) from blocking every post-restart request.
     if ENVIRONMENT != "test":
         try:
+            from tools.cache import get_regime_cache, set_regime_cache
+            cached = await get_regime_cache()
+            if cached:
+                return cached
+
             from tools.regime_detector import detect_current_regime
-            return detect_current_regime()
+            result = detect_current_regime()
+            await set_regime_cache(result, ttl_minutes=15)
+            return result
         except Exception as exc:
             log.warning("regime_detection_fallback", error=str(exc))
     return MOCK_REGIME

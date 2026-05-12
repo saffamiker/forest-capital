@@ -98,6 +98,10 @@ CACHE_DIR          = "data/cache"
 CACHE_EXPIRY_HOURS = 24
 
 # ── MACRO DATA (FRED) ─────────────────────────────────────────────────────────
+# 60-second timeout guards against FRED gateway stalls that previously caused
+# 3-minute dashboard load times — regime cache (15-min TTL) absorbs most hits.
+FRED_TIMEOUT_SECONDS = 60
+
 FRED_SERIES = {
     "fed_funds":   "DFF",
     "treasury_10y": "DGS10",

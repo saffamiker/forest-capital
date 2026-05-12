@@ -71,6 +71,10 @@ class OptimizeRequest(BaseModel):
     method: str
     assets: Optional[list[str]] = None
     constraints: Optional[dict[str, Any]] = None
+    # start/end allow callers to specify the optimisation window;
+    # the optimizer falls back to config defaults when omitted
+    start: Optional[str] = None
+    end: Optional[str] = None
 
 
 class UIUXReviewRequest(BaseModel):

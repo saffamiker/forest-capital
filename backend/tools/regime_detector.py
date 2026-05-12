@@ -215,6 +215,26 @@ def detect_current_regime() -> dict:
         credit_spread=credit_spread,
     )
 
+    # Correlation breakdown: compare pre-2022 vs post-2022 equity-bond correlation.
+    # The 2022 rate-hiking cycle is the central finding of this project — equity-bond
+    # correlation turned positive (+0.48) vs the historical negative (-0.31), meaning
+    # fixed income failed to cushion equity losses precisely when most needed.
+    # Computed here so the frontend never hardcodes these values.
+    pre_2022_corr: float | None = None
+    post_2022_corr: float | None = None
+    try:
+        from tools.data_fetcher import build_monthly_returns
+        monthly = build_monthly_returns()
+        if monthly is not None and "equity_return" in monthly.columns and "ig_return" in monthly.columns:
+            pre_2022 = monthly[monthly.index < "2022-01-01"]
+            post_2022 = monthly[monthly.index >= "2022-01-01"]
+            if len(pre_2022) >= 24:
+                pre_2022_corr = float(pre_2022["equity_return"].corr(pre_2022["ig_return"]))
+            if len(post_2022) >= 6:
+                post_2022_corr = float(post_2022["equity_return"].corr(post_2022["ig_return"]))
+    except Exception as e:
+        log.warning("regime_correlation_unavailable", error=str(e))
+
     result = {
         "threshold_regime": threshold_regime,
         "hmm_regime": hmm_regime,
@@ -224,6 +244,8 @@ def detect_current_regime() -> dict:
         "yield_curve_slope": yield_curve_slope,
         "equity_trend": equity_trend,
         "credit_spread": credit_spread,
+        "pre_2022_avg_correlation": pre_2022_corr,
+        "post_2022_avg_correlation": post_2022_corr,
         "as_of": end,
     }
     _regime_cache["data"] = result
