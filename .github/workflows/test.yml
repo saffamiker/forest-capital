@@ -6,9 +6,6 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   # ── BACKEND TESTS ──────────────────────────────────────────────────────
   backend-tests:
@@ -19,7 +16,7 @@ jobs:
         working-directory: backend
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v5
 
       - name: Set up Python
         uses: actions/setup-python@v5.6.0
@@ -49,10 +46,10 @@ jobs:
         working-directory: frontend
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4.4.0
+        uses: actions/setup-node@v5
         with:
           node-version: "24"
           cache: "npm"
@@ -79,7 +76,7 @@ jobs:
     continue-on-error: true  # tracked: github.com/saffamiker/forest-capital/issues/1
 
     steps:
-      - uses: actions/checkout@v4.2.2
+      - uses: actions/checkout@v5
 
       - name: Set up Python
         uses: actions/setup-python@v5.6.0
@@ -87,7 +84,7 @@ jobs:
           python-version: "3.12"
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4.4.0
+        uses: actions/setup-node@v5
         with:
           node-version: "24"
 
@@ -140,4 +137,3 @@ jobs:
         with:
           name: playwright-report
           path: frontend/playwright-report/
-
