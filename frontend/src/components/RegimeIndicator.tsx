@@ -29,12 +29,12 @@ function MetricPill({ label, value, mono = true }: { label: string; value: strin
 export default function RegimeIndicator({ regime }: { regime: RegimeData }) {
   const {
     threshold_regime = 'BULL',
-    hmm_regime = 0,
-    hmm_probabilities = [0.82, 0.12, 0.06],
+    hmm_regime,
+    hmm_probabilities,
     regimes_agree = true,
-    vix_level = 14.3,
-    yield_curve_slope = 0.42,
-    credit_spread = 3.21,
+    vix_level,
+    yield_curve_slope,
+    credit_spread,
     as_of = '2024-12-31',
   } = regime
 
@@ -43,8 +43,9 @@ export default function RegimeIndicator({ regime }: { regime: RegimeData }) {
   const { Icon } = cfg
 
   const hmm_labels = ['BULL', 'BEAR', 'TRANSITION']
-  const dominantHmmLabel = hmm_labels[hmm_regime] ?? 'BULL'
-  const hmmProb = hmm_probabilities[hmm_regime] ?? 0
+  const safeHmmRegime = hmm_regime ?? 0
+  const dominantHmmLabel = hmm_labels[safeHmmRegime] ?? 'BULL'
+  const hmmProb = hmm_probabilities != null ? (hmm_probabilities[safeHmmRegime] ?? null) : null
 
   return (
     <div className={`border-b border-border ${cfg.bg} px-6 py-2.5`}>
@@ -67,11 +68,11 @@ export default function RegimeIndicator({ regime }: { regime: RegimeData }) {
 
         {/* Market metrics */}
         <div className="flex items-center gap-2 flex-wrap ml-auto">
-          <MetricPill label="VIX" value={vix_level.toFixed(1)} />
-          <MetricPill label="10Y−2Y" value={`${yield_curve_slope >= 0 ? '+' : ''}${yield_curve_slope.toFixed(2)}%`} />
-          <MetricPill label="HY Spread" value={`${credit_spread.toFixed(2)}%`} />
+          <MetricPill label="VIX" value={vix_level != null ? vix_level.toFixed(1) : '—'} />
+          <MetricPill label="10Y−2Y" value={yield_curve_slope != null ? `${yield_curve_slope >= 0 ? '+' : ''}${yield_curve_slope.toFixed(2)}%` : '—'} />
+          <MetricPill label="HY Spread" value={credit_spread != null ? `${credit_spread.toFixed(2)}%` : '—'} />
           <MetricPill label="Threshold" value={threshold_regime} mono={false} />
-          <MetricPill label="HMM" value={`${dominantHmmLabel} (${(hmmProb * 100).toFixed(0)}%)`} />
+          <MetricPill label="HMM" value={hmmProb != null ? `${dominantHmmLabel} (${(hmmProb * 100).toFixed(0)}%)` : dominantHmmLabel} />
           <span className="text-muted text-2xs font-mono ml-1">as of {as_of}</span>
         </div>
       </div>

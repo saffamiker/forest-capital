@@ -10,13 +10,13 @@ export type RegimeType = 'BULL' | 'BEAR' | 'TRANSITION'
 
 export interface RegimeData {
   threshold_regime: RegimeType
-  hmm_regime: number
-  hmm_probabilities: number[]
+  hmm_regime: number | null
+  hmm_probabilities: number[] | null
   regimes_agree: boolean
-  vix_level: number
-  yield_curve_slope: number
-  credit_spread: number
-  equity_trend?: number
+  vix_level: number | null
+  yield_curve_slope: number | null
+  credit_spread: number | null
+  equity_trend?: number | null
   as_of?: string
 }
 

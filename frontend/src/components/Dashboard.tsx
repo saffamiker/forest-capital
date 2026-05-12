@@ -91,7 +91,7 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
       <td className="px-3 py-2 font-mono text-white text-xs">
         {s.sharpe_ratio != null ? s.sharpe_ratio.toFixed(2) : '—'}
         <span className="text-muted">
-          {s.sharpe_ci_95 != null
+          {s.sharpe_ci_95 != null && s.sharpe_ci_95[0] != null && s.sharpe_ci_95[1] != null
             ? ` [${s.sharpe_ci_95[0].toFixed(2)}–${s.sharpe_ci_95[1].toFixed(2)}]`
             : ''}
         </span>
