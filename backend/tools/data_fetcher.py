@@ -23,6 +23,7 @@ import concurrent.futures
 import hashlib
 import io
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -758,18 +759,183 @@ def compute_signals(
     return signals
 
 
+# ── Database-first read helpers ───────────────────────────────────────────────
+
+def _db_monthly_row_count() -> int:
+    """
+    Return the number of rows in market_data_monthly without running the pipeline.
+
+    A fast COUNT(*) over a single indexed table takes < 5ms. Runs in a
+    ThreadPoolExecutor so it is safe to call from any context — including
+    inside a running FastAPI event loop. Returns 0 on any error (table missing,
+    DB unreachable, DATABASE_URL not set) so the caller always gets an int.
+    """
+    from database import DATABASE_URL  # URL string only — not the shared engine
+    if not DATABASE_URL:
+        return 0
+
+    async def _count() -> int:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        local_engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+        try:
+            async with local_engine.connect() as conn:
+                row = await conn.execute(text("SELECT COUNT(*) FROM market_data_monthly"))
+                return int(row.scalar() or 0)
+        except Exception:
+            # Table may not exist yet on first boot — that is a normal miss
+            return 0
+        finally:
+            await local_engine.dispose()
+
+    try:
+        def _run() -> int:
+            return asyncio.run(_count())
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(_run).result(timeout=15)
+    except Exception:
+        return 0
+
+
+def _read_history_from_db() -> dict:
+    """
+    Assemble the full history dict from PostgreSQL without touching Excel, yfinance, or FRED.
+
+    Reads market_data_monthly (monthly return series + signal averages) and
+    market_data_daily (daily return series). ff_factors and risk_free_daily are
+    not stored in the DB tables; they are returned as None — callers that need
+    them (factor attribution, daily Sharpe) handle None gracefully.
+
+    Uses the same NullPool + asyncio.run() pattern as _persist_to_db() so this
+    function can be called from any context without conflicting with FastAPI's
+    event loop.
+    """
+    from database import DATABASE_URL
+
+    async def _read() -> dict[str, list]:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        local_engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+        try:
+            async with local_engine.connect() as conn:
+                m_rows = await conn.execute(text(
+                    "SELECT date, equity_return, ig_return, hy_return, risk_free_rate, "
+                    "vix_month_avg, yield_curve, hy_spread, ig_spread, gdp_growth, pe_ratio "
+                    "FROM market_data_monthly ORDER BY date"
+                ))
+                monthly_raw = [dict(r._mapping) for r in m_rows]
+
+                d_rows = await conn.execute(text(
+                    "SELECT date, equity_return, ig_return, hy_return, vix, dgs2 "
+                    "FROM market_data_daily ORDER BY date"
+                ))
+                daily_raw = [dict(r._mapping) for r in d_rows]
+        finally:
+            await local_engine.dispose()
+
+        return {"monthly": monthly_raw, "daily": daily_raw}
+
+    def _run() -> dict[str, list]:
+        return asyncio.run(_read())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        raw = pool.submit(_run).result(timeout=60)
+
+    # Reconstruct monthly DataFrame — index snapped to month-end to match pipeline output
+    monthly_df = pd.DataFrame(raw["monthly"])
+    monthly_df["date"] = pd.to_datetime(monthly_df["date"]) + pd.offsets.MonthEnd(0)
+    monthly_df = monthly_df.set_index("date").sort_index()
+
+    # Reconstruct daily DataFrame
+    if raw["daily"]:
+        daily_df = pd.DataFrame(raw["daily"])
+        daily_df["date"] = pd.to_datetime(daily_df["date"])
+        daily_df = daily_df.set_index("date").sort_index()
+    else:
+        daily_df = pd.DataFrame(
+            columns=["equity_return", "ig_return", "hy_return", "vix", "dgs2"]
+        )
+
+    # Signals: monthly averages from the monthly table for regime-detection columns.
+    # These are monthly-aggregated values (not daily) — adequate for backtester
+    # strategies that consume quarterly rebalance signals.
+    signals: dict[str, pd.Series] = {}
+    for col, sig_key in [
+        ("vix_month_avg", "vix"),
+        ("yield_curve",   "yield_curve"),
+        ("hy_spread",     "hy_spread"),
+        ("ig_spread",     "ig_spread"),
+        ("gdp_growth",    "gdp_growth"),
+        ("pe_ratio",      "pe_ratio"),
+    ]:
+        if col in monthly_df.columns:
+            s = monthly_df[col].dropna()
+            if len(s) > 0:
+                signals[sig_key] = s
+
+    # Prefer daily VIX from market_data_daily when available — higher resolution
+    if "vix" in daily_df.columns:
+        vix_d = daily_df["vix"].dropna()
+        if len(vix_d) > 0:
+            signals["vix"] = vix_d
+
+    def _series(df: pd.DataFrame, col: str) -> pd.Series | None:
+        if col not in df.columns:
+            return None
+        s = df[col].dropna()
+        return s if len(s) > 0 else None
+
+    return {
+        "equity_monthly":    _series(monthly_df, "equity_return"),
+        "ig_monthly":        _series(monthly_df, "ig_return"),
+        "hy_monthly":        _series(monthly_df, "hy_return"),
+        "risk_free_monthly": _series(monthly_df, "risk_free_rate"),
+        "equity_daily":      _series(daily_df,   "equity_return"),
+        "ig_daily":          _series(daily_df,   "ig_return"),
+        "hy_daily":          _series(daily_df,   "hy_return"),
+        # DTB3 daily not stored in DB; callers fall back to risk_free_monthly
+        "risk_free_daily":   None,
+        "signals":           signals,
+        # Ken French factors not stored in DB; factor attribution callers handle None
+        "ff_factors":        None,
+    }
+
+
 def get_full_history() -> dict:
     """
     Orchestrate the complete data pipeline and return the unified dataset.
 
+    DB-first: if market_data_monthly already has >= 200 rows, the pipeline
+    output is already stored and validated — return directly from PostgreSQL.
+    Cold-start pipeline computation takes ~30s on a free-tier server; the DB
+    read takes < 1s. Only run the full pipeline on the very first boot or
+    after a database reset (row count below the 200-row threshold).
+
     Loads Excel data, fetches supplemental series, cross-validates equity,
     runs Section 4b sanity assertions, writes provenance.json, writes
     all four PostgreSQL tables, and returns aligned monthly and daily series.
-
-    Sprint 3+ reads from market_data_monthly / market_data_daily directly.
-    Cold-start computation takes ~30s on a free-tier server.
     """
     log.info("get_full_history_start")
+
+    row_count = _db_monthly_row_count()
+    if row_count >= 200:
+        log.info(
+            "db_cache_hit",
+            monthly_rows=row_count,
+            note="Returning from PostgreSQL — skipping Excel/yfinance/FRED pipeline",
+        )
+        result = _read_history_from_db()
+        log.info("get_full_history_complete", monthly_rows=row_count, source="db_cache")
+        return result
+
+    log.info(
+        "db_cache_miss",
+        monthly_rows=row_count,
+        note="Running full Excel/yfinance/FRED pipeline — DB empty or below threshold",
+    )
 
     provided = load_provided_data()
     supplemental = fetch_supplemental_data()
