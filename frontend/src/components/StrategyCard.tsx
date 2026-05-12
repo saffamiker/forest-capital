@@ -18,12 +18,12 @@ function pFmt(p: number | undefined) {
 
 interface SignificanceBadgeProps {
   label: string
-  pValue: number
+  pValue: number | undefined
   threshold?: number
 }
 
 function SignificanceBadge({ label, pValue, threshold = 0.005 }: SignificanceBadgeProps) {
-  const pass = pValue <= threshold
+  const pass = pValue != null && pValue <= threshold
   return (
     <div className="flex items-center justify-between py-1 border-b border-border/50 last:border-0">
       <span className="text-muted text-2xs">{label}</span>
@@ -108,7 +108,7 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
     ? 'bg-electric/10 text-electric border-electric/20'
     : 'bg-navy-600 text-slate-300 border-border'
 
-  const sigColor = s.is_significant ? 'text-success' : s.tier1_gates_passed >= 3 ? 'text-warning' : 'text-danger'
+  const sigColor = s.is_significant ? 'text-success' : (s.tier1_gates_passed ?? 0) >= 3 ? 'text-warning' : 'text-danger'
 
   return (
     <div className="card overflow-hidden">
@@ -121,11 +121,11 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
                 {s.strategy_name.replace(/_/g, ' ')}
               </h3>
               <span className={`text-2xs px-1.5 py-0.5 rounded border font-medium ${typeBadge}`}>
-                {s.strategy_type.toUpperCase()}
+                {(s.strategy_type ?? 'static').toUpperCase()}
               </span>
             </div>
             <p className={`text-2xs mt-0.5 font-mono ${sigColor}`}>
-              {s.tier1_gates_passed}/5 Tier 1 gates
+              {s.tier1_gates_passed ?? '?'}/5 Tier 1 gates
               {s.is_significant && ' · ✓ SIGNIFICANT'}
             </p>
           </div>
@@ -222,8 +222,8 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
             <div className="section-header mb-1.5">Economic Significance</div>
             <div className="flex items-center justify-between">
               <span className="text-muted text-xs">Alpha after costs</span>
-              <span className={`font-mono text-xs ${s.alpha_after_costs_bps >= 50 ? 'text-success' : 'text-warning'}`}>
-                {s.alpha_after_costs_bps}bps {s.alpha_after_costs_bps >= 50 ? '✓' : '< 50bps threshold'}
+              <span className={`font-mono text-xs ${(s.alpha_after_costs_bps ?? 0) >= 50 ? 'text-success' : 'text-warning'}`}>
+                {s.alpha_after_costs_bps ?? '—'}bps {(s.alpha_after_costs_bps ?? 0) >= 50 ? '✓' : '< 50bps threshold'}
               </span>
             </div>
           </div>

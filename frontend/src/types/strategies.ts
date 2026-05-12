@@ -47,59 +47,59 @@ export interface CrossValidation {
 
 export interface StrategyResult {
   strategy_name: string
-  strategy_type: 'static' | 'dynamic'
+  strategy_type?: 'static' | 'dynamic'
   cagr: number
-  total_return: number
+  total_return?: number
   monthly_returns?: number[]
   volatility: number
   max_drawdown: number
-  drawdown_duration_days: number
-  drawdown_recovery_days: number
-  var_95: number
-  cvar_95: number
-  skewness: number
-  kurtosis: number
+  drawdown_duration_days?: number
+  drawdown_recovery_days?: number
+  var_95?: number
+  cvar_95?: number
+  skewness?: number
+  kurtosis?: number
   sharpe_ratio: number
-  sortino_ratio: number
-  calmar_ratio: number
-  information_ratio: number
-  omega_ratio: number
-  alpha: number
-  alpha_bps: number
-  alpha_after_costs_bps: number
-  beta: number
-  r_squared: number
-  avg_monthly_turnover: number
-  avg_equity_weight: number
-  avg_bond_weight: number
-  is_economically_significant: boolean
-  min_viable_aum: number
-  p_value_ttest: number
-  p_value_sharpe_jk: number
-  p_value_alpha: number
-  p_value_corrected: number
-  p_value_bootstrap: number
-  normality_rejected: boolean
-  bootstrap_used: boolean
-  has_autocorrelation: boolean
-  is_stationary: boolean
-  is_adequately_powered: boolean
-  deflated_sharpe_ratio: number
-  dsr_p_value: number
-  probabilistic_sharpe_ratio: number
-  sharpe_ci_95: [number, number]
-  spa_p_value: number
-  passes_spa: boolean
+  sortino_ratio?: number
+  calmar_ratio?: number
+  information_ratio?: number
+  omega_ratio?: number
+  alpha?: number
+  alpha_bps?: number
+  alpha_after_costs_bps?: number
+  beta?: number
+  r_squared?: number
+  avg_monthly_turnover?: number
+  avg_equity_weight?: number
+  avg_bond_weight?: number
+  is_economically_significant?: boolean
+  min_viable_aum?: number
+  p_value_ttest?: number
+  p_value_sharpe_jk?: number
+  p_value_alpha?: number
+  p_value_corrected?: number
+  p_value_bootstrap?: number
+  normality_rejected?: boolean
+  bootstrap_used?: boolean
+  has_autocorrelation?: boolean
+  is_stationary?: boolean
+  is_adequately_powered?: boolean
+  deflated_sharpe_ratio?: number
+  dsr_p_value?: number
+  probabilistic_sharpe_ratio?: number
+  sharpe_ci_95?: [number, number]
+  spa_p_value?: number
+  passes_spa?: boolean
   cross_validation?: CrossValidation
   attribution?: Record<string, number>
-  oos_sharpe: number
-  oos_cagr: number
-  oos_p_value: number
-  oos_significant: boolean
+  oos_sharpe?: number
+  oos_cagr?: number
+  oos_p_value?: number
+  oos_significant?: boolean
   subperiod_results?: SubperiodResults
   stress_results?: StressResults
-  tier1_gates_passed: number
-  is_significant: boolean
-  significance_summary: string
-  cv_stability_score: number
+  tier1_gates_passed?: number
+  is_significant?: boolean
+  significance_summary?: string
+  cv_stability_score?: number
 }

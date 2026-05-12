@@ -27,6 +27,7 @@ unstable estimates with high regime switching frequency.
 """
 from __future__ import annotations
 
+import time
 import warnings
 from datetime import datetime, timedelta
 
@@ -57,6 +58,12 @@ try:
 except ImportError:  # pragma: no cover
     _HMM_AVAILABLE = False
     warnings.warn("hmmlearn not installed — HMM regime detection disabled. Install hmmlearn.")
+
+# In-process cache for regime detection results.
+# FRED fetches can take 30-60 seconds on slow days; a 15-minute TTL is short enough
+# to reflect intraday regime shifts while avoiding repeated timeouts on every page load.
+_REGIME_CACHE_TTL = 15 * 60  # seconds
+_regime_cache: dict = {}
 
 
 # ── Threshold-based classification ───────────────────────────────────────────
@@ -120,14 +127,17 @@ def _classify_threshold(
 def detect_current_regime() -> dict:
     """
     Live regime classification from freshly fetched market data.
-    Fetches live rather than using a precomputed cache because regime is used
-    to make real-time allocation decisions — a stale cached regime from 24 hours
-    ago would be wrong during fast-moving markets (March 2020, October 2008).
-    Each signal fetch has its own exception handler so a FRED outage for VIX
-    does not block the classification — the function degrades gracefully, reporting
-    whichever signals are available. A missing signal reduces confidence but does
-    not prevent a regime call.
+    Results are cached in-process for _REGIME_CACHE_TTL seconds (15 min).
+    This prevents repeated FRED timeouts on every dashboard load while still
+    reflecting intraday regime shifts. Each signal fetch has its own exception
+    handler so a FRED outage degrades gracefully — the call returns whichever
+    signals are available rather than failing outright.
     """
+    now = time.time()
+    if _regime_cache and now - _regime_cache.get("ts", 0) < _REGIME_CACHE_TTL:
+        log.info("regime_cache_hit", age_seconds=int(now - _regime_cache["ts"]))
+        return _regime_cache["data"]
+
     from tools.data_fetcher import fetch_equity_data, fetch_fred_series
 
     end = datetime.today().strftime("%Y-%m-%d")
@@ -205,7 +215,7 @@ def detect_current_regime() -> dict:
         credit_spread=credit_spread,
     )
 
-    return {
+    result = {
         "threshold_regime": threshold_regime,
         "hmm_regime": hmm_regime,
         "hmm_probabilities": hmm_probs,
@@ -216,6 +226,9 @@ def detect_current_regime() -> dict:
         "credit_spread": credit_spread,
         "as_of": end,
     }
+    _regime_cache["data"] = result
+    _regime_cache["ts"] = time.time()
+    return result
 
 
 def _check_agreement(threshold: str, hmm: str | None) -> bool:

@@ -83,7 +83,7 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
             s.strategy_type === 'dynamic'
               ? 'text-electric bg-electric/10 border border-electric/20'
               : 'text-muted bg-navy-700 border border-border'
-          }`}>{s.strategy_type.toUpperCase()}</span>
+          }`}>{(s.strategy_type ?? 'static').toUpperCase()}</span>
           {isSignificant && <span className="badge-pass">SIG</span>}
         </div>
       </td>
@@ -98,27 +98,27 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
       </td>
       <td className="px-3 py-2 font-mono text-danger text-xs">{s.max_drawdown != null ? (s.max_drawdown * 100).toFixed(1) : '—'}%</td>
       <td className="px-3 py-2 font-mono text-xs">
-        <span className={s.dsr_p_value <= 0.005 ? 'text-success' : 'text-muted'}>
+        <span className={(s.dsr_p_value ?? 1) <= 0.005 ? 'text-success' : 'text-muted'}>
           {s.deflated_sharpe_ratio != null ? s.deflated_sharpe_ratio.toFixed(2) : '—'}
         </span>
       </td>
       <td className="px-3 py-2 font-mono text-xs">
-        <span className={s.p_value_corrected <= 0.005 ? 'text-success' : 'text-muted'}>
+        <span className={(s.p_value_corrected ?? 1) <= 0.005 ? 'text-success' : 'text-muted'}>
           {pFmt(s.p_value_corrected)}
         </span>
       </td>
       <td className="px-3 py-2 font-mono text-xs">
-        <span className={s.cv_stability_score >= 0.60 ? 'text-success' : 'text-warning'}>
+        <span className={(s.cv_stability_score ?? 0) >= 0.60 ? 'text-success' : 'text-warning'}>
           {s.cv_stability_score != null ? s.cv_stability_score.toFixed(2) : '—'}
         </span>
       </td>
       <td className="px-3 py-2">
         {isSignificant ? (
           <span className="badge-pass">PASS</span>
-        ) : s.tier1_gates_passed >= 3 ? (
-          <span className="badge-warn">{s.tier1_gates_passed}/5</span>
+        ) : (s.tier1_gates_passed ?? 0) >= 3 ? (
+          <span className="badge-warn">{s.tier1_gates_passed ?? 0}/5</span>
         ) : (
-          <span className="badge-fail">{s.tier1_gates_passed}/5</span>
+          <span className="badge-fail">{s.tier1_gates_passed ?? 0}/5</span>
         )}
       </td>
     </tr>
@@ -130,6 +130,7 @@ export default function Dashboard() {
   const [regime, setRegime] = useState<RegimeData | null>(null)
   const [frontier, setFrontier] = useState<EfficientFrontierData | null>(null)
   const [loading, setLoading] = useState(true)
+  const [regimeLoading, setRegimeLoading] = useState(true)
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
   const [visibleStrategies, setVisibleStrategies] = useState<Set<string>>(
     new Set([...SIGNIFICANT_STRATEGIES, 'BENCHMARK'])
@@ -137,28 +138,37 @@ export default function Dashboard() {
   const navigate = useNavigate()
 
   useEffect(() => {
-    const load = async () => {
+    // Strategy results (fast — served from DB cache) unblock the dashboard immediately.
+    // Regime and frontier run concurrently but never gate chart rendering — they update
+    // their tiles in-place when they resolve, even if FRED takes minutes to respond.
+    const loadStrategies = async () => {
       try {
-        const [compRes, regimeRes, optRes] = await Promise.all([
-          axios.get<{ strategies: StrategyResult[] }>('/api/backtest/compare'),
-          axios.get<RegimeData>('/api/regime/current'),
-          axios.post<{ efficient_frontier: EfficientFrontierData }>('/api/optimize/weights', { method: 'MAX_SHARPE' }),
-        ])
+        const compRes = await axios.get<{ strategies: StrategyResult[] }>('/api/backtest/compare')
         setStrategies(compRes.data.strategies)
-        setRegime(regimeRes.data)
-        setFrontier(optRes.data.efficient_frontier)
       } finally {
         setLoading(false)
       }
     }
-    void load()
+
+    const loadSecondary = async () => {
+      const [regimeRes, optRes] = await Promise.allSettled([
+        axios.get<RegimeData>('/api/regime/current'),
+        axios.post<{ efficient_frontier: EfficientFrontierData }>('/api/optimize/weights', { method: 'MAX_SHARPE' }),
+      ])
+      if (regimeRes.status === 'fulfilled') setRegime(regimeRes.value.data)
+      setRegimeLoading(false)
+      if (optRes.status === 'fulfilled') setFrontier(optRes.value.data.efficient_frontier)
+    }
+
+    void loadStrategies()
+    void loadSecondary()
   }, [])
 
   const cumulativeData = strategies.length ? buildCumulativeReturns(strategies) : []
-  const sorted = [...strategies].sort((a, b) => b.sharpe_ratio - a.sharpe_ratio)
+  const sorted = [...strategies].sort((a, b) => (b.sharpe_ratio ?? 0) - (a.sharpe_ratio ?? 0))
   const significant = strategies.filter((s) => s.is_significant)
   const bestSharpe = sorted[0]
-  const bestOos = [...strategies].sort((a, b) => b.oos_sharpe - a.oos_sharpe)[0]
+  const bestOos = [...strategies].sort((a, b) => (b.oos_sharpe ?? 0) - (a.oos_sharpe ?? 0))[0]
   const benchmark = strategies.find((s) => s.strategy_name === 'BENCHMARK')
 
   const toggleStrategy = (name: string) => {
@@ -180,8 +190,15 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-0">
-      {/* Regime indicator */}
-      {regime && <RegimeIndicator regime={regime} />}
+      {/* Regime indicator — shows spinner until FRED resolves, never blocks charts */}
+      {regimeLoading ? (
+        <div className="border-b border-border bg-navy-800/50 px-6 py-2.5 flex items-center gap-2">
+          <RefreshCw className="w-3.5 h-3.5 text-muted animate-spin" />
+          <span className="text-muted text-xs font-mono">Fetching regime signals…</span>
+        </div>
+      ) : regime ? (
+        <RegimeIndicator regime={regime} />
+      ) : null}
 
       {/* 2022 Correlation Breakdown Warning */}
       <div className="mx-4 md:mx-6 mt-4 p-3 rounded-lg border border-warning/30 bg-warning/5 flex items-start gap-2">
