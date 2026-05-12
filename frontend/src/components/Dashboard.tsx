@@ -207,18 +207,18 @@ export default function Dashboard() {
           />
           <MetricTile
             label="Best Sharpe (IS)"
-            value={bestSharpe ? bestSharpe.sharpe_ratio.toFixed(2) : '—'}
+            value={bestSharpe?.sharpe_ratio != null ? bestSharpe.sharpe_ratio.toFixed(2) : '—'}
             sub={bestSharpe?.strategy_name.replace(/_/g, ' ')}
             color="text-electric"
           />
           <MetricTile
             label="Best Sharpe (OOS)"
-            value={bestOos ? bestOos.oos_sharpe.toFixed(2) : '—'}
+            value={bestOos?.oos_sharpe != null ? bestOos.oos_sharpe.toFixed(2) : '—'}
             sub="Walk-forward out-of-sample"
           />
           <MetricTile
             label="Benchmark Sharpe"
-            value={benchmark?.sharpe_ratio.toFixed(2) ?? '—'}
+            value={benchmark?.sharpe_ratio != null ? benchmark.sharpe_ratio.toFixed(2) : '—'}
             sub="100% SPY 2000–2024"
             color="text-muted"
           />
@@ -258,7 +258,7 @@ export default function Dashboard() {
               <CartesianGrid strokeDasharray="3 3" stroke="#1e2d47" />
               <XAxis dataKey="year" tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'JetBrains Mono' }} />
               <YAxis
-                tickFormatter={(v: number) => `${v.toFixed(1)}x`}
+                tickFormatter={(v: unknown) => typeof v === 'number' ? `${v.toFixed(1)}x` : ''}
                 tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'JetBrains Mono' }}
                 domain={['auto', 'auto']}
               />
@@ -266,7 +266,7 @@ export default function Dashboard() {
                 contentStyle={{ backgroundColor: '#0d1424', border: '1px solid #1e2d47', borderRadius: 6 }}
                 labelStyle={{ color: '#94a3b8', fontSize: 11 }}
                 itemStyle={{ fontFamily: 'JetBrains Mono', fontSize: 11 }}
-                formatter={(v: number) => `${v.toFixed(2)}x`}
+                formatter={(v: unknown) => typeof v === 'number' ? `${v.toFixed(2)}x` : '—'}
               />
               {strategies.filter((s) => visibleStrategies.has(s.strategy_name)).map((s) => (
                 <Line

@@ -39,11 +39,11 @@ const CustomTooltip = ({ active, payload }: { active?: boolean; payload?: Toolti
       </div>
       <div className="flex justify-between gap-4">
         <span className="text-muted">Volatility</span>
-        <span className="font-mono text-white">{(d.volatility * 100).toFixed(1)}%</span>
+        <span className="font-mono text-white">{d.volatility != null ? (d.volatility * 100).toFixed(1) : '—'}%</span>
       </div>
       <div className="flex justify-between gap-4">
         <span className="text-muted">Exp. Return</span>
-        <span className="font-mono text-white">{(d.expected_return * 100).toFixed(1)}%</span>
+        <span className="font-mono text-white">{d.expected_return != null ? (d.expected_return * 100).toFixed(1) : '—'}%</span>
       </div>
       {d.sharpe !== undefined && (
         <div className="flex justify-between gap-4">
