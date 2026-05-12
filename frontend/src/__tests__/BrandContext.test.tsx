@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { BrandProvider, useBrand, BRANDS } from '../context/BrandContext'
 import type { BrandMode } from '../context/BrandContext'
@@ -58,10 +58,9 @@ describe('BrandContext', () => {
   })
 
   it('useBrand throws when used outside BrandProvider', () => {
-    const consoleError = console.error
-    console.error = () => {}
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
     expect(() => render(<BrandDisplay />)).toThrow('useBrand must be used within BrandProvider')
-    console.error = consoleError
+    consoleSpy.mockRestore()
   })
 
   it('setBrand accepts both valid brand modes', () => {
