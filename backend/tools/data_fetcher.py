@@ -847,11 +847,16 @@ def _persist_to_db(
         return
 
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(
-                asyncio.run,
-                _async_persist_all(provided, supplemental, monthly, daily, signals, cv_result),
+        def _run_in_thread() -> None:
+            # Coroutine is created here, inside the worker thread, so asyncpg
+            # binds futures to the new event loop that asyncio.run() creates —
+            # not to the FastAPI event loop running on the calling thread.
+            asyncio.run(
+                _async_persist_all(provided, supplemental, monthly, daily, signals, cv_result)
             )
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(_run_in_thread)
             future.result(timeout=120)
         log.info("db_persist_complete")
     except Exception as exc:
