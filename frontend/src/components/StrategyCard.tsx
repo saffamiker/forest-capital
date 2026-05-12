@@ -2,15 +2,16 @@ import { CheckCircle, XCircle, ChevronDown, ChevronUp } from 'lucide-react'
 import { useState } from 'react'
 import type { StrategyResult, StressResults } from '../types/strategies'
 
-function pct(v: number, decimals = 1) {
-  return `${(v * 100).toFixed(decimals)}%`
+function pct(v: number | undefined, decimals = 1) {
+  return v != null ? `${(v * 100).toFixed(decimals)}%` : '—'
 }
 
 function fmt(v: number | undefined, decimals = 2) {
   return typeof v === 'number' ? v.toFixed(decimals) : '—'
 }
 
-function pFmt(p: number) {
+function pFmt(p: number | undefined) {
+  if (p == null) return '—'
   if (p >= 0.01) return p.toFixed(3)
   return p.toFixed(4)
 }
@@ -38,7 +39,10 @@ function SignificanceBadge({ label, pValue, threshold = 0.005 }: SignificanceBad
   )
 }
 
-function StabilityGauge({ score }: { score: number }) {
+function StabilityGauge({ score }: { score: number | undefined }) {
+  if (score == null) {
+    return <span className="font-mono text-xs text-muted">—</span>
+  }
   const pctVal = Math.round(score * 100)
   const color = score >= 0.75 ? '#22c55e' : score >= 0.60 ? '#f59e0b' : '#ef4444'
   const passes = score >= 0.60
@@ -137,7 +141,7 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
           <div className="text-2xs text-muted uppercase tracking-wide">Sharpe Ratio</div>
           <div className="font-mono text-white text-sm font-semibold">{fmt(s.sharpe_ratio)}</div>
           <div className="text-2xs text-muted font-mono">
-            [{fmt(s.sharpe_ci_95[0])} – {fmt(s.sharpe_ci_95[1])}] 95% CI
+            [{fmt(s.sharpe_ci_95?.[0])} – {fmt(s.sharpe_ci_95?.[1])}] 95% CI
           </div>
         </div>
         <div>

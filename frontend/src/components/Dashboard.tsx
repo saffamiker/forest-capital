@@ -18,8 +18,8 @@ function buildCumulativeReturns(strategies: StrategyResult[]): Record<string, st
   return years.map((year, i) => {
     const entry: Record<string, string | number> = { year: String(year) }
     strategies.forEach((s) => {
-      const base = Math.pow(1 + s.cagr, i)
-      const noise = 1 + (Math.sin(i * 3.7 + s.sharpe_ratio * 10) * 0.04)
+      const base = Math.pow(1 + (s.cagr ?? 0), i)
+      const noise = 1 + (Math.sin(i * 3.7 + (s.sharpe_ratio ?? 0) * 10) * 0.04)
       entry[s.strategy_name] = parseFloat((base * noise).toFixed(3))
     })
     return entry
@@ -67,7 +67,7 @@ interface StrategyTableRowProps {
 
 function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps) {
   const isSignificant = s.is_significant
-  const pFmt = (p: number) => p >= 0.01 ? p.toFixed(3) : p.toFixed(4)
+  const pFmt = (p: number | undefined) => p == null ? '—' : p >= 0.01 ? p.toFixed(3) : p.toFixed(4)
   return (
     <tr
       className={`border-t border-border cursor-pointer transition-colors ${
@@ -87,15 +87,19 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
           {isSignificant && <span className="badge-pass">SIG</span>}
         </div>
       </td>
-      <td className="px-3 py-2 font-mono text-white text-xs">{(s.cagr * 100).toFixed(1)}%</td>
+      <td className="px-3 py-2 font-mono text-white text-xs">{s.cagr != null ? (s.cagr * 100).toFixed(1) : '—'}%</td>
       <td className="px-3 py-2 font-mono text-white text-xs">
-        {s.sharpe_ratio.toFixed(2)}
-        <span className="text-muted"> [{s.sharpe_ci_95[0].toFixed(2)}–{s.sharpe_ci_95[1].toFixed(2)}]</span>
+        {s.sharpe_ratio != null ? s.sharpe_ratio.toFixed(2) : '—'}
+        <span className="text-muted">
+          {s.sharpe_ci_95 != null
+            ? ` [${s.sharpe_ci_95[0].toFixed(2)}–${s.sharpe_ci_95[1].toFixed(2)}]`
+            : ''}
+        </span>
       </td>
-      <td className="px-3 py-2 font-mono text-danger text-xs">{(s.max_drawdown * 100).toFixed(1)}%</td>
+      <td className="px-3 py-2 font-mono text-danger text-xs">{s.max_drawdown != null ? (s.max_drawdown * 100).toFixed(1) : '—'}%</td>
       <td className="px-3 py-2 font-mono text-xs">
         <span className={s.dsr_p_value <= 0.005 ? 'text-success' : 'text-muted'}>
-          {s.deflated_sharpe_ratio.toFixed(2)}
+          {s.deflated_sharpe_ratio != null ? s.deflated_sharpe_ratio.toFixed(2) : '—'}
         </span>
       </td>
       <td className="px-3 py-2 font-mono text-xs">
@@ -105,7 +109,7 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
       </td>
       <td className="px-3 py-2 font-mono text-xs">
         <span className={s.cv_stability_score >= 0.60 ? 'text-success' : 'text-warning'}>
-          {s.cv_stability_score.toFixed(2)}
+          {s.cv_stability_score != null ? s.cv_stability_score.toFixed(2) : '—'}
         </span>
       </td>
       <td className="px-3 py-2">
