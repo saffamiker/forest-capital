@@ -166,6 +166,25 @@ async def get_provenance():
 
 @app.get("/api/strategies/list")
 async def list_strategies(session: dict = Depends(require_auth)):
+    # Primary path: derive strategy list from the real backtester output so the
+    # names and types always match what run_all_strategies() actually produces.
+    # MOCK_STRATEGIES is the fallback — same keys, but avoids running the full
+    # pipeline just to return a name/type list.
+    if ENVIRONMENT != "test":
+        try:
+            from tools.data_fetcher import get_full_history
+            from tools.backtester import run_all_strategies
+            history = get_full_history()
+            results_dict = run_all_strategies(history)
+            return {
+                "strategies": [
+                    {"name": name, "type": r.get("strategy_type", "static")}
+                    for name, r in results_dict.items()
+                ]
+            }
+        except Exception as exc:
+            log.warning("list_strategies_fallback", error=str(exc))
+    # Fallback: MOCK_STRATEGIES mirrors the real strategy keys and types.
     return {
         "strategies": [
             {"name": s["strategy_name"], "type": s["strategy_type"]}
@@ -183,6 +202,9 @@ async def run_backtest(
     body: BacktestRequest,
     session: dict = Depends(require_auth),
 ):
+    # Canonical strategy names come from MOCK_STRATEGIES, which mirrors the
+    # keys that run_all_strategies() produces.  This validation step has no
+    # dependency on the real pipeline so it is always cheap.
     valid_strategies = {s["strategy_name"] for s in MOCK_STRATEGIES}
     if body.strategy not in valid_strategies:
         raise HTTPException(
@@ -192,17 +214,24 @@ async def run_backtest(
 
     log.info("backtest_run", strategy=body.strategy, user=session["email"])
 
-    # Sprint 3: real BENCHMARK computation via the pre-loaded history dict.
-    # get_full_history() owns all data fetching; run_benchmark only computes returns.
-    if body.strategy == "100% Equity (Benchmark)" and ENVIRONMENT != "test":
+    # Primary path: run the full pipeline and return the requested strategy.
+    # run_all_strategies() computes all 10 at once; we pick the one requested.
+    # The old condition checked for "100% Equity (Benchmark)" — the Sprint 1
+    # human-readable name — which never matched the real key "BENCHMARK", making
+    # that branch dead code.  Fixed here to handle all strategies uniformly.
+    if ENVIRONMENT != "test":
         try:
             from tools.data_fetcher import get_full_history
-            from tools.backtester import run_benchmark
+            from tools.backtester import run_all_strategies
             history = get_full_history()
-            return run_benchmark(history)
+            results_dict = run_all_strategies(history)
+            if body.strategy in results_dict:
+                return results_dict[body.strategy]
         except Exception as exc:
             log.warning("backtest_run_fallback", strategy=body.strategy, error=str(exc))
 
+    # Fallback: return the corresponding MOCK_STRATEGIES entry when the real
+    # pipeline is unavailable (test environment or unhandled exception above).
     result = next(s for s in MOCK_STRATEGIES if s["strategy_name"] == body.strategy)
     return result
 
@@ -223,6 +252,9 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
             return {"strategies": ranked, "ranked_by": "sharpe_ratio"}
         except Exception as exc:
             log.warning("compare_all_strategies_fallback", error=str(exc))
+    # Fallback: MOCK_STRATEGIES used only in test environment or when the real
+    # pipeline raises an exception.  Should never be the primary response in
+    # production — the warning log above will flag if this path is taken.
     sorted_strategies = sorted(MOCK_STRATEGIES, key=lambda s: s["sharpe_ratio"], reverse=True)
     return {"strategies": sorted_strategies, "ranked_by": "sharpe_ratio"}
 
