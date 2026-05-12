@@ -6,7 +6,7 @@
   "rewrites": [
     {
       "source": "/api/:path*",
-      "destination": "https://forest-capital-api.onrender.com/api/:path*"
+      "destination": "https://forest-capital.onrender.com/api/:path*"
     }
   ]
 }
