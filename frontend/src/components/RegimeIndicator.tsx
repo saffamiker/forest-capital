@@ -42,8 +42,8 @@ export default function RegimeIndicator({ regime }: { regime: RegimeData }) {
   const cfg = REGIME_CONFIG[displayRegime] ?? REGIME_CONFIG['BULL']!
   const { Icon } = cfg
 
-  const hmm_labels = ['State 0', 'State 1', 'State 2']
-  const dominantHmmLabel = hmm_labels[hmm_regime] ?? 'State 0'
+  const hmm_labels = ['BULL', 'BEAR', 'TRANSITION']
+  const dominantHmmLabel = hmm_labels[hmm_regime] ?? 'BULL'
   const hmmProb = hmm_probabilities[hmm_regime] ?? 0
 
   return (

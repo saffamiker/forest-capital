@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useRef, useState, useEffect } from 'react'
-import { LayoutDashboard, Users, ShieldCheck, LogOut, Settings } from 'lucide-react'
+import { LayoutDashboard, Users, ShieldCheck, Settings } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../App'
 import { useBrand, BRANDS } from '../context/BrandContext'
@@ -174,8 +174,7 @@ export default function MainLayout() {
             className="flex items-center gap-1.5 text-muted hover:text-white text-xs px-2 py-1 rounded hover:bg-navy-700 transition-colors"
             title="Sign out"
           >
-            <LogOut className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Sign out</span>
+            <span>Sign out</span>
           </button>
         </div>
       </header>
