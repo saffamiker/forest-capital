@@ -1978,7 +1978,12 @@ REGIME BANNER (top, full width)
 2022 EQUITY-BOND CORRELATION CALLOUT (below banner)
   Always visible — the project's central finding
   Amber warning card: correlation timeline summary
+  Values computed from /api/regime/current response:
+    pre_2022_avg_correlation  — computed from market_data_monthly
+    post_2022_avg_correlation — computed from market_data_monthly
+  Never hardcoded — always live from backend
   "Read the full analysis" → expands to rolling correlation chart
+  Reference lines on chart also use computed values
 
 SUMMARY METRIC CARDS (4 cards, top row)
   Significant Strategies | Best Sharpe (IS) | Best Sharpe (OOS) | Benchmark Sharpe
@@ -3014,11 +3019,18 @@ Sprint 4 (COMPLETE — commits e2d3308, f631bbb, 337c892, and subsequent fixes):
   ✅ 576 tests passing, 19 skipped
   ✅ Commentary review complete
   Known issues carried to Sprint 5:
-    FRED timeouts in production (VIX, DGS2) — 60s fix in Sprint 5
+    FRED timeouts in production (VIX, DGS2) — regime cache fixes this
     FF factors fetch failing (datareader deprecation)
     E2E CI timeout (issue #1) — first task of Sprint 5
     Zustand strategiesStore — data persists across navigation
     Skeleton loading states — no blank charts
+    Correlation breakdown banner — hardcoded values, needs real data
+    OptimizeRequest 'start' attribute warning — appears every request
+    _used_magic_jtis dict — dies on Render restart, needs DB persistence
+    strategy_results_cache — recomputes on every restart (in Sprint 5)
+    0/10 significant strategies — correct result (none pass all 5
+      FDR-corrected gates at p < 0.005), needs clear explanation in UI
+
 
 Sprint 5 (May 13):
   E2E CI FIX — FIRST TASK
@@ -3060,8 +3072,101 @@ Sprint 5 (May 13):
   ─ Re-run strategies only when new rows were appended
   ─ Historical data (2002-2024) never re-fetched
   ─ Log: incremental_update_rows_added / no_new_data
+  CORRELATION BREAKDOWN BANNER — REAL DATA
+  ─ Currently hardcoded: "Pre-2022 averaged -0.31,
+    Post-2022 rose to +0.48"
+  ─ Fix: compute actual rolling correlation from
+    market_data_monthly in the backend
+  ─ Add to /api/regime/current response:
+    pre_2022_avg_correlation: float (computed)
+    post_2022_avg_correlation: float (computed)
+    breakdown_year: 2022
+  ─ Frontend reads from regime response:
+    Banner hidden until regime data loads
+    Values from API replace hardcoded strings
+    Rolling correlation chart reference lines
+    also update from real computed values
+  OPTIMIZE REQUEST FIX
+  ─ Warning appears on every request:
+    "'OptimizeRequest' object has no attribute 'start'"
+  ─ Fix the OptimizeRequest schema in models/schemas.py
+    to include the 'start' field, or remove the reference
+    to it in the optimizer fallback path
+  MAGIC LINK JTI PERSISTENCE
+  ─ _used_magic_jtis dict lives in Python memory
+  ─ Dies on every Render restart — magic link
+    scanner pre-fetch protection resets on redeploy
+  ─ Fix: persist used JTIs to PostgreSQL
+    New table: used_magic_tokens (jti, session_token,
+    redeemed_at, expires_at)
+    On restart: JTI history survives
+  ALEMBIC MIGRATIONS FOR NEW SPRINT 5 TABLES
+  ─ All new tables require Alembic migration:
+    strategy_results_cache
+    regime_signals_cache
+    auth_attempts
+    used_magic_tokens
+  ─ Create migration file for all four tables
+  ─ Run on Render shell after deploy:
+    alembic upgrade head
 
-  STATISTICAL EVIDENCE + REGIME ANALYSIS DASHBOARDS
+  QA GATE — PRESENT MODE REQUIRES QA PASS
+  ─ Analyst and Commentary modes always accessible
+  ─ Present mode requires QA audit status ≥ WARN
+  ─ If QA not yet run → Present toggle shows:
+    "Run QA Audit before presenting"
+    Clicking navigates to QA Audit screen
+  ─ If QA = FAIL → Present mode locked:
+    Red lock icon on Present toggle
+    Tooltip: "QA audit failed — review issues before
+    presenting to Forest Capital"
+  ─ If QA = WARN → Present mode unlocked with amber badge:
+    "QA: WARN — review limitations before presenting"
+  ─ If QA = PASS → Present mode fully unlocked, no badge
+  ─ QA status persists in session — re-runs only on
+    manual trigger or Force Refresh, not on every page load
+  TEAM PRIMER DOCUMENT
+  ─ Generate docs/TEAM_PRIMER.md in the repo
+  ─ Plain English guide to the three modes
+  ─ Accessible from dashboard via ? help icon (nav bar)
+  ─ Contents:
+
+    ANALYST MODE (default):
+      Full dashboard — all metrics, all technical columns
+      DSR, P(FDR), CV Score, Tier 1 gates all visible
+      QA Audit and Council fully accessible
+      Use for: analysis, verification, exploration
+
+    COMMENTARY MODE (toggle speech bubble icon):
+      Everything in Analyst mode plus explanations
+      Hover any metric → plain English explanation
+      Click any chart → annotation strip expands
+      Explainer Agent available throughout
+      Use for: understanding results, preparing for Q&A,
+      Bob writing the Analytical Appendix
+
+    PRESENT MODE (Forest Capital only):
+      Clean view — no technical columns, no QA screen
+      Branding switches to Forest Capital
+      Export Pack button appears (one-click chart ZIP)
+      LOCKED until QA audit status ≥ WARN
+      Use for: June 3 and July 1 presentations only
+
+    BOB — before the midpoint:
+      Open Commentary mode
+      Read every chart annotation and hover every metric
+      Run the Council with the research question
+      Check QA Audit — understand why items show WARN
+      Use the Analytical Appendix generator (Sprint 6)
+
+    MOLLY — before the presentation:
+      Open Present mode and verify branding is correct
+      Confirm QA status is WARN or PASS
+      Build the storyboard in the Reports screen (Sprint 6)
+      Test the live demo flow end-to-end
+      Prepare two or three Council queries for the demo
+
+
   ─ All 6 charts on Statistical Evidence (SignificanceJourneyMatrix,
     CPCVSharpePlot, CVStabilityRadar, ProbabilisticSharpeChart,
     MultipleComparisonTable, WalkForwardChart)
