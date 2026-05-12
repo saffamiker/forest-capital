@@ -75,7 +75,7 @@ describe('LoginPage', () => {
 
   it('shows error message on failed submit', async () => {
     mockedAxios.post = vi.fn().mockRejectedValue(new Error('Network error'))
-    mockedAxios.isAxiosError = vi.fn().mockReturnValue(false)
+    mockedAxios.isAxiosError = vi.fn().mockReturnValue(false) as unknown as typeof mockedAxios.isAxiosError
     render(<LoginPage />)
     await userEvent.type(screen.getByRole('textbox'), 'ruurdsm@queens.edu')
     fireEvent.click(screen.getByRole('button', { name: /send magic link/i }))

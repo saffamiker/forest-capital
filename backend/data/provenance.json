@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-05-12T08:44:26.401877",
+  "generated_at": "2026-05-12T09:23:17.292150",
   "series": [
     {
       "series_id": "equity_monthly",
@@ -15,7 +15,7 @@
       "date_range_start": "1999-11-30",
       "date_range_end": "2025-12-31",
       "row_count": 314,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "ig_monthly_bnd",
@@ -31,7 +31,7 @@
       "date_range_start": "2007-04-10",
       "date_range_end": "2026-01-27",
       "row_count": 4731,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "hy_monthly_baml",
@@ -47,7 +47,7 @@
       "date_range_start": "1986-08-31",
       "date_range_end": "2026-01-27",
       "row_count": 9296,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "risk_free_dtb3",
@@ -63,7 +63,7 @@
       "date_range_start": "1954-01-04",
       "date_range_end": "2026-01-26",
       "row_count": 18006,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "hy_spread_baml",
@@ -79,7 +79,7 @@
       "date_range_start": "1996-12-31",
       "date_range_end": "2026-01-27",
       "row_count": 7684,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "ig_spread_baml",
@@ -95,7 +95,7 @@
       "date_range_start": "1996-12-31",
       "date_range_end": "2026-01-27",
       "row_count": 7589,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "yield_curve_10y2y",
@@ -111,7 +111,7 @@
       "date_range_start": "1962-01-02",
       "date_range_end": "2026-01-26",
       "row_count": 16000,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "gdp_real_gdpc1",
@@ -127,7 +127,7 @@
       "date_range_start": "1947-01-01",
       "date_range_end": "2025-07-01",
       "row_count": 315,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "sp500_pe_ratio",
@@ -143,7 +143,7 @@
       "date_range_start": "1988-12-31",
       "date_range_end": "2025-09-30",
       "row_count": 148,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "equity_daily_spy",
@@ -153,13 +153,13 @@
         "ticker": "SPY",
         "auto_adjust": true,
         "interval": "1d",
-        "fetched_at": "2026-05-12T08:44:26.401877"
+        "fetched_at": "2026-05-12T09:23:17.292150"
       },
       "frequency": "daily",
       "date_range_start": "2000-01-04",
       "date_range_end": "2024-12-30",
       "row_count": 6287,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "vix_daily",
@@ -167,14 +167,14 @@
       "source_type": "fred_api",
       "source_detail": {
         "series_id": "VIXCLS",
-        "fetched_at": "2026-05-12T08:44:26.401877",
+        "fetched_at": "2026-05-12T09:23:17.292150",
         "fred_url": "https://fred.stlouisfed.org/series/VIXCLS"
       },
       "frequency": "daily",
       "date_range_start": "2000-01-03",
       "date_range_end": "2024-12-31",
       "row_count": 6309,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "dgs2_daily",
@@ -182,14 +182,14 @@
       "source_type": "fred_api",
       "source_detail": {
         "series_id": "DGS2",
-        "fetched_at": "2026-05-12T08:44:26.401877",
+        "fetched_at": "2026-05-12T09:23:17.292150",
         "fred_url": "https://fred.stlouisfed.org/series/DGS2"
       },
       "frequency": "daily",
       "date_range_start": "2000-01-03",
       "date_range_end": "2024-12-31",
       "row_count": 6253,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "ff_factors_monthly",
@@ -197,14 +197,14 @@
       "source_type": "ken_french",
       "source_detail": {
         "dataset": "F-F_Research_Data_Factors",
-        "fetched_at": "2026-05-12T08:44:26.401877",
+        "fetched_at": "2026-05-12T09:23:17.292150",
         "url": "mba.tuck.dartmouth.edu/pages/faculty/ken.french"
       },
       "frequency": "monthly",
       "date_range_start": "",
       "date_range_end": "",
       "row_count": 0,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     },
     {
       "series_id": "ig_lqd_bridge",
@@ -214,14 +214,14 @@
         "ticker": "LQD",
         "auto_adjust": true,
         "interval": "1d",
-        "fetched_at": "2026-05-12T08:44:26.401877",
+        "fetched_at": "2026-05-12T09:23:17.292150",
         "note": "Pre-BND IG bridge: spliced into ig series for dates before BND (Excel) starts"
       },
       "frequency": "daily",
       "date_range_start": "2002-07-31",
       "date_range_end": "2007-05-30",
       "row_count": 1216,
-      "loaded_at": "2026-05-12T08:44:26.401877"
+      "loaded_at": "2026-05-12T09:23:17.292150"
     }
   ],
   "cross_validation": {
@@ -232,8 +232,8 @@
       "n_green": 175,
       "n_amber": 123,
       "n_red": 2,
-      "max_discrepancy_pct": 0.010695637100173627,
-      "mean_discrepancy_pct": 0.002129941898993813,
+      "max_discrepancy_pct": 0.010696297380550335,
+      "mean_discrepancy_pct": 0.00212992517065224,
       "worst_month": "2001-05-31",
       "status": "WARN",
       "authoritative": "Excel (Y-charts)"

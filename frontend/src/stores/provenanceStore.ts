@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 /**
  * frontend/src/stores/provenanceStore.ts
  *
@@ -69,7 +70,7 @@ export const useProvenanceStore = create<ProvenanceState>((set, get) => ({
     }
   },
 
-  getSeriesForChart: (chartId, registry) => {
+  getSeriesForChart: (chartId: string, registry: Record<string, string[]>) => {
     const { series } = get();
     const seriesIds = registry[chartId] ?? [];
     return seriesIds
