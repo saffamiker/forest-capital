@@ -2562,6 +2562,23 @@ SCREEN SECTIONS:
        Downloads CSV of full data_series_registry
        Suitable for Analytical Appendix Section 1
 
+  8. AUTH ATTEMPTS (last 24 hours)
+     Total: [n] requests  Sent: [n]  Rejected: [n]  Blocked: [n]
+     AMBER banner if rejected or geo_blocked > 0
+
+     Table: Timestamp | Email | IP | Country | Org | Status
+     Status colour coding:
+       sent:         text_muted (normal)
+       rejected:     accent_amber (unapproved email)
+       geo_blocked:  accent_red (outside US)
+       rate_blocked: accent_red (too many attempts)
+
+     Filters: All / Sent / Rejected / Geo Blocked / Rate Blocked
+     Date range picker: last 24h / 7d / 30d
+
+     [ Export CSV ]          — downloads full attempt log
+     [ Clear old attempts ]  — Michael only, deletes >30 days
+
 NAVIGATION:
   Admin screen accessible from nav bar (settings icon ⚙)
   Visible to all authenticated users
@@ -2975,7 +2992,7 @@ Sprint 3 (COMPLETE — commit 366dd54):
   ✅ 356 tests passing, 10 skipped (HMM on Windows)
   ✅ Commentary review complete across all Sprint 3 modules
 
-Sprint 4 (COMPLETE — commits e2d3308, f631bbb, 337c892, and fixes):
+Sprint 4 (COMPLETE — commits e2d3308, f631bbb, 337c892, and subsequent fixes):
   ✅ All 9 agents + Academic Writer scaffold
   ✅ Council endpoint + WebSocket streaming
   ✅ AI Usage Logger (council_sessions table)
@@ -2983,19 +3000,25 @@ Sprint 4 (COMPLETE — commits e2d3308, f631bbb, 337c892, and fixes):
   ✅ Render backend live (forest-capital.onrender.com)
   ✅ Vercel frontend live (forest-capital.vercel.app)
   ✅ Magic link authentication end-to-end
-  ✅ PostgreSQL persistence fixed (event loop bug)
+  ✅ Single-use magic link tokens (scanner pre-fetch safe)
+  ✅ Email differentiation: approved=sent, unapproved=pending
+  ✅ 401 redirect to login with expired session banner
+  ✅ PostgreSQL database-first cache (db_cache_hit < 1s)
+  ✅ Event loop persistence fix (asyncpg ThreadPoolExecutor)
   ✅ Model strings updated (claude-sonnet-4-6, claude-opus-4-6)
   ✅ Mock data replaced with real data as primary path
-  ✅ test_deployment.py — live URL verification tests
-  ✅ VITE_API_URL removed from Vercel (rewrite proxy handles all /api/*)
-  ✅ vercel.json rewrite: /api/:path* → Render, catch-all → index.html
-  ✅ references.json created (8 curated academic citations)
+  ✅ test_deployment.py — live URL verification
+  ✅ VITE_API_URL removed (rewrite proxy handles /api/*)
+  ✅ vercel.json rewrite + catch-all for React Router
+  ✅ references.json created (8 curated citations)
   ✅ 576 tests passing, 19 skipped
   ✅ Commentary review complete
   Known issues carried to Sprint 5:
-    FRED timeouts in production (VIX, DGS2) — 30s timeout too short
-    FF factors fetch failing (pandas-datareader deprecation)
-    E2E CI timeout (issue #1) — fix is first task of Sprint 5
+    FRED timeouts in production (VIX, DGS2) — 60s fix in Sprint 5
+    FF factors fetch failing (datareader deprecation)
+    E2E CI timeout (issue #1) — first task of Sprint 5
+    Zustand strategiesStore — data persists across navigation
+    Skeleton loading states — no blank charts
 
 Sprint 5 (May 13):
   E2E CI FIX — FIRST TASK
@@ -3070,12 +3093,50 @@ Sprint 5 (May 13):
     (requires MASTER_API_KEY header)
   ─ Sections: Data Health Summary, Source Breakdown,
     Cross-Validation Status, Sanity Assertions,
-    Last Fetch Timestamps, Production Environment
+    Last Fetch Timestamps, Production Environment,
+    Auth Attempts (see security section below)
   ─ Action buttons: Force Refresh (Michael only),
     Run Sanity Checks, Export Data Profile
   ─ Settings icon (⚙) in nav bar links to /admin
   ─ Hidden in Present mode
   ─ All four team members have read access
+  SECURITY — AUTH ATTEMPT LOGGING + GEOLOCKING
+  ─ New table: auth_attempts
+    id, timestamp, email, ip_address, user_agent,
+    country, country_code, city, isp, org,
+    status ("sent"|"rejected"|"geo_blocked"|"rate_blocked"),
+    attempt_count (times this IP tried today)
+  ─ IP geolocation via ip-api.com (free, no API key needed)
+    Called on every /api/auth/request-link request
+    Adds country, city, ISP, org to attempt record
+    Timeout 5 seconds — fail open (don't block on geo failure)
+  ─ US geolocking:
+    Any request from outside countryCode=US returns
+    generic 200 response — never reveals the block
+    Logged as status=geo_blocked with full geo details
+    Config flag: GEOBLOCK_ENABLED (skip in development)
+    IP whitelist: GEOBLOCK_WHITELIST_IPS env var
+      (comma-separated, for exceptions like Dr. Panttser)
+    Render health check IPs whitelisted automatically
+  ─ Rate limiting on rejected attempts:
+    Same IP making >5 rejected attempts in 1 hour
+    → blocked for 24 hours, logged as rate_blocked
+    → flagged in admin screen with count
+  ─ Email response differentiation:
+    Approved emails: status=sent
+      Frontend shows: "Check your inbox — link sent to [email]"
+    Unapproved emails: status=pending
+      Frontend shows: "If this email is authorised,
+      a link has been sent. Check your inbox."
+    Frontend reads status field — specific message only for sent
+    Never reveals which emails are on the approved list
+  ─ Admin screen — AUTH ATTEMPTS section:
+    Total requests / sent / rejected / geo_blocked (last 24h)
+    AMBER highlight if any rejected or geo_blocked > 0
+    Table: timestamp, email, IP, country, org, status
+    Filter by status, date range
+    Export as CSV for security review
+    [ Clear old attempts ] — Michael only, deletes >30 days
   SPRINT 5 TESTS
 
 Sprint 6 (Jun 22-Jul 1):
@@ -6466,6 +6527,17 @@ Backend:
     — Sanity assertions all present with status
     — Force refresh requires MASTER_API_KEY
     — Force refresh without key returns 401
+  test_security.py           ← NEW: auth attempt logging + geolocking
+    — Approved email logs status=sent in auth_attempts
+    — Unapproved email logs status=rejected in auth_attempts
+    — Non-US IP logs status=geo_blocked (with GEOBLOCK_ENABLED=true)
+    — US IP passes geolock check
+    — Whitelisted IP bypasses geolock
+    — Rate limit fires after 5 rejected attempts from same IP
+    — Rate blocked IP logs status=rate_blocked
+    — Frontend receives status=sent for approved email
+    — Frontend receives status=pending for unapproved email
+    — auth_attempts table populated after each request
 Frontend:
   ChartCommentStrip.test.tsx
     — Strip renders in collapsed state by default
