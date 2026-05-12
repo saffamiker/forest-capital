@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import axios from 'axios'
 import { TrendingUp, Mail, ArrowRight, AlertCircle } from 'lucide-react'
+import type { MagicLinkResponse } from '../types/api'
 
 type LoginStatus = 'idle' | 'loading' | 'sent' | 'error'
 
@@ -11,15 +12,21 @@ export default function LoginPage() {
   const [email, setEmail] = useState('')
   const [status, setStatus] = useState<LoginStatus>('idle')
   const [errorMsg, setErrorMsg] = useState('')
+  // true  → email is on the approved list; show "check your inbox" with address
+  // false → email not approved; show generic confirmation to prevent enumeration
+  const [isApproved, setIsApproved] = useState(false)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setStatus('loading')
     setErrorMsg('')
     try {
-      const res = await axios.post('/api/auth/request-link', { email: email.trim() })
+      const res = await axios.post<MagicLinkResponse>('/api/auth/request-link', {
+        email: email.trim(),
+      })
+      setIsApproved(res.data.status === 'sent')
       setStatus('sent')
-      if ((res.data as { dev_mode?: boolean }).dev_mode) {
+      if (res.data.dev_mode && res.data.status === 'sent') {
         setErrorMsg('Dev mode: check the backend terminal for your login link.')
       }
     } catch (err: unknown) {
@@ -101,18 +108,33 @@ export default function LoginPage() {
             <div className="w-12 h-12 rounded-full bg-success/10 border border-success/20 flex items-center justify-center mx-auto mb-4">
               <Mail className="w-6 h-6 text-success" />
             </div>
-            <h2 className="text-white font-semibold text-lg mb-2">Check your inbox</h2>
-            <p className="text-muted text-sm mb-4">
-              A login link has been sent to <span className="text-white">{email}</span>.
-              It expires in 15 minutes.
-            </p>
+
+            {isApproved ? (
+              <>
+                <h2 className="text-white font-semibold text-lg mb-2">Check your inbox</h2>
+                <p className="text-muted text-sm mb-4">
+                  A login link has been sent to{' '}
+                  <span className="text-white">{email}</span>.
+                  It expires in 15 minutes.
+                </p>
+              </>
+            ) : (
+              <>
+                <h2 className="text-white font-semibold text-lg mb-2">Request received</h2>
+                <p className="text-muted text-sm mb-4">
+                  If that email address is authorised, a login link has been sent.
+                  Check your inbox and spam folder.
+                </p>
+              </>
+            )}
+
             {errorMsg && (
               <div className="p-3 rounded-md bg-electric/10 border border-electric/20">
                 <p className="text-electric text-xs font-mono">{errorMsg}</p>
               </div>
             )}
             <button
-              onClick={() => setStatus('idle')}
+              onClick={() => { setStatus('idle'); setIsApproved(false) }}
               className="mt-4 text-xs text-muted hover:text-white transition-colors underline underline-offset-2"
             >
               Use a different email

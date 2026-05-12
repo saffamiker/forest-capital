@@ -87,17 +87,21 @@ app.add_middleware(
 @app.post("/api/auth/request-link", response_model=MagicLinkResponse)
 async def request_magic_link(body: MagicLinkRequest, request: Request):
     email = body.email.strip().lower()
+    # Both branches return HTTP 200 with an identical message to prevent email
+    # enumeration. The status field is the only difference: the frontend shows a
+    # specific "check your inbox" confirmation only when status == "sent".
     if email not in {e.lower() for e in ALLOWED_EMAILS}:
-        # Don't reveal which emails are allowed — same response either way
         log.warning("magic_link_unauthorized_email", email_hash=hash(email))
         return MagicLinkResponse(
             message="If that email is authorised, a login link has been sent.",
+            status="pending",
             dev_mode=(ENVIRONMENT == "development"),
         )
     token = generate_magic_token(email)
     await send_magic_link(email, token)
     return MagicLinkResponse(
         message="If that email is authorised, a login link has been sent.",
+        status="sent",
         dev_mode=(ENVIRONMENT == "development"),
     )
 

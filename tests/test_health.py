@@ -103,10 +103,28 @@ def test_request_magic_link_unknown_email_also_returns_200():
     assert response.status_code == 200
 
 def test_request_magic_link_response_is_generic():
-    """The response body must not reveal whether the email is registered."""
+    """The response message must be identical for approved and unapproved emails."""
     r1 = client.post("/api/auth/request-link", json={"email": "ruurdsm@queens.edu"})
     r2 = client.post("/api/auth/request-link", json={"email": "nobody@evil.com"})
     assert r1.json()["message"] == r2.json()["message"]
+
+def test_request_magic_link_known_email_status_sent():
+    """Approved email returns status='sent' so the frontend shows the inbox confirmation."""
+    response = client.post("/api/auth/request-link", json={"email": "ruurdsm@queens.edu"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "sent"
+
+def test_request_magic_link_unknown_email_status_pending():
+    """Unapproved email returns status='pending' so the frontend shows the generic message."""
+    response = client.post("/api/auth/request-link", json={"email": "attacker@evil.com"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "pending"
+
+def test_request_magic_link_status_field_present():
+    """Every response includes a status field — frontend must never KeyError on it."""
+    for email in ("ruurdsm@queens.edu", "random@example.com"):
+        response = client.post("/api/auth/request-link", json={"email": email})
+        assert "status" in response.json()
 
 
 # ── Protected endpoints require auth ─────────────────────────────────────────

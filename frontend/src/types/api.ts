@@ -1,3 +1,11 @@
+export interface MagicLinkResponse {
+  message: string
+  // "sent"    → email is approved; link was dispatched
+  // "pending" → email is not on the approved list; no link sent
+  status: 'sent' | 'pending'
+  dev_mode: boolean
+}
+
 export type RegimeType = 'BULL' | 'BEAR' | 'TRANSITION'
 
 export interface RegimeData {

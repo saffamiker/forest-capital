@@ -14,6 +14,11 @@ class MagicLinkRequest(BaseModel):
 
 class MagicLinkResponse(BaseModel):
     message: str
+    # "sent"    → email is on the approved list; link was sent (or printed in dev mode)
+    # "pending" → email is NOT on the approved list; no link sent
+    # Both return HTTP 200 to prevent email enumeration — the frontend uses this
+    # field to decide which confirmation UI to show.
+    status: str = "pending"
     dev_mode: bool = False
 
 
