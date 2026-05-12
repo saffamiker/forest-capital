@@ -143,17 +143,21 @@ def _yfinance_fetch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
 def _fred_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
     """
     Internal FRED wrapper using FRED's public CSV endpoint — patched in tests.
-    No API key required; FRED serves CSV files at a stable public URL.
+    Appends FRED_API_KEY when set to avoid anonymous-tier rate limits in production.
     Only used for VIXCLS, DGS2, and DFF (fed funds). DGS10 comes from the
     Excel file — fetching it here would duplicate and potentially contradict
     the authoritative Excel source.
     """
     import requests
 
+    fred_key = os.getenv("FRED_API_KEY")
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    if fred_key:
+        url = f"{url}&api_key={fred_key}"
     log.info("fred_fetch", series_id=series_id, start=start, end=end)
 
-    response = requests.get(url, timeout=30)
+    # 60-second timeout — FRED can be slow under load in production
+    response = requests.get(url, timeout=60)
     response.raise_for_status()
 
     # index_col=0 sets DATE as index directly; parse manually afterward.
@@ -829,15 +833,17 @@ def _persist_to_db(
     """
     Write the full pipeline output to all four PostgreSQL tables.
 
-    Runs async SQLAlchemy in a dedicated thread so this sync function can
-    be called from within FastAPI's running event loop without deadlocking.
-    All writes use INSERT ... ON CONFLICT DO UPDATE — safe to re-run.
-    Failures are logged as warnings; the pipeline continues without DB.
+    Uses a ThreadPoolExecutor so this sync function can be called from within
+    FastAPI's running event loop without deadlocking.  Inside the thread,
+    asyncio.run() creates a brand-new event loop — the module-level engine in
+    database.py was created on a different loop and cannot be reused here.
+    _async_persist_all therefore creates its own NullPool engine so that
+    asyncpg never tries to return connections to a pool owned by a foreign loop.
     """
-    from database import engine  # import here to avoid circular at module level
+    from database import DATABASE_URL  # URL only — not the shared engine
 
-    if engine is None:
-        log.warning("db_persist_skipped", reason="engine is None (DATABASE_URL not set)")
+    if not DATABASE_URL:
+        log.warning("db_persist_skipped", reason="DATABASE_URL not set")
         return
 
     try:
@@ -860,18 +866,33 @@ async def _async_persist_all(
     signals: dict[str, pd.Series],
     cv_result: CrossValidationResult,
 ) -> None:
-    """Top-level async coordinator — all four tables written in a single transaction."""
-    from sqlalchemy import text
-    from database import engine
+    """
+    Top-level async coordinator — all four tables written in a single transaction.
 
+    Creates a fresh NullPool engine inside this coroutine rather than reusing
+    the module-level engine from database.py.  asyncio.run() in the calling
+    thread creates a new event loop; the shared engine's asyncpg pool is bound
+    to the FastAPI event loop and raises 'Task got Future attached to a
+    different loop' if used here.  NullPool opens a new connection for every
+    call and closes it immediately — no pool, no loop attachment.
+    """
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
+    from database import DATABASE_URL
+
+    local_engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
     now_iso = datetime.now(timezone.utc).isoformat()
     series_list = _build_registry_entries(provided, supplemental, daily, now_iso)
 
-    async with engine.begin() as conn:  # type: ignore[union-attr]
-        await _upsert_registry(conn, series_list, text)
-        await _upsert_monthly(conn, monthly, signals, text)
-        await _upsert_daily(conn, daily, supplemental, text)
-        await _insert_validation_log(conn, cv_result, text)
+    try:
+        async with local_engine.begin() as conn:
+            await _upsert_registry(conn, series_list, text)
+            await _upsert_monthly(conn, monthly, signals, text)
+            await _upsert_daily(conn, daily, supplemental, text)
+            await _insert_validation_log(conn, cv_result, text)
+    finally:
+        await local_engine.dispose()
 
 
 def _build_registry_entries(
