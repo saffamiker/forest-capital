@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -107,13 +107,18 @@ async def request_magic_link(body: MagicLinkRequest, request: Request):
 
 
 @app.get("/api/auth/verify")
-async def verify_magic_link(token: str = Query(...)):
+async def verify_magic_link(token: str = Query(...), response: Response = None):
     # redeem_magic_token enforces single-use: a second request with the same token
     # (e.g. from an email security scanner) returns the existing active session
     # rather than creating a new one and invalidating the user's real click.
     session_token = redeem_magic_token(token)
     email = verify_session_token(session_token)["email"]
     log.info("auth_success", email=email)
+    # Prevent browsers and intermediary caches from storing the session token.
+    # A cached 200 response could replay a stale token on a shared machine.
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
     return SessionResponse(
         session_token=session_token,
         email=email,

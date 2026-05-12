@@ -20,6 +20,7 @@ interface Session {
 
 interface AuthContextType {
   session: Session | null
+  isVerifying: boolean
   login: (token: string, email: string) => void
   logout: () => Promise<void>
 }
@@ -39,6 +40,13 @@ function AuthProvider({ children }: { children: ReactNode }) {
     const email = localStorage.getItem('fc_email')
     return token && email ? { token, email } : null
   })
+
+  // True while we validate a stored token against the backend on first load.
+  // Only starts true when there is actually a token to check — otherwise we
+  // go straight to showing the login page with no delay.
+  const [isVerifying, setIsVerifying] = useState<boolean>(
+    () => !!localStorage.getItem('fc_session_token')
+  )
 
   // Stable helper that clears all session state without calling the logout endpoint
   // — used by the 401 interceptor where we can't await an API call
@@ -71,11 +79,33 @@ function AuthProvider({ children }: { children: ReactNode }) {
   const navigateRef = useRef(navigate)
   navigateRef.current = navigate
 
-  // Restore axios header on mount (session persists across page refreshes)
+  // On mount: restore the axios auth header and immediately verify the stored
+  // token against the backend before any protected content renders.
+  // RequireAuth holds a full-screen spinner while isVerifying is true.
+  // /api/auth/me contains /api/auth/ so the 401 interceptor below skips it —
+  // this catch handler is solely responsible for clearing the stale session.
   useEffect(() => {
+    let cancelled = false
     const token = localStorage.getItem('fc_session_token')
-    if (token) axios.defaults.headers.common['X-API-Key'] = token
-  }, [])
+
+    if (!token) {
+      setIsVerifying(false)
+      return
+    }
+
+    axios.defaults.headers.common['X-API-Key'] = token
+
+    void axios.get('/api/auth/me')
+      .then(() => { /* token valid — keep session as-is */ })
+      .catch(() => {
+        // 401 expired/invalid token, or network error: clear all local state.
+        // RequireAuth will redirect to /login once isVerifying flips false.
+        if (!cancelled) clearSessionRef.current()
+      })
+      .finally(() => { if (!cancelled) setIsVerifying(false) })
+
+    return () => { cancelled = true }
+  }, []) // intentionally empty — runs once on mount only
 
   // 401 interceptor — redirect to /login when the backend rejects a session.
   // Auth endpoints (/api/auth/*) are excluded: their 401 responses are handled
@@ -98,7 +128,7 @@ function AuthProvider({ children }: { children: ReactNode }) {
   }, [])
 
   return (
-    <AuthContext.Provider value={{ session, login, logout }}>
+    <AuthContext.Provider value={{ session, isVerifying, login, logout }}>
       {children}
     </AuthContext.Provider>
   )
@@ -107,8 +137,20 @@ function AuthProvider({ children }: { children: ReactNode }) {
 // ── Route guard ───────────────────────────────────────────────────────────────
 
 function RequireAuth({ children }: { children: ReactNode }) {
-  const { session } = useAuth()
+  const { session, isVerifying } = useAuth()
   const location = useLocation()
+
+  // Hold here with a full-screen spinner until the mount-time token check
+  // completes. This prevents the dashboard shell from flashing before we know
+  // whether the stored session is still valid.
+  if (isVerifying) {
+    return (
+      <div className="fixed inset-0 bg-[#0a0e1a] flex items-center justify-center" aria-label="Verifying session">
+        <div className="w-8 h-8 border-2 border-blue-500/30 border-t-blue-500 rounded-full animate-spin" />
+      </div>
+    )
+  }
+
   if (!session) return <Navigate to="/login" state={{ from: location }} replace />
   return <>{children}</>
 }
