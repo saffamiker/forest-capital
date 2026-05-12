@@ -2470,9 +2470,107 @@ Implementation: tooltip formatter receives the dataProvenance array
 for that series and appends the source string when Commentary mode is active.
 In Analyst and Present modes: standard tooltip only (no provenance line).
 
+─── ADMIN SCREEN — DATA HEALTH AND OPERATIONAL VISIBILITY ───────────────────
+
+Route: /admin
+Auth: all four team members (read access); Force Refresh requires MASTER_API_KEY
+Visible in: all three modes (Analyst / Commentary / Present)
+Purpose: operational visibility for the whole team — Bob needs to know if
+         data is stale before writing the appendix, Molly needs to know if
+         the numbers she's presenting are from a fresh run.
+
+Backend endpoint:
+  GET /api/v1/admin/data-health
+  Returns: full data health object (see below)
+  No auth required beyond session (all team members)
+
+  GET /api/v1/admin/force-refresh
+  Triggers get_full_history() re-run
+  Requires: X-Master-Key header (MASTER_API_KEY)
+  Returns: 202 Accepted, streams progress via WebSocket
+
+SCREEN SECTIONS:
+
+  1. DATA HEALTH SUMMARY
+     ┌──────────────────────────────────────────────────────┐
+     │  DATA HEALTH                                         │
+     │  Last pipeline run:   2026-05-12 17:27:20 UTC        │
+     │  Data source:         ● PostgreSQL cache             │
+     │                       (or ● Live pipeline if fresh)  │
+     │  market_data_monthly: 282 rows                       │
+     │  market_data_daily:   9,297 rows                     │
+     │  registry:            16 series                      │
+     └──────────────────────────────────────────────────────┘
+
+  2. SOURCE BREAKDOWN TABLE
+     Series | Source type | Last fetched | Status | Rows
+     One row per data_series_registry entry
+     Status: ✅ GREEN if last fetch succeeded
+             ⚠️ AMBER if last fetch had warnings
+             ❌ RED if last fetch failed
+     Notable statuses:
+       excel_provided:  ✅ always (loaded from committed file)
+       VIXCLS (FRED):   ❌ if last fetch timed out
+       DGS2 (FRED):     ❌ if last fetch timed out
+       FF factors:      ❌ if datareader failed
+
+  3. CROSS-VALIDATION STATUS
+     Equity monthly vs SPY daily:
+       Status badge: WARN / PASS / FAIL
+       n_green / n_amber / n_red months
+       Max discrepancy: 1.07%
+       Worst month: 2001-05-31
+     Bond internal consistency:
+       Status badge: PASS
+       No gaps, no outliers
+
+  4. SANITY ASSERTIONS
+     One row per assertion:
+     Assert | Description | Expected | Actual | Status
+     Assert 1: S&P 500 CAGR      8-12%     8.54%   ✅
+     Assert 2: GFC HY peak       >15%      23.26%  ✅
+     Assert 3: BND 2022          -10/-18%  -15.23% ✅
+     Assert 4: Corr 2022         positive  +0.69   ✅
+     Assert 5: Obs count         ≥220      282     ✅
+
+  5. LAST FETCH TIMESTAMPS
+     Series | Last attempt | Result | Duration
+     SPY (yfinance):      2026-05-12 17:25:41  ✅  1.2s
+     LQD bridge:          2026-05-12 17:25:41  ✅  0.3s
+     VIXCLS (FRED):       2026-05-12 17:25:41  ❌  30s timeout
+     DGS2 (FRED):         2026-05-12 17:26:11  ❌  30s timeout
+     FF factors:          2026-05-12 17:26:41  ❌  datareader error
+
+  6. PRODUCTION ENVIRONMENT
+     Backend:     https://forest-capital.onrender.com
+     Frontend:    https://forest-capital.vercel.app
+     Database:    Virginia US East (PostgreSQL 18)
+     Environment: production
+     Sprint:      4
+
+  7. ACTION BUTTONS
+     [ Force Refresh Data ]   — Michael only (MASTER_API_KEY)
+       Re-runs get_full_history() on demand
+       Shows progress stream while running
+       Updates all sections when complete
+
+     [ Run Sanity Checks ]    — all team members
+       Re-runs all 5 assertions against current DB data
+       Updates Assert section immediately
+
+     [ Export Data Profile ]  — all team members
+       Downloads CSV of full data_series_registry
+       Suitable for Analytical Appendix Section 1
+
+NAVIGATION:
+  Admin screen accessible from nav bar (settings icon ⚙)
+  Visible to all authenticated users
+  Not shown in Present mode (clean presentation UI)
+
 ─── DATA SOURCES PANEL (Statistical Evidence screen) ────────────────────────
 
-Populated from provenance.json. Already in spec — now extended:
+Populated from provenance.json and links to Admin screen.
+Simplified version of the Admin screen — key facts only.
 
 Panel sections:
   1. PROVIDED DATA (from Excel file)
@@ -2493,6 +2591,9 @@ Panel sections:
      Date range of full analysis
      Any AMBER warnings from cross-validation
      "Export for Appendix" button → CSV of full provenance log
+     "View full Admin screen →" link
+
+
 
 
 
@@ -2945,6 +3046,36 @@ Sprint 5 (May 13):
   ─ Data Sources panel on Statistical Evidence screen
   ─ Full provenance table: all 16 registry entries
   ─ Cross-validation results with WARN status documented
+  DATA ACCURACY AND FRONTEND STATE MANAGEMENT
+  ─ strategiesStore.ts (Zustand) — persists strategy results
+    for entire session, never re-fetches if already loaded
+    loaded flag prevents blank charts on navigation
+  ─ Database-first cache with strategy_hash validation
+    On every request: compare input hash vs stored hash
+    If match: serve from PostgreSQL (fast path)
+    If mismatch: re-run pipeline, update hash, return fresh data
+  ─ Data freshness indicator on dashboard header:
+    "Data as of: [timestamp] · [n] months · [ Refresh ]"
+    AMBER if data older than 24 hours
+    WARNING icon if last pipeline run had failures
+  ─ Skeleton loading states on all charts and tables
+    Never blank — always loading skeleton or real data
+    Error state with retry for failed fetches
+  ─ GET /api/v1/admin/data-health includes:
+    last_pipeline_run timestamp
+    strategy_hash (current vs stored)
+    cache_status: "hit" | "miss" | "stale"
+
+  ─ GET /api/v1/admin/force-refresh — triggers pipeline re-run
+    (requires MASTER_API_KEY header)
+  ─ Sections: Data Health Summary, Source Breakdown,
+    Cross-Validation Status, Sanity Assertions,
+    Last Fetch Timestamps, Production Environment
+  ─ Action buttons: Force Refresh (Michael only),
+    Run Sanity Checks, Export Data Profile
+  ─ Settings icon (⚙) in nav bar links to /admin
+  ─ Hidden in Present mode
+  ─ All four team members have read access
   SPRINT 5 TESTS
 
 Sprint 6 (Jun 22-Jul 1):
@@ -6328,6 +6459,13 @@ Backend:
     — DGS2 fetch succeeds within 60s timeout
     — FRED_API_KEY passed to all requests
     — Fallback behaviour when FRED unavailable
+  test_admin_screen.py       ← NEW: admin data health endpoint
+    — GET /api/v1/admin/data-health returns 200
+    — Response contains all required sections
+    — Source breakdown has 16 entries
+    — Sanity assertions all present with status
+    — Force refresh requires MASTER_API_KEY
+    — Force refresh without key returns 401
 Frontend:
   ChartCommentStrip.test.tsx
     — Strip renders in collapsed state by default
