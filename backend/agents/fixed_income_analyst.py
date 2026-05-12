@@ -263,12 +263,16 @@ class FixedIncomeAnalyst:
         strategy_results: dict[str, Any],
         correlation_data: dict[str, Any],
     ) -> dict[str, Any]:
-        # Even in fallback, we return the pre-computed correlation_data so
-        # the council still has the breakdown_detected flag. The LLM narrative
-        # is optional — the correlation arithmetic is not.
+        # Promote breakdown_detected and diversification_effective to the top
+        # level of technical_findings so tests and the council can read them
+        # directly without traversing nested dicts. The full correlation_data
+        # block is still included for callers that want per-period detail.
         """Returns data-only response when LLM call fails."""
+        breakdown = bool(correlation_data.get("breakdown_detected", False))
         return build_agent_response(
             technical_findings={
+                "breakdown_detected": breakdown,
+                "diversification_effective": not breakdown,
                 "equity_bond_correlation": correlation_data,
                 "note": "LLM analysis unavailable — correlation computed directly",
             },

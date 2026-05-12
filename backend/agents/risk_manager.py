@@ -256,12 +256,26 @@ class RiskManager:
         strategy_results: dict[str, Any],
         risk_summary: dict[str, Any],
     ) -> dict[str, Any]:
-        # risk_summary contains all pre-computed arithmetic — the council
-        # still gets accurate n_significant and drawdown figures even when
-        # the LLM narrative is unavailable.
+        # Build technical_findings that mirrors _parse_response's schema.
+        # risk_summary uses "n_significant" internally; tests and the council
+        # expect "n_strategies_significant" — map it explicitly here so the
+        # fallback path is indistinguishable from the live path schema-wise.
         """Returns data-only response when LLM call fails."""
+        technical_findings = {
+            "n_strategies_significant": risk_summary["n_significant"],
+            "significant_strategies": risk_summary["significant_strategies"],
+            "n_strategies_beating_benchmark": risk_summary["n_beating_benchmark"],
+            "worst_drawdown": {
+                "strategy": risk_summary["worst_drawdown_strategy"],
+                "value": risk_summary["worst_drawdown_value"],
+            },
+            "best_sharpe": {
+                "strategy": risk_summary["best_sharpe_strategy"],
+                "value": risk_summary["best_sharpe_value"],
+            },
+        }
         return build_agent_response(
-            technical_findings=risk_summary,
+            technical_findings=technical_findings,
             summary=(
                 f"{risk_summary['n_significant']} strategies pass all Tier 1 gates. "
                 "LLM analysis temporarily unavailable."
