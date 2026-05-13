@@ -94,6 +94,10 @@ MOCK_REGIME = {
     "yield_curve_slope": 0.42,
     "credit_spread": 3.21,
     "equity_trend": 0.08,
+    # Correlation breakdown: computed from market_data_monthly in production;
+    # representative values shown here for test/dev environments.
+    "pre_2022_avg_correlation": -0.31,
+    "post_2022_avg_correlation": 0.48,
     "as_of": "2024-12-31",
 }
 

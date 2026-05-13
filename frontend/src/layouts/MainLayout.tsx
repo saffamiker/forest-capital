@@ -1,11 +1,12 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useRef, useState, useEffect } from 'react'
-import { LayoutDashboard, Users, ShieldCheck, Settings } from 'lucide-react'
+import { LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../App'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import { useUI } from '../context/UIContext'
 import type { UIMode } from '../context/UIContext'
+import { useQAStore } from '../stores/qaStore'
 
 interface NavItem {
   to: string
@@ -60,6 +61,7 @@ export default function MainLayout() {
   const navigate = useNavigate()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const settingsRef = useRef<HTMLDivElement>(null)
+  const { status: qaStatus } = useQAStore()
 
   const handleLogout = async () => {
     await logout()
@@ -114,29 +116,75 @@ export default function MainLayout() {
 
         {/* Right side: mode selector + user + settings + logout */}
         <div className="flex items-center gap-3 ml-4">
-          {/* Three-mode selector */}
+          {/* Three-mode selector — Present mode gated on QA audit status */}
           <div className="hidden sm:flex items-center rounded border border-border overflow-hidden shrink-0">
             {MODE_OPTIONS.map((opt) => {
               const isActive = mode === opt.value
+              const isPresent = opt.value === 'present'
+
+              // Derive QA gate state for the Present button
+              const presentBlocked = isPresent && (qaStatus === 'unknown' || qaStatus === 'fail')
+              const presentWarn = isPresent && qaStatus === 'warn'
+              const presentTitle = isPresent
+                ? qaStatus === 'unknown'
+                  ? 'Run QA Audit before presenting'
+                  : qaStatus === 'fail'
+                    ? 'QA audit failed — review issues before presenting to Forest Capital'
+                    : qaStatus === 'warn'
+                      ? 'QA: WARN — review limitations before presenting'
+                      : ''
+                : ''
+
+              const handleClick = () => {
+                if (isPresent && qaStatus === 'unknown') {
+                  // Navigate to QA tab so user can run the audit
+                  navigate('/qa')
+                  return
+                }
+                if (isPresent && qaStatus === 'fail') {
+                  // Blocked — do nothing (title tooltip explains why)
+                  return
+                }
+                setMode(opt.value)
+              }
+
               return (
                 <button
                   key={opt.value}
-                  onClick={() => setMode(opt.value)}
-                  className={`px-2.5 py-1 text-xs transition-colors whitespace-nowrap ${
-                    isActive
-                      ? opt.value === 'present'
-                        ? 'bg-warning/20 text-warning font-medium'
-                        : 'bg-electric/15 text-electric font-medium'
-                      : 'text-muted hover:text-white hover:bg-navy-700'
+                  onClick={handleClick}
+                  title={presentTitle}
+                  className={`px-2.5 py-1 text-xs transition-colors whitespace-nowrap flex items-center gap-1 ${
+                    presentBlocked
+                      ? 'text-muted/50 cursor-not-allowed'
+                      : isActive
+                        ? opt.value === 'present'
+                          ? 'bg-warning/20 text-warning font-medium'
+                          : 'bg-electric/15 text-electric font-medium'
+                        : 'text-muted hover:text-white hover:bg-navy-700'
                   }`}
                 >
                   {opt.label}
+                  {/* QA status indicators on the Present button only */}
+                  {isPresent && qaStatus === 'fail'  && <span className="text-red-400 text-[10px]">🔒</span>}
+                  {isPresent && qaStatus === 'unknown' && <span className="text-muted/60 text-[10px]">○</span>}
+                  {presentWarn && <span className="text-warning text-[10px]">⚠</span>}
                 </button>
               )
             })}
           </div>
 
           <span className="text-muted text-xs hidden sm:inline font-mono">{session?.email}</span>
+
+          {/* Help icon — opens Team Primer in a new tab */}
+          <a
+            href="/TEAM_PRIMER.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="flex items-center text-muted hover:text-white p-1 rounded hover:bg-navy-700 transition-colors"
+            title="Team Primer — how to use the three modes"
+          >
+            <HelpCircle className="w-3.5 h-3.5" />
+          </a>
 
           {/* Settings cog — brand toggle */}
           <div className="relative" ref={settingsRef}>

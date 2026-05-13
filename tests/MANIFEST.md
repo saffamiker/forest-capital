@@ -571,6 +571,54 @@ Commentary review (Sprint 5 — all modules pass standard):
 Test counts: 651 passed, 10 skipped (HMM on Windows), 0 failed
   Frontend: 73 tests pass
 
+## Sprint 5 Addendum ✅ COMPLETE (2026-05-12)
+QA gate for Present mode, Team Primer, correlation breakdown live data,
+magic link JTI persistence, provenance justification endpoint, 0/10 tooltip.
+
+Backend — new/updated:
+  main.py — verify_magic_link updated with DB-backed JTI check (is_jti_used /
+             mark_jti_used from tools/cache.py); GET /api/v1/provenance/justification
+             endpoint added (spy_daily, vixcls, dgs2, lqd_bridge structured metadata)
+  models/schemas.py — MOCK_REGIME updated with pre_2022_avg_correlation and
+             post_2022_avg_correlation fields for test environments
+
+  test_provenance_justification.py — 17 tests:
+    Endpoint returns 200; all four supplemental sources present;
+    each source has required fields (strategies_enabled, key_reason,
+    months_added, statistical_impact, without_this_source);
+    lqd_bridge months_added ≥ 50; spy_daily months_added = 0;
+    VOL_TARGETING and MOMENTUM_ROTATION in spy_daily.strategies_enabled;
+    REGIME_SWITCHING in vixcls and dgs2 strategies_enabled;
+    lqd_bridge enables ≥5 strategies; all string fields non-empty;
+    strategies_enabled is a list not a string
+
+Frontend — new/updated:
+  MainLayout.tsx — QA gate on Present mode (lock on unknown/fail, warn badge
+                   on warn, navigate to /qa when unknown, 🔒 ○ ⚠ indicators);
+                   HelpCircle ? icon linking to /TEAM_PRIMER.md (served from public/)
+  Dashboard.tsx  — 0/10 significant strategies note (amber colour + italic
+                   explanatory line when no strategies pass all 5 Tier 1 gates);
+                   MetricTile accepts note prop (shown as italic subtitle and
+                   native title tooltip)
+  frontend/public/TEAM_PRIMER.md — plain English guide to all three modes;
+                   sections for Bob (Commentary mode workflow), Molly (Present
+                   mode workflow), Michael (pre-presentation checklist);
+                   FAQ explaining 0/10, data provenance, AI council architecture
+
+Correlation breakdown banner: already correct in prior session —
+  detect_current_regime() computes pre_2022_avg_correlation and
+  post_2022_avg_correlation from live DB data; Dashboard reads from
+  regimeStore (never hardcoded); fallback to −0.31/+0.48 only when API returns null
+
+Magic link JTI persistence: DB check (is_jti_used) runs before token
+  redemption in verify_magic_link endpoint; mark_jti_used called after
+  successful redemption; in-memory dict still handles scanner pre-fetch
+  within same instance; DB handles cross-restart replay attack prevention
+
+Test counts (Sprint 5 + addendum): 668 passed, 10 skipped (HMM on Windows), 0 failed
+  Frontend: 73 tests pass
+  New addendum tests: 17 (test_provenance_justification.py, all passing)
+
 ## Sprint 6 ⏳ PENDING
   Academic Writer Agent (agents/academic_writer.py)
   Report generation endpoints (analytical-appendix, executive-brief, midpoint)

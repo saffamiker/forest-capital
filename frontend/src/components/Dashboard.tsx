@@ -48,14 +48,16 @@ interface MetricTileProps {
   value: string
   sub?: string
   color?: string
+  note?: string
 }
 
-function MetricTile({ label, value, sub, color = 'text-white' }: MetricTileProps) {
+function MetricTile({ label, value, sub, color = 'text-white', note }: MetricTileProps) {
   return (
-    <div className="card p-3">
+    <div className="card p-3" title={note}>
       <div className="text-2xs text-muted uppercase tracking-wide mb-1">{label}</div>
       <div className={`font-mono text-lg font-bold ${color}`}>{value}</div>
       {sub && <div className="text-2xs text-muted mt-0.5 font-mono">{sub}</div>}
+      {note && <div className="text-2xs text-muted/70 mt-1 leading-tight italic">{note}</div>}
     </div>
   )
 }
@@ -222,7 +224,10 @@ export default function Dashboard() {
             label="Significant Strategies"
             value={`${significant.length} / 10`}
             sub="Pass all 5 Tier 1 gates"
-            color="text-success"
+            color={significant.length === 0 ? 'text-warning' : 'text-success'}
+            note={significant.length === 0
+              ? 'Honest result — p < 0.005 with FDR correction is intentionally strict. No strategy passes all 5 gates simultaneously.'
+              : undefined}
           />
           <MetricTile
             label="Best Sharpe (IS)"
