@@ -29,18 +29,11 @@ describe('TableExportButton', () => {
     const revokeObjectURL = vi.fn()
     vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
 
-    // Capture the blob content passed to createObjectURL
-    let capturedBlob: Blob | null = null
-    createObjectURL.mockImplementation((blob: Blob) => {
-      capturedBlob = blob
-      return 'blob:fake'
-    })
-
     render(<TableExportButton tableId="strategy_table" headers={HEADERS} rows={ROWS} />)
     fireEvent.click(screen.getByTestId('table-export-button'))
 
     expect(createObjectURL).toHaveBeenCalled()
-    // Verify the blob was created (content checked via read below)
+    const capturedBlob: Blob | null = createObjectURL.mock.calls[0]?.[0] ?? null
     expect(capturedBlob).not.toBeNull()
 
     vi.unstubAllGlobals()
@@ -80,12 +73,10 @@ describe('TableExportButton', () => {
     const revokeObjectURL = vi.fn()
     vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
 
-    let capturedBlob: Blob | null = null
-    createObjectURL.mockImplementation((blob: Blob) => { capturedBlob = blob; return 'blob:fake' })
-
     render(<TableExportButton tableId="t" headers={HEADERS} rows={ROWS} />)
     fireEvent.click(screen.getByTestId('table-export-button'))
 
+    const capturedBlob: Blob | null = createObjectURL.mock.calls[0]?.[0] ?? null
     expect(capturedBlob).not.toBeNull()
 
     vi.unstubAllGlobals()
