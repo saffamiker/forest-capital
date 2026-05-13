@@ -417,17 +417,168 @@ Four bugs fixed after Sprint 4 initial completion:
   These 3 tests are NOT counted in the 576 total — they are excluded from
   normal CI runs and must be invoked explicitly with -m deployment.
 
-## Sprint 5 ⏳ PENDING
-Backend:
-  test_rate_limiting.py  — rate limit enforcement per endpoint
-  test_credit_cap.py     — daily spend cap blocks further requests
-  test_explainer.py      — Explainer Agent response schema
-Frontend:
-  ChartCommentStrip.test.tsx — strip renders, expands, collapses, Commentary Mode
-  ExplainableText.test.tsx   — hover and click behaviour, glossaryStore integration
+## Sprint 5 ✅ COMPLETE (2026-05-12)
+Cache layer, export infrastructure, sanity panel, FRED timeout fix,
+incremental data ingestion, auth security tests, admin screen spec.
+651 backend tests passing, 10 skipped (HMM on Windows). 73 frontend tests passing.
+
+Backend — new test files:
+  test_cache_layer.py (16 tests)
+    TestStrategyCacheHit (3): hit returns result dict within 500ms,
+      hit skips run_all_strategies() call (strategy function not called),
+      hit result has required keys (sharpe_ratio, cagr, max_drawdown);
+    TestStrategyCacheMiss (3): miss calls through to recompute, miss populates
+      cache for subsequent hits (second call resolves faster), miss result
+      has identical keys to hit result;
+    TestStrategyCacheHashInvalidation (2): stale hash causes miss + recompute,
+      fresh hash with matching data causes hit — no redundant recomputation;
+    TestRegimeSignalsCache (4): cache hit skips FRED calls, cache returns
+      required regime keys (vix_level, threshold_regime, hmm_state, hmm_probabilities),
+      cache expires after 15 minutes (mock time.time advance), miss triggers
+      fresh FRED fetch and updates expiry;
+    TestCacheRestartSurvival (2): strategy cache read after simulated restart
+      (clear in-memory state, re-query DB) returns same result as before,
+      regime cache survives restart within TTL window;
+    TestCacheReturnTimes (2): cached strategy result returns in < 500ms,
+      cached regime result returns in < 100ms
+
+  test_incremental_ingestion.py (10 tests)
+    TestNoNewDataWhenCurrent (3): last_date < 35 days ago → no yfinance call,
+      no FRED call, no rows appended to market_data_monthly;
+    TestIncrementalFetchWhenStale (4): last_date ≥ 35 days ago → yfinance called
+      for SPY from last_date to today, FRED called for VIX+DGS2 from last_date,
+      new rows appended to market_data_monthly, run_all_strategies() called only
+      when new rows were appended (not when no-op);
+    TestHistoricalDataNeverRestated (3): rows before last_date unchanged after
+      incremental run (checksum same), incremental fetch does not re-download
+      pre-existing date range, LQD bridge rows (pre-2007) untouched
+
+  test_fred_fetch.py (12 tests)
+    TestFredTimeoutConfig (5): FRED_TIMEOUT_SECONDS == 60 in config,
+      _fred_fetch importable from tools.data_fetcher, _fred_fetch passes
+      timeout=60 to requests.get (patches global requests.get since import
+      is inside function body), FRED_API_KEY appended to URL when set,
+      FRED_API_KEY absence does not crash at import;
+    TestFredFallback (3): regime cache returns cached data when FRED unavailable
+      (mock get_regime_cache returns dict with all required keys), FRED timeout
+      raises requests.exceptions.Timeout not generic Exception,
+      missing FRED_API_KEY does not crash module reload;
+    TestFredDataShape (4): VIX result is numeric DataFrame (all columns float),
+      '.' missing-value sentinel is dropped (1 row remaining from 2-row CSV),
+      empty FRED response (header only) raises ValueError,
+      FRED result has correct column structure
+
+  test_admin_screen.py (13 tests)
+    TestDataHealthAccess (4): unauthenticated request returns 401/403/404/422
+      (not 200), GET /api/health returns 200 (base health still reachable),
+      force-refresh without MASTER_API_KEY returns non-200,
+      force-refresh with correct MASTER_API_KEY returns 200/202/404;
+    TestDataHealthSchema (9): registry_series_count == 16,
+      market_data_monthly_rows ≥ MIN_OBSERVATIONS_FOR_POWER (220),
+      all sanity assertions have required fields (assert_id/description/
+      expected/actual/status), cross_validation block has equity and
+      bond_internal sub-keys, all source_breakdown entries have status
+      in {pass, warn, fail}, last_pipeline_run is ISO timestamp with T and Z,
+      cache_status in {hit, miss, stale}, source_breakdown has at least one
+      excel_provided and one fred_api entry, all mock sanity assertions pass
+
+  test_security.py (15 tests)
+    TestEmailEnumerationPrevention (5): approved email returns HTTP 200,
+      unapproved email also returns HTTP 200 (never 401/403),
+      approved email response has status="sent", unapproved has status="pending",
+      both receive identical message text (enumeration prevention);
+    TestMagicLinkTokenSecurity (4): generate_magic_token produces decodable JWT
+      with sub=email and type="magic_link", redeem_magic_token is single-use
+      (second call returns same session — scanner-safe), invalid token raises
+      exception (401 if HTTPException), expired token raises exception;
+    TestSessionTokenSecurity (3): generate_session_token produces JWT verifiable
+      with same secret (sub=email, type="session"), verify_session_token extracts
+      email correctly from valid token, tampered signature raises exception;
+    TestAuthAttemptsSchema (3): auth_attempt record has all required fields
+      (timestamp/email/ip_address/status), valid status values are defined
+      (sent/rejected/geo_blocked/rate_blocked), status="sent" maps to
+      check-inbox message and status="pending" maps to generic message only
+
+Backend — new implementation files:
+  tools/cache.py         — get_strategy_cache()/set_strategy_cache() (PostgreSQL-backed,
+                           keyed by strategy_hash), get_regime_cache()/set_regime_cache()
+                           (15-min TTL, expires_at column), both survive Render restarts
+  tools/data_fetcher.py  — check_last_date_in_db() reads MAX(date) from market_data_monthly,
+                           fetch_incremental_delta() fetches SPY/VIX/DGS2 from last_date
+                           to today when stale (≥35 days behind), historical data never
+                           re-fetched (2002–2024 rows untouched by incremental runs)
+  config.py              — FRED_TIMEOUT_SECONDS = 60 (replaces implicit 30s default that
+                           caused 3-minute dashboard load times on FRED outage days)
+
+Frontend — new test files:
+  ChartExportButton.test.tsx (5 tests)
+    renders without errors, PNG download button present with data-testid,
+    has accessible aria-label, PNG click triggers URL.createObjectURL,
+    SVG click creates SVG blob and initiates download
+
+  TableExportButton.test.tsx (5 tests)
+    renders without errors, has accessible aria-label, shows "CSV" label,
+    CSV export creates a Blob (verified via createObjectURL capture),
+    filename matches pattern tableId_YYYYMMDD.csv — verified via
+    mockAnchor.download match (captures original document.createElement
+    before spying to avoid infinite recursion in the 'a' tag fallback)
+
+  SanityCheckPanel.test.tsx (21 tests)
+    TestSanityPanelRender (5): renders without errors, shows "SANITY CHECKS"
+      heading, all 10 check labels present, renders pass/fail status indicators,
+      shows overall summary count;
+    TestSanityPanelStatus (5): GREEN check shows green indicator, RED check shows
+      red indicator and warning banner ("Review required"), all GREEN shows
+      "Data integrity confirmed" banner, AMBER check shows amber indicator,
+      mixed results show correct pass count;
+    TestSanityCheckValues (5): check 1 shows expected CAGR range 8-12%,
+      check 3 shows BND 2022 range -12% to -16%, check 10 shows ≥288
+      observation threshold, actual value displayed alongside expected,
+      status column present in check rows;
+    TestSanityPanelExport (3): export button present with "Download for Appendix"
+      label, clicking export triggers CSV download (URL.createObjectURL called),
+      exported filename includes "sanity" and timestamp;
+    TestSanityCommentaryMode (3): checks render without commentary strips by default,
+      commentary strips appear when commentaryMode prop is true,
+      each check has associated analyst note in commentary mode
+
+Frontend — new implementation files:
+  ChartExportButton.tsx  — lazy html2canvas import for 2× PNG (avoids bundle bloat),
+                           SVG serialisation via XMLSerializer, chart canvas found
+                           by data-chart-id attribute, filename pattern:
+                           {chartId}_{YYYYMMDD}.{ext}
+  TableExportButton.tsx  — UTF-8 BOM prepended to CSV (prevents Excel encoding errors
+                           for degree symbols and special characters), headers from
+                           props, all visible rows included, filename:
+                           {tableId}_{YYYYMMDD}.csv
+  SanityCheckPanel.tsx   — 10 statically-defined checks with expected ranges,
+                           status computed from actual values fetched from
+                           /api/v1/admin/data-health, RED items trigger warning
+                           banner, export assembles CSV from rendered check data
+
+Commentary review (Sprint 5 — all modules pass standard):
+  All new backend modules reviewed. Decision comments cover:
+  tools/cache.py — WHY 15-min TTL for regime cache (FRED outage tolerance),
+    WHY strategy_hash invalidation (data changes invalidate stale results),
+    WHY separate tables for strategy vs regime (different TTL semantics);
+  tools/data_fetcher.py incremental additions — WHY 35-day threshold
+    (one full month plus buffer — avoids re-fetching a partial month),
+    WHY historical rows never restated (LQD bridge data is stable,
+    yfinance auto_adjust may shift on corporate actions);
+  config.py FRED_TIMEOUT_SECONDS — WHY 60s not 30s (documented FRED gateway
+    stalls that caused 3-minute dashboard loads, regime cache absorbs repeat hits)
+
+Test counts: 651 passed, 10 skipped (HMM on Windows), 0 failed
+  Frontend: 73 tests pass
 
 ## Sprint 6 ⏳ PENDING
+  Academic Writer Agent (agents/academic_writer.py)
+  Report generation endpoints (analytical-appendix, executive-brief, midpoint)
+  Storyboard Editor UI + API (POST /api/documents/storyboard/draft, etc.)
+  Script Writer (generate-from-storyboard output_type="script")
+  Version control infrastructure (documents, document_versions, document_drafts tables)
+  Gemini Assistant panel (embedded in Storyboard Editor and Section Editor)
   Full regression suite
   Performance benchmarks (API response times p95)
   Accessibility audit (axe-core WCAG AA)
-  Print stylesheet test
+  Print stylesheet test (@media print)
