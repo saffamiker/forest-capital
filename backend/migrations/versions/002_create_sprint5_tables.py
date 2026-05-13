@@ -191,11 +191,11 @@ def upgrade() -> None:
             comment="SHA-256 of email — for audit without storing plaintext",
         ),
     )
+    # Index supports periodic cleanup queries that prune expired tokens.
     op.create_index(
         "ix_used_magic_tokens_expires_at",
         "used_magic_tokens",
         ["expires_at"],
-        comment="Supports periodic cleanup of expired tokens",
     )
 
 

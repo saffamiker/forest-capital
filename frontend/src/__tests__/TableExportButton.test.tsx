@@ -25,22 +25,20 @@ describe('TableExportButton', () => {
   })
 
   it('CSV export contains correct headers', () => {
-    const createObjectURL = vi.fn(() => 'blob:fake')
-    const revokeObjectURL = vi.fn()
-    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockImplementation(() => 'blob:mock-url')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
 
     render(<TableExportButton tableId="strategy_table" headers={HEADERS} rows={ROWS} />)
     fireEvent.click(screen.getByTestId('table-export-button'))
 
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
 
-    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 
   it('CSV filename includes tableId and timestamp', () => {
-    const createObjectURL = vi.fn(() => 'blob:fake')
-    const revokeObjectURL = vi.fn()
-    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+    vi.spyOn(URL, 'createObjectURL').mockImplementation(() => 'blob:mock-url')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
 
     // Track what download attr is set
     const clickSpy = vi.fn()
@@ -63,19 +61,17 @@ describe('TableExportButton', () => {
     expect(clickSpy).toHaveBeenCalled()
 
     vi.restoreAllMocks()
-    vi.unstubAllGlobals()
   })
 
   it('all visible rows are included in the export', () => {
-    const createObjectURL = vi.fn(() => 'blob:fake')
-    const revokeObjectURL = vi.fn()
-    vi.stubGlobal('URL', { createObjectURL, revokeObjectURL })
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockImplementation(() => 'blob:mock-url')
+    vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
 
     render(<TableExportButton tableId="t" headers={HEADERS} rows={ROWS} />)
     fireEvent.click(screen.getByTestId('table-export-button'))
 
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
 
-    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
   })
 })
