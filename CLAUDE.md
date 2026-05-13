@@ -3173,8 +3173,44 @@ Sprint 4 (COMPLETE — commits e2d3308, f631bbb, 337c892, and subsequent fixes):
       FDR-corrected gates at p < 0.005), needs clear explanation in UI
 
 
-Sprint 5 (May 13):
-  E2E CI FIX — FIRST TASK
+Sprint 5 (COMPLETE — commits cec0338, f5bfd33, addendum commits):
+  ✅ E2E CI fixed — points at live Render/Vercel URLs, issue #1 closed
+  ✅ Zustand stores — strategiesStore, regimeStore, councilStore, qaStore
+     Navigation between screens instant, data never re-fetched
+  ✅ PostgreSQL caching — strategy_results_cache, regime_signals_cache
+     Dashboard loads in <2s after first run, survives restarts
+  ✅ Incremental data ingestion — delta only, historical never re-fetched
+  ✅ FRED timeout fix — 60s timeout, FRED_API_KEY on all requests
+  ✅ Correlation breakdown banner — real computed values from backend
+  ✅ OptimizeRequest fix — 'start' attribute warning resolved
+  ✅ Magic link JTI persistence — used_magic_tokens table in PostgreSQL
+  ✅ Statistical Evidence screen — 6 charts with real data
+  ✅ Regime Analysis screen — 6 charts with real data
+  ✅ Commentary mode — ExplainableText, ChartCommentStrip, LearnMode
+  ✅ Export infrastructure — ChartExportButton, TableExportButton,
+     PresentationPackage ZIP
+  ✅ Sanity Check panel — 10 checks, GREEN/AMBER/RED
+  ✅ Admin screen (/admin) — data health, source breakdown,
+     sanity assertions, auth attempts
+  ✅ Security — auth_attempts table, US geolocking, rate limiting
+  ✅ Email differentiation — approved=sent, unapproved=pending
+  ✅ Data sources panel — provenance justification per source
+  ✅ GET /api/v1/provenance/justification — 17 tests
+  ✅ QA gate — Present mode locked until QA ≥ WARN
+  ✅ Team Primer — docs/TEAM_PRIMER.md, ? help icon in nav bar
+  ✅ 0/10 significant strategies — amber note explaining strict gates
+  ✅ Alembic migrations — all 4 new Sprint 5 tables
+  ✅ 668 backend tests passing, 10 skipped
+  ✅ 73 frontend tests passing
+  ✅ All three CI jobs green including E2E
+  ✅ README.md, MANIFEST.md, CLAUDE.md all updated
+  Known issues carried to Sprint 6:
+    FF factors fetch failing (pandas-datareader deprecation)
+    Correlation banner mock values match hardcoded — verify
+      production is computing real values not serving mock
+    Strategy results cache — verify hitting in production logs
+
+
   ─ Fix .github/workflows/test.yml E2E job to point at live
     Render and Vercel URLs instead of spinning up local backend
   ─ Set PLAYWRIGHT_BASE_URL=https://forest-capital.vercel.app
