@@ -999,10 +999,13 @@ Tools:
   minimum_aum_to_be_viable
 
 ─────────────────────────────────────────────────────────────────────────────
-AGENT 6: Independent Analyst — Google Gemini Pro (independent_analyst.py)
+AGENT 6: Independent Analyst — Google Gemini (independent_analyst.py)
 ─────────────────────────────────────────────────────────────────────────────
 
-Model: gemini-2.0-flash (google-generativeai SDK)
+Model: gemini-1.5-pro (google-generativeai SDK)
+NOTE: gemini-2.0-flash was deprecated May 2026. Use gemini-1.5-pro or
+the latest available Gemini model. Update model string when new versions
+are released. Check available models at aistudio.google.com.
 
 System prompt:
 "You are an independent investment analyst reviewing recommendations from
@@ -1024,7 +1027,93 @@ Tools:
   Returns agreement_score per strategy, flags maximum divergence points
 
 UI: Gemini card uses PURPLE (#7c3aed) accent. Label: "Independent Analyst
-— Dissenting View". Always rendered separately from Claude agents.
+— Gemini Dissenting View". Always rendered separately from Claude agents.
+
+─────────────────────────────────────────────────────────────────────────────
+AGENT 6b: Contrarian Analyst — xAI Grok (contrarian_analyst.py)
+─────────────────────────────────────────────────────────────────────────────
+
+Model: grok-3 or grok-3-mini (xAI API — xai-sdk or openai-compatible endpoint)
+API: https://api.x.ai/v1 (OpenAI-compatible)
+API Key: XAI_API_KEY environment variable
+Add to backend/.env and Render environment variables
+
+WHY GROK:
+  xAI has a different training philosophy — more contrarian by design
+  Adds a third independent perspective alongside Claude + Gemini
+  Three AI companies (Anthropic, Google, xAI) representing genuinely
+  independent views is compelling for the July 1 presentation
+  Forest Capital will find it interesting and differentiating
+
+System prompt:
+"You are a contrarian investment analyst. Your role is to stress-test
+the conclusions of an investment council and identify the strongest
+possible case AGAINST their recommendation. You are not trying to be
+difficult — you are trying to find what the optimists are missing.
+
+Focus on:
+  Tail risks the council may have discounted
+  Historical analogues where similar strategies failed
+  Regime assumptions that may not hold going forward
+  Data limitations that could invalidate the findings
+  What a bearish portfolio manager would say in response
+
+Be direct. Be specific. Cite numbers from the data provided.
+Do not simply agree with the council or restate their conclusions."
+
+Tools:
+- stress_test_recommendation(recommendation, strategy_results)
+  Returns: strongest_objection, historical_failure_analogues,
+  tail_risk_scenario, regime_assumption_failure, data_limitation
+- challenge_significance(statistical_results)
+  Challenges p-values, sample size adequacy, multiple testing concerns
+- identify_survivorship_concerns(strategy_results)
+  Flags any strategies that may benefit from look-ahead or survivorship
+
+UI: Grok card uses ORANGE (#f97316) accent. Label: "Contrarian Analyst
+— xAI Grok". Always rendered separately from Claude and Gemini agents.
+Position: after Gemini in the council output, before CIO synthesis.
+
+COUNCIL FLOW WITH GROK:
+  1. Equity Analyst (Sonnet)
+  2. Fixed Income Analyst (Sonnet)
+  3. Risk Manager (Sonnet)
+  4. Quant/Backtester (Sonnet)
+  5. Independent Analyst / Gemini (challenges Claude consensus)
+  6. Contrarian Analyst / Grok (stress-tests the recommendation)
+  7. CIO (Opus) — synthesises all views including both dissenters
+
+CIO prompt updated to reference both dissenters:
+"You have received analysis from four specialist Claude agents,
+a Gemini independent analyst challenging consensus, and a Grok
+contrarian analyst stress-testing the recommendation. Synthesise
+all views. Where Gemini and Grok agree in their dissent, weight
+that dissent heavily. Where they disagree, explain why."
+
+DISAGREEMENT HEATMAP:
+  Add Grok column alongside Gemini column
+  Both dissenters shown with their respective accent colours
+  Divergence % calculated across all 6 agents (not just 5)
+
+IMPLEMENTATION NOTES:
+  xAI API is OpenAI-compatible — use openai Python SDK:
+    from openai import OpenAI
+    client = OpenAI(api_key=XAI_API_KEY, base_url="https://api.x.ai/v1")
+  
+  Fail gracefully if XAI_API_KEY not set:
+    Log xai_analyst_unavailable, continue without Grok
+    Council still runs with Gemini as the sole dissenter
+  
+  Cost: grok-3-mini is lower cost for initial testing
+  Switch to grok-3 for final presentations
+
+SPRINT 6 SCOPE:
+  ─ agents/contrarian_analyst.py — Grok agent
+  ─ XAI_API_KEY added to backend/.env and Render env vars
+  ─ CIO system prompt updated to reference both dissenters
+  ─ Disagreement heatmap updated with Grok column (orange)
+  ─ Council session logging updated for Grok agent
+  ─ Fallback handling if XAI_API_KEY not set
 
 ─────────────────────────────────────────────────────────────────────────────
 AGENT 7: QA Agent — Claude Opus (qa_agent.py)
@@ -3501,8 +3590,24 @@ Sprint 5 (COMPLETE — commits cec0338, f5bfd33, addendum commits):
     [ Clear old attempts ] — Michael only, deletes >30 days
   SPRINT 5 TESTS
 
-Sprint 6 (Jun 22-Jul 1):
-  ACADEMIC WRITER AGENT + REPORT GENERATORS
+Sprint 6 (May 13 onwards — in progress):
+  COUNCIL FIXES (Phase 1 priority)
+  ─ Fix CIO model string — must be claude-opus-4-6 not Sonnet
+  ─ Fix Gemini model — update from deprecated gemini-2.0-flash
+    to gemini-1.5-pro or latest available model
+  ─ Fix council Debate tab blank after analysis completes
+  ─ Fix navigation persistence — Zustand stores not persisting
+  GROK CONTRARIAN ANALYST (Agent 6b)
+  ─ agents/contrarian_analyst.py (xAI Grok)
+  ─ XAI_API_KEY in backend/.env and Render environment
+  ─ OpenAI-compatible endpoint: https://api.x.ai/v1
+  ─ Model: grok-3-mini (testing) → grok-3 (final presentation)
+  ─ Orange (#f97316) accent in UI
+  ─ CIO system prompt updated to reference both dissenters
+  ─ Disagreement heatmap: Grok column added (orange)
+  ─ Graceful fallback if XAI_API_KEY not set
+  12 DASHBOARD CHARTS (Phase 1 — in progress)
+
   ─ agents/academic_writer.py — Agent 9 (Sonnet)
   ─ backend/data/references.json — curated citation database
   ─ All output labeled "AI DRAFT — REQUIRES HUMAN REVIEW"
