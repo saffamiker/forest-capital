@@ -443,6 +443,15 @@ def _build_result(
             "start": str(portfolio_returns.index[0].date()),
             "end": str(portfolio_returns.index[-1].date()),
         },
+        # Per-month returns as [iso_date, return_float] pairs — needed by the
+        # charts endpoint for FF factor regression, regime-conditional stats,
+        # walk-forward window plots, and rolling correlation. Stored as a list
+        # of pairs (not a dict) to keep JSONB-cached payload sizes predictable
+        # and to preserve chronological order when round-tripping through JSON.
+        "monthly_returns": [
+            [str(idx.date()), round(float(val), 6)]
+            for idx, val in portfolio_returns.dropna().items()
+        ],
     }
 
 

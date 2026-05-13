@@ -1,0 +1,102 @@
+/**
+ * FactorExposureHeatmap — Fama-French 3-factor loadings per strategy.
+ * Rows: strategies. Columns: Mkt-RF, SMB, HML, plus alpha and R².
+ * Cell colour: blue for positive loading, red for negative; intensity
+ * scales with magnitude.
+ *
+ * Audience reads: which strategies are levered to market (high Mkt-RF),
+ * to value (high HML), to small-cap (high SMB). Alpha column shows
+ * unexplained outperformance; R² shows how much of the strategy's
+ * return variance the factor model captures.
+ */
+import type { FactorLoadings } from '../../types/charts'
+import { prettyName } from '../../lib/strategyColors'
+
+interface Props {
+  factorLoadings: Record<string, FactorLoadings>
+}
+
+const FACTOR_KEYS = ['mkt_rf', 'smb', 'hml'] as const
+const FACTOR_LABELS: Record<typeof FACTOR_KEYS[number], string> = {
+  mkt_rf: 'Mkt-RF',
+  smb:    'SMB',
+  hml:    'HML',
+}
+
+function cellColor(value: number, max: number): string {
+  if (max === 0) return '#1a2438'
+  const norm = Math.max(-1, Math.min(1, value / max))
+  if (norm > 0) {
+    const a = Math.abs(norm) * 0.7 + 0.1
+    return `rgba(59, 130, 246, ${a})`     // blue for positive
+  }
+  const a = Math.abs(norm) * 0.7 + 0.1
+  return `rgba(239, 68, 68, ${a})`        // red for negative
+}
+
+export default function FactorExposureHeatmap({ factorLoadings }: Props) {
+  const entries = Object.entries(factorLoadings)
+  if (entries.length === 0) {
+    return (
+      <div className="card p-4" data-testid="factor-exposure-heatmap">
+        <h3 className="text-white font-semibold text-sm">Factor Exposure Heatmap</h3>
+        <p className="text-muted text-xs mt-3">Loading factor loadings…</p>
+      </div>
+    )
+  }
+
+  // Determine max absolute loading across all factors/strategies for colour normalisation
+  const maxLoading = Math.max(
+    0.01,
+    ...entries.flatMap(([, l]) => FACTOR_KEYS.map((k) => Math.abs(l[k]))),
+  )
+
+  return (
+    <div className="card p-4" data-testid="factor-exposure-heatmap">
+      <div className="mb-3">
+        <h3 className="text-white font-semibold text-sm">Factor Exposure Heatmap</h3>
+        <p className="text-muted text-xs mt-0.5">
+          Fama-French 3-factor OLS loadings · blue = positive, red = negative
+        </p>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-muted text-2xs uppercase tracking-wide">
+              <th className="text-left py-2 pr-3">Strategy</th>
+              {FACTOR_KEYS.map((k) => (
+                <th key={k} className="px-2 py-2 text-center">{FACTOR_LABELS[k]}</th>
+              ))}
+              <th className="text-right px-2 py-2">α (monthly)</th>
+              <th className="text-right px-2 py-2">R²</th>
+            </tr>
+          </thead>
+          <tbody>
+            {entries.map(([name, loadings]) => (
+              <tr key={name} className="border-t border-border/50">
+                <td className="py-1.5 pr-3 text-white font-mono">{prettyName(name)}</td>
+                {FACTOR_KEYS.map((k) => (
+                  <td key={k} className="px-2 py-1.5 text-center">
+                    <span
+                      className="inline-block px-2 py-1 rounded font-mono text-2xs"
+                      style={{ background: cellColor(loadings[k], maxLoading), color: '#f9fafb' }}
+                    >
+                      {loadings[k].toFixed(2)}
+                    </span>
+                  </td>
+                ))}
+                <td className="text-right px-2 py-1.5 font-mono text-cbd5e1">
+                  {(loadings.alpha * 10000).toFixed(0)} bps
+                </td>
+                <td className="text-right px-2 py-1.5 font-mono text-cbd5e1">
+                  {loadings.r_squared.toFixed(2)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}

@@ -398,6 +398,67 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
     return {"strategies": sorted_strategies, "ranked_by": "sharpe_ratio"}
 
 
+# ── Charts data — aux payload for Statistical Evidence & Regime Analysis ─────
+
+@app.get("/api/v1/charts/data")
+@limiter.limit("30/minute")
+async def get_chart_data(request: Request, session: dict = Depends(require_auth)):
+    """
+    Returns the auxiliary data required by all twelve Sprint 6 charts in a
+    single call. Bundling avoids 12 sequential round-trips on Render's free
+    tier where each cold start adds noticeable latency. The payload is
+    derived from the same get_full_history() + run_all_strategies() outputs
+    that /api/backtest/compare uses, so a cache hit there means cache hit here.
+    """
+    if ENVIRONMENT == "test":
+        # Tests: return an empty-shape payload so frontend tests can mock
+        # without spinning up the full pipeline.
+        return {
+            "cpcv": {}, "cv_radar": {}, "walk_forward": {},
+            "regime_conditional": {}, "regime_timeline": [],
+            "correlation_breakdown": [], "factor_loadings": {},
+            "attribution": {}, "transition_matrix": {},
+            "n_strategies": 0, "n_months": 0,
+        }
+
+    try:
+        from tools.data_fetcher import get_full_history
+        from tools.backtester import run_all_strategies
+        from tools.chart_data import compute_chart_data
+        from tools.cache import get_strategy_cache, _compute_data_hash
+
+        history = get_full_history()
+        monthly = history.get("equity_monthly")
+        n_rows = len(monthly) if monthly is not None else 0
+        last_date = str(monthly.index[-1]) if monthly is not None and len(monthly) > 0 else "unknown"
+        strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
+
+        # Reuse the strategy cache if a prior /compare call populated it.
+        # The cached results carry monthly_returns; chart_data only needs
+        # those plus the history dict.
+        cached_results = await get_strategy_cache(strategy_hash)
+        if cached_results:
+            results_dict = cached_results
+        else:
+            # Cold path — run strategies fresh. The /compare endpoint will
+            # populate the cache on its own; we don't write here to avoid
+            # double-writes if both endpoints are hit concurrently.
+            results_dict = run_all_strategies(history)
+
+        payload = compute_chart_data(history, results_dict)
+        payload["strategy_hash"] = strategy_hash
+        return payload
+    except Exception as exc:
+        log.warning("chart_data_fallback", error=str(exc))
+        return {
+            "cpcv": {}, "cv_radar": {}, "walk_forward": {},
+            "regime_conditional": {}, "regime_timeline": [],
+            "correlation_breakdown": [], "factor_loadings": {},
+            "attribution": {}, "transition_matrix": {},
+            "n_strategies": 0, "n_months": 0, "error": str(exc),
+        }
+
+
 # ── Regime ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/regime/current")

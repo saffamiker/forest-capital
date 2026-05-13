@@ -1,37 +1,58 @@
 /**
- * RegimeAnalysis — placeholder screen scaffolded in Sprint 5 addendum.
- *
- * Sprint 5 spec calls for six charts here (RegimeConditionalPerformance,
- * RegimeTimeline, CorrelationBreakdownChart, FactorExposureHeatmap,
- * PerformanceAttributionWaterfall, RegimeTransitionMatrix). This file
- * establishes the route and nav target so the link works; charts ship
- * as separate component PRs without re-touching routing each time.
+ * RegimeAnalysis — six Sprint 6 charts focused on how strategies behave
+ * under different market regimes, including the central 2022 correlation
+ * breakdown finding. Reads strategy + regime metadata from stores; both
+ * are session-cached so navigation between screens does not re-fetch.
  */
+import { useEffect } from 'react'
+import { useChartsStore } from '../stores/chartsStore'
+import { useRegimeStore } from '../stores/regimeStore'
+import RegimeTimeline from '../components/charts/RegimeTimeline'
+import RegimeConditionalPerformance from '../components/charts/RegimeConditionalPerformance'
+import CorrelationBreakdownChart from '../components/charts/CorrelationBreakdownChart'
+import FactorExposureHeatmap from '../components/charts/FactorExposureHeatmap'
+import PerformanceAttributionWaterfall from '../components/charts/PerformanceAttributionWaterfall'
+import RegimeTransitionMatrix from '../components/charts/RegimeTransitionMatrix'
+
 export default function RegimeAnalysis() {
+  const { data: chartData, load: loadCharts, loading } = useChartsStore()
+  const { regime, load: loadRegime } = useRegimeStore()
+
+  useEffect(() => {
+    void loadCharts()
+    void loadRegime()
+  }, [loadCharts, loadRegime])
+
+  const initialLoad = loading && !chartData
+
   return (
     <div className="p-4 md:p-6 space-y-5">
       <div>
         <h1 className="text-xl font-semibold text-white">Regime Analysis</h1>
         <p className="text-sm text-muted mt-1">
-          Performance across bull, bear, high-volatility, and rising-rate
-          environments — including the central 2022 equity-bond correlation
-          breakdown finding.
+          Performance across bull, bear, and transition environments — and
+          the 2022 equity-bond correlation breakdown that drove this project.
         </p>
       </div>
 
-      <div className="card p-4">
-        <div className="text-2xs text-muted uppercase tracking-wide mb-2">
-          Charts pending Sprint 5 completion
-        </div>
-        <ul className="text-sm text-muted space-y-1 list-disc list-inside">
-          <li>Regime Conditional Performance — strategies by regime</li>
-          <li>Regime Timeline — HMM and threshold classifications 2000–2024</li>
-          <li>Correlation Breakdown Chart — rolling equity-bond correlation</li>
-          <li>Factor Exposure Heatmap — Fama-French loadings per strategy</li>
-          <li>Performance Attribution Waterfall — Brinson-Hood-Beebower</li>
-          <li>Regime Transition Matrix — bull/bear/transition probabilities</li>
-        </ul>
-      </div>
+      {initialLoad ? (
+        <div className="card p-8 text-center text-muted text-sm">Loading…</div>
+      ) : (
+        <>
+          <RegimeTimeline timeline={chartData?.regime_timeline ?? []} />
+          <CorrelationBreakdownChart
+            correlation={chartData?.correlation_breakdown ?? []}
+            pre2022={regime?.pre_2022_avg_correlation ?? null}
+            post2022={regime?.post_2022_avg_correlation ?? null}
+          />
+          <RegimeConditionalPerformance regimeConditional={chartData?.regime_conditional ?? {}} />
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <FactorExposureHeatmap factorLoadings={chartData?.factor_loadings ?? {}} />
+            <RegimeTransitionMatrix matrix={chartData?.transition_matrix ?? ({} as never)} />
+          </div>
+          <PerformanceAttributionWaterfall attribution={chartData?.attribution ?? {}} />
+        </>
+      )}
     </div>
   )
 }

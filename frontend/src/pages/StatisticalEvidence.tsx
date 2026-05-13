@@ -1,13 +1,31 @@
 /**
- * StatisticalEvidence — placeholder screen scaffolded in Sprint 5 addendum.
- *
- * Sprint 5 spec calls for six charts here (SignificanceJourneyMatrix,
- * CPCVSharpePlot, CVStabilityRadar, ProbabilisticSharpeChart,
- * MultipleComparisonTable, WalkForwardChart). This file establishes the
- * route and nav target so the link works; the charts arrive as separate
- * component PRs without churning routing each time.
+ * StatisticalEvidence — six Sprint 6 charts that establish the academic
+ * credibility of every result on the Dashboard. Reads strategy data from
+ * strategiesStore (already loaded by the Dashboard) and aux chart data
+ * from chartsStore. Both stores cache for the session — navigating away
+ * and back is instant.
  */
+import { useEffect } from 'react'
+import { useStrategiesStore } from '../stores/strategiesStore'
+import { useChartsStore } from '../stores/chartsStore'
+import SignificanceJourneyMatrix from '../components/charts/SignificanceJourneyMatrix'
+import CPCVSharpePlot from '../components/charts/CPCVSharpePlot'
+import CVStabilityRadar from '../components/charts/CVStabilityRadar'
+import ProbabilisticSharpeChart from '../components/charts/ProbabilisticSharpeChart'
+import MultipleComparisonTable from '../components/charts/MultipleComparisonTable'
+import WalkForwardChart from '../components/charts/WalkForwardChart'
+
 export default function StatisticalEvidence() {
+  const { strategies, load: loadStrategies, loading: strategiesLoading } = useStrategiesStore()
+  const { data: chartData, load: loadCharts, loading: chartsLoading } = useChartsStore()
+
+  useEffect(() => {
+    void loadStrategies()
+    void loadCharts()
+  }, [loadStrategies, loadCharts])
+
+  const initialLoad = (strategiesLoading || chartsLoading) && strategies.length === 0
+
   return (
     <div className="p-4 md:p-6 space-y-5">
       <div>
@@ -18,19 +36,22 @@ export default function StatisticalEvidence() {
         </p>
       </div>
 
-      <div className="card p-4">
-        <div className="text-2xs text-muted uppercase tracking-wide mb-2">
-          Charts pending Sprint 5 completion
-        </div>
-        <ul className="text-sm text-muted space-y-1 list-disc list-inside">
-          <li>Significance Journey Matrix — 5 Tier 1 gates per strategy</li>
-          <li>CPCV Sharpe Distribution — box plots across CPCV paths</li>
-          <li>CV Stability Radar — six-axis robustness profile</li>
-          <li>Probabilistic Sharpe Chart — point estimates with 95% CIs</li>
-          <li>Multiple Comparison Table — raw vs FDR-corrected p-values</li>
-          <li>Walk-Forward Chart — rolling OOS Sharpe by window</li>
-        </ul>
-      </div>
+      {initialLoad ? (
+        <div className="card p-8 text-center text-muted text-sm">Loading…</div>
+      ) : (
+        <>
+          <SignificanceJourneyMatrix strategies={strategies} />
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <CPCVSharpePlot cpcv={chartData?.cpcv ?? {}} />
+            <ProbabilisticSharpeChart strategies={strategies} />
+          </div>
+          <CVStabilityRadar radar={chartData?.cv_radar ?? {}} />
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <MultipleComparisonTable strategies={strategies} />
+            <WalkForwardChart walkForward={chartData?.walk_forward ?? {}} />
+          </div>
+        </>
+      )}
     </div>
   )
 }
