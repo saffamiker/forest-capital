@@ -225,9 +225,7 @@ export default function Dashboard() {
             value={`${significant.length} / 10`}
             sub="Pass all 5 Tier 1 gates"
             color={significant.length === 0 ? 'text-warning' : 'text-success'}
-            note={significant.length === 0
-              ? 'Honest result — p < 0.005 with FDR correction is intentionally strict. No strategy passes all 5 gates simultaneously.'
-              : undefined}
+            {...(significant.length === 0 ? { note: 'Honest result — p < 0.005 with FDR correction is intentionally strict. No strategy passes all 5 gates simultaneously.' } : {})}
           />
           <MetricTile
             label="Best Sharpe (IS)"

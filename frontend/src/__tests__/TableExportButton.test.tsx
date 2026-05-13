@@ -32,9 +32,7 @@ describe('TableExportButton', () => {
     render(<TableExportButton tableId="strategy_table" headers={HEADERS} rows={ROWS} />)
     fireEvent.click(screen.getByTestId('table-export-button'))
 
-    expect(createObjectURL).toHaveBeenCalled()
-    const capturedBlob: Blob | null = createObjectURL.mock.calls[0]?.[0] ?? null
-    expect(capturedBlob).not.toBeNull()
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
 
     vi.unstubAllGlobals()
   })
@@ -76,8 +74,7 @@ describe('TableExportButton', () => {
     render(<TableExportButton tableId="t" headers={HEADERS} rows={ROWS} />)
     fireEvent.click(screen.getByTestId('table-export-button'))
 
-    const capturedBlob: Blob | null = createObjectURL.mock.calls[0]?.[0] ?? null
-    expect(capturedBlob).not.toBeNull()
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob))
 
     vi.unstubAllGlobals()
   })
