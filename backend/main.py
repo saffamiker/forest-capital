@@ -368,13 +368,19 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
             # Build a stable hash from pipeline metadata to detect new data
             monthly = history.get("equity_monthly")
             n_rows = len(monthly) if monthly is not None else 0
-            last_date = str(monthly.index[-1]) if monthly is not None and len(monthly) > 0 else "unknown"
+            first_date = str(monthly.index[0].date()) if monthly is not None and len(monthly) > 0 else "unknown"
+            last_date = str(monthly.index[-1].date()) if monthly is not None and len(monthly) > 0 else "unknown"
             strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
+
+            # Expose the actual date range so the frontend can label charts
+            # dynamically. With the LQD bridge: ~2002-07 to ~2024-12 (282 months).
+            # Without LQD bridge: ~2007-05 to ~2024-12 (224 months) — fall-back state.
+            data_range = {"start": first_date, "end": last_date, "n_months": n_rows}
 
             cached = await get_strategy_cache(strategy_hash)
             if cached:
                 ranked = sorted(cached.values(), key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
-                return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": "hit"}
+                return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": "hit", "data_range": data_range}
 
             results_dict = run_all_strategies(history)
             ranked = sorted(results_dict.values(), key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
@@ -382,7 +388,7 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
             # Write-through: persist for next cold start or Render restart
             await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
 
-            return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": "miss"}
+            return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": "miss", "data_range": data_range}
         except Exception as exc:
             log.warning("compare_all_strategies_fallback", error=str(exc))
     # Fallback: MOCK_STRATEGIES used only in test environment or when the real

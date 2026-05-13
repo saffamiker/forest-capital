@@ -214,6 +214,47 @@ def _make_lqd_prices(n: int = 1000, seed: int = 99) -> pd.DataFrame:
     )
 
 
+def test_lqd_bridge_survives_renamed_column(tmp_path, monkeypatch):
+    """
+    Regression test: the LQD bridge fetch must succeed even when the
+    yfinance wrapper returns a DataFrame whose column is not literally
+    named "LQD". This used to break when newer yfinance versions returned
+    multi-level columns or renamed Close to Price — the old check
+    `if "LQD" in lqd_prices.columns` would fail silently and the LQD
+    bridge would be skipped, leaving the aligned monthly count at 224
+    instead of 282. The fix accesses the close-price series positionally.
+    """
+    spy_prices = _make_spy_prices()
+    # Simulate the wrapper having renamed the column (e.g. to the price
+    # field name instead of the ticker)
+    lqd_with_close_column = pd.DataFrame(
+        {"Close": _make_lqd_prices()["LQD"].values},
+        index=_make_lqd_prices().index,
+    )
+
+    def mock_yfinance(tickers: list[str], s: str, e: str) -> pd.DataFrame:
+        if "SPY" in tickers:
+            return spy_prices
+        if "LQD" in tickers:
+            return lqd_with_close_column
+        return pd.DataFrame()
+
+    monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
+    monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", mock_yfinance)
+    monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
+    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+
+    from tools.data_fetcher import fetch_supplemental_data
+    result = fetch_supplemental_data("2000-01-01", "2024-12-31")
+
+    assert "lqd_bridge_daily" in result, (
+        "LQD bridge skipped — positional access to close-price column failed"
+    )
+    bridge = result["lqd_bridge_daily"]
+    assert len(bridge) > 0, "LQD bridge present but empty"
+    assert bridge.abs().max() < 0.15, "Bridge looks like prices not returns"
+
+
 def test_supplemental_fetcher_has_lqd_bridge_daily(tmp_path, monkeypatch):
     """
     fetch_supplemental_data() must include lqd_bridge_daily.

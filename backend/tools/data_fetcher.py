@@ -584,8 +584,10 @@ def fetch_supplemental_data(
     # SPY daily equity prices → daily returns (equity, not bonds — see CLAUDE.md Section 4)
     try:
         spy_prices = fetch_equity_data(["SPY"], start, end)
-        if "SPY" in spy_prices.columns:
-            result["spy_daily"] = spy_prices["SPY"].pct_change().dropna()
+        # Access by position rather than ticker name — see LQD comment below
+        # for why the column name check was unreliable.
+        if spy_prices is not None and not spy_prices.empty:
+            result["spy_daily"] = spy_prices.iloc[:, 0].pct_change().dropna()
     except Exception as exc:
         log.warning("spy_fetch_failed", error=str(exc))
 
@@ -596,14 +598,21 @@ def fetch_supplemental_data(
     # within a month. This is the only permitted non-SPY yfinance fetch.
     try:
         lqd_prices = _yfinance_fetch(["LQD"], "2002-01-01", "2007-05-31")
-        if "LQD" in lqd_prices.columns:
-            result["lqd_bridge_daily"] = lqd_prices["LQD"].pct_change().dropna()
+        # Access by position rather than the "LQD" column name: the wrapper's
+        # defensive fall-back path may rename the column to the ticker label,
+        # but pathological yfinance schemas (e.g. Price-only flat columns)
+        # could leave a non-standard column name. iloc[:, 0] is guaranteed to
+        # be the close-price series no matter how the wrapper resolved it.
+        if lqd_prices is not None and not lqd_prices.empty:
+            result["lqd_bridge_daily"] = lqd_prices.iloc[:, 0].pct_change().dropna()
             log.info(
                 "lqd_bridge_fetched",
                 rows=len(result["lqd_bridge_daily"]),
                 start=str(result["lqd_bridge_daily"].index.min().date()),
                 end=str(result["lqd_bridge_daily"].index.max().date()),
             )
+        else:
+            log.warning("lqd_bridge_empty_result")
     except Exception as exc:
         log.warning("lqd_bridge_fetch_failed", error=str(exc))
 
@@ -1136,6 +1145,19 @@ def get_full_history() -> dict:
 
     row_count = _db_monthly_row_count()
     if row_count >= 200:
+        # The LQD bridge extends the IG series back to ~2002-07, taking the
+        # aligned monthly count from 224 (BND-only, starting 2007-05) to 282.
+        # If the DB was populated when LQD fetch was failing (pre-fix yfinance
+        # column issue), we end up "stuck" at 224 because that's still > 200.
+        # Surface this explicitly so the operator can force a re-fetch via
+        # the admin endpoint.
+        if row_count < 270:
+            log.warning(
+                "lqd_bridge_likely_missing",
+                monthly_rows=row_count,
+                expected_with_bridge=282,
+                hint="DB populated without LQD bridge — POST /api/v1/admin/force-refresh to rebuild",
+            )
         log.info(
             "db_cache_hit",
             monthly_rows=row_count,

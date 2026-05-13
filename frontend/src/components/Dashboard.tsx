@@ -43,6 +43,17 @@ const STRATEGY_COLORS: Record<string, string> = {
 
 const SIGNIFICANT_STRATEGIES = ['REGIME_SWITCHING', 'VOL_TARGETING', 'BLACK_LITTERMAN', 'MAX_SHARPE_ROLLING']
 
+// Render a "YYYY–YYYY" label from ISO dates. Falls back to a long em-dash when
+// the API hasn't returned a range yet (initial render before the store loads).
+// Years are extracted from the ISO date prefix — no timezone gymnastics needed
+// because the backend already serialises with .date() (no time component).
+function formatDateRange(start: string | undefined, end: string | undefined): string {
+  if (!start || !end) return '—'
+  const startYear = start.slice(0, 4)
+  const endYear = end.slice(0, 4)
+  return startYear === endYear ? startYear : `${startYear}–${endYear}`
+}
+
 interface MetricTileProps {
   label: string
   value: string
@@ -132,7 +143,7 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
 export default function Dashboard() {
   // Read from stores — no direct axios calls in this component.
   // Stores are session-scoped singletons; load() is a no-op if already loaded.
-  const { strategies, loading, load: loadStrategies } = useStrategiesStore()
+  const { strategies, dataRange, loading, load: loadStrategies } = useStrategiesStore()
   const { regime, loading: regimeLoading, load: loadRegime } = useRegimeStore()
   const [frontier, setFrontier] = useState<EfficientFrontierData | null>(null)
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
@@ -241,7 +252,7 @@ export default function Dashboard() {
           <MetricTile
             label="Benchmark Sharpe"
             value={benchmark?.sharpe_ratio != null ? benchmark.sharpe_ratio.toFixed(2) : '—'}
-            sub="100% SPY 2000–2024"
+            sub={`100% SPY ${formatDateRange(dataRange?.start, dataRange?.end)}`}
             color="text-muted"
           />
         </div>
@@ -250,7 +261,9 @@ export default function Dashboard() {
         <div className="card p-4">
           <div className="flex items-center justify-between mb-3">
             <div>
-              <h3 className="text-white font-semibold text-sm">Cumulative Returns — 2000–2024</h3>
+              <h3 className="text-white font-semibold text-sm">
+                Cumulative Returns — {formatDateRange(dataRange?.start, dataRange?.end)}
+              </h3>
               <p className="text-muted text-xs mt-0.5">Log scale available · Click legend to toggle</p>
             </div>
           </div>
