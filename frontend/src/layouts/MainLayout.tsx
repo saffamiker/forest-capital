@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { useRef, useState, useEffect } from 'react'
-import { LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle } from 'lucide-react'
+import { LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle, BarChart3, Activity } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../App'
 import { useBrand, BRANDS } from '../context/BrandContext'
@@ -16,9 +16,11 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { to: '/',        label: 'Dashboard', icon: LayoutDashboard, end: true },
-  { to: '/council', label: 'Council',   icon: Users },
-  { to: '/qa',      label: 'QA Audit',  icon: ShieldCheck },
+  { to: '/',                      label: 'Dashboard',            icon: LayoutDashboard, end: true },
+  { to: '/statistical-evidence',  label: 'Statistical Evidence', icon: BarChart3 },
+  { to: '/regime-analysis',       label: 'Regime Analysis',      icon: Activity },
+  { to: '/council',               label: 'Council',              icon: Users },
+  { to: '/qa',                    label: 'QA Audit',             icon: ShieldCheck },
 ]
 
 interface ModeOption {

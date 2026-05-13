@@ -8,7 +8,7 @@ blind spots that similarly-trained models might miss.
 Gemini's sole job: challenge the council consensus with specific,
 data-grounded objections. Not contrarianism for its own sake.
 
-Model: gemini-2.0-flash (google-generativeai SDK).
+Model: gemini-1.5-pro (google-generativeai SDK).
 UI accent: purple (#7c3aed) — always distinct from Claude agents.
 """
 from __future__ import annotations
@@ -77,7 +77,7 @@ class IndependentAnalyst:
 
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(
-                "gemini-2.0-flash",
+                "gemini-1.5-pro",
                 system_instruction=_SYSTEM_PROMPT,
             )
 

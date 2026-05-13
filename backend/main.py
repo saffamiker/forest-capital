@@ -513,7 +513,7 @@ _AGENT_META: dict[str, tuple[str, str, str]] = {
     "fixed_income_analyst": ("Fixed Income Analyst",          "specialist", "claude-sonnet-4-6"),
     "risk_manager":         ("Risk Manager",                  "specialist", "claude-sonnet-4-6"),
     "quant_backtester":     ("Quant Backtester",              "specialist", "claude-sonnet-4-6"),
-    "independent_analyst":  ("Independent Analyst (Gemini)",  "dissenter",  "gemini-2.0-flash"),
+    "independent_analyst":  ("Independent Analyst (Gemini)",  "dissenter",  "gemini-1.5-pro"),
     "cio":                  ("CIO",                           "cio",        "claude-opus-4-6"),
 }
 

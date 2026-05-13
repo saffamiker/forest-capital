@@ -774,7 +774,7 @@ MOCK_COUNCIL_RESPONSE = {
         {
             "agent": "Independent Analyst (Gemini)",
             "role": "dissenter",
-            "model": "gemini-2.0-flash",
+            "model": "gemini-1.5-pro",
             "content": (
                 "I challenge the consensus on three points. "
                 "First, the 2022 correlation breakdown is more severe than acknowledged — "

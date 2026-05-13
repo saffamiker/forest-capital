@@ -129,15 +129,52 @@ def _yfinance_fetch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     if raw.empty:
         raise ValueError(f"yfinance returned no data for {tickers}")
 
-    if isinstance(raw.columns, pd.MultiIndex):
-        df = raw["Close"]
-    else:
-        df = raw[["Close"]].copy()
-        df.columns = [tickers[0]]
-
+    df = _extract_yfinance_close(raw, tickers)
     df = df.dropna(how="all")
     df.attrs["adjusted"] = True
     log.info("yfinance_fetch_complete", tickers=tickers, rows=len(df))
+    return df
+
+
+def _extract_yfinance_close(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFrame:
+    """
+    Extract a close-price DataFrame from a raw yfinance result with defensive
+    column detection. yfinance has shifted its schema across versions:
+    auto_adjust=True used to expose 'Close' (with 'Adj Close' equal to it);
+    newer versions sometimes return 'Price' as the level-0 label and drop
+    'Adj Close' entirely. Falling back through Close → Adj Close → Price →
+    first numeric column means the wrapper survives those shifts without
+    silently returning the wrong series.
+    """
+    ticker_label = tickers[0] if isinstance(tickers, list) else str(tickers)
+
+    if isinstance(raw.columns, pd.MultiIndex):
+        level0_values = list(raw.columns.get_level_values(0).unique())
+        for candidate in ("Close", "Adj Close", "Price"):
+            if candidate in level0_values:
+                return raw[candidate]
+        # Fall back: take the first level-0 group and hope it's numeric
+        first = raw[level0_values[0]]
+        if isinstance(first, pd.Series):
+            return first.to_frame(name=ticker_label)
+        return first
+
+    # Flat (single-level) columns
+    for candidate in ("Close", "Adj Close", "Price"):
+        if candidate in raw.columns:
+            df = raw[[candidate]].copy()
+            df.columns = [ticker_label]
+            return df
+
+    # Last resort: first numeric column
+    numeric = raw.select_dtypes(include="number")
+    if numeric.empty:
+        raise ValueError(
+            f"yfinance returned no numeric price column for {tickers}; "
+            f"got columns: {list(raw.columns)}"
+        )
+    df = numeric.iloc[:, [0]].copy()
+    df.columns = [ticker_label]
     return df
 
 
@@ -818,9 +855,12 @@ def _append_incremental_daily(from_date: str, to_date: str) -> int:
         return 0
 
     try:
-        spy = _yfinance_fetch("SPY", from_date, to_date)
+        spy = _yfinance_fetch(["SPY"], from_date, to_date)
         if spy is not None and not spy.empty:
-            spy_ret = spy["Close"].pct_change().dropna()
+            # _yfinance_fetch normalises columns to ticker symbols (here: "SPY").
+            # Access by position rather than name in case the wrapper's
+            # defensive fallback path renamed the column to something else.
+            spy_ret = spy.iloc[:, 0].pct_change().dropna()
         else:
             spy_ret = pd.Series(dtype=float)
 

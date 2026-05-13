@@ -8,6 +8,8 @@ import MainLayout from './layouts/MainLayout'
 import Dashboard from './components/Dashboard'
 import CouncilDebate from './components/CouncilDebate'
 import QAAuditPanel from './components/QAAuditPanel'
+import StatisticalEvidence from './pages/StatisticalEvidence'
+import RegimeAnalysis from './pages/RegimeAnalysis'
 import { BrandProvider } from './context/BrandContext'
 import { UIProvider } from './context/UIContext'
 
@@ -174,6 +176,8 @@ export default function App() {
               }
             >
               <Route index element={<Dashboard />} />
+              <Route path="statistical-evidence" element={<StatisticalEvidence />} />
+              <Route path="regime-analysis" element={<RegimeAnalysis />} />
               <Route path="council" element={<CouncilDebate />} />
               <Route path="qa" element={<QAAuditPanel />} />
             </Route>
