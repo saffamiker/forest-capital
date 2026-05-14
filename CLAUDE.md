@@ -6901,10 +6901,15 @@ A sprint is NOT complete until ALL of the following are true:
   5. Code is committed and pushed to GitHub
   6. GitHub Actions shows all three jobs GREEN ✅
   7. tests/MANIFEST.md is updated with sprint test summary
+  8. README.md is updated with current test counts, new features
+     delivered, and sprint history table reflecting latest status
 
 Claude Code must never declare a sprint done before CI is green.
 If CI fails, fix the failures before closing the sprint.
 "It works locally" is not sufficient — CI green is the standard.
+README.md update is mandatory on every commit — not just sprint close.
+Every commit that adds features or changes test counts must update
+README.md before committing. Never commit without updating README.md.
 
 ─────────────────────────────────────────────────────────────────────────────
 STANDARD SPRINT PROMPT TEMPLATE
@@ -6926,7 +6931,14 @@ Michael uses this exact prompt to start every sprint:
        Standard in Section 15b for examples of what is and is not
        acceptable. Do not declare the sprint complete until all
        flagged comments are rewritten to standard.
-   Do not declare Sprint [N] done until all six conditions are met."
+   (g) Update README.md — current test counts (backend + frontend),
+       new features delivered this sprint, sprint history table
+       updated to reflect latest status.
+   Do not declare Sprint [N] done until all seven conditions are met."
+
+NOTE: README.md must also be updated on every individual commit
+that adds features or changes test counts — not just at sprint close.
+Never commit without updating README.md when test counts change.
 
 ─────────────────────────────────────────────────────────────────────────────
 TEST MANIFEST (tests/MANIFEST.md) — UPDATED EACH SPRINT
