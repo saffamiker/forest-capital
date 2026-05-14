@@ -3843,6 +3843,35 @@ Sprint 6 (May 13 onwards — in progress):
 
   FINAL POLISH
   ─ UI/UX Agent sprint review — Big 4 standards check
+  ─ EXPLAINER AGENT OPPORTUNITY REVIEW (UI/UX Agent task)
+    Now that Explainer is cached + routed to Grok (essentially free),
+    the UI/UX Agent should audit every screen and identify every place
+    the Explainer could add value. Deliverable: a prioritised list of
+    expansion opportunities with implementation suggestions.
+
+    Screens to audit:
+      Dashboard — which metric tiles and table columns lack explanation?
+      Statistical Evidence — are all 6 charts explained? All table cells?
+      Regime Analysis — are regime labels, transition matrix cells explained?
+      QA Audit — are all 30 checklist items hoverable with explanation?
+      Admin screen — are data health metrics explained?
+      Council — are agent names/roles explained on first view?
+      Reports screen — are document types explained?
+
+    For each opportunity, report:
+      Location (screen + element)
+      What the Explainer would say (1-2 sentence summary)
+      Priority: HIGH (core to research question) /
+                MEDIUM (useful for Bob/Molly) /
+                LOW (nice to have)
+      Implementation effort: trivial (wrap in ExplainableText) /
+                             moderate (new explain endpoint needed) /
+                             complex (new agent capability needed)
+
+    Output: prioritised markdown report committed to docs/
+    Title: EXPLAINER_OPPORTUNITIES.md
+    Michael reviews and selects which to implement before July 1
+
   ─ WCAG AA accessibility audit (axe-core)
   ─ Performance benchmarks (p95 response times)
   ─ Print stylesheet (@media print)
