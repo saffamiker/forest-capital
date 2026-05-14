@@ -1116,15 +1116,77 @@ SPRINT 6 SCOPE:
   ─ Fallback handling if XAI_API_KEY not set
 
 ─────────────────────────────────────────────────────────────────────────────
-AGENT 7: QA Agent — Claude Opus (qa_agent.py)
+AGENT 7: QA Agent — Tiered Model (qa_agent.py)
 ─────────────────────────────────────────────────────────────────────────────
 
-Model: claude-opus-4-20250514
+TIERED MODEL APPROACH — cost-efficient, always current:
+
+  Tier 1 — Pure Python (free, instant):
+    All deterministic mathematical checks — no LLM cost
+    Weights sum to 1.0, no negative weights, sanity assertions,
+    is_significant logic, annualisation factor, seed verification
+    Run on every data update, result stored in qa_results_cache
+    Returns PASS/FAIL with exact computed values
+
+  Tier 2 — Claude Sonnet (cheap, background, automated):
+    Model: claude-sonnet-4-6
+    Methodology interpretation checks — "is this approach sound?"
+    D01-D07 (data integrity), P03-P05 (portfolio mechanics),
+    S01-S09 (statistical integrity), C01-C04 (cross-validation),
+    O01-O04 (overfitting), E01-E03 (economic significance)
+    Runs automatically when:
+      — New data arrives (incremental update adds rows)
+      — Strategy hash changes (results changed)
+      — First login of the day (once per 24 hours maximum)
+      — Never on navigation between screens
+      — Never when cache is fresh (< 24 hours old)
+    Runs in background — dashboard never waits for QA
+    QA badge shows "Running..." then updates when complete
+    Cost: ~$0.01-0.02 per full audit run
+
+  Tier 3 — Claude Opus (expensive, manual only):
+    Model: claude-opus-4-6
+    Final synthesis — "Overall verdict, what must be fixed"
+    Triggered ONLY when:
+      — Team clicks "Full Review" button (pre-presentation)
+      — Sonnet Tier 2 finds a FAIL verdict
+    Adds deep methodological reasoning to the synthesis
+    Worth the cost before June 3 and July 1 presentations
+    Not worth the cost on routine data updates
+
+AUTOMATIC QA TRIGGERING:
+  qa_results_cache table (new Sprint 6 table):
+    id, run_at, strategy_hash, verdict (PASS/WARN/FAIL),
+    tier (1/2/3), checklist_json, expires_at
+
+  Trigger logic in get_full_history():
+    if new_rows_added > 0:
+      invalidate_qa_cache()         ← force fresh QA
+    if strategy_hash changed:
+      invalidate_qa_cache()         ← force fresh QA
+
+  Trigger logic on /api/backtest/compare:
+    if qa_cache_age > 24 hours OR qa_cache empty:
+      run_qa_tier1_and_2_in_background()   ← async, non-blocking
+      return strategy results immediately
+      QA badge updates via polling or WebSocket
+
+  Manual deep review (Tier 3):
+    Admin screen → [ Full Review (Opus) ] button
+    Also triggered automatically if Tier 2 returns FAIL
+
+PRESENT MODE GATE:
+  Present mode unlocks when qa_cache has:
+    status = WARN or PASS (not FAIL, not empty)
+    run_at within 48 hours of current time
+    strategy_hash matches current data hash
+  This ensures QA is always current before presenting
+  With automatic triggering, this happens transparently
 
 This agent runs INDEPENDENTLY of the council. It reports directly to the
 developer (Michael). It has no interest in making results look favourable.
 
-System prompt:
+System prompt (Tier 2 — Sonnet):
 "You are the Chief Methodology Officer for a quantitative finance project
 presenting to investment professionals at Forest Capital. Your job is to
 audit statistical methods, backtesting assumptions, and result claims.
@@ -1139,6 +1201,12 @@ The developer is rigorous and detail-oriented. Explain statistical concepts
 precisely. Do not oversimplify. When you find a FAIL, explain exactly
 what is wrong and provide the specific fix.
 [GLOBAL AGENT RULE]"
+
+System prompt addition (Tier 3 — Opus only):
+"Additionally: provide a final synthesis across all 30 checks.
+Identify the single most important issue to address before presenting.
+If multiple FAILs exist, prioritise by severity and likelihood of
+being caught by investment professionals at Forest Capital."
 
 QA Audit Checklist (all 30 points must run on every audit):
 
@@ -3598,15 +3666,36 @@ Sprint 6 (May 13 onwards — in progress):
   ─ Fix council Debate tab blank after analysis completes
   ─ Fix navigation persistence — Zustand stores not persisting
   GROK CONTRARIAN ANALYST (Agent 6b)
-  ─ agents/contrarian_analyst.py (xAI Grok)
+  ─ agents/contrarian_analyst.py (xAI Grok) ✅ DONE (5b3ea5b)
   ─ XAI_API_KEY in backend/.env and Render environment
   ─ OpenAI-compatible endpoint: https://api.x.ai/v1
   ─ Model: grok-3-mini (testing) → grok-3 (final presentation)
   ─ Orange (#f97316) accent in UI
   ─ CIO system prompt updated to reference both dissenters
   ─ Disagreement heatmap: Grok column added (orange)
-  ─ Graceful fallback if XAI_API_KEY not set
+  ─ Three-tier tinting: purple/orange/amber (both dissenters)
+  ─ Graceful fallback mock if XAI_API_KEY not set
+  AUTOMATIC QA — TIERED MODEL
+  ─ qa_results_cache table (Alembic migration Sprint 6)
+    id, run_at, strategy_hash, verdict, tier,
+    checklist_json, expires_at
+  ─ Tier 1 (Python, free): deterministic checks
+    Weights, sanity assertions, is_significant logic
+    Runs synchronously on every data update
+  ─ Tier 2 (Sonnet, ~$0.01/run): methodology checks
+    Runs in background async when:
+      new rows added OR strategy_hash changed
+      OR qa_cache older than 24 hours
+    Dashboard never waits — QA badge updates async
+    QA badge states: Running... / PASS / WARN / FAIL
+  ─ Tier 3 (Opus, manual only): deep synthesis
+    [ Full Review (Opus) ] button on Admin screen
+    Auto-triggers if Tier 2 returns FAIL
+  ─ Present mode gate updated:
+    Requires status ≥ WARN + run_at < 48h
+    + strategy_hash matches current data hash
   12 DASHBOARD CHARTS (Phase 1 — in progress)
+
 
   ─ agents/academic_writer.py — Agent 9 (Sonnet)
   ─ backend/data/references.json — curated citation database
