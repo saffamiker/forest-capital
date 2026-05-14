@@ -119,7 +119,7 @@ def test_provenance_json_series_have_required_fields():
 
 
 def test_provenance_json_source_types_are_valid():
-    valid = {"excel_provided", "yfinance", "fred_api", "ken_french", "constant"}
+    valid = {"excel_provided", "yfinance", "fred_api", "ken_french", "ken_french_direct", "constant"}
     registry = _get_data_series_registry()
     for s in registry:
         assert s["source_type"] in valid, (

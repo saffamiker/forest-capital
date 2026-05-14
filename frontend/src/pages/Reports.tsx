@@ -23,8 +23,10 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, Presentation, Download, Loader2, Calendar, AlertCircle,
-  CheckCircle, Clock, ArrowRight,
+  CheckCircle, Clock, ArrowRight, GraduationCap,
 } from 'lucide-react'
+import AdvisorPanel from '../components/AdvisorPanel'
+import type { DeliverableType } from '../types/advisor'
 
 interface ReportCard {
   id: string
@@ -50,6 +52,19 @@ const ICON_FOR_ID: Record<string, typeof FileText> = {
   storyboard_draft:     Presentation,
   presentation_deck:    Presentation,
   qa_preparation:       FileText,
+}
+
+// Map deliverable id → Academic Advisor deliverable type. Both presentation
+// artifacts (deck, Q&A, storyboard) share the same advisor context — the
+// advisor doesn't need separate prompts for each Molly artifact, it just
+// needs to know we're prepping for the final presentation.
+const ADVISOR_TYPE_FOR_ID: Record<string, DeliverableType> = {
+  midpoint_template:    'midpoint',
+  executive_brief:      'brief',
+  analytical_appendix:  'appendix',
+  storyboard_draft:     'presentation',
+  presentation_deck:    'presentation',
+  qa_preparation:       'presentation',
 }
 
 // The StoryboardEditor writes the active document_id here so deck / Q&A
@@ -116,10 +131,14 @@ async function downloadDocxResponse(card: ReportCard): Promise<void> {
   URL.revokeObjectURL(url)
 }
 
-function DeliverableCard({ card, onGenerate, isGenerating }: {
+function DeliverableCard({ card, onGenerate, isGenerating, onAdvisor }: {
   card: ReportCard
   onGenerate: (c: ReportCard) => void
   isGenerating: boolean
+  // Opens the Academic Advisor pre-pinned to this card's deliverable type.
+  // The button below the Generate button surfaces grade-aware guidance
+  // before the team commits to a draft.
+  onAdvisor: (c: ReportCard) => void
 }) {
   const Icon = ICON_FOR_ID[card.id] ?? FileText
   const isAvailable = card.status === 'available'
@@ -188,6 +207,25 @@ function DeliverableCard({ card, onGenerate, isGenerating }: {
                 : <><Download className="w-3 h-3" /> Generate {card.format.toUpperCase()}</>)
             : <>Planned</>}
       </button>
+
+      {/* Get Advisor Feedback — gold accent, always available regardless of
+          card status. The team should be able to consult the advisor on a
+          deliverable even when its generator isn't wired yet. */}
+      <button
+        type="button"
+        onClick={() => onAdvisor(card)}
+        data-testid={`advisor-button-${card.id}`}
+        className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs transition-colors"
+        style={{
+          backgroundColor: 'rgba(245,158,11,0.08)',
+          border: '1px solid rgba(245,158,11,0.3)',
+          color: '#f59e0b',
+        }}
+        title="Open Academic Advisor with this deliverable preselected"
+      >
+        <GraduationCap className="w-3 h-3" />
+        Get Advisor Feedback
+      </button>
     </div>
   )
 }
@@ -198,6 +236,12 @@ export default function Reports() {
   const [loading, setLoading] = useState(true)
   const [generatingId, setGeneratingId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  // Active deliverable for the advisor panel — null when the panel is
+  // closed, set to a DeliverableType when a card's "Get Advisor Feedback"
+  // button is clicked. We use the controlled-open form of AdvisorPanel
+  // here so the panel opens to the right card's context rather than the
+  // default midpoint deliverable that the floating button would pick.
+  const [advisorDeliverable, setAdvisorDeliverable] = useState<DeliverableType | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -213,6 +257,11 @@ export default function Reports() {
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
   }, [])
+
+  const handleAdvisor = (card: ReportCard) => {
+    const dt = ADVISOR_TYPE_FOR_ID[card.id] ?? 'presentation'
+    setAdvisorDeliverable(dt)
+  }
 
   const handleGenerate = async (card: ReportCard) => {
     // Storyboard draft opens the editor, not a download. The editor
@@ -266,6 +315,20 @@ export default function Reports() {
         <div className="card p-8 text-center text-muted text-sm">Loading deliverables…</div>
       )}
 
+      {/* Controlled advisor panel — opened from a card's "Get Advisor Feedback"
+          button with the card's deliverable type preselected. The global
+          floating advisor (mounted in MainLayout) remains visible alongside
+          this; opening either one is equivalent from the user's perspective.
+          We use the controlled API here so the panel knows which deliverable
+          to pin to, which the floating button can't infer. */}
+      {advisorDeliverable && (
+        <AdvisorPanel
+          initialDeliverable={advisorDeliverable}
+          open
+          onClose={() => setAdvisorDeliverable(null)}
+        />
+      )}
+
       {!loading && manifest && (
         <>
           <section>
@@ -284,6 +347,7 @@ export default function Reports() {
                   card={card}
                   onGenerate={handleGenerate}
                   isGenerating={generatingId === card.id}
+                  onAdvisor={handleAdvisor}
                 />
               ))}
             </div>
@@ -305,6 +369,7 @@ export default function Reports() {
                   card={card}
                   onGenerate={handleGenerate}
                   isGenerating={generatingId === card.id}
+                  onAdvisor={handleAdvisor}
                 />
               ))}
             </div>

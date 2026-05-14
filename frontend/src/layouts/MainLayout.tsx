@@ -9,6 +9,7 @@ import type { UIMode } from '../context/UIContext'
 import { useQAStore } from '../stores/qaStore'
 import QAStatusBadge from '../components/QAStatusBadge'
 import LearnModeToggle from '../components/LearnModeToggle'
+import AdvisorPanel from '../components/AdvisorPanel'
 
 interface NavItem {
   to: string
@@ -275,6 +276,13 @@ export default function MainLayout() {
       <main className="flex-1 overflow-y-auto overflow-x-hidden">
         <Outlet />
       </main>
+
+      {/* Academic Advisor floating button — visible on every screen except
+          Present mode (the panel hides itself when mode === 'present').
+          Mounted at layout level so the button persists across navigation
+          and any deliverable-specific dialog can dismiss into the same
+          floating affordance. */}
+      <AdvisorPanel />
     </div>
   )
 }

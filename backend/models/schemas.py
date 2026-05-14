@@ -83,6 +83,32 @@ class UIUXReviewRequest(BaseModel):
     screenshot: Optional[str] = None
 
 
+# ── Academic Advisor (Agent 10) ───────────────────────────────────────────────
+
+class AdvisorAnalyseRequest(BaseModel):
+    # Free-text query from any team member — must pass scope guard.
+    query: str
+    # One of: "midpoint" | "appendix" | "brief" | "presentation"
+    # Unknown values still receive a response, just without grade-weight context.
+    deliverable_type: str = "presentation"
+    # Strategy results dict — optional to allow advisor queries before
+    # backtests have finished running.
+    strategy_results: Optional[dict[str, Any]] = None
+
+
+class AdvisorVerifyRequest(BaseModel):
+    # A single specific claim to check against external evidence.
+    finding: str
+    magnitude: Optional[Any] = None
+    period: Optional[str] = None
+
+
+class AdvisorCitationsRequest(BaseModel):
+    finding: str
+    # Capped server-side at 1..5 — protects the per-call token budget.
+    n_sources: int = 3
+
+
 # ── Mock data ─────────────────────────────────────────────────────────────────
 
 MOCK_REGIME = {

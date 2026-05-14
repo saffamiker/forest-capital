@@ -42,6 +42,9 @@ from models.schemas import (
     QAQueryRequest,
     OptimizeRequest,
     UIUXReviewRequest,
+    AdvisorAnalyseRequest,
+    AdvisorVerifyRequest,
+    AdvisorCitationsRequest,
     MOCK_STRATEGIES,
     MOCK_REGIME,
     MOCK_COUNCIL_RESPONSE,
@@ -831,6 +834,124 @@ async def explain_qa(
         except Exception as exc:
             log.error("explain_qa_error", error=str(exc))
     return {}
+
+
+# ── Academic Advisor (Agent 10) ───────────────────────────────────────────────
+#
+# Three endpoints map 1:1 to AcademicAdvisor methods. All three enforce citation
+# integrity via Anthropic's server-side web_search tool — any URL the model
+# emits that the tool did not actually fetch is dropped before the response
+# is returned to the frontend. See agents/academic_advisor.py:_filter_to_verified
+# for the runtime check.
+#
+# Limit is 10/min (same as council/QA endpoints) — the advisor is interactive
+# but each call costs ~$0.04-0.06 incl. web_search, and we don't want a stuck
+# floating button to drain the daily credit cap.
+
+@app.post("/api/advisor/analyse")
+@limiter.limit("10/minute")
+async def advisor_analyse(
+    request: Request,
+    body: AdvisorAnalyseRequest,
+    session: dict = Depends(require_auth),
+):
+    """
+    Main advisor entry point — academic guidance for one deliverable.
+
+    The query is scope-checked (portfolio-analysis only); the advisor agent
+    uses web_search to verify any citations before returning them. Verified
+    citations are merged into the response so the frontend can render them
+    immediately without a second round-trip.
+    """
+    if ENVIRONMENT == "test":
+        # Mock keeps the test suite hermetic — no Anthropic API calls.
+        from agents.academic_advisor import MOCK_ADVISOR_ANALYSE
+        return MOCK_ADVISOR_ANALYSE
+
+    try:
+        from agents.academic_advisor import AcademicAdvisor
+        advisor = AcademicAdvisor()
+        return advisor.analyse_findings(
+            query=body.query,
+            deliverable_type=body.deliverable_type,
+            strategy_results=body.strategy_results,
+        )
+    except Exception as exc:
+        log.error("advisor_analyse_endpoint_error", error=str(exc))
+        return {
+            "key_findings":     [],
+            "guidance":         [],
+            "citations":        [],
+            "potential_issues": [],
+            "error":            "Advisor temporarily unavailable.",
+        }
+
+
+@app.post("/api/advisor/verify-finding")
+@limiter.limit("10/minute")
+async def advisor_verify_finding(
+    request: Request,
+    body: AdvisorVerifyRequest,
+    session: dict = Depends(require_auth),
+):
+    """
+    Verifies one specific finding against external academic evidence.
+
+    Returns supporting_evidence, contradicting_evidence, and a verdict in
+    {"plausible", "implausible", "uncertain"}. The frontend uses this to
+    sanity-check a single number before committing it to a slide or paper.
+    """
+    if ENVIRONMENT == "test":
+        from agents.academic_advisor import MOCK_ADVISOR_VERIFY
+        return MOCK_ADVISOR_VERIFY
+
+    try:
+        from agents.academic_advisor import AcademicAdvisor
+        advisor = AcademicAdvisor()
+        return advisor.check_finding_plausibility(
+            finding=body.finding,
+            magnitude=body.magnitude,
+            period=body.period,
+        )
+    except Exception as exc:
+        log.error("advisor_verify_endpoint_error", error=str(exc))
+        return {
+            "supporting_evidence":    [],
+            "contradicting_evidence": [],
+            "verdict":                "uncertain",
+            "reasoning":              "Advisor temporarily unavailable.",
+            "verified_sources":       [],
+        }
+
+
+@app.post("/api/advisor/citations")
+@limiter.limit("10/minute")
+async def advisor_citations(
+    request: Request,
+    body: AdvisorCitationsRequest,
+    session: dict = Depends(require_auth),
+):
+    """
+    Returns up to n_sources verified academic citations for a finding.
+
+    Citations the agent emits but web_search did not return are silently
+    dropped — this is the citation integrity contract. n_sources is capped
+    at 5 server-side regardless of what the request specifies.
+    """
+    if ENVIRONMENT == "test":
+        from agents.academic_advisor import MOCK_ADVISOR_CITATIONS
+        return MOCK_ADVISOR_CITATIONS
+
+    try:
+        from agents.academic_advisor import AcademicAdvisor
+        advisor = AcademicAdvisor()
+        return advisor.find_supporting_citations(
+            finding=body.finding,
+            n_sources=body.n_sources,
+        )
+    except Exception as exc:
+        log.error("advisor_citations_endpoint_error", error=str(exc))
+        return {"citations": [], "verified_sources": []}
 
 
 # ── QA ────────────────────────────────────────────────────────────────────────
