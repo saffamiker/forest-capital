@@ -12,12 +12,13 @@ interface AgentStyleConfig {
 }
 
 const AGENT_STYLE: Record<string, AgentStyleConfig> = {
-  'Equity Analyst':                { accent: '#60a5fa', label: 'Equity Analyst',          tag: 'SPECIALIST' },
-  'Fixed Income Analyst':          { accent: '#34d399', label: 'Fixed Income Analyst',     tag: 'SPECIALIST' },
-  'Risk Manager':                  { accent: '#f59e0b', label: 'Risk Manager',             tag: 'SPECIALIST' },
-  'Quant Backtester':              { accent: '#a78bfa', label: 'Quant / Backtester',       tag: 'SPECIALIST' },
-  'Independent Analyst (Gemini)':  { accent: '#c084fc', label: 'Independent Analyst',      tag: 'DISSENTER', note: 'Gemini Pro' },
-  'CIO':                           { accent: '#3b82f6', label: 'Chief Investment Officer', tag: 'CIO' },
+  'Equity Analyst':                { accent: '#60a5fa', label: 'Equity Analyst',          tag: 'SPECIALIST', note: 'claude-sonnet-4-6' },
+  'Fixed Income Analyst':          { accent: '#34d399', label: 'Fixed Income Analyst',     tag: 'SPECIALIST', note: 'claude-sonnet-4-6' },
+  'Risk Manager':                  { accent: '#f59e0b', label: 'Risk Manager',             tag: 'SPECIALIST', note: 'claude-sonnet-4-6' },
+  'Quant Backtester':              { accent: '#a78bfa', label: 'Quant / Backtester',       tag: 'SPECIALIST', note: 'claude-sonnet-4-6' },
+  'Independent Analyst (Gemini)':  { accent: '#c084fc', label: 'Independent Analyst',      tag: 'DISSENTER', note: 'gemini-1.5-pro' },
+  'Contrarian Analyst (Grok)':     { accent: '#f97316', label: 'Contrarian Analyst',       tag: 'DISSENTER', note: 'grok-3-mini' },
+  'CIO':                           { accent: '#3b82f6', label: 'Chief Investment Officer', tag: 'CIO',       note: 'claude-opus-4-6' },
 }
 
 function AgentCard({ message, streaming = false }: { message: AgentMessage; streaming?: boolean }) {
@@ -122,7 +123,7 @@ export default function CouncilDebate() {
     }
   }
 
-  const agentOrder = ['Equity Analyst', 'Fixed Income Analyst', 'Risk Manager', 'Quant Backtester', 'Independent Analyst (Gemini)', 'CIO']
+  const agentOrder = ['Equity Analyst', 'Fixed Income Analyst', 'Risk Manager', 'Quant Backtester', 'Independent Analyst (Gemini)', 'Contrarian Analyst (Grok)', 'CIO']
   const messages = result?.messages ?? []
   const orderedMessages = agentOrder
     .map((name) => messages.find((m) => m.agent === name))
@@ -182,7 +183,7 @@ export default function CouncilDebate() {
           {loading && !result && agentOrder.map((name) => (
             <AgentCard
               key={name}
-              message={{ agent: name, role: 'specialist', model: AGENT_STYLE[name]?.note ?? 'claude-sonnet-4-6', content: '', is_final: name === 'CIO' }}
+              message={{ agent: name, role: name === 'CIO' ? 'cio' : 'specialist', model: AGENT_STYLE[name]?.note ?? '', content: '', is_final: name === 'CIO' }}
               streaming
             />
           ))}

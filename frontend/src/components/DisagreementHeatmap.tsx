@@ -23,6 +23,7 @@ const AGENTS: AgentConfig[] = [
   { key: 'risk',     label: 'Risk Mgr',  color: '#f59e0b' },
   { key: 'quant',    label: 'Quant',     color: '#a78bfa' },
   { key: 'gemini',   label: 'Gemini',    color: '#c084fc' },
+  { key: 'grok',     label: 'Grok',      color: '#f97316' },
   { key: 'cio',      label: 'CIO',       color: '#3b82f6' },
 ]
 
@@ -31,16 +32,16 @@ type SentimentData = Record<string, Sentiment>
 type SentimentMap = Record<string, SentimentData>
 
 const MOCK_SENTIMENTS: SentimentMap = {
-  BENCHMARK:          { equity: 0,  fi: 0,  risk: 0,  quant: 0,  gemini: 0,  cio: 0  },
-  CLASSIC_60_40:      { equity: 0,  fi: 1,  risk: 0,  quant: 0,  gemini: -1, cio: 0  },
-  RISK_PARITY:        { equity: 1,  fi: 1,  risk: 1,  quant: 1,  gemini: 0,  cio: 1  },
-  MIN_VARIANCE:       { equity: 0,  fi: 1,  risk: 1,  quant: 0,  gemini: 0,  cio: 0  },
-  EQUAL_WEIGHT:       { equity: 0,  fi: 0,  risk: -1, quant: -1, gemini: -1, cio: -1 },
-  MOMENTUM_ROTATION:  { equity: 1,  fi: 0,  risk: 0,  quant: 1,  gemini: -1, cio: 1  },
-  REGIME_SWITCHING:   { equity: 1,  fi: 1,  risk: 1,  quant: 1,  gemini: 0,  cio: 1  },
-  VOL_TARGETING:      { equity: 1,  fi: 1,  risk: 1,  quant: 1,  gemini: 1,  cio: 1  },
-  BLACK_LITTERMAN:    { equity: 1,  fi: 1,  risk: 1,  quant: 1,  gemini: 0,  cio: 1  },
-  MAX_SHARPE_ROLLING: { equity: 1,  fi: 0,  risk: 1,  quant: 1,  gemini: -1, cio: 1  },
+  BENCHMARK:          { equity: 0,  fi: 0,  risk: 0,  quant: 0,  gemini: 0,  grok: 0,  cio: 0  },
+  CLASSIC_60_40:      { equity: 0,  fi: 1,  risk: 0,  quant: 0,  gemini: -1, grok: -1, cio: 0  },
+  RISK_PARITY:        { equity: 1,  fi: 1,  risk: 1,  quant: 1,  gemini: 0,  grok: 0,  cio: 1  },
+  MIN_VARIANCE:       { equity: 0,  fi: 1,  risk: 1,  quant: 0,  gemini: 0,  grok: 0,  cio: 0  },
+  EQUAL_WEIGHT:       { equity: 0,  fi: 0,  risk: -1, quant: -1, gemini: -1, grok: -1, cio: -1 },
+  MOMENTUM_ROTATION:  { equity: 1,  fi: 0,  risk: 0,  quant: 1,  gemini: -1, grok: -1, cio: 1  },
+  REGIME_SWITCHING:   { equity: 1,  fi: 1,  risk: 1,  quant: 1,  gemini: 0,  grok: -1, cio: 1  },
+  VOL_TARGETING:      { equity: 1,  fi: 1,  risk: 1,  quant: 1,  gemini: 1,  grok: 0,  cio: 1  },
+  BLACK_LITTERMAN:    { equity: 1,  fi: 1,  risk: 1,  quant: 1,  gemini: 0,  grok: 0,  cio: 1  },
+  MAX_SHARPE_ROLLING: { equity: 1,  fi: 0,  risk: 1,  quant: 1,  gemini: -1, grok: -1, cio: 1  },
 }
 
 interface CellConfig {
@@ -103,7 +104,7 @@ export default function DisagreementHeatmap({ sentiments = MOCK_SENTIMENTS }: Di
             <span className="text-success">▲ Bullish</span>
             <span className="mx-2 text-muted">—  Neutral</span>
             <span className="text-danger">▼ Bearish</span>
-            <span className="text-muted ml-2">— Gemini divergence from Claude consensus highlighted</span>
+            <span className="text-muted ml-2">— Rows highlighted where Gemini or Grok diverges from the CIO</span>
           </p>
         </div>
       </div>
@@ -128,12 +129,22 @@ export default function DisagreementHeatmap({ sentiments = MOCK_SENTIMENTS }: Di
         <tbody>
           {strategies.map((strat) => {
             const row = sentiments[strat] ?? {}
-            const isGeminiDivergent = (row['gemini'] ?? 0) !== (row['cio'] ?? 0)
+            const cio = row['cio'] ?? 0
+            const geminiDiverges = (row['gemini'] ?? 0) !== cio
+            const grokDiverges = (row['grok'] ?? 0) !== cio
+            const anyDissenterDiverges = geminiDiverges || grokDiverges
+            // Row tint: blend purple (Gemini) and orange (Grok). Both diverging
+            // is a stronger signal than one — render with a slightly darker
+            // amber background so the audience can pick it out.
+            const rowBg = geminiDiverges && grokDiverges
+              ? 'bg-amber-500/5'
+              : geminiDiverges
+                ? 'bg-purple-500/5'
+                : grokDiverges
+                  ? 'bg-orange-500/5'
+                  : ''
             return (
-              <tr
-                key={strat}
-                className={`border-t border-border/50 ${isGeminiDivergent ? 'bg-purple-500/5' : ''}`}
-              >
+              <tr key={strat} className={`border-t border-border/50 ${rowBg}`}>
                 <td className="py-1.5 pr-4">
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="text-white text-2xs font-medium">
@@ -148,8 +159,16 @@ export default function DisagreementHeatmap({ sentiments = MOCK_SENTIMENTS }: Di
                         STATIC
                       </span>
                     ) : null}
-                    {isGeminiDivergent && (
-                      <span className="text-2xs text-purple-400 border border-purple-400/20 rounded px-1 bg-purple-400/10">
+                    {anyDissenterDiverges && (
+                      <span
+                        className="text-2xs border rounded px-1"
+                        style={geminiDiverges && grokDiverges
+                          ? { color: '#f59e0b', borderColor: 'rgba(245,158,11,0.2)', background: 'rgba(245,158,11,0.1)' }
+                          : geminiDiverges
+                            ? { color: '#c084fc', borderColor: 'rgba(192,132,252,0.2)', background: 'rgba(192,132,252,0.1)' }
+                            : { color: '#f97316', borderColor: 'rgba(249,115,22,0.2)', background: 'rgba(249,115,22,0.1)' }
+                        }
+                      >
                         ≠
                       </span>
                     )}
@@ -171,9 +190,19 @@ export default function DisagreementHeatmap({ sentiments = MOCK_SENTIMENTS }: Di
         </tbody>
       </table>
 
-      <div className="mt-3 pt-3 border-t border-border flex items-center gap-2">
-        <div className="w-2 h-2 rounded-full bg-purple-400/50" />
-        <span className="text-muted text-2xs">Purple highlight = Gemini diverges from CIO recommendation</span>
+      <div className="mt-3 pt-3 border-t border-border flex flex-wrap items-center gap-3 text-2xs">
+        <div className="flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full bg-purple-400/50" />
+          <span className="text-muted">Purple = Gemini diverges from CIO</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full" style={{ background: 'rgba(249,115,22,0.5)' }} />
+          <span className="text-muted">Orange = Grok diverges from CIO</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <div className="w-2 h-2 rounded-full" style={{ background: 'rgba(245,158,11,0.6)' }} />
+          <span className="text-muted">Amber = both dissenters diverge (hard caveat)</span>
+        </div>
       </div>
     </div>
   )

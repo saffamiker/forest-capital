@@ -28,6 +28,7 @@ from agents.base import (
     build_agent_response,
     call_claude,
 )
+from agents.contrarian_analyst import ContrarianAnalyst
 from agents.equity_analyst import EquityAnalyst
 from agents.fixed_income_analyst import FixedIncomeAnalyst
 from agents.independent_analyst import IndependentAnalyst
@@ -37,8 +38,10 @@ from agents.risk_manager import RiskManager
 log = structlog.get_logger(__name__)
 
 _SYSTEM_PROMPT = f"""You are the Chief Investment Officer of a quantitative investment council \
-advising Forest Capital. You manage a team of specialist analysts and an independent \
-dissenting analyst (Gemini). Your role is to synthesise their findings and make final \
+advising Forest Capital. You manage a team of specialist analysts and TWO independent \
+dissenting analysts: Gemini (which surfaces blind spots and alternative interpretations) \
+and Grok (which stress-tests the recommendation and builds the strongest available case \
+against the consensus). Your role is to synthesise all of these findings and make final \
 portfolio allocation decisions with full reasoning.
 
 You only recommend strategies that pass ALL five Tier 1 primary gates:
@@ -53,8 +56,10 @@ citing a p-value.
 
 You are rigorous, decisive, and intellectually honest about uncertainty. \
 You always explain reasoning in terms a sophisticated investor can follow. \
-When Gemini challenges the consensus, you engage seriously before confirming \
-or revising. You never recommend a strategy based on in-sample results alone.
+When Gemini and Grok challenge the consensus, you engage seriously with both before \
+confirming or revising. Treat any concern raised by both dissenters as a hard caveat \
+that must be addressed before you finalise the recommendation. You never recommend a \
+strategy based on in-sample results alone.
 
 {GLOBAL_AGENT_RULE}
 
@@ -77,6 +82,7 @@ class CIO:
         self._risk = RiskManager()
         self._quant = QuantBacktester()
         self._gemini = IndependentAnalyst()
+        self._grok = ContrarianAnalyst()
 
     def deliberate(
         self,
@@ -120,15 +126,20 @@ class CIO:
             query, equity_report, fi_report, risk_report, quant_report, strategy_results
         )
 
-        # Step 7-8: Gemini challenge
+        # Step 7-8: dissent — Gemini (blind spots) + Grok (stress test).
+        # Both run before synthesis so the CIO sees both critiques together
+        # and can flag concerns raised by both as hard caveats.
         gemini_report = self._gemini.challenge(draft_consensus, strategy_results)
         log.info("gemini_challenge_received")
+        grok_report = self._grok.challenge(draft_consensus, strategy_results)
+        log.info("grok_challenge_received")
 
-        # Step 9: Synthesise final recommendation — CIO engages with Gemini's dissent
+        # Step 9: Synthesise final recommendation — CIO engages with both dissenters
         cio_synthesis = self._synthesise(
             query,
             draft_consensus,
             gemini_report,
+            grok_report,
             equity_report,
             fi_report,
             risk_report,
@@ -146,6 +157,7 @@ class CIO:
                 "risk_manager": risk_report,
                 "quant_backtester": quant_report,
                 "independent_analyst": gemini_report,
+                "contrarian_analyst": grok_report,
                 "cio": cio_synthesis,
             },
             "draft_consensus": draft_consensus,
@@ -220,6 +232,7 @@ class CIO:
         query: str,
         draft_consensus: str,
         gemini_report: dict[str, Any],
+        grok_report: dict[str, Any],
         equity_report: dict[str, Any],
         fi_report: dict[str, Any],
         risk_report: dict[str, Any],
@@ -227,14 +240,18 @@ class CIO:
         strategy_results: dict[str, Any],
     ) -> dict[str, Any]:
         """
-        Final CIO synthesis — engages with Gemini's challenge before recommending.
+        Final CIO synthesis — engages with both Gemini and Grok before recommending.
 
-        Opus sees the draft, Gemini's specific objections, and all specialist
-        data simultaneously. The synthesis must either rebut Gemini's concerns
-        with evidence or revise the recommendation to address them.
+        Opus sees the draft, both sets of dissent objections, and all
+        specialist data simultaneously. Any concern raised by BOTH dissenters
+        is flagged as a hard caveat. Single-dissenter concerns are still
+        addressed but carry less weight.
         """
         significant = self._get_significant(strategy_results)
         gemini_objections = gemini_report.get("technical_findings", {}).get(
+            "objections", []
+        )
+        grok_objections = grok_report.get("technical_findings", {}).get(
             "objections", []
         )
 
@@ -243,6 +260,7 @@ class CIO:
                 "query": query,
                 "draft_consensus": draft_consensus,
                 "gemini_objections": gemini_objections,
+                "grok_objections": grok_objections,
                 "significant_strategies": significant,
                 "specialist_summaries": {
                     "equity": equity_report.get("summary", ""),
@@ -262,13 +280,16 @@ class CIO:
         )
 
         user_message = (
-            "You have reviewed four specialist reports and received Gemini's challenge. "
+            "You have reviewed four specialist reports and received TWO independent "
+            "challenges — Gemini (blind spots) and Grok (stress test). "
             "Now produce the FINAL RECOMMENDATION. Required:\n"
             "1. Engage with each of Gemini's objections — rebut or acknowledge.\n"
-            "2. State which strategies you recommend and why (Tier 1 gates required).\n"
-            "3. State which strategies you do NOT recommend and why.\n"
-            "4. Give one primary recommendation with highest conviction.\n"
-            "5. State the key risk that could invalidate this recommendation.\n"
+            "2. Engage with each of Grok's stress-test objections — rebut or acknowledge.\n"
+            "3. Explicitly flag any concern raised by BOTH dissenters as a hard caveat.\n"
+            "4. State which strategies you recommend and why (Tier 1 gates required).\n"
+            "5. State which strategies you do NOT recommend and why.\n"
+            "6. Give one primary recommendation with highest conviction.\n"
+            "7. State the key risk that could invalidate this recommendation.\n"
             "Use only the numbers in the data provided.\n\n"
             f"DATA:\n{context}"
         )
@@ -282,7 +303,7 @@ class CIO:
             synthesis_text = (
                 f"FINAL RECOMMENDATION: The council recommends "
                 f"{', '.join(significant[:2]) if significant else 'no strategies'} "
-                f"based on Tier 1 statistical gates. Gemini's concerns are noted. "
+                f"based on Tier 1 statistical gates. Gemini and Grok concerns are noted. "
                 f"LLM narrative temporarily unavailable."
             )
 
@@ -294,24 +315,28 @@ class CIO:
                 "recommended_strategies": significant,
                 "primary_recommendation": primary,
                 "gemini_objections_addressed": len(gemini_objections),
+                "grok_objections_addressed": len(grok_objections),
                 "draft_consensus": draft_consensus,
                 "final_synthesis_text": synthesis_text,
             },
             summary=(
                 f"Council recommends {len(significant)} strategies (Tier 1). "
                 f"Primary recommendation: {primary}. "
-                f"Gemini's {len(gemini_objections)} objection(s) engaged."
+                f"Engaged with {len(gemini_objections)} Gemini and "
+                f"{len(grok_objections)} Grok objection(s)."
             ),
             what_we_found=(
                 "The council reviewed 10 strategies across equity, fixed income, "
-                "risk, and quantitative dimensions. An independent Gemini analyst "
-                "challenged the consensus before the final recommendation was made."
+                "risk, and quantitative dimensions. Two independent dissenters — "
+                "Gemini and Grok — challenged the consensus before the final "
+                "recommendation was made."
             ),
             why_it_matters=(
                 "A multi-agent council is more robust than a single model — "
-                "each specialist focuses on their domain and Gemini introduces "
-                "a genuinely different perspective. The final recommendation "
-                "has survived both internal and external challenge."
+                "each specialist focuses on their domain and two non-Claude "
+                "dissenters introduce genuinely different perspectives. The "
+                "final recommendation has survived both internal review and "
+                "external challenge from two different model providers."
             ),
             for_our_portfolio=(
                 f"{len(significant)} strategies pass all five Tier 1 statistical "

@@ -9,6 +9,7 @@ from agents.fixed_income_analyst import FixedIncomeAnalyst
 from agents.risk_manager import RiskManager
 from agents.quant_backtester import QuantBacktester
 from agents.independent_analyst import IndependentAnalyst
+from agents.contrarian_analyst import ContrarianAnalyst
 from agents.cio import CIO
 from agents.qa_agent import QAAgent
 from agents.explainer_agent import ExplainerAgent
@@ -19,6 +20,7 @@ __all__ = [
     "RiskManager",
     "QuantBacktester",
     "IndependentAnalyst",
+    "ContrarianAnalyst",
     "CIO",
     "QAAgent",
     "ExplainerAgent",

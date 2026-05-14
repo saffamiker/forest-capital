@@ -581,6 +581,7 @@ _AGENT_META: dict[str, tuple[str, str, str]] = {
     "risk_manager":         ("Risk Manager",                  "specialist", "claude-sonnet-4-6"),
     "quant_backtester":     ("Quant Backtester",              "specialist", "claude-sonnet-4-6"),
     "independent_analyst":  ("Independent Analyst (Gemini)",  "dissenter",  "gemini-1.5-pro"),
+    "contrarian_analyst":   ("Contrarian Analyst (Grok)",     "dissenter",  "grok-3-mini"),
     "cio":                  ("CIO",                           "cio",        "claude-opus-4-6"),
 }
 
