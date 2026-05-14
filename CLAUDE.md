@@ -4106,7 +4106,40 @@ Sprint 6 (May 13 onwards — in progress):
     Title: EXPLAINER_OPPORTUNITIES.md
     Michael reviews and selects which to implement before July 1
 
-  ─ WCAG AA accessibility audit (axe-core)
+  ─ TEAM TEST GUIDE (docs/TEAM_TEST_GUIDE.md)
+    AI-facilitated testing protocol for Bob and Molly
+    Structure:
+      Opening instructions — how to use with any AI model
+      Model instructions — test facilitator prompt at top
+        "Guide tester step by step, collect evidence,
+         record Pass/Fail, compile artifact at end"
+      ~52 structured tests across all screens/features:
+        Authentication (3), Dashboard data (6),
+        Statistical Evidence (4), Regime Analysis (4),
+        Commentary mode (4), AI Council (5),
+        QA Audit (3), Admin screen (3),
+        Bob's reports workflow (4), Molly's storyboard (4),
+        Present mode (3), Navigation persistence (3),
+        Performance (2), Mock data audit (4)
+      Each test specifies:
+        Context: what it tests and why
+        Prerequisites: what must be true before starting
+        Exact navigation steps: "go to URL, click X, do Y"
+        Evidence required: "upload screenshot of Z"
+        Expected result: what pass looks like
+        Forced interaction: model prompts tester for
+          screenshot, observations, Pass/Fail assessment
+      Artifact format each tester submits:
+        Markdown table: ID, Screen, Feature, Result,
+        Evidence, Notes
+        Observations outside test scope (free text)
+        Overall assessment
+        Email to ruurdsm@queens.edu on completion
+    Michael aggregates all three tester artifacts
+    and acts on findings before July 1
+    Build timing: after feature complete + code review
+      (target ~May 17-18, send with professor link ~May 20)
+
   ─ Performance benchmarks (p95 response times)
   ─ Print stylesheet (@media print)
   ─ Full regression suite
