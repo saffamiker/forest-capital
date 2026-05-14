@@ -233,8 +233,15 @@ describe('ChartCommentStrip', () => {
     await act(async () => { await Promise.resolve() })
     // No explainer call in Analyst — the strip body is hidden so fetching
     // would be wasted bandwidth.
+    // Use a non-destructuring predicate: mock.calls is typed as any[][] and
+    // each entry "may have fewer than 1 element" by TS's typing, so the
+    // destructuring tuple pattern ([url]: [string]) is rejected at compile
+    // time. Indexing the array inside the function body works because we
+    // never look up an element that doesn't exist — calls without args
+    // simply have call[0] === undefined and fail the equality check.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const explainCalls = mockedAxios.post.mock.calls.filter(
-      ([url]: [string]) => url === '/api/explain/chart',
+      (call: any[]) => call[0] === '/api/explain/chart',
     )
     expect(explainCalls.length).toBe(0)
   })
