@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
+import requests   # noqa: E402 — top-level so tests can monkey-patch tools.data_fetcher.requests
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -186,7 +187,8 @@ def _fred_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
     Excel file — fetching it here would duplicate and potentially contradict
     the authoritative Excel source.
     """
-    import requests
+    # `requests` is imported at module level so tests can monkey-patch
+    # tools.data_fetcher.requests for HTTP-mock tests.
 
     fred_key = os.getenv("FRED_API_KEY")
     url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
@@ -222,19 +224,129 @@ def _fred_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
     return df
 
 
-def _famafrench_fetch(dataset: str = "F-F_Research_Data_Factors") -> pd.DataFrame:
-    """
-    Internal Fama-French wrapper via pandas_datareader — patched in tests.
-    Returns monthly factor returns (Mkt-RF, SMB, HML) as percentage values.
-    The datareader returns a tuple (monthly_df, annual_df); we take monthly only.
-    """
-    import pandas_datareader.data as web
+_KEN_FRENCH_FF3_ZIP_URL = (
+    "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/"
+    "F-F_Research_Data_Factors_CSV.zip"
+)
+_KEN_FRENCH_TIMEOUT_SECONDS = 30.0
 
-    raw = web.get_data_famafrench(dataset)
-    if isinstance(raw, tuple):
-        raw = raw[0]  # (monthly, annual) tuple — take monthly
-    log.info("famafrench_fetch_complete", dataset=dataset, rows=len(raw))
-    return raw
+
+def _kenfrench_direct_fetch(
+    url: str = _KEN_FRENCH_FF3_ZIP_URL,
+) -> pd.DataFrame:
+    """
+    Direct HTTP fetch of the Ken French 3-factor monthly file. Replaces
+    pandas-datareader, which broke after a Dartmouth URL change and has
+    been unmaintained at the data-source layer for over a year.
+
+    Format quirks the parser handles:
+      - The CSV inside the zip starts with a multi-line preamble
+        (copyright + column headers buried in prose). We locate the
+        actual data block by scanning for a row whose first field is
+        a 6-digit YYYYMM integer.
+      - The monthly block is followed by an "Annual Factors" section
+        with a different schema. We stop reading when the date format
+        changes from YYYYMM to YYYY.
+      - Values are in percent (e.g. 0.50 = 0.005 monthly return). The
+        caller in fetch_supplemental_data divides by 100 — we keep
+        that responsibility there to match the old datareader path.
+
+    Returns a DataFrame indexed by YYYYMM integers with columns
+    [Mkt-RF, SMB, HML, RF]. Caller converts the index to month-end
+    timestamps.
+    """
+    import io
+    import zipfile
+
+    log.info("kenfrench_direct_fetch_start", url=url)
+    response = requests.get(url, timeout=_KEN_FRENCH_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        # The CSV inside the zip is named F-F_Research_Data_Factors.csv.
+        # Defensive: pick the first .csv file rather than hardcoding the
+        # name so the parser survives an upstream rename.
+        csv_name = next(
+            (n for n in zf.namelist() if n.lower().endswith(".csv")),
+            None,
+        )
+        if csv_name is None:
+            raise ValueError(f"No CSV file found in zip at {url}")
+        raw_text = zf.read(csv_name).decode("utf-8", errors="ignore")
+
+    # ── Parse the monthly block out of the prose-heavy CSV ──────────────
+    # The format is roughly:
+    #   <preamble text>
+    #   ,Mkt-RF,SMB,HML,RF
+    #   192607, 2.96, -2.30, -2.87, 0.22
+    #   ...
+    #   202412, 1.05, -1.34, 0.41, 0.37
+    #   ,Mkt-RF,SMB,HML,RF                     ← Annual block starts here
+    #   1927, 29.05, ...
+    #
+    # Heuristic: walk lines, capture rows whose first field looks like
+    # YYYYMM (6 digits between 192501 and 209912). Stop on the first
+    # non-matching row after we've started collecting.
+    monthly_rows: list[tuple[int, float, float, float, float]] = []
+    in_monthly_block = False
+    for line in raw_text.splitlines():
+        fields = [f.strip() for f in line.split(",")]
+        if len(fields) < 5:
+            if in_monthly_block:
+                # Empty/short line after data — end of monthly block
+                break
+            continue
+        date_field = fields[0]
+        if len(date_field) == 6 and date_field.isdigit():
+            yyyymm = int(date_field)
+            if 192501 <= yyyymm <= 209912 and 1 <= yyyymm % 100 <= 12:
+                try:
+                    row = (
+                        yyyymm,
+                        float(fields[1]),
+                        float(fields[2]),
+                        float(fields[3]),
+                        float(fields[4]),
+                    )
+                    monthly_rows.append(row)
+                    in_monthly_block = True
+                    continue
+                except ValueError:
+                    # Malformed numeric — bail rather than coerce zeros
+                    if in_monthly_block:
+                        break
+                    continue
+        # Non-data line: skip while we're still finding the header,
+        # stop once we've already captured monthly data (we've crossed
+        # into the Annual Factors block).
+        if in_monthly_block:
+            break
+
+    if not monthly_rows:
+        raise ValueError(
+            f"Ken French CSV at {url} contained no monthly rows — "
+            f"the upstream format may have changed.",
+        )
+
+    df = pd.DataFrame(
+        monthly_rows,
+        columns=["yyyymm", "Mkt-RF", "SMB", "HML", "RF"],
+    )
+    df = df.set_index("yyyymm")
+    log.info(
+        "kenfrench_direct_fetch_complete",
+        rows=len(df),
+        first=int(df.index.min()),
+        last=int(df.index.max()),
+    )
+    return df
+
+
+# Backward-compatible alias for any test that still monkey-patches the
+# old name. The new code path goes through _kenfrench_direct_fetch.
+def _famafrench_fetch(dataset: str = "F-F_Research_Data_Factors") -> pd.DataFrame:
+    """Deprecated alias — kept so legacy test monkey-patches still resolve."""
+    return _kenfrench_direct_fetch()
 
 
 # ── Equity fetch (SPY only — used by backtester.py, keep signature stable) ────
@@ -628,14 +740,16 @@ def fetch_supplemental_data(
     except Exception as exc:
         log.warning("dgs2_fetch_failed", error=str(exc))
 
-    # Fama-French monthly factors — factor exposure attribution
+    # Fama-French monthly factors — factor exposure attribution.
+    # DB-first: read from ff_factors_monthly when populated (saves a
+    # 30s+ Dartmouth fetch on every cold start). HTTP fetch only when
+    # the cache is empty or stale; results are persisted back so the
+    # next pipeline run finds them. Matches the market_data_monthly
+    # caching pattern.
     try:
-        ff = _famafrench_fetch("F-F_Research_Data_Factors")
-        ff = ff / 100.0  # datareader returns percentage points, convert to decimal
-        ff.index = pd.to_datetime(ff.index.astype(str)) + pd.offsets.MonthEnd(0)
-        ff = ff.loc[ff.index >= start]
-        ff = ff.loc[ff.index <= end]
-        result["ff_factors"] = ff
+        ff = _load_ff_factors_with_cache(start, end)
+        if ff is not None and not ff.empty:
+            result["ff_factors"] = ff
     except Exception as exc:
         log.warning("ff_fetch_failed", error=str(exc))
 
@@ -1022,6 +1136,181 @@ def _db_monthly_row_count() -> int:
         return 0
 
 
+def _load_ff_factors_with_cache(start: str, end: str) -> pd.DataFrame | None:
+    """
+    DB-first FF factor loader. Three execution paths:
+
+      1. Postgres has the data → read + return (typical fast path).
+      2. Postgres is empty for ff_factors_monthly → HTTP fetch from
+         Ken French, write everything to the DB, return the slice.
+      3. Postgres has data but last_date is older than 35 days →
+         HTTP fetch, append the delta rows, return the merged slice.
+         35 days = one month + a margin; FF data publishes mid-month
+         after month-end.
+
+    Returns a DataFrame with month-end DatetimeIndex and decimal-form
+    Mkt-RF/SMB/HML/RF columns. None when DATABASE_URL is unset AND
+    the upstream fetch fails (keeps the calling try/except's silent
+    fallback intact).
+    """
+    from database import DATABASE_URL
+
+    rows = _read_ff_factors_from_db()
+    db_last_yyyymm = max((r[0] for r in rows), default=None) if rows else None
+    needs_initial_fetch = not rows
+    needs_incremental = False
+    if db_last_yyyymm is not None:
+        # YYYYMM → year + month → days-since check. Older than 35 days
+        # means a new month has likely published.
+        from datetime import date as _date
+        last_year, last_month = divmod(db_last_yyyymm, 100)
+        last_year, last_month = int(db_last_yyyymm // 100), int(db_last_yyyymm % 100)
+        # First day of the month after the last cached month
+        if last_month == 12:
+            next_period = _date(last_year + 1, 1, 1)
+        else:
+            next_period = _date(last_year, last_month + 1, 1)
+        days_stale = (_date.today() - next_period).days
+        needs_incremental = days_stale >= 35
+
+    fetched: pd.DataFrame | None = None
+    if needs_initial_fetch or needs_incremental:
+        try:
+            fetched = _kenfrench_direct_fetch()
+        except Exception as exc:
+            log.warning("kenfrench_fetch_failed", error=str(exc))
+            fetched = None
+
+        if fetched is not None and DATABASE_URL:
+            # On incremental: write only rows strictly newer than the DB max.
+            to_write = fetched
+            if db_last_yyyymm is not None:
+                to_write = fetched[fetched.index > db_last_yyyymm]
+            if not to_write.empty:
+                _write_ff_factors_to_db(to_write)
+                log.info(
+                    "ff_factors_cache_updated",
+                    rows_written=len(to_write),
+                    mode="initial" if needs_initial_fetch else "incremental",
+                )
+
+    # Re-read so the returned DataFrame reflects whatever's now in the
+    # DB (post-write). When DATABASE_URL is unset we fall through to the
+    # raw fetched data.
+    rows = _read_ff_factors_from_db()
+    if rows:
+        df = pd.DataFrame(
+            rows,
+            columns=["yyyymm", "Mkt-RF", "SMB", "HML", "RF"],
+        ).set_index("yyyymm")
+    elif fetched is not None:
+        df = fetched
+    else:
+        return None
+
+    # Convert YYYYMM index to month-end timestamps; divide percent-form
+    # values to decimal returns. Restrict to the requested window.
+    df = df.copy()
+    df.index = pd.to_datetime(df.index.astype(str), format="%Y%m") + pd.offsets.MonthEnd(0)
+    df = df / 100.0
+    df = df.loc[df.index >= start]
+    df = df.loc[df.index <= end]
+    return df
+
+
+def _read_ff_factors_from_db() -> list[tuple[int, float, float, float, float]]:
+    """
+    Returns [(yyyymm, mkt_rf, smb, hml, rf), ...] sorted ascending by
+    yyyymm. Empty list when DATABASE_URL is unset OR the table is
+    missing OR the cache is empty — all three look the same to the
+    caller.
+    """
+    from database import DATABASE_URL
+    if not DATABASE_URL:
+        return []
+
+    async def _query() -> list[tuple[int, float, float, float, float]]:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        local_engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+        try:
+            async with local_engine.connect() as conn:
+                result = await conn.execute(text(
+                    "SELECT yyyymm, mkt_rf, smb, hml, rf "
+                    "FROM ff_factors_monthly ORDER BY yyyymm ASC"
+                ))
+                return [
+                    (int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]))
+                    for r in result.fetchall()
+                ]
+        except Exception:
+            return []
+        finally:
+            await local_engine.dispose()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(_query())).result(timeout=15)
+    except Exception:
+        return []
+
+
+def _write_ff_factors_to_db(df: pd.DataFrame) -> int:
+    """
+    Bulk-insert FF factor rows. Caller passes only NEW rows (ones with
+    yyyymm > current DB max) so we never need ON CONFLICT — duplicates
+    would indicate a bug in the caller's incremental filter.
+
+    Returns the number of rows written, 0 on any DB error so the caller
+    can keep going with the in-memory copy.
+    """
+    from database import DATABASE_URL
+    if not DATABASE_URL or df is None or df.empty:
+        return 0
+
+    rows = [
+        (
+            int(idx),
+            float(row["Mkt-RF"]),
+            float(row["SMB"]),
+            float(row["HML"]),
+            float(row["RF"]),
+        )
+        for idx, row in df.iterrows()
+    ]
+
+    async def _insert() -> int:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        local_engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+        try:
+            async with local_engine.begin() as conn:
+                for yyyymm, mkt, smb, hml, rf in rows:
+                    await conn.execute(
+                        text(
+                            "INSERT INTO ff_factors_monthly "
+                            "(yyyymm, mkt_rf, smb, hml, rf, source) "
+                            "VALUES (:y, :m, :s, :h, :r, 'ken_french_direct') "
+                            "ON CONFLICT (yyyymm) DO NOTHING"
+                        ),
+                        {"y": yyyymm, "m": mkt, "s": smb, "h": hml, "r": rf},
+                    )
+            return len(rows)
+        except Exception as exc:
+            log.warning("ff_factors_write_error", error=str(exc))
+            return 0
+        finally:
+            await local_engine.dispose()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(_insert())).result(timeout=30)
+    except Exception:
+        return 0
+
+
 def _read_history_from_db() -> dict:
     """
     Assemble the full history dict from PostgreSQL without touching Excel, yfinance, or FRED.
@@ -1404,9 +1693,10 @@ def _build_registry_entries(
                "fred_url": "https://fred.stlouisfed.org/series/DGS2"},
               "daily", "dgs2_daily"),
         _supp("ff_factors_monthly", "Fama-French 3-Factor Monthly Returns",
-              "ken_french",
+              "ken_french_direct",
               {"dataset": "F-F_Research_Data_Factors", "fetched_at": now_iso,
-               "url": "mba.tuck.dartmouth.edu/pages/faculty/ken.french"},
+               "url": _KEN_FRENCH_FF3_ZIP_URL,
+               "method": "direct_http_zip"},
               "monthly", "ff_factors"),
         # LQD bridge — pre-BND IG coverage (2002-07 to 2007-04).
         # Distinct registry entry so every monthly row in market_data_monthly can
@@ -1910,11 +2200,12 @@ def _write_provenance(
         {
             "series_id": "ff_factors_monthly",
             "display_name": "Fama-French 3-Factor Monthly Returns",
-            "source_type": "ken_french",
+            "source_type": "ken_french_direct",
             "source_detail": {
                 "dataset": "F-F_Research_Data_Factors",
                 "fetched_at": now_iso,
-                "url": "mba.tuck.dartmouth.edu/pages/faculty/ken.french",
+                "url": _KEN_FRENCH_FF3_ZIP_URL,
+                "method": "direct_http_zip",
             },
             "frequency": "monthly",
             "date_range_start": "",

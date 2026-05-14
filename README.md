@@ -26,8 +26,8 @@ Six AI agents (Claude Opus CIO, four Claude Sonnet specialists, Google Gemini Pr
 
 | Layer | Tests | Notes |
 |-------|-------|-------|
-| Backend (pytest) | 758 passed, 10 skipped | HMM tests skip on Windows (hmmlearn requires C++ build tools; passes in CI on Linux). +24 storyboard tests in Sprint 6 Phase 6 (CRUD, pptx, script, Q&A, Gemini assistant). |
-| Frontend (Vitest) | 111 passed | +15 storyboard tests in Sprint 6 Phase 6 (store mutations, autosave debounce, Gemini panel rendering, scope-guard rejection). |
+| Backend (pytest) | 775 passed, 10 skipped | HMM tests skip on Windows (hmmlearn requires C++ build tools; passes in CI on Linux). +10 tests in Sprint 6 Phase 7 (Ken French direct fetcher, DB cache, migration 005). |
+| Frontend (Vitest) | 114 passed | +3 cost-optimisation tests in Phase 7 (hover-fires-one-call invariant, no-Analyst-load guardrail, re-render cache hit). |
 | E2E (Playwright) | Non-blocking | Pointed at live Render + Vercel URLs; `continue-on-error: true` removed once CI green |
 
 Run backend tests:
@@ -48,7 +48,7 @@ npm run test
 **Compute:** pandas, numpy, scipy, cvxpy (CLARABEL solver), hmmlearn, statsmodels, arch  
 **Agents:** Anthropic SDK (Claude Opus 4.6 + Sonnet 4.6 + Haiku 4.5), Google GenerativeAI SDK (Gemini 1.5 Pro), xAI HTTP API (Grok 3 Mini — Contrarian Analyst, Sprint 6)  
 **Frontend:** React 18, TypeScript 5 (strict), Vite, TailwindCSS, Recharts, Zustand, React Query  
-**Database:** PostgreSQL (asyncpg), 12 tables: `data_series_registry`, `market_data_monthly`, `market_data_daily`, `data_validation_log`, `strategy_results_cache`, `regime_signals_cache`, `auth_attempts`, `used_magic_tokens`, `qa_results_cache` (Sprint 6 Phase 3), `documents` / `document_versions` / `document_drafts` (Sprint 6 Phase 5 — Storyboard Editor)  
+**Database:** PostgreSQL (asyncpg), 13 tables: `data_series_registry`, `market_data_monthly`, `market_data_daily`, `data_validation_log`, `strategy_results_cache`, `regime_signals_cache`, `auth_attempts`, `used_magic_tokens`, `qa_results_cache` (Sprint 6 Phase 3), `documents` / `document_versions` / `document_drafts` (Sprint 6 Phase 5 — Storyboard Editor), `ff_factors_monthly` (Sprint 6 Phase 7 — direct Ken French fetch)  
 **Auth:** Itsdangerous (signed magic-link tokens), JWT sessions, SendGrid email delivery  
 **CI/CD:** GitHub Actions (backend pytest + frontend Vitest + E2E Playwright)
 

@@ -17,7 +17,8 @@ export type SourceType =
   | "excel_provided"
   | "yfinance"
   | "fred_api"
-  | "ken_french"
+  | "ken_french"          // legacy pandas-datareader (deprecated)
+  | "ken_french_direct"   // Sprint 6: direct HTTP zip fetch from Dartmouth
   | "constant";
 
 export type ValidationStatus = "pass" | "warn" | "fail";
@@ -168,6 +169,8 @@ export function formatSource(sourceType: SourceType, detail: SourceDetail): stri
       return `FRED API — ${(detail as FredApiDetail).series_id}`;
     case "ken_french":
       return "Ken French data library";
+    case "ken_french_direct":
+      return "Ken French data library (direct HTTP)";
     case "constant":
       return "Fixed assumption (documented)";
   }

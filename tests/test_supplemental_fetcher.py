@@ -53,10 +53,23 @@ def _make_dgs2_series(n: int = 252, value: float = 4.5) -> pd.Series:
 
 
 def _make_ff_factors(n: int = 60) -> pd.DataFrame:
-    # Monthly index from 2000 (within the supplemental fetch range) so date alignment works.
-    # Percentage values: Mkt-RF typically ranges -20% to +20% monthly.
-    # fetch_supplemental_data divides by 100 to convert to decimals.
-    idx = pd.date_range("2000-01-31", periods=n, freq="ME")
+    """
+    Builds a Ken French-shaped DataFrame for the patched fetcher.
+
+    Returns YYYYMM-integer index (the actual Dartmouth response shape).
+    Percentage values — _load_ff_factors_with_cache divides by 100 when
+    it converts to decimal returns. Index starts at 200001 so the date
+    alignment in fetch_supplemental_data picks up these months.
+    """
+    # Generate YYYYMM integers for n consecutive months from Jan 2000
+    yyyymm_values = []
+    year, month = 2000, 1
+    for _ in range(n):
+        yyyymm_values.append(year * 100 + month)
+        month += 1
+        if month > 12:
+            month = 1
+            year += 1
     return pd.DataFrame(
         {
             "Mkt-RF": np.random.normal(0.5, 4.0, n),
@@ -64,7 +77,7 @@ def _make_ff_factors(n: int = 60) -> pd.DataFrame:
             "HML": np.random.normal(0.2, 2.0, n),
             "RF": np.full(n, 0.02),
         },
-        index=idx,
+        index=pd.Index(yyyymm_values, name="yyyymm"),
     )
 
 
@@ -75,7 +88,7 @@ def test_supplemental_fetcher_returns_dict(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", lambda t, s, e: spy_prices)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     result = fetch_supplemental_data("2000-01-01", "2001-01-01")
@@ -87,7 +100,7 @@ def test_supplemental_fetcher_has_spy_daily(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", lambda t, s, e: spy_prices)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     result = fetch_supplemental_data("2000-01-01", "2001-01-01")
@@ -100,7 +113,7 @@ def test_supplemental_fetcher_has_vix_daily(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", lambda t, s, e: spy_prices)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     result = fetch_supplemental_data("2000-01-01", "2001-01-01")
@@ -120,7 +133,7 @@ def test_supplemental_fetcher_has_dgs2_daily(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", lambda t, s, e: spy_prices)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", mock_fred)
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     result = fetch_supplemental_data("2000-01-01", "2001-01-01")
@@ -134,7 +147,7 @@ def test_supplemental_fetcher_has_ff_factors(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", lambda t, s, e: spy_prices)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     result = fetch_supplemental_data("2000-01-01", "2001-01-01")
@@ -147,7 +160,7 @@ def test_supplemental_fetcher_spy_is_returns_not_prices(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", lambda t, s, e: spy_prices)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     result = fetch_supplemental_data("2000-01-01", "2001-01-01")
@@ -171,7 +184,7 @@ def test_supplemental_fetcher_yfinance_called_with_spy_only(tmp_path, monkeypatc
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", spy_only_fetch)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     fetch_supplemental_data("2000-01-01", "2001-01-01")
@@ -187,7 +200,7 @@ def test_supplemental_fetcher_ff_factors_are_decimals(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", lambda t, s, e: spy_prices)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     result = fetch_supplemental_data("2000-01-01", "2001-01-01")
@@ -242,7 +255,7 @@ def test_lqd_bridge_survives_renamed_column(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", mock_yfinance)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     result = fetch_supplemental_data("2000-01-01", "2024-12-31")
@@ -274,7 +287,7 @@ def test_supplemental_fetcher_has_lqd_bridge_daily(tmp_path, monkeypatch):
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", mock_yfinance)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     result = fetch_supplemental_data("2000-01-01", "2024-12-31")
@@ -302,7 +315,7 @@ def test_supplemental_fetcher_lqd_bnd_hyg_not_in_bond_fetches(tmp_path, monkeypa
     monkeypatch.setattr("tools.data_fetcher._CACHE_PATH", tmp_path)
     monkeypatch.setattr("tools.data_fetcher._yfinance_fetch", mock_yfinance)
     monkeypatch.setattr("tools.data_fetcher._fred_fetch", lambda sid, s, e: _make_vix_series().to_frame(sid))
-    monkeypatch.setattr("tools.data_fetcher._famafrench_fetch", lambda d: _make_ff_factors())
+    monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", lambda: _make_ff_factors())
 
     from tools.data_fetcher import fetch_supplemental_data
     fetch_supplemental_data("2000-01-01", "2024-12-31")

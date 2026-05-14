@@ -111,6 +111,14 @@ export default function WalkForwardChart({ walkForward }: Props) {
               <Line
                 key={name}
                 type="monotone"
+                // connectNulls bridges windows where a strategy has no
+                // entry in chartData.walk_forward — without it recharts
+                // breaks the polyline at every sparse point, producing
+                // disconnected dots that only appear on hover. The
+                // walk-forward windows are 6-month-stepped, so different
+                // strategies legitimately land on slightly different
+                // window_end dates.
+                connectNulls={true}
                 dataKey={name}
                 name={prettyName(name)}
                 stroke={colorFor(name)}
