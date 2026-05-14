@@ -1526,6 +1526,15 @@ Help the team connect their data findings to the three graded deliverables:
   Analytical Appendix (35%) — rigour, provenance, reproducibility
   Executive Brief (20%) — Forest Capital recommendation
 
+For every finding, answer the SO WHAT question explicitly:
+  — What does this mean for the research question?
+  — What does this mean for Forest Capital specifically?
+  — What would a senior investment professional conclude?
+  — What is the academic significance?
+  — What is the mechanism — why does this happen?
+  The SO WHAT is the most important part of every response.
+  Data without interpretation is not analysis.
+
 Always ground feedback in the actual strategy results provided to you.
 Never suggest conclusions the data does not support.
 Flag the difference between what the data shows and what would need to
@@ -1590,22 +1599,78 @@ UI:
                   Team Primer → links directly to advisor
   Not shown in Present mode (internal tool, not for Forest Capital)
 
-  Advisor response format:
+  Advisor response format — SIX sections:
     ┌─────────────────────────────────────────────────────────┐
     │  📚 Academic Advisor                                    │
     │─────────────────────────────────────────────────────────│
     │  KEY FINDINGS FROM YOUR DATA                            │
-    │  [grounded in actual results]                           │
+    │  What the numbers actually show — plain English         │
+    │  Grounded in actual strategy results                    │
+    │─────────────────────────────────────────────────────────│
+    │  SO WHAT — WHY THIS MATTERS                             │
+    │  The interpretation layer:                              │
+    │  — What does this mean for the research question?       │
+    │  — What does this mean for Forest Capital?              │
+    │  — What would a senior investment professional          │
+    │    conclude from this finding?                          │
+    │  — What is the academic significance?                   │
+    │  — What would happen if this finding were different?    │
     │─────────────────────────────────────────────────────────│
     │  WHAT TO FOCUS ON FOR [DELIVERABLE]                     │
-    │  [prioritised by grade weight]                          │
+    │  Prioritised by grade weight and deadline               │
+    │  June 3: focus on X, Y, Z                              │
+    │  July 1: also address A, B, C                          │
+    │─────────────────────────────────────────────────────────│
+    │  LIKELY PANEL QUESTIONS                                 │
+    │  Questions Forest Capital or MSFA Board will ask        │
+    │  Suggested answers grounded in the data                 │
     │─────────────────────────────────────────────────────────│
     │  EXTERNAL EVIDENCE                                      │
-    │  [verified citations with URLs]                         │
+    │  Verified citations with URLs                           │
+    │  Hover any citation for corroborating excerpt           │
+    │  (fetched from the actual source via web_fetch)         │
     │─────────────────────────────────────────────────────────│
     │  ⚠ POTENTIAL ISSUES                                     │
-    │  [contradictions or gaps to investigate]                │
+    │  Contradictions between data and external evidence      │
+    │  Gaps to investigate before presenting                  │
     └─────────────────────────────────────────────────────────│
+
+  THE SO WHAT SECTION is the most important section.
+  It answers the question the team actually has:
+  "We have this data — why does it matter and what
+  should we do with it?"
+
+  Example of what SO WHAT looks like for this project:
+
+  "Your 2022 correlation finding (pre: 0.06, post: 0.68)
+  is not just a data point — it is the central argument
+  for why dynamic diversification strategies exist.
+  For 20 years, bonds provided downside protection
+  precisely because they were negatively correlated with
+  equities. In 2022 that relationship inverted. A static
+  60/40 portfolio had nowhere to hide. Regime Switching's
+  0.63 Sharpe vs benchmark 0.52 is the quantitative proof
+  that adapting to this regime change was worth 11 basis
+  points of annual risk-adjusted return.
+
+  For Forest Capital, this means: static diversification
+  is not a permanent feature of markets — it is a regime-
+  dependent phenomenon. The recommendation is not '60/40
+  is dead' but 'regime-aware allocation is worth the
+  operational complexity.'
+
+  For the MSFA panel, this answers the research question
+  directly: yes, diversification improves risk-adjusted
+  returns — but only when the strategy adapts to changing
+  correlation regimes. Static diversification alone
+  underperforms the benchmark in the post-2022 period."
+
+  The SO WHAT must always:
+    — Connect the finding to the research question
+    — Explain the mechanism (why does this happen?)
+    — State the implication for Forest Capital
+    — State the academic significance
+    — Be written in plain English, not jargon
 
 AI USAGE LOGGING:
   Every advisor call logged to council_sessions table
