@@ -1478,7 +1478,166 @@ generated document. Display prominently in the UI before any generated
 text. This label must appear in the downloaded file, not just the UI.
 
 ─────────────────────────────────────────────────────────────────────────────
-REFERENCES.JSON — CURATED CITATION DATABASE
+─────────────────────────────────────────────────────────────────────────────
+AGENT 10: Academic Advisor — Claude Sonnet (agents/academic_advisor.py)
+─────────────────────────────────────────────────────────────────────────────
+
+Model: claude-sonnet-4-6
+Available to: All three team members (Michael, Bob, Molly)
+Accessed via: Reports screen → "Get Advisor Feedback" per deliverable
+              + floating "Advisor" button accessible from any screen
+
+PURPOSE:
+Bridges the analytical output and the academic deliverables. The council
+analyses strategies for Forest Capital. The QA agent audits methodology.
+This agent answers the question the team actually has: "What does this
+mean for our grade, and what should we focus on?"
+
+Two distinct roles:
+  1. Academic guidance — connects findings to deliverables and rubric
+  2. Hallucination detection — verifies internal findings against
+     external academic sources. If the system claims Regime Switching
+     had Sharpe 0.63, the advisor searches for academic evidence that
+     regime-switching strategies in similar periods produced comparable
+     results. Wild disagreement between internal data and external
+     evidence is flagged as a potential data issue.
+
+CRITICAL CONSTRAINTS — citation integrity:
+  Every citation must be verified via web_search before being referenced.
+  The agent NEVER fabricates a paper, author, or finding.
+  If web_search cannot confirm a source exists and says what is claimed,
+  the agent does not cite it — it says "I could not verify this source."
+  Reputable sources only: Fed publications, IMF, BIS, AQR, NBER,
+  peer-reviewed journals, major central banks.
+  No blogs, no LinkedIn posts, no unverified working papers.
+
+System prompt:
+"You are an academic advisor for an MSFA graduate practicum at Queens
+University McColl School of Business, course FNA 670. The research
+question is: does diversification across equities and fixed income
+improve risk-adjusted performance vs a 100% equity benchmark over the
+period 2002-2025?
+
+Your role has two components:
+
+COMPONENT 1 — ACADEMIC GUIDANCE:
+Help the team connect their data findings to the three graded deliverables:
+  Final Presentation (35%) — June 3 midpoint + July 1 final
+  Analytical Appendix (35%) — rigour, provenance, reproducibility
+  Executive Brief (20%) — Forest Capital recommendation
+
+Always ground feedback in the actual strategy results provided to you.
+Never suggest conclusions the data does not support.
+Flag the difference between what the data shows and what would need to
+be true for a stronger conclusion.
+
+COMPONENT 2 — EXTERNAL EVIDENCE AND HALLUCINATION DETECTION:
+For every key finding, search for external academic evidence:
+  Does the finding align with published research?
+  Are the magnitudes plausible vs academic literature?
+  Is there contradicting evidence that should be disclosed?
+
+If external evidence contradicts the internal data:
+  Flag this explicitly: "External research suggests X, but your data
+  shows Y. This discrepancy should be investigated before presenting."
+  Do not suppress contradictions — they are valuable quality signals.
+
+Citation rules (non-negotiable):
+  ALWAYS use web_search to verify a source exists before citing it.
+  NEVER cite a paper you cannot verify via web search.
+  State the URL or DOI when you cite something.
+  If you cannot verify: say 'I searched for supporting evidence but
+  could not verify a reputable source for this claim.'
+
+Grade awareness:
+  FNA 670 grading: Presentation 35%, Appendix 35%, Brief 20%, Midpoint 10%
+  Prioritise feedback by grade weight.
+  June 3 midpoint: focus on framing, preliminary findings, methodology.
+  July 1 final: focus on completeness, statistical rigour, implications.
+[GLOBAL AGENT RULE]"
+
+Tools:
+- web_search(query) → searches for academic papers, Fed publications,
+  AQR research, IMF reports, BIS papers, NBER working papers
+  Used to: verify citations, find supporting evidence, detect
+  contradictions between internal findings and published research
+
+- analyse_findings(strategy_results, research_question) → str
+  Reviews all 10 strategy results against the research question
+  Identifies strongest findings, weakest findings, gaps to address
+  Returns: key_takeaways[], presentation_priorities[], appendix_gaps[]
+
+- check_finding_plausibility(finding, magnitude, period) → dict
+  Searches external sources to verify a specific finding is plausible
+  e.g. "Regime Switching Sharpe 0.63 vs benchmark 0.52, 2002-2025"
+  Returns: supporting_evidence[], contradicting_evidence[], verdict
+
+- get_deliverable_guidance(deliverable_type, current_data) → str
+  deliverable_type: "midpoint" | "appendix" | "brief" | "presentation"
+  Returns specific, actionable guidance for that deliverable
+  Grounded in actual strategy results and external evidence
+
+- find_supporting_citations(finding, n_sources=3) → list
+  Searches for verified academic sources supporting a specific finding
+  Only returns sources it can confirm via web_search
+  Returns: [{title, authors, year, url, relevance, verified: true}]
+
+UI:
+  Accent colour: GOLD (#f59e0b) — distinct from all other agents
+  Label: "Academic Advisor"
+  Available from: Reports screen (per-deliverable context)
+                  Floating button accessible from all screens
+                  Team Primer → links directly to advisor
+  Not shown in Present mode (internal tool, not for Forest Capital)
+
+  Advisor response format:
+    ┌─────────────────────────────────────────────────────────┐
+    │  📚 Academic Advisor                                    │
+    │─────────────────────────────────────────────────────────│
+    │  KEY FINDINGS FROM YOUR DATA                            │
+    │  [grounded in actual results]                           │
+    │─────────────────────────────────────────────────────────│
+    │  WHAT TO FOCUS ON FOR [DELIVERABLE]                     │
+    │  [prioritised by grade weight]                          │
+    │─────────────────────────────────────────────────────────│
+    │  EXTERNAL EVIDENCE                                      │
+    │  [verified citations with URLs]                         │
+    │─────────────────────────────────────────────────────────│
+    │  ⚠ POTENTIAL ISSUES                                     │
+    │  [contradictions or gaps to investigate]                │
+    └─────────────────────────────────────────────────────────│
+
+AI USAGE LOGGING:
+  Every advisor call logged to council_sessions table
+  Fields: query, deliverable_type, citations_found, citations_verified,
+  contradictions_found, tokens, cost_usd
+  Visible in AI Usage Log screen
+
+COST:
+  Model: Sonnet (not Opus — runs on demand, frequently)
+  Web search adds latency (~3-5s) but minimal token cost
+  Per call: ~$0.02-0.04 including web searches
+  Session limit: respect DAILY_CREDIT_CAP_USD
+
+SPRINT 6 SCOPE:
+  ─ agents/academic_advisor.py — full implementation
+  ─ POST /api/advisor/analyse — main endpoint
+    Accepts: {query, deliverable_type, strategy_results}
+    Returns: findings, guidance, citations, potential_issues
+  ─ POST /api/advisor/verify-finding — hallucination check
+    Accepts: {finding, magnitude, period}
+    Returns: supporting_evidence, contradicting_evidence, verdict
+  ─ POST /api/advisor/citations — find verified sources
+    Accepts: {finding, n_sources}
+    Returns: verified citations only
+  ─ advisorStore.ts — Zustand store, session cached
+  ─ AdvisorPanel.tsx — gold accent, floating button
+  ─ Reports screen integration — per-deliverable context button
+  ─ Logging to council_sessions table
+  ─ test_academic_advisor.py — citation verification tests,
+    hallucination detection tests, deliverable guidance tests
+
+
 ─────────────────────────────────────────────────────────────────────────────
 
 File: backend/data/references.json
@@ -3843,6 +4002,16 @@ Sprint 6 (May 13 onwards — in progress):
 
   FINAL POLISH
   ─ UI/UX Agent sprint review — Big 4 standards check
+  ─ ACADEMIC ADVISOR AGENT (Agent 10) — Sprint 6 final
+    agents/academic_advisor.py (Sonnet + web_search)
+    Gold accent (#f59e0b), floating button all screens
+    POST /api/advisor/analyse, /verify-finding, /citations
+    Citation integrity: web_search verifies every source
+    Hallucination detection: cross-references vs external evidence
+    Grade-aware: knows FNA 670 rubric and deliverable weights
+    advisorStore.ts + AdvisorPanel.tsx
+    Reports screen per-deliverable "Get Advisor Feedback" button
+    Not shown in Present mode
   ─ EXPLAINER AGENT OPPORTUNITY REVIEW (UI/UX Agent task)
     Now that Explainer is cached + routed to Grok (essentially free),
     the UI/UX Agent should audit every screen and identify every place
