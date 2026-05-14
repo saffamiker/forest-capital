@@ -3,25 +3,38 @@
  * under different market regimes, including the central 2022 correlation
  * breakdown finding. Reads strategy + regime metadata from stores; both
  * are session-cached so navigation between screens does not re-fetch.
+ *
+ * Commentary-mode chrome mirrors StatisticalEvidence: a banner up top
+ * and a ChartCommentStrip after every chart. The strips render in all
+ * three modes (Sources line always visible) but only show the narrative
+ * body in Commentary and Present mode.
  */
 import { useEffect } from 'react'
 import { useChartsStore } from '../stores/chartsStore'
 import { useRegimeStore } from '../stores/regimeStore'
+import { useGlossaryStore } from '../stores/glossaryStore'
 import RegimeTimeline from '../components/charts/RegimeTimeline'
 import RegimeConditionalPerformance from '../components/charts/RegimeConditionalPerformance'
 import CorrelationBreakdownChart from '../components/charts/CorrelationBreakdownChart'
 import FactorExposureHeatmap from '../components/charts/FactorExposureHeatmap'
 import PerformanceAttributionWaterfall from '../components/charts/PerformanceAttributionWaterfall'
 import RegimeTransitionMatrix from '../components/charts/RegimeTransitionMatrix'
+import ChartCommentStrip from '../components/ChartCommentStrip'
+import LearnModeBanner from '../components/LearnModeBanner'
+
+// Purple accent — Regime Analysis is the regime/macro screen.
+const ACCENT = '#7c3aed'
 
 export default function RegimeAnalysis() {
   const { data: chartData, load: loadCharts, loading } = useChartsStore()
   const { regime, load: loadRegime } = useRegimeStore()
+  const loadTerms = useGlossaryStore((s) => s.loadTerms)
 
   useEffect(() => {
     void loadCharts()
     void loadRegime()
-  }, [loadCharts, loadRegime])
+    void loadTerms()
+  }, [loadCharts, loadRegime, loadTerms])
 
   const initialLoad = loading && !chartData
 
@@ -35,22 +48,76 @@ export default function RegimeAnalysis() {
         </p>
       </div>
 
+      <LearnModeBanner />
+
       {initialLoad ? (
         <div className="card p-8 text-center text-muted text-sm">Loading…</div>
       ) : (
         <>
-          <RegimeTimeline timeline={chartData?.regime_timeline ?? []} />
-          <CorrelationBreakdownChart
-            correlation={chartData?.correlation_breakdown ?? []}
-            pre2022={regime?.pre_2022_avg_correlation ?? null}
-            post2022={regime?.post_2022_avg_correlation ?? null}
-          />
-          <RegimeConditionalPerformance regimeConditional={chartData?.regime_conditional ?? {}} />
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-            <FactorExposureHeatmap factorLoadings={chartData?.factor_loadings ?? {}} />
-            <RegimeTransitionMatrix matrix={chartData?.transition_matrix ?? ({} as never)} />
+          <div>
+            <RegimeTimeline timeline={chartData?.regime_timeline ?? []} />
+            <ChartCommentStrip
+              chartId="regime_timeline"
+              chartType="timeline_band"
+              chartData={chartData?.regime_timeline}
+              accentColor={ACCENT}
+            />
           </div>
-          <PerformanceAttributionWaterfall attribution={chartData?.attribution ?? {}} />
+
+          <div>
+            <CorrelationBreakdownChart
+              correlation={chartData?.correlation_breakdown ?? []}
+              pre2022={regime?.pre_2022_avg_correlation ?? null}
+              post2022={regime?.post_2022_avg_correlation ?? null}
+            />
+            <ChartCommentStrip
+              chartId="correlation_breakdown_chart"
+              chartType="line_rolling_correlation"
+              chartData={chartData?.correlation_breakdown}
+              accentColor={ACCENT}
+            />
+          </div>
+
+          <div>
+            <RegimeConditionalPerformance regimeConditional={chartData?.regime_conditional ?? {}} />
+            <ChartCommentStrip
+              chartId="regime_conditional_performance"
+              chartType="bar_by_regime"
+              chartData={chartData?.regime_conditional}
+              accentColor={ACCENT}
+            />
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
+            <div>
+              <FactorExposureHeatmap factorLoadings={chartData?.factor_loadings ?? {}} />
+              <ChartCommentStrip
+                chartId="factor_exposure_heatmap"
+                chartType="heatmap_ff_loadings"
+                chartData={chartData?.factor_loadings}
+                accentColor={ACCENT}
+              />
+            </div>
+            <div>
+              <RegimeTransitionMatrix matrix={chartData?.transition_matrix ?? ({} as never)} />
+              <ChartCommentStrip
+                chartId="regime_transition_matrix"
+                chartType="matrix_3x3"
+                chartData={chartData?.transition_matrix}
+                accentColor={ACCENT}
+              />
+            </div>
+          </div>
+
+          <div>
+            <PerformanceAttributionWaterfall attribution={chartData?.attribution ?? {}} />
+            <ChartCommentStrip
+              chartId="performance_attribution_waterfall"
+              chartType="waterfall_brinson"
+              chartData={chartData?.attribution}
+              accentColor={ACCENT}
+            />
+          </div>
         </>
       )}
     </div>

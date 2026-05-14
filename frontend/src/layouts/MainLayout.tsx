@@ -8,6 +8,7 @@ import { useUI } from '../context/UIContext'
 import type { UIMode } from '../context/UIContext'
 import { useQAStore } from '../stores/qaStore'
 import QAStatusBadge from '../components/QAStatusBadge'
+import LearnModeToggle from '../components/LearnModeToggle'
 
 interface NavItem {
   to: string
@@ -205,6 +206,10 @@ export default function MainLayout() {
               )
             })}
           </div>
+
+          {/* Technical/Plain-English sub-toggle — only rendered in Commentary
+              mode. Persists per session so label preference survives navigation. */}
+          <LearnModeToggle />
 
           {/* QA status badge — polls /api/v1/qa/status every 30s.
               Click to open the QA Audit screen. Hidden on mobile to

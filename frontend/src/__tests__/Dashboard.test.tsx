@@ -6,6 +6,7 @@ import Dashboard from '../components/Dashboard'
 import type { StrategyResult } from '../types/strategies'
 import { useStrategiesStore } from '../stores/strategiesStore'
 import { useRegimeStore } from '../stores/regimeStore'
+import { UIProvider } from '../context/UIContext'
 
 vi.mock('axios')
 const mockedAxios = vi.mocked(axios, true)
@@ -98,9 +99,13 @@ const MOCK_FRONTIER = {
 }
 
 function renderDashboard() {
+  // UIProvider is needed because Dashboard renders LearnModeBanner, which
+  // reads `mode` from useUI() to decide whether to show itself.
   return render(
     <MemoryRouter>
-      <Dashboard />
+      <UIProvider>
+        <Dashboard />
+      </UIProvider>
     </MemoryRouter>
   )
 }

@@ -13,6 +13,10 @@ import type { StrategyResult } from '../types/strategies'
 import type { EfficientFrontierData } from '../types/api'
 import { useStrategiesStore } from '../stores/strategiesStore'
 import { useRegimeStore } from '../stores/regimeStore'
+import { useGlossaryStore } from '../stores/glossaryStore'
+import ExplainableText from './ExplainableText'
+import ChartCommentStrip from './ChartCommentStrip'
+import LearnModeBanner from './LearnModeBanner'
 
 // ── Simulated cumulative return series (mock) ──────────────────────────────
 function buildCumulativeReturns(strategies: StrategyResult[]): Record<string, string | number>[] {
@@ -60,12 +64,19 @@ interface MetricTileProps {
   sub?: string
   color?: string
   note?: string
+  /** Glossary key. When set, the label is wrapped in ExplainableText so
+   *  Commentary-mode users get a tooltip + click-panel on the tile label.
+   *  Leave undefined to render a plain label (the default for tiles whose
+   *  meaning is obvious without explanation, e.g. "Best Sharpe (IS)"). */
+  term?: string
 }
 
-function MetricTile({ label, value, sub, color = 'text-white', note }: MetricTileProps) {
+function MetricTile({ label, value, sub, color = 'text-white', note, term }: MetricTileProps) {
   return (
     <div className="card p-3" title={note}>
-      <div className="text-2xs text-muted uppercase tracking-wide mb-1">{label}</div>
+      <div className="text-2xs text-muted uppercase tracking-wide mb-1">
+        {term ? <ExplainableText term={term}>{label}</ExplainableText> : label}
+      </div>
       <div className={`font-mono text-lg font-bold ${color}`}>{value}</div>
       {sub && <div className="text-2xs text-muted mt-0.5 font-mono">{sub}</div>}
       {note && <div className="text-2xs text-muted/70 mt-1 leading-tight italic">{note}</div>}
@@ -145,6 +156,10 @@ export default function Dashboard() {
   // Stores are session-scoped singletons; load() is a no-op if already loaded.
   const { strategies, dataRange, loading, load: loadStrategies } = useStrategiesStore()
   const { regime, loading: regimeLoading, load: loadRegime } = useRegimeStore()
+  // Pre-warm the glossary once strategies are loaded so Commentary-mode
+  // tooltips have content on first hover. The store is idempotent — this
+  // fires at most once per session.
+  const loadTerms = useGlossaryStore((s) => s.loadTerms)
   const [frontier, setFrontier] = useState<EfficientFrontierData | null>(null)
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
   const [visibleStrategies, setVisibleStrategies] = useState<Set<string>>(
@@ -157,6 +172,7 @@ export default function Dashboard() {
     // Frontier (optimizer) runs independently and updates in-place when resolved.
     void loadStrategies()
     void loadRegime()
+    void loadTerms()
 
     const loadFrontier = async () => {
       try {
@@ -167,7 +183,7 @@ export default function Dashboard() {
       } catch (_) { /* frontier is decorative — failures are silent */ }
     }
     void loadFrontier()
-  }, [loadStrategies, loadRegime])
+  }, [loadStrategies, loadRegime, loadTerms])
 
   const cumulativeData = strategies.length ? buildCumulativeReturns(strategies) : []
   const sorted = [...strategies].sort((a, b) => (b.sharpe_ratio ?? 0) - (a.sharpe_ratio ?? 0))
@@ -229,6 +245,10 @@ export default function Dashboard() {
       )}
 
       <div className="p-4 md:p-6 space-y-5">
+        {/* Commentary-mode banner — renders only when mode === 'commentary'.
+            Renders nothing in Analyst/Present, so adding it here is free. */}
+        <LearnModeBanner />
+
         {/* Summary tiles */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <MetricTile
@@ -236,6 +256,7 @@ export default function Dashboard() {
             value={`${significant.length} / 10`}
             sub="Pass all 5 Tier 1 gates"
             color={significant.length === 0 ? 'text-warning' : 'text-success'}
+            term="tier1_gates"
             {...(significant.length === 0 ? { note: 'Honest result — p < 0.005 with FDR correction is intentionally strict. No strategy passes all 5 gates simultaneously.' } : {})}
           />
           <MetricTile
@@ -243,17 +264,20 @@ export default function Dashboard() {
             value={bestSharpe?.sharpe_ratio != null ? bestSharpe.sharpe_ratio.toFixed(2) : '—'}
             sub={bestSharpe?.strategy_name.replace(/_/g, ' ')}
             color="text-electric"
+            term="sharpe_ratio"
           />
           <MetricTile
             label="Best Sharpe (OOS)"
             value={bestOos?.oos_sharpe != null ? bestOos.oos_sharpe.toFixed(2) : '—'}
             sub="Walk-forward out-of-sample"
+            term="walk_forward_oos"
           />
           <MetricTile
             label="Benchmark Sharpe"
             value={benchmark?.sharpe_ratio != null ? benchmark.sharpe_ratio.toFixed(2) : '—'}
             sub={`100% SPY ${formatDateRange(dataRange?.start, dataRange?.end)}`}
             color="text-muted"
+            term="sharpe_ratio"
           />
         </div>
 
@@ -317,6 +341,13 @@ export default function Dashboard() {
             </LineChart>
           </ResponsiveContainer>
         </div>
+
+        {/* Annotation strip + always-on Sources line */}
+        <ChartCommentStrip
+          chartId="cumulative_returns"
+          chartType="line_cumulative"
+          chartData={cumulativeData}
+        />
 
         {/* Strategy comparison table */}
         <div className="card overflow-hidden">
