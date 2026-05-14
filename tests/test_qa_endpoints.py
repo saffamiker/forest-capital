@@ -29,7 +29,20 @@ os.environ.setdefault(
 
 
 def _auth_headers() -> dict:
-    return {"X-API-Key": "test-master-key"}
+    """
+    Build the X-API-Key header from the SAME value the server loaded.
+
+    Hardcoding "test-master-key" failed in CI because the workflow sets
+    MASTER_API_KEY=test_master_key (underscore variant). os.environ.setdefault
+    above is a no-op when the var is already set, so the hardcoded hyphenated
+    header didn't match the underscore-cased value config.py had loaded —
+    every authenticated request returned 401.
+
+    Importing from config means we send whatever the server actually checks
+    against, regardless of which variant the surrounding environment chose.
+    """
+    from config import MASTER_API_KEY  # type: ignore[import]
+    return {"X-API-Key": MASTER_API_KEY}
 
 
 @pytest.fixture
