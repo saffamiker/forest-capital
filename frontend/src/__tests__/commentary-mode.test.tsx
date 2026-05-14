@@ -246,3 +246,96 @@ describe('ChartCommentStrip', () => {
     expect(explainCalls.length).toBe(0)
   })
 })
+
+
+describe('ExplainableText hover cost optimisation', () => {
+  it('hovering 10 different metrics fires /api/explain/terms exactly once', async () => {
+    // The cache invariant: every metric on the dashboard wraps in
+    // ExplainableText, but only one HTTP call goes out per session
+    // regardless of how many components mount. Without this guarantee,
+    // a busy dashboard with 50 wrapped values would fire 50 LLM
+    // requests in parallel — exactly the cost regression this test
+    // exists to catch.
+    const TERMS = [
+      'sharpe_ratio', 'cagr', 'max_drawdown', 'fdr', 'dsr',
+      'cv_stability', 'p_value_ttest', 'oos_sharpe', 'alpha', 'beta',
+    ]
+
+    // Seed the store with one term so the consumer doesn't render the
+    // muted-state path; the load() call we're counting fires
+    // independently when the component mounts.
+    useGlossaryStore.setState({
+      terms: { sharpe_ratio: { hover: 'h', what: 'w', why: 'w' } },
+      termsLoaded: false,    // not yet loaded — load() will fire
+      termsLoading: false,
+    })
+
+    renderInMode(
+      'commentary',
+      <>
+        {TERMS.map((t) => (
+          <ExplainableText key={t} term={t}>{t}</ExplainableText>
+        ))}
+      </>,
+    )
+
+    // Allow the useEffect microtasks for all 10 components to flush.
+    await act(async () => { await Promise.resolve() })
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const termCalls = mockedAxios.post.mock.calls.filter(
+      (call: any[]) => call[0] === '/api/explain/terms',
+    )
+    expect(termCalls.length).toBe(1)
+  })
+
+  it('subsequent re-renders of the same ExplainableText do not refire load', async () => {
+    // Once termsLoaded=true, the store's guard short-circuits every
+    // future call. This test catches the regression where someone
+    // accidentally drops the loaded check and re-fetches on every
+    // hover.
+    useGlossaryStore.setState({
+      terms: { sharpe_ratio: { hover: 'h', what: 'w', why: 'w' } },
+      termsLoaded: true,     // pre-marked loaded → load() should be a no-op
+      termsLoading: false,
+    })
+
+    const { rerender } = renderInMode(
+      'commentary',
+      <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>,
+    )
+    await act(async () => { await Promise.resolve() })
+    // rerender replaces the entire element including the UIProvider wrapper;
+    // re-supply the provider so the second render still has context.
+    rerender(
+      <UIProvider>
+        <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>
+      </UIProvider>,
+    )
+    await act(async () => { await Promise.resolve() })
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const termCalls = mockedAxios.post.mock.calls.filter(
+      (call: any[]) => call[0] === '/api/explain/terms',
+    )
+    expect(termCalls.length).toBe(0)
+  })
+
+  it('ExplainableText does not fire load in Analyst mode (no chrome rendered)', async () => {
+    // Cost guardrail: don't pay for explanations the user can't see.
+    useGlossaryStore.setState({
+      terms: {}, termsLoaded: false, termsLoading: false,
+    })
+    renderInMode(
+      'analyst',
+      <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>,
+    )
+    await act(async () => { await Promise.resolve() })
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const termCalls = mockedAxios.post.mock.calls.filter(
+      (call: any[]) => call[0] === '/api/explain/terms',
+    )
+    expect(termCalls.length).toBe(0)
+  })
+})

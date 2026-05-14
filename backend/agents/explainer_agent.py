@@ -1,7 +1,7 @@
 """
 agents/explainer_agent.py
 
-Explainer Agent — Claude Haiku (claude-haiku-4-5-20251001).
+Explainer Agent — Grok-3-mini via xAI (primary), Claude Haiku (fallback).
 
 Generates all plain-English content dynamically after council completes.
 Never blocks the council deliberation — runs in background after results arrive.
@@ -12,19 +12,39 @@ Four trigger types (CLAUDE.md Section 15 Dynamic Explanation Architecture):
   3. Persona prompt    — on "View system prompt" click
   4. Chart explanation — on chart hover/click
 
-Haiku is chosen for speed and cost: < $0.05 per full session.
-The content quality required (Goldman Sachs research note register)
-is achievable at Haiku — the prompts are tightly constrained to
-actual data and the domain is narrow.
+Why Grok-3-mini over Haiku:
+  Cost per session is similar at these prompt sizes (< $0.05 either way),
+  but routing the high-frequency Explainer load through Grok keeps the
+  Anthropic credit budget concentrated on the council deliberations
+  (Sonnet specialists + Opus CIO + Opus QA) where quality matters most.
+  Grok-3-mini's output quality at the constrained prompts here — every
+  call cites only numbers already in the input — is indistinguishable
+  from Haiku for the user-visible content.
+
+Falls back to Haiku when XAI_API_KEY is unset or the xAI endpoint
+returns an error. The fallback is silent from the caller's perspective:
+both code paths return plain text via the same _call_llm() wrapper.
 """
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
+import httpx
 import structlog
 
 from agents.base import HAIKU_MODEL, SCOPE_ENFORCEMENT, call_claude
+
+
+# xAI / Grok configuration — mirrors the pattern in agents/contrarian_analyst.py
+# so the cost-routing decisions stay consistent across the agent fleet.
+# Tighter timeout than the contrarian (20s vs 30s): the Explainer fires
+# on user interactions (chart hover, term click) and a slow response
+# degrades the UX more than missing a single contrarian opinion would.
+XAI_API_URL = "https://api.x.ai/v1/chat/completions"
+XAI_MODEL = "grok-3-mini"
+XAI_TIMEOUT_SECONDS = 20.0
 
 log = structlog.get_logger(__name__)
 
@@ -50,6 +70,60 @@ NARRATIVE (what_to_tell_the_audience):
   Total: 60-80 words.
 
 {SCOPE_ENFORCEMENT}"""
+
+
+def _call_grok(
+    api_key: str, system_prompt: str, user_message: str, max_tokens: int,
+) -> str:
+    """
+    Single-shot xAI call returning the plain-text content. Raises on any
+    non-2xx response so _call_llm() can catch and fall back to Haiku.
+    """
+    with httpx.Client(timeout=XAI_TIMEOUT_SECONDS) as client:
+        resp = client.post(
+            XAI_API_URL,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type":  "application/json",
+            },
+            json={
+                "model":       XAI_MODEL,
+                "messages":    [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user",   "content": user_message},
+                ],
+                "max_tokens":  max_tokens,
+                "temperature": 0.7,
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    # xAI returns OpenAI-compatible shape — same as agents/contrarian_analyst
+    return data["choices"][0]["message"]["content"]
+
+
+def _call_llm(system_prompt: str, user_message: str, max_tokens: int = 800) -> str:
+    """
+    Routes every Explainer LLM call through here. Grok-3-mini is tried
+    first when XAI_API_KEY is set; Haiku is the silent fallback when
+    the key is unset or the xAI call fails (timeout, 5xx, malformed
+    response). Callers see plain text either way and don't branch on
+    which model produced it.
+    """
+    api_key = os.getenv("XAI_API_KEY", "")
+    if api_key:
+        try:
+            text = _call_grok(api_key, system_prompt, user_message, max_tokens)
+            log.info("explainer_grok_completed", chars=len(text))
+            return text
+        except Exception as exc:
+            # Common reasons to fall back: rate limit, xAI brief outage,
+            # response shape change. Logged at warning level so it shows
+            # up in the AI Usage Log without flooding the error feed.
+            log.warning("explainer_grok_fallback_to_haiku", error=str(exc))
+
+    # Haiku fallback — also the no-XAI-key path. Same prompt, same shape.
+    return call_claude(HAIKU_MODEL, system_prompt, user_message, max_tokens)
 
 
 class ExplainerAgent:
@@ -105,7 +179,7 @@ class ExplainerAgent:
         )
 
         try:
-            response = call_claude(HAIKU_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=800)
+            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=800)
             # Strip markdown fences if present
             clean = response.strip()
             if clean.startswith("```"):
@@ -157,7 +231,7 @@ class ExplainerAgent:
         )
 
         try:
-            response = call_claude(HAIKU_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=512)
+            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=512)
             clean = response.strip()
             if clean.startswith("```"):
                 clean = clean.split("```")[1]
@@ -209,7 +283,7 @@ class ExplainerAgent:
         )
 
         try:
-            response = call_claude(HAIKU_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=512)
+            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=512)
             clean = response.strip()
             if clean.startswith("```"):
                 clean = clean.split("```")[1]
@@ -279,7 +353,7 @@ class ExplainerAgent:
         )
 
         try:
-            response = call_claude(HAIKU_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=600)
+            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=600)
             clean = response.strip()
             if clean.startswith("```"):
                 clean = clean.split("```")[1]
@@ -328,7 +402,7 @@ class ExplainerAgent:
         )
 
         try:
-            response = call_claude(HAIKU_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=800)
+            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=800)
             clean = response.strip()
             if clean.startswith("```"):
                 clean = clean.split("```")[1]
