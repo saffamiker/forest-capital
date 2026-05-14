@@ -25,10 +25,12 @@
  * but they live on different surfaces).
  */
 import { useState, useMemo } from 'react'
-import { GraduationCap, X, AlertTriangle, CheckCircle, Loader2, ExternalLink } from 'lucide-react'
+import {
+  GraduationCap, X, AlertTriangle, CheckCircle, Loader2, ExternalLink, Quote,
+} from 'lucide-react'
 import { useAdvisorStore } from '../stores/advisorStore'
 import { useUI } from '../context/UIContext'
-import type { DeliverableType, AdvisorAnalysis } from '../types/advisor'
+import type { DeliverableType, AdvisorAnalysis, VerifiedCitation } from '../types/advisor'
 
 const GOLD = '#f59e0b'
 
@@ -266,27 +268,7 @@ function AdvisorResult({ result }: { result: AdvisorAnalysis }) {
           </div>
           <ul className="space-y-1.5">
             {result.citations.map((c, idx) => (
-              <li
-                key={`${c.url}-${idx}`}
-                className="border border-border rounded p-2 bg-navy-900"
-              >
-                <a
-                  href={c.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-electric text-xs hover:underline flex items-start gap-1.5"
-                >
-                  <ExternalLink className="w-3 h-3 mt-0.5 shrink-0" />
-                  <span className="flex-1">{c.title}</span>
-                </a>
-                {c.relevance && (
-                  <p className="text-muted text-2xs mt-1 leading-relaxed">{c.relevance}</p>
-                )}
-                <div className="flex items-center gap-1 mt-1.5">
-                  <CheckCircle className="w-3 h-3 text-success" />
-                  <span className="text-2xs text-success">Verified via web search</span>
-                </div>
-              </li>
+              <CitationItem key={`${c.url}-${idx}`} citation={c} />
             ))}
           </ul>
         </div>
@@ -336,5 +318,94 @@ function Section({ title, items, accent }: { title: string; items: string[]; acc
         ))}
       </ul>
     </div>
+  )
+}
+
+/**
+ * One citation row: title links to the source (opens new tab), hover
+ * reveals the web_fetch excerpt so the team can audit the corroborating
+ * passage without leaving the panel. When excerpt is null, the tooltip
+ * surfaces the fallback message — telling the user the page couldn't
+ * be fetched and they need to click through to verify.
+ */
+const FALLBACK_EXCERPT = 'Excerpt unavailable — click to verify directly'
+
+function CitationItem({ citation }: { citation: VerifiedCitation }) {
+  const [hovered, setHovered] = useState(false)
+  const hasExcerpt = typeof citation.excerpt === 'string' && citation.excerpt.length > 0
+  const tooltipText = hasExcerpt ? (citation.excerpt as string) : FALLBACK_EXCERPT
+
+  return (
+    <li
+      className="border border-border rounded p-2 bg-navy-900 relative"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setHovered(true)}
+      onBlur={() => setHovered(false)}
+    >
+      <a
+        href={citation.url}
+        target="_blank"
+        rel="noopener noreferrer"
+        // Native title attribute serves as the accessible fallback for
+        // screen readers and the no-JS case. The visual tooltip below
+        // is the primary UX surface — it renders the full passage
+        // without truncation.
+        title={tooltipText}
+        aria-describedby={`excerpt-${citation.url}`}
+        className="text-electric text-xs hover:underline flex items-start gap-1.5"
+        data-testid="advisor-citation-link"
+      >
+        <ExternalLink className="w-3 h-3 mt-0.5 shrink-0" />
+        <span className="flex-1">{citation.title}</span>
+      </a>
+
+      {citation.relevance && (
+        <p className="text-muted text-2xs mt-1 leading-relaxed">{citation.relevance}</p>
+      )}
+
+      <div className="flex items-center gap-1 mt-1.5">
+        <CheckCircle className="w-3 h-3 text-success" />
+        <span className="text-2xs text-success">
+          {hasExcerpt ? 'Verified — passage retrieved' : 'Verified — passage not retrievable'}
+        </span>
+      </div>
+
+      {/* Visible tooltip — appears on hover/focus, positioned above the
+          citation row so it never covers the link the user is hovering.
+          Width pinned to the panel width minus margins so the excerpt
+          wraps readably. Uses role=tooltip so assistive tech announces
+          it as supplementary, not as a focusable region. */}
+      {hovered && (
+        <div
+          id={`excerpt-${citation.url}`}
+          role="tooltip"
+          data-testid="advisor-citation-tooltip"
+          className="absolute left-2 right-2 bottom-full mb-1 z-50 rounded shadow-lg p-2.5"
+          style={{
+            backgroundColor: '#1a2438',
+            border: '1px solid rgba(245,158,11,0.4)',
+            // Subtle gold left accent ties the tooltip back to the
+            // advisor's brand colour and signals "advisor surfaced this".
+            borderLeftColor: '#f59e0b',
+            borderLeftWidth: '2px',
+          }}
+        >
+          <div className="flex items-start gap-1.5">
+            {hasExcerpt ? (
+              <Quote className="w-3 h-3 mt-0.5 shrink-0" style={{ color: '#f59e0b' }} />
+            ) : (
+              <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0 text-warning" />
+            )}
+            <p
+              className="text-xs leading-relaxed"
+              style={{ color: hasExcerpt ? '#cbd5e1' : '#fcd34d' }}
+            >
+              {tooltipText}
+            </p>
+          </div>
+        </div>
+      )}
+    </li>
   )
 }

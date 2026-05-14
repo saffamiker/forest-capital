@@ -22,6 +22,12 @@ export interface VerifiedCitation {
   authors?:   string
   year?:      number
   relevance?: string
+  // 2-3 sentence passage drawn from web_fetch of `url`. The backend
+  // emits the field on every citation. A non-empty string means the
+  // page was fetched and the model extracted a corroborating passage;
+  // null means web_fetch failed or didn't run for this URL — the UI
+  // shows "Excerpt unavailable — click to verify directly" on hover.
+  excerpt:    string | null
   // Always true after the backend filter — the post-filter list never
   // contains a citation that wasn't returned by web_search. We keep the
   // field so the frontend can show a "verified" badge regardless.

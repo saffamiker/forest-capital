@@ -34,6 +34,8 @@ const mockedAxios = axios as unknown as {
   isAxiosError: typeof axios.isAxiosError
 }
 
+const EXCERPT_TEXT = 'Direct passage from the fetched page corroborating the finding.'
+
 const ANALYSIS_FIXTURE: AdvisorAnalysis = {
   key_findings: ['Regime Switching passes all 5 Tier 1 gates.'],
   guidance: ['Lead with the 2022 correlation breakdown.'],
@@ -42,11 +44,31 @@ const ANALYSIS_FIXTURE: AdvisorAnalysis = {
       title: 'Stock-Bond Correlations',
       url: 'https://aqr.com/example',
       relevance: 'Confirms the 2022 regime shift.',
+      excerpt: EXCERPT_TEXT,
       verified: true,
     },
   ],
   potential_issues: ['Sample size borderline for regime-conditional tests.'],
   verified_sources: [{ title: 'AQR', url: 'https://aqr.com/example', verified: true }],
+  deliverable_type: 'midpoint',
+}
+
+// Same shape but with excerpt=null — simulates the case where web_fetch
+// failed or wasn't called for this URL. The UI must show fallback text.
+const ANALYSIS_FIXTURE_NO_EXCERPT: AdvisorAnalysis = {
+  key_findings: ['Regime Switching passes all 5 Tier 1 gates.'],
+  guidance: ['Lead with the 2022 correlation breakdown.'],
+  citations: [
+    {
+      title: 'Paywalled Paper',
+      url: 'https://paywalled.example/paper',
+      relevance: 'Should be cited but page could not be retrieved.',
+      excerpt: null,
+      verified: true,
+    },
+  ],
+  potential_issues: [],
+  verified_sources: [{ title: 'Paywalled', url: 'https://paywalled.example/paper', verified: true }],
   deliverable_type: 'midpoint',
 }
 
@@ -68,6 +90,7 @@ const CITATIONS_FIXTURE: AdvisorCitationsResponse = {
       year: 1986,
       url: 'https://cfainstitute.org/example',
       relevance: 'Foundational attribution paper.',
+      excerpt: 'Investment policy explains over 90 percent of return variance for a typical pension fund.',
       verified: true,
     },
   ],
@@ -249,8 +272,9 @@ describe('AdvisorPanel — interaction', () => {
 
     expect(await screen.findByTestId('advisor-result')).toBeInTheDocument()
     expect(screen.getByText(/Stock-Bond Correlations/)).toBeInTheDocument()
-    // Every citation must show the "verified" affordance.
-    expect(screen.getAllByText(/Verified via web search/i).length).toBe(1)
+    // Every citation must show the verified affordance. With excerpt
+    // present, the row reads "Verified — passage retrieved".
+    expect(screen.getAllByText(/Verified — passage retrieved/i).length).toBe(1)
   })
 
   it('respects controlled open prop', () => {
@@ -281,7 +305,7 @@ describe('AdvisorPanel — interaction', () => {
 // ── Citation integrity at the UI layer ───────────────────────────────────────
 
 describe('AdvisorPanel — citation integrity', () => {
-  it('marks every rendered citation as verified', async () => {
+  it('marks every rendered citation as verified — excerpt present', async () => {
     mockedAxios.post = vi.fn().mockResolvedValue({ data: ANALYSIS_FIXTURE })
 
     const user = userEvent.setup()
@@ -290,9 +314,20 @@ describe('AdvisorPanel — citation integrity', () => {
     await user.click(screen.getByTestId('advisor-submit-button'))
 
     await screen.findByTestId('advisor-result')
-    // Number of "Verified via web search" rows equals number of citations.
-    const verifiedLabels = screen.getAllByText(/Verified via web search/i)
-    expect(verifiedLabels.length).toBe(ANALYSIS_FIXTURE.citations.length)
+    // With excerpt present, the row reads "Verified — passage retrieved".
+    expect(screen.getByText(/passage retrieved/i)).toBeInTheDocument()
+  })
+
+  it('marks citation with missing excerpt as not retrievable', async () => {
+    mockedAxios.post = vi.fn().mockResolvedValue({ data: ANALYSIS_FIXTURE_NO_EXCERPT })
+
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    await user.click(screen.getByTestId('advisor-submit-button'))
+
+    await screen.findByTestId('advisor-result')
+    expect(screen.getByText(/passage not retrievable/i)).toBeInTheDocument()
   })
 
   it('renders potential_issues with warning affordance', async () => {
@@ -306,5 +341,80 @@ describe('AdvisorPanel — citation integrity', () => {
     await screen.findByTestId('advisor-result')
     expect(screen.getByText(/Sample size borderline/)).toBeInTheDocument()
     expect(screen.getByText(/Potential issues/i)).toBeInTheDocument()
+  })
+})
+
+
+// ── Excerpt tooltip rendering ────────────────────────────────────────────────
+
+describe('AdvisorPanel — excerpt tooltip', () => {
+  async function renderResultAndHover(fixture: AdvisorAnalysis) {
+    mockedAxios.post = vi.fn().mockResolvedValue({ data: fixture })
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    await user.click(screen.getByTestId('advisor-submit-button'))
+    await screen.findByTestId('advisor-result')
+    const link = screen.getByTestId('advisor-citation-link')
+    await user.hover(link)
+    return { user, link }
+  }
+
+  it('renders the excerpt in a tooltip on hover when fetch succeeded', async () => {
+    await renderResultAndHover(ANALYSIS_FIXTURE)
+    const tooltip = await screen.findByTestId('advisor-citation-tooltip')
+    expect(tooltip).toBeInTheDocument()
+    expect(tooltip.textContent).toContain(EXCERPT_TEXT)
+  })
+
+  it('renders the fallback message on hover when excerpt is null', async () => {
+    await renderResultAndHover(ANALYSIS_FIXTURE_NO_EXCERPT)
+    const tooltip = await screen.findByTestId('advisor-citation-tooltip')
+    expect(tooltip.textContent).toContain('Excerpt unavailable')
+    expect(tooltip.textContent).toContain('click to verify directly')
+  })
+
+  it('citation link opens the source in a new tab', async () => {
+    mockedAxios.post = vi.fn().mockResolvedValue({ data: ANALYSIS_FIXTURE })
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    await user.click(screen.getByTestId('advisor-submit-button'))
+    await screen.findByTestId('advisor-result')
+
+    const link = screen.getByTestId('advisor-citation-link') as HTMLAnchorElement
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(link.getAttribute('rel')).toContain('noopener')
+  })
+
+  it('sets the title attribute to the excerpt for native fallback / a11y', async () => {
+    mockedAxios.post = vi.fn().mockResolvedValue({ data: ANALYSIS_FIXTURE })
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    await user.click(screen.getByTestId('advisor-submit-button'))
+    await screen.findByTestId('advisor-result')
+
+    const link = screen.getByTestId('advisor-citation-link') as HTMLAnchorElement
+    expect(link.getAttribute('title')).toBe(EXCERPT_TEXT)
+  })
+
+  it('title attribute falls back to "Excerpt unavailable" when excerpt is null', async () => {
+    mockedAxios.post = vi.fn().mockResolvedValue({ data: ANALYSIS_FIXTURE_NO_EXCERPT })
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    await user.click(screen.getByTestId('advisor-submit-button'))
+    await screen.findByTestId('advisor-result')
+
+    const link = screen.getByTestId('advisor-citation-link') as HTMLAnchorElement
+    expect(link.getAttribute('title')).toContain('Excerpt unavailable')
+  })
+
+  it('hides the tooltip on mouse leave', async () => {
+    const { user, link } = await renderResultAndHover(ANALYSIS_FIXTURE)
+    expect(screen.getByTestId('advisor-citation-tooltip')).toBeInTheDocument()
+    await user.unhover(link)
+    expect(screen.queryByTestId('advisor-citation-tooltip')).not.toBeInTheDocument()
   })
 })

@@ -63,7 +63,7 @@ class TestFilterToVerified:
         citations = [{"title": "Fake Paper", "url": "https://fake.example.com/never-fetched"}]
         verified = [{"url": "https://real.example.com/actually-fetched"}]
 
-        result = _filter_to_verified(citations, verified)
+        result = _filter_to_verified(citations, verified, fetched_urls=set())
         assert result == [], "Unverified URL must be dropped"
 
     def test_keeps_url_present_in_verified_sources(self):
@@ -72,7 +72,7 @@ class TestFilterToVerified:
         citations = [{"title": "Real Paper", "url": "https://real.example.com/paper"}]
         verified = [{"url": "https://real.example.com/paper"}]
 
-        result = _filter_to_verified(citations, verified)
+        result = _filter_to_verified(citations, verified, fetched_urls=set())
         assert len(result) == 1
         assert result[0]["title"] == "Real Paper"
         # Filter forces verified=true even if model emitted otherwise.
@@ -84,7 +84,7 @@ class TestFilterToVerified:
         citations = [{"title": "Mixed Case", "url": "HTTPS://Example.COM/Paper"}]
         verified = [{"url": "https://example.com/paper"}]
 
-        result = _filter_to_verified(citations, verified)
+        result = _filter_to_verified(citations, verified, fetched_urls=set())
         assert len(result) == 1
 
     def test_trailing_slash_normalised(self):
@@ -93,7 +93,7 @@ class TestFilterToVerified:
         citations = [{"title": "Slash", "url": "https://example.com/paper/"}]
         verified = [{"url": "https://example.com/paper"}]
 
-        result = _filter_to_verified(citations, verified)
+        result = _filter_to_verified(citations, verified, fetched_urls=set())
         assert len(result) == 1
 
     def test_overrides_model_verified_false(self):
@@ -103,12 +103,12 @@ class TestFilterToVerified:
         citations = [{"title": "X", "url": "https://e.com", "verified": False}]
         verified = [{"url": "https://e.com"}]
 
-        result = _filter_to_verified(citations, verified)
+        result = _filter_to_verified(citations, verified, fetched_urls=set())
         assert result[0]["verified"] is True
 
     def test_empty_citations_returns_empty(self):
         from agents.academic_advisor import _filter_to_verified
-        assert _filter_to_verified([], [{"url": "https://anything"}]) == []
+        assert _filter_to_verified([], [{"url": "https://anything"}], fetched_urls=set()) == []
 
     def test_empty_verified_drops_all(self):
         """No verified URLs means no citations survive — the strictest case."""
@@ -116,19 +116,119 @@ class TestFilterToVerified:
         result = _filter_to_verified(
             [{"title": "X", "url": "https://x.com"}, {"title": "Y", "url": "https://y.com"}],
             [],
+            fetched_urls=set(),
         )
         assert result == []
 
     def test_non_dict_citations_ignored(self):
         from agents.academic_advisor import _filter_to_verified
         # String entries should never crash the filter.
-        result = _filter_to_verified(["just a string", None, 42], [{"url": "https://a"}])
+        result = _filter_to_verified(["just a string", None, 42], [{"url": "https://a"}], fetched_urls=set())
         assert result == []
 
     def test_handles_non_list_input(self):
         """Defensive — model occasionally returns a string when asked for a list."""
         from agents.academic_advisor import _filter_to_verified
-        assert _filter_to_verified("not a list", []) == []
+        assert _filter_to_verified("not a list", [], fetched_urls=set()) == []
+
+
+# ── Excerpt provenance (Gate 2) ──────────────────────────────────────────────
+
+class TestExcerptGate:
+    """
+    Excerpt is allowed through only when the URL was successfully fetched
+    by web_fetch. The model is the one writing the excerpt text — what we
+    enforce is that the fetch actually happened. If it didn't, excerpt
+    must be None so the frontend shows 'Excerpt unavailable'.
+    """
+
+    def test_excerpt_kept_when_url_fetched(self):
+        from agents.academic_advisor import _filter_to_verified
+
+        citations = [{
+            "title": "Paper",
+            "url": "https://example.com/paper",
+            "excerpt": "Direct passage from the fetched page corroborating the finding.",
+        }]
+        verified = [{"url": "https://example.com/paper"}]
+        fetched = {"https://example.com/paper"}
+
+        result = _filter_to_verified(citations, verified, fetched_urls=fetched)
+        assert result[0]["excerpt"] == "Direct passage from the fetched page corroborating the finding."
+
+    def test_excerpt_stripped_when_url_not_fetched(self):
+        """The integrity property — excerpt without a fetch is dropped to None."""
+        from agents.academic_advisor import _filter_to_verified
+
+        citations = [{
+            "title": "Paywalled",
+            "url": "https://example.com/paywalled",
+            # Model claims it read the page, but the fetch never landed.
+            "excerpt": "This text would be fabricated from training memory.",
+        }]
+        verified = [{"url": "https://example.com/paywalled"}]
+        fetched: set[str] = set()  # No URL was successfully fetched.
+
+        result = _filter_to_verified(citations, verified, fetched_urls=fetched)
+        assert len(result) == 1
+        assert result[0]["excerpt"] is None, (
+            "Excerpt must be None when web_fetch did not retrieve the URL"
+        )
+
+    def test_excerpt_always_present_in_response_shape(self):
+        """Every surviving citation carries the excerpt key — even when None."""
+        from agents.academic_advisor import _filter_to_verified
+
+        citations = [{"title": "X", "url": "https://x.com"}]  # No excerpt emitted
+        verified = [{"url": "https://x.com"}]
+
+        result = _filter_to_verified(citations, verified, fetched_urls=set())
+        assert "excerpt" in result[0]
+        assert result[0]["excerpt"] is None
+
+    def test_excerpt_stripped_when_empty_string(self):
+        from agents.academic_advisor import _filter_to_verified
+
+        citations = [{"title": "X", "url": "https://x.com", "excerpt": "   "}]
+        verified = [{"url": "https://x.com"}]
+        fetched = {"https://x.com"}
+
+        result = _filter_to_verified(citations, verified, fetched_urls=fetched)
+        assert result[0]["excerpt"] is None
+
+    def test_excerpt_trimmed(self):
+        from agents.academic_advisor import _filter_to_verified
+
+        citations = [{
+            "title": "X", "url": "https://x.com",
+            "excerpt": "  Leading and trailing whitespace.  ",
+        }]
+        verified = [{"url": "https://x.com"}]
+        fetched = {"https://x.com"}
+
+        result = _filter_to_verified(citations, verified, fetched_urls=fetched)
+        assert result[0]["excerpt"] == "Leading and trailing whitespace."
+
+    def test_fetched_urls_none_disables_gate2(self):
+        """verify-finding passes fetched_urls=None — excerpt is kept if emitted."""
+        from agents.academic_advisor import _filter_to_verified
+
+        citations = [{"title": "X", "url": "https://x.com", "excerpt": "From summary."}]
+        verified = [{"url": "https://x.com"}]
+
+        result = _filter_to_verified(citations, verified, fetched_urls=None)
+        assert result[0]["excerpt"] == "From summary."
+
+    def test_url_fetched_but_no_excerpt_emitted_is_none(self):
+        """Fetched-but-no-excerpt is the same as not-fetched from the UI's view."""
+        from agents.academic_advisor import _filter_to_verified
+
+        citations = [{"title": "X", "url": "https://x.com"}]  # No excerpt field
+        verified = [{"url": "https://x.com"}]
+        fetched = {"https://x.com"}
+
+        result = _filter_to_verified(citations, verified, fetched_urls=fetched)
+        assert result[0]["excerpt"] is None
 
 
 class TestParseJSONResponse:
@@ -202,6 +302,26 @@ class TestAdvisorAnalyseEndpoint:
         for citation in data["citations"]:
             assert citation.get("verified") is True, (
                 "Every citation returned to frontend must be verified"
+            )
+
+    def test_citations_carry_excerpt_field(self):
+        """The excerpt field is part of the citation contract — present on
+        every citation as either a non-empty string or None. The frontend
+        relies on the field's presence to decide between excerpt tooltip
+        and fallback message."""
+        resp = client.post(
+            "/api/advisor/analyse",
+            json={"query": "any", "deliverable_type": "midpoint"},
+            headers=AUTH_HEADERS,
+        )
+        data = resp.json()
+        for citation in data["citations"]:
+            assert "excerpt" in citation, (
+                "Every citation must include the 'excerpt' field"
+            )
+            excerpt = citation["excerpt"]
+            assert excerpt is None or isinstance(excerpt, str), (
+                "excerpt must be string or None"
             )
 
     def test_unauthenticated_rejected(self):
@@ -345,6 +465,29 @@ class TestCitationIntegrityInvariant:
             assert (
                 citation["url"].lower().rstrip("/") in verified_urls
             ), f"Mock citation {citation['url']} not in mock verified_sources"
+
+    def test_mock_analyse_citations_have_excerpts(self):
+        """
+        Mock fixtures must include excerpt strings to exercise the
+        frontend's tooltip-rendering path. If the mock drops the excerpt,
+        the frontend test that asserts excerpts render would degrade to
+        the fallback-message path and silently change semantics.
+        """
+        from agents.academic_advisor import MOCK_ADVISOR_ANALYSE
+        for citation in MOCK_ADVISOR_ANALYSE["citations"]:
+            assert citation.get("excerpt"), (
+                f"Mock citation {citation['url']} must include a non-empty excerpt"
+            )
+            assert len(citation["excerpt"]) >= 50, (
+                "Mock excerpts should be 2-3 sentences (≥50 chars)"
+            )
+
+    def test_mock_citations_have_excerpts(self):
+        from agents.academic_advisor import MOCK_ADVISOR_CITATIONS
+        for citation in MOCK_ADVISOR_CITATIONS["citations"]:
+            assert citation.get("excerpt"), (
+                f"Mock citation {citation['url']} must include a non-empty excerpt"
+            )
 
     def test_mock_verify_evidence_present_in_verified_sources(self):
         from agents.academic_advisor import MOCK_ADVISOR_VERIFY

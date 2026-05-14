@@ -64,6 +64,24 @@ _WEB_SEARCH_TOOL = {
     "max_uses": 3,
 }
 
+# web_fetch lets the model retrieve the actual page text behind a URL it
+# discovered via web_search. The excerpt requirement (CLAUDE.md addendum)
+# is enforced here: every citation must be backed by a successful fetch,
+# and the 2-3 sentence excerpt the model writes must come from the fetched
+# page. We cap at 5 fetches per call — enough to back the typical 3-5
+# citations the advisor returns, without inviting runaway tool use.
+_WEB_FETCH_TOOL = {
+    "type": "web_fetch_20250910",
+    "name": "web_fetch",
+    "max_uses": 5,
+}
+
+# Sentinel shown on the frontend when a citation has no excerpt — either
+# because the fetch failed (paywall, 404, robots.txt) or because the
+# model emitted a citation it didn't actually fetch. Either case fails
+# the integrity gate; the user is directed to verify directly.
+EXCERPT_UNAVAILABLE = None
+
 _DELIVERABLE_RUBRIC = {
     "midpoint":      {"weight": "10%", "due": "2026-05-27", "focus": "framing, preliminary findings, methodology"},
     "appendix":      {"weight": "35%", "due": "2026-07-01", "focus": "rigour, provenance, reproducibility"},
@@ -100,13 +118,23 @@ If external evidence contradicts the internal data, flag it explicitly.
 Do not suppress contradictions — they are valuable quality signals.
 
 CITATION RULES — NON-NEGOTIABLE:
-  ALWAYS use web_search to verify a source exists before citing it.
-  NEVER cite a paper you cannot verify via the tool.
-  When you cite a source, state the URL returned by web_search.
-  If you cannot verify a claim, say: 'I searched for supporting evidence
-  but could not verify a reputable source for this claim.'
-  Reputable sources only: Fed, IMF, BIS, AQR, NBER, peer-reviewed journals,
-  major central banks. No blogs, LinkedIn posts, or unverified preprints.
+  1. ALWAYS use web_search to verify a source exists before citing it.
+  2. THEN use web_fetch on the URL of every source you intend to cite.
+     The fetch retrieves the actual page text — you must read it before
+     including the source in your citations list.
+  3. From the fetched page, write a 2-3 sentence excerpt that
+     specifically corroborates the finding you are citing it for.
+     The excerpt must be drawn from the fetched page text — never
+     from your training memory. Quote or paraphrase tightly enough
+     that a reader can locate the supporting passage in the source.
+  4. If web_fetch fails (paywall, 404, robots.txt block, timeout),
+     OMIT the citation entirely. Do not write an excerpt from memory.
+     It is better to return three verified citations than five with
+     fabricated excerpts.
+  5. NEVER cite a paper you cannot verify via web_search AND web_fetch.
+  6. Reputable sources only: Fed, IMF, BIS, AQR, NBER, peer-reviewed
+     journals, major central banks. No blogs, LinkedIn, unverified
+     preprints.
 
 GRADE AWARENESS:
   Prioritise feedback by grade weight. For the midpoint, focus on framing
@@ -114,32 +142,43 @@ GRADE AWARENESS:
   statistical rigour.
 
 OUTPUT FORMAT:
-  Respond in JSON with four top-level keys: key_findings, guidance,
-  citations (each citation having title, url, relevance, verified=true),
-  potential_issues (contradictions or gaps). If you cannot verify a
-  source, omit it rather than guess.
+  Respond in JSON with four top-level keys:
+    key_findings     (list[str])
+    guidance         (list[str])
+    citations        (list of objects with keys: title, url, relevance, excerpt, verified=true)
+    potential_issues (list[str])
+  The excerpt field is REQUIRED for every citation and must be a direct
+  2-3 sentence passage from the page returned by web_fetch. If you did
+  not fetch the page, do not include the citation.
 
 {GLOBAL_AGENT_RULE}
 
 {SCOPE_ENFORCEMENT}"""
 
 
-def _extract_text_and_sources(
+def _extract_text_sources_and_fetches(
     response: anthropic.types.Message,
-) -> tuple[str, list[dict[str, Any]]]:
+) -> tuple[str, list[dict[str, Any]], set[str]]:
     """
-    Pulls the final-turn text and any URLs surfaced by the web_search tool.
+    Pulls the final-turn text, URLs surfaced by web_search, and the set of
+    URLs successfully retrieved by web_fetch.
 
     Why we walk the content list ourselves rather than using message.content[0]:
-    when web_search runs, the SDK returns a mixed list — server_tool_use blocks,
-    web_search_tool_result blocks, and text blocks all interleaved. The final
-    answer is the LAST text block. Verified sources come from
-    web_search_tool_result blocks, which carry the URLs Anthropic's tool
-    actually fetched. Citations not appearing in this list are unverified
-    by definition.
+    when web_search + web_fetch run, the SDK returns a mixed list —
+    server_tool_use blocks, web_search_tool_result blocks,
+    web_fetch_tool_result blocks, and text blocks all interleaved. The
+    final answer is the LAST text block.
+
+    fetched_urls is the integrity gate for excerpts: a citation gets a
+    rendered excerpt only when its URL is in this set. URLs whose fetch
+    errored (paywall, 404, timeout) never enter the set — the
+    web_fetch_tool_result_error path is detected and skipped. The model
+    can still emit an excerpt in its JSON, but _filter_to_verified
+    strips it whenever the URL was not actually fetched.
     """
     final_text = ""
     sources: list[dict[str, Any]] = []
+    fetched_urls: set[str] = set()
 
     for block in response.content:
         block_type = getattr(block, "type", None)
@@ -163,7 +202,25 @@ def _extract_text_and_sources(
                             "verified": True,
                         })
 
-    return final_text, sources
+        elif block_type == "web_fetch_tool_result":
+            # A successful fetch carries a web_fetch_result inner block
+            # with the fetched URL and a document with the page text.
+            # A failed fetch carries a web_fetch_tool_result_error block
+            # — we deliberately skip those so the URL never enters
+            # fetched_urls, which the excerpt gate depends on.
+            content = getattr(block, "content", None)
+            if content is None:
+                continue
+            inner_type = getattr(content, "type", None)
+            if inner_type == "web_fetch_result":
+                url = getattr(content, "url", "")
+                if url:
+                    fetched_urls.add(_normalise_url(url))
+            # web_fetch_tool_result_error path: intentionally skipped.
+            # The error code is in content.error_code if needed for
+            # logging, but the integrity contract is binary: in or out.
+
+    return final_text, sources, fetched_urls
 
 
 def _parse_json_response(text: str) -> dict[str, Any]:
@@ -194,28 +251,39 @@ def _parse_json_response(text: str) -> dict[str, Any]:
         return {}
 
 
-def _call_advisor_with_web_search(
+def _call_advisor_with_web_tools(
     user_message: str,
     max_tokens: int = MAX_OUTPUT_TOKENS,
-) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    enable_fetch: bool = True,
+) -> tuple[dict[str, Any], list[dict[str, Any]], set[str], dict[str, Any]]:
     """
     Single entry point for all advisor calls.
 
-    Returns (parsed_json, verified_sources, usage_metadata).
-    Verified_sources reflects URLs the model actually retrieved via the
-    web_search tool — passed to the frontend so the advisor's citations
-    can be cross-checked against tool-returned URLs.
+    Returns (parsed_json, verified_sources, fetched_urls, usage_metadata).
+
+    verified_sources reflects URLs returned by the web_search tool.
+    fetched_urls is the set of URLs the model successfully retrieved via
+    web_fetch — used by _filter_to_verified to gate excerpt rendering.
+
+    enable_fetch defaults to True for analyse/citations, where the
+    excerpt contract applies. The verify-finding endpoint passes False:
+    that endpoint returns supporting/contradicting evidence with one-
+    line summaries, not full per-citation excerpts.
     """
     client = get_anthropic_client()
+    tools: list[dict[str, Any]] = [_WEB_SEARCH_TOOL]
+    if enable_fetch:
+        tools.append(_WEB_FETCH_TOOL)
+
     response = client.messages.create(
         model=SONNET_MODEL,
         max_tokens=max_tokens,
         system=_SYSTEM_PROMPT,
-        tools=[_WEB_SEARCH_TOOL],
+        tools=tools,
         messages=[{"role": "user", "content": user_message}],
     )
 
-    text, sources = _extract_text_and_sources(response)
+    text, sources, fetched_urls = _extract_text_sources_and_fetches(response)
     parsed = _parse_json_response(text)
 
     usage = {
@@ -223,8 +291,9 @@ def _call_advisor_with_web_search(
         "output_tokens": getattr(response.usage, "output_tokens", 0),
         "model":         SONNET_MODEL,
         "n_searches":    len(sources),
+        "n_fetches":     len(fetched_urls),
     }
-    return parsed, sources, usage
+    return parsed, sources, fetched_urls, usage
 
 
 class AcademicAdvisor:
@@ -287,7 +356,7 @@ class AcademicAdvisor:
         )
 
         try:
-            parsed, sources, usage = _call_advisor_with_web_search(user_message)
+            parsed, sources, fetched_urls, usage = _call_advisor_with_web_tools(user_message)
         except Exception as exc:
             log.error("advisor_analyse_error", error=str(exc), deliverable=deliverable_type)
             return {
@@ -301,7 +370,11 @@ class AcademicAdvisor:
         result = {
             "key_findings":      parsed.get("key_findings", []),
             "guidance":          parsed.get("guidance", []),
-            "citations":         _filter_to_verified(parsed.get("citations", []), sources),
+            "citations":         _filter_to_verified(
+                parsed.get("citations", []),
+                sources,
+                fetched_urls,
+            ),
             "potential_issues":  parsed.get("potential_issues", []),
             "verified_sources":  sources,
             "deliverable_type":  deliverable_type,
@@ -312,6 +385,7 @@ class AcademicAdvisor:
             deliverable=deliverable_type,
             usage=usage,
             n_citations_verified=len(result["citations"]),
+            n_excerpts=sum(1 for c in result["citations"] if c.get("excerpt")),
             n_potential_issues=len(result["potential_issues"]),
         )
         return result
@@ -343,7 +417,12 @@ class AcademicAdvisor:
         )
 
         try:
-            parsed, sources, usage = _call_advisor_with_web_search(user_message)
+            # verify-finding doesn't need excerpts — its evidence carries
+            # short summary text already. Keeping web_fetch off here saves
+            # tokens and keeps the call snappier for a sanity-check loop.
+            parsed, sources, fetched_urls, usage = _call_advisor_with_web_tools(
+                user_message, enable_fetch=False,
+            )
         except Exception as exc:
             log.error("advisor_verify_error", error=str(exc), finding=finding[:80])
             return {
@@ -355,8 +434,12 @@ class AcademicAdvisor:
             }
 
         result = {
-            "supporting_evidence":    _filter_to_verified(parsed.get("supporting_evidence", []), sources),
-            "contradicting_evidence": _filter_to_verified(parsed.get("contradicting_evidence", []), sources),
+            "supporting_evidence":    _filter_to_verified(
+                parsed.get("supporting_evidence", []), sources, fetched_urls,
+            ),
+            "contradicting_evidence": _filter_to_verified(
+                parsed.get("contradicting_evidence", []), sources, fetched_urls,
+            ),
             "verdict":                parsed.get("verdict", "uncertain"),
             "reasoning":              parsed.get("reasoning", ""),
             "verified_sources":       sources,
@@ -396,16 +479,19 @@ class AcademicAdvisor:
         )
 
         try:
-            parsed, sources, usage = _call_advisor_with_web_search(user_message)
+            parsed, sources, fetched_urls, usage = _call_advisor_with_web_tools(user_message)
         except Exception as exc:
             log.error("advisor_citations_error", error=str(exc), finding=finding[:80])
             return {"citations": [], "verified_sources": []}
 
-        verified_citations = _filter_to_verified(parsed.get("citations", []), sources)
+        verified_citations = _filter_to_verified(
+            parsed.get("citations", []), sources, fetched_urls,
+        )
         _log_advisor_call(
             method="citations",
             usage=usage,
             n_citations_verified=len(verified_citations),
+            n_excerpts=sum(1 for c in verified_citations if c.get("excerpt")),
             n_citations_requested=capped,
         )
         return {
@@ -417,15 +503,31 @@ class AcademicAdvisor:
 def _filter_to_verified(
     citations: list[Any],
     verified_sources: list[dict[str, Any]],
+    fetched_urls: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Drops any citation whose URL does not appear in the web_search result set.
+    Drops any citation whose URL did not appear in the web_search results.
+    Gates the `excerpt` field on a successful web_fetch of the same URL.
 
-    This is the runtime enforcement of the citation integrity rule: even
-    if the model invents a plausible-looking URL, it cannot survive this
-    filter unless the tool actually retrieved that URL. URLs are compared
-    case-insensitively with trailing slashes stripped — a common source of
-    spurious mismatches.
+    The two-gate integrity contract:
+
+      Gate 1 — web_search verification (URL existence):
+        Even if the model invents a plausible-looking URL, it cannot
+        survive this filter unless web_search actually returned it.
+        URLs are compared case-insensitively with trailing slashes
+        stripped — a common source of spurious mismatches.
+
+      Gate 2 — web_fetch verification (excerpt provenance):
+        The model emits an `excerpt` field per citation when the system
+        prompt asks for one. We only keep the excerpt if the URL is in
+        fetched_urls — meaning Anthropic's web_fetch tool retrieved the
+        actual page. If not, excerpt is forced to None so the frontend
+        shows "Excerpt unavailable — click to verify directly". The
+        model cannot bypass this by writing an excerpt from memory: no
+        fetch, no excerpt.
+
+    fetched_urls=None disables Gate 2 entirely (used by verify-finding,
+    which carries one-line summaries rather than passage excerpts).
     """
     if not isinstance(citations, list):
         return []
@@ -439,9 +541,32 @@ def _filter_to_verified(
         url = _normalise_url(c.get("url", ""))
         if not url:
             continue
-        if url in verified_urls:
-            # Force verified=true even if the model emitted false.
-            out.append({**c, "verified": True})
+        if url not in verified_urls:
+            continue
+
+        # Gate 2 — excerpt provenance. When fetched_urls is provided,
+        # we enforce: excerpt is present only if the URL was fetched.
+        # Otherwise the frontend falls back to "Excerpt unavailable".
+        emitted_excerpt = c.get("excerpt")
+        if fetched_urls is None:
+            # Caller opted out of the excerpt gate (verify-finding).
+            excerpt_value: str | None = (
+                emitted_excerpt if isinstance(emitted_excerpt, str) and emitted_excerpt.strip()
+                else None
+            )
+        elif url in fetched_urls and isinstance(emitted_excerpt, str) and emitted_excerpt.strip():
+            # Both gates passed: keep the model's excerpt (it generated
+            # it from the fetched page).
+            excerpt_value = emitted_excerpt.strip()
+        else:
+            # Either the fetch never landed (paywall/error/timeout) or
+            # the model didn't emit an excerpt despite being asked.
+            excerpt_value = None
+
+        # Force verified=true even if the model emitted otherwise, and
+        # always emit the excerpt field so the frontend can rely on its
+        # presence (None signals fallback text).
+        out.append({**c, "verified": True, "excerpt": excerpt_value})
 
     return out
 
@@ -485,6 +610,10 @@ MOCK_ADVISOR_ANALYSE = {
             "title": "Stock-Bond Correlations in the Post-Pandemic Era",
             "url": "https://www.aqr.com/Insights/Research/Journal-Article/Stock-Bond-Correlations",
             "relevance": "Empirical confirmation of the 2022 correlation regime shift.",
+            # Excerpt mirrors the contract: short, drawn from the fetched
+            # page, corroborates the specific finding. In production this
+            # comes from web_fetch; in tests it's a fixture.
+            "excerpt": "The previously negative stock-bond correlation flipped positive in 2022 as both asset classes repriced lower in response to coordinated central bank tightening. The traditional 60/40 portfolio offered little diversification benefit during the worst drawdown.",
             "verified": True,
         }
     ],
@@ -521,6 +650,7 @@ MOCK_ADVISOR_CITATIONS = {
             "year": 1986,
             "url": "https://www.cfainstitute.org/en/research/financial-analysts-journal/1986/determinants-of-portfolio-performance",
             "relevance": "Foundational attribution framework — allocation vs selection.",
+            "excerpt": "Investment policy — the long-term mix of asset classes — explains over 90 percent of the variance of returns for a typical pension fund. Market timing and security selection contribute far less to total performance variation than the strategic asset allocation decision.",
             "verified": True,
         }
     ],
