@@ -52,6 +52,10 @@ matplotlib>=3.8.0
 # Sprint 6: also used by the executive brief and analytical appendix
 # generators. Pinned to a major version that's been stable for years.
 python-docx>=1.1.0
+# python-pptx generates the .pptx deck from Molly's storyboard.
+# Sprint 6 Phase 6: drives /api/reports/generate-from-storyboard/:id
+# when output_type='deck'.
+python-pptx>=0.6.21
 
 # ── Testing ───────────────────────────────────────────────────────────────────
 pytest>=7.4.0

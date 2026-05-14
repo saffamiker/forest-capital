@@ -1319,7 +1319,7 @@ async def reports_manifest(request: Request, session: dict = Depends(require_aut
                 "endpoint": "/api/documents/storyboard/draft",
                 "method": "POST",
                 "format": "json",
-                "status": "planned",
+                "status": "available",
                 "deadline": "July 1, 2026",
             },
             {
@@ -1332,7 +1332,7 @@ async def reports_manifest(request: Request, session: dict = Depends(require_aut
                 "endpoint": "/api/reports/generate-from-storyboard",
                 "method": "POST",
                 "format": "pptx",
-                "status": "planned",
+                "status": "available",
                 "deadline": "July 1, 2026",
             },
             {
@@ -1345,10 +1345,495 @@ async def reports_manifest(request: Request, session: dict = Depends(require_aut
                 "endpoint": "/api/reports/generate-from-storyboard",
                 "method": "POST",
                 "format": "docx",
-                "status": "planned",
+                "status": "available",
                 "deadline": "July 1, 2026",
             },
         ],
+    }
+
+
+# ── Documents & Storyboard Editor (Sprint 6 Phase 6) ─────────────────────────
+#
+# Documents tables (migration 004) back four routes here. They follow a
+# strict pattern: every mutation goes through tools/documents_cache.py
+# so the DB-unavailable failure mode degrades to 503 rather than 500.
+# Auth scope: any logged-in team member can read / mutate any document —
+# we trust the four-person ALLOWED_EMAILS list, not row-level ACLs.
+
+@app.post("/api/documents/storyboard/draft")
+@limiter.limit("10/minute")
+async def storyboard_draft(request: Request, session: dict = Depends(require_auth)):
+    """
+    Generates an initial 15-slide storyboard from current strategy results.
+
+    Returns the new document_id + the full slide JSON. The caller (typically
+    the Reports screen's "Create Storyboard" button) hands the document_id
+    to the StoryboardEditor route. Subsequent edits flow through
+    PATCH /api/documents/:id/draft.
+    """
+    from tools.storyboard_template import build_default_storyboard
+    from tools.documents_cache import create_document
+
+    # Pull current strategy results so the AI draft references live numbers.
+    # Tests / dev environments without a DATABASE_URL still produce a valid
+    # storyboard from the default template + placeholder numbers.
+    results_dict: dict = {}
+    strategy_hash: str | None = None
+    if ENVIRONMENT != "test":
+        try:
+            from tools.data_fetcher import get_full_history
+            from tools.backtester import run_all_strategies
+            from tools.cache import get_strategy_cache, _compute_data_hash
+
+            history = get_full_history()
+            monthly = history.get("equity_monthly")
+            n_rows = len(monthly) if monthly is not None else 0
+            last_date = (
+                str(monthly.index[-1].date())
+                if monthly is not None and len(monthly) > 0 else "unknown"
+            )
+            strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
+            cached = await get_strategy_cache(strategy_hash)
+            results_dict = cached if cached else run_all_strategies(history)
+        except Exception as exc:
+            log.warning("storyboard_draft_strategy_load_failed", error=str(exc))
+
+    # Try Academic Writer enrichment for speaker notes. None on failure —
+    # build_default_storyboard handles both paths gracefully.
+    writer = None
+    if ENVIRONMENT != "test":
+        try:
+            from agents.academic_writer import AcademicWriter
+            writer = AcademicWriter()
+        except Exception:
+            writer = None
+
+    storyboard = build_default_storyboard(strategy_results=results_dict, writer=writer)
+
+    doc_id = await create_document(
+        doc_type="storyboard",
+        owner_email=session.get("email", "unknown@queens.edu"),
+        initial_content=storyboard,
+        strategy_hash=strategy_hash,
+        created_by=session.get("email"),
+    )
+
+    if doc_id is None:
+        # DB unavailable — return the storyboard inline so the UI can still
+        # render an editable preview, but flag that persistence failed.
+        return {
+            "document_id": None,
+            "storyboard": storyboard,
+            "persistence": "unavailable",
+            "message": (
+                "Storyboard generated but not saved to the database. "
+                "Save Version will fail until the operator runs "
+                "`alembic upgrade head` on Render."
+            ),
+        }
+
+    return {
+        "document_id": doc_id,
+        "storyboard": storyboard,
+        "persistence": "saved",
+    }
+
+
+@app.get("/api/documents/{document_id}")
+@limiter.limit("60/minute")
+async def get_document(
+    document_id: str, request: Request, session: dict = Depends(require_auth),
+):
+    """Returns the current working draft for a document."""
+    from tools.documents_cache import get_document_draft
+    draft = await get_document_draft(document_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return draft
+
+
+@app.patch("/api/documents/{document_id}/draft")
+@limiter.limit("120/minute")
+async def patch_document_draft(
+    document_id: str,
+    body: dict,
+    request: Request,
+    session: dict = Depends(require_auth),
+):
+    """
+    Auto-save endpoint. 120/min lets the 30-second auto-save fire freely
+    without throttling. Updates the draft in place — version snapshots
+    use POST /api/documents/:id/versions instead.
+    """
+    from tools.documents_cache import update_draft
+    content = body.get("content")
+    if not isinstance(content, dict):
+        raise HTTPException(status_code=422, detail="Body must include 'content' object")
+    ok = await update_draft(document_id, content)
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail="Document not found or draft update failed",
+        )
+    return {"saved_at": "now", "document_id": document_id}
+
+
+@app.post("/api/documents/{document_id}/versions")
+@limiter.limit("30/minute")
+async def post_document_version(
+    document_id: str,
+    body: dict,
+    request: Request,
+    session: dict = Depends(require_auth),
+):
+    """
+    Creates a named snapshot of the current draft state. The body must
+    include 'content' (current draft) and optionally 'version_name' +
+    'change_summary'. Returns the new version's id and version_number.
+    """
+    from tools.documents_cache import save_named_version
+    content = body.get("content")
+    if not isinstance(content, dict):
+        raise HTTPException(status_code=422, detail="Body must include 'content' object")
+    version_name = body.get("version_name") or "Untitled version"
+    change_summary = body.get("change_summary")
+
+    result = await save_named_version(
+        document_id=document_id,
+        version_name=version_name,
+        content=content,
+        created_by=session.get("email", "unknown@queens.edu"),
+        change_summary=change_summary,
+        is_auto_save=False,
+    )
+    if result is None:
+        raise HTTPException(status_code=503, detail="Version persistence unavailable")
+    return result
+
+
+@app.get("/api/documents/{document_id}/versions")
+@limiter.limit("60/minute")
+async def list_document_versions(
+    document_id: str, request: Request, session: dict = Depends(require_auth),
+):
+    """Returns all versions for a document, newest first."""
+    from tools.documents_cache import list_versions
+    return {"versions": await list_versions(document_id)}
+
+
+@app.post("/api/documents/{document_id}/restore/{version_id}")
+@limiter.limit("20/minute")
+async def restore_document_version(
+    document_id: str,
+    version_id: str,
+    request: Request,
+    session: dict = Depends(require_auth),
+):
+    """
+    Restores a prior version: copies its content into a new version row
+    (with restored_from set to track the rollback) and replaces the draft.
+    The original version stays intact — restore never deletes history.
+    """
+    from tools.documents_cache import restore_version
+    result = await restore_version(
+        document_id=document_id,
+        version_id=version_id,
+        restored_by=session.get("email", "unknown@queens.edu"),
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Version not found")
+    return result
+
+
+# ── Generate from storyboard — pptx / script / Q&A ────────────────────────────
+
+@app.post("/api/reports/generate-from-storyboard/{document_id}")
+@limiter.limit("10/minute")
+async def generate_from_storyboard(
+    document_id: str,
+    body: dict,
+    request: Request,
+    session: dict = Depends(require_auth),
+):
+    """
+    Reads Molly's edited storyboard from document_drafts and renders one
+    of four artifact types into a download. The `output_type` field in
+    the request body picks the renderer:
+
+      deck            → .pptx via tools/pptx_generator
+      script          → .docx full team script via tools/script_writer
+      script_molly    → .docx Molly-only filtered script
+      script_michael  → .docx Michael-only filtered script
+      script_bob      → .docx Bob-only filtered script
+      rehearsal       → .docx full team + cues every 2 min + visual cues
+      qa              → .docx Q&A preparation, 3 sections, 18 questions
+
+    The pptx deck biases toward Molly's edits — her slide order, chart
+    refs, and timing all drive the deck output.
+    """
+    from fastapi.responses import Response as FastAPIResponse
+    from tools.documents_cache import get_document_draft
+
+    output_type = body.get("output_type") or "deck"
+    valid = {"deck", "script", "script_molly", "script_michael", "script_bob",
+             "rehearsal", "qa"}
+    if output_type not in valid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"output_type must be one of {sorted(valid)}",
+        )
+
+    # Test env: short-circuit to a minimal deck/script without touching
+    # the DB or LLM. Keeps the test runs fast and the assertion surface
+    # focused on routing rather than content quality.
+    if ENVIRONMENT == "test":
+        storyboard = body.get("storyboard") or {"slides": []}
+    else:
+        draft = await get_document_draft(document_id)
+        if draft is None:
+            raise HTTPException(status_code=404, detail="Storyboard not found")
+        storyboard = draft.get("content", {}) or {}
+
+    # Academic Writer is the spoken-prose engine for the script outputs.
+    # Unavailable in test env or without an API key — script_writer falls
+    # back to deterministic paragraphs in both cases.
+    writer = None
+    if ENVIRONMENT != "test":
+        try:
+            from agents.academic_writer import AcademicWriter
+            writer = AcademicWriter()
+        except Exception:
+            writer = None
+
+    if output_type == "deck":
+        from tools.pptx_generator import build_pptx_from_storyboard
+        pptx_bytes = build_pptx_from_storyboard(storyboard)
+        from datetime import date
+        filename = f"forest-capital-deck-{date.today().isoformat()}.pptx"
+        return FastAPIResponse(
+            content=pptx_bytes,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "presentationml.presentation"
+            ),
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    if output_type == "qa":
+        from tools.script_writer import build_qa_prep_docx
+        from datetime import date
+        # Pull current strategy results so the Q&A doc references the live
+        # significance count. Unavailable in test env → empty results dict.
+        results: dict = {}
+        if ENVIRONMENT != "test":
+            try:
+                from tools.data_fetcher import get_full_history
+                from tools.backtester import run_all_strategies
+                history = get_full_history()
+                results = run_all_strategies(history)
+            except Exception:
+                pass
+        docx_bytes = build_qa_prep_docx(storyboard, strategy_results=results)
+        filename = f"forest-capital-qa-prep-{date.today().isoformat()}.docx"
+        return FastAPIResponse(
+            content=docx_bytes,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # All remaining types are script variants — one shared docx builder.
+    from tools.script_writer import build_script_docx
+    owner_filter = None
+    include_cues = False
+    if output_type == "script_molly":
+        owner_filter = "Molly"
+    elif output_type == "script_michael":
+        owner_filter = "Michael"
+    elif output_type == "script_bob":
+        owner_filter = "Bob"
+    elif output_type == "rehearsal":
+        include_cues = True
+
+    docx_bytes = build_script_docx(
+        storyboard,
+        owner_filter=owner_filter,
+        include_rehearsal_cues=include_cues,
+        writer=writer,
+    )
+    from datetime import date
+    suffix = output_type if output_type != "script" else "full-team"
+    filename = f"forest-capital-script-{suffix}-{date.today().isoformat()}.docx"
+    return FastAPIResponse(
+        content=docx_bytes,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument."
+            "wordprocessingml.document"
+        ),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ── Gemini assistant for storyboard + section editors ────────────────────────
+
+@app.post("/api/documents/{document_id}/assistant")
+@limiter.limit("20/minute")
+async def document_assistant(
+    document_id: str,
+    body: dict,
+    request: Request,
+    session: dict = Depends(require_auth),
+):
+    """
+    Routes an inline editing request to Gemini 1.5 Pro for the storyboard
+    and section editors. Returns a suggestion + a structured diff so the
+    UI can render red-removed / green-added text and let the user accept
+    or reject per paragraph.
+
+    Constraints (CLAUDE.md Section 14):
+      - No statistics introduced that aren't already in the input
+      - No citations outside references.json
+      - Scope guard rejects off-topic requests
+      - Multi-turn conversation context is the caller's responsibility
+        (we don't persist conversation state here; the UI sends prior
+        messages in body['history'] when needed)
+    """
+    user_message = (body.get("message") or "").strip()
+    context_content = (body.get("context_content") or "").strip()
+    context_type = body.get("context_type") or "slide"
+
+    if not user_message:
+        raise HTTPException(status_code=422, detail="'message' is required")
+    if len(user_message) > 1000:
+        raise HTTPException(status_code=422, detail="Message exceeds 1000-char limit")
+
+    # Scope guard — same Haiku-classifier path the council uses
+    if ENVIRONMENT != "test":
+        try:
+            from scope_guard import ScopeGuard
+            guard = ScopeGuard()
+            scope_result = await guard.check(user_message)
+            if not scope_result["allowed"]:
+                return {
+                    "suggestion": "",
+                    "diff": {"removed": [], "added": []},
+                    "explanation": scope_result.get(
+                        "rejection_message",
+                        "This request is outside the scope of the Forest "
+                        "Capital Portfolio Intelligence System.",
+                    ),
+                    "confidence": 0.0,
+                    "out_of_scope": True,
+                }
+        except Exception:
+            # Scope-guard failure is non-fatal — proceed but log
+            log.warning("document_assistant_scope_guard_failed")
+
+    # Test env: return a deterministic mock without calling Gemini
+    if ENVIRONMENT == "test":
+        return _mock_assistant_response(user_message, context_content)
+
+    try:
+        from agents.contrarian_analyst import XAI_TIMEOUT_SECONDS  # noqa: F401
+        import os as _os
+        import google.generativeai as genai  # type: ignore[import-untyped]
+
+        api_key = _os.getenv("GOOGLE_API_KEY", "")
+        if not api_key:
+            log.info("document_assistant_mock_no_key")
+            return _mock_assistant_response(user_message, context_content)
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(
+            "gemini-1.5-pro",
+            system_instruction=_GEMINI_ASSISTANT_SYSTEM_PROMPT,
+        )
+
+        prompt = (
+            f"Editing context: {context_type}\n"
+            f"Current content:\n```\n{context_content}\n```\n\n"
+            f"User request: {user_message}\n\n"
+            f"Respond with a rewritten version of the content that addresses the "
+            f"user's request. Constraints:\n"
+            f"  - Only reference numbers present in the current content above\n"
+            f"  - Do not introduce citations not already in the content\n"
+            f"  - Match the spoken-paragraph register of the original\n"
+            f"  - Output ONLY the rewritten content, no preamble"
+        )
+
+        response = model.generate_content(prompt)
+        suggestion = response.text.strip()
+
+        return {
+            "suggestion":   suggestion,
+            "diff":         _build_diff(context_content, suggestion),
+            "explanation":  f"Rewrote {context_type} to address: {user_message[:120]}",
+            "confidence":   0.7,
+            "out_of_scope": False,
+        }
+
+    except Exception as exc:
+        log.warning("document_assistant_error", error=str(exc))
+        return _mock_assistant_response(user_message, context_content)
+
+
+_GEMINI_ASSISTANT_SYSTEM_PROMPT = (
+    "You are an editing assistant embedded in the Forest Capital Portfolio "
+    "Intelligence System. Your job is to rewrite the user's content according "
+    "to their request — tighten, expand, restructure, change tone — without "
+    "introducing facts that weren't in the original. You may only reference "
+    "numbers and citations present in the input content. If the request "
+    "would require fabricating a statistic or citing a source not in the "
+    "content, say so plainly and refuse that part of the request. "
+    "Output only the rewritten content. No preamble, no explanation."
+)
+
+
+def _build_diff(before: str, after: str) -> dict[str, list[str]]:
+    """
+    Simple paragraph-level diff used by the UI diff display. Splits both
+    versions on blank lines and tags paragraphs as removed (in before
+    only), added (in after only), or unchanged. The UI renders removed
+    red and added green; unchanged paragraphs aren't sent to keep the
+    payload small.
+    """
+    before_paras = [p.strip() for p in before.split("\n\n") if p.strip()]
+    after_paras = [p.strip() for p in after.split("\n\n") if p.strip()]
+    before_set = set(before_paras)
+    after_set = set(after_paras)
+    return {
+        "removed": [p for p in before_paras if p not in after_set],
+        "added":   [p for p in after_paras if p not in before_set],
+    }
+
+
+def _mock_assistant_response(user_message: str, context: str) -> dict[str, Any]:
+    """
+    Deterministic mock returned when GOOGLE_API_KEY is missing or the
+    Gemini API is unreachable. Lets the UI render a usable diff in
+    development without requiring credentials.
+    """
+    # Trivial transformation: prepend a sentence reflecting the request
+    if not context:
+        suggestion = (
+            f"[Mock — Gemini API unavailable] You asked: {user_message}. "
+            f"Provide content in 'context_content' to receive a real rewrite."
+        )
+    else:
+        suggestion = (
+            f"[Mock revision] {context}\n\n"
+            f"(Edit requested: {user_message[:200]} — set GOOGLE_API_KEY "
+            f"on Render for real Gemini suggestions.)"
+        )
+    return {
+        "suggestion":   suggestion,
+        "diff":         _build_diff(context, suggestion),
+        "explanation":  "Gemini unavailable — returning structured mock.",
+        "confidence":   0.0,
+        "out_of_scope": False,
+        "mock":         True,
     }
 
 

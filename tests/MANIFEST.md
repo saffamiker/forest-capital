@@ -630,3 +630,83 @@ Test counts (Sprint 5 + addendum): 668 passed, 10 skipped (HMM on Windows), 0 fa
   Performance benchmarks (API response times p95)
   Accessibility audit (axe-core WCAG AA)
   Print stylesheet test (@media print)
+
+## Sprint 6 Phase 6 ✅ COMPLETE (2026-05-14)
+Storyboard Editor + Presentation Script Writer + Gemini Assistant.
+
+Backend:
+  tools/storyboard_template.py  — 15-slide default + Academic Writer
+                                   enrichment + context-driven interpolation
+  tools/documents_cache.py       — full CRUD against documents,
+                                   document_versions, document_drafts
+                                   (migration 004). Atomic create_document
+                                   inserts parent + draft + v1 in one txn.
+  tools/pptx_generator.py        — .pptx via python-pptx with AI DRAFT
+                                   footer on every slide + speaker notes
+  tools/script_writer.py         — 130 wpm voice-differentiated scripts,
+                                   rehearsal cues, Q&A doc with 18 questions
+
+  Endpoints (main.py):
+    POST   /api/documents/storyboard/draft
+    GET    /api/documents/:id
+    PATCH  /api/documents/:id/draft
+    POST   /api/documents/:id/versions
+    GET    /api/documents/:id/versions
+    POST   /api/documents/:id/restore/:ver_id
+    POST   /api/reports/generate-from-storyboard/:id  (deck/script/qa)
+    POST   /api/documents/:id/assistant               (Gemini diff)
+
+  tests/test_storyboard_endpoints.py — 24 tests:
+    Draft generation: 200, contains storyboard, 15 slides, all three
+      team owners present, total timing 18–20.5 min, every slide has
+      the required 11 fields
+    Generate-from-storyboard: deck returns valid pptx, filename .pptx,
+      script returns valid docx, script_molly excludes Bob slides,
+      rehearsal includes cues, Q&A docx contains all three sections,
+      invalid output_type returns 422
+    Template unit: pure-function builds 15-slide structure with no
+      strategy_results; with results, interpolates {best_strategy}
+      into headlines
+    Assistant: 200, returns diff object, rejects missing message,
+      rejects oversized message (>1000 chars)
+    pptx_generator unit: valid bytes, correct slide count (storyboard + 1)
+    script_writer unit: full script includes all slides, owner_filter
+      excludes other owners, rehearsal cues only when requested
+
+Frontend:
+  components/GeminiAssistantPanel.tsx — purple-accented sliding panel,
+    paragraph-level red/green diff, per-message Apply/Skip, multi-turn
+    conversation, scope-guard out_of_scope handling, mock fallback display
+  stores/storyboardStore.ts        — createDraft, updateSlide,
+    reorderSlides, addSlide, removeSlide, saveNamedVersion, restoreVersion;
+    30s debounced auto-save via shared module-level timer;
+    localStorage stash of active document_id for Reports screen
+  pages/StoryboardEditor.tsx       — three-column layout: slide list
+    with native HTML5 drag-reorder + timing bar (green ≤20m / amber ≤21 /
+    red >21), centre editor with all 11 slide fields + Regenerate
+    speaker note + Remove, version-history sidebar with named versions +
+    collapsible auto-saves + Restore buttons + Save Version dialog
+  types/storyboard.ts              — Slide / Storyboard / DocumentVersion
+    / AssistantResponse interfaces
+
+  __tests__/storyboard.test.tsx    — 15 tests:
+    createDraft: populates state + selects first slide, writes
+      localStorage, surfaces error on persistence failure
+    Mutations: updateSlide patches one slide and recomputes total
+      timing, reorderSlides renumbers to 1..N contiguous, addSlide
+      inserts and renumbers, removeSlide shifts following orders down
+      and reselects nearest sibling
+    Auto-save: 30-second debounce — multiple rapid edits produce one
+      PATCH call (vi.useFakeTimers)
+    saveNamedVersion: POSTs to /versions with content + name + summary
+    GeminiAssistantPanel: renders header + textarea, disables send when
+      no documentId, renders Apply after response, calls onApply with
+      suggestion, renders warning when out_of_scope
+
+Test counts (cumulative): 758 backend pass, 10 skipped (HMM/Windows),
+                           111 frontend pass, npm run build clean.
+
+Migration:
+  004_create_documents_tables.py applied at storyboard endpoint
+  rollout — operator runs `alembic upgrade head` on Render before
+  the next deploy.

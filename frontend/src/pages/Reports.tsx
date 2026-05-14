@@ -19,10 +19,11 @@
  *               the deadline.
  */
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, Presentation, Download, Loader2, Calendar, AlertCircle,
-  CheckCircle, Clock,
+  CheckCircle, Clock, ArrowRight,
 } from 'lucide-react'
 
 interface ReportCard {
@@ -50,6 +51,41 @@ const ICON_FOR_ID: Record<string, typeof FileText> = {
   presentation_deck:    Presentation,
   qa_preparation:       FileText,
 }
+
+// The StoryboardEditor writes the active document_id here so deck / Q&A
+// generators on this page can target the right document. When unset (no
+// storyboard yet) we route the user to the editor first.
+const STORYBOARD_ID_KEY = 'fc_active_storyboard_id'
+
+async function downloadFromGenerator(outputType: 'deck' | 'qa'): Promise<void> {
+  const docId = localStorage.getItem(STORYBOARD_ID_KEY)
+  if (!docId) {
+    throw new Error(
+      'No storyboard saved yet. Open the Storyboard Editor first to create one.',
+    )
+  }
+  const res = await axios({
+    url: `/api/reports/generate-from-storyboard/${docId}`,
+    method: 'POST',
+    responseType: 'blob',
+    data: { output_type: outputType },
+  })
+  const dispo = String(res.headers['content-disposition'] ?? '')
+  const filenameMatch = /filename="?([^";]+)"?/i.exec(dispo)
+  const fmt = outputType === 'deck' ? 'pptx' : 'docx'
+  const filename = filenameMatch?.[1] ?? `forest-capital-${outputType}.${fmt}`
+  const contentType = String(res.headers['content-type'] ?? 'application/octet-stream')
+  const blob = new Blob([res.data], { type: contentType })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  URL.revokeObjectURL(url)
+}
+
 
 async function downloadDocxResponse(card: ReportCard): Promise<void> {
   // axios responseType: 'blob' is required for the browser to download
@@ -87,6 +123,9 @@ function DeliverableCard({ card, onGenerate, isGenerating }: {
 }) {
   const Icon = ICON_FOR_ID[card.id] ?? FileText
   const isAvailable = card.status === 'available'
+  // Storyboard draft opens the editor rather than triggering a download —
+  // the JSON payload is meant to be edited, not saved to disk.
+  const opensEditor = card.id === 'storyboard_draft'
 
   return (
     <div className="card p-4 flex flex-col gap-3">
@@ -144,7 +183,9 @@ function DeliverableCard({ card, onGenerate, isGenerating }: {
         {isGenerating
           ? <><Loader2 className="w-3 h-3 animate-spin" /> Generating…</>
           : isAvailable
-            ? <><Download className="w-3 h-3" /> Generate {card.format.toUpperCase()}</>
+            ? (opensEditor
+                ? <><ArrowRight className="w-3 h-3" /> Open Editor</>
+                : <><Download className="w-3 h-3" /> Generate {card.format.toUpperCase()}</>)
             : <>Planned</>}
       </button>
     </div>
@@ -152,6 +193,7 @@ function DeliverableCard({ card, onGenerate, isGenerating }: {
 }
 
 export default function Reports() {
+  const navigate = useNavigate()
   const [manifest, setManifest] = useState<ManifestResponse | null>(null)
   const [loading, setLoading] = useState(true)
   const [generatingId, setGeneratingId] = useState<string | null>(null)
@@ -173,10 +215,25 @@ export default function Reports() {
   }, [])
 
   const handleGenerate = async (card: ReportCard) => {
+    // Storyboard draft opens the editor, not a download. The editor
+    // calls /api/documents/storyboard/draft on first mount.
+    if (card.id === 'storyboard_draft') {
+      navigate('/reports/storyboard')
+      return
+    }
+
     setGeneratingId(card.id)
     setError(null)
     try {
-      await downloadDocxResponse(card)
+      // Deck and Q&A cards call generate-from-storyboard with a specific
+      // output_type. They depend on a saved storyboard — if there isn't
+      // one yet, the server returns 404 and we surface the error so the
+      // user goes to the editor first.
+      if (card.id === 'presentation_deck' || card.id === 'qa_preparation') {
+        await downloadFromGenerator(card.id === 'presentation_deck' ? 'deck' : 'qa')
+      } else {
+        await downloadDocxResponse(card)
+      }
     } catch (err) {
       const msg = axios.isAxiosError(err)
         ? (err.response?.data?.detail ?? err.message)

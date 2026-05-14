@@ -20,14 +20,14 @@ Six AI agents (Claude Opus CIO, four Claude Sonnet specialists, Google Gemini Pr
 | 3 | ✅ Complete | All 10 strategies with real metrics, full 12-test statistical suite (DSR, PSR, SPA), 7 CV methods including CPCV C(6,2)=15 paths, HMM 3-state regime detection, LQD bridge extending IG coverage to July 2002, `run_all_strategies` returning `dict[str, dict]`, numerical accuracy tests, splice integrity tests |
 | 4 | ✅ Complete | All 8 AI agents live (Equity, Fixed Income, Risk, Quant, Gemini, CIO, QA, Explainer), council WebSocket streaming, scope guard, academic writer scaffold, production deployment (Render + Vercel), magic-link email via SendGrid |
 | 5 | ✅ Complete | PostgreSQL cache layer (strategy + regime signals), `FRED_TIMEOUT_SECONDS=60`, incremental data ingestion, `ChartExportButton` (PNG/SVG), `TableExportButton` (CSV), `SanityCheckPanel` (10-check data integrity), 5 new backend test files (75 new tests), 3 new frontend test files (31 new tests) |
-| 6 | 🚧 In progress | **Phase 1:** 12 Statistical-Evidence + Regime-Analysis charts with `/api/v1/charts/data` bundle endpoint. **Phase 2:** Council Debate narrative fix, navigation persistence via Zustand stores, chart UX standardisation. **Phase 3:** Tiered QA system (Tier 1 deterministic + Tier 2 Sonnet background + Tier 3 Opus manual) with `qa_results_cache` table, nav-bar status badge, Present-mode gate (≥WARN + <48h + hash match). **Phase 4:** Commentary mode frontend bridge — `glossaryStore`, `ExplainableText` three-level wrapper, `ChartCommentStrip` (always-visible Sources line, mode-conditional narrative), `LearnModeBanner` + `LearnModeToggle`. **Phase 5:** Reports screen + Priority 1 (June 3) midpoint paper generator with `python-docx`, Academic Writer prose, AI DRAFT banner; `documents` / `document_versions` / `document_drafts` migration staged for Storyboard Editor (next session). Grok contrarian analyst added alongside Gemini. |
+| 6 | 🚧 In progress | **Phase 1:** 12 Statistical-Evidence + Regime-Analysis charts with `/api/v1/charts/data` bundle endpoint. **Phase 2:** Council Debate narrative fix, navigation persistence via Zustand stores, chart UX standardisation. **Phase 3:** Tiered QA system (Tier 1 deterministic + Tier 2 Sonnet background + Tier 3 Opus manual) with `qa_results_cache` table, nav-bar status badge, Present-mode gate (≥WARN + <48h + hash match). **Phase 4:** Commentary mode frontend bridge — `glossaryStore`, `ExplainableText` three-level wrapper, `ChartCommentStrip` (always-visible Sources line, mode-conditional narrative), `LearnModeBanner` + `LearnModeToggle`. **Phase 5:** Reports screen + Priority 1 (June 3) midpoint paper generator with `python-docx`, Academic Writer prose, AI DRAFT banner. **Phase 6:** Storyboard Editor + Presentation Script Writer. 15-slide AI draft (`POST /api/documents/storyboard/draft`) with Academic Writer speaker-note enrichment. Full CRUD via `tools/documents_cache.py` against `documents` / `document_versions` / `document_drafts` (migration 004). React `StoryboardEditor` page with drag-to-reorder, slide editor panel, running timing bar (GREEN ≤20m, AMBER ≤21m, RED >21m), Version History sidebar (named + auto-saves), and 30s debounced auto-save. `python-pptx` deck generator; `script_writer.py` produces full-team / Molly / Michael / Bob / rehearsal scripts at 130 wpm; Q&A doc with 18 questions across Forest Capital / MSFA Board / AI usage. Gemini 1.5 Pro assistant panel with paragraph-level red/green diff display, multi-turn conversation, scope guard, and mock fallback. Grok contrarian analyst remains alongside Gemini independent analyst. |
 
 ## Test Counts (current)
 
 | Layer | Tests | Notes |
 |-------|-------|-------|
-| Backend (pytest) | 734 passed, 10 skipped | HMM tests skip on Windows (hmmlearn requires C++ build tools; passes in CI on Linux). +16 reports tests in Sprint 6 Phase 5. |
-| Frontend (Vitest) | 96 passed | +14 commentary-mode tests in Sprint 6 Phase 4. |
+| Backend (pytest) | 758 passed, 10 skipped | HMM tests skip on Windows (hmmlearn requires C++ build tools; passes in CI on Linux). +24 storyboard tests in Sprint 6 Phase 6 (CRUD, pptx, script, Q&A, Gemini assistant). |
+| Frontend (Vitest) | 111 passed | +15 storyboard tests in Sprint 6 Phase 6 (store mutations, autosave debounce, Gemini panel rendering, scope-guard rejection). |
 | E2E (Playwright) | Non-blocking | Pointed at live Render + Vercel URLs; `continue-on-error: true` removed once CI green |
 
 Run backend tests:
@@ -120,15 +120,17 @@ See `backend/.env.example` for all required variables. Key ones:
 - Alembic migrations 003 (`qa_results_cache`) and 004 (`documents` / `document_versions` / `document_drafts`)
 
 **Remaining for Sprint 6 close (target Jul 1)**:
-- Storyboard Editor UI — 15-slide AI draft, drag reorder, headline/chart/timing editing, auto-save every 30s
-- `POST /api/documents/storyboard/draft` + version control endpoints (tables already exist)
-- `POST /api/reports/generate-from-storyboard` — `.pptx` deck + Q&A `.docx`
-- Presentation Script Writer — full team + 3 individual scripts + rehearsal guide
-- Gemini Assistant panel for storyboard and section editors (inline diff)
 - Executive Brief + Analytical Appendix generators (Bob's remaining deliverables)
 - Full regression suite + performance benchmarks (p95 response times)
 - Accessibility audit (axe-core, WCAG AA)
 - Final git tag: `v1.0.0-presentation`
+
+**Shipped in Phase 6** (this commit):
+- Storyboard Editor UI — drag-reorder, slide editor, timing bar, 30s auto-save, Version History sidebar
+- `POST /api/documents/storyboard/draft` + full CRUD on `documents` / `document_versions` / `document_drafts`
+- `POST /api/reports/generate-from-storyboard/:id` — `.pptx` deck, full-team / Molly / Michael / Bob / rehearsal scripts, Q&A `.docx`
+- Presentation Script Writer at 130 wpm with voice differentiation per owner
+- Gemini Assistant panel with red/green paragraph diff and per-message Apply/Skip
 
 ## Team
 
