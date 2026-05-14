@@ -268,9 +268,55 @@ Only four external fetches are required. Everything else comes from Excel.
 
   GAP 4 — Fama-French factors (Mkt-RF, SMB, HML, Mom)
     Needed by: Factor Exposure Heatmap on Regime Analysis dashboard
-    Fix: pandas-datareader — pdr.get_data_famafrench('F-F_Research_Data_Factors')
+    PREVIOUS FIX: pandas-datareader — BROKEN (deprecate_kwarg error)
+    RECOMMENDED FIX: Direct HTTP fetch from Ken French's website
+
+    Source: https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_CSV.zip
+    No library dependency, no API key, free forever
+    Data goes back to 1926 — academically authoritative
+
+    Implementation:
+      import requests, zipfile, io, pandas as pd
+
+      def fetch_ff_factors():
+          url = "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/F-F_Research_Data_Factors_CSV.zip"
+          r = requests.get(url, timeout=60)
+          zf = zipfile.ZipFile(io.BytesIO(r.content))
+          fname = [f for f in zf.namelist() if f.endswith('.CSV')][0]
+          with zf.open(fname) as f:
+              # Parse: skip header rows, read until annual data section
+              df = pd.read_csv(f, skiprows=3, index_col=0)
+              df = df[df.index.astype(str).str.match(r'^\d{6}$')]
+              df.index = pd.to_datetime(df.index.astype(str), format='%Y%m')
+              df = df.astype(float) / 100  # convert from % to decimal
+          return df  # columns: Mkt-RF, SMB, HML, RF
+
+    Storage: ff_factors_monthly table in PostgreSQL
+      Fetch once at pipeline init, append incrementally
+      Same pattern as market_data_monthly
+      Never call external source again after initial load
+
+    PostgreSQL table: ff_factors_monthly
+      date DATE PRIMARY KEY
+      mkt_rf FLOAT   — market excess return
+      smb    FLOAT   — small minus big
+      hml    FLOAT   — high minus low (value)
+      rf     FLOAT   — risk-free rate
+      source VARCHAR DEFAULT 'ken_french_direct'
+
+    Incremental update:
+      Check last date in ff_factors_monthly
+      Fetch full zip (it's small, ~200KB)
+      Insert only rows after last stored date
+
+    Registry entry:
+      source_type: 'ken_french_direct'
+      source_detail: 'F-F_Research_Data_Factors_CSV.zip'
+      display_name: 'Fama-French 3-Factor Model'
+
     Frequency: monthly — aligns directly with portfolio return series
-    Fallback: direct download from Ken French data library if datareader fails
+    OLS regression: per-strategy using monthly excess returns vs factors
+    Factor heatmap: MKT-RF, SMB, HML loadings + alpha + R²
 
   GAP 5 — Black-Litterman equilibrium weights
     Not a fetch — hardcoded prior: equity=0.60, ig=0.30, hy=0.10
@@ -3694,7 +3740,20 @@ Sprint 6 (May 13 onwards — in progress):
   ─ Present mode gate updated:
     Requires status ≥ WARN + run_at < 48h
     + strategy_hash matches current data hash
-  12 DASHBOARD CHARTS (Phase 1 — in progress)
+  FAMA-FRENCH FACTORS FIX
+  ─ Replace broken pandas-datareader with direct HTTP fetch
+    from Ken French's website (no API key, no library dependency)
+  ─ New table: ff_factors_monthly (date, mkt_rf, smb, hml, rf)
+    Alembic migration included
+  ─ Fetch once at pipeline init, append incrementally
+    Same pattern as market_data_monthly
+  ─ source_type: 'ken_french_direct' in data_series_registry
+  ─ OLS regression per strategy: monthly excess returns vs factors
+  ─ Factor Exposure Heatmap now shows real MKT-RF, SMB, HML,
+    alpha, and R² values instead of all zeros
+  ─ Walk-Forward OOS Sharpe: connectNulls={true} and
+    type='monotone' on all Line components
+
 
 
   ─ agents/academic_writer.py — Agent 9 (Sonnet)
