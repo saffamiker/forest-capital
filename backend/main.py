@@ -1110,6 +1110,248 @@ async def export_report(session: dict = Depends(require_auth)):
     }
 
 
+# Sprint 6 Priority 1 — midpoint paper for June 3 deadline.
+# Academic Writer composes the prose; tools/docx_generator assembles the
+# .docx around it. Every page carries the AI DRAFT banner so Bob can never
+# accidentally submit a template-generated draft verbatim.
+
+@app.post("/api/reports/midpoint-template")
+@limiter.limit("10/minute")
+async def midpoint_template(request: Request, session: dict = Depends(require_auth)):
+    """
+    Generates the 3-page midpoint paper draft as a .docx download.
+
+    Four sections per the FNA 670 brief:
+      1. Data & Methodology   (Academic Writer → write_methodology)
+      2. Preliminary Results  (Academic Writer → write_results)
+      3. Roles & Division     (deterministic team-roles section)
+      4. Next Steps           (deterministic remaining-sprints section)
+
+    The Academic Writer Agent runs on Sonnet and can take 10-30 seconds.
+    Returned as application/vnd.openxmlformats-officedocument.wordprocessingml.document
+    with a filename header so the browser triggers a download instead
+    of rendering the bytes inline.
+    """
+    from fastapi.responses import Response as FastAPIResponse
+
+    try:
+        from agents.academic_writer import AcademicWriter
+        from tools.data_fetcher import get_full_history
+        from tools.backtester import run_all_strategies
+        from tools.docx_generator import build_docx
+        from tools.cache import get_strategy_cache, _compute_data_hash
+
+        # In test env we skip the pipeline entirely so the smoke test runs
+        # in milliseconds. The structured fallback in build_docx still
+        # produces a valid .docx Bob could open and edit.
+        if ENVIRONMENT == "test":
+            results_dict: dict = {}
+            data_range = {"start": "—", "end": "—", "n_months": 0}
+        else:
+            history = get_full_history()
+            monthly = history.get("equity_monthly")
+            n_rows = len(monthly) if monthly is not None else 0
+            last_date = (
+                str(monthly.index[-1].date())
+                if monthly is not None and len(monthly) > 0 else "unknown"
+            )
+            strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
+            cached = await get_strategy_cache(strategy_hash)
+            if cached:
+                results_dict = cached
+            else:
+                results_dict = run_all_strategies(history)
+            first_date = (
+                str(monthly.index[0].date())
+                if monthly is not None and len(monthly) > 0 else "unknown"
+            )
+            data_range = {"start": first_date, "end": last_date, "n_months": n_rows}
+
+        significance_flags = {
+            name: bool(r.get("is_significant"))
+            for name, r in results_dict.items()
+        }
+        n_significant = sum(1 for v in significance_flags.values() if v)
+
+        # Build the four sections. Academic Writer methods already prepend
+        # an AI DRAFT banner to each section; the docx builder also adds
+        # one to the document header. The banner is intentionally redundant
+        # so a partial-page PDF export still carries the warning.
+        writer = AcademicWriter()
+        methodology = writer.write_methodology(
+            data_sources={"data_range": data_range, "n_months": data_range["n_months"]},
+            strategies=list(results_dict.keys()),
+            statistical_tests=[
+                "Paired t-test (full period)",
+                "Benjamini-Hochberg FDR correction",
+                "Deflated Sharpe Ratio",
+                "Walk-forward out-of-sample",
+                "CV Stability Score",
+            ],
+        )
+        results = writer.write_results(
+            strategy_results=results_dict,
+            significance_flags=significance_flags,
+            stress_tests={},
+        )
+
+        roles_body = (
+            "Michael Ruurds — Lead Engineer. Responsible for the full backend "
+            "implementation, data pipeline, AI council architecture, statistical "
+            "test suite, and the React frontend that surfaces all analytical results. "
+            "Hours: ~20 per week.\n\n"
+            "Bob Thao — Lead Analyst. Responsible for the academic interpretation "
+            "of all results, methodological justification, and the written report "
+            "in APA format. Edits this AI draft into the final submission.\n\n"
+            "Molly Murdock — Lead Presenter. Responsible for the Forest Capital "
+            "presentation slide deck, executive brief, and the July 1 demo.\n\n"
+            "Dr. Panttser — Faculty supervisor and reviewer."
+        )
+        next_steps_body = (
+            f"As of the midpoint, {n_significant} of 10 strategies pass all five "
+            f"Tier 1 statistical gates at p < 0.005 with Benjamini-Hochberg FDR "
+            f"correction. Remaining work for the final presentation:\n\n"
+            "• Sprint 6: Academic Writer Agent endpoints (analytical appendix, "
+            "executive brief), Storyboard Editor, Presentation Script Writer, "
+            "Gemini assistant for inline editing, full regression suite, "
+            "accessibility audit, presentation-ready demo.\n\n"
+            "• Final tag v1.0.0-presentation targeted for July 1."
+        )
+
+        sections = [
+            {"heading": "1. Data & Methodology", "body": methodology},
+            {"heading": "2. Preliminary Results", "body": results},
+            {"heading": "3. Roles & Division of Labor", "body": roles_body},
+            {"heading": "4. Next Steps & Open Questions", "body": next_steps_body},
+        ]
+
+        docx_bytes = build_docx(
+            title="Forest Capital Portfolio Intelligence System",
+            subtitle=(
+                "Midpoint Checkpoint — FNA 670 Practicum · "
+                f"Data range: {data_range['start']} – {data_range['end']} · "
+                f"{n_significant}/10 strategies pass all Tier 1 gates"
+            ),
+            sections=sections,
+            strategy_results=results_dict,
+            references=None,
+        )
+
+        # Tag the filename with the date so iterative drafts don't overwrite
+        # each other in Bob's downloads folder.
+        from datetime import date
+        filename = f"forest-capital-midpoint-{date.today().isoformat()}.docx"
+        return FastAPIResponse(
+            content=docx_bytes,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"
+            ),
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    except Exception as exc:
+        log.error("midpoint_template_error", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Midpoint generation failed: {exc}")
+
+
+@app.get("/api/reports/manifest")
+@limiter.limit("60/minute")
+async def reports_manifest(request: Request, session: dict = Depends(require_auth)):
+    """
+    Returns the list of available report generators for the Reports screen.
+
+    Shape lets the UI render the deliverable cards without hardcoding the
+    endpoint URLs in three places — change a card label here, the frontend
+    updates on next mount.
+    """
+    return {
+        "owner_bob": [
+            {
+                "id": "midpoint_template",
+                "title": "Midpoint Paper Template",
+                "description": (
+                    "3-page APA draft with Data & Methodology, Preliminary "
+                    "Results, Roles, and Next Steps. Generated by Academic Writer."
+                ),
+                "endpoint": "/api/reports/midpoint-template",
+                "method": "POST",
+                "format": "docx",
+                "status": "available",
+                "deadline": "June 3, 2026",
+            },
+            {
+                "id": "executive_brief",
+                "title": "Executive Brief Template",
+                "description": (
+                    "5-page brief for Forest Capital. Includes abstract, "
+                    "methodology, key findings, discussion, recommendations."
+                ),
+                "endpoint": "/api/reports/executive-brief-template",
+                "method": "POST",
+                "format": "docx",
+                "status": "planned",
+                "deadline": "July 1, 2026",
+            },
+            {
+                "id": "analytical_appendix",
+                "title": "Analytical Appendix",
+                "description": (
+                    "Full appendix with data provenance table, methodology, "
+                    "complete statistical results, sensitivity analysis, "
+                    "limitations, and references."
+                ),
+                "endpoint": "/api/reports/analytical-appendix",
+                "method": "POST",
+                "format": "html",
+                "status": "planned",
+                "deadline": "July 1, 2026",
+            },
+        ],
+        "owner_molly": [
+            {
+                "id": "storyboard_draft",
+                "title": "Presentation Storyboard",
+                "description": (
+                    "AI-drafted 15-slide structure. Edit in the Storyboard "
+                    "Editor — drag to reorder, swap charts, refine speaker notes."
+                ),
+                "endpoint": "/api/documents/storyboard/draft",
+                "method": "POST",
+                "format": "json",
+                "status": "planned",
+                "deadline": "July 1, 2026",
+            },
+            {
+                "id": "presentation_deck",
+                "title": "Presentation Deck",
+                "description": (
+                    "PowerPoint deck generated from the edited storyboard. "
+                    "Embedded charts, speaker notes, presenter ownership tags."
+                ),
+                "endpoint": "/api/reports/generate-from-storyboard",
+                "method": "POST",
+                "format": "pptx",
+                "status": "planned",
+                "deadline": "July 1, 2026",
+            },
+            {
+                "id": "qa_preparation",
+                "title": "Q&A Preparation Doc",
+                "description": (
+                    "Council-anticipated questions split by audience "
+                    "(Forest Capital / MSFA Board / AI usage)."
+                ),
+                "endpoint": "/api/reports/generate-from-storyboard",
+                "method": "POST",
+                "format": "docx",
+                "status": "planned",
+                "deadline": "July 1, 2026",
+            },
+        ],
+    }
+
+
 # ── Developer endpoints (MASTER_API_KEY only) ─────────────────────────────────
 
 @app.post("/api/dev/uiux/review")
