@@ -2,7 +2,9 @@ import { useState, useEffect } from 'react'
 import { CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { Verdict, QACheck } from '../types/agents'
+import type { QAItemExplanation } from '../types/glossary'
 import { useQAStore } from '../stores/qaStore'
+import { useGlossaryStore } from '../stores/glossaryStore'
 
 interface VerdictStyle {
   Icon: LucideIcon
@@ -27,9 +29,13 @@ interface CheckRowProps {
   check: QACheck
   open: boolean
   onToggle: () => void
+  // Commentary-mode QA narrative, loaded per audit run from the Explainer
+  // Agent. Optional — when undefined (audit hasn't been explained yet, or
+  // the Explainer call failed), the row falls back to evidence/fix only.
+  explanation?: QAItemExplanation
 }
 
-function CheckRow({ check, open, onToggle }: CheckRowProps) {
+function CheckRow({ check, open, onToggle, explanation }: CheckRowProps) {
   const cfg = VERDICT_CONFIG[check.status]
   const { Icon } = cfg
   return (
@@ -49,10 +55,30 @@ function CheckRow({ check, open, onToggle }: CheckRowProps) {
         )}
       </button>
       {open && (
-        <div className="px-3 py-2 border-t border-border/50 bg-navy-900">
+        <div className="px-3 py-2 border-t border-border/50 bg-navy-900 space-y-2">
           <p className="text-slate-300 text-xs">{check.evidence}</p>
           {check.fix && (
-            <p className="text-warning text-xs mt-1"><strong>Fix:</strong> {check.fix}</p>
+            <p className="text-warning text-xs"><strong>Fix:</strong> {check.fix}</p>
+          )}
+          {explanation && (
+            <div className="pt-2 mt-1 border-t border-border/40 space-y-2">
+              <div>
+                <div className="text-2xs uppercase tracking-wide text-muted mb-0.5">What this check tests</div>
+                <p className="text-slate-300 text-xs">{explanation.what}</p>
+              </div>
+              <div>
+                <div className="text-2xs uppercase tracking-wide text-muted mb-0.5">Why it matters</div>
+                <p className="text-slate-300 text-xs">{explanation.why}</p>
+              </div>
+              <div>
+                <div className="text-2xs uppercase tracking-wide text-muted mb-0.5">What a failure would mean</div>
+                <p className="text-slate-300 text-xs">{explanation.failure_meaning}</p>
+              </div>
+              <div>
+                <div className="text-2xs uppercase tracking-wide text-muted mb-0.5">How it was tested</div>
+                <p className="text-slate-300 text-xs">{explanation.how_tested}</p>
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -65,10 +91,20 @@ export default function QAAuditPanel() {
   // load() is a no-op when loaded=true, so re-entering this tab is instant
   // and never triggers a second 10-second audit run.
   const { result: audit, loading, load, reload } = useQAStore()
+  // Per-audit Commentary narrative. Loaded once per audit-items array —
+  // the Explainer Agent generates fresh what/why/failure/how text for the
+  // 30 checks based on their actual pass/warn/fail state in this run.
+  const qaExplanations = useGlossaryStore((s) => s.qa)
+  const loadQA = useGlossaryStore((s) => s.loadQA)
   const [openChecks, setOpenChecks] = useState<Set<string>>(new Set())
   const [activeCategory, setActiveCategory] = useState('ALL')
 
   useEffect(() => { void load() }, [load])
+
+  useEffect(() => {
+    if (!audit?.items?.length) return
+    void loadQA(audit.items as unknown as Array<Record<string, unknown>>)
+  }, [audit, loadQA])
 
   const toggleCheck = (id: string) => {
     setOpenChecks((prev) => {
@@ -176,6 +212,7 @@ export default function QAAuditPanel() {
             check={check}
             open={openChecks.has(check.check_id)}
             onToggle={() => toggleCheck(check.check_id)}
+            explanation={qaExplanations[check.check_id]}
           />
         ))}
       </div>

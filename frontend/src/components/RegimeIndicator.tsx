@@ -1,6 +1,7 @@
 import { AlertTriangle, TrendingUp, TrendingDown, Minus } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { RegimeData } from '../types/api'
+import ExplainableText from './ExplainableText'
 
 interface RegimeStyleConfig {
   label: string
@@ -50,11 +51,17 @@ export default function RegimeIndicator({ regime }: { regime: RegimeData }) {
   return (
     <div className={`border-b border-border ${cfg.bg} px-6 py-2.5`}>
       <div className="max-w-screen-xl mx-auto flex items-center gap-4 flex-wrap">
-        {/* Regime badge */}
+        {/* Regime badge — the single most-asked-about element on the
+            Dashboard. ExplainableText wraps the label so Commentary-mode
+            users get a click-to-explain affordance covering threshold vs
+            HMM signals, BULL/BEAR/TRANSITION boundaries, and what the
+            current regime implies for asset allocation. */}
         <div className={`flex items-center gap-2 px-3 py-1 rounded border ${cfg.border} ${cfg.bg}`}>
           <Icon className={`w-3.5 h-3.5 ${cfg.color}`} />
           <span className={`font-mono font-semibold text-sm tracking-widest ${cfg.color}`}>
-            {displayRegime}
+            <ExplainableText term="regime_classification">
+              {displayRegime}
+            </ExplainableText>
           </span>
         </div>
 

@@ -47,6 +47,27 @@ const STRATEGY_COLORS: Record<string, string> = {
 
 const SIGNIFICANT_STRATEGIES = ['REGIME_SWITCHING', 'VOL_TARGETING', 'BLACK_LITTERMAN', 'MAX_SHARPE_ROLLING']
 
+// Strategy comparison table columns. `term` keys the glossary entry that
+// the ExplainableText wrapper looks up — null means "structural column,
+// no metric explanation needed". Keep the term IDs stable: they're the
+// same identifiers the Explainer Agent prompt expects to emit.
+interface StrategyTableColumn {
+  label: string
+  term: string | null
+}
+
+const STRATEGY_TABLE_COLUMNS: StrategyTableColumn[] = [
+  { label: '#',                term: null },
+  { label: 'Strategy',         term: null },
+  { label: 'CAGR',             term: 'cagr' },
+  { label: 'Sharpe [95% CI]',  term: 'sharpe_ratio' },
+  { label: 'Max DD',           term: 'max_drawdown' },
+  { label: 'DSR',              term: 'dsr' },
+  { label: 'p (FDR)',          term: 'p_fdr' },
+  { label: 'CV Score',         term: 'cv_score' },
+  { label: 'Tier 1',           term: 'tier1_gates' },
+]
+
 // Render a "YYYY–YYYY" label from ISO dates. Falls back to a long em-dash when
 // the API hasn't returned a range yet (initial render before the store loads).
 // Years are extracted from the ISO date prefix — no timezone gymnastics needed
@@ -226,7 +247,16 @@ export default function Dashboard() {
         <div className="mx-4 md:mx-6 mt-4 p-3 rounded-lg border border-warning/30 bg-warning/5 flex items-start gap-2">
           <AlertTriangle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
           <div className="text-xs">
-            <span className="text-warning font-semibold">2022 Equity-Bond Correlation Breakdown: </span>
+            <span className="text-warning font-semibold">
+              {/* Central project finding — wrap the heading so the
+                  audience can click it for the academic context. The
+                  underline inherits ExplainableText's electric-blue
+                  dotted style but the surrounding `text-warning` keeps
+                  the banner amber overall. */}
+              <ExplainableText term="equity_bond_correlation_breakdown">
+                2022 Equity-Bond Correlation Breakdown
+              </ExplainableText>:{' '}
+            </span>
             <span className="text-slate-300">
               Pre-2022 rolling correlation averaged{' '}
               {regime.pre_2022_avg_correlation != null
@@ -361,8 +391,21 @@ export default function Dashboard() {
             <table className="w-full text-left">
               <thead className="sticky top-0 z-10 bg-navy-800">
                 <tr className="border-b border-border">
-                  {['#', 'Strategy', 'CAGR', 'Sharpe [95% CI]', 'Max DD', 'DSR', 'p (FDR)', 'CV Score', 'Tier 1'].map((h) => (
-                    <th key={h} className="px-3 py-2 text-2xs text-muted uppercase tracking-wide font-medium whitespace-nowrap">{h}</th>
+                  {/*
+                    Column headers carry stable glossary term IDs so clicking
+                    any header in Commentary mode opens the standard
+                    what/why/in-context panel. The '#' and 'Strategy' columns
+                    have no term — they're structural, not metric labels.
+                  */}
+                  {STRATEGY_TABLE_COLUMNS.map((col) => (
+                    <th
+                      key={col.label}
+                      className="px-3 py-2 text-2xs text-muted uppercase tracking-wide font-medium whitespace-nowrap"
+                    >
+                      {col.term
+                        ? <ExplainableText term={col.term}>{col.label}</ExplainableText>
+                        : col.label}
+                    </th>
                   ))}
                 </tr>
               </thead>

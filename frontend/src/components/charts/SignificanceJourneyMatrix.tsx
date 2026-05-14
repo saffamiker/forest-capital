@@ -10,10 +10,16 @@
 import type { StrategyResult } from '../../types/strategies'
 import { prettyName, tooltipLine } from '../../lib/strategyColors'
 import StrategyTypeBadge from '../StrategyTypeBadge'
+import ExplainableText from '../ExplainableText'
 
 interface Gate {
   label: string
   metricName: string                           // for tooltip standardisation
+  // Glossary term ID. Wrapping the column header in ExplainableText
+  // gives the audience a click-to-explain affordance for each Tier 1
+  // gate without crowding the cells. IDs are stable so the Explainer
+  // Agent prompt can emit them.
+  term: string
   pass: (s: StrategyResult) => boolean
   // Returns the value to render inside the cell — no "p=" prefix needed
   // when the column header already says "T-TEST", so each gate decides
@@ -26,30 +32,35 @@ const GATES: Gate[] = [
   {
     label: 'T-TEST',
     metricName: 'Full-period p-value',
+    term: 'tier1_t_test',
     pass: (s) => (s.p_value_ttest ?? 1) < 0.005,
     cellText: (s) => `p=${(s.p_value_ttest ?? 1).toFixed(3)}`,
   },
   {
     label: 'FDR',
     metricName: 'FDR-corrected q-value',
+    term: 'tier1_fdr_correction',
     pass: (s) => (s.p_value_corrected ?? 1) < 0.005,
     cellText: (s) => `q=${(s.p_value_corrected ?? 1).toFixed(3)}`,
   },
   {
     label: 'DSR',
     metricName: 'Deflated Sharpe p-value',
+    term: 'tier1_dsr',
     pass: (s) => (s.dsr_p_value ?? 1) < 0.005,
     cellText: (s) => `p=${(s.dsr_p_value ?? 1).toFixed(3)}`,
   },
   {
     label: 'OOS',
     metricName: 'Out-of-sample p-value',
+    term: 'tier1_oos',
     pass: (s) => (s.oos_p_value ?? 1) < 0.050,
     cellText: (s) => `p=${(s.oos_p_value ?? 1).toFixed(3)}`,
   },
   {
     label: 'CV',
     metricName: 'CV stability score',
+    term: 'tier1_cv',
     pass: (s) => (s.cv_stability_score ?? 0) >= 0.60,
     cellText: (s) => `${(s.cv_stability_score ?? 0).toFixed(2)}`,
   },
@@ -82,7 +93,7 @@ export default function SignificanceJourneyMatrix({ strategies }: Props) {
               <th className="text-left py-1.5 pr-3">Strategy</th>
               {GATES.map((g) => (
                 <th key={g.label} className="px-1.5 py-1.5 text-center w-20">
-                  {g.label}
+                  <ExplainableText term={g.term}>{g.label}</ExplainableText>
                 </th>
               ))}
               <th className="px-1.5 py-1.5 text-right w-12">Total</th>
