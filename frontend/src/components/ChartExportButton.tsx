@@ -40,7 +40,9 @@ export default function ChartExportButton({
       a.download = `${chartId}_${timestamp()}.png`
       a.click()
     } catch {
-      console.warn('html2canvas unavailable — PNG export skipped')
+      // html2canvas dynamic import failed (offline, bundle issue) —
+      // silently no-op so the export menu stays usable. SVG export
+      // is the deterministic fallback and remains available.
     }
   }
 

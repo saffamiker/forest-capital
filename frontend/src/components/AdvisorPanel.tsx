@@ -77,6 +77,17 @@ export default function AdvisorPanel({
 
   const { analyse, analyses, loading, error } = useAdvisorStore()
 
+  // Cache key matches the store's so we can read the cached result
+  // synchronously without re-rendering on every keystroke. MUST run
+  // before any early return — react-hooks/rules-of-hooks forbids
+  // conditional hook calls, and the Present-mode guard below is an
+  // early return that would otherwise skip this useMemo on some
+  // renders and change the hook call order between renders.
+  const cacheKey = useMemo(() => {
+    const q = query.trim() || DEFAULT_QUERIES[deliverable]
+    return `${deliverable}:${q.slice(0, 200).toLowerCase()}`
+  }, [deliverable, query])
+
   // Hide in Present mode — the advisor is internal team scaffolding,
   // not Forest-Capital-facing content.
   if (mode === 'present') return null
@@ -97,13 +108,6 @@ export default function AdvisorPanel({
     }
     setSubmitted(false)
   }
-
-  // Cache key matches the store's so we can read the cached result
-  // synchronously without re-rendering on every keystroke.
-  const cacheKey = useMemo(() => {
-    const q = query.trim() || DEFAULT_QUERIES[deliverable]
-    return `${deliverable}:${q.slice(0, 200).toLowerCase()}`
-  }, [deliverable, query])
 
   const cached: AdvisorAnalysis | undefined = analyses[cacheKey]
 

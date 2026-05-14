@@ -239,9 +239,8 @@ describe('ChartCommentStrip', () => {
     // time. Indexing the array inside the function body works because we
     // never look up an element that doesn't exist — calls without args
     // simply have call[0] === undefined and fail the equality check.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const explainCalls = mockedAxios.post.mock.calls.filter(
-      (call: any[]) => call[0] === '/api/explain/chart',
+      (call: unknown[]) => call[0] === '/api/explain/chart',
     )
     expect(explainCalls.length).toBe(0)
   })
@@ -282,9 +281,8 @@ describe('ExplainableText hover cost optimisation', () => {
     // Allow the useEffect microtasks for all 10 components to flush.
     await act(async () => { await Promise.resolve() })
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const termCalls = mockedAxios.post.mock.calls.filter(
-      (call: any[]) => call[0] === '/api/explain/terms',
+      (call: unknown[]) => call[0] === '/api/explain/terms',
     )
     expect(termCalls.length).toBe(1)
   })
@@ -314,9 +312,8 @@ describe('ExplainableText hover cost optimisation', () => {
     )
     await act(async () => { await Promise.resolve() })
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const termCalls = mockedAxios.post.mock.calls.filter(
-      (call: any[]) => call[0] === '/api/explain/terms',
+      (call: unknown[]) => call[0] === '/api/explain/terms',
     )
     expect(termCalls.length).toBe(0)
   })
@@ -332,9 +329,8 @@ describe('ExplainableText hover cost optimisation', () => {
     )
     await act(async () => { await Promise.resolve() })
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const termCalls = mockedAxios.post.mock.calls.filter(
-      (call: any[]) => call[0] === '/api/explain/terms',
+      (call: unknown[]) => call[0] === '/api/explain/terms',
     )
     expect(termCalls.length).toBe(0)
   })
