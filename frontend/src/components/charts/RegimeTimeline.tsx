@@ -81,7 +81,7 @@ export default function RegimeTimeline({ timeline }: Props) {
             fill={REGIME_COLORS[p.regime]}
             opacity={0.85}
           >
-            <title>{`${p.date}: ${p.regime}`}</title>
+            <title>{`${p.date.slice(0, 7)} · Regime: ${p.regime}`}</title>
           </rect>
         ))}
         {yearTicks.map((t) => (

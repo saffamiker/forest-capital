@@ -7,7 +7,7 @@
  * cleaner with hand-drawn SVG sized exactly for our use case.
  */
 import type { CVRadarPoint } from '../../types/charts'
-import { colorFor, prettyName } from '../../lib/strategyColors'
+import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
 
 const AXES: (keyof CVRadarPoint)[] = [
   'walk_forward', 'cpcv', 'permutation', 'regime', 'oos', 'stability',
@@ -31,6 +31,8 @@ function RadarSmall({ name, point }: { name: string; point: CVRadarPoint }) {
   const cy = SIZE / 2
   const radius = SIZE * 0.34
   const color = colorFor(name)
+  const t = typeFor(name)
+  const badgeColor = t === 'dynamic' ? '#3b82f6' : t === 'static' ? '#64748b' : null
 
   // Polar coordinates for each axis (starting at 12 o'clock, going clockwise)
   const points = AXES.map((axis, i) => {
@@ -51,7 +53,21 @@ function RadarSmall({ name, point }: { name: string; point: CVRadarPoint }) {
 
   return (
     <div className="bg-navy-800/60 rounded p-2 border border-border/40">
-      <div className="text-2xs text-muted mb-1 text-center">{prettyName(name)}</div>
+      <div className="text-2xs mb-1 text-center flex items-center justify-center gap-1.5">
+        <span className="text-muted">{prettyName(name)}</span>
+        {badgeColor && (
+          <span
+            className="text-2xs px-1 py-0.5 rounded border font-medium"
+            style={{
+              color: badgeColor,
+              borderColor: `${badgeColor}30`,
+              background: `${badgeColor}10`,
+            }}
+          >
+            {t!.toUpperCase()}
+          </span>
+        )}
+      </div>
       <svg viewBox={`0 0 ${SIZE} ${SIZE}`} className="w-full">
         {/* Axis spokes */}
         {points.map((p) => (
@@ -64,8 +80,10 @@ function RadarSmall({ name, point }: { name: string; point: CVRadarPoint }) {
         {/* Concentric grid circles at 0.5 and 1.0 */}
         <circle cx={cx} cy={cy} r={radius} stroke="#1e3a5c" fill="none" strokeWidth={0.5} />
         <circle cx={cx} cy={cy} r={radius * 0.5} stroke="#1e3a5c" fill="none" strokeWidth={0.5} strokeDasharray="2,2" />
-        {/* Filled polygon */}
-        <polygon points={polygon} fill={color} fillOpacity={0.35} stroke={color} strokeWidth={1.5} />
+        {/* Filled polygon — title hovers anywhere in the shape */}
+        <polygon points={polygon} fill={color} fillOpacity={0.35} stroke={color} strokeWidth={1.5}>
+          <title>{tooltipLine(name, 'CV stability axes', `WF ${point.walk_forward.toFixed(2)}, CPCV ${point.cpcv.toFixed(2)}, Stab ${point.stability.toFixed(2)}`)}</title>
+        </polygon>
         {/* Axis labels */}
         {points.map((p) => (
           <text

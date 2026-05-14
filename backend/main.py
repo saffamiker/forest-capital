@@ -378,7 +378,15 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
             data_range = {"start": first_date, "end": last_date, "n_months": n_rows}
 
             cached = await get_strategy_cache(strategy_hash)
-            if cached:
+            # Schema gate: cache entries written before Sprint 6 lack the
+            # monthly_returns field that /charts/data needs. Treat them as
+            # stale so a single recompute fills the cache with current-schema
+            # entries; both endpoints see the benefit on the next request.
+            cache_current_schema = bool(cached) and all(
+                isinstance(r.get("monthly_returns"), list) and len(r["monthly_returns"]) > 0
+                for r in cached.values()
+            )
+            if cache_current_schema:
                 ranked = sorted(cached.values(), key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
                 return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": "hit", "data_range": data_range}
 
@@ -388,7 +396,8 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
             # Write-through: persist for next cold start or Render restart
             await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
 
-            return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": "miss", "data_range": data_range}
+            cache_label = "miss" if not cached else "schema_refresh"
+            return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": cache_label, "data_range": data_range}
         except Exception as exc:
             log.warning("compare_all_strategies_fallback", error=str(exc))
     # Fallback: MOCK_STRATEGIES used only in test environment or when the real
@@ -434,16 +443,35 @@ async def get_chart_data(request: Request, session: dict = Depends(require_auth)
         strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
 
         # Reuse the strategy cache if a prior /compare call populated it.
-        # The cached results carry monthly_returns; chart_data only needs
-        # those plus the history dict.
+        # The cached results MUST carry monthly_returns — without them, the
+        # per-strategy chart computations (CPCV, walk-forward, regime-
+        # conditional, factor loadings, attribution, CV radar) all produce
+        # empty output. Cache entries written before Sprint 6 lack this
+        # field; detect and refresh so the system self-heals without
+        # requiring a manual DB invalidation.
         cached_results = await get_strategy_cache(strategy_hash)
-        if cached_results:
+        cache_is_chart_compatible = bool(cached_results) and all(
+            isinstance(r.get("monthly_returns"), list) and len(r["monthly_returns"]) > 0
+            for r in cached_results.values()
+        )
+        if cache_is_chart_compatible:
             results_dict = cached_results
+            log.info("chart_data_cache_hit", strategy_hash=strategy_hash[:8])
         else:
-            # Cold path — run strategies fresh. The /compare endpoint will
-            # populate the cache on its own; we don't write here to avoid
-            # double-writes if both endpoints are hit concurrently.
+            if cached_results:
+                log.info(
+                    "chart_data_cache_schema_miss",
+                    strategy_hash=strategy_hash[:8],
+                    note="cached entry lacks monthly_returns — refreshing",
+                )
             results_dict = run_all_strategies(history)
+            # Write-through so the next /charts/data hit AND the next
+            # /compare hit both find a schema-compatible entry.
+            try:
+                from tools.cache import set_strategy_cache
+                await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
+            except Exception as exc:
+                log.warning("chart_data_cache_write_failed", error=str(exc))
 
         payload = compute_chart_data(history, results_dict)
         payload["strategy_hash"] = strategy_hash

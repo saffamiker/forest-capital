@@ -78,7 +78,10 @@ export default function CorrelationBreakdownChart({ correlation, pre2022, post20
             <Tooltip
               contentStyle={{ background: '#0d1929', border: '1px solid #1e3a5c', fontSize: 11 }}
               labelStyle={{ color: '#cbd5e1' }}
-              formatter={(v: number) => v.toFixed(3)}
+              // Non-strategy chart — header is the date, single metric per row.
+              // Keeps the same "Label · Metric: value" shape as the strategy
+              // charts so the visual cadence is identical product-wide.
+              formatter={(v: number) => [`12-month correlation: ${v.toFixed(3)}`, '']}
             />
             <ReferenceLine y={0} stroke="#cbd5e1" strokeOpacity={0.3} strokeDasharray="2 2" />
             {summary.pre != null && (

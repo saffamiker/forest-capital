@@ -7,7 +7,7 @@
  * primitive and a hand-drawn box is < 30 lines.
  */
 import type { CPCVStats } from '../../types/charts'
-import { colorFor, prettyName } from '../../lib/strategyColors'
+import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
 
 interface Props {
   cpcv: Record<string, CPCVStats>
@@ -73,10 +73,21 @@ export default function CPCVSharpePlot({ cpcv }: Props) {
         {sorted.map(([name, v], i) => {
           const y = PAD_TOP + i * 32 + 16
           const color = colorFor(name)
+          const t = typeFor(name)
+          const badgeColor = t === 'dynamic' ? '#3b82f6' : t === 'static' ? '#64748b' : null
+          // Tooltip lives on every visible element in the row so hovering
+          // anywhere produces the canonical "Strategy DYNAMIC · CPCV median: …"
+          const tooltip = tooltipLine(name, 'CPCV median Sharpe', v.sharpe_median.toFixed(2))
           return (
             <g key={name}>
+              <title>{tooltip}</title>
               <text x={PAD_LEFT - 8} y={y + 4} fill="#cbd5e1" fontSize="11" textAnchor="end">
                 {prettyName(name)}
+                {badgeColor && (
+                  <tspan dx="6" fill={badgeColor} fontSize="9" fontWeight={600} letterSpacing="0.06em">
+                    {t!.toUpperCase()}
+                  </tspan>
+                )}
               </text>
               {/* Whisker line */}
               <line x1={xPos(v.sharpe_min)} x2={xPos(v.sharpe_max)} y1={y} y2={y} stroke={color} strokeWidth={1.5} />
@@ -90,7 +101,9 @@ export default function CPCVSharpePlot({ cpcv }: Props) {
                 height={16}
                 fill={color} fillOpacity={0.3}
                 stroke={color} strokeWidth={1.5}
-              />
+              >
+                <title>{tooltipLine(name, 'CPCV Q1-Q3 Sharpe', `[${v.sharpe_q1.toFixed(2)}, ${v.sharpe_q3.toFixed(2)}]`)}</title>
+              </rect>
               {/* Median */}
               <line
                 x1={xPos(v.sharpe_median)} x2={xPos(v.sharpe_median)}

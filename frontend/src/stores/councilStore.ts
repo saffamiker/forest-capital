@@ -1,49 +1,64 @@
 /**
  * frontend/src/stores/councilStore.ts
  *
- * Persists the last council query and response for the session.
- * When the user navigates away from the Council tab and returns,
- * they see the previous response instead of a blank screen.
- * A new query clears the previous response and streams the new one.
+ * Persists the most recent council query and response for the session.
+ * When the user navigates away from the Council tab and returns, they
+ * see the previous response immediately rather than an empty screen or
+ * a duplicate API call. A new query replaces the previous response.
+ *
+ * runQuery() is the single entry point that owns the network call so
+ * the component never touches axios directly — the same pattern as
+ * strategiesStore.reload() and chartsStore.reload().
  */
 
 import { create } from 'zustand'
+import axios from 'axios'
+import type { CouncilResponse } from '../types/agents'
 
-export interface AgentMessage {
-  agent: string
-  content: string
-  is_final: boolean
+interface CouncilResult extends CouncilResponse {
+  error?: boolean
 }
 
 interface CouncilState {
-  lastQuery: string
-  messages: AgentMessage[]
-  streaming: boolean
+  query: string                  // current text in the input box
+  lastQuery: string              // the query that produced `result`
+  result: CouncilResult | null   // last response (survives navigation)
+  loading: boolean
   error: string | null
 
   setQuery: (q: string) => void
-  appendMessage: (msg: AgentMessage) => void
-  setStreaming: (v: boolean) => void
-  setError: (e: string | null) => void
+  runQuery: (q: string) => Promise<void>
   clear: () => void
 }
 
-export const useCouncilStore = create<CouncilState>((set) => ({
+export const useCouncilStore = create<CouncilState>((set, get) => ({
+  query: '',
   lastQuery: '',
-  messages: [],
-  streaming: false,
+  result: null,
+  loading: false,
   error: null,
 
-  setQuery: (q) => set({ lastQuery: q, messages: [], error: null }),
-  appendMessage: (msg) =>
-    set((s) => ({
-      messages: [
-        ...s.messages.filter((m) => m.agent !== msg.agent),
-        msg,
-      ],
-    })),
-  setStreaming: (v) => set({ streaming: v }),
-  setError: (e) => set({ error: e, streaming: false }),
+  setQuery: (q) => set({ query: q }),
+
+  runQuery: async (q) => {
+    const trimmed = q.trim()
+    if (!trimmed || get().loading) return
+    set({ loading: true, error: null, result: null, lastQuery: trimmed })
+    try {
+      const res = await axios.post<CouncilResponse>('/api/council/query', { query: trimmed })
+      set({ result: res.data, loading: false })
+    } catch (err) {
+      const msg = axios.isAxiosError(err)
+        ? (err.response?.data?.detail ?? err.message)
+        : 'Council query failed'
+      set({
+        loading: false,
+        error: String(msg),
+        result: { error: true, query: trimmed, messages: [], final_recommendation: '', consensus_reached: false },
+      })
+    }
+  },
+
   clear: () =>
-    set({ lastQuery: '', messages: [], streaming: false, error: null }),
+    set({ query: '', lastQuery: '', result: null, loading: false, error: null }),
 }))

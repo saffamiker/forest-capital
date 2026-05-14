@@ -5,7 +5,7 @@
  * uncertain estimate, narrow CI = sample size was sufficient.
  */
 import type { StrategyResult } from '../../types/strategies'
-import { colorFor, prettyName } from '../../lib/strategyColors'
+import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
 
 interface Props {
   strategies: StrategyResult[]
@@ -72,18 +72,36 @@ export default function ProbabilisticSharpeChart({ strategies }: Props) {
           const color = colorFor(s.strategy_name)
           const [ciLow, ciHigh] = s.sharpe_ci_95!
           const sr = s.sharpe_ratio ?? 0
+          const t = typeFor(s.strategy_name)
+          // Inline DYNAMIC/STATIC text after the strategy name — SVG can't
+          // host a JSX badge so we use a styled <tspan> instead. Same idea
+          // as the StrategyTypeBadge component: electric blue for dynamic,
+          // slate for static, omitted entirely when class is unknown.
+          const badgeColor = t === 'dynamic' ? '#3b82f6' : t === 'static' ? '#64748b' : null
+          const badgeText = t ? t.toUpperCase() : ''
+          const tooltip = tooltipLine(s.strategy_name, 'Sharpe', sr.toFixed(2))
           return (
             <g key={s.strategy_name}>
+              <title>{tooltip}</title>
               <text x={PAD_LEFT - 8} y={y + 4} fill="#cbd5e1" fontSize="11" textAnchor="end">
                 {prettyName(s.strategy_name)}
+                {badgeColor && (
+                  <tspan dx="6" fill={badgeColor} fontSize="9" fontWeight={600} letterSpacing="0.06em">
+                    {badgeText}
+                  </tspan>
+                )}
               </text>
               {/* CI bar */}
-              <line x1={xPos(ciLow)} x2={xPos(ciHigh)} y1={y} y2={y} stroke={color} strokeWidth={2} opacity={0.7} />
+              <line x1={xPos(ciLow)} x2={xPos(ciHigh)} y1={y} y2={y} stroke={color} strokeWidth={2} opacity={0.7}>
+                <title>{tooltipLine(s.strategy_name, 'Sharpe 95% CI', `[${ciLow.toFixed(2)}, ${ciHigh.toFixed(2)}]`)}</title>
+              </line>
               {/* CI caps */}
               <line x1={xPos(ciLow)} x2={xPos(ciLow)} y1={y - 5} y2={y + 5} stroke={color} strokeWidth={1.5} />
               <line x1={xPos(ciHigh)} x2={xPos(ciHigh)} y1={y - 5} y2={y + 5} stroke={color} strokeWidth={1.5} />
               {/* Point estimate */}
-              <circle cx={xPos(sr)} cy={y} r={4} fill={color} stroke="#f9fafb" strokeWidth={1.5} />
+              <circle cx={xPos(sr)} cy={y} r={4} fill={color} stroke="#f9fafb" strokeWidth={1.5}>
+                <title>{tooltip}</title>
+              </circle>
               {/* Value label to the right */}
               <text
                 x={xPos(ciHigh) + 8} y={y + 4}

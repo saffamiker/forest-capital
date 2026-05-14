@@ -7,7 +7,7 @@
 import { useMemo, useState } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, Legend } from 'recharts'
 import type { WalkForwardWindow } from '../../types/charts'
-import { colorFor, prettyName } from '../../lib/strategyColors'
+import { colorFor, prettyName, tooltipLine } from '../../lib/strategyColors'
 
 interface Props {
   walkForward: Record<string, WalkForwardWindow[]>
@@ -98,6 +98,12 @@ export default function WalkForwardChart({ walkForward }: Props) {
             <Tooltip
               contentStyle={{ background: '#0d1929', border: '1px solid #1e3a5c', fontSize: 11 }}
               labelStyle={{ color: '#cbd5e1' }}
+              // Standardised "Strategy DYNAMIC · OOS Sharpe: 1.02" rows
+              // — same format used everywhere else via tooltipLine().
+              formatter={(value: number, name: string) => [
+                tooltipLine(name, 'OOS Sharpe', value.toFixed(2)),
+                '',
+              ]}
             />
             <ReferenceLine y={0} stroke="#ef4444" strokeOpacity={0.4} strokeDasharray="2 2" />
             <Legend wrapperStyle={{ fontSize: 10 }} />

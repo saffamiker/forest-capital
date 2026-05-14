@@ -14,27 +14,14 @@
  */
 
 import { create } from 'zustand'
+import axios from 'axios'
+import type { QAAuditResult as QAAuditResponse } from '../types/agents'
 
 export type QAStatus = 'unknown' | 'pass' | 'warn' | 'fail'
 
-export interface QACheckItem {
-  check_id: string
-  category: string
-  check: string
-  description: string
-  status: 'PASS' | 'WARN' | 'FAIL'
-  evidence?: string
-  fix?: string | null
-}
-
-export interface QAAuditResult {
-  checks_passed: number
-  checks_warned: number
-  checks_failed: number
-  summary: string
-  items: QACheckItem[]
-  run_at: string
-}
+// Re-exported alias preserves backward compatibility with components/code
+// that imports the QA audit response shape from this store rather than types/agents.
+export type QAAuditResult = QAAuditResponse
 
 interface QAState {
   result: QAAuditResult | null
@@ -43,6 +30,8 @@ interface QAState {
   error: string | null
   loaded: boolean
 
+  load: () => Promise<void>    // no-op if already loaded — used on tab mount
+  reload: () => Promise<void>  // force re-run — used by the "Re-run audit" button
   setResult: (r: QAAuditResult) => void
   setLoading: (v: boolean) => void
   setError: (e: string | null) => void
@@ -55,12 +44,38 @@ function deriveStatus(r: QAAuditResult): QAStatus {
   return 'pass'
 }
 
-export const useQAStore = create<QAState>((set) => ({
+export const useQAStore = create<QAState>((set, get) => ({
   result: null,
   status: 'unknown',
   loading: false,
   error: null,
   loaded: false,
+
+  load: async () => {
+    // Skip if already loaded or in flight — the invariant that makes the QA tab
+    // instant when revisited after the first run.
+    if (get().loaded || get().loading) return
+    await get().reload()
+  },
+
+  reload: async () => {
+    set({ loading: true, error: null })
+    try {
+      const res = await axios.post<QAAuditResult>('/api/qa/audit')
+      set({
+        result: res.data,
+        status: deriveStatus(res.data),
+        loaded: true,
+        loading: false,
+        error: null,
+      })
+    } catch (err) {
+      const msg = axios.isAxiosError(err)
+        ? (err.response?.data?.detail ?? err.message)
+        : 'Failed to run QA audit'
+      set({ loading: false, error: String(msg) })
+    }
+  },
 
   setResult: (r) =>
     set({ result: r, status: deriveStatus(r), loaded: true, error: null }),

@@ -1,15 +1,4 @@
-const STRATEGY_TYPES: Record<string, 'dynamic' | 'static'> = {
-  BENCHMARK:          'static',
-  CLASSIC_60_40:      'static',
-  RISK_PARITY:        'static',
-  MIN_VARIANCE:       'static',
-  EQUAL_WEIGHT:       'static',
-  MOMENTUM_ROTATION:  'dynamic',
-  REGIME_SWITCHING:   'dynamic',
-  VOL_TARGETING:      'dynamic',
-  BLACK_LITTERMAN:    'dynamic',
-  MAX_SHARPE_ROLLING: 'dynamic',
-}
+import StrategyTypeBadge from './StrategyTypeBadge'
 
 interface AgentConfig {
   key: string
@@ -150,15 +139,7 @@ export default function DisagreementHeatmap({ sentiments = MOCK_SENTIMENTS }: Di
                     <span className="text-white text-2xs font-medium">
                       {strat.replace(/_/g, ' ')}
                     </span>
-                    {STRATEGY_TYPES[strat] === 'dynamic' ? (
-                      <span className="text-2xs px-1 py-0.5 rounded border border-electric/30 bg-electric/10 text-electric font-medium">
-                        DYNAMIC
-                      </span>
-                    ) : STRATEGY_TYPES[strat] === 'static' ? (
-                      <span className="text-2xs px-1 py-0.5 rounded border border-border bg-navy-700 text-muted font-medium">
-                        STATIC
-                      </span>
-                    ) : null}
+                    <StrategyTypeBadge strategy={strat} />
                     {anyDissenterDiverges && (
                       <span
                         className="text-2xs border rounded px-1"

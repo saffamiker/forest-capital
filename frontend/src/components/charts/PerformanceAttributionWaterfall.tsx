@@ -8,7 +8,7 @@
  * timing (selection).
  */
 import type { AttributionResult } from '../../types/charts'
-import { colorFor, prettyName } from '../../lib/strategyColors'
+import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
 
 interface Props {
   attribution: Record<string, AttributionResult>
@@ -16,14 +16,16 @@ interface Props {
 
 function WaterfallSmall({ name, attr }: { name: string; attr: AttributionResult }) {
   const components = [
-    { label: 'Alloc',  value: attr.allocation },
-    { label: 'Select', value: attr.selection },
-    { label: 'Inter',  value: attr.interaction },
-    { label: 'Total',  value: attr.total_active },
+    { label: 'Alloc',  metric: 'Allocation effect', value: attr.allocation },
+    { label: 'Select', metric: 'Selection effect',  value: attr.selection },
+    { label: 'Inter',  metric: 'Interaction effect', value: attr.interaction },
+    { label: 'Total',  metric: 'Total active return', value: attr.total_active },
   ]
   const allVals = components.map((c) => c.value)
   const absMax = Math.max(0.01, Math.max(...allVals.map(Math.abs)))
   const color = colorFor(name)
+  const t = typeFor(name)
+  const badgeColor = t === 'dynamic' ? '#3b82f6' : t === 'static' ? '#64748b' : null
 
   const W = 200
   const H = 110
@@ -37,7 +39,21 @@ function WaterfallSmall({ name, attr }: { name: string; attr: AttributionResult 
 
   return (
     <div className="bg-navy-800/60 rounded p-2 border border-border/40">
-      <div className="text-2xs text-muted mb-1 text-center">{prettyName(name)}</div>
+      <div className="text-2xs mb-1 text-center flex items-center justify-center gap-1.5">
+        <span className="text-muted">{prettyName(name)}</span>
+        {badgeColor && (
+          <span
+            className="text-2xs px-1 py-0.5 rounded border font-medium"
+            style={{
+              color: badgeColor,
+              borderColor: `${badgeColor}30`,
+              background: `${badgeColor}10`,
+            }}
+          >
+            {t!.toUpperCase()}
+          </span>
+        )}
+      </div>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
         <line x1={PAD_X} x2={W - PAD_X} y1={zeroY} y2={zeroY} stroke="#1e3a5c" strokeWidth={1} />
         {components.map((c, i) => {
@@ -47,6 +63,7 @@ function WaterfallSmall({ name, attr }: { name: string; attr: AttributionResult 
           const barColor = c.label === 'Total' ? color : (c.value >= 0 ? '#10b981' : '#ef4444')
           return (
             <g key={c.label}>
+              <title>{tooltipLine(name, c.metric, `${(c.value * 100).toFixed(2)}%`)}</title>
               <rect
                 x={x} y={y} width={barW} height={Math.max(1, h)}
                 fill={barColor} fillOpacity={c.label === 'Total' ? 1 : 0.65}

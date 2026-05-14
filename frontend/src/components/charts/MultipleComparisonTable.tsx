@@ -6,6 +6,7 @@
  */
 import type { StrategyResult } from '../../types/strategies'
 import { prettyName } from '../../lib/strategyColors'
+import StrategyTypeBadge from '../StrategyTypeBadge'
 
 interface Props {
   strategies: StrategyResult[]
@@ -56,7 +57,12 @@ export default function MultipleComparisonTable({ strategies }: Props) {
               const arrow = corrected > raw ? '→' : '='
               return (
                 <tr key={s.strategy_name} className="border-t border-border/50">
-                  <td className="py-1.5 pr-3 text-white font-mono">{prettyName(s.strategy_name)}</td>
+                  <td className="py-1.5 pr-3">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-white font-mono">{prettyName(s.strategy_name)}</span>
+                      <StrategyTypeBadge strategy={s.strategy_name} />
+                    </div>
+                  </td>
                   <td className="text-right px-2 py-1.5 font-mono text-cbd5e1">
                     {raw.toFixed(4)}
                   </td>

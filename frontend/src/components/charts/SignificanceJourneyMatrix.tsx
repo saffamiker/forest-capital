@@ -1,44 +1,57 @@
 /**
- * SignificanceJourneyMatrix — pass/fail visual for the five Tier 1 gates
- * per strategy. Rows: 10 strategies. Columns: t-test, FDR, DSR, OOS, CV.
+ * SignificanceJourneyMatrix — five Tier 1 gates per strategy, scannable
+ * at a glance. Every cell shows the actual metric value (p=0.049, q=0.066,
+ * 0.65) rather than just a pass/fail tile, so the audience never has to
+ * hover to read a number — the matrix is presentation-ready in print too.
+ *
  * Reads gates directly from StrategyResult so it works offline of the
  * chart-data endpoint — useful when /api/v1/charts/data is cold.
  */
 import type { StrategyResult } from '../../types/strategies'
-import { prettyName } from '../../lib/strategyColors'
+import { prettyName, tooltipLine } from '../../lib/strategyColors'
+import StrategyTypeBadge from '../StrategyTypeBadge'
 
 interface Gate {
   label: string
+  metricName: string                           // for tooltip standardisation
   pass: (s: StrategyResult) => boolean
-  fmt: (s: StrategyResult) => string
+  // Returns the value to render inside the cell — no "p=" prefix needed
+  // when the column header already says "T-TEST", so each gate decides
+  // its own formatting. Bold-cased, sub-second to read.
+  cellText: (s: StrategyResult) => string
 }
 
 // Thresholds match backend/tools/backtester.py run_all_strategies gate logic.
 const GATES: Gate[] = [
   {
-    label: 't-test',
+    label: 'T-TEST',
+    metricName: 'Full-period p-value',
     pass: (s) => (s.p_value_ttest ?? 1) < 0.005,
-    fmt: (s) => `p=${(s.p_value_ttest ?? 1).toFixed(4)}`,
+    cellText: (s) => `p=${(s.p_value_ttest ?? 1).toFixed(3)}`,
   },
   {
     label: 'FDR',
+    metricName: 'FDR-corrected q-value',
     pass: (s) => (s.p_value_corrected ?? 1) < 0.005,
-    fmt: (s) => `q=${(s.p_value_corrected ?? 1).toFixed(4)}`,
+    cellText: (s) => `q=${(s.p_value_corrected ?? 1).toFixed(3)}`,
   },
   {
     label: 'DSR',
+    metricName: 'Deflated Sharpe p-value',
     pass: (s) => (s.dsr_p_value ?? 1) < 0.005,
-    fmt: (s) => `p=${(s.dsr_p_value ?? 1).toFixed(4)}`,
+    cellText: (s) => `p=${(s.dsr_p_value ?? 1).toFixed(3)}`,
   },
   {
     label: 'OOS',
+    metricName: 'Out-of-sample p-value',
     pass: (s) => (s.oos_p_value ?? 1) < 0.050,
-    fmt: (s) => `p=${(s.oos_p_value ?? 1).toFixed(3)}`,
+    cellText: (s) => `p=${(s.oos_p_value ?? 1).toFixed(3)}`,
   },
   {
     label: 'CV',
+    metricName: 'CV stability score',
     pass: (s) => (s.cv_stability_score ?? 0) >= 0.60,
-    fmt: (s) => `score=${(s.cv_stability_score ?? 0).toFixed(2)}`,
+    cellText: (s) => `${(s.cv_stability_score ?? 0).toFixed(2)}`,
   },
 ]
 
@@ -61,38 +74,50 @@ export default function SignificanceJourneyMatrix({ strategies }: Props) {
       </div>
 
       <div className="overflow-x-auto">
-        <table className="w-full text-xs">
+        {/* Compact table: 11px font, 4px row padding. Numbers live inside
+            each cell so the matrix is scannable in print and screenshot. */}
+        <table className="w-full text-2xs">
           <thead>
-            <tr className="text-muted text-2xs uppercase tracking-wide">
-              <th className="text-left py-2 pr-3">Strategy</th>
+            <tr className="text-muted uppercase tracking-wide">
+              <th className="text-left py-1.5 pr-3">Strategy</th>
               {GATES.map((g) => (
-                <th key={g.label} className="px-2 py-2">{g.label}</th>
+                <th key={g.label} className="px-1.5 py-1.5 text-center w-20">
+                  {g.label}
+                </th>
               ))}
-              <th className="px-2 py-2 text-right">Total</th>
+              <th className="px-1.5 py-1.5 text-right w-12">Total</th>
             </tr>
           </thead>
           <tbody>
             {sorted.map((s) => (
-              <tr key={s.strategy_name} className="border-t border-border/50">
-                <td className="py-1.5 pr-3 text-white font-mono">{prettyName(s.strategy_name)}</td>
+              <tr key={s.strategy_name} className="border-t border-border/40">
+                <td className="py-1 pr-3 align-middle">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-white font-mono text-xs">{prettyName(s.strategy_name)}</span>
+                    <StrategyTypeBadge strategy={s.strategy_name} />
+                  </div>
+                </td>
                 {GATES.map((g) => {
                   const pass = g.pass(s)
                   return (
                     <td
                       key={g.label}
-                      className="px-2 py-1.5 text-center"
-                      title={g.fmt(s)}
+                      className="px-1 py-1 text-center"
+                      title={tooltipLine(s.strategy_name, g.metricName, g.cellText(s).replace(/^[pq]=/, ''))}
                     >
                       <span
-                        className={`inline-block w-4 h-4 rounded-sm ${
-                          pass ? 'bg-success/30 border border-success/60' : 'bg-danger/20 border border-danger/40'
+                        className={`inline-block w-full max-w-[5rem] px-1.5 py-0.5 rounded font-mono text-white text-2xs border ${
+                          pass
+                            ? 'bg-success/30 border-success/60'
+                            : 'bg-danger/20 border-danger/40'
                         }`}
-                        aria-label={`${g.label} ${pass ? 'pass' : 'fail'}`}
-                      />
+                      >
+                        {g.cellText(s)}
+                      </span>
                     </td>
                   )
                 })}
-                <td className="px-2 py-1.5 text-right font-mono text-white">
+                <td className="px-1.5 py-1 text-right font-mono text-white">
                   {s.tier1_gates_passed ?? 0}/5
                 </td>
               </tr>

@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import { CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, RefreshCw } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import axios from 'axios'
-import type { Verdict, QACheck, QAAuditResult } from '../types/agents'
+import type { Verdict, QACheck } from '../types/agents'
+import { useQAStore } from '../stores/qaStore'
 
 interface VerdictStyle {
   Icon: LucideIcon
@@ -61,24 +61,14 @@ function CheckRow({ check, open, onToggle }: CheckRowProps) {
 }
 
 export default function QAAuditPanel() {
-  const [audit, setAudit] = useState<QAAuditResult | null>(null)
-  const [loading, setLoading] = useState(false)
+  // Audit result lives in qaStore — survives navigation away and back.
+  // load() is a no-op when loaded=true, so re-entering this tab is instant
+  // and never triggers a second 10-second audit run.
+  const { result: audit, loading, load, reload } = useQAStore()
   const [openChecks, setOpenChecks] = useState<Set<string>>(new Set())
   const [activeCategory, setActiveCategory] = useState('ALL')
 
-  const fetchAudit = async () => {
-    setLoading(true)
-    try {
-      const res = await axios.post<QAAuditResult>('/api/qa/audit')
-      setAudit(res.data)
-    } catch {
-      // handled by parent state
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => { void fetchAudit() }, [])
+  useEffect(() => { void load() }, [load])
 
   const toggleCheck = (id: string) => {
     setOpenChecks((prev) => {
@@ -90,7 +80,7 @@ export default function QAAuditPanel() {
 
   if (!audit && !loading) return (
     <div className="p-6 text-center text-muted text-sm">
-      <button onClick={() => void fetchAudit()} className="text-electric underline">Load QA Audit</button>
+      <button onClick={() => void reload()} className="text-electric underline">Load QA Audit</button>
     </div>
   )
 
@@ -151,7 +141,7 @@ export default function QAAuditPanel() {
             <span className="text-muted text-xs">failed</span>
           </div>
           <button
-            onClick={() => void fetchAudit()}
+            onClick={() => void reload()}
             disabled={loading}
             className="ml-auto flex items-center gap-1.5 text-muted hover:text-white text-xs transition-colors"
           >

@@ -88,6 +88,7 @@ export default function RegimeTransitionMatrix({ matrix }: Props) {
                         color: '#f9fafb',
                         border: from === to ? '1px solid rgba(255,255,255,0.2)' : '1px solid transparent',
                       }}
+                      title={`${from} → ${to} · P(next month): ${(p * 100).toFixed(1)}%`}
                     >
                       {(p * 100).toFixed(1)}%
                     </div>

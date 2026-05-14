@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { Bot, TrendingUp, AlertTriangle, Loader2, Send } from 'lucide-react'
-import axios from 'axios'
 import DisagreementHeatmap from './DisagreementHeatmap'
-import type { AgentMessage, CouncilResponse } from '../types/agents'
+import type { AgentMessage } from '../types/agents'
+import { useCouncilStore } from '../stores/councilStore'
 
 interface AgentStyleConfig {
   accent: string
@@ -98,29 +98,17 @@ function AgentCard({ message, streaming = false }: { message: AgentMessage; stre
   )
 }
 
-interface CouncilResult extends CouncilResponse {
-  error?: boolean
-}
-
 export default function CouncilDebate() {
-  const [query, setQuery] = useState('')
-  const [result, setResult] = useState<CouncilResult | null>(null)
-  const [loading, setLoading] = useState(false)
+  // Query text, last result, and loading state all live in councilStore so
+  // navigating Council → Dashboard → Council preserves the previous response
+  // without a re-fetch. The query input is wired to the store's `query`
+  // field so half-typed text also survives navigation.
+  const { query, result, loading, setQuery, runQuery } = useCouncilStore()
   const [activeTab, setActiveTab] = useState<'debate' | 'heatmap'>('debate')
 
-  const handleSubmit = async (e?: React.FormEvent) => {
+  const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault()
-    if (!query.trim() || loading) return
-    setLoading(true)
-    setResult(null)
-    try {
-      const res = await axios.post<CouncilResponse>('/api/council/query', { query })
-      setResult(res.data)
-    } catch {
-      setResult({ error: true, query: '', messages: [], final_recommendation: '', consensus_reached: false })
-    } finally {
-      setLoading(false)
-    }
+    void runQuery(query)
   }
 
   const agentOrder = ['Equity Analyst', 'Fixed Income Analyst', 'Risk Manager', 'Quant Backtester', 'Independent Analyst (Gemini)', 'Contrarian Analyst (Grok)', 'CIO']

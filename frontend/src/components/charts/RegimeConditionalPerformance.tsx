@@ -6,7 +6,7 @@
  */
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 import type { RegimeConditional } from '../../types/charts'
-import { prettyName } from '../../lib/strategyColors'
+import { prettyName, typeFor } from '../../lib/strategyColors'
 
 interface Props {
   regimeConditional: Record<string, RegimeConditional>
@@ -29,8 +29,11 @@ export default function RegimeConditionalPerformance({ regimeConditional }: Prop
     )
   }
 
+  // Carry the raw strategy key alongside the display name so the tooltip
+  // formatter can produce the standard "Strategy DYNAMIC · regime: Sharpe" line.
   const data = entries.map(([name, regimes]) => ({
     strategy: prettyName(name),
+    strategyKey: name,
     BULL:       regimes.BULL.sharpe,
     BEAR:       regimes.BEAR.sharpe,
     TRANSITION: regimes.TRANSITION.sharpe,
@@ -66,6 +69,19 @@ export default function RegimeConditionalPerformance({ regimeConditional }: Prop
             <Tooltip
               contentStyle={{ background: '#0d1929', border: '1px solid #1e3a5c', fontSize: 11 }}
               labelStyle={{ color: '#cbd5e1' }}
+              // Custom label: "Strategy Name DYNAMIC" — same shape as the
+              // tooltipLine helper but split into label (header) + per-regime
+              // rows because recharts renders multi-series tooltips natively.
+              labelFormatter={(label, payload) => {
+                const row = payload?.[0]?.payload as { strategyKey?: string } | undefined
+                const key = row?.strategyKey ?? ''
+                const t = typeFor(key)
+                return t ? `${label} ${t.toUpperCase()}` : String(label)
+              }}
+              formatter={(value: number, name: string) => [
+                `${name} Sharpe: ${value.toFixed(2)}`,
+                '',
+              ]}
             />
             <Legend wrapperStyle={{ fontSize: 10 }} />
             <Bar dataKey="BULL"       fill={REGIME_COLORS.BULL}       isAnimationActive={false} />

@@ -10,7 +10,8 @@
  * return variance the factor model captures.
  */
 import type { FactorLoadings } from '../../types/charts'
-import { prettyName } from '../../lib/strategyColors'
+import { prettyName, tooltipLine } from '../../lib/strategyColors'
+import StrategyTypeBadge from '../StrategyTypeBadge'
 
 interface Props {
   factorLoadings: Record<string, FactorLoadings>
@@ -75,12 +76,18 @@ export default function FactorExposureHeatmap({ factorLoadings }: Props) {
           <tbody>
             {entries.map(([name, loadings]) => (
               <tr key={name} className="border-t border-border/50">
-                <td className="py-1.5 pr-3 text-white font-mono">{prettyName(name)}</td>
+                <td className="py-1.5 pr-3">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-white font-mono">{prettyName(name)}</span>
+                    <StrategyTypeBadge strategy={name} />
+                  </div>
+                </td>
                 {FACTOR_KEYS.map((k) => (
                   <td key={k} className="px-2 py-1.5 text-center">
                     <span
                       className="inline-block px-2 py-1 rounded font-mono text-2xs"
                       style={{ background: cellColor(loadings[k], maxLoading), color: '#f9fafb' }}
+                      title={tooltipLine(name, FACTOR_LABELS[k] + ' loading', loadings[k].toFixed(2))}
                     >
                       {loadings[k].toFixed(2)}
                     </span>
