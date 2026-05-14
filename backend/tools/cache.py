@@ -259,6 +259,98 @@ async def is_jti_used(jti: str) -> bool:
     return False
 
 
+# ── QA results cache (Sprint 6 tiered QA) ──────────────────────────────
+
+async def get_latest_qa(
+    strategy_hash: str,
+    min_tier: int = 1,
+) -> dict[str, Any] | None:
+    """
+    Returns the MOST RECENT non-expired QA verdict for the given hash,
+    across any tier ≥ min_tier. The Present-mode gate uses this with
+    min_tier=1 — Tier 1 deterministic checks are enough to unlock Present
+    mode; Tier 2 and Tier 3 simply refine the narrative.
+
+    Returns None if no fresh verdict exists for this strategy_hash. The
+    caller is responsible for triggering a fresh Tier 1 run on a miss.
+    """
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(
+                text(
+                    "SELECT tier, verdict, checklist_json, run_at, expires_at "
+                    "FROM qa_results_cache "
+                    "WHERE strategy_hash = :h AND tier >= :mt AND expires_at > now() "
+                    "ORDER BY run_at DESC LIMIT 1"
+                ),
+                {"h": strategy_hash, "mt": min_tier},
+            )
+            r = row.fetchone()
+            if not r:
+                return None
+            checklist = r[2] if isinstance(r[2], dict) else json.loads(r[2])
+            return {
+                "tier":           int(r[0]),
+                "verdict":        str(r[1]),
+                "checklist":      checklist,
+                "run_at":         r[3].isoformat() if r[3] else None,
+                "expires_at":     r[4].isoformat() if r[4] else None,
+                "strategy_hash":  strategy_hash,
+            }
+    except Exception as exc:
+        log.warning("qa_cache_read_error", error=str(exc))
+    return None
+
+
+async def set_qa_cache(
+    strategy_hash: str,
+    verdict_payload: dict[str, Any],
+    tier: int,
+) -> None:
+    """
+    Appends a new QA verdict row. Never updates an existing row — the
+    table is an immutable audit log so the Admin screen can show the
+    full history of tier upgrades over a single strategy_hash.
+
+    TTL hours per tier come from qa_tiered.TIER_TTL_HOURS so the two
+    modules can never disagree on freshness windows.
+    """
+    if not _DB_AVAILABLE:
+        return
+    try:
+        from sqlalchemy import text
+        from tools.qa_tiered import TIER_TTL_HOURS
+        ttl_hours = TIER_TTL_HOURS.get(int(tier), 24)
+        expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            await session.execute(
+                text(
+                    "INSERT INTO qa_results_cache "
+                    "(tier, strategy_hash, verdict, checklist_json, expires_at) "
+                    "VALUES (:t, :h, :v, :c, :e)"
+                ),
+                {
+                    "t": int(tier),
+                    "h": strategy_hash,
+                    "v": verdict_payload.get("verdict", "UNKNOWN"),
+                    "c": json.dumps(verdict_payload),
+                    "e": expires_at,
+                },
+            )
+            await session.commit()
+            log.info(
+                "qa_cache_written",
+                strategy_hash=strategy_hash[:8],
+                tier=tier,
+                verdict=verdict_payload.get("verdict"),
+            )
+    except Exception as exc:
+        log.warning("qa_cache_write_error", error=str(exc))
+
+
 async def mark_jti_used(jti: str, expires_at: datetime, email: str) -> None:
     """Persists a consumed JTI so single-use protection survives Render restarts."""
     if not _DB_AVAILABLE:

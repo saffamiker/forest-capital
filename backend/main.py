@@ -628,23 +628,34 @@ def _deliberate_to_frontend(query: str, council_response: dict[str, Any]) -> dic
     for key, (display_name, role, model) in _AGENT_META.items():
         report = agents.get(key, {})
         if not report:
+            # Agent was never invoked — skip rather than show an empty card.
+            # An expected agent missing from the response is a council-flow
+            # bug, not a rendering bug; the heatmap or another diagnostic
+            # will catch it.
             continue
-        # CIO: use the full synthesised narrative; Gemini: use the full challenge text.
-        # Specialists: summary is purpose-built for display (1-2 sentences + key finding).
+
+        # Per-agent content selection:
+        #   CIO         → final synthesis (the recommendation narrative)
+        #   Gemini/Grok → full challenge text (the dissenting narrative)
+        #   Specialists → summary (1-2 sentences purpose-built for display)
+        tech = report.get("technical_findings", {}) or {}
         if key == "cio":
-            content = (
-                report.get("technical_findings", {}).get("final_synthesis_text")
-                or report.get("summary", "")
-            )
+            content = tech.get("final_synthesis_text") or report.get("summary", "")
         elif key == "independent_analyst":
-            content = (
-                report.get("technical_findings", {}).get("full_challenge")
-                or report.get("summary", "")
-            )
+            content = tech.get("full_challenge") or report.get("summary", "")
+        elif key == "contrarian_analyst":
+            content = tech.get("full_challenge") or report.get("summary", "")
         else:
             content = report.get("summary", "")
+
+        # NEVER drop an agent whose report exists. An empty content field
+        # used to be silently filtered, which produced an empty Debate tab
+        # whenever a single LLM extraction returned no text. The frontend
+        # renders a placeholder for empty content; the audience still sees
+        # which agent ran and what its tag was.
         if not content:
-            continue
+            content = "(Narrative unavailable — agent ran but no text returned.)"
+
         messages.append({
             "agent":    display_name,
             "role":     role,
@@ -891,6 +902,202 @@ async def qa_ask(
         "answer": "QA Agent temporarily unavailable. Please try POST /api/qa/audit for the full checklist.",
         "verdict": "WARN",
     }
+
+
+# ── Tiered QA (Sprint 6) ──────────────────────────────────────────────────────
+#
+# Tier 1: pure-Python deterministic, sync. Result cached forever per
+#   strategy_hash; same inputs always produce the same verdict.
+# Tier 2: Sonnet narrative audit, async background. Runs when strategy_hash
+#   changes or the most recent Tier 2 cache entry is older than 24h.
+# Tier 3: Opus deep review, manual only. Auto-triggered if Tier 2 returns FAIL.
+#
+# The Present-mode gate reads the LATEST cached verdict for the current
+# strategy_hash. Tier 1 alone is enough to unlock Present mode (≥ WARN);
+# higher tiers refine the narrative shown on the QA tab. The dashboard
+# never waits on a Sonnet/Opus call.
+
+async def _current_strategy_hash() -> tuple[str, dict[str, dict] | None]:
+    """
+    Computes the current strategy_hash and returns it alongside cached
+    strategy_results (when present). Shared by every QA endpoint so a
+    single hash computation can serve both the status read and any
+    tier trigger that follows.
+    """
+    from tools.data_fetcher import get_full_history
+    from tools.cache import get_strategy_cache, _compute_data_hash
+
+    history = get_full_history()
+    monthly = history.get("equity_monthly")
+    n_rows = len(monthly) if monthly is not None else 0
+    last_date = str(monthly.index[-1]) if monthly is not None and len(monthly) > 0 else "unknown"
+    strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
+    cached = await get_strategy_cache(strategy_hash)
+    return strategy_hash, cached
+
+
+@app.get("/api/v1/qa/status")
+@limiter.limit("60/minute")
+async def qa_status(request: Request, session: dict = Depends(require_auth)):
+    """
+    Returns the latest QA verdict for the current strategy_hash.
+
+    Response shape:
+      {
+        verdict: PASS|WARN|FAIL|UNKNOWN,
+        tier: 1|2|3|null,
+        run_at: iso8601 | null,
+        age_hours: float | null,
+        strategy_hash: str,
+        present_mode_allowed: bool,
+        running: bool,            # True while a Tier 2 audit is in flight
+      }
+
+    The nav-bar badge polls this endpoint every 30 seconds so the
+    Running → PASS/WARN/FAIL transition shows up without a page reload.
+    """
+    if ENVIRONMENT == "test":
+        return {
+            "verdict": "UNKNOWN", "tier": None, "run_at": None,
+            "age_hours": None, "strategy_hash": "test",
+            "present_mode_allowed": False, "running": False,
+        }
+
+    try:
+        from tools.cache import get_latest_qa
+        strategy_hash, _cached = await _current_strategy_hash()
+        latest = await get_latest_qa(strategy_hash, min_tier=1)
+
+        if not latest:
+            return {
+                "verdict": "UNKNOWN", "tier": None, "run_at": None,
+                "age_hours": None, "strategy_hash": strategy_hash,
+                "present_mode_allowed": False, "running": False,
+            }
+
+        # Present-mode gate: verdict ≥ WARN AND age < 48h AND hash matches.
+        # The hash equality is already enforced by the query filter, so we
+        # only need to check verdict and age here.
+        from datetime import datetime, timezone
+        run_at_iso = latest.get("run_at")
+        age_hours: float | None = None
+        if run_at_iso:
+            run_at_dt = datetime.fromisoformat(run_at_iso.replace("Z", "+00:00"))
+            age_hours = (datetime.now(timezone.utc) - run_at_dt).total_seconds() / 3600.0
+
+        present_allowed = (
+            latest["verdict"] in ("PASS", "WARN")
+            and age_hours is not None
+            and age_hours < 48.0
+        )
+
+        return {
+            "verdict":              latest["verdict"],
+            "tier":                 latest["tier"],
+            "run_at":               run_at_iso,
+            "age_hours":            round(age_hours, 2) if age_hours is not None else None,
+            "strategy_hash":        strategy_hash,
+            "present_mode_allowed": present_allowed,
+            "running":              False,
+        }
+    except Exception as exc:
+        log.warning("qa_status_fallback", error=str(exc))
+        return {
+            "verdict": "UNKNOWN", "tier": None, "run_at": None,
+            "age_hours": None, "strategy_hash": "unknown",
+            "present_mode_allowed": False, "running": False,
+        }
+
+
+@app.post("/api/v1/qa/run")
+@limiter.limit("20/minute")
+async def qa_run(request: Request, session: dict = Depends(require_auth)):
+    """
+    Runs Tier 1 synchronously and triggers Tier 2 in the background.
+    Returns immediately with the Tier 1 verdict — the audience never
+    waits on the Sonnet call. The Tier 2 result lands in the cache
+    on its own; subsequent /qa/status polls pick it up.
+
+    Auto-escalation to Tier 3 happens inside the background worker if
+    Tier 2 returns FAIL (see schedule_tier2_background).
+    """
+    if ENVIRONMENT == "test":
+        return {"verdict": "PASS", "tier": 1, "tier2_scheduled": False}
+
+    try:
+        from tools.qa_tiered import run_tier1_checks, schedule_tier2_background
+        from tools.cache import set_qa_cache
+        from tools.backtester import run_all_strategies
+        from tools.data_fetcher import get_full_history
+
+        strategy_hash, cached = await _current_strategy_hash()
+        if cached:
+            results_dict = cached
+        else:
+            results_dict = run_all_strategies(get_full_history())
+
+        # Tier 1 — synchronous, deterministic, free.
+        t1 = run_tier1_checks(results_dict)
+        await set_qa_cache(strategy_hash, t1, tier=1)
+
+        # Tier 2 — fire and forget. Need a sync wrapper for the writer.
+        import asyncio as _asyncio
+        def _writer(h: str, v: dict, tier: int) -> None:
+            _asyncio.run(set_qa_cache(h, v, tier=tier))
+        schedule_tier2_background(results_dict, strategy_hash, _writer)
+
+        return {
+            "verdict": t1["verdict"],
+            "tier": 1,
+            "tier2_scheduled": True,
+            "strategy_hash": strategy_hash,
+            "checks_total": t1["checks_total"],
+            "checks_passed": t1["checks_passed"],
+            "checks_warned": t1["checks_warned"],
+            "checks_failed": t1["checks_failed"],
+            "summary": t1["summary"],
+        }
+    except Exception as exc:
+        log.error("qa_run_error", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"QA run failed: {exc}")
+
+
+@app.post("/api/v1/qa/full-review")
+@limiter.limit("5/minute")
+async def qa_full_review(request: Request, session: dict = Depends(require_auth)):
+    """
+    Manually triggers a Tier 3 (Opus) deep review. Synchronous because
+    the caller (Admin screen Full Review button) is willing to wait
+    20-30 seconds — unlike the dashboard, which never waits.
+
+    Master-key path: anyone with a valid session can trigger Tier 3,
+    but the rate limit caps abuse at 5/minute.
+    """
+    if ENVIRONMENT == "test":
+        return {"verdict": "PASS", "tier": 3}
+
+    try:
+        from tools.qa_tiered import run_tier3_review
+        from tools.cache import set_qa_cache
+        from tools.backtester import run_all_strategies
+        from tools.data_fetcher import get_full_history
+
+        strategy_hash, cached = await _current_strategy_hash()
+        if cached:
+            results_dict = cached
+        else:
+            results_dict = run_all_strategies(get_full_history())
+
+        t3 = run_tier3_review(results_dict)
+        await set_qa_cache(strategy_hash, t3, tier=3)
+
+        return {
+            **t3,
+            "strategy_hash": strategy_hash,
+        }
+    except Exception as exc:
+        log.error("qa_full_review_error", error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Full review failed: {exc}")
 
 
 # ── Report ────────────────────────────────────────────────────────────────────

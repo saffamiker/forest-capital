@@ -167,18 +167,37 @@ export default function CouncilDebate() {
 
       {/* Agent cards */}
       {activeTab === 'debate' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          {loading && !result && agentOrder.map((name) => (
-            <AgentCard
-              key={name}
-              message={{ agent: name, role: name === 'CIO' ? 'cio' : 'specialist', model: AGENT_STYLE[name]?.note ?? '', content: '', is_final: name === 'CIO' }}
-              streaming
-            />
-          ))}
-          {orderedMessages.map((msg) => (
-            <AgentCard key={msg.agent} message={msg} />
-          ))}
-        </div>
+        <>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {loading && !result && agentOrder.map((name) => (
+              <AgentCard
+                key={name}
+                message={{ agent: name, role: name === 'CIO' ? 'cio' : 'specialist', model: AGENT_STYLE[name]?.note ?? '', content: '', is_final: name === 'CIO' }}
+                streaming
+              />
+            ))}
+            {orderedMessages.map((msg) => (
+              <AgentCard key={msg.agent} message={msg} />
+            ))}
+          </div>
+
+          {/* Defensive empty state — fires when the council ran but every
+              agent returned an empty narrative. The Debate tab used to
+              render an invisible empty grid in this case, which looked
+              like a frontend bug; this banner makes the failure mode
+              explicit so the user can re-run or check backend logs. */}
+          {result && !result.error && !loading && orderedMessages.length === 0 && (
+            <div className="card border border-warning/30 bg-warning/5 p-4">
+              <div className="section-header mb-2 text-warning">Council ran — narratives missing</div>
+              <p className="text-white text-sm">
+                The council deliberation completed but no agent narrative was
+                returned. The heatmap and final recommendation may still be
+                populated. Try re-running the query, or check backend logs
+                for council_session entries.
+              </p>
+            </div>
+          )}
+        </>
       )}
 
       {/* Final summary banner */}

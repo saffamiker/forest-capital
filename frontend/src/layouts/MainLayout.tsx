@@ -7,6 +7,7 @@ import { useBrand, BRANDS } from '../context/BrandContext'
 import { useUI } from '../context/UIContext'
 import type { UIMode } from '../context/UIContext'
 import { useQAStore } from '../stores/qaStore'
+import QAStatusBadge from '../components/QAStatusBadge'
 
 interface NavItem {
   to: string
@@ -63,7 +64,11 @@ export default function MainLayout() {
   const navigate = useNavigate()
   const [settingsOpen, setSettingsOpen] = useState(false)
   const settingsRef = useRef<HTMLDivElement>(null)
-  const { status: qaStatus } = useQAStore()
+  // Read both the legacy qaStatus (driven by the local QA audit panel) and
+  // the new tieredStatus (driven by /api/v1/qa/status polling). The Present-mode
+  // gate trusts tieredStatus first when available — that's what enforces the
+  // ≥WARN + 48h + hash-match contract from CLAUDE.md Section 14.
+  const { status: qaStatus, tieredStatus } = useQAStore()
 
   const handleLogout = async () => {
     await logout()
@@ -124,26 +129,52 @@ export default function MainLayout() {
               const isActive = mode === opt.value
               const isPresent = opt.value === 'present'
 
-              // Derive QA gate state for the Present button
-              const presentBlocked = isPresent && (qaStatus === 'unknown' || qaStatus === 'fail')
-              const presentWarn = isPresent && qaStatus === 'warn'
+              // Present-mode gate — three sources of truth, in priority order:
+              //   1. tieredStatus.present_mode_allowed (≥WARN + <48h + hash match)
+              //   2. tieredStatus.verdict (informs the icon/tooltip)
+              //   3. qaStatus (legacy local-audit fallback, kept until both
+              //      panels share the same store path)
+              const tieredAllowed = tieredStatus?.present_mode_allowed
+              const tieredVerdict = tieredStatus?.verdict   // PASS|WARN|FAIL|UNKNOWN
+              const ageHours = tieredStatus?.age_hours ?? null
+
+              // Derive effective status: prefer tieredStatus when available.
+              const effectiveStatus: typeof qaStatus = tieredVerdict
+                ? (tieredVerdict === 'PASS' ? 'pass'
+                  : tieredVerdict === 'WARN' ? 'warn'
+                  : tieredVerdict === 'FAIL' ? 'fail'
+                  : 'unknown')
+                : qaStatus
+
+              // Blocked when either explicit verdict is FAIL/unknown OR the
+              // tiered gate says no (covers the ">48h stale" case where the
+              // verdict is PASS but age is too old).
+              const presentBlocked = isPresent && (
+                effectiveStatus === 'unknown'
+                || effectiveStatus === 'fail'
+                || (tieredStatus !== null && !tieredAllowed && effectiveStatus !== 'running')
+              )
+              const presentWarn = isPresent && effectiveStatus === 'warn' && (tieredAllowed ?? true)
+
               const presentTitle = isPresent
-                ? qaStatus === 'unknown'
+                ? effectiveStatus === 'unknown'
                   ? 'Run QA Audit before presenting'
-                  : qaStatus === 'fail'
+                  : effectiveStatus === 'fail'
                     ? 'QA audit failed — review issues before presenting to Forest Capital'
-                    : qaStatus === 'warn'
-                      ? 'QA: WARN — review limitations before presenting'
-                      : ''
+                    : ageHours !== null && ageHours >= 48
+                      ? `QA audit is ${ageHours.toFixed(0)}h old (>48h) — re-run before presenting`
+                      : effectiveStatus === 'warn'
+                        ? 'QA: WARN — review limitations before presenting'
+                        : ''
                 : ''
 
               const handleClick = () => {
-                if (isPresent && qaStatus === 'unknown') {
-                  // Navigate to QA tab so user can run the audit
+                if (isPresent && (effectiveStatus === 'unknown' || (ageHours !== null && ageHours >= 48))) {
+                  // Send the user to the QA tab so they can run/refresh the audit
                   navigate('/qa')
                   return
                 }
-                if (isPresent && qaStatus === 'fail') {
+                if (isPresent && effectiveStatus === 'fail') {
                   // Blocked — do nothing (title tooltip explains why)
                   return
                 }
@@ -167,13 +198,18 @@ export default function MainLayout() {
                 >
                   {opt.label}
                   {/* QA status indicators on the Present button only */}
-                  {isPresent && qaStatus === 'fail'  && <span className="text-red-400 text-[10px]">🔒</span>}
-                  {isPresent && qaStatus === 'unknown' && <span className="text-muted/60 text-[10px]">○</span>}
+                  {isPresent && effectiveStatus === 'fail'  && <span className="text-red-400 text-[10px]">🔒</span>}
+                  {isPresent && effectiveStatus === 'unknown' && <span className="text-muted/60 text-[10px]">○</span>}
                   {presentWarn && <span className="text-warning text-[10px]">⚠</span>}
                 </button>
               )
             })}
           </div>
+
+          {/* QA status badge — polls /api/v1/qa/status every 30s.
+              Click to open the QA Audit screen. Hidden on mobile to
+              keep the nav uncluttered at narrow breakpoints. */}
+          <QAStatusBadge />
 
           <span className="text-muted text-xs hidden sm:inline font-mono">{session?.email}</span>
 
