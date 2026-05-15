@@ -60,7 +60,7 @@ describe('LoginPage', () => {
 
   it('renders MSFA practicum footer', () => {
     renderLogin()
-    expect(screen.getByText(/MSFA FNA 667/)).toBeInTheDocument()
+    expect(screen.getByText(/MSFA FNA 670/)).toBeInTheDocument()
   })
 
   // ── Approved email — status: "sent" ────────────────────────────────────────

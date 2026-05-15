@@ -145,7 +145,7 @@ export default function LoginPage() {
 
       {/* Footer */}
       <p className="text-muted text-xs mt-8">
-        MSFA FNA 667 · Queens University of Charlotte · Forest Capital Practicum
+        MSFA FNA 670 · Queens University of Charlotte · Forest Capital Practicum
       </p>
     </div>
   )
