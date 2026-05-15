@@ -192,3 +192,89 @@ class TestTier2FallbackWithoutLLM:
         out = qa.run_tier2_audit(_healthy_results())
         assert out["tier"] == 2
         assert "Tier 2 audit unavailable" in out["summary"]
+
+
+class TestTier2BackgroundExecutor:
+    """Memory-audit fix: schedule_tier2_background must use one process-wide
+    ThreadPoolExecutor instead of constructing a fresh one per call, and the
+    worker must be a top-level function (no closure capturing results_dict)."""
+
+    def test_executor_is_module_level_singleton(self):
+        """_TIER2_EXECUTOR exists at module scope and is a single instance."""
+        import concurrent.futures
+        from tools.qa_tiered import _TIER2_EXECUTOR
+        assert isinstance(_TIER2_EXECUTOR, concurrent.futures.ThreadPoolExecutor)
+
+    def test_schedule_reuses_the_same_executor(self, monkeypatch):
+        """Two schedule_tier2_background calls must submit to the SAME
+        executor — not build a new one each time."""
+        import tools.qa_tiered as qa
+
+        submitted: list = []
+
+        class _SpyExecutor:
+            def submit(self, fn, *args, **kwargs):
+                submitted.append((fn, args))
+                # Don't actually run — just record.
+                class _F:
+                    pass
+                return _F()
+
+        spy = _SpyExecutor()
+        monkeypatch.setattr(qa, "_TIER2_EXECUTOR", spy)
+
+        qa.schedule_tier2_background(_healthy_results(), "hash1", lambda *a, **k: None)
+        qa.schedule_tier2_background(_healthy_results(), "hash2", lambda *a, **k: None)
+
+        assert len(submitted) == 2, "Both schedules must submit to the executor"
+        # Both submissions went to the one spy executor instance.
+
+    def test_worker_is_top_level_function_with_no_closure(self):
+        """_tier2_run_and_cache must be a module-level function — a
+        top-level function has __closure__ is None, so it captures
+        NOTHING implicitly (results_dict arrives as an explicit arg).
+        The previous nested-closure form pinned results_dict via a
+        closure cell for the whole task lifetime."""
+        from tools.qa_tiered import _tier2_run_and_cache
+        assert _tier2_run_and_cache.__closure__ is None, (
+            "_tier2_run_and_cache must be a top-level function with no "
+            "closure cells — results_dict must be passed as an argument, "
+            "not captured"
+        )
+
+    def test_schedule_passes_results_dict_as_submit_argument(self, monkeypatch):
+        """results_dict must reach the worker via submit() args, not via
+        a closure — so the executor releases it when the task completes."""
+        import tools.qa_tiered as qa
+
+        captured_args: list = []
+
+        class _SpyExecutor:
+            def submit(self, fn, *args, **kwargs):
+                captured_args.append(args)
+                class _F:
+                    pass
+                return _F()
+
+        monkeypatch.setattr(qa, "_TIER2_EXECUTOR", _SpyExecutor())
+
+        results = _healthy_results()
+        qa.schedule_tier2_background(results, "hashX", lambda *a, **k: None)
+
+        assert len(captured_args) == 1
+        # First positional arg to the worker is the results_dict itself.
+        assert captured_args[0][0] is results
+        assert captured_args[0][1] == "hashX"
+
+    def test_worker_runs_audit_and_writes_cache(self, monkeypatch):
+        """End-to-end: _tier2_run_and_cache runs the audit and calls the
+        sync cache_writer with the verdict."""
+        import tools.qa_tiered as qa
+
+        monkeypatch.setattr(qa, "run_tier2_audit", lambda r: {"verdict": "PASS"})
+        writes: list = []
+        qa._tier2_run_and_cache(
+            _healthy_results(), "hashY",
+            lambda h, v, tier: writes.append((h, v, tier)),
+        )
+        assert writes == [("hashY", {"verdict": "PASS"}, 2)]

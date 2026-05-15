@@ -25,44 +25,44 @@ def pytest_configure(config: pytest.Config) -> None:
     )
 
 
+def _reset_all_inprocess_caches() -> None:
+    """Clears every module-level in-process cache. Each clear is wrapped
+    so a module that fails to import (a test that doesn't touch the data
+    layer) doesn't break the fixture."""
+    try:
+        from tools.data_fetcher import _ff_cache_clear
+        _ff_cache_clear()
+    except Exception:
+        pass
+    try:
+        from tools.data_fetcher import _history_memo_clear
+        _history_memo_clear()
+    except Exception:
+        pass
+    try:
+        from tools.regime_detector import _hmm_cache_clear
+        _hmm_cache_clear()
+    except Exception:
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _clear_inprocess_caches():
-    """Resets the two module-level in-process caches before AND after
-    every test.
+    """Resets every module-level in-process cache before AND after each test.
 
-    The FF factors loader (_load_ff_factors_with_cache) and the HMM
-    classifier (classify_hmm_regime) each keep a module-level cache to
-    avoid re-loading 1,197 FF rows from Postgres / re-fitting a
-    200-iteration Baum-Welch HMM on every request. Those caches persist
-    for the lifetime of the process — including across tests in a single
-    pytest run. Without this fixture, a test that warmed either cache
-    would let the next test silently skip its own monkeypatched stubs
-    and assert against stale data.
+    Three caches persist for the lifetime of the process — and therefore
+    across tests in a single pytest run:
+      - FF factors  (data_fetcher._ff_factors_cache) — avoids re-loading
+        1,197 rows from Postgres on every request.
+      - HMM model   (regime_detector._hmm_model_cache) — avoids re-fitting
+        a 200-iteration Baum-Welch on every request.
+      - History memo (data_fetcher._history_memo) — 30-second TTL memo of
+        get_full_history() that collapses the QA-badge poll storm.
 
-    Both clear functions are no-ops if their module fails to import
-    (e.g. a test that doesn't touch the data layer), so this fixture is
-    safe to run autouse across the whole suite.
+    Without this fixture, a test that warmed any of them would let the
+    next test silently skip its monkeypatched stubs and assert against
+    stale data.
     """
-    try:
-        from tools.data_fetcher import _ff_cache_clear
-        _ff_cache_clear()
-    except Exception:
-        pass
-    try:
-        from tools.regime_detector import _hmm_cache_clear
-        _hmm_cache_clear()
-    except Exception:
-        pass
-
+    _reset_all_inprocess_caches()
     yield
-
-    try:
-        from tools.data_fetcher import _ff_cache_clear
-        _ff_cache_clear()
-    except Exception:
-        pass
-    try:
-        from tools.regime_detector import _hmm_cache_clear
-        _hmm_cache_clear()
-    except Exception:
-        pass
+    _reset_all_inprocess_caches()

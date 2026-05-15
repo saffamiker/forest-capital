@@ -259,3 +259,145 @@ class TestHMMModelCache:
         assert "result" in _hmm_model_cache
         _hmm_cache_clear()
         assert _hmm_model_cache == {}
+
+
+# ── get_full_history 30-second memo ──────────────────────────────────────────
+
+class TestGetFullHistoryMemo:
+    """The QA-status badge polls every 30s; without the memo each poll
+    ran a full DB round-trip + DataFrame rebuild. The memo collapses
+    every caller within the TTL window onto one computation."""
+
+    def test_second_call_within_ttl_skips_recompute(self, monkeypatch):
+        """A warm memo hit must NOT re-enter _compute_full_history."""
+        import tools.data_fetcher as df_mod
+        from tools.data_fetcher import get_full_history, _history_memo_clear
+        _history_memo_clear()
+
+        compute_calls: list[int] = []
+
+        def _fake_compute():
+            compute_calls.append(1)
+            return {"equity_monthly": None, "marker": len(compute_calls)}
+
+        monkeypatch.setattr(df_mod, "_compute_full_history", _fake_compute)
+
+        first = get_full_history()
+        second = get_full_history()
+        third = get_full_history()
+
+        assert len(compute_calls) == 1, (
+            "Within the 30s TTL, _compute_full_history must run exactly "
+            f"once; ran {len(compute_calls)} times"
+        )
+        # All three callers get the identical cached object.
+        assert first is second is third
+
+    def test_expired_memo_triggers_recompute(self, monkeypatch):
+        """A memo entry older than _HISTORY_MEMO_TTL_SECONDS must be
+        ignored and the pipeline recomputed."""
+        import time
+        import tools.data_fetcher as df_mod
+        from tools.data_fetcher import (
+            get_full_history, _history_memo_clear, _history_memo,
+            _HISTORY_MEMO_TTL_SECONDS,
+        )
+        _history_memo_clear()
+
+        compute_calls: list[int] = []
+
+        def _fake_compute():
+            compute_calls.append(1)
+            return {"equity_monthly": None, "marker": len(compute_calls)}
+
+        monkeypatch.setattr(df_mod, "_compute_full_history", _fake_compute)
+
+        get_full_history()
+        # Backdate the memo beyond the TTL.
+        _history_memo["cached_at"] = time.time() - _HISTORY_MEMO_TTL_SECONDS - 1
+        get_full_history()
+
+        assert len(compute_calls) == 2, (
+            "An expired memo must trigger a fresh _compute_full_history"
+        )
+
+    def test_memo_clear_forces_recompute(self, monkeypatch):
+        import tools.data_fetcher as df_mod
+        from tools.data_fetcher import get_full_history, _history_memo_clear
+
+        compute_calls: list[int] = []
+
+        def _fake_compute():
+            compute_calls.append(1)
+            return {"equity_monthly": None}
+
+        monkeypatch.setattr(df_mod, "_compute_full_history", _fake_compute)
+
+        _history_memo_clear()
+        get_full_history()
+        _history_memo_clear()
+        get_full_history()
+        assert len(compute_calls) == 2
+
+    def test_memo_holds_exactly_one_entry(self, monkeypatch):
+        """Bounded — the memo dict never accumulates entries."""
+        import tools.data_fetcher as df_mod
+        from tools.data_fetcher import (
+            get_full_history, _history_memo_clear, _history_memo,
+        )
+        monkeypatch.setattr(
+            df_mod, "_compute_full_history", lambda: {"equity_monthly": None},
+        )
+        _history_memo_clear()
+        for _ in range(10):
+            get_full_history()
+        assert set(_history_memo.keys()) == {"result", "cached_at"}
+
+
+# ── Read-only DB engine singleton ────────────────────────────────────────────
+
+class TestReadOnlyEngineSingleton:
+    """_read_history_from_db must reuse one process-wide NullPool engine
+    instead of constructing a fresh engine on every call."""
+
+    def test_get_readonly_engine_returns_same_object(self, monkeypatch):
+        """Repeated calls return the identical engine object — the
+        per-call create_async_engine churn is gone."""
+        import tools.data_fetcher as df_mod
+        # Reset the lazily-created singleton so the test is order-independent.
+        df_mod._readonly_engine = None
+        monkeypatch.setattr("database.DATABASE_URL", "postgresql+asyncpg://stub")
+
+        first = df_mod._get_readonly_engine()
+        second = df_mod._get_readonly_engine()
+        assert first is not None
+        assert first is second, (
+            "_get_readonly_engine must return a process-wide singleton, "
+            "not a fresh engine per call"
+        )
+        # Clean up so we don't leave a stub engine for other tests.
+        df_mod._readonly_engine = None
+
+    def test_get_readonly_engine_none_without_database_url(self, monkeypatch):
+        import tools.data_fetcher as df_mod
+        df_mod._readonly_engine = None
+        monkeypatch.setattr("database.DATABASE_URL", "")
+        assert df_mod._get_readonly_engine() is None
+
+    def test_readonly_engine_uses_nullpool(self, monkeypatch):
+        """NullPool is the loop-safety contract: it retains no connections
+        between checkouts, so the engine object can be shared across the
+        per-call asyncio.run() loops without binding a connection to a
+        dead loop."""
+        import tools.data_fetcher as df_mod
+        from sqlalchemy.pool import NullPool
+        df_mod._readonly_engine = None
+        monkeypatch.setattr("database.DATABASE_URL", "postgresql+asyncpg://stub")
+
+        eng = df_mod._get_readonly_engine()
+        assert eng is not None
+        assert isinstance(eng.pool, NullPool), (
+            "The read engine must use NullPool so it is safe to share "
+            "across asyncio.run() loop boundaries"
+        )
+        df_mod._readonly_engine = None

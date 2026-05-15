@@ -336,40 +336,80 @@ def run_tier1_in_thread(results_dict: dict[str, dict]) -> dict[str, Any]:
     return run_tier1_checks(results_dict)
 
 
+# ── Tier 2 background executor — process-wide singleton ──────────────────────
+#
+# Memory-audit finding: schedule_tier2_background used to construct a NEW
+# ThreadPoolExecutor on EVERY call and shut it down with wait=False. Each
+# executor + its worker thread stayed alive until the (10-30s Sonnet, longer
+# on Tier 3 Opus) audit finished, and the nested `_run_and_cache` CLOSURE
+# pinned the full results_dict — 10 strategies including their monthly_returns
+# lists — for that whole window. Repeated triggers stacked executors, threads,
+# and results_dict copies.
+#
+# Fix: one module-level executor for the life of the process. max_workers=1
+# means audits queue and run one at a time — QA audits aren't latency-critical
+# and serialising them bounds memory to a single in-flight results_dict.
+# The interpreter's concurrent.futures atexit hook joins the worker on
+# shutdown; a single in-flight audit (~30s) is an acceptable redeploy delay
+# and means an audit is never lost mid-write.
+_TIER2_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+    max_workers=1, thread_name_prefix="qa-tier2",
+)
+
+
+def _tier2_run_and_cache(
+    results_dict: dict[str, dict],
+    strategy_hash: str,
+    cache_writer,
+) -> None:
+    """
+    Module-level worker for the Tier 2 background audit.
+
+    Deliberately a top-level function, NOT a closure nested inside
+    schedule_tier2_background: a top-level function has no __closure__
+    cells, so it captures NOTHING implicitly. results_dict / strategy_hash
+    / cache_writer arrive as explicit submit() arguments — the executor's
+    work item holds them only until the task runs, then releases them.
+    The previous nested-closure form pinned results_dict via a closure
+    cell for the whole task lifetime even after it was no longer needed.
+    """
+    try:
+        verdict = run_tier2_audit(results_dict)
+        # cache_writer is sync; if it's async, run it in a fresh loop
+        if asyncio.iscoroutinefunction(cache_writer):
+            asyncio.run(cache_writer(strategy_hash, verdict, tier=2))
+        else:
+            cache_writer(strategy_hash, verdict, tier=2)
+        log.info("tier2_background_complete",
+                 strategy_hash=strategy_hash[:8], verdict=verdict.get("verdict"))
+        # Auto-escalate to Tier 3 if Tier 2 came back FAIL
+        if verdict.get("verdict") == "FAIL":
+            log.info("tier2_failed_escalating_to_tier3",
+                     strategy_hash=strategy_hash[:8])
+            t3 = run_tier3_review(results_dict)
+            if asyncio.iscoroutinefunction(cache_writer):
+                asyncio.run(cache_writer(strategy_hash, t3, tier=3))
+            else:
+                cache_writer(strategy_hash, t3, tier=3)
+    except Exception as exc:
+        log.error("tier2_background_error", error=str(exc))
+
+
 def schedule_tier2_background(
     results_dict: dict[str, dict],
     strategy_hash: str,
     cache_writer,
 ) -> None:
     """
-    Fire-and-forget a Tier 2 audit. The caller passes a write callback
-    (typically `tools.cache.set_qa_cache`) so this module doesn't import
-    the cache layer directly — keeps the dependency graph one-directional.
-    """
-    def _run_and_cache() -> None:
-        try:
-            verdict = run_tier2_audit(results_dict)
-            # cache_writer is sync; if it's async, run it in a fresh loop
-            if asyncio.iscoroutinefunction(cache_writer):
-                asyncio.run(cache_writer(strategy_hash, verdict, tier=2))
-            else:
-                cache_writer(strategy_hash, verdict, tier=2)
-            log.info("tier2_background_complete",
-                     strategy_hash=strategy_hash[:8], verdict=verdict.get("verdict"))
-            # Auto-escalate to Tier 3 if Tier 2 came back FAIL
-            if verdict.get("verdict") == "FAIL":
-                log.info("tier2_failed_escalating_to_tier3",
-                         strategy_hash=strategy_hash[:8])
-                t3 = run_tier3_review(results_dict)
-                if asyncio.iscoroutinefunction(cache_writer):
-                    asyncio.run(cache_writer(strategy_hash, t3, tier=3))
-                else:
-                    cache_writer(strategy_hash, t3, tier=3)
-        except Exception as exc:
-            log.error("tier2_background_error", error=str(exc))
+    Fire-and-forget a Tier 2 audit on the process-wide _TIER2_EXECUTOR.
+    The caller passes a write callback (typically `tools.cache.set_qa_cache`)
+    so this module doesn't import the cache layer directly — keeps the
+    dependency graph one-directional.
 
-    # ThreadPoolExecutor so a slow LLM call never blocks the request-thread.
-    # Daemon=True so a backend restart doesn't wait for in-flight audits.
-    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-    pool.submit(_run_and_cache)
-    pool.shutdown(wait=False)
+    results_dict / strategy_hash / cache_writer are passed as submit()
+    arguments (not captured in a closure) so the executor releases its
+    reference to results_dict as soon as the task finishes.
+    """
+    _TIER2_EXECUTOR.submit(
+        _tier2_run_and_cache, results_dict, strategy_hash, cache_writer,
+    )

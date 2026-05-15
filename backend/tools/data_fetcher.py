@@ -1458,6 +1458,48 @@ def _write_ff_factors_to_db(df: pd.DataFrame) -> int:
         return 0
 
 
+# ── Process-wide read-only DB engine ─────────────────────────────────────────
+#
+# _read_history_from_db used to call create_async_engine() on EVERY invocation.
+# The QA-status badge polls /api/v1/qa/status every 30 seconds → _current_
+# strategy_hash → get_full_history → _read_history_from_db, so a fresh engine
+# was built (and disposed) on every poll. That per-call churn — plus the
+# asyncio.run() loop being torn down with asyncpg connections still finalising
+# — is what produced the recurring "coroutine Connection._cancel was never
+# awaited" RuntimeWarnings and the slow zero-traffic memory creep.
+#
+# Why a dedicated NullPool engine rather than reusing database.py's engine:
+#   database.py's engine uses a connection POOL. _read_history_from_db runs
+#   its query inside a fresh asyncio.run() loop per call. A pooled asyncpg
+#   connection acquired in one asyncio.run() loop is invalid the moment that
+#   loop closes — the next call's loop would be handed a connection bound to
+#   a dead loop ("got Future attached to a different loop"). A NullPool engine
+#   sidesteps this completely: it retains NO connections between checkouts, so
+#   every call opens a fresh connection and closes it (via `async with`)
+#   entirely within its own loop. The ENGINE OBJECT is the only thing shared
+#   across calls — and that per-call allocation is exactly what we're killing.
+#   The engine is never disposed per call (NullPool has no pool to drain); it
+#   lives for the process, like database.py's engine.
+_readonly_engine = None  # lazily-created NullPool AsyncEngine | None
+
+
+def _get_readonly_engine():
+    """Returns the process-wide NullPool read engine, creating it once.
+    None when DATABASE_URL is unset (callers fall back gracefully)."""
+    global _readonly_engine
+    from database import DATABASE_URL
+    if not DATABASE_URL:
+        return None
+    if _readonly_engine is None:
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        _readonly_engine = create_async_engine(
+            DATABASE_URL, echo=False, poolclass=NullPool,
+        )
+        log.info("readonly_engine_created")
+    return _readonly_engine
+
+
 def _read_history_from_db() -> dict:
     """
     Assemble the full history dict from PostgreSQL without touching Excel, yfinance, or FRED.
@@ -1467,33 +1509,30 @@ def _read_history_from_db() -> dict:
     not stored in the DB tables; they are returned as None — callers that need
     them (factor attribution, daily Sharpe) handle None gracefully.
 
-    Uses the same NullPool + asyncio.run() pattern as _persist_to_db() so this
-    function can be called from any context without conflicting with FastAPI's
-    event loop.
+    Uses the process-wide NullPool engine (_get_readonly_engine) rather than
+    constructing a fresh engine per call. asyncio.run() still provides the
+    isolated loop so this sync function is safe to call from any context.
     """
     from database import DATABASE_URL
 
     async def _read() -> dict[str, list]:
         from sqlalchemy import text
-        from sqlalchemy.ext.asyncio import create_async_engine
-        from sqlalchemy.pool import NullPool
-        local_engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
-        try:
-            async with local_engine.connect() as conn:
-                m_rows = await conn.execute(text(
-                    "SELECT date, equity_return, ig_return, hy_return, risk_free_rate, "
-                    "vix_month_avg, yield_curve, hy_spread, ig_spread, gdp_growth, pe_ratio "
-                    "FROM market_data_monthly ORDER BY date"
-                ))
-                monthly_raw = [dict(r._mapping) for r in m_rows]
+        eng = _get_readonly_engine()
+        # `async with conn` closes the asyncpg connection BEFORE asyncio.run()
+        # tears down the loop — no orphaned Connection._cancel coroutine.
+        async with eng.connect() as conn:
+            m_rows = await conn.execute(text(
+                "SELECT date, equity_return, ig_return, hy_return, risk_free_rate, "
+                "vix_month_avg, yield_curve, hy_spread, ig_spread, gdp_growth, pe_ratio "
+                "FROM market_data_monthly ORDER BY date"
+            ))
+            monthly_raw = [dict(r._mapping) for r in m_rows]
 
-                d_rows = await conn.execute(text(
-                    "SELECT date, equity_return, ig_return, hy_return, vix, dgs2 "
-                    "FROM market_data_daily ORDER BY date"
-                ))
-                daily_raw = [dict(r._mapping) for r in d_rows]
-        finally:
-            await local_engine.dispose()
+            d_rows = await conn.execute(text(
+                "SELECT date, equity_return, ig_return, hy_return, vix, dgs2 "
+                "FROM market_data_daily ORDER BY date"
+            ))
+            daily_raw = [dict(r._mapping) for r in d_rows]
 
         return {"monthly": monthly_raw, "daily": daily_raw}
 
@@ -1573,7 +1612,57 @@ def _read_history_from_db() -> dict:
     }
 
 
+# ── get_full_history 30-second memo ──────────────────────────────────────────
+#
+# Memory-audit finding: the QA-status badge polls /api/v1/qa/status every 30
+# seconds, and every poll ran _current_strategy_hash → get_full_history → a
+# full DB round-trip + monthly/daily DataFrame rebuild. React Query's own
+# refetch and the charts endpoint pile on more calls. None of that data
+# changes second-to-second.
+#
+# This memo caches the assembled history dict for _HISTORY_MEMO_TTL_SECONDS.
+# A warm hit returns the cached dict immediately — zero DB I/O, zero DataFrame
+# reconstruction. The memo collapses every caller within the TTL window onto
+# one computation; the badge poll becomes a pure in-memory return.
+#
+# Bounded: one entry, overwritten (not appended) on refresh. The cached dict
+# is treated as read-only by all callers (strategy runners build their own
+# DataFrames; get_full_history's cold path copies `daily` before mutating).
+# Cleared via _history_memo_clear() — exposed for tests and any admin
+# force-refresh path that must bypass the memo.
+_HISTORY_MEMO_TTL_SECONDS = 30.0
+_history_memo: dict[str, Any] = {}  # {"result": dict, "cached_at": float}
+
+
+def _history_memo_clear() -> None:
+    """Drops the get_full_history memo so the next call recomputes."""
+    _history_memo.clear()
+
+
 def get_full_history() -> dict:
+    """
+    30-second memoized entry point for the unified data pipeline.
+
+    Returns the cached history dict when one was assembled less than
+    _HISTORY_MEMO_TTL_SECONDS ago; otherwise delegates to
+    _compute_full_history() and caches the result. See the memo comment
+    block above for the rationale (QA badge poll storm).
+    """
+    now = time.time()
+    cached = _history_memo.get("result")
+    if cached is not None and (now - _history_memo.get("cached_at", 0.0)) < _HISTORY_MEMO_TTL_SECONDS:
+        log.info(
+            "get_full_history_memo_hit",
+            age_seconds=int(now - _history_memo.get("cached_at", 0.0)),
+        )
+        return cached
+    result = _compute_full_history()
+    _history_memo["result"] = result
+    _history_memo["cached_at"] = now
+    return result
+
+
+def _compute_full_history() -> dict:
     """
     Orchestrate the complete data pipeline and return the unified dataset.
 
@@ -1586,6 +1675,9 @@ def get_full_history() -> dict:
     Loads Excel data, fetches supplemental series, cross-validates equity,
     runs Section 4b sanity assertions, writes provenance.json, writes
     all four PostgreSQL tables, and returns aligned monthly and daily series.
+
+    This is the uncached implementation — callers go through get_full_history()
+    which adds the 30-second memo.
     """
     log.info("get_full_history_start")
 
