@@ -56,12 +56,6 @@ const DELIVERABLE_OPTIONS: Array<{ value: DeliverableType; label: string; grade:
   { value: 'presentation', label: 'Final Presentation',  grade: '35%' },
 ]
 
-const DEFAULT_QUERIES: Record<DeliverableType, string> = {
-  midpoint:     'What should we focus on for the midpoint paper?',
-  appendix:     'What gaps should we close in the analytical appendix?',
-  brief:        'What is the strongest recommendation for the executive brief?',
-  presentation: 'What are the must-show findings for the final presentation?',
-}
 
 export default function AdvisorPanel({
   initialDeliverable = 'midpoint',
@@ -83,10 +77,14 @@ export default function AdvisorPanel({
   // conditional hook calls, and the Present-mode guard below is an
   // early return that would otherwise skip this useMemo on some
   // renders and change the hook call order between renders.
-  const cacheKey = useMemo(() => {
-    const q = query.trim() || DEFAULT_QUERIES[deliverable]
-    return `${deliverable}:${q.slice(0, 200).toLowerCase()}`
-  }, [deliverable, query])
+  // Cache key matches the store's cacheKeyForAnalysis. When the query is
+  // empty the key is harmless (it just never matches any cached entry) —
+  // submit is gated separately by hasValidQuery so we never actually fire
+  // a request with an empty query.
+  const cacheKey = useMemo(
+    () => `${deliverable}:${query.trim().slice(0, 200).toLowerCase()}`,
+    [deliverable, query],
+  )
 
   // Hide in Present mode — the advisor is internal team scaffolding,
   // not Forest-Capital-facing content.
@@ -111,10 +109,18 @@ export default function AdvisorPanel({
 
   const cached: AdvisorAnalysis | undefined = analyses[cacheKey]
 
+  // Pre-validate the query: at least one non-whitespace character.
+  // Disables the submit button until Bob/Molly types a real question —
+  // keeps the user from firing a $0.04-0.06 web-search call against an
+  // empty string and getting a generic placeholder response.
+  const trimmedQuery = query.trim()
+  const hasValidQuery = trimmedQuery.length > 0
+  const submitDisabled = loading || !hasValidQuery
+
   const handleSubmit = async () => {
-    const effective = query.trim() || DEFAULT_QUERIES[deliverable]
+    if (!hasValidQuery) return
     setSubmitted(true)
-    await analyse(effective, deliverable, strategyResults)
+    await analyse(trimmedQuery, deliverable, strategyResults)
   }
 
   return (
@@ -201,7 +207,7 @@ export default function AdvisorPanel({
               <textarea
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder={DEFAULT_QUERIES[deliverable]}
+                placeholder="Ask about your findings, deliverables, or what to focus on..."
                 rows={3}
                 className="w-full bg-navy-900 border border-border rounded px-2.5 py-1.5 text-sm text-white placeholder-muted resize-none"
                 data-testid="advisor-query-input"
@@ -211,13 +217,20 @@ export default function AdvisorPanel({
             <button
               type="button"
               onClick={handleSubmit}
-              disabled={loading}
-              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded text-xs font-medium transition-colors disabled:opacity-50"
+              disabled={submitDisabled}
+              className="w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded text-xs font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               style={{
                 backgroundColor: 'rgba(245,158,11,0.12)',
                 border: `1px solid ${GOLD}40`,
                 color: GOLD,
               }}
+              title={
+                !hasValidQuery
+                  ? 'Type a question first'
+                  : loading
+                    ? 'Searching…'
+                    : 'Submit query to the Academic Advisor'
+              }
               data-testid="advisor-submit-button"
             >
               {loading

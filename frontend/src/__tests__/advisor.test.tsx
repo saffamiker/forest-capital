@@ -268,6 +268,8 @@ describe('AdvisorPanel — interaction', () => {
     const user = userEvent.setup()
     renderInMode('analyst', <AdvisorPanel />)
     await user.click(screen.getByTestId('advisor-floating-button'))
+    // Submit is disabled until a non-whitespace query is typed.
+    await user.type(screen.getByTestId('advisor-query-input'), 'midpoint guidance')
     await user.click(screen.getByTestId('advisor-submit-button'))
 
     expect(await screen.findByTestId('advisor-result')).toBeInTheDocument()
@@ -302,6 +304,86 @@ describe('AdvisorPanel — interaction', () => {
 })
 
 
+// ── Input validation (Phase 12) ──────────────────────────────────────────────
+//
+// Get Advisor Feedback must be disabled until a non-whitespace query is
+// typed. Prevents firing the $0.04-0.06 web-search call against an empty
+// string and the model defaulting to a generic placeholder response.
+
+describe('AdvisorPanel — query input validation', () => {
+  it('submit button is disabled when the panel first opens (empty query)', async () => {
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    const submit = screen.getByTestId('advisor-submit-button') as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+  })
+
+  it('submit button stays disabled when only whitespace is typed', async () => {
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    await user.type(screen.getByTestId('advisor-query-input'), '   ')
+    const submit = screen.getByTestId('advisor-submit-button') as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+  })
+
+  it('submit button enables once a single non-whitespace character is typed', async () => {
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    await user.type(screen.getByTestId('advisor-query-input'), 'x')
+    const submit = screen.getByTestId('advisor-submit-button') as HTMLButtonElement
+    expect(submit.disabled).toBe(false)
+  })
+
+  it('submit button re-disables if the query is cleared', async () => {
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    const input = screen.getByTestId('advisor-query-input')
+    await user.type(input, 'some text')
+    await user.clear(input)
+    const submit = screen.getByTestId('advisor-submit-button') as HTMLButtonElement
+    expect(submit.disabled).toBe(true)
+  })
+
+  it('placeholder text guides the user', async () => {
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    const input = screen.getByTestId('advisor-query-input') as HTMLTextAreaElement
+    expect(input.placeholder).toBe(
+      'Ask about your findings, deliverables, or what to focus on...',
+    )
+  })
+
+  it('clicking submit while disabled never fires an axios call', async () => {
+    mockedAxios.post = vi.fn().mockResolvedValue({ data: ANALYSIS_FIXTURE })
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    // Don't type anything — try to click submit anyway.
+    await user.click(screen.getByTestId('advisor-submit-button'))
+    expect(mockedAxios.post).not.toHaveBeenCalled()
+  })
+
+  it('submits with the trimmed query (no leading/trailing whitespace)', async () => {
+    mockedAxios.post = vi.fn().mockResolvedValue({ data: ANALYSIS_FIXTURE })
+    const user = userEvent.setup()
+    renderInMode('analyst', <AdvisorPanel />)
+    await user.click(screen.getByTestId('advisor-floating-button'))
+    await user.type(screen.getByTestId('advisor-query-input'), '  trimmed query  ')
+    await user.click(screen.getByTestId('advisor-submit-button'))
+
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      '/api/advisor/analyse',
+      expect.objectContaining({ query: 'trimmed query' }),
+    )
+  })
+})
+
+
 // ── Citation integrity at the UI layer ───────────────────────────────────────
 
 describe('AdvisorPanel — citation integrity', () => {
@@ -311,6 +393,8 @@ describe('AdvisorPanel — citation integrity', () => {
     const user = userEvent.setup()
     renderInMode('analyst', <AdvisorPanel />)
     await user.click(screen.getByTestId('advisor-floating-button'))
+    // Submit is disabled until a non-whitespace query is typed.
+    await user.type(screen.getByTestId('advisor-query-input'), 'midpoint guidance')
     await user.click(screen.getByTestId('advisor-submit-button'))
 
     await screen.findByTestId('advisor-result')
@@ -324,6 +408,8 @@ describe('AdvisorPanel — citation integrity', () => {
     const user = userEvent.setup()
     renderInMode('analyst', <AdvisorPanel />)
     await user.click(screen.getByTestId('advisor-floating-button'))
+    // Submit is disabled until a non-whitespace query is typed.
+    await user.type(screen.getByTestId('advisor-query-input'), 'midpoint guidance')
     await user.click(screen.getByTestId('advisor-submit-button'))
 
     await screen.findByTestId('advisor-result')
@@ -336,6 +422,8 @@ describe('AdvisorPanel — citation integrity', () => {
     const user = userEvent.setup()
     renderInMode('analyst', <AdvisorPanel />)
     await user.click(screen.getByTestId('advisor-floating-button'))
+    // Submit is disabled until a non-whitespace query is typed.
+    await user.type(screen.getByTestId('advisor-query-input'), 'midpoint guidance')
     await user.click(screen.getByTestId('advisor-submit-button'))
 
     await screen.findByTestId('advisor-result')
@@ -353,6 +441,8 @@ describe('AdvisorPanel — excerpt tooltip', () => {
     const user = userEvent.setup()
     renderInMode('analyst', <AdvisorPanel />)
     await user.click(screen.getByTestId('advisor-floating-button'))
+    // Submit is disabled until a non-whitespace query is typed.
+    await user.type(screen.getByTestId('advisor-query-input'), 'midpoint guidance')
     await user.click(screen.getByTestId('advisor-submit-button'))
     await screen.findByTestId('advisor-result')
     const link = screen.getByTestId('advisor-citation-link')
@@ -379,6 +469,8 @@ describe('AdvisorPanel — excerpt tooltip', () => {
     const user = userEvent.setup()
     renderInMode('analyst', <AdvisorPanel />)
     await user.click(screen.getByTestId('advisor-floating-button'))
+    // Submit is disabled until a non-whitespace query is typed.
+    await user.type(screen.getByTestId('advisor-query-input'), 'midpoint guidance')
     await user.click(screen.getByTestId('advisor-submit-button'))
     await screen.findByTestId('advisor-result')
 
@@ -392,6 +484,8 @@ describe('AdvisorPanel — excerpt tooltip', () => {
     const user = userEvent.setup()
     renderInMode('analyst', <AdvisorPanel />)
     await user.click(screen.getByTestId('advisor-floating-button'))
+    // Submit is disabled until a non-whitespace query is typed.
+    await user.type(screen.getByTestId('advisor-query-input'), 'midpoint guidance')
     await user.click(screen.getByTestId('advisor-submit-button'))
     await screen.findByTestId('advisor-result')
 
@@ -404,6 +498,8 @@ describe('AdvisorPanel — excerpt tooltip', () => {
     const user = userEvent.setup()
     renderInMode('analyst', <AdvisorPanel />)
     await user.click(screen.getByTestId('advisor-floating-button'))
+    // Submit is disabled until a non-whitespace query is typed.
+    await user.type(screen.getByTestId('advisor-query-input'), 'midpoint guidance')
     await user.click(screen.getByTestId('advisor-submit-button'))
     await screen.findByTestId('advisor-result')
 
