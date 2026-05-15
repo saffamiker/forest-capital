@@ -132,3 +132,72 @@ class TestOptimizeWeightsContract:
         assert "weights" in body
         assert "efficient_frontier" in body
         assert body["method"] == "MAX_SHARPE"
+
+    def test_efficient_frontier_is_structured_not_a_flat_list(self):
+        """The EfficientFrontier component destructures
+        {frontier_points, portfolio_points, ...}. A flat list left the
+        chart blank — pin the structured shape in both real and mock paths."""
+        r = client.post(
+            "/api/optimize/weights",
+            json={"method": "MAX_SHARPE"},
+            headers=SESSION_HEADERS,
+        )
+        ef = r.json()["efficient_frontier"]
+        assert isinstance(ef, dict), "efficient_frontier must be an object, not a list"
+        assert "frontier_points" in ef
+        assert "portfolio_points" in ef
+
+
+class TestBuildEfficientFrontier:
+    """Unit tests for the reshape that turns the optimizer's flat sweep
+    into the component's structured payload. Pure function — no DB, no
+    event loop — so the previously endpoint-only logic is now covered."""
+
+    def test_renames_return_to_expected_return(self):
+        """The optimizer keys annualised return as `return`; the component
+        reads `expected_return`. The reshape must rename it."""
+        from main import _build_efficient_frontier
+        raw = [{"volatility": 0.10, "return": 0.08, "sharpe": 0.8}]
+        out = _build_efficient_frontier(raw, [])
+        assert out["frontier_points"][0]["expected_return"] == 0.08
+        assert "return" not in out["frontier_points"][0]
+
+    def test_empty_sweep_yields_none_reference_points(self):
+        """An empty frontier must not raise on max()/min() — the
+        decorative reference points are simply absent."""
+        from main import _build_efficient_frontier
+        out = _build_efficient_frontier([], [])
+        assert out["frontier_points"] == []
+        assert out["max_sharpe_point"] is None
+        assert out["min_variance_point"] is None
+
+    def test_malformed_point_is_skipped_not_raised_on(self):
+        """A point dict missing a key must be skipped, never KeyError."""
+        from main import _build_efficient_frontier
+        raw = [
+            {"volatility": 0.10, "return": 0.08, "sharpe": 0.8},
+            {"volatility": 0.12},  # missing `return` — skip, do not raise
+        ]
+        out = _build_efficient_frontier(raw, [])
+        assert len(out["frontier_points"]) == 1
+
+    def test_reference_points_derived_from_sweep(self):
+        """max_sharpe_point = highest sharpe; min_variance_point = lowest vol."""
+        from main import _build_efficient_frontier
+        raw = [
+            {"volatility": 0.08, "return": 0.05, "sharpe": 0.5},
+            {"volatility": 0.14, "return": 0.13, "sharpe": 0.9},
+            {"volatility": 0.20, "return": 0.15, "sharpe": 0.7},
+        ]
+        out = _build_efficient_frontier(raw, [])
+        assert out["max_sharpe_point"]["sharpe"] == 0.9
+        assert out["min_variance_point"]["volatility"] == 0.08
+
+    def test_portfolio_points_passed_through_unchanged(self):
+        """portfolio_points come from strategy_results_cache — the reshape
+        forwards them verbatim, it does not recompute them."""
+        from main import _build_efficient_frontier
+        pts = [{"strategy": "BENCHMARK", "volatility": 0.19,
+                "expected_return": 0.10, "sharpe": 0.52}]
+        out = _build_efficient_frontier([], pts)
+        assert out["portfolio_points"] == pts

@@ -74,6 +74,38 @@ async def get_strategy_cache(strategy_hash: str) -> dict[str, Any] | None:
     return None
 
 
+async def get_latest_strategy_cache() -> dict[str, Any] | None:
+    """
+    Returns the MOST RECENTLY computed strategy results, regardless of
+    which data hash produced them.
+
+    Used by the efficient-frontier endpoint to plot the ten strategies'
+    (volatility, return) coordinates. Unlike get_strategy_cache() it does
+    not require the caller to know the current data hash — so it needs
+    neither get_full_history() nor run_all_strategies(), keeping an
+    optimize request light. A marginally stale point set is acceptable
+    here: the scatter is a visual reference and /api/backtest/compare
+    keeps this table current on every dashboard load.
+    """
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(
+                text(
+                    "SELECT results_json FROM strategy_results_cache "
+                    "ORDER BY computed_at DESC LIMIT 1"
+                )
+            )
+            result = row.fetchone()
+            if result:
+                return dict(result[0])
+    except Exception as exc:
+        log.warning("strategy_cache_latest_read_error", error=str(exc))
+    return None
+
+
 async def set_strategy_cache(
     strategy_hash: str,
     results: dict[str, Any],
