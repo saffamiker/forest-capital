@@ -289,3 +289,41 @@ def test_efficient_frontier_volatility_increases():
     if len(vols) >= 3:
         # Should be generally increasing (allow some numerical noise)
         assert vols[-1] >= vols[0] - 0.001
+
+
+# ── Regression: keyword-argument signatures ─────────────────────────────────
+#
+# main.py used to call _optimize(..., assets=assets) and
+# _frontier(..., assets=assets). Neither function accepts that keyword —
+# the asset list is implicit in returns.columns. The kwarg raised
+# "optimize_weights() got an unexpected keyword argument 'assets'"
+# every time a logged-in user hit the dashboard's frontier prefetch.
+# These tests pin both signatures so a future regression that
+# reintroduces the kwarg surfaces in CI rather than in Render logs.
+
+
+def test_optimize_weights_does_not_accept_assets_kwarg():
+    from tools.optimizer import optimize_weights
+    rets = make_returns()
+    with pytest.raises(TypeError, match="assets"):
+        # Type-ignore: deliberate misuse to pin the signature.
+        optimize_weights("MEAN_VARIANCE", rets, assets=["A", "B"])  # type: ignore[call-arg]
+
+
+def test_efficient_frontier_does_not_accept_assets_kwarg():
+    from tools.optimizer import efficient_frontier
+    rets = make_returns(n_assets=3, n_obs=80)
+    with pytest.raises(TypeError, match="assets"):
+        efficient_frontier(rets, n_points=10, assets=["A", "B", "C"])  # type: ignore[call-arg]
+
+
+def test_optimize_weights_derives_tickers_from_returns_columns():
+    """The signature contract that makes the `assets` kwarg redundant:
+    the optimizer reads its ticker list from returns.columns. This test
+    pins that contract so a refactor that drops the column-name path
+    breaks loudly here rather than silently in production."""
+    from tools.optimizer import optimize_weights
+    rets = make_returns(n_assets=4)
+    rets.columns = ["SPY", "TLT", "IEF", "GLD"]
+    result = optimize_weights("RISK_PARITY", rets)
+    assert set(result["weights"].keys()) == {"SPY", "TLT", "IEF", "GLD"}

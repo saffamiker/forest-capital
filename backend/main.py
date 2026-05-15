@@ -536,8 +536,14 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
             prices = fetch_equity_data(assets, start, end)
             returns = prices.pct_change().dropna()
 
-            result = _optimize(body.method, returns, assets=assets)
-            frontier = _frontier(returns, n_points=100, assets=assets)
+            # The optimizer derives its ticker list from returns.columns
+            # (see tools/optimizer.py:440), so the `assets` argument is
+            # already implicit. Passing it as a kwarg raised
+            # `optimize_weights() got an unexpected keyword argument
+            # 'assets'` on every /api/optimize/weights call, which fired
+            # at every login through the dashboard's frontier prefetch.
+            result = _optimize(body.method, returns)
+            frontier = _frontier(returns, n_points=100)
 
             return {
                 "method": body.method,
