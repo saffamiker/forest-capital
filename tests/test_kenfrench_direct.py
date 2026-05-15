@@ -213,6 +213,119 @@ class TestKenFrenchCacheLayer:
         assert recent_yyyymm in [int(d.strftime("%Y%m")) for d in df.index]
 
 
+class TestLoadFFFactorsOptionalRange:
+    """_load_ff_factors_with_cache accepts start=None / end=None so callers
+    that don't know the date layout can still trigger an incremental fetch.
+    The DB-first incremental decision is driven by the DB's last_yyyymm,
+    not by the start/end arguments — those only slice the returned frame."""
+
+    @staticmethod
+    def _patch_fetch(monkeypatch):
+        """Return a stub _kenfrench_direct_fetch that returns 24 months of
+        plausible FF data and a counter so tests can assert call count."""
+        calls: list[int] = []
+
+        def _stub() -> pd.DataFrame:
+            calls.append(1)
+            from datetime import date
+            today = date.today()
+            year, month = today.year, today.month
+            idx = []
+            for _ in range(24):
+                idx.append(year * 100 + month)
+                month -= 1
+                if month == 0:
+                    month = 12
+                    year -= 1
+            idx.sort()
+            return pd.DataFrame(
+                {"Mkt-RF": [0.5] * 24, "SMB": [0.1] * 24, "HML": [0.2] * 24, "RF": [0.02] * 24},
+                index=idx,
+            )
+
+        monkeypatch.setattr("tools.data_fetcher._kenfrench_direct_fetch", _stub)
+        return calls
+
+    def test_accepts_no_arguments_at_all(self, monkeypatch):
+        """The headline contract: callers that don't know the date range
+        can call _load_ff_factors_with_cache() with zero arguments."""
+        from tools.data_fetcher import _load_ff_factors_with_cache
+        monkeypatch.setattr("tools.data_fetcher._read_ff_factors_from_db", lambda: [])
+        self._patch_fetch(monkeypatch)
+
+        # No keyword args, no positional args — must not TypeError.
+        df = _load_ff_factors_with_cache()
+
+        assert df is not None
+        assert isinstance(df.index, pd.DatetimeIndex)
+        assert not df.empty
+
+    def test_start_none_means_no_lower_bound(self, monkeypatch):
+        """start=None must skip the >= filter so historical months survive."""
+        from tools.data_fetcher import _load_ff_factors_with_cache
+        monkeypatch.setattr("tools.data_fetcher._read_ff_factors_from_db", lambda: [])
+        self._patch_fetch(monkeypatch)
+
+        df_with_start = _load_ff_factors_with_cache(start="2100-01-01", end=None)
+        # start in the future + no upper bound → empty slice
+        assert df_with_start is not None and df_with_start.empty
+
+        df_no_start = _load_ff_factors_with_cache(start=None, end=None)
+        # No bounds → 24 rows survive
+        assert df_no_start is not None and len(df_no_start) == 24
+
+    def test_end_none_means_no_upper_bound(self, monkeypatch):
+        """end=None must skip the <= filter so the most recent month
+        always appears (the bug we're guarding against: someone passing
+        end='2024-12-31' and silently losing 2025-onward rows)."""
+        from tools.data_fetcher import _load_ff_factors_with_cache
+        monkeypatch.setattr("tools.data_fetcher._read_ff_factors_from_db", lambda: [])
+        self._patch_fetch(monkeypatch)
+
+        df = _load_ff_factors_with_cache(start=None, end=None)
+        assert df is not None
+        # The stub's most recent row is the current month — must be present.
+        from datetime import date
+        today = date.today()
+        recent_yyyymm = today.year * 100 + today.month
+        seen_yyyymm = [int(d.strftime("%Y%m")) for d in df.index]
+        assert recent_yyyymm in seen_yyyymm
+
+    def test_existing_positional_call_still_works(self, monkeypatch):
+        """Backwards compat: the existing call site
+        `_load_ff_factors_with_cache(start, end)` with positional strings
+        must continue to work unchanged."""
+        from tools.data_fetcher import _load_ff_factors_with_cache
+        monkeypatch.setattr("tools.data_fetcher._read_ff_factors_from_db", lambda: [])
+        self._patch_fetch(monkeypatch)
+
+        df = _load_ff_factors_with_cache("2000-01-01", "2024-12-31")
+        assert df is not None
+        assert isinstance(df.index, pd.DatetimeIndex)
+
+    def test_incremental_decision_uses_db_not_arguments(self, monkeypatch):
+        """The 35-day staleness check looks at the DB's last_yyyymm, not
+        at the caller's start/end. A caller asking for an old window
+        should NOT force a fresh HTTP fetch when the DB is current."""
+        from datetime import date
+        from tools.data_fetcher import _load_ff_factors_with_cache
+
+        # Populate DB with current-month rows → cache is fresh
+        today = date.today()
+        recent_yyyymm = today.year * 100 + today.month
+        rows = [(recent_yyyymm, 0.5, 0.1, 0.2, 0.02)]
+        monkeypatch.setattr("tools.data_fetcher._read_ff_factors_from_db", lambda: rows)
+        calls = self._patch_fetch(monkeypatch)
+
+        # Caller asks for an ancient slice; this must NOT trigger a refetch.
+        _load_ff_factors_with_cache(start="1990-01-01", end="1995-12-31")
+
+        assert len(calls) == 0, (
+            "Caller's start/end window must not influence the incremental "
+            "decision — the DB cache is the only authority on freshness"
+        )
+
+
 class TestRegistryDirectSource:
     """The provenance registry must reflect ken_french_direct so the
     Frontend Sources line displays the new label. We don't invoke

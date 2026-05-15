@@ -746,8 +746,13 @@ def fetch_supplemental_data(
     # the cache is empty or stale; results are persisted back so the
     # next pipeline run finds them. Matches the market_data_monthly
     # caching pattern.
+    #
+    # _load_ff_factors_with_cache accepts None for either bound and
+    # determines its own range from the DB. We pass the supplemental
+    # fetcher's start/end as a courtesy slice — the function still
+    # handles the incremental decision internally regardless.
     try:
-        ff = _load_ff_factors_with_cache(start, end)
+        ff = _load_ff_factors_with_cache(start=start, end=end)
         if ff is not None and not ff.empty:
             result["ff_factors"] = ff
     except Exception as exc:
@@ -1143,7 +1148,10 @@ def _db_monthly_row_count() -> int:
         return 0
 
 
-def _load_ff_factors_with_cache(start: str, end: str) -> pd.DataFrame | None:
+def _load_ff_factors_with_cache(
+    start: str | None = None,
+    end: str | None = None,
+) -> pd.DataFrame | None:
     """
     DB-first FF factor loader. Three execution paths:
 
@@ -1154,6 +1162,22 @@ def _load_ff_factors_with_cache(start: str, end: str) -> pd.DataFrame | None:
          HTTP fetch, append the delta rows, return the merged slice.
          35 days = one month + a margin; FF data publishes mid-month
          after month-end.
+
+    Both `start` and `end` are optional. The function determines its own
+    date range from the database when either is omitted:
+
+      start=None → no lower bound. The full FF series (1926-07 onward)
+                   is returned; the caller can slice if it only wants a
+                   recent window.
+      end=None   → no upper bound. Defaults to "today" semantically — no
+                   slice is applied so the most recent month always
+                   appears in the returned DataFrame.
+
+    The incremental decision (whether to call _kenfrench_direct_fetch) is
+    driven purely by the DB's existing `last_yyyymm` and the 35-day
+    staleness window — independent of the start/end arguments. This is
+    the DB-first contract: callers don't have to know the data layout to
+    get a correct incremental fetch.
 
     Returns a DataFrame with month-end DatetimeIndex and decimal-form
     Mkt-RF/SMB/HML/RF columns. None when DATABASE_URL is unset AND
@@ -1170,7 +1194,6 @@ def _load_ff_factors_with_cache(start: str, end: str) -> pd.DataFrame | None:
         # YYYYMM → year + month → days-since check. Older than 35 days
         # means a new month has likely published.
         from datetime import date as _date
-        last_year, last_month = divmod(db_last_yyyymm, 100)
         last_year, last_month = int(db_last_yyyymm // 100), int(db_last_yyyymm % 100)
         # First day of the month after the last cached month
         if last_month == 12:
@@ -1182,6 +1205,11 @@ def _load_ff_factors_with_cache(start: str, end: str) -> pd.DataFrame | None:
 
     fetched: pd.DataFrame | None = None
     if needs_initial_fetch or needs_incremental:
+        log.info(
+            "ff_factors_fetch_triggered",
+            mode="initial" if needs_initial_fetch else "incremental",
+            db_last_yyyymm=db_last_yyyymm,
+        )
         try:
             fetched = _kenfrench_direct_fetch()
         except Exception as exc:
@@ -1216,12 +1244,15 @@ def _load_ff_factors_with_cache(start: str, end: str) -> pd.DataFrame | None:
         return None
 
     # Convert YYYYMM index to month-end timestamps; divide percent-form
-    # values to decimal returns. Restrict to the requested window.
+    # values to decimal returns. Apply window bounds only when the caller
+    # supplied them — start=None / end=None means "no bound on that side".
     df = df.copy()
     df.index = pd.to_datetime(df.index.astype(str), format="%Y%m") + pd.offsets.MonthEnd(0)
     df = df / 100.0
-    df = df.loc[df.index >= start]
-    df = df.loc[df.index <= end]
+    if start is not None:
+        df = df.loc[df.index >= start]
+    if end is not None:
+        df = df.loc[df.index <= end]
     return df
 
 
