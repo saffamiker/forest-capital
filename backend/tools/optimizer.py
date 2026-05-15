@@ -519,6 +519,7 @@ def efficient_frontier(
     n_points: int = 100,
     min_weight: float = MIN_WEIGHT,
     max_weight: float = MAX_WEIGHT,
+    periods_per_year: int = ANNUALIZATION_FACTOR,
 ) -> list[dict]:
     """
     100-point efficient frontier via parametric mean-variance sweep.
@@ -528,6 +529,13 @@ def efficient_frontier(
     half the points in the extreme risk-averse regime.
     Returns list of {volatility, return, sharpe, weights} dicts suitable
     for the EfficientFrontier.jsx recharts component.
+
+    periods_per_year sets the annualisation: 252 for daily returns
+    (the default, used by the strategy backtester), 12 for monthly. The
+    efficient-frontier chart feeds monthly equity/IG/HY returns and passes
+    12 so the curve's annualised (volatility, return) coordinates sit on
+    the same scale as the strategy scatter dots — which are annualised
+    from the identical monthly series.
     """
     if not _CVXPY_AVAILABLE:
         log.warning("cvxpy_unavailable_frontier", fallback="empty")
@@ -546,8 +554,8 @@ def efficient_frontier(
     # This matches the standard efficient-frontier convention used in the chart.
     risk_aversions = np.logspace(np.log10(50.0), np.log10(0.5), n_points)
     frontier = []
-    mu = returns.mean().values * ANNUALIZATION_FACTOR
-    cov = returns.cov().values * ANNUALIZATION_FACTOR
+    mu = returns.mean().values * periods_per_year
+    cov = returns.cov().values * periods_per_year
 
     for lam in risk_aversions:
         w = mean_variance_optimize(returns, risk_aversion=float(lam), min_weight=min_weight, max_weight=max_weight)

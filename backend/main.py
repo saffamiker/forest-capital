@@ -541,15 +541,22 @@ async def _strategy_portfolio_points() -> list[dict]:
             return []
 
         points: list[dict] = []
-        for r in cached.values():
+        for name, r in cached.items():
             if not isinstance(r, dict):
                 continue
             vol = r.get("volatility")
             ret = r.get("cagr")
             if vol is None or ret is None:
                 continue
+            # The strategy name: prefer the record's own field, but a
+            # null/blank strategy_name produced a grey unlabelled dot on
+            # the chart. `.get(key, default)` only substitutes when the
+            # key is ABSENT — a present-but-None value slips through — so
+            # fall back explicitly to the cache key (which IS the strategy
+            # name, strategy_results_cache being keyed by it).
+            strategy_name = r.get("strategy_name") or name or "UNKNOWN"
             points.append({
-                "strategy": r.get("strategy_name", "UNKNOWN"),
+                "strategy": strategy_name,
                 "volatility": float(vol),
                 "expected_return": float(ret),
                 "sharpe": float(r.get("sharpe_ratio") or 0.0),
@@ -610,41 +617,48 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
     # Sprint 3: real optimizer backed by historical returns.
     if ENVIRONMENT != "test":
         try:
-            from tools.data_fetcher import fetch_equity_data
             from tools.optimizer import optimize_weights as _optimize, efficient_frontier as _frontier
+            from tools.cache import get_monthly_returns
             import pandas as pd
 
-            assets = body.assets or ["SPY", "TLT", "IEF", "GLD"]
-            start = body.start or "2000-01-01"
-            end = body.end or "2024-12-31"
-
-            prices = fetch_equity_data(assets, start, end)
-
-            # Sanitise before the optimizer. yfinance can return an
-            # all-NaN column when a ticker fails to fetch (rate-limited
-            # from a cloud IP, delisted symbol). A plain
-            # `.pct_change().dropna()` then drops EVERY row — one bad
-            # column has a NaN in every row — leaving an empty frame whose
-            # mean/cov are NaN, which makes CLARABEL raise "Problem data
-            # contains NaN or Inf" on all 100 frontier points. Drop dead
-            # columns FIRST, then drop rows with partial gaps.
-            returns = prices.pct_change()
-            returns = returns.dropna(axis=1, how="all")  # drop failed tickers
-            returns = returns.dropna(how="any")          # drop partial-gap rows
-            if returns.empty or returns.shape[1] < 2:
+            # The frontier is computed from the equity/IG/HY monthly return
+            # series in market_data_monthly — the SAME three-asset universe
+            # the ten strategies are built on. Earlier this path fetched
+            # SPY/TLT/IEF/GLD daily from yfinance: a different universe AND
+            # a different frequency, so the frontier curve sat visibly
+            # offset from the strategy scatter dots. yfinance also drops
+            # tickers to NaN from Render's cloud IPs. Reading the DB series
+            # is reliable, recompute-free, and puts the curve on the same
+            # (volatility, return) scale as the dots.
+            monthly = await get_monthly_returns()
+            if not monthly or len(monthly.get("dates", [])) < 24:
                 raise ValueError(
-                    f"insufficient clean return columns for {assets} "
-                    f"({returns.shape[1]} usable) — falling back to mock frontier"
+                    "market_data_monthly unavailable or too short for a "
+                    "frontier — falling back to mock"
                 )
 
-            # The optimizer derives its ticker list from returns.columns
-            # (see tools/optimizer.py:440), so the `assets` argument is
-            # already implicit. Passing it as a kwarg raised
-            # `optimize_weights() got an unexpected keyword argument
-            # 'assets'` on every /api/optimize/weights call, which fired
-            # at every login through the dashboard's frontier prefetch.
+            returns = pd.DataFrame(
+                {
+                    "EQUITY": monthly["equity"],
+                    "IG":     monthly["ig"],
+                    "HY":     monthly["hy"],
+                },
+                index=pd.to_datetime(monthly["dates"]),
+            ).dropna()
+
+            # Issue 1: log the exact asset list reaching the solver.
+            log.info(
+                "optimize_frontier_universe",
+                tickers=list(returns.columns),
+                n_obs=len(returns),
+                source="market_data_monthly",
+            )
+
             result = _optimize(body.method, returns)
-            raw_frontier = _frontier(returns, n_points=100)
+            # Monthly returns → annualise with 12, not 252, so the frontier
+            # curve's (volatility, return) coordinates sit on the same
+            # scale as the strategy scatter (also annualised from monthly).
+            raw_frontier = _frontier(returns, n_points=100, periods_per_year=12)
 
             # efficient_frontier() returns a flat list keyed `return`, but
             # the EfficientFrontier component reads `expected_return` off a

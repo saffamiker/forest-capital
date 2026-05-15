@@ -375,3 +375,20 @@ def test_returns_have_finite_moments_detects_bad_frames():
     assert _returns_have_finite_moments(pd.DataFrame()) is False
     assert _returns_have_finite_moments(make_returns(n_obs=1)) is False
     assert _returns_have_finite_moments(_returns_with_nan_column()) is False
+
+
+def test_efficient_frontier_periods_per_year_scales_annualisation():
+    """Monthly returns must annualise with periods_per_year=12, not the
+    252 default — otherwise the curve's annualised (vol, return) scale
+    dwarfs the monthly-based strategy scatter and the chart looks
+    disconnected. The sweep solves identical weights regardless of the
+    annualisation factor, so volatility scales by exactly sqrt(252/12)
+    between a pp=252 and a pp=12 frontier on the same monthly frame."""
+    from tools.optimizer import efficient_frontier
+    rets = make_returns(n_assets=3, n_obs=120)
+    f12 = efficient_frontier(rets, n_points=20, periods_per_year=12)
+    f252 = efficient_frontier(rets, n_points=20, periods_per_year=252)
+    assert f12 and f252
+    assert f12[-1]["volatility"] < f252[-1]["volatility"]
+    ratio = f252[10]["volatility"] / f12[10]["volatility"]
+    assert abs(ratio - (252 / 12) ** 0.5) < 0.05
