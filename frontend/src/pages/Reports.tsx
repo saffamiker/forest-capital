@@ -23,10 +23,11 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, Presentation, Download, Loader2, Calendar, AlertCircle,
-  CheckCircle, Clock, ArrowRight, GraduationCap,
+  CheckCircle, Clock, ArrowRight, GraduationCap, Edit3,
 } from 'lucide-react'
 import AdvisorPanel from '../components/AdvisorPanel'
 import type { DeliverableType } from '../types/advisor'
+import type { SectionDocType } from '../types/documents'
 
 interface ReportCard {
   id: string
@@ -65,6 +66,15 @@ const ADVISOR_TYPE_FOR_ID: Record<string, DeliverableType> = {
   storyboard_draft:     'presentation',
   presentation_deck:    'presentation',
   qa_preparation:       'presentation',
+}
+
+// Map Bob's three deliverable IDs to the section-doc type the SectionEditor
+// expects. Other IDs (Molly's) don't open in the section editor — they
+// either route to the Storyboard Editor or trigger a direct download.
+const SECTION_DOC_TYPE_FOR_ID: Record<string, SectionDocType | undefined> = {
+  midpoint_template:    'midpoint_paper',
+  executive_brief:      'executive_brief',
+  analytical_appendix:  'analytical_appendix',
 }
 
 // The StoryboardEditor writes the active document_id here so deck / Q&A
@@ -131,7 +141,7 @@ async function downloadDocxResponse(card: ReportCard): Promise<void> {
   URL.revokeObjectURL(url)
 }
 
-function DeliverableCard({ card, onGenerate, isGenerating, onAdvisor }: {
+function DeliverableCard({ card, onGenerate, isGenerating, onAdvisor, onOpenSectionEditor }: {
   card: ReportCard
   onGenerate: (c: ReportCard) => void
   isGenerating: boolean
@@ -139,6 +149,10 @@ function DeliverableCard({ card, onGenerate, isGenerating, onAdvisor }: {
   // The button below the Generate button surfaces grade-aware guidance
   // before the team commits to a draft.
   onAdvisor: (c: ReportCard) => void
+  // Bob's section editor — only wired for the three doc types that
+  // have a SECTION_DOC_TYPE_FOR_ID entry. Molly's cards pass undefined
+  // and the button doesn't render.
+  onOpenSectionEditor?: (c: ReportCard) => void
 }) {
   const Icon = ICON_FOR_ID[card.id] ?? FileText
   const isAvailable = card.status === 'available'
@@ -208,6 +222,22 @@ function DeliverableCard({ card, onGenerate, isGenerating, onAdvisor }: {
             : <>Planned</>}
       </button>
 
+      {/* Edit in Section Editor — only for Bob's three section-structured
+          deliverables. Opens the in-browser editor where Bob can edit each
+          section against the immutable AI draft. */}
+      {onOpenSectionEditor && isAvailable && (
+        <button
+          type="button"
+          onClick={() => onOpenSectionEditor(card)}
+          data-testid={`edit-button-${card.id}`}
+          className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded text-xs border border-border text-slate-300 hover:bg-navy-700 transition-colors"
+          title="Open this draft in the section editor"
+        >
+          <Edit3 className="w-3 h-3" />
+          Edit in Section Editor
+        </button>
+      )}
+
       {/* Get Advisor Feedback — gold accent, always available regardless of
           card status. The team should be able to consult the advisor on a
           deliverable even when its generator isn't wired yet. */}
@@ -261,6 +291,37 @@ export default function Reports() {
   const handleAdvisor = (card: ReportCard) => {
     const dt = ADVISOR_TYPE_FOR_ID[card.id] ?? 'presentation'
     setAdvisorDeliverable(dt)
+  }
+
+  const handleOpenSectionEditor = async (card: ReportCard) => {
+    const docType = SECTION_DOC_TYPE_FOR_ID[card.id]
+    if (!docType) return
+    setGeneratingId(card.id)
+    setError(null)
+    try {
+      // Create a new section-structured draft for this deliverable.
+      // The backend returns the document_id and the AI-drafted content;
+      // we navigate to the SectionEditor which loads it via GET.
+      const res = await axios.post<{
+        document_id: string | null
+        persistence: 'saved' | 'unavailable'
+      }>('/api/documents/section-doc/draft', { doc_type: docType })
+      if (res.data.document_id) {
+        navigate(`/reports/document/${res.data.document_id}`)
+      } else {
+        setError(
+          'Section editor requires database persistence. ' +
+          'Run `alembic upgrade head` on the server first.',
+        )
+      }
+    } catch (err) {
+      const msg = axios.isAxiosError(err)
+        ? (err.response?.data?.detail ?? err.message)
+        : 'Failed to open section editor'
+      setError(String(msg))
+    } finally {
+      setGeneratingId(null)
+    }
   }
 
   const handleGenerate = async (card: ReportCard) => {
@@ -341,15 +402,32 @@ export default function Reports() {
               </span>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {manifest.owner_bob.map((card) => (
-                <DeliverableCard
-                  key={card.id}
-                  card={card}
-                  onGenerate={handleGenerate}
-                  isGenerating={generatingId === card.id}
-                  onAdvisor={handleAdvisor}
-                />
-              ))}
+              {manifest.owner_bob.map((card) => {
+                // Only Bob's section-structured deliverables get the
+                // editor entry point. Cards whose ID isn't in
+                // SECTION_DOC_TYPE_FOR_ID omit the prop entirely —
+                // exactOptionalPropertyTypes disallows passing undefined
+                // explicitly when the type is `((c) => void) | undefined`.
+                const supportsSectionEditor = !!SECTION_DOC_TYPE_FOR_ID[card.id]
+                return supportsSectionEditor ? (
+                  <DeliverableCard
+                    key={card.id}
+                    card={card}
+                    onGenerate={handleGenerate}
+                    isGenerating={generatingId === card.id}
+                    onAdvisor={handleAdvisor}
+                    onOpenSectionEditor={(c) => void handleOpenSectionEditor(c)}
+                  />
+                ) : (
+                  <DeliverableCard
+                    key={card.id}
+                    card={card}
+                    onGenerate={handleGenerate}
+                    isGenerating={generatingId === card.id}
+                    onAdvisor={handleAdvisor}
+                  />
+                )
+              })}
             </div>
           </section>
 

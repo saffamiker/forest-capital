@@ -1,7 +1,9 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import StrategyCard from '../components/StrategyCard'
 import type { StrategyResult } from '../types/strategies'
+import { UIProvider } from '../context/UIContext'
+import { useGlossaryStore } from '../stores/glossaryStore'
 
 const mockStrategy: StrategyResult = {
   strategy_name: 'VOL_TARGETING',
@@ -80,70 +82,70 @@ const benchmarkStrategy: StrategyResult = {
 
 describe('StrategyCard', () => {
   it('renders without errors', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(document.body).toBeTruthy()
   })
 
   it('renders strategy name', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(screen.getByText('VOL TARGETING')).toBeInTheDocument()
   })
 
   it('renders the strategy type badge', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(screen.getByText('DYNAMIC')).toBeInTheDocument()
   })
 
   it('renders Sharpe ratio', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(screen.getByText('0.83')).toBeInTheDocument()
   })
 
   it('renders the Sharpe 95% CI', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(screen.getByText(/0\.71.*0\.95/)).toBeInTheDocument()
   })
 
   it('renders max drawdown as negative percentage', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(screen.getByText('-15.6%')).toBeInTheDocument()
   })
 
   it('shows SIGNIFICANT badge for significant strategy', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     const badges = screen.getAllByText('SIGNIFICANT')
     expect(badges.length).toBeGreaterThanOrEqual(1)
   })
 
   it('does not show SIGNIFICANT badge for non-significant strategy', () => {
-    render(<StrategyCard strategy={benchmarkStrategy} />)
+    render(<UIProvider><StrategyCard strategy={benchmarkStrategy} /></UIProvider>)
     expect(screen.queryByText('SIGNIFICANT')).not.toBeInTheDocument()
   })
 
   it('renders tier 1 gates count', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(screen.getByText(/5\/5 Tier 1 gates/)).toBeInTheDocument()
   })
 
   it('renders CV stability score', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(screen.getByText('0.81')).toBeInTheDocument()
   })
 
   it('shows "More detail" button initially', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(screen.getByText('More detail')).toBeInTheDocument()
   })
 
   it('expands to show detailed stats on click', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     fireEvent.click(screen.getByText('More detail'))
     expect(screen.getByText('Less detail')).toBeInTheDocument()
     expect(screen.getByText(/Tier 1 Significance Tests/i)).toBeInTheDocument()
   })
 
   it('collapses back to summary view on second click', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     fireEvent.click(screen.getByText('More detail'))
     fireEvent.click(screen.getByText('Less detail'))
     expect(screen.getByText('More detail')).toBeInTheDocument()
@@ -151,23 +153,109 @@ describe('StrategyCard', () => {
 
   it('calls onAskCouncil with strategy name when Ask button clicked', () => {
     const onAskCouncil = vi.fn()
-    render(<StrategyCard strategy={mockStrategy} onAskCouncil={onAskCouncil} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} onAskCouncil={onAskCouncil} /></UIProvider>)
     fireEvent.click(screen.getByText(/Ask the Council about VOL TARGETING/i))
     expect(onAskCouncil).toHaveBeenCalledWith('VOL_TARGETING')
   })
 
   it('renders static type badge for static strategy', () => {
-    render(<StrategyCard strategy={benchmarkStrategy} />)
+    render(<UIProvider><StrategyCard strategy={benchmarkStrategy} /></UIProvider>)
     expect(screen.getByText('STATIC')).toBeInTheDocument()
   })
 
   it('renders CAGR', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(screen.getByText('9.5%')).toBeInTheDocument()
   })
 
   it('renders volatility', () => {
-    render(<StrategyCard strategy={mockStrategy} />)
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
     expect(screen.getByText('11.8%')).toBeInTheDocument()
+  })
+})
+
+
+// ── ExplainableText label wraps (Explainer §2.4) ─────────────────────────────
+//
+// Each metric label is wrapped in ExplainableText with a stable term ID
+// so a glossary lookup hits the same entry whether the click happens on
+// the dashboard table header or here. ExplainableText renders an
+// aria-label="Explain {term}" button in Commentary mode WHEN the
+// glossary has a matching entry — in Analyst mode children pass through
+// plainly; in Commentary mode without a glossary entry the chrome is a
+// muted-state dotted-underline span instead.
+//
+// To exercise the interactive path we pre-seed the glossary store with
+// stub entries for every metric term wrapped in StrategyCard.
+
+const GLOSSARY_TERMS = [
+  'sharpe_ratio', 'cagr', 'max_drawdown', 'volatility', 'cv_score',
+  'tier1_gates', 'dsr', 'p_fdr',
+]
+
+function seedGlossary() {
+  useGlossaryStore.setState({
+    terms: Object.fromEntries(
+      GLOSSARY_TERMS.map((t) => [t, { hover: `${t} hover`, what: 'What', why: 'Why' }]),
+    ),
+    parameters: {}, personas: {}, qa: {}, charts: {},
+    termsLoaded: true, termsLoading: false, inflight: new Set<string>(),
+  })
+}
+
+function renderInCommentary(node: React.ReactNode) {
+  sessionStorage.setItem('fc_ui_mode', 'commentary')
+  seedGlossary()
+  return render(<UIProvider>{node}</UIProvider>)
+}
+
+describe('StrategyCard — ExplainableText metric labels', () => {
+  beforeEach(() => {
+    // Reset the store before every test to keep state isolated.
+    useGlossaryStore.setState({
+      terms: {}, parameters: {}, personas: {}, qa: {}, charts: {},
+      termsLoaded: false, termsLoading: false, inflight: new Set<string>(),
+    })
+  })
+
+  it('Sharpe Ratio label is wrapped with explain affordance', () => {
+    renderInCommentary(<StrategyCard strategy={mockStrategy} />)
+    expect(screen.getByLabelText('Explain sharpe_ratio')).toBeInTheDocument()
+  })
+
+  it('CAGR label is wrapped', () => {
+    renderInCommentary(<StrategyCard strategy={mockStrategy} />)
+    expect(screen.getByLabelText('Explain cagr')).toBeInTheDocument()
+  })
+
+  it('Max Drawdown label is wrapped', () => {
+    renderInCommentary(<StrategyCard strategy={mockStrategy} />)
+    expect(screen.getByLabelText('Explain max_drawdown')).toBeInTheDocument()
+  })
+
+  it('Volatility label is wrapped', () => {
+    renderInCommentary(<StrategyCard strategy={mockStrategy} />)
+    expect(screen.getByLabelText('Explain volatility')).toBeInTheDocument()
+  })
+
+  it('CV Stability Score label is wrapped', () => {
+    renderInCommentary(<StrategyCard strategy={mockStrategy} />)
+    expect(screen.getByLabelText('Explain cv_score')).toBeInTheDocument()
+  })
+
+  it('Tier 1 Significance Tests label is wrapped when expanded', () => {
+    renderInCommentary(<StrategyCard strategy={mockStrategy} />)
+    fireEvent.click(screen.getByText('More detail'))
+    expect(screen.getByLabelText('Explain tier1_gates')).toBeInTheDocument()
+  })
+
+  it('in Analyst mode labels are plain text (no explain button)', () => {
+    sessionStorage.setItem('fc_ui_mode', 'analyst')
+    seedGlossary()
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    // Analyst mode → ExplainableText emits children directly, no aria-label.
+    expect(screen.queryByLabelText('Explain sharpe_ratio')).toBeNull()
+    // Plain label text is still there though.
+    expect(screen.getByText('Sharpe Ratio')).toBeInTheDocument()
   })
 })

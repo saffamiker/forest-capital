@@ -213,6 +213,315 @@ class TestDocxGeneratorUnit:
         assert "AI DRAFT" in header_xml
 
 
+class TestAnalyticalAppendixEndpoint:
+    """The Analytical Appendix is 35% of the grade. The HTML deliverable
+    must contain all six required sections, the AI DRAFT banner, and the
+    strategy comparison table for the grader to cross-reference."""
+
+    def test_endpoint_returns_200(self, client: TestClient) -> None:
+        r = client.post("/api/reports/analytical-appendix", headers=_auth_headers())
+        assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
+
+    def test_returns_html_media_type(self, client: TestClient) -> None:
+        r = client.post("/api/reports/analytical-appendix", headers=_auth_headers())
+        assert "text/html" in r.headers.get("content-type", "")
+
+    def test_response_carries_ai_draft_banner(self, client: TestClient) -> None:
+        r = client.post("/api/reports/analytical-appendix", headers=_auth_headers())
+        assert "AI DRAFT" in r.text, "AI DRAFT banner missing from HTML body"
+        # The banner subtitle must also be present — it's the auditable text
+        # that explains why human review is required.
+        assert "verified by a team member" in r.text
+
+    def test_response_contains_all_six_sections(self, client: TestClient) -> None:
+        """Per CLAUDE.md Section 14, the appendix has 6 named sections.
+        Each section's heading must appear in the rendered HTML or the
+        grader will dock points for missing required content."""
+        r = client.post("/api/reports/analytical-appendix", headers=_auth_headers())
+        for needle in (
+            "Abstract",
+            "Data Sources and Provenance",
+            "Portfolio Construction Methodology",
+            "Statistical Results",
+            "Sensitivity Analysis",
+            "Reproducibility Notes",
+        ):
+            assert needle in r.text, f"Required section '{needle}' missing"
+
+    def test_response_includes_references_when_available(self, client: TestClient) -> None:
+        """references.json carries the curated bibliography. When loaded,
+        the appendix must surface them in a References block."""
+        r = client.post("/api/reports/analytical-appendix", headers=_auth_headers())
+        # The Academic Writer's references DB has at minimum these authors.
+        # If references load fails the section is silently omitted — so
+        # this test only fires when at least one cite makes it through.
+        if "References" in r.text:
+            # When the section is present, at least one citation must render.
+            assert "López de Prado" in r.text or "Sharpe" in r.text
+
+    def test_filename_includes_today_iso_date(self, client: TestClient) -> None:
+        from datetime import date
+        r = client.post("/api/reports/analytical-appendix", headers=_auth_headers())
+        dispo = r.headers.get("content-disposition", "")
+        assert date.today().isoformat() in dispo
+        assert ".html" in dispo
+
+    def test_response_is_valid_html(self, client: TestClient) -> None:
+        """Smoke-check: must start with a doctype declaration and have a
+        single closing </html> tag. Catches the case where the builder
+        emits malformed markup that browsers might tolerate but graders
+        viewing source will flag."""
+        r = client.post("/api/reports/analytical-appendix", headers=_auth_headers())
+        assert r.text.strip().startswith("<!DOCTYPE html>")
+        assert r.text.count("</html>") == 1
+
+
+class TestExecutiveBriefEndpoint:
+    """5-page brief — 20% of the grade. .docx with all six required
+    sections, the AI DRAFT banner, and the strategy table embedded."""
+
+    def test_endpoint_returns_200(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/reports/executive-brief-template",
+            headers=_auth_headers(),
+        )
+        assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
+
+    def test_returns_docx_media_type(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/reports/executive-brief-template",
+            headers=_auth_headers(),
+        )
+        assert "wordprocessingml.document" in r.headers.get("content-type", "")
+
+    def test_response_is_a_valid_docx(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/reports/executive-brief-template",
+            headers=_auth_headers(),
+        )
+        with ZipFile(BytesIO(r.content)) as z:
+            assert "word/document.xml" in z.namelist()
+
+    def test_response_contains_ai_draft_banner(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/reports/executive-brief-template",
+            headers=_auth_headers(),
+        )
+        with ZipFile(BytesIO(r.content)) as z:
+            body = z.read("word/document.xml").decode("utf-8", errors="ignore")
+            header_xml = ""
+            for name in z.namelist():
+                if "header" in name and name.endswith(".xml"):
+                    header_xml = z.read(name).decode("utf-8", errors="ignore")
+                    break
+        assert "AI DRAFT" in (body + header_xml)
+
+    def test_response_contains_all_six_sections(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/reports/executive-brief-template",
+            headers=_auth_headers(),
+        )
+        with ZipFile(BytesIO(r.content)) as z:
+            body = z.read("word/document.xml").decode("utf-8", errors="ignore")
+        for needle in (
+            "Executive Summary",
+            "Methodology",
+            "Key Findings",
+            "Limitations",
+            "Recommendations",
+            "Charts Referenced",
+        ):
+            assert needle in body, f"Required section '{needle}' missing"
+
+    def test_filename_includes_today_iso_date(self, client: TestClient) -> None:
+        from datetime import date
+        r = client.post(
+            "/api/reports/executive-brief-template",
+            headers=_auth_headers(),
+        )
+        dispo = r.headers.get("content-disposition", "")
+        assert date.today().isoformat() in dispo
+        assert ".docx" in dispo
+
+
+class TestManifestNewGenerators:
+    """The two new generators must appear in the manifest with
+    status='available' so the Reports screen renders the Generate buttons
+    rather than the disabled 'Planned' state."""
+
+    def test_executive_brief_is_available(self, client: TestClient) -> None:
+        r = client.get("/api/reports/manifest", headers=_auth_headers())
+        body = r.json()
+        card = next(
+            (c for c in body["owner_bob"] if c["id"] == "executive_brief"),
+            None,
+        )
+        assert card is not None
+        assert card["status"] == "available"
+        assert card["endpoint"] == "/api/reports/executive-brief-template"
+
+    def test_analytical_appendix_is_available(self, client: TestClient) -> None:
+        r = client.get("/api/reports/manifest", headers=_auth_headers())
+        body = r.json()
+        card = next(
+            (c for c in body["owner_bob"] if c["id"] == "analytical_appendix"),
+            None,
+        )
+        assert card is not None
+        assert card["status"] == "available"
+        assert card["format"] == "html"
+
+
+class TestAgentPersonasEndpoint:
+    """GET /api/agents/personas powers the PersonaModal in CouncilDebate."""
+
+    def test_endpoint_returns_200(self, client: TestClient) -> None:
+        r = client.get("/api/agents/personas", headers=_auth_headers())
+        assert r.status_code == 200
+
+    def test_response_lists_all_seven_agents(self, client: TestClient) -> None:
+        """Seven agents in the council: 4 specialists + 2 dissenters + CIO.
+        The Explainer Agent is not a council member (background-only) and
+        the QA Agent isn't either (audit role)."""
+        r = client.get("/api/agents/personas", headers=_auth_headers())
+        body = r.json()
+        names = {a["agent"] for a in body["agents"]}
+        for expected in (
+            "Equity Analyst",
+            "Fixed Income Analyst",
+            "Risk Manager",
+            "Quant Backtester",
+            "Independent Analyst (Gemini)",
+            "Contrarian Analyst (Grok)",
+            "CIO",
+        ):
+            assert expected in names, f"Agent '{expected}' missing from personas"
+
+    def test_each_agent_has_required_fields(self, client: TestClient) -> None:
+        r = client.get("/api/agents/personas", headers=_auth_headers())
+        body = r.json()
+        required = {"agent", "model", "system_prompt", "prompt_summary_first_sentence"}
+        for a in body["agents"]:
+            missing = required - set(a.keys())
+            assert not missing, f"Agent {a.get('agent')} missing keys: {missing}"
+
+    def test_system_prompt_is_non_empty_for_implemented_agents(self, client: TestClient) -> None:
+        """Every agent module that exists must surface a non-empty prompt.
+        The endpoint falls back to empty string if the module import fails;
+        a passing test confirms all module imports succeed in CI."""
+        r = client.get("/api/agents/personas", headers=_auth_headers())
+        body = r.json()
+        for a in body["agents"]:
+            assert len(a["system_prompt"]) > 50, (
+                f"Agent {a['agent']} has suspiciously short prompt — "
+                "import likely failed silently."
+            )
+
+    def test_unauthenticated_rejected(self, client: TestClient) -> None:
+        r = client.get("/api/agents/personas")
+        assert r.status_code in (401, 403)
+
+
+class TestSectionDocumentEndpoints:
+    """Bob's section editor uses three endpoints:
+       POST /api/documents/section-doc/draft       — creates the doc
+       POST /api/documents/{id}/sections/{sid}/regenerate — single-section re-run
+       POST /api/documents/{id}/export             — download current draft
+       The standard documents API (get / patch / versions / restore) is
+       already tested in test_storyboard_endpoints — these tests focus
+       only on the section-document-specific behaviour.
+    """
+
+    def test_section_draft_rejects_unknown_doc_type(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/documents/section-doc/draft",
+            headers=_auth_headers(),
+            json={"doc_type": "random_garbage"},
+        )
+        assert r.status_code == 422
+
+    def test_section_draft_creates_midpoint_with_correct_sections(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/documents/section-doc/draft",
+            headers=_auth_headers(),
+            json={"doc_type": "midpoint_paper"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        # Without a DATABASE_URL the endpoint returns persistence=unavailable
+        # but still surfaces the content for the UI to render. Both paths
+        # must include the section structure.
+        content = body["content"]
+        assert content["doc_type"] == "midpoint_paper"
+        section_ids = [s["id"] for s in content["sections"]]
+        # Midpoint has 4 required sections per FNA 670 brief.
+        for expected in ("methodology", "results", "roles", "next_steps"):
+            assert expected in section_ids, f"Section '{expected}' missing"
+
+    def test_section_draft_creates_executive_brief_with_six_sections(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/documents/section-doc/draft",
+            headers=_auth_headers(),
+            json={"doc_type": "executive_brief"},
+        )
+        assert r.status_code == 200
+        content = r.json()["content"]
+        section_ids = [s["id"] for s in content["sections"]]
+        assert len(section_ids) == 6
+        for expected in (
+            "executive_summary", "methodology", "key_findings",
+            "limitations", "recommendations", "appendix_charts",
+        ):
+            assert expected in section_ids
+
+    def test_section_draft_creates_analytical_appendix_with_six_sections(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/documents/section-doc/draft",
+            headers=_auth_headers(),
+            json={"doc_type": "analytical_appendix"},
+        )
+        assert r.status_code == 200
+        content = r.json()["content"]
+        section_ids = [s["id"] for s in content["sections"]]
+        for expected in (
+            "abstract", "data_sources", "methodology",
+            "statistical_results", "sensitivity", "reproducibility",
+        ):
+            assert expected in section_ids
+
+    def test_each_section_has_required_fields(self, client: TestClient) -> None:
+        """SectionEditor UI reads id, title, ai_draft, content, last_edited.
+        All four must be present on every section or the UI breaks."""
+        r = client.post(
+            "/api/documents/section-doc/draft",
+            headers=_auth_headers(),
+            json={"doc_type": "executive_brief"},
+        )
+        content = r.json()["content"]
+        for s in content["sections"]:
+            for required in ("id", "title", "ai_draft", "content", "last_edited"):
+                assert required in s, f"Section missing field: {required}"
+            # ai_draft and content should be equal on creation (Bob hasn't
+            # edited yet). After Bob edits, they diverge — that's the whole
+            # point of having both fields.
+            assert s["ai_draft"] == s["content"]
+
+    def test_regenerate_section_returns_404_for_unknown_document(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/documents/nonexistent-uuid/sections/methodology/regenerate",
+            headers=_auth_headers(),
+        )
+        # Without a DB-persisted doc the endpoint returns 404 (no draft found).
+        assert r.status_code == 404
+
+    def test_export_returns_404_for_unknown_document(self, client: TestClient) -> None:
+        r = client.post(
+            "/api/documents/nonexistent-uuid/export",
+            headers=_auth_headers(),
+        )
+        assert r.status_code == 404
+
+
 class TestMigration004Importable:
     def test_migration_module_imports(self) -> None:
         import importlib.util

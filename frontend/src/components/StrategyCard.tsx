@@ -1,6 +1,7 @@
 import { CheckCircle, XCircle, ChevronDown, ChevronUp } from 'lucide-react'
 import { useState } from 'react'
 import type { StrategyResult, StressResults } from '../types/strategies'
+import ExplainableText from './ExplainableText'
 
 function pct(v: number | undefined, decimals = 1) {
   return v != null ? `${(v * 100).toFixed(decimals)}%` : '—'
@@ -135,27 +136,38 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
         </div>
       </div>
 
-      {/* Core metrics */}
+      {/* Core metrics — labels wrapped in ExplainableText with stable
+          term IDs that line up with the dashboard table headers, so a
+          glossary lookup hits the same entry whether the user clicks
+          the Sharpe label here or in the Dashboard table. */}
       <div className="px-4 py-3 grid grid-cols-2 gap-x-4 gap-y-2">
         <div>
-          <div className="text-2xs text-muted uppercase tracking-wide">Sharpe Ratio</div>
+          <div className="text-2xs text-muted uppercase tracking-wide">
+            <ExplainableText term="sharpe_ratio">Sharpe Ratio</ExplainableText>
+          </div>
           <div className="font-mono text-white text-sm font-semibold">{fmt(s.sharpe_ratio)}</div>
           <div className="text-2xs text-muted font-mono">
             [{fmt(s.sharpe_ci_95?.[0])} – {fmt(s.sharpe_ci_95?.[1])}] 95% CI
           </div>
         </div>
         <div>
-          <div className="text-2xs text-muted uppercase tracking-wide">CAGR</div>
+          <div className="text-2xs text-muted uppercase tracking-wide">
+            <ExplainableText term="cagr">CAGR</ExplainableText>
+          </div>
           <div className="font-mono text-white text-sm font-semibold">{pct(s.cagr)}</div>
           <div className="text-2xs text-muted font-mono">OOS: {pct(s.oos_cagr)}</div>
         </div>
         <div>
-          <div className="text-2xs text-muted uppercase tracking-wide">Max Drawdown</div>
+          <div className="text-2xs text-muted uppercase tracking-wide">
+            <ExplainableText term="max_drawdown">Max Drawdown</ExplainableText>
+          </div>
           <div className="font-mono text-danger text-sm font-semibold">{pct(s.max_drawdown)}</div>
           <div className="text-2xs text-muted font-mono">{s.drawdown_duration_days}d duration</div>
         </div>
         <div>
-          <div className="text-2xs text-muted uppercase tracking-wide">Volatility</div>
+          <div className="text-2xs text-muted uppercase tracking-wide">
+            <ExplainableText term="volatility">Volatility</ExplainableText>
+          </div>
           <div className="font-mono text-white text-sm font-semibold">{pct(s.volatility)}</div>
           <div className="text-2xs text-muted font-mono">β={fmt(s.beta)}</div>
         </div>
@@ -163,7 +175,9 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
 
       {/* CV Stability */}
       <div className="px-4 pb-3">
-        <div className="text-2xs text-muted uppercase tracking-wide mb-1">CV Stability Score</div>
+        <div className="text-2xs text-muted uppercase tracking-wide mb-1">
+          <ExplainableText term="cv_score">CV Stability Score</ExplainableText>
+        </div>
         <StabilityGauge score={s.cv_stability_score} />
       </div>
 
@@ -180,7 +194,9 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
         <div className="px-4 pb-4 space-y-4 border-t border-border pt-3">
           {/* Significance tests */}
           <div>
-            <div className="section-header mb-2">Tier 1 Significance Tests (p &lt; 0.005)</div>
+            <div className="section-header mb-2">
+              <ExplainableText term="tier1_gates">Tier 1 Significance Tests (p &lt; 0.005)</ExplainableText>
+            </div>
             <SignificanceBadge label="Paired t-test"         pValue={s.p_value_ttest} />
             <SignificanceBadge label="Jobson-Korkie Sharpe"  pValue={s.p_value_sharpe_jk} />
             <SignificanceBadge label="Alpha (Newey-West)"    pValue={s.p_value_alpha} />
@@ -188,18 +204,21 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
             <SignificanceBadge label="OOS walk-forward"      pValue={s.oos_p_value} />
           </div>
 
-          {/* DSR / PSR */}
+          {/* DSR / PSR — labels carry stable term IDs so the glossary
+              tooltip explains each Lopez de Prado metric. */}
           <div>
             <div className="section-header mb-2">Lopez de Prado Metrics</div>
             <div className="grid grid-cols-2 gap-2">
               {[
-                { label: 'Deflated SR',     value: fmt(s.deflated_sharpe_ratio) },
-                { label: 'DSR p-value',      value: pFmt(s.dsr_p_value) },
-                { label: 'Probabilistic SR', value: fmt(s.probabilistic_sharpe_ratio) },
-                { label: 'SPA p-value',      value: pFmt(s.spa_p_value) },
-              ].map(({ label, value }) => (
+                { label: 'Deflated SR',      term: 'dsr',      value: fmt(s.deflated_sharpe_ratio) },
+                { label: 'DSR p-value',      term: 'dsr',      value: pFmt(s.dsr_p_value) },
+                { label: 'Probabilistic SR', term: 'sharpe_ratio', value: fmt(s.probabilistic_sharpe_ratio) },
+                { label: 'SPA p-value',      term: 'p_fdr',    value: pFmt(s.spa_p_value) },
+              ].map(({ label, term, value }) => (
                 <div key={label} className="bg-navy-700 rounded p-2">
-                  <div className="text-2xs text-muted">{label}</div>
+                  <div className="text-2xs text-muted">
+                    <ExplainableText term={term}>{label}</ExplainableText>
+                  </div>
                   <div className="font-mono text-white text-xs mt-0.5">{value}</div>
                 </div>
               ))}

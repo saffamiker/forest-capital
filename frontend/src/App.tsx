@@ -12,6 +12,7 @@ import StatisticalEvidence from './pages/StatisticalEvidence'
 import RegimeAnalysis from './pages/RegimeAnalysis'
 import Reports from './pages/Reports'
 import StoryboardEditor from './pages/StoryboardEditor'
+import SectionEditor from './pages/SectionEditor'
 import { BrandProvider } from './context/BrandContext'
 import { UIProvider } from './context/UIContext'
 
@@ -184,6 +185,7 @@ export default function App() {
               <Route path="qa" element={<QAAuditPanel />} />
               <Route path="reports" element={<Reports />} />
               <Route path="reports/storyboard" element={<StoryboardEditor />} />
+              <Route path="reports/document/:documentId" element={<SectionEditor />} />
             </Route>
           </Routes>
         </UIProvider>

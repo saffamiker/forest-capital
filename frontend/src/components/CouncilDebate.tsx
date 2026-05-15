@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { Bot, TrendingUp, AlertTriangle, Loader2, Send } from 'lucide-react'
+import { Bot, TrendingUp, AlertTriangle, Loader2, Send, BookOpen } from 'lucide-react'
 import DisagreementHeatmap from './DisagreementHeatmap'
+import PersonaModal from './PersonaModal'
 import type { AgentMessage } from '../types/agents'
 import { useCouncilStore } from '../stores/councilStore'
 
@@ -21,7 +22,16 @@ const AGENT_STYLE: Record<string, AgentStyleConfig> = {
   'CIO':                           { accent: '#3b82f6', label: 'Chief Investment Officer', tag: 'CIO',       note: 'claude-opus-4-6' },
 }
 
-function AgentCard({ message, streaming = false }: { message: AgentMessage; streaming?: boolean }) {
+function AgentCard({
+  message, streaming = false, onViewPrompt,
+}: {
+  message: AgentMessage
+  streaming?: boolean
+  // Opens the PersonaModal for this agent. The card doesn't own modal
+  // state — it lifts the click up to CouncilDebate which mounts the
+  // modal in a single shared slot.
+  onViewPrompt?: (message: AgentMessage) => void
+}) {
   const style = AGENT_STYLE[message.agent] ?? { accent: '#64748b', label: message.agent, tag: 'AGENT' }
   const isGemini = message.agent.includes('Gemini')
   const isCIO = message.agent === 'CIO'
@@ -82,6 +92,23 @@ function AgentCard({ message, streaming = false }: { message: AgentMessage; stre
         )}
       </div>
 
+      {/* View system prompt — opens the three-tab PersonaModal. Hidden
+          while streaming; the agent's persona is meaningless if the
+          card hasn't returned content yet. */}
+      {!streaming && onViewPrompt && (
+        <div className="px-4 pb-2.5 -mt-1">
+          <button
+            type="button"
+            onClick={() => onViewPrompt(message)}
+            data-testid={`view-prompt-${message.agent}`}
+            className="flex items-center gap-1 text-2xs text-muted hover:text-white transition-colors"
+          >
+            <BookOpen className="w-3 h-3" />
+            View system prompt
+          </button>
+        </div>
+      )}
+
       {/* CIO final marker */}
       {message.is_final && !streaming && (
         <div
@@ -105,6 +132,10 @@ export default function CouncilDebate() {
   // field so half-typed text also survives navigation.
   const { query, result, loading, setQuery, runQuery } = useCouncilStore()
   const [activeTab, setActiveTab] = useState<'debate' | 'heatmap'>('debate')
+  // Active persona-modal target. Null = modal closed. Carries the
+  // agent message so the THIS SESSION tab can render the agent's
+  // contribution to the current council run.
+  const [personaTarget, setPersonaTarget] = useState<AgentMessage | null>(null)
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault()
@@ -177,7 +208,11 @@ export default function CouncilDebate() {
               />
             ))}
             {orderedMessages.map((msg) => (
-              <AgentCard key={msg.agent} message={msg} />
+              <AgentCard
+                key={msg.agent}
+                message={msg}
+                onViewPrompt={setPersonaTarget}
+              />
             ))}
           </div>
 
@@ -209,6 +244,16 @@ export default function CouncilDebate() {
       )}
 
       {activeTab === 'heatmap' && <DisagreementHeatmap />}
+
+      {/* PersonaModal — mounted once. Open state is controlled by
+          personaTarget; closing nulls it back. */}
+      {personaTarget && (
+        <PersonaModal
+          agentName={personaTarget.agent}
+          sessionContent={personaTarget.content}
+          onClose={() => setPersonaTarget(null)}
+        />
+      )}
 
       {/* Empty state */}
       {!result && !loading && (
