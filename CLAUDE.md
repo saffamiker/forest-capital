@@ -4033,9 +4033,72 @@ Sprint 6 (COMPLETE — May 13-15 2026):
      FF factors warm cache path (independent of incremental gate)
      optimize_weights 'assets' keyword argument
      Opus 4 → Opus 4.7 model upgrade (Anthropic retirement Jun 15)
-  Final test counts: 893 backend / 178 frontend
+  Final test counts: 959 backend / 178 frontend
   GitHub Actions: all three jobs green including E2E
   Issue #1 (E2E): CLOSED
+
+
+─────────────────────────────────────────────────────────────────────────────
+POST-SPRINT 6 — RECENT COMMITS & ARCHITECTURE NOTES (May 15 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+RECENT COMMITS:
+  e0906e8  Fix Grok model string: grok-4 → grok-4.3
+  7ca5545  Fix NaN optimizer crash + grok-4 upgrade + get_full_history investigation
+  e2c03b6  Fix optimize/weights 500 — direct cache read, no get_full_history on optimize path
+  9765d15  Fix Efficient Frontier chart — return structured payload from /api/optimize/weights
+  c86034b  Add /api/optimize/weights endpoint auth tests — route was already correct
+  9e9e51e  Fix the zero-traffic memory leak — get_full_history memo + engine/executor singletons
+
+Test counts: 959 backend / 178 frontend.
+
+MEMORY LEAK FIX (commit 9e9e51e):
+  Symptom: memory climbed 65% → 100% over 3.5h with ZERO user traffic.
+  Cause: the QA badge polled /api/v1/qa/status every 30s; each poll ran
+  get_full_history() → a fresh SQLAlchemy engine plus a full DataFrame
+  rebuild, neither of which was released.
+  Fixes:
+   - get_full_history() memoized with a 30-second TTL. _compute_full_history()
+     is the uncached implementation; _history_memo_clear() resets the memo
+     (the conftest.py autouse fixture calls it between tests).
+   - NullPool read-only engine singleton — _get_readonly_engine() in
+     data_fetcher.py. NullPool is chosen over a pooled engine because
+     _read_history_from_db runs inside per-call asyncio.run() event loops;
+     a pooled connection bound to a now-closed loop raises on the next
+     call, whereas NullPool opens and closes a connection per use.
+   - _TIER2_EXECUTOR — one module-level ThreadPoolExecutor for Tier 2 QA
+     instead of a fresh executor constructed on every
+     schedule_tier2_background() call. The worker (_tier2_run_and_cache)
+     is a top-level function so it captures nothing via closure.
+
+EFFICIENT FRONTIER (commits 9765d15, e2c03b6, 7ca5545):
+  - /api/optimize/weights returns a structured EfficientFrontierData object
+    — {frontier_points, portfolio_points, max_sharpe_point,
+    min_variance_point} — in BOTH the real and mock paths. A flat list
+    left the chart blank: the EfficientFrontier component destructures
+    data.frontier_points, which is undefined on an array.
+  - portfolio_points (the ten strategies' volatility/return scatter
+    coordinates) are read from strategy_results_cache via
+    cache.get_latest_strategy_cache() — the most recent row, no data
+    hash, no get_full_history(), no run_all_strategies() recompute on an
+    optimize request. The scatter stays consistent with the strategy
+    comparison table; /api/backtest/compare keeps the table current.
+  - Optimizer hardened against NaN: /api/optimize/weights drops all-NaN
+    columns BEFORE dropna() (a dead yfinance ticker no longer wipes every
+    row to an empty frame); optimizer._returns_have_finite_moments()
+    guards every cvxpy/scipy solver and the efficient_frontier sweep —
+    non-finite moments fall back to equal weight with one diagnostic log
+    line instead of a CLARABEL "Problem data contains NaN or Inf" crash
+    on all 100 frontier points.
+
+GROK MODEL CHURN RUNBOOK:
+  Grok aliases on OpenRouter retire frequently — grok-3-mini → grok-4 →
+  grok-4.3 within May 2026, each retired alias returning 404 Not Found.
+  To swap the Grok model WITHOUT a code change or redeploy: set the
+  XAI_MODEL env var on Render. resolve_xai_config() honors XAI_MODEL
+  (and XAI_BASE_URL) ahead of the hardcoded constants in
+  agents/_xai_config.py — both Grok agents route through it.
+  Current model: grok-4.3 / x-ai/grok-4.3.
 
 
 
@@ -4050,6 +4113,11 @@ CRITICAL (must complete before June 3):
   ✅ FF factors warm cache path fixed (893 backend tests)
   ✅ Opus 4 → Opus 4.7 upgrade (retirement Jun 15 2026)
   ✅ XAI OpenRouter auto-detection via agents/_xai_config.py
+  ✅ Push memory leak fix (commit 9e9e51e — get_full_history 30s memo,
+     NullPool engine singleton, _TIER2_EXECUTOR singleton)
+  ✅ Fix efficient frontier (auth + chart — commits c86034b, 9765d15,
+     e2c03b6; structured EfficientFrontierData, cache-backed scatter)
+  ✅ Verify Performance Attribution Waterfall
   □ optimize_weights 'assets' warning — fires every login
   □ alembic upgrade head to 007 on Render
   □ Level 1 code review audit
