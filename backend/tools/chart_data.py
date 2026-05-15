@@ -340,35 +340,95 @@ def _compute_factor_loadings(
 def _compute_attribution(
     strategy_returns: pd.Series,
     benchmark_returns: pd.Series,
+    bond_returns: pd.Series | None,
     avg_eq_wt: float,
     avg_bond_wt: float,
+    strategy_name: str = "",
 ) -> dict:
     """
-    Simplified Brinson attribution: decomposes active return into allocation
-    (weight deviation from benchmark) and selection (within-asset-class).
-    Benchmark is 100% SPY; allocation effect equals bond_weight × (bond_return
-    - equity_return). Selection effect is the residual.
+    Simplified Brinson-Hood-Beebower attribution for the 100%-equity
+    benchmark case used in this project. Decomposes annualised active
+    return into:
 
-    Full multi-asset Brinson lives in tools/attribution.py; this is the
-    summary shape needed by the waterfall chart.
+      allocation = w_bond_strategy × (R_bond - R_benchmark)
+                   the gain/loss from shifting weight away from
+                   100% equity into bonds. Positive when bonds
+                   outperformed the benchmark over the window.
+
+      selection  = active_return - allocation
+                   residual — captures everything the simplified
+                   allocation effect doesn't (within-asset stock
+                   selection, monthly timing, costs). For strategies
+                   that just rebalance between asset-class proxies
+                   this is small; for momentum/regime strategies
+                   that actively pick instruments it dominates.
+
+      interaction = 0
+                   The full BHB three-term decomposition needs the
+                   strategy's per-asset-class component returns
+                   (R_p^bond, R_p^equity). The backtester emits
+                   only portfolio-level returns, so interaction
+                   can't be separated from selection — we report
+                   it as zero rather than guess. tools/attribution.py
+                   carries the full multi-asset decomposition for
+                   the Analytical Appendix; this is a chart summary.
+
+    Previously this function tried `bond_drag_or_lift = avg_bond_wt
+    × (-aligned["b"].mean() * 12 * 0.4)` (a synthetic guess that
+    doesn't reference the actual bond series), and the formula
+    `interaction = active_return - allocation - selection` where
+    `selection = active_return - allocation` reduced interaction to
+    an algebraic zero on every input. The new formula uses the real
+    bond series passed in by the caller.
     """
-    aligned = pd.DataFrame({"s": strategy_returns, "b": benchmark_returns}).dropna()
+    aligned = pd.DataFrame(
+        {"s": strategy_returns, "b": benchmark_returns},
+    ).dropna()
     if len(aligned) < 12:
         return {"allocation": 0.0, "selection": 0.0, "interaction": 0.0,
                 "total_active": 0.0}
 
+    # Annualise on a monthly cadence (12 obs/year).
     active_return = float((aligned["s"] - aligned["b"]).mean() * 12)
 
-    # Bond weight × negative active return drives allocation effect for
-    # bond-heavy strategies; equity-only (BENCHMARK) has zero allocation effect.
-    bond_drag_or_lift = float(avg_bond_wt) * (-aligned["b"].mean() * 12 * 0.4)
-    allocation = round(bond_drag_or_lift, 4)
-    selection = round(active_return - allocation, 4)
-    interaction = round(active_return - allocation - selection, 4)
+    # Bond contribution to allocation effect. Falls back to 0 when the
+    # bond series is unavailable (preserves the old behaviour for
+    # callers that don't pass it).
+    if bond_returns is not None and not bond_returns.empty:
+        bond_aligned = pd.DataFrame(
+            {"bond": bond_returns, "b": benchmark_returns},
+        ).dropna()
+        if len(bond_aligned) >= 12:
+            ann_bond = float(bond_aligned["bond"].mean() * 12)
+            ann_bm = float(bond_aligned["b"].mean() * 12)
+            allocation_raw = float(avg_bond_wt) * (ann_bond - ann_bm)
+        else:
+            allocation_raw = 0.0
+    else:
+        allocation_raw = 0.0
+
+    selection_raw = active_return - allocation_raw
+    interaction_raw = 0.0  # see docstring
+
+    # Diagnostic log for the first strategy in each chart-data computation
+    # so an operator can see the pre-rounding values when the waterfall
+    # appears blank. Cheap to keep on (one info line per request).
+    log.info(
+        "attribution_computed",
+        strategy=strategy_name,
+        n_aligned=len(aligned),
+        avg_bond_wt=avg_bond_wt,
+        avg_eq_wt=avg_eq_wt,
+        bond_series_len=len(bond_returns) if bond_returns is not None else 0,
+        active_return=round(active_return, 6),
+        allocation_raw=round(allocation_raw, 6),
+        selection_raw=round(selection_raw, 6),
+    )
+
     return {
-        "allocation":   allocation,
-        "selection":    selection,
-        "interaction":  interaction,
+        "allocation":   round(allocation_raw, 4),
+        "selection":    round(selection_raw, 4),
+        "interaction":  round(interaction_raw, 4),
         "total_active": round(active_return, 4),
     }
 
@@ -465,9 +525,18 @@ def compute_chart_data(history: dict, results_dict: dict) -> dict:
         )
         factor_out[name] = _compute_factor_loadings(strat_returns, ff_factors)
         attribution_out[name] = _compute_attribution(
-            strat_returns, bm_returns,
-            float(result.get("avg_equity_weight", 0.0)),
-            float(result.get("avg_bond_weight", 0.0)),
+            strategy_returns=strat_returns,
+            benchmark_returns=bm_returns,
+            # ig_monthly is the bond-class return series the
+            # backtester reads. Passing it through lets the
+            # allocation effect reflect the actual bond-vs-equity
+            # spread over the window — previously the function
+            # synthesised the allocation effect from the benchmark
+            # mean alone and selection swallowed everything.
+            bond_returns=history.get("ig_monthly"),
+            avg_eq_wt=float(result.get("avg_equity_weight", 0.0)),
+            avg_bond_wt=float(result.get("avg_bond_weight", 0.0)),
+            strategy_name=name,
         )
 
     transition = _compute_transition_matrix(regime_history)

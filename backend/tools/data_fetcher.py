@@ -1208,17 +1208,35 @@ def _load_ff_factors_with_cache(
         needs_initial_fetch = True
     else:
         db_last_yyyymm = max(r[0] for r in rows)
-        # YYYYMM → year + month → days-since check. Older than 35 days
-        # means a new month has likely published.
+        # Staleness in YYYYMM space, converted to approximate days.
+        #
+        # Previous logic computed (today - first_of_next_month).days,
+        # which fired ~5 days after each month-end — but the upstream
+        # Ken French file only publishes a new month around the 15th
+        # of the following month. The result: from the 1st to the 15th
+        # of every month, every request re-downloaded the same zip
+        # without finding new data.
+        #
+        # New rule: compare today's YYYYMM directly to db_last_yyyymm,
+        # convert the month-difference to approximate days at 30/month,
+        # fetch only when the gap exceeds 35 days. With db_last=202603
+        # and today=202604 (months_behind=1, ~30 days), no fetch.
+        # Once today=202605 (months_behind=2, ~60 days), fetch.
         from datetime import date as _date
         last_year, last_month = int(db_last_yyyymm // 100), int(db_last_yyyymm % 100)
-        # First day of the month after the last cached month
-        if last_month == 12:
-            next_period = _date(last_year + 1, 1, 1)
-        else:
-            next_period = _date(last_year, last_month + 1, 1)
-        days_stale = (_date.today() - next_period).days
-        needs_incremental = days_stale >= 35
+        today = _date.today()
+        today_yyyymm = today.year * 100 + today.month
+        months_behind = (today.year - last_year) * 12 + (today.month - last_month)
+        days_behind_approx = months_behind * 30
+        needs_incremental = days_behind_approx > 35
+        log.info(
+            "ff_factors_staleness_check",
+            db_last_yyyymm=db_last_yyyymm,
+            today_yyyymm=today_yyyymm,
+            months_behind=months_behind,
+            days_behind_approx=days_behind_approx,
+            will_fetch=needs_incremental,
+        )
 
     fetched: pd.DataFrame | None = None
     if needs_initial_fetch or needs_incremental:

@@ -185,19 +185,74 @@ def _call_llm(system_prompt: str, user_message: str, max_tokens: int = 800) -> s
     return call_claude(HAIKU_MODEL, system_prompt, user_message, fallback_tokens)
 
 
+def _repair_common_json_mistakes(text: str) -> str:
+    """
+    Best-effort repair of the JSON malformations Grok-3-mini emits when
+    routed via OpenRouter. The three failure modes we've seen in Render
+    logs:
+
+      1. Missing comma between two adjacent key/value pairs on
+         consecutive lines:
+             "foo": "bar"
+             "next": ...
+         Grok writes the second key on a new line without the trailing
+         comma after "bar". Pattern: a closing quote / number / bracket
+         followed by whitespace + newline + whitespace + an opening
+         quote. We insert the comma.
+
+      2. Trailing comma before } or ]:
+             { "foo": "bar", }
+         strict json.loads rejects this; Python json5/demjson tolerate
+         it. We strip the offending comma.
+
+      3. Single quotes around keys or string values (Python-style dict
+         literal sneaking in). Replaced with double quotes for the
+         narrow case of `'key':` or `: 'value'` — leaves quotes inside
+         strings alone.
+
+    Pure-stdlib (regex) implementation so we don't pull in a new dep.
+    Each pattern is independent — if all three repairs leave the text
+    still unparseable, the caller falls back silently.
+    """
+    import re as _re
+
+    # 1. Missing comma between two key/value pairs.
+    # Match: ending quote/digit/brace/bracket, optional whitespace,
+    # newline, whitespace, opening double quote of next key.
+    text = _re.sub(
+        r'(["\d\]\}])\s*\n(\s*)(")',
+        r"\1,\n\2\3",
+        text,
+    )
+
+    # 2. Trailing comma before } or ] (with optional whitespace between).
+    text = _re.sub(r",\s*([}\]])", r"\1", text)
+
+    # 3. Single-quoted keys → double-quoted. Only at the start of a key
+    # position (after { or , or whitespace at start). Conservative —
+    # doesn't touch single quotes inside legitimately-quoted strings.
+    text = _re.sub(r"([{,]\s*)'([^']+?)'(\s*:)", r'\1"\2"\3', text)
+
+    return text
+
+
 def _safe_json_parse(response: str, fallback: Any) -> Any:
     """
     Defensive JSON parser used by every explain_* method.
 
-    Tolerates the three failure modes we see in production:
+    Tolerates the failure modes we see in production:
       1. Truncated JSON (max_tokens hit mid-string) → JSONDecodeError
       2. Markdown code fences around the JSON → stripped before parse
       3. Leading/trailing prose around the JSON → first {...} extracted
+      4. Missing commas / trailing commas / single-quoted keys (typical
+         OpenRouter Grok-3-mini output) → repaired by regex before parse
 
     Returns `fallback` on any parse failure rather than raising — keeps
     the Explainer endpoints always returning a valid (possibly empty)
-    response. The frontend treats an empty glossary as "explanations
-    not yet available", which degrades gracefully.
+    response. We deliberately do NOT log a warning on parse failure
+    because the Explainer fires on every chart hover; a model that emits
+    malformed JSON would flood Render logs with one warning per request.
+    The fallback dict is the operator's signal that something's off.
     """
     if not isinstance(response, str) or not response.strip():
         return fallback
@@ -224,14 +279,18 @@ def _safe_json_parse(response: str, fallback: Any) -> Any:
     start = cleaned.find("{")
     end = cleaned.rfind("}")
     if start != -1 and end != -1 and end > start:
+        candidate = cleaned[start : end + 1]
         try:
-            return json.loads(cleaned[start : end + 1])
-        except json.JSONDecodeError as exc:
-            log.warning(
-                "explainer_json_parse_failed",
-                error=str(exc),
-                preview=cleaned[:200],
-            )
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+        # Repair common Grok / OpenRouter malformations and retry.
+        repaired = _repair_common_json_mistakes(candidate)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
 
     return fallback
 
