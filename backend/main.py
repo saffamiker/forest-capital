@@ -516,6 +516,58 @@ async def get_current_regime(session: dict = Depends(require_auth)):
 
 # ── Optimize ──────────────────────────────────────────────────────────────────
 
+async def _strategy_portfolio_points() -> list[dict]:
+    """
+    Builds the (volatility, return) scatter coordinates for all ten
+    strategies on the efficient-frontier chart.
+
+    Reads from strategy_results_cache — the SAME results
+    /api/backtest/compare serves to the rest of the dashboard — so the
+    scatter is consistent with the strategy comparison table and an
+    optimize request never triggers a 30s run_all_strategies() recompute.
+    On a cache miss returns [] (the dashboard's /api/backtest/compare call
+    warms the cache); the frontier curve still renders, just without the
+    per-strategy markers until the cache is populated.
+    """
+    try:
+        from tools.data_fetcher import get_full_history
+        from tools.cache import get_strategy_cache, _compute_data_hash
+
+        # get_full_history() is 30s-memoised, so this is a cheap lookup of
+        # the metadata needed to reproduce /api/backtest/compare's hash.
+        history = get_full_history()
+        monthly = history.get("equity_monthly")
+        n_rows = len(monthly) if monthly is not None else 0
+        last_date = (
+            str(monthly.index[-1].date())
+            if monthly is not None and len(monthly) > 0
+            else "unknown"
+        )
+        strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
+
+        cached = await get_strategy_cache(strategy_hash)
+        if not cached:
+            log.info("portfolio_points_cache_miss", strategy_hash=strategy_hash)
+            return []
+
+        points: list[dict] = []
+        for r in cached.values():
+            vol = r.get("volatility")
+            ret = r.get("cagr")
+            if vol is None or ret is None:
+                continue
+            points.append({
+                "strategy": r.get("strategy_name", "UNKNOWN"),
+                "volatility": vol,
+                "expected_return": ret,
+                "sharpe": r.get("sharpe_ratio"),
+            })
+        return points
+    except Exception as exc:
+        log.warning("portfolio_points_unavailable", error=str(exc))
+        return []
+
+
 @app.post("/api/optimize/weights")
 async def optimize_weights(body: OptimizeRequest, session: dict = Depends(require_auth)):
     valid_methods = {"MEAN_VARIANCE", "RISK_PARITY", "MIN_VARIANCE", "BLACK_LITTERMAN", "MAX_SHARPE", "MIN_DRAWDOWN"}
@@ -543,13 +595,45 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
             # 'assets'` on every /api/optimize/weights call, which fired
             # at every login through the dashboard's frontier prefetch.
             result = _optimize(body.method, returns)
-            frontier = _frontier(returns, n_points=100)
+            raw_frontier = _frontier(returns, n_points=100)
+
+            # efficient_frontier() returns a flat list keyed `return`, but
+            # the EfficientFrontier component reads `expected_return` off a
+            # structured {frontier_points, portfolio_points, ...} object —
+            # the same shape MOCK_EFFICIENT_FRONTIER uses. Reshape here so
+            # the real and mock paths return an identical contract; a flat
+            # list left the chart blank (no frontier_points key on an array).
+            frontier_points = [
+                {
+                    "volatility": p["volatility"],
+                    "expected_return": p["return"],
+                    "sharpe": p["sharpe"],
+                }
+                for p in raw_frontier
+            ]
+
+            portfolio_points = await _strategy_portfolio_points()
+
+            max_sharpe_point = None
+            min_variance_point = None
+            if frontier_points:
+                max_sharpe_point = max(
+                    frontier_points, key=lambda p: p.get("sharpe") or 0.0
+                )
+                min_variance_point = min(
+                    frontier_points, key=lambda p: p["volatility"]
+                )
 
             return {
                 "method": body.method,
                 "weights": result["weights"],
                 "sum_check": result["sum_check"],
-                "efficient_frontier": frontier,
+                "efficient_frontier": {
+                    "frontier_points": frontier_points,
+                    "portfolio_points": portfolio_points,
+                    "max_sharpe_point": max_sharpe_point,
+                    "min_variance_point": min_variance_point,
+                },
             }
         except Exception as exc:
             log.warning("optimize_weights_fallback", method=body.method, error=str(exc))
