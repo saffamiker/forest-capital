@@ -525,6 +525,19 @@ def run_benchmark(history: dict) -> dict:
             "start": str(r.index[0].date()),
             "end": str(r.index[-1].date()),
         },
+        # Same per-month return list every other strategy emits via
+        # _build_result (line 451). tools/chart_data.compute_chart_data
+        # reads results_dict["BENCHMARK"]["monthly_returns"] as the
+        # reference series for active-return decomposition. Omitting it
+        # (the pre-fix state) caused bm_returns to be empty for every
+        # request → every per-strategy attribution returned the zero
+        # dict via the < 12 obs early return → blank waterfall.
+        # Format matches _build_result exactly for cross-strategy
+        # JSONB cache consistency.
+        "monthly_returns": [
+            [str(idx.date()), round(float(val), 6)]
+            for idx, val in r.dropna().items()
+        ],
     }
 
 

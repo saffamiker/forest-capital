@@ -181,6 +181,41 @@ def test_run_benchmark_has_cvar_95():
     assert result["cvar_95"] <= result["var_95"]
 
 
+def test_run_benchmark_includes_monthly_returns():
+    """Regression: BENCHMARK previously omitted monthly_returns, which
+    tools/chart_data.compute_chart_data reads as the universal reference
+    series for active-return decomposition. Without it bm_returns came
+    in empty and every per-strategy attribution returned the zero dict
+    via the < 12 obs early-return guard → blank Performance Attribution
+    Waterfall on every request.
+
+    Pin both the field's presence AND the [iso_date, float] pair shape
+    that _build_result (the helper for the other 9 strategies) uses.
+    A drift in either side would put BENCHMARK back out of sync with
+    the rest of the JSONB cache payload."""
+    from tools.backtester import run_benchmark
+    result = run_benchmark(make_history())
+
+    assert "monthly_returns" in result, (
+        "BENCHMARK result must include monthly_returns so the chart-data "
+        "endpoint can use it as the universal active-return reference"
+    )
+    pairs = result["monthly_returns"]
+    assert isinstance(pairs, list)
+    assert len(pairs) > 0
+    # Shape contract: each entry is [iso_date_str, return_float]. Catches
+    # accidental Series→dict serialisation or tuple-instead-of-list.
+    for entry in pairs[:3]:
+        assert isinstance(entry, list) and len(entry) == 2
+        assert isinstance(entry[0], str)
+        assert isinstance(entry[1], (int, float))
+    # The number of monthly returns must match n_observations — if these
+    # ever diverge it means one of them is computed from a filtered
+    # series and the other isn't, and the chart-data downstream will
+    # produce subtly wrong attribution.
+    assert len(pairs) == result["n_observations"]
+
+
 # ── Weight validation ─────────────────────────────────────────────────────────
 
 def test_validate_weights_passes_for_valid():
