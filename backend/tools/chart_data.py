@@ -385,6 +385,19 @@ def _compute_attribution(
         {"s": strategy_returns, "b": benchmark_returns},
     ).dropna()
     if len(aligned) < 12:
+        # Diagnostic for the most common failure mode: bm_returns came
+        # in empty (BENCHMARK had no monthly_returns in the cached
+        # payload) so the inner-join `aligned` is empty too. Without
+        # this log line a blank waterfall looked identical to "math
+        # produced zeros" — now Render logs surface the difference.
+        log.info(
+            "attribution_skipped_short_series",
+            strategy=strategy_name,
+            n_strategy=len(strategy_returns),
+            n_benchmark=len(benchmark_returns),
+            n_aligned=len(aligned),
+            reason="aligned_series_below_12_obs",
+        )
         return {"allocation": 0.0, "selection": 0.0, "interaction": 0.0,
                 "total_active": 0.0}
 
@@ -504,6 +517,29 @@ def compute_chart_data(history: dict, results_dict: dict) -> dict:
     bm_pairs = results_dict.get("BENCHMARK", {}).get("monthly_returns", [])
     bm_returns = _monthly_returns_to_series(bm_pairs)
 
+    # Diagnostic entry log — Render production showed
+    # `attribution_computed` never appearing despite the per-strategy
+    # log inside _compute_attribution. The likely cause is one of:
+    #   (a) BENCHMARK has no monthly_returns in the cached payload →
+    #       bm_returns empty → every strategy loop iteration enters
+    #       _compute_attribution which returns the zero dict before
+    #       reaching the diagnostic log (which is below the < 12 obs
+    #       guard).
+    #   (b) results_dict is empty (cache miss with no recompute path).
+    #   (c) Per-strategy monthly_returns is empty so the loop
+    #       `continue`s before reaching the attribution call.
+    # This entry log surfaces (a) and (b) immediately; the per-loop
+    # log below catches (c).
+    log.info(
+        "compute_chart_data_entry",
+        n_strategies=len(results_dict),
+        has_benchmark="BENCHMARK" in results_dict,
+        bm_returns_len=len(bm_returns),
+        ig_monthly_len=len(ig_monthly) if ig_monthly is not None else 0,
+        equity_monthly_len=len(equity_monthly) if equity_monthly is not None else 0,
+        ff_factors_len=len(ff_factors) if ff_factors is not None else 0,
+    )
+
     cpcv_out: dict = {}
     radar_out: dict = {}
     wf_out: dict = {}
@@ -513,6 +549,21 @@ def compute_chart_data(history: dict, results_dict: dict) -> dict:
 
     for name, result in results_dict.items():
         strat_returns = _monthly_returns_to_series(result.get("monthly_returns", []))
+
+        # Per-strategy diagnostic — caught one production failure mode
+        # where the cache stored aggregate metrics but stripped
+        # monthly_returns, so strat_returns.empty fired below and the
+        # attribution loop body never ran. Surfacing the lengths here
+        # makes that case obvious in Render logs.
+        log.info(
+            "chart_data_strategy_inputs",
+            strategy=name,
+            strat_returns_len=len(strat_returns),
+            avg_bond_wt=float(result.get("avg_bond_weight", 0.0)),
+            avg_equity_wt=float(result.get("avg_equity_weight", 0.0)),
+            bm_returns_len=len(bm_returns),
+        )
+
         if strat_returns.empty:
             continue
 
@@ -537,6 +588,11 @@ def compute_chart_data(history: dict, results_dict: dict) -> dict:
             avg_eq_wt=float(result.get("avg_equity_weight", 0.0)),
             avg_bond_wt=float(result.get("avg_bond_weight", 0.0)),
             strategy_name=name,
+        )
+        log.info(
+            "attribution_output",
+            strategy=name,
+            **attribution_out[name],
         )
 
     transition = _compute_transition_matrix(regime_history)

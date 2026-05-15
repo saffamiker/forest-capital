@@ -144,6 +144,30 @@ class TestBrinsonAttribution:
         # contribution can be computed.
         assert abs(out["selection"] - (0.002 * 12)) < 0.001
 
+    def test_short_series_path_now_logs_skip_reason(self, capsys, caplog):
+        """The previous fix added a log INSIDE the attribution function
+        but BELOW the < 12 obs early-return — so when bm_returns came
+        in empty (the most likely production cause), nothing logged.
+        The new diagnostic at the early-return path surfaces this case
+        in Render logs."""
+        import logging
+        from tools.chart_data import _compute_attribution
+
+        idx = pd.date_range("2024-01-31", periods=6, freq="ME")
+        s = pd.Series([0.01] * 6, index=idx)
+        b = pd.Series([0.005] * 6, index=idx)  # < 12 obs → early return
+
+        with caplog.at_level(logging.INFO, logger="tools.chart_data"):
+            _compute_attribution(s, b, None, 0.6, 0.4, strategy_name="SHORT")
+
+        captured = capsys.readouterr()
+        log_text = (
+            captured.out + captured.err
+            + " ".join(str(r.__dict__) + " " + str(r.msg) for r in caplog.records)
+        )
+        assert "attribution_skipped_short_series" in log_text
+        assert "SHORT" in log_text
+
     def test_diagnostic_log_fires_with_raw_attribution_values(self, capsys, caplog):
         """Production failure mode: the waterfall renders blank but
         we can't tell whether (a) inputs were empty or (b) the math
@@ -291,9 +315,14 @@ class TestFFStalenessWindow:
             f"the fetch must NOT fire; got {len(calls)} calls"
         )
 
-    def test_two_months_behind_fetches(self, monkeypatch):
-        """db_last=202603, today=2026-05-14 → months_behind=2 → ~60
-        days → fetch. By mid-May, FF should have April data."""
+    def test_two_months_behind_does_not_fetch(self, monkeypatch):
+        """db_last=202603, today=2026-05-14 → months_behind=2 → no fetch.
+        Ken French publishes new months with a 1-2 month lag — at
+        2 months behind, the upstream file likely still ends at
+        db_last. Previous v2 rule (months_behind >= 2) fetched here
+        every request and re-downloaded the same zip. New v3 rule
+        (months_behind >= 3) waits until upstream has had a clear
+        publication window."""
         from tools.data_fetcher import _load_ff_factors_with_cache
 
         self._seed_db(monkeypatch, 202603)
@@ -302,8 +331,26 @@ class TestFFStalenessWindow:
         with _freeze_today(monkeypatch, 2026, 5, 14):
             _load_ff_factors_with_cache()
 
-        assert len(calls) == 1, (
+        assert len(calls) == 0, (
             f"With db_last=202603 and today=2026-05-14 (2 months behind), "
+            f"the fetch must NOT fire — KF lag means upstream isn't newer; "
+            f"got {len(calls)} calls"
+        )
+
+    def test_three_months_behind_fetches(self, monkeypatch):
+        """db_last=202603, today=2026-06-14 → months_behind=3 → fetch.
+        By June, KF has had two clear monthly publication windows past
+        March and the fetch should find new data."""
+        from tools.data_fetcher import _load_ff_factors_with_cache
+
+        self._seed_db(monkeypatch, 202603)
+        calls = self._spy_fetch(monkeypatch)
+
+        with _freeze_today(monkeypatch, 2026, 6, 14):
+            _load_ff_factors_with_cache()
+
+        assert len(calls) == 1, (
+            f"With db_last=202603 and today=2026-06-14 (3 months behind), "
             f"the fetch must fire exactly once; got {len(calls)} calls"
         )
 
@@ -323,14 +370,14 @@ class TestFFStalenessWindow:
         assert len(calls) == 0
 
     def test_year_boundary_handled(self, monkeypatch):
-        """db_last=202512 (Dec 2025), today=2026-02-15 → months_behind=2 → fetch.
+        """db_last=202512 (Dec 2025), today=2026-03-15 → months_behind=3 → fetch.
         Verifies YYYYMM arithmetic handles year rollover correctly."""
         from tools.data_fetcher import _load_ff_factors_with_cache
 
         self._seed_db(monkeypatch, 202512)
         calls = self._spy_fetch(monkeypatch)
 
-        with _freeze_today(monkeypatch, 2026, 2, 15):
+        with _freeze_today(monkeypatch, 2026, 3, 15):
             _load_ff_factors_with_cache()
 
         assert len(calls) == 1

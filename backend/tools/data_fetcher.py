@@ -1208,33 +1208,40 @@ def _load_ff_factors_with_cache(
         needs_initial_fetch = True
     else:
         db_last_yyyymm = max(r[0] for r in rows)
-        # Staleness in YYYYMM space, converted to approximate days.
+        # Staleness in YYYYMM space.
         #
-        # Previous logic computed (today - first_of_next_month).days,
-        # which fired ~5 days after each month-end — but the upstream
-        # Ken French file only publishes a new month around the 15th
-        # of the following month. The result: from the 1st to the 15th
-        # of every month, every request re-downloaded the same zip
-        # without finding new data.
+        # History of this threshold:
+        #   v1: (today - first_of_next_month).days >= 35 — fired
+        #       ~5 days after each month-end but Ken French only
+        #       publishes around the 15th of the following month,
+        #       so days 5-15 wasted the zip download.
+        #   v2: months_behind >= 2 — fired in the second month past
+        #       db_last (e.g. May with db_last=March), but Ken French
+        #       publishes month N's data with a 1-2 month lag in
+        #       practice (March data lands mid-May, not mid-April).
+        #       Result: every request from early May through ~May 15
+        #       re-fetched a zip whose newest month was still 202603,
+        #       wrote zero rows, and looked like progress in logs.
+        #   v3 (this commit): months_behind >= 3 — only fire when
+        #       we're a clear 3 calendar months past db_last. By that
+        #       point KF has had ample time to publish two new months
+        #       and the fetch is almost certain to find new data.
         #
-        # New rule: compare today's YYYYMM directly to db_last_yyyymm,
-        # convert the month-difference to approximate days at 30/month,
-        # fetch only when the gap exceeds 35 days. With db_last=202603
-        # and today=202604 (months_behind=1, ~30 days), no fetch.
-        # Once today=202605 (months_behind=2, ~60 days), fetch.
+        # Trade-off: in the rare case KF publishes a month within 35
+        # days of its close, we'd discover it ~30 days late. Fine for
+        # a factor model that's used for monthly attribution charts.
         from datetime import date as _date
         last_year, last_month = int(db_last_yyyymm // 100), int(db_last_yyyymm % 100)
         today = _date.today()
         today_yyyymm = today.year * 100 + today.month
         months_behind = (today.year - last_year) * 12 + (today.month - last_month)
-        days_behind_approx = months_behind * 30
-        needs_incremental = days_behind_approx > 35
+        needs_incremental = months_behind >= 3
         log.info(
             "ff_factors_staleness_check",
             db_last_yyyymm=db_last_yyyymm,
             today_yyyymm=today_yyyymm,
             months_behind=months_behind,
-            days_behind_approx=days_behind_approx,
+            threshold_months=3,
             will_fetch=needs_incremental,
         )
 
