@@ -37,14 +37,15 @@ import structlog
 from agents.base import HAIKU_MODEL, SCOPE_ENFORCEMENT, call_claude
 
 
-# xAI / Grok configuration — exact match with agents/contrarian_analyst.py.
-# Previously we used a tighter 20s timeout, but production traces showed
-# the xAI endpoint occasionally returning 400 on the Explainer's calls
-# while the contrarian (identical body) succeeded. Aligning the timeout +
-# the request shape literally rules the format out as a regression vector.
+# Backwards-compatible exports — older tests import these for assertion
+# purposes. The runtime path now routes through agents/_xai_config so the
+# Explainer transparently supports both direct xAI (`xai-...` keys against
+# api.x.ai) and OpenRouter (`sk-or-...` keys against openrouter.ai).
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
 XAI_MODEL = "grok-3-mini"
 XAI_TIMEOUT_SECONDS = 30.0
+
+from agents._xai_config import build_headers, resolve_xai_config  # noqa: E402
 
 # Haiku fallback default when the Explainer can't reach xAI. Bumped from
 # 800 → 2000 after production traces showed truncated JSON responses
@@ -83,24 +84,48 @@ def _call_grok(
     api_key: str, system_prompt: str, user_message: str, max_tokens: int,
 ) -> str:
     """
-    Single-shot xAI call returning the plain-text content. Raises on any
+    Single-shot Grok call returning the plain-text content. Raises on any
     non-2xx response so _call_llm() can catch and fall back to Haiku.
 
-    Body shape matches agents/contrarian_analyst.py character-for-character
-    (whitespace differences don't go over the wire — what matters is the
-    JSON keys, model name, and content types). On 400 we log the response
-    body text so future regressions in the xAI spec surface immediately
-    in Render logs instead of a bare "400 Bad Request" line.
+    Provider resolution: the request routes through resolve_xai_config()
+    which inspects XAI_API_KEY's prefix and picks the right base URL +
+    model. `sk-or-...` keys go to OpenRouter as `x-ai/grok-3-mini`;
+    `xai-...` keys go to api.x.ai as `grok-3-mini`. XAI_BASE_URL +
+    XAI_MODEL env vars override the auto-detection. Body shape is
+    identical for both providers — OpenAI chat-completions spec.
+
+    On any 4xx the response body is logged at
+    `explainer_grok_http_error.body_preview[:500]` so future provider
+    drift surfaces in Render logs instead of a bare status code line.
     """
+    # api_key is forwarded for backwards-compat with existing tests that
+    # patch _call_grok directly; the real value comes from resolve_xai_config
+    # so XAI_BASE_URL / XAI_MODEL overrides land here automatically.
+    xai = resolve_xai_config()
+    if xai is None:
+        # Fall back to the literal api_key + canonical xAI endpoint when
+        # the resolver finds nothing in env. Preserves the test contract
+        # of "call _call_grok with an explicit key and it works".
+        from agents._xai_config import _DIRECT_XAI_BASE_URL, _DIRECT_XAI_MODEL
+        chat_url = f"{_DIRECT_XAI_BASE_URL}/chat/completions"
+        model = _DIRECT_XAI_MODEL
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        provider = "direct_xai"
+    else:
+        chat_url = xai.chat_url
+        model = xai.model
+        headers = build_headers(xai.api_key, xai.provider)
+        provider = xai.provider
+
     with httpx.Client(timeout=XAI_TIMEOUT_SECONDS) as client:
         resp = client.post(
-            XAI_API_URL,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
+            chat_url,
+            headers=headers,
             json={
-                "model": XAI_MODEL,
+                "model": model,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message},
@@ -110,27 +135,31 @@ def _call_grok(
             },
         )
         # Capture the response body on any non-2xx so callers (and the
-        # operator) see WHY xAI rejected the request, not just the status
-        # code. The body is bounded to 500 chars to keep log lines sane.
+        # operator) see WHY the provider rejected the request, not just
+        # the status code. The body is bounded to 500 chars to keep log
+        # lines sane.
         if resp.status_code >= 400:
             log.warning(
                 "explainer_grok_http_error",
                 status=resp.status_code,
                 body_preview=resp.text[:500],
+                provider=provider,
+                model=model,
             )
         resp.raise_for_status()
         data = resp.json()
-    # xAI returns OpenAI-compatible shape — same as agents/contrarian_analyst
+    # Both providers return the OpenAI chat-completions shape:
+    # choices[0].message.content
     return data["choices"][0]["message"]["content"]
 
 
 def _call_llm(system_prompt: str, user_message: str, max_tokens: int = 800) -> str:
     """
-    Routes every Explainer LLM call through here. Grok-3-mini is tried
-    first when XAI_API_KEY is set; Haiku is the silent fallback when
-    the key is unset or the xAI call fails (timeout, 5xx, malformed
-    response). Callers see plain text either way and don't branch on
-    which model produced it.
+    Routes every Explainer LLM call through here. Grok is tried first
+    when XAI_API_KEY is set (direct xAI or OpenRouter, auto-detected);
+    Haiku is the silent fallback when the key is unset or the Grok call
+    fails (timeout, 5xx, malformed response). Callers see plain text
+    either way and don't branch on which model produced it.
 
     Haiku fallback uses a higher max_tokens cap (HAIKU_FALLBACK_MAX_TOKENS,
     2000) regardless of what the Grok caller requested — production traces
@@ -146,9 +175,9 @@ def _call_llm(system_prompt: str, user_message: str, max_tokens: int = 800) -> s
             log.info("explainer_grok_completed", chars=len(text))
             return text
         except Exception as exc:
-            # Common reasons to fall back: rate limit, xAI brief outage,
-            # response shape change. Logged at warning level so it shows
-            # up in the AI Usage Log without flooding the error feed.
+            # Common reasons to fall back: rate limit, brief provider
+            # outage, response shape change. Logged at warning level so
+            # it shows up in the AI Usage Log without flooding the error feed.
             log.warning("explainer_grok_fallback_to_haiku", error=str(exc))
 
     # Haiku fallback — generous token cap so JSON responses complete fully.

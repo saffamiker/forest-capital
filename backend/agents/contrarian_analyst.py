@@ -28,8 +28,15 @@ from typing import Any
 import httpx
 import structlog
 
+from agents._xai_config import build_headers, resolve_xai_config
+
 log = structlog.get_logger(__name__)
 
+# XAI_API_URL is kept as a backwards-compatible export — older tests that
+# import it for assertion purposes still resolve, but the runtime path
+# routes through resolve_xai_config() so a Render deploy with an
+# OpenRouter key (sk-or-...) and a deploy with a direct xAI key (xai-...)
+# both work without code changes.
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
 XAI_MODEL = "grok-3-mini"
 XAI_TIMEOUT_SECONDS = 30.0
@@ -76,13 +83,13 @@ class ContrarianAnalyst:
         Returns the standard agent response schema so the CIO doesn't need
         to special-case Grok versus Claude/Gemini.
         """
-        api_key = os.getenv("XAI_API_KEY", "")
         environment = os.getenv("ENVIRONMENT", "development")
+        xai = resolve_xai_config()
 
         # Fail-open: missing key or test environment → deterministic mock.
         # The council must always have something to engage with; an absent
         # Grok must not block the deliberation.
-        if environment == "test" or not api_key:
+        if environment == "test" or xai is None:
             log.info(
                 "contrarian_analyst_mock",
                 reason="test_env" if environment == "test" else "no_xai_api_key",
@@ -101,13 +108,10 @@ class ContrarianAnalyst:
 
             with httpx.Client(timeout=XAI_TIMEOUT_SECONDS) as client:
                 resp = client.post(
-                    XAI_API_URL,
-                    headers={
-                        "Authorization": f"Bearer {api_key}",
-                        "Content-Type": "application/json",
-                    },
+                    xai.chat_url,
+                    headers=build_headers(xai.api_key, xai.provider),
                     json={
-                        "model": XAI_MODEL,
+                        "model": xai.model,
                         "messages": [
                             {"role": "system", "content": _SYSTEM_PROMPT},
                             {"role": "user", "content": user_prompt},
@@ -119,9 +123,14 @@ class ContrarianAnalyst:
                 resp.raise_for_status()
                 data = resp.json()
 
-            # xAI returns OpenAI-compatible shape: choices[0].message.content
+            # Both providers return the OpenAI shape: choices[0].message.content
             challenge_text = data["choices"][0]["message"]["content"]
-            log.info("contrarian_analyst_completed", response_len=len(challenge_text))
+            log.info(
+                "contrarian_analyst_completed",
+                response_len=len(challenge_text),
+                provider=xai.provider,
+                model=xai.model,
+            )
             return self._parse_challenge(challenge_text, strategy_results)
 
         except Exception as exc:
