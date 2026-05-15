@@ -868,7 +868,7 @@ hallucination and would be caught by the QA audit agent."
 AGENT 1: CIO — Claude Opus (cio.py)
 ─────────────────────────────────────────────────────────────────────────────
 
-Model: claude-opus-4-20250514
+Model: claude-opus-4-7
 
 System prompt:
 "You are the Chief Investment Officer of a quantitative investment council
@@ -1191,7 +1191,7 @@ TIERED MODEL APPROACH — cost-efficient, always current:
     Cost: ~$0.01-0.02 per full audit run
 
   Tier 3 — Claude Opus (expensive, manual only):
-    Model: claude-opus-4-6
+    Model: claude-opus-4-7
     Final synthesis — "Overall verdict, what must be fixed"
     Triggered ONLY when:
       — Team clicks "Full Review" button (pre-presentation)
@@ -3639,7 +3639,7 @@ Sprint 4 (COMPLETE — commits e2d3308, f631bbb, 337c892, and subsequent fixes):
   ✅ 401 redirect to login with expired session banner
   ✅ PostgreSQL database-first cache (db_cache_hit < 1s)
   ✅ Event loop persistence fix (asyncpg ThreadPoolExecutor)
-  ✅ Model strings updated (claude-sonnet-4-6, claude-opus-4-6)
+  ✅ Model strings updated (claude-sonnet-4-6, claude-opus-4-7)
   ✅ Mock data replaced with real data as primary path
   ✅ test_deployment.py — live URL verification
   ✅ VITE_API_URL removed (rewrite proxy handles /api/*)
@@ -3662,7 +3662,7 @@ Sprint 4 (COMPLETE — commits e2d3308, f631bbb, 337c892, and subsequent fixes):
 
 
 Sprint 5 (COMPLETE — commits cec0338, f5bfd33, addendum commits):
-  ✅ E2E CI fixed — points at live Render/Vercel URLs, issue #1 closed
+  ✅ E2E CI fixed — points at live Render/Vercel URLs, issue #1 CLOSED
   ✅ Zustand stores — strategiesStore, regimeStore, councilStore, qaStore
      Navigation between screens instant, data never re-fetched
   ✅ PostgreSQL caching — strategy_results_cache, regime_signals_cache
@@ -3989,55 +3989,120 @@ Sprint 5 (COMPLETE — commits cec0338, f5bfd33, addendum commits):
     [ Clear old attempts ] — Michael only, deletes >30 days
   SPRINT 5 TESTS
 
-Sprint 6 (May 13 onwards — in progress):
-  COUNCIL FIXES (Phase 1 priority)
-  ─ Fix CIO model string — must be claude-opus-4-6 not Sonnet
-  ─ Fix Gemini model — update from deprecated gemini-2.0-flash
-    to gemini-1.5-pro or latest available model
-  ─ Fix council Debate tab blank after analysis completes
-  ─ Fix navigation persistence — Zustand stores not persisting
-  GROK CONTRARIAN ANALYST (Agent 6b)
-  ─ agents/contrarian_analyst.py (xAI Grok) ✅ DONE (5b3ea5b)
-  ─ XAI_API_KEY in backend/.env and Render environment
-  ─ OpenAI-compatible endpoint: https://api.x.ai/v1
-  ─ Model: grok-3-mini (testing) → grok-3 (final presentation)
-  ─ Orange (#f97316) accent in UI
-  ─ CIO system prompt updated to reference both dissenters
-  ─ Disagreement heatmap: Grok column added (orange)
-  ─ Three-tier tinting: purple/orange/amber (both dissenters)
-  ─ Graceful fallback mock if XAI_API_KEY not set
-  AUTOMATIC QA — TIERED MODEL
-  ─ qa_results_cache table (Alembic migration Sprint 6)
-    id, run_at, strategy_hash, verdict, tier,
-    checklist_json, expires_at
-  ─ Tier 1 (Python, free): deterministic checks
-    Weights, sanity assertions, is_significant logic
-    Runs synchronously on every data update
-  ─ Tier 2 (Sonnet, ~$0.01/run): methodology checks
-    Runs in background async when:
-      new rows added OR strategy_hash changed
-      OR qa_cache older than 24 hours
-    Dashboard never waits — QA badge updates async
-    QA badge states: Running... / PASS / WARN / FAIL
-  ─ Tier 3 (Opus, manual only): deep synthesis
-    [ Full Review (Opus) ] button on Admin screen
-    Auto-triggers if Tier 2 returns FAIL
-  ─ Present mode gate updated:
-    Requires status ≥ WARN + run_at < 48h
-    + strategy_hash matches current data hash
-  FAMA-FRENCH FACTORS FIX
-  ─ Replace broken pandas-datareader with direct HTTP fetch
-    from Ken French's website (no API key, no library dependency)
-  ─ New table: ff_factors_monthly (date, mkt_rf, smb, hml, rf)
-    Alembic migration included
-  ─ Fetch once at pipeline init, append incrementally
-    Same pattern as market_data_monthly
-  ─ source_type: 'ken_french_direct' in data_series_registry
-  ─ OLS regression per strategy: monthly excess returns vs factors
-  ─ Factor Exposure Heatmap now shows real MKT-RF, SMB, HML,
-    alpha, and R² values instead of all zeros
-  ─ Walk-Forward OOS Sharpe: connectNulls={true} and
-    type='monotone' on all Line components
+Sprint 6 (COMPLETE — May 13-15 2026):
+  ✅ CIO model confirmed claude-opus-4-7 (upgraded from opus-4)
+  ✅ QA Tier 3 upgraded to claude-opus-4-7
+  ✅ Gemini updated to gemini-1.5-pro
+  ✅ Council Debate tab blank — fixed
+  ✅ Navigation persistence — Zustand stores fully wired
+  ✅ Grok Contrarian Analyst (Agent 6b) — orange #f97316
+  ✅ XAI config auto-detection — OpenRouter (sk-or-) and
+     direct xAI (xai-) both supported via agents/_xai_config.py
+     XAI_BASE_URL and XAI_MODEL env overrides available
+  ✅ Automatic tiered QA (Python/Sonnet/Opus)
+  ✅ FF factors — Ken French direct HTTP, ff_factors_monthly table
+     Fixed: warm cache path now calls _load_ff_factors_with_cache
+     directly from _read_history_from_db (was only in
+     fetch_supplemental_data which gets skipped on warm cache)
+  ✅ Walk-Forward OOS Sharpe — connectNulls fix
+  ✅ All 12 Statistical Evidence + Regime Analysis charts
+  ✅ Commentary mode + Explainer Agent (Grok-routed, cached)
+  ✅ Explainer opportunities §1.1-1.4 + §2.1 wired
+  ✅ Academic Advisor Agent (Agent 10) — gold #f59e0b
+     Sonnet + web_search, verified citations, SO WHAT section
+     Hallucination detection via external evidence cross-check
+  ✅ Bob's section editor — Analytical Appendix + Executive Brief
+  ✅ Midpoint template .docx — June 3 ready
+  ✅ Storyboard Editor + version control (Molly)
+  ✅ Presentation Script Writer (130 wpm, voice-differentiated)
+  ✅ Q&A Preparation document generator
+  ✅ Gemini assistant panel (purple, diff display)
+  ✅ Reports screen — Bob + Molly deliverables
+  ✅ Explainer OPPORTUNITIES.md (15 items, prioritised)
+  ✅ Cost optimisation — Grok Explainer routing, session caching
+  ✅ Significance framing — 0/10 with economic context
+  ✅ Migrations 001-007 (head):
+     007: hmm_probabilities ARRAY(Float) → JSONB
+          regime_signals_cache now stores HMM state correctly
+  ✅ Multiple bug fixes:
+     regime cache schema (hmm_regime VARCHAR, hmm_probabilities JSONB)
+     incremental update date column access
+     Explainer JSON truncation (max_tokens 2000, safe parser)
+     FF factors empty table check
+     FF factors warm cache path (independent of incremental gate)
+     optimize_weights 'assets' keyword argument
+     Opus 4 → Opus 4.7 model upgrade (Anthropic retirement Jun 15)
+  Final test counts: 893 backend / 178 frontend
+  GitHub Actions: all three jobs green including E2E
+  Issue #1 (E2E): CLOSED
+
+
+
+═══════════════════════════════════════════════════════════════════
+KANBAN BOARD — POST SPRINT 6 (May 15 onwards)
+═══════════════════════════════════════════════════════════════════
+
+Work is no longer sprint-batched. Pull items from BACKLOG as
+time allows. All items are independent unless noted.
+
+CRITICAL (must complete before June 3):
+  ✅ FF factors warm cache path fixed (893 backend tests)
+  ✅ Opus 4 → Opus 4.7 upgrade (retirement Jun 15 2026)
+  ✅ XAI OpenRouter auto-detection via agents/_xai_config.py
+  □ optimize_weights 'assets' warning — fires every login
+  □ alembic upgrade head to 007 on Render
+  □ Level 1 code review audit
+  □ Team Test Guide (docs/TEAM_TEST_GUIDE.md)
+  □ Execute test script — all three team members
+  □ Fix punch list from test results
+  □ Professor link sent (~May 20)
+    Add professor email to ALLOWED_EMAILS on Render
+    Send outreach email (two variants drafted)
+
+  □ Level 1 code review audit
+    Claude Code prompt: performance, architecture, dead code,
+    consistency audit → CRITICAL/IMPORTANT/LOW report
+  □ Team Test Guide (docs/TEAM_TEST_GUIDE.md)
+    ~52 structured tests for Bob and Molly
+    AI-facilitated, forced evidence collection
+    Email artifact format → ruurdsm@queens.edu
+  □ Execute test script — all three team members
+  □ Fix punch list from test results
+  □ Professor link sent (~May 20)
+    Add professor email to ALLOWED_EMAILS on Render
+    Send outreach email (two variants drafted)
+
+IMPORTANT (complete before July 1):
+  □ Significance framing — update MetricTile amber note
+    and Present mode "3 strategies outperform" view
+  □ Explainer §2.2 — Council persona explanations
+    "View system prompt" modal on each AgentCard
+    loadPersona namespace consumer
+  □ Grok upgrade grok-3-mini → grok-3 (final presentation)
+  □ Demo rehearsal — Present mode end-to-end
+    Dashboard → Statistical Evidence → Regime Analysis
+    → Council (live query) → QA Audit → Reports
+  □ WCAG AA accessibility audit (axe-core)
+  □ v1.0.0-presentation git tag
+  □ Final README + MANIFEST update
+
+POLISH (nice to have before July 1):
+  □ Explainer HIGH+trivial items from EXPLAINER_OPPORTUNITIES.md
+    §1.1-1.4 already done — remaining HIGH items:
+    §2.4 Strategy detail card labels
+  □ Team Primer styled modal (replaces static .md file)
+  □ Performance benchmarks (p95 response times)
+  □ Print stylesheet (@media print)
+  □ test_reproducibility.py — pipeline determinism
+  □ test_report_accuracy.py — every number traceable to DB
+
+POST JULY 1 (backlog for commercial MDP venture):
+  □ Parameter Explorer panel (/api/explain/parameter consumer)
+  □ Live demo running commentary (Present mode floating panel)
+  □ OpenRouter migration for multi-provider cost optimisation
+  □ Automatic regression alerting (Admin screen)
+
+
 
 
 
