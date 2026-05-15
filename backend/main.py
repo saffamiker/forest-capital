@@ -613,7 +613,7 @@ _AGENT_META: dict[str, tuple[str, str, str]] = {
     "quant_backtester":     ("Quant Backtester",              "specialist", "claude-sonnet-4-6"),
     "independent_analyst":  ("Independent Analyst (Gemini)",  "dissenter",  "gemini-1.5-pro"),
     "contrarian_analyst":   ("Contrarian Analyst (Grok)",     "dissenter",  "grok-3-mini"),
-    "cio":                  ("CIO",                           "cio",        "claude-opus-4-6"),
+    "cio":                  ("CIO",                           "cio",        "claude-opus-4-7"),
 }
 
 
@@ -1889,7 +1889,7 @@ _AGENT_PERSONA_REGISTRY: list[tuple[str, str, str]] = [
     ("Quant Backtester",            "claude-sonnet-4-6", "agents.quant_backtester"),
     ("Independent Analyst (Gemini)","gemini-1.5-pro",    "agents.independent_analyst"),
     ("Contrarian Analyst (Grok)",   "grok-3-mini",       "agents.contrarian_analyst"),
-    ("CIO",                         "claude-opus-4-6",   "agents.cio"),
+    ("CIO",                         "claude-opus-4-7",   "agents.cio"),
 ]
 
 

@@ -19,7 +19,7 @@ const AGENT_STYLE: Record<string, AgentStyleConfig> = {
   'Quant Backtester':              { accent: '#a78bfa', label: 'Quant / Backtester',       tag: 'SPECIALIST', note: 'claude-sonnet-4-6' },
   'Independent Analyst (Gemini)':  { accent: '#c084fc', label: 'Independent Analyst',      tag: 'DISSENTER', note: 'gemini-1.5-pro' },
   'Contrarian Analyst (Grok)':     { accent: '#f97316', label: 'Contrarian Analyst',       tag: 'DISSENTER', note: 'grok-3-mini' },
-  'CIO':                           { accent: '#3b82f6', label: 'Chief Investment Officer', tag: 'CIO',       note: 'claude-opus-4-6' },
+  'CIO':                           { accent: '#3b82f6', label: 'Chief Investment Officer', tag: 'CIO',       note: 'claude-opus-4-7' },
 }
 
 function AgentCard({

@@ -817,7 +817,7 @@ MOCK_COUNCIL_RESPONSE = {
         {
             "agent": "CIO",
             "role": "cio",
-            "model": "claude-opus-4-6",
+            "model": "claude-opus-4-7",
             "content": (
                 "FINAL RECOMMENDATION — after full council deliberation including Gemini's challenge. "
                 "\n\n"

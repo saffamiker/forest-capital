@@ -41,7 +41,7 @@ SCOPE_ENFORCEMENT = (
 
 # Sonnet for specialist analysts; Opus for CIO and QA; Haiku for Explainer.
 SONNET_MODEL = "claude-sonnet-4-6"
-OPUS_MODEL = "claude-opus-4-6"
+OPUS_MODEL = "claude-opus-4-7"
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
 
 # Token budget per call — protects credits from runaway prompts.

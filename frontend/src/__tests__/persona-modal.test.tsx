@@ -37,7 +37,7 @@ const PERSONAS_FIXTURE = {
     },
     {
       agent: 'CIO',
-      model: 'claude-opus-4-6',
+      model: 'claude-opus-4-7',
       module: 'agents.cio',
       system_prompt: 'You are the Chief Investment Officer.',
       prompt_summary_first_sentence: 'You are the Chief Investment Officer.',

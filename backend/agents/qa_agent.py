@@ -6,7 +6,7 @@ Runs independently of the council. Reports to Michael (the developer).
 Has no interest in making results look favourable.
 Runs the 30-point methodology checklist on every audit request.
 
-Model: claude-opus-4-6 (most capable — QA requires deep reasoning).
+Model: claude-opus-4-7 (most capable — QA requires deep reasoning).
 """
 from __future__ import annotations
 
