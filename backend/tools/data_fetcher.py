@@ -1187,10 +1187,27 @@ def _load_ff_factors_with_cache(
     from database import DATABASE_URL
 
     rows = _read_ff_factors_from_db()
-    db_last_yyyymm = max((r[0] for r in rows), default=None) if rows else None
-    needs_initial_fetch = not rows
+    row_count = len(rows)
+
+    # Empty table is its own decision path — always trigger a full fetch.
+    # Previously the empty case was handled implicitly via `not rows` plus
+    # a `db_last_yyyymm is None` guard on the staleness check, but
+    # production traces showed the table sometimes ending up empty after
+    # migration 005 ran without a follow-up cold-start populating it, and
+    # the implicit path made the failure hard to diagnose. Hoisting the
+    # empty check to the top with its own log line ("ff_factors_cache_empty")
+    # makes the "empty table → fetch" guarantee explicit, observable in
+    # Render logs, and impossible to short-circuit by an arithmetic bug in
+    # the staleness calculation downstream.
+    needs_initial_fetch = False
     needs_incremental = False
-    if db_last_yyyymm is not None:
+    db_last_yyyymm: int | None = None
+
+    if row_count == 0:
+        log.info("ff_factors_cache_empty")
+        needs_initial_fetch = True
+    else:
+        db_last_yyyymm = max(r[0] for r in rows)
         # YYYYMM → year + month → days-since check. Older than 35 days
         # means a new month has likely published.
         from datetime import date as _date
@@ -1209,6 +1226,7 @@ def _load_ff_factors_with_cache(
             "ff_factors_fetch_triggered",
             mode="initial" if needs_initial_fetch else "incremental",
             db_last_yyyymm=db_last_yyyymm,
+            row_count=row_count,
         )
         try:
             fetched = _kenfrench_direct_fetch()

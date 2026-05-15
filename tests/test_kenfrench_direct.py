@@ -303,6 +303,50 @@ class TestLoadFFFactorsOptionalRange:
         assert df is not None
         assert isinstance(df.index, pd.DatetimeIndex)
 
+    def test_empty_table_always_triggers_fetch(self, monkeypatch, capsys, caplog):
+        """The headline regression guard: when ff_factors_monthly is empty
+        (0 rows), _load_ff_factors_with_cache MUST trigger a full fetch
+        regardless of any date arithmetic on the (NULL) db_last_yyyymm.
+        Production saw this fail when migration 005 created the table
+        without populating it — the implicit `not rows` check should
+        have caught it but the failure was hard to diagnose. The fix
+        adds an explicit row_count == 0 path with its own log line.
+
+        structlog's output destination depends on whether other tests
+        configured stdlib logging first. The renderer ends up writing
+        EITHER to stdout/stderr directly OR via stdlib logging records.
+        We check both sources so the test is order-independent."""
+        import logging
+        from tools.data_fetcher import _load_ff_factors_with_cache
+
+        # DB-read returns empty list (table just created, never populated)
+        monkeypatch.setattr("tools.data_fetcher._read_ff_factors_from_db", lambda: [])
+        calls = self._patch_fetch(monkeypatch)
+
+        with caplog.at_level(logging.INFO, logger="tools.data_fetcher"):
+            df = _load_ff_factors_with_cache()
+
+        # The fetch MUST have fired exactly once — empty table = always fetch.
+        assert len(calls) == 1, (
+            f"Empty ff_factors_monthly must trigger Ken French fetch; "
+            f"got {len(calls)} calls"
+        )
+        # The returned DataFrame must reflect the fetched data (24 stub rows).
+        assert df is not None and not df.empty
+
+        # The cache-empty log line must fire so an operator scanning Render
+        # logs can see WHY the fetch was triggered. Check both capture
+        # surfaces because structlog routes through stdlib logging when
+        # another test configured the chain first, and stdout otherwise.
+        captured = capsys.readouterr()
+        stream_text = captured.out + captured.err
+        record_text = " ".join(str(r.__dict__) + " " + str(r.msg) for r in caplog.records)
+        log_text = stream_text + record_text
+        assert "ff_factors_cache_empty" in log_text, (
+            "Empty-table path must log 'ff_factors_cache_empty' for "
+            "operator visibility in Render logs"
+        )
+
     def test_incremental_decision_uses_db_not_arguments(self, monkeypatch):
         """The 35-day staleness check looks at the DB's last_yyyymm, not
         at the caller's start/end. A caller asking for an old window
