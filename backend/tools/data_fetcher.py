@@ -987,15 +987,22 @@ def _append_incremental_daily(from_date: str, to_date: str) -> int:
         else:
             spy_ret = pd.Series(dtype=float)
 
+        # _fred_fetch returns a DataFrame with the date as its INDEX
+        # (set via index_col=0 in the FRED CSV reader) and the value
+        # column named after the series_id (e.g. "VIXCLS"). Using
+        # set_index("date")["value"] on that shape raised
+        # "None of date are in the columns" in production — the
+        # DataFrame has neither a 'date' nor a 'value' column.
+        # Take the first column as a Series; index stays as dates.
         vix_series = _fred_fetch("VIXCLS", from_date, to_date)
         if vix_series is not None and not vix_series.empty:
-            vix_s = vix_series.set_index("date")["value"]
+            vix_s = vix_series.iloc[:, 0]
         else:
             vix_s = pd.Series(dtype=float)
 
         dgs2_series = _fred_fetch("DGS2", from_date, to_date)
         if dgs2_series is not None and not dgs2_series.empty:
-            dgs2_s = dgs2_series.set_index("date")["value"]
+            dgs2_s = dgs2_series.iloc[:, 0]
         else:
             dgs2_s = pd.Series(dtype=float)
 

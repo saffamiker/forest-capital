@@ -37,14 +37,21 @@ import structlog
 from agents.base import HAIKU_MODEL, SCOPE_ENFORCEMENT, call_claude
 
 
-# xAI / Grok configuration — mirrors the pattern in agents/contrarian_analyst.py
-# so the cost-routing decisions stay consistent across the agent fleet.
-# Tighter timeout than the contrarian (20s vs 30s): the Explainer fires
-# on user interactions (chart hover, term click) and a slow response
-# degrades the UX more than missing a single contrarian opinion would.
+# xAI / Grok configuration — exact match with agents/contrarian_analyst.py.
+# Previously we used a tighter 20s timeout, but production traces showed
+# the xAI endpoint occasionally returning 400 on the Explainer's calls
+# while the contrarian (identical body) succeeded. Aligning the timeout +
+# the request shape literally rules the format out as a regression vector.
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
 XAI_MODEL = "grok-3-mini"
-XAI_TIMEOUT_SECONDS = 20.0
+XAI_TIMEOUT_SECONDS = 30.0
+
+# Haiku fallback default when the Explainer can't reach xAI. Bumped from
+# 800 → 2000 after production traces showed truncated JSON responses
+# (max_tokens hit mid-string, breaking json.loads downstream). 2000 is
+# safe for all five Explainer methods — the longest legitimate response
+# is the 30-item QA explanation, which sits at ~1400 tokens.
+HAIKU_FALLBACK_MAX_TOKENS = 2000
 
 log = structlog.get_logger(__name__)
 
@@ -78,24 +85,39 @@ def _call_grok(
     """
     Single-shot xAI call returning the plain-text content. Raises on any
     non-2xx response so _call_llm() can catch and fall back to Haiku.
+
+    Body shape matches agents/contrarian_analyst.py character-for-character
+    (whitespace differences don't go over the wire — what matters is the
+    JSON keys, model name, and content types). On 400 we log the response
+    body text so future regressions in the xAI spec surface immediately
+    in Render logs instead of a bare "400 Bad Request" line.
     """
     with httpx.Client(timeout=XAI_TIMEOUT_SECONDS) as client:
         resp = client.post(
             XAI_API_URL,
             headers={
                 "Authorization": f"Bearer {api_key}",
-                "Content-Type":  "application/json",
+                "Content-Type": "application/json",
             },
             json={
-                "model":       XAI_MODEL,
-                "messages":    [
+                "model": XAI_MODEL,
+                "messages": [
                     {"role": "system", "content": system_prompt},
-                    {"role": "user",   "content": user_message},
+                    {"role": "user", "content": user_message},
                 ],
-                "max_tokens":  max_tokens,
+                "max_tokens": max_tokens,
                 "temperature": 0.7,
             },
         )
+        # Capture the response body on any non-2xx so callers (and the
+        # operator) see WHY xAI rejected the request, not just the status
+        # code. The body is bounded to 500 chars to keep log lines sane.
+        if resp.status_code >= 400:
+            log.warning(
+                "explainer_grok_http_error",
+                status=resp.status_code,
+                body_preview=resp.text[:500],
+            )
         resp.raise_for_status()
         data = resp.json()
     # xAI returns OpenAI-compatible shape — same as agents/contrarian_analyst
@@ -109,6 +131,13 @@ def _call_llm(system_prompt: str, user_message: str, max_tokens: int = 800) -> s
     the key is unset or the xAI call fails (timeout, 5xx, malformed
     response). Callers see plain text either way and don't branch on
     which model produced it.
+
+    Haiku fallback uses a higher max_tokens cap (HAIKU_FALLBACK_MAX_TOKENS,
+    2000) regardless of what the Grok caller requested — production traces
+    showed Haiku returning JSON truncated mid-string when the cap was 800,
+    breaking every downstream json.loads. The cap is safe to raise here
+    because the fallback path is rare (Grok available ~99% of the time)
+    and the extra tokens only get charged on fallback.
     """
     api_key = os.getenv("XAI_API_KEY", "")
     if api_key:
@@ -122,8 +151,60 @@ def _call_llm(system_prompt: str, user_message: str, max_tokens: int = 800) -> s
             # up in the AI Usage Log without flooding the error feed.
             log.warning("explainer_grok_fallback_to_haiku", error=str(exc))
 
-    # Haiku fallback — also the no-XAI-key path. Same prompt, same shape.
-    return call_claude(HAIKU_MODEL, system_prompt, user_message, max_tokens)
+    # Haiku fallback — generous token cap so JSON responses complete fully.
+    fallback_tokens = max(max_tokens, HAIKU_FALLBACK_MAX_TOKENS)
+    return call_claude(HAIKU_MODEL, system_prompt, user_message, fallback_tokens)
+
+
+def _safe_json_parse(response: str, fallback: Any) -> Any:
+    """
+    Defensive JSON parser used by every explain_* method.
+
+    Tolerates the three failure modes we see in production:
+      1. Truncated JSON (max_tokens hit mid-string) → JSONDecodeError
+      2. Markdown code fences around the JSON → stripped before parse
+      3. Leading/trailing prose around the JSON → first {...} extracted
+
+    Returns `fallback` on any parse failure rather than raising — keeps
+    the Explainer endpoints always returning a valid (possibly empty)
+    response. The frontend treats an empty glossary as "explanations
+    not yet available", which degrades gracefully.
+    """
+    if not isinstance(response, str) or not response.strip():
+        return fallback
+
+    cleaned = response.strip()
+
+    # Strip ```json or ``` fences.
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("```", 2)[1] if "```" in cleaned[3:] else cleaned[3:]
+        if cleaned.startswith("json"):
+            cleaned = cleaned[4:]
+        cleaned = cleaned.strip()
+
+    # Try a direct parse first (handles the happy path).
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Truncated/prose-wrapped fallback: extract the first balanced JSON
+    # object from the first { to the LAST }. The "last }" catches the
+    # common case where the model finished one nested struct but the
+    # outer object was cut off mid-stream.
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(cleaned[start : end + 1])
+        except json.JSONDecodeError as exc:
+            log.warning(
+                "explainer_json_parse_failed",
+                error=str(exc),
+                preview=cleaned[:200],
+            )
+
+    return fallback
 
 
 class ExplainerAgent:
@@ -180,13 +261,13 @@ class ExplainerAgent:
 
         try:
             response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=800)
-            # Strip markdown fences if present
-            clean = response.strip()
-            if clean.startswith("```"):
-                clean = clean.split("```")[1]
-                if clean.startswith("json"):
-                    clean = clean[4:]
-            return json.loads(clean.strip())
+            parsed = _safe_json_parse(response, fallback=None)
+            if parsed is None:
+                # Parsing failed even after the defensive extract — fall
+                # through to the curated fallback rather than return an
+                # empty dict that would look like "no explanations exist".
+                return self._fallback_terms(significant)
+            return parsed
         except Exception as exc:
             log.error("explainer_terms_error", error=str(exc))
             return self._fallback_terms(significant)
@@ -230,25 +311,21 @@ class ExplainerAgent:
             f"why: str, effect_now: str, what_if: str}}"
         )
 
+        param_fallback = {
+            "parameter": parameter,
+            "value": str(value),
+            "hover": f"{parameter} is currently set to {value}.",
+            "what": f"This parameter controls {parameter} in the analysis.",
+            "why": "See CLAUDE.md config for the rationale behind this value.",
+            "effect_now": "Effect cannot be computed — Explainer temporarily unavailable.",
+            "what_if": "Effect cannot be computed — Explainer temporarily unavailable.",
+        }
         try:
             response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=512)
-            clean = response.strip()
-            if clean.startswith("```"):
-                clean = clean.split("```")[1]
-                if clean.startswith("json"):
-                    clean = clean[4:]
-            return json.loads(clean.strip())
+            return _safe_json_parse(response, fallback=param_fallback)
         except Exception as exc:
             log.error("explainer_parameter_error", parameter=parameter, error=str(exc))
-            return {
-                "parameter": parameter,
-                "value": str(value),
-                "hover": f"{parameter} is currently set to {value}.",
-                "what": f"This parameter controls {parameter} in the analysis.",
-                "why": "See CLAUDE.md config for the rationale behind this value.",
-                "effect_now": "Effect cannot be computed — Explainer temporarily unavailable.",
-                "what_if": "Effect cannot be computed — Explainer temporarily unavailable.",
-            }
+            return param_fallback
 
     def explain_persona(
         self,
@@ -282,21 +359,17 @@ class ExplainerAgent:
             f"Return JSON: {{plain_english: str, design_decisions: str, this_session: str}}"
         )
 
+        persona_fallback = {
+            "plain_english": f"The {agent_name} analyses portfolio strategies from its specialist perspective.",
+            "design_decisions": "See system prompt tab for the full configuration.",
+            "this_session": findings.get("summary", "No summary available."),
+        }
         try:
             response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=512)
-            clean = response.strip()
-            if clean.startswith("```"):
-                clean = clean.split("```")[1]
-                if clean.startswith("json"):
-                    clean = clean[4:]
-            return json.loads(clean.strip())
+            return _safe_json_parse(response, fallback=persona_fallback)
         except Exception as exc:
             log.error("explainer_persona_error", agent=agent_name, error=str(exc))
-            return {
-                "plain_english": f"The {agent_name} analyses portfolio strategies from its specialist perspective.",
-                "design_decisions": "See system prompt tab for the full configuration.",
-                "this_session": findings.get("summary", "No summary available."),
-            }
+            return persona_fallback
 
     def explain_chart(
         self,
@@ -354,12 +427,10 @@ class ExplainerAgent:
 
         try:
             response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=600)
-            clean = response.strip()
-            if clean.startswith("```"):
-                clean = clean.split("```")[1]
-                if clean.startswith("json"):
-                    clean = clean[4:]
-            return json.loads(clean.strip())
+            parsed = _safe_json_parse(response, fallback=None)
+            if parsed is None:
+                return self._fallback_chart(chart_id, chart_type, significant)
+            return parsed
         except Exception as exc:
             log.error("explainer_chart_error", chart_id=chart_id, error=str(exc))
             return self._fallback_chart(chart_id, chart_type, significant)
@@ -402,13 +473,12 @@ class ExplainerAgent:
         )
 
         try:
-            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=800)
-            clean = response.strip()
-            if clean.startswith("```"):
-                clean = clean.split("```")[1]
-                if clean.startswith("json"):
-                    clean = clean[4:]
-            return json.loads(clean.strip())
+            # QA explanations cover up to 30 checklist items at once; bump
+            # the per-call max_tokens above the 800 default so the JSON
+            # response doesn't get truncated mid-string. Production traces
+            # showed this exact failure when the Haiku fallback fired.
+            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=2000)
+            return _safe_json_parse(response, fallback={})
         except Exception as exc:
             log.error("explainer_qa_error", error=str(exc))
             return {}

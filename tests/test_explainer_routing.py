@@ -80,25 +80,43 @@ class TestExplainerRouting:
         assert claude_mock.call_count == 1
 
     def test_max_tokens_forwarded_to_both_paths(self, monkeypatch) -> None:
-        """The token cap must reach whichever model actually runs —
-        regression guard against accidentally hardcoding a default."""
+        """The token cap must reach whichever model actually runs.
+
+        Asymmetric behaviour by design: the Grok branch forwards the
+        caller's max_tokens verbatim; the Haiku branch enforces a floor
+        of HAIKU_FALLBACK_MAX_TOKENS so the fallback path never produces
+        truncated JSON. Production bug — explain_qa was truncating mid-
+        string at max_tokens=800. See test_render_bugfixes.py."""
         import agents.explainer_agent as ex
 
-        # Grok path
+        # Grok path: caller's max_tokens forwarded verbatim.
         monkeypatch.setenv("XAI_API_KEY", "fake-test-key")
         with patch.object(ex, "_call_grok", return_value="ok") as grok_mock:
             ex._call_llm("s", "u", max_tokens=1234)
-        # max_tokens is the fourth positional arg to _call_grok
         call_args = grok_mock.call_args
         assert call_args.args[-1] == 1234 or call_args.kwargs.get("max_tokens") == 1234
 
-        # Haiku path
+        # Haiku path: caller's max_tokens floored at HAIKU_FALLBACK_MAX_TOKENS.
+        # 999 < 2000 → bumped up to the floor.
         monkeypatch.delenv("XAI_API_KEY", raising=False)
         with patch.object(ex, "call_claude", return_value="ok") as claude_mock:
             ex._call_llm("s", "u", max_tokens=999)
         call_args = claude_mock.call_args
-        # call_claude signature: (model, system_prompt, user_message, max_tokens)
-        assert call_args.args[-1] == 999 or call_args.kwargs.get("max_tokens") == 999
+        forwarded = call_args.args[-1] if not call_args.kwargs.get("max_tokens") \
+            else call_args.kwargs["max_tokens"]
+        assert forwarded == ex.HAIKU_FALLBACK_MAX_TOKENS, (
+            f"Haiku path should floor at HAIKU_FALLBACK_MAX_TOKENS "
+            f"({ex.HAIKU_FALLBACK_MAX_TOKENS}), got {forwarded}"
+        )
+
+        # Haiku path: when caller's max_tokens already exceeds the floor,
+        # pass through unchanged.
+        with patch.object(ex, "call_claude", return_value="ok") as claude_mock:
+            ex._call_llm("s", "u", max_tokens=3000)
+        call_args = claude_mock.call_args
+        forwarded = call_args.args[-1] if not call_args.kwargs.get("max_tokens") \
+            else call_args.kwargs["max_tokens"]
+        assert forwarded == 3000
 
 
 class TestExplainerXAIConfig:
