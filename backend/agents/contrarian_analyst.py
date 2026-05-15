@@ -15,7 +15,7 @@ https://api.x.ai/v1/chat/completions. We call it directly via httpx
 rather than adding the openai SDK as a dependency — the call surface is
 small (one POST) and httpx is already in requirements.txt.
 
-Model: grok-3-mini.
+Model: grok-4.
 Env var: XAI_API_KEY (fail-open with mock challenge when not set).
 UI accent: orange (#f97316) — always distinct from Claude and Gemini.
 """
@@ -38,7 +38,7 @@ log = structlog.get_logger(__name__)
 # OpenRouter key (sk-or-...) and a deploy with a direct xAI key (xai-...)
 # both work without code changes.
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
-XAI_MODEL = "grok-3-mini"
+XAI_MODEL = "grok-4"
 XAI_TIMEOUT_SECONDS = 30.0
 
 _SYSTEM_PROMPT = """You are a contrarian investment analyst conducting a stress test \

@@ -12,8 +12,8 @@ Why this module exists:
   The two providers share the OpenAI-compatible request shape but
   differ in three places:
 
-    Direct xAI:   base_url = https://api.x.ai/v1        model = grok-3-mini
-    OpenRouter:   base_url = https://openrouter.ai/api/v1  model = x-ai/grok-3-mini
+    Direct xAI:   base_url = https://api.x.ai/v1        model = grok-4
+    OpenRouter:   base_url = https://openrouter.ai/api/v1  model = x-ai/grok-4
 
   Auto-detection by API key prefix keeps both agents free of provider-
   branching code: they call `resolve_xai_config()` once at request
@@ -39,12 +39,13 @@ log = structlog.get_logger(__name__)
 
 
 # Canonical endpoints + models per provider. Kept in this module so the
-# two agents stay in lockstep — if xAI ever changes the model alias to
-# "grok-3-mini-2024" or similar, we update one constant here.
+# two agents stay in lockstep — when xAI/OpenRouter retire a model alias
+# we update one constant here. grok-3-mini was retired on OpenRouter
+# (404 Not Found) and replaced with grok-4 — May 2026.
 _DIRECT_XAI_BASE_URL = "https://api.x.ai/v1"
-_DIRECT_XAI_MODEL = "grok-3-mini"
+_DIRECT_XAI_MODEL = "grok-4"
 _OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-_OPENROUTER_MODEL = "x-ai/grok-3-mini"
+_OPENROUTER_MODEL = "x-ai/grok-4"
 
 
 @dataclass(frozen=True)
@@ -84,7 +85,7 @@ def resolve_xai_config() -> XAIConfig | None:
     Auto-detection by API key prefix can be overridden by setting
     XAI_BASE_URL (and optionally XAI_MODEL) explicitly. The override
     path exists for operator emergencies — if OpenRouter starts
-    returning 5xx on grok-3-mini, the team can pin XAI_BASE_URL +
+    returning 5xx on grok-4, the team can pin XAI_BASE_URL +
     XAI_MODEL on Render and route through direct xAI without a redeploy.
     """
     api_key = os.getenv("XAI_API_KEY", "").strip()

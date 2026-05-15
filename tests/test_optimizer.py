@@ -327,3 +327,51 @@ def test_optimize_weights_derives_tickers_from_returns_columns():
     rets.columns = ["SPY", "TLT", "IEF", "GLD"]
     result = optimize_weights("RISK_PARITY", rets)
     assert set(result["weights"].keys()) == {"SPY", "TLT", "IEF", "GLD"}
+
+
+# ── NaN / Inf guard ───────────────────────────────────────────────────────────
+# yfinance can return an all-NaN column when a ticker fails to fetch. Without a
+# guard, the resulting NaN covariance matrix makes CLARABEL raise "Problem data
+# contains NaN or Inf" — once per frontier sweep point. These tests pin the
+# guard: every method falls back to equal weight, and the frontier returns empty
+# instead of looping 100 failed solves.
+
+def _returns_with_nan_column(n_obs: int = 120) -> pd.DataFrame:
+    """Four-asset frame where one ticker failed to fetch (all-NaN column)."""
+    df = make_returns(n_assets=4, n_obs=n_obs)
+    df.iloc[:, 2] = np.nan  # ticker the data layer could not retrieve
+    return df
+
+
+@pytest.mark.parametrize(
+    "method",
+    ["MEAN_VARIANCE", "RISK_PARITY", "MIN_VARIANCE",
+     "BLACK_LITTERMAN", "MAX_SHARPE", "MIN_DRAWDOWN"],
+)
+def test_nan_returns_fall_back_to_equal_weight(method: str):
+    """A NaN column must never reach the solver — every method returns a
+    valid equal-weight vector (sums to 1, length = asset count) instead
+    of raising 'Problem data contains NaN or Inf'."""
+    from tools.optimizer import optimize_weights
+    result = optimize_weights(method, _returns_with_nan_column())
+    weights = list(result["weights"].values())
+    assert len(weights) == 4
+    assert abs(sum(weights) - 1.0) < 1e-6
+    assert all(np.isfinite(w) for w in weights)
+
+
+def test_efficient_frontier_returns_empty_on_nan_returns():
+    """The frontier sweep must short-circuit on non-finite moments —
+    one log line, empty list — not 100 failed CLARABEL calls."""
+    from tools.optimizer import efficient_frontier
+    assert efficient_frontier(_returns_with_nan_column(), n_points=100) == []
+
+
+def test_returns_have_finite_moments_detects_bad_frames():
+    """The guard predicate itself: empty, single-row, and all-NaN-column
+    frames are all rejected; a clean frame passes."""
+    from tools.optimizer import _returns_have_finite_moments
+    assert _returns_have_finite_moments(make_returns()) is True
+    assert _returns_have_finite_moments(pd.DataFrame()) is False
+    assert _returns_have_finite_moments(make_returns(n_obs=1)) is False
+    assert _returns_have_finite_moments(_returns_with_nan_column()) is False

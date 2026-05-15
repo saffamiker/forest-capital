@@ -40,7 +40,7 @@ class TestProviderDetection:
         assert cfg.provider == "openrouter"
         assert cfg.base_url == "https://openrouter.ai/api/v1"
         assert cfg.chat_url == "https://openrouter.ai/api/v1/chat/completions"
-        assert cfg.model == "x-ai/grok-3-mini"
+        assert cfg.model == "x-ai/grok-4"
 
     def test_xai_prefix_routes_to_direct_xai(self, monkeypatch):
         _set_xai_env(monkeypatch, key="xai-abc123")
@@ -51,7 +51,7 @@ class TestProviderDetection:
         assert cfg.provider == "direct_xai"
         assert cfg.base_url == "https://api.x.ai/v1"
         assert cfg.chat_url == "https://api.x.ai/v1/chat/completions"
-        assert cfg.model == "grok-3-mini"
+        assert cfg.model == "grok-4"
 
     def test_unknown_prefix_falls_back_to_direct_xai(self, monkeypatch):
         """Unknown prefixes (the historical default) route to direct xAI
@@ -64,7 +64,7 @@ class TestProviderDetection:
         assert cfg is not None
         assert cfg.provider == "unknown"
         assert cfg.base_url == "https://api.x.ai/v1"
-        assert cfg.model == "grok-3-mini"
+        assert cfg.model == "grok-4"
 
 
 class TestNoKey:
@@ -114,7 +114,7 @@ class TestEnvOverrides:
         _set_xai_env(
             monkeypatch,
             key="xai-abc",
-            model="grok-3",  # pretend we want the full grok-3 not grok-3-mini
+            model="grok-3",  # pretend we want the full grok-3 not grok-4
         )
         from agents._xai_config import resolve_xai_config
 
@@ -145,7 +145,7 @@ class TestEnvOverrides:
         cfg = resolve_xai_config()
         assert cfg is not None
         assert cfg.base_url == "https://api.x.ai/v1"
-        assert cfg.model == "grok-3-mini"
+        assert cfg.model == "grok-4"
 
 
 class TestHeaders:
@@ -179,7 +179,7 @@ class TestIntegrationWithExplainer:
 
     def test_explainer_call_grok_uses_resolved_endpoint(self, monkeypatch):
         """When XAI_API_KEY starts with sk-or-, the request goes to
-        openrouter.ai with x-ai/grok-3-mini — even though the legacy
+        openrouter.ai with x-ai/grok-4 — even though the legacy
         XAI_API_URL / XAI_MODEL module constants still point at direct xAI."""
         import agents.explainer_agent as ex
 
@@ -209,7 +209,7 @@ class TestIntegrationWithExplainer:
         ex._call_grok("sk-or-v1-test", "system", "user", 500)
 
         assert captured["url"] == "https://openrouter.ai/api/v1/chat/completions"
-        assert captured["json"]["model"] == "x-ai/grok-3-mini"
+        assert captured["json"]["model"] == "x-ai/grok-4"
         # Authorization header carries the actual env-resolved key.
         assert captured["headers"]["Authorization"].startswith("Bearer sk-or-v1-test")
 
@@ -222,11 +222,11 @@ class TestBackwardsCompatibleExports:
     def test_contrarian_legacy_constants_preserved(self):
         from agents.contrarian_analyst import XAI_API_URL, XAI_MODEL, XAI_TIMEOUT_SECONDS
         assert XAI_API_URL == "https://api.x.ai/v1/chat/completions"
-        assert XAI_MODEL == "grok-3-mini"
+        assert XAI_MODEL == "grok-4"
         assert XAI_TIMEOUT_SECONDS == 30.0
 
     def test_explainer_legacy_constants_preserved(self):
         from agents.explainer_agent import XAI_API_URL, XAI_MODEL, XAI_TIMEOUT_SECONDS
         assert XAI_API_URL == "https://api.x.ai/v1/chat/completions"
-        assert XAI_MODEL == "grok-3-mini"
+        assert XAI_MODEL == "grok-4"
         assert XAI_TIMEOUT_SECONDS == 30.0

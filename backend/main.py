@@ -619,7 +619,23 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
             end = body.end or "2024-12-31"
 
             prices = fetch_equity_data(assets, start, end)
-            returns = prices.pct_change().dropna()
+
+            # Sanitise before the optimizer. yfinance can return an
+            # all-NaN column when a ticker fails to fetch (rate-limited
+            # from a cloud IP, delisted symbol). A plain
+            # `.pct_change().dropna()` then drops EVERY row — one bad
+            # column has a NaN in every row — leaving an empty frame whose
+            # mean/cov are NaN, which makes CLARABEL raise "Problem data
+            # contains NaN or Inf" on all 100 frontier points. Drop dead
+            # columns FIRST, then drop rows with partial gaps.
+            returns = prices.pct_change()
+            returns = returns.dropna(axis=1, how="all")  # drop failed tickers
+            returns = returns.dropna(how="any")          # drop partial-gap rows
+            if returns.empty or returns.shape[1] < 2:
+                raise ValueError(
+                    f"insufficient clean return columns for {assets} "
+                    f"({returns.shape[1]} usable) — falling back to mock frontier"
+                )
 
             # The optimizer derives its ticker list from returns.columns
             # (see tools/optimizer.py:440), so the `assets` argument is
@@ -713,7 +729,7 @@ _AGENT_META: dict[str, tuple[str, str, str]] = {
     "risk_manager":         ("Risk Manager",                  "specialist", "claude-sonnet-4-6"),
     "quant_backtester":     ("Quant Backtester",              "specialist", "claude-sonnet-4-6"),
     "independent_analyst":  ("Independent Analyst (Gemini)",  "dissenter",  "gemini-1.5-pro"),
-    "contrarian_analyst":   ("Contrarian Analyst (Grok)",     "dissenter",  "grok-3-mini"),
+    "contrarian_analyst":   ("Contrarian Analyst (Grok)",     "dissenter",  "grok-4"),
     "cio":                  ("CIO",                           "cio",        "claude-opus-4-7"),
 }
 
@@ -1989,7 +2005,7 @@ _AGENT_PERSONA_REGISTRY: list[tuple[str, str, str]] = [
     ("Risk Manager",                "claude-sonnet-4-6", "agents.risk_manager"),
     ("Quant Backtester",            "claude-sonnet-4-6", "agents.quant_backtester"),
     ("Independent Analyst (Gemini)","gemini-1.5-pro",    "agents.independent_analyst"),
-    ("Contrarian Analyst (Grok)",   "grok-3-mini",       "agents.contrarian_analyst"),
+    ("Contrarian Analyst (Grok)",   "grok-4",            "agents.contrarian_analyst"),
     ("CIO",                         "claude-opus-4-7",   "agents.cio"),
 ]
 

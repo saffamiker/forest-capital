@@ -83,6 +83,27 @@ def _cov_to_corr(cov: np.ndarray) -> np.ndarray:
     return cov / np.outer(std, std)
 
 
+def _returns_have_finite_moments(returns: pd.DataFrame) -> bool:
+    """
+    True only when the mean vector and covariance matrix derived from
+    `returns` are entirely finite — the precondition every cvxpy/scipy
+    solver below requires.
+
+    A returns frame that is empty, has fewer than two rows, or carries an
+    all-NaN column (a ticker the data layer failed to fetch, or one wiped
+    out by an unaligned dropna) produces NaN/Inf moments. Handing those to
+    CLARABEL raises "Problem data contains NaN or Inf" — and the
+    efficient-frontier sweep then logs that exception 100 times, once per
+    risk-aversion point. Guarding here lets each method fall back to equal
+    weight with a single diagnostic line instead of a solver crash storm.
+    """
+    if returns.empty or returns.shape[0] < 2 or returns.shape[1] < 1:
+        return False
+    mu = returns.mean().to_numpy(dtype=float)
+    cov = returns.cov().to_numpy(dtype=float)
+    return bool(np.all(np.isfinite(mu)) and np.all(np.isfinite(cov)))
+
+
 # ── Mean-variance optimisation ────────────────────────────────────────────────
 
 def mean_variance_optimize(
@@ -105,6 +126,10 @@ def mean_variance_optimize(
     """
     if not _CVXPY_AVAILABLE:
         log.warning("cvxpy_unavailable", fallback="equal_weight")
+        return _equal_weight(returns.shape[1])
+
+    if not _returns_have_finite_moments(returns):
+        log.warning("optimizer_nonfinite_returns", method="mean_variance", fallback="equal_weight")
         return _equal_weight(returns.shape[1])
 
     mu = returns.mean().values
@@ -145,6 +170,10 @@ def risk_parity_optimize(
     scipy is preferred over cvxpy here because cvxpy does not support the
     non-linear w * (Σw) product directly without DCP-compliant reformulation.
     """
+    if not _returns_have_finite_moments(returns):
+        log.warning("optimizer_nonfinite_returns", method="risk_parity", fallback="equal_weight")
+        return _equal_weight(returns.shape[1])
+
     cov = returns.cov().values
     n = cov.shape[0]
     target = np.full(n, 1.0 / n)
@@ -219,6 +248,10 @@ def min_variance_optimize(
         log.warning("cvxpy_unavailable", fallback="equal_weight")
         return _equal_weight(returns.shape[1])
 
+    if not _returns_have_finite_moments(returns):
+        log.warning("optimizer_nonfinite_returns", method="min_variance", fallback="equal_weight")
+        return _equal_weight(returns.shape[1])
+
     cov = returns.cov().values
     n = cov.shape[0]
 
@@ -263,6 +296,10 @@ def black_litterman_optimize(
     Sprint 3: market_weights default to equal weight (views=None → posterior=prior).
     Sprint 4 CIO agent will pass actual views from its qualitative assessment.
     """
+    if not _returns_have_finite_moments(returns):
+        log.warning("optimizer_nonfinite_returns", method="black_litterman", fallback="equal_weight")
+        return _equal_weight(returns.shape[1])
+
     cov = returns.cov().values
     n = cov.shape[0]
 
@@ -332,6 +369,10 @@ def max_sharpe_optimize(
     compare with per-period μ estimates.
     Fallback to min_variance when all excess returns ≤ 0 (problem infeasible).
     """
+    if not _returns_have_finite_moments(returns):
+        log.warning("optimizer_nonfinite_returns", method="max_sharpe", fallback="equal_weight")
+        return _equal_weight(returns.shape[1])
+
     mu = returns.mean().values
     cov = returns.cov().values
     n = len(mu)
@@ -388,6 +429,10 @@ def min_drawdown_optimize(
     """
     if not _CVXPY_AVAILABLE:
         log.warning("cvxpy_unavailable", fallback="equal_weight")
+        return _equal_weight(returns.shape[1])
+
+    if not _returns_have_finite_moments(returns):
+        log.warning("optimizer_nonfinite_returns", method="min_drawdown", fallback="equal_weight")
         return _equal_weight(returns.shape[1])
 
     R = returns.values  # shape: (T, n)
@@ -486,6 +531,14 @@ def efficient_frontier(
     """
     if not _CVXPY_AVAILABLE:
         log.warning("cvxpy_unavailable_frontier", fallback="empty")
+        return []
+
+    # Guard once, up front: without this an all-NaN returns frame would
+    # call mean_variance_optimize() 100 times — each logging a solver
+    # failure — and still return a degenerate equal-weight line. One log
+    # line and an empty sweep is the honest, quiet outcome.
+    if not _returns_have_finite_moments(returns):
+        log.warning("efficient_frontier_nonfinite_returns", fallback="empty")
         return []
 
     # High-to-low RA sweep (conservative → aggressive) so the returned list
