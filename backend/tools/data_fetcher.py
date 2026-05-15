@@ -1467,8 +1467,18 @@ def _read_history_from_db() -> dict:
         # DTB3 daily not stored in DB; callers fall back to risk_free_monthly
         "risk_free_daily":   None,
         "signals":           signals,
-        # Ken French factors not stored in DB; factor attribution callers handle None
-        "ff_factors":        None,
+        # Ken French factors live in their own table (ff_factors_monthly,
+        # migration 005). Previously this read returned None because the
+        # FF load was only wired into fetch_supplemental_data() — which
+        # is skipped entirely on the warm-cache path. Production traces
+        # showed the factor heatmap rendering blank on every repeat
+        # request as a result. Routing through _load_ff_factors_with_cache
+        # here makes the FF table a first-class part of the DB cache:
+        # the function is DB-first + empty-table-fetches itself, so a
+        # warm cache returns instantly and a cold/empty cache triggers
+        # the Ken French HTTP fetch independently of market_data_monthly's
+        # incremental update gate.
+        "ff_factors":        _load_ff_factors_with_cache(),
     }
 
 

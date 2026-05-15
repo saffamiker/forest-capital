@@ -142,10 +142,24 @@ async def get_regime_cache() -> dict[str, Any] | None:
                 now = datetime.now(timezone.utc)
                 if expires_at and now < expires_at:
                     log.info("regime_db_cache_hit", expires_at=str(expires_at))
+                    # hmm_probabilities is JSONB after migration 007 and
+                    # asyncpg normally returns it as a Python dict already.
+                    # On configurations that route the JSONB column through
+                    # a Text codec it can come back as a string instead —
+                    # defensively decode so the API always returns the
+                    # canonical dict shape the frontend expects.
+                    hp_raw = result[2]
+                    if isinstance(hp_raw, str):
+                        try:
+                            hp_value = json.loads(hp_raw)
+                        except json.JSONDecodeError:
+                            hp_value = None
+                    else:
+                        hp_value = hp_raw
                     return {
                         "threshold_regime": result[0],
                         "hmm_regime": result[1],
-                        "hmm_probabilities": result[2],
+                        "hmm_probabilities": hp_value,
                         "regimes_agree": result[3],
                         "vix_level": result[4],
                         "yield_curve_slope": result[5],
@@ -172,6 +186,17 @@ async def set_regime_cache(regime_data: dict[str, Any], ttl_minutes: int = 15) -
         now = datetime.now(timezone.utc)
         expires_at = now + timedelta(minutes=ttl_minutes)
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            # hmm_probabilities is JSONB after migration 007 (was
+            # ARRAY(Float) before — see migration 007 docstring for the
+            # mismatch story). The detector emits a dict
+            # {"BULL": 0.82, ...}; we json.dumps it here and CAST it on
+            # the SQL side so the bound parameter is unambiguously a
+            # JSON value. The same pattern is used for
+            # strategy_results_cache.results_json elsewhere in this file.
+            # Defensively json.dumps(None) → "null" which JSONB accepts;
+            # an unset hmm_probabilities round-trips correctly.
+            hp_raw = regime_data.get("hmm_probabilities")
+            hp_json = json.dumps(hp_raw) if hp_raw is not None else None
             await session.execute(
                 text(
                     "INSERT INTO regime_signals_cache "
@@ -179,12 +204,13 @@ async def set_regime_cache(regime_data: dict[str, Any], ttl_minutes: int = 15) -
                     " vix_level, yield_curve_slope, credit_spread, equity_trend, "
                     " pre_2022_avg_correlation, post_2022_avg_correlation, "
                     " fetched_at, expires_at) "
-                    "VALUES (:tr, :hr, :hp, :ra, :vix, :yc, :cs, :et, :p22, :po22, now(), :exp)"
+                    "VALUES (:tr, :hr, CAST(:hp AS JSONB), :ra, :vix, :yc, :cs, :et, "
+                    "        :p22, :po22, now(), :exp)"
                 ),
                 {
                     "tr": regime_data.get("threshold_regime"),
                     "hr": regime_data.get("hmm_regime"),
-                    "hp": regime_data.get("hmm_probabilities"),
+                    "hp": hp_json,
                     "ra": regime_data.get("regimes_agree", True),
                     "vix": regime_data.get("vix_level"),
                     "yc": regime_data.get("yield_curve_slope"),
