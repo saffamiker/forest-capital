@@ -65,6 +65,34 @@ except ImportError:  # pragma: no cover
 _REGIME_CACHE_TTL = 15 * 60  # seconds
 _regime_cache: dict = {}
 
+# ── In-process HMM model cache ───────────────────────────────────────────────
+#
+# Memory-leak / cost audit finding: classify_hmm_regime fits a fresh
+# GaussianHMM (200-iteration Baum-Welch over ~6,500 daily observations)
+# on every call. The detect_current_regime cache above shields it within
+# any 15-minute window, but the HMM is still re-fit from scratch every
+# time that window expires — ~96 full fits per day.
+#
+# The fitted model is a function of the input return series. Within a
+# trading day the daily-return series passed to classify_hmm_regime has
+# the same length and the same last observation all day (the market is
+# closed → no new bar). So the fit is deterministic per (series length,
+# last date, n_states, seed). This cache keys the RESULT dict on exactly
+# that fingerprint: a cache hit skips the fit entirely and returns the
+# prior result. Effect: one fit per trading day instead of one per
+# 15-minute regime-cache miss.
+#
+# This is NOT a leak: the cache holds exactly one entry, overwritten
+# (not appended) when the fingerprint changes. The cached result dict
+# carries a ~6,500-entry historical_labels map — bounded, one copy.
+_hmm_model_cache: dict = {}  # {"key": tuple, "result": dict}
+
+
+def _hmm_cache_clear() -> None:
+    """Drops the in-process HMM cache. Exposed for tests and for any
+    future admin force-refresh path."""
+    _hmm_model_cache.clear()
+
 
 # ── Threshold-based classification ───────────────────────────────────────────
 
@@ -305,6 +333,21 @@ def classify_hmm_regime(
     if len(clean) < 100:
         return {"error": "insufficient_data", "current_regime_label": None}
 
+    # ── Fast path: warm HMM cache ───────────────────────────────────────────
+    # Fingerprint = (series length, last observation date, n_states, seed).
+    # Within a trading day all four are stable, so a cache hit skips the
+    # 200-iteration Baum-Welch fit and returns the prior result directly.
+    cache_key = (
+        len(clean),
+        str(clean.index[-1]),
+        n_states,
+        seed,
+    )
+    cached = _hmm_model_cache.get("result")
+    if cached is not None and _hmm_model_cache.get("key") == cache_key:
+        log.info("hmm_inprocess_cache_hit", n_obs=len(clean), n_states=n_states)
+        return cached
+
     # Feature matrix: [return, abs(return)]
     X = np.column_stack([clean.values, np.abs(clean.values)])
 
@@ -367,7 +410,7 @@ def classify_hmm_regime(
         n_obs=len(clean),
     )
 
-    return {
+    result = {
         "n_states": n_states,
         "current_state_index": current_state,
         "current_regime_label": current_label,
@@ -378,6 +421,12 @@ def classify_hmm_regime(
         "historical_labels": labelled_series.to_dict(),
         "converged": bool(model.monitor_.converged),
     }
+
+    # Store under the input fingerprint. The next call with the same
+    # series (same trading day) returns this without re-fitting.
+    _hmm_model_cache["key"] = cache_key
+    _hmm_model_cache["result"] = result
+    return result
 
 
 def fit_hmm_historical(

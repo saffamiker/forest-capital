@@ -24,6 +24,7 @@ import hashlib
 import io
 import json
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
@@ -229,6 +230,32 @@ _KEN_FRENCH_FF3_ZIP_URL = (
     "F-F_Research_Data_Factors_CSV.zip"
 )
 _KEN_FRENCH_TIMEOUT_SECONDS = 30.0
+
+# ── In-process FF factors cache ──────────────────────────────────────────────
+#
+# Memory-leak / cost audit finding: _load_ff_factors_with_cache did a fresh
+# PostgreSQL round-trip + a ~1,197-row pandas DataFrame reconstruction on
+# EVERY call. Since the warm-cache path of get_full_history() now calls it
+# on every request (commit 083dc05), the FF table was being re-materialised
+# from the DB on every dashboard load.
+#
+# This module-level cache holds the fully-assembled, month-end-indexed,
+# decimal-form FF DataFrame. The 1-hour TTL is generous — FF data changes
+# at most monthly, so an hour-stale copy is never wrong for an attribution
+# chart. The cache is invalidated immediately when an incremental fetch
+# writes new rows to the DB, so a genuinely-new month is never hidden by
+# a stale in-memory copy.
+#
+# This is NOT a leak: the cache holds exactly one DataFrame, replaced
+# (not appended) on refresh. Memory footprint is bounded at one FF table.
+_FF_CACHE_TTL_SECONDS = 3600.0
+_ff_factors_cache: dict[str, Any] = {}  # {"df": pd.DataFrame, "cached_at": float}
+
+
+def _ff_cache_clear() -> None:
+    """Drops the in-process FF cache. Called after an incremental DB write
+    so the next _load_ff_factors_with_cache call rebuilds with new rows."""
+    _ff_factors_cache.clear()
 
 
 def _kenfrench_direct_fetch(
@@ -1183,8 +1210,34 @@ def _load_ff_factors_with_cache(
     Mkt-RF/SMB/HML/RF columns. None when DATABASE_URL is unset AND
     the upstream fetch fails (keeps the calling try/except's silent
     fallback intact).
+
+    In-process cache: the fully-assembled DataFrame is held in
+    _ff_factors_cache for _FF_CACHE_TTL_SECONDS (1 hour). A warm cache
+    skips the DB round-trip AND the DataFrame reconstruction entirely —
+    the function only slices the cached frame to the requested window.
+    The cache is dropped via _ff_cache_clear() whenever an incremental
+    fetch writes new rows, so a fresh month is never masked by a stale
+    copy.
     """
     from database import DATABASE_URL
+
+    # ── Fast path: warm in-process cache ────────────────────────────────────
+    # The cache holds the full unsliced DataFrame; we apply the caller's
+    # start/end window here so different callers share one cached frame.
+    cached = _ff_factors_cache.get("df")
+    cached_at = _ff_factors_cache.get("cached_at", 0.0)
+    if cached is not None and (time.time() - cached_at) < _FF_CACHE_TTL_SECONDS:
+        log.info(
+            "ff_factors_inprocess_cache_hit",
+            age_seconds=int(time.time() - cached_at),
+            rows=len(cached),
+        )
+        out = cached
+        if start is not None:
+            out = out.loc[out.index >= start]
+        if end is not None:
+            out = out.loc[out.index <= end]
+        return out
 
     rows = _read_ff_factors_from_db()
     row_count = len(rows)
@@ -1266,6 +1319,9 @@ def _load_ff_factors_with_cache(
                 to_write = fetched[fetched.index > db_last_yyyymm]
             if not to_write.empty:
                 _write_ff_factors_to_db(to_write)
+                # New rows landed in the DB — drop the in-process cache so
+                # the rebuild below (and the next caller) sees them.
+                _ff_cache_clear()
                 log.info(
                     "ff_factors_cache_updated",
                     rows_written=len(to_write),
@@ -1287,16 +1343,26 @@ def _load_ff_factors_with_cache(
         return None
 
     # Convert YYYYMM index to month-end timestamps; divide percent-form
-    # values to decimal returns. Apply window bounds only when the caller
-    # supplied them — start=None / end=None means "no bound on that side".
+    # values to decimal returns.
     df = df.copy()
     df.index = pd.to_datetime(df.index.astype(str), format="%Y%m") + pd.offsets.MonthEnd(0)
     df = df / 100.0
+
+    # Store the FULL (unsliced) frame in the in-process cache. Caching
+    # before the start/end slice means every caller — whichever window
+    # it asks for — shares one cached DataFrame.
+    _ff_factors_cache["df"] = df
+    _ff_factors_cache["cached_at"] = time.time()
+    log.info("ff_factors_inprocess_cache_stored", rows=len(df))
+
+    # Apply window bounds only when the caller supplied them —
+    # start=None / end=None means "no bound on that side".
+    out = df
     if start is not None:
-        df = df.loc[df.index >= start]
+        out = out.loc[out.index >= start]
     if end is not None:
-        df = df.loc[df.index <= end]
-    return df
+        out = out.loc[out.index <= end]
+    return out
 
 
 def _read_ff_factors_from_db() -> list[tuple[int, float, float, float, float]]:

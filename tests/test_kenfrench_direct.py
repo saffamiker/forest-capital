@@ -31,6 +31,9 @@ os.environ.setdefault(
     "ruurdsm@queens.edu,thaob@queens.edu,murdockm@queens.edu,panttserk@queens.edu",
 )
 
+# Note: the module-level FF in-process cache is reset before/after every
+# test by the autouse _clear_inprocess_caches fixture in tests/conftest.py.
+
 
 def _make_kenfrench_zip_bytes() -> bytes:
     """
