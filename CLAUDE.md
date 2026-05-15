@@ -1079,8 +1079,9 @@ UI: Gemini card uses PURPLE (#7c3aed) accent. Label: "Independent Analyst
 AGENT 6b: Contrarian Analyst — xAI Grok (contrarian_analyst.py)
 ─────────────────────────────────────────────────────────────────────────────
 
-Model: grok-4 (xAI API — xai-sdk or openai-compatible endpoint)
-       grok-3-mini was retired on OpenRouter (404 Not Found) — May 2026.
+Model: grok-4.3 (xAI API — xai-sdk or openai-compatible endpoint)
+       grok-3-mini and grok-4 were both retired on OpenRouter
+       (404 Not Found) — current alias is grok-4.3, May 2026.
 API: https://api.x.ai/v1 (OpenAI-compatible)
 API Key: XAI_API_KEY environment variable
 Add to backend/.env and Render environment variables
@@ -1151,7 +1152,7 @@ IMPLEMENTATION NOTES:
     Log xai_analyst_unavailable, continue without Grok
     Council still runs with Gemini as the sole dissenter
   
-  Cost: grok-4 is the current model (grok-3-mini retired May 2026)
+  Cost: grok-4.3 is the current model (grok-3-mini and grok-4 retired May 2026)
 
 SPRINT 6 SCOPE:
   ─ agents/contrarian_analyst.py — Grok agent
@@ -4078,7 +4079,7 @@ IMPORTANT (complete before July 1):
   □ Explainer §2.2 — Council persona explanations
     "View system prompt" modal on each AgentCard
     loadPersona namespace consumer
-  ✅ Grok upgrade grok-3-mini → grok-4 (grok-3-mini retired on OpenRouter, 404)
+  ✅ Grok upgrade grok-3-mini → grok-4 → grok-4.3 (earlier aliases retired on OpenRouter, 404)
   □ Demo rehearsal — Present mode end-to-end
     Dashboard → Statistical Evidence → Regime Analysis
     → Council (live query) → QA Audit → Reports

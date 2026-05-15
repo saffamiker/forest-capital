@@ -42,7 +42,7 @@ from agents.base import HAIKU_MODEL, SCOPE_ENFORCEMENT, call_claude
 # Explainer transparently supports both direct xAI (`xai-...` keys against
 # api.x.ai) and OpenRouter (`sk-or-...` keys against openrouter.ai).
 XAI_API_URL = "https://api.x.ai/v1/chat/completions"
-XAI_MODEL = "grok-4"
+XAI_MODEL = "grok-4.3"
 XAI_TIMEOUT_SECONDS = 30.0
 
 from agents._xai_config import build_headers, resolve_xai_config  # noqa: E402
@@ -89,8 +89,8 @@ def _call_grok(
 
     Provider resolution: the request routes through resolve_xai_config()
     which inspects XAI_API_KEY's prefix and picks the right base URL +
-    model. `sk-or-...` keys go to OpenRouter as `x-ai/grok-4`;
-    `xai-...` keys go to api.x.ai as `grok-4`. XAI_BASE_URL +
+    model. `sk-or-...` keys go to OpenRouter as `x-ai/grok-4.3`;
+    `xai-...` keys go to api.x.ai as `grok-4.3`. XAI_BASE_URL +
     XAI_MODEL env vars override the auto-detection. Body shape is
     identical for both providers — OpenAI chat-completions spec.
 

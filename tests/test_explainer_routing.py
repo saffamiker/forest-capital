@@ -126,10 +126,10 @@ class TestExplainerXAIConfig:
         from agents.explainer_agent import XAI_API_URL
         assert XAI_API_URL == "https://api.x.ai/v1/chat/completions"
 
-    def test_grok_model_id_is_grok_4(self) -> None:
-        # grok-3-mini was retired on OpenRouter (404) — May 2026.
+    def test_grok_model_id_is_grok_4_3(self) -> None:
+        # grok-3-mini, then grok-4, were retired on OpenRouter (404) — May 2026.
         from agents.explainer_agent import XAI_MODEL
-        assert XAI_MODEL == "grok-4"
+        assert XAI_MODEL == "grok-4.3"
 
     def test_timeout_is_set_and_reasonable(self) -> None:
         from agents.explainer_agent import XAI_TIMEOUT_SECONDS
