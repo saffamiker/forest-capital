@@ -4179,6 +4179,45 @@ Grading:     clarity / rigour, analytical progress, results quality,
              division of labor, peer feedback quality
 
 
+─────────────────────────────────────────────────────────────────────────────
+SETTINGS PAGE (/settings, May 16 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+/settings is a full page route — a single scrollable page (no tabs)
+with five sections, each with a heading, description and divider:
+
+  1. Organisation            — the McColl / Forest Capital brand
+       switcher, relocated here from the old nav-gear dropdown. Logic
+       unchanged: useBrand()/setBrand from BrandContext.
+  2. Data and Study Period   — read-only data-table status from
+       GET /api/v1/admin/data-status: row count, date range,
+       last-updated timestamp and a green/amber/red staleness pill per
+       table (market_data_monthly, market_data_daily, ff_factors_monthly,
+       strategy_results_cache, academic_documents), plus a study-period
+       summary line. cache.get_data_status() does the per-table queries.
+  3. Analytics Configuration — the risk-free rate from
+       GET /api/v1/analytics/config (mean monthly DTB3 ×12 — the same
+       value the efficient frontier and analytics layer use), shown
+       read-only with its FRED DTB3 source label.
+  4. Academic Documents      — the AcademicDocumentsPanel, MOVED here
+       from the Reports view. The Reports view now shows a muted info
+       banner linking to /settings#academic-documents. The section
+       carries id="academic-documents"; an effect scrolls to
+       location.hash on mount, so the anchor deep-links to it.
+  5. Account                 — the signed-in email and a Sign out
+       button (same behaviour as the nav-ribbon control — a convenience
+       duplicate, not a replacement).
+
+NAV GEAR ICON: the nav-ribbon gear (⚙, top-right) is a NavLink to
+/settings — it navigates to the page and gains the active/highlighted
+treatment when /settings is the current route. It no longer opens a
+dropdown.
+
+Document types (academic_documents): the upload dropdown offers
+midpoint_requirements, final_presentation_requirements, midpoint_draft,
+presentation_slides, presentation_script, other.
+
+
 ═══════════════════════════════════════════════════════════════════
 KANBAN BOARD — POST SPRINT 6 (May 15 onwards)
 ═══════════════════════════════════════════════════════════════════
@@ -5375,16 +5414,15 @@ Frontend: BrandContext.jsx
   }
 
   Default: BRAND_MODES.MCCOLL
-  Persisted in: session storage (resets on new session — intentional)
-  Toggled via: settings icon (⚙) in top-right header
+  Persisted in: BrandContext (in-memory React state for the session)
+  Toggled via: the Organisation section of the /settings page
 
-Toggle UI:
-  Small, unobtrusive settings cog (⚙) in header — top right
-  Click opens a minimal dropdown:
-    ○ McColl School of Business  ← default
-    ● Forest Capital (co-branded)
-  Changes take effect immediately across all pages
-  No page reload required
+Toggle UI (since the Settings-page build, May 16 2026):
+  The brand switcher lives in Settings → Organisation as two selectable
+  rows (McColl / Forest Capital) with an active check. The nav-ribbon
+  gear icon (⚙, top-right) navigates to /settings — it no longer opens
+  a dropdown. Changes take effect immediately across all pages, no
+  page reload required.
 
 PDF report: always uses whichever mode is currently active
             so the exported report matches what's on screen
