@@ -517,56 +517,106 @@ def optimize_weights(
 def efficient_frontier(
     returns: pd.DataFrame,
     n_points: int = 100,
-    min_weight: float = MIN_WEIGHT,
-    max_weight: float = MAX_WEIGHT,
+    min_weight: float = 0.0,
+    max_weight: float = 1.0,
     periods_per_year: int = ANNUALIZATION_FACTOR,
+    risk_free: float = 0.0,
 ) -> list[dict]:
     """
-    100-point efficient frontier via parametric mean-variance sweep.
-    Sweeps risk_aversion from 0.5 (aggressive) to 50.0 (very conservative)
-    on a log scale — the log scale ensures dense coverage near the knee of
-    the frontier where most practical portfolios sit, rather than spending
-    half the points in the extreme risk-averse regime.
-    Returns list of {volatility, return, sharpe, weights} dicts suitable
-    for the EfficientFrontier.jsx recharts component.
+    Efficient frontier via a target-return sweep.
 
-    periods_per_year sets the annualisation: 252 for daily returns
-    (the default, used by the strategy backtester), 12 for monthly. The
-    efficient-frontier chart feeds monthly equity/IG/HY returns and passes
-    12 so the curve's annualised (volatility, return) coordinates sit on
-    the same scale as the strategy scatter dots — which are annualised
-    from the identical monthly series.
+    For each of n_points target returns — swept linearly from the
+    minimum-variance portfolio's return up to the highest single-asset
+    return — minimise portfolio variance subject to:
+      - fully invested:  sum(w) = 1
+      - target return:   muᵀw = target
+      - long-only:       min_weight <= w <= max_weight
+    The locus of (volatility, return) pairs is the classic frontier
+    hyperbola. Returns list of {volatility, return, sharpe, weights} dicts
+    for the EfficientFrontier component.
+
+    BOUNDS: the default is the full long-only space [0, 1] — NOT the 0.40
+    MAX_WEIGHT cap the operational strategies use. With only three assets
+    a 0.40 cap forces every weight into [0.20, 0.40], collapsing the
+    feasible set to a sliver: the frontier then renders as a near-straight
+    segment and cannot reach the max-return (single-asset) corner. The
+    theoretical frontier must span the whole long-only space.
+
+    periods_per_year sets the annualisation: 252 for daily returns, 12 for
+    monthly. risk_free is the annual rate used for the Sharpe of each
+    point, so the curve's tangency (max-Sharpe) point is consistent with
+    the strategy scatter, which is annualised from the same series.
     """
-    if not _CVXPY_AVAILABLE:
-        log.warning("cvxpy_unavailable_frontier", fallback="empty")
-        return []
-
-    # Guard once, up front: without this an all-NaN returns frame would
-    # call mean_variance_optimize() 100 times — each logging a solver
-    # failure — and still return a degenerate equal-weight line. One log
-    # line and an empty sweep is the honest, quiet outcome.
     if not _returns_have_finite_moments(returns):
         log.warning("efficient_frontier_nonfinite_returns", fallback="empty")
         return []
 
-    # High-to-low RA sweep (conservative → aggressive) so the returned list
-    # is ordered with increasing volatility — index 0 = min-vol, index -1 = max-vol.
-    # This matches the standard efficient-frontier convention used in the chart.
-    risk_aversions = np.logspace(np.log10(50.0), np.log10(0.5), n_points)
-    frontier = []
-    mu = returns.mean().values * periods_per_year
-    cov = returns.cov().values * periods_per_year
+    mu = returns.mean().to_numpy(dtype=float) * periods_per_year
+    cov = returns.cov().to_numpy(dtype=float) * periods_per_year
+    n = len(mu)
 
-    for lam in risk_aversions:
-        w = mean_variance_optimize(returns, risk_aversion=float(lam), min_weight=min_weight, max_weight=max_weight)
+    # Covariance conditioning. A near-singular covariance matrix makes the
+    # variance objective ill-posed — the optimiser can chase a flat
+    # direction and return junk. Log the condition number; regularise with
+    # a tiny diagonal term (a minimal shrinkage) when it exceeds 1e10.
+    cond = float(np.linalg.cond(cov))
+    if cond > 1e10:
+        cov = cov + 1e-8 * np.eye(n)
+        log.warning("efficient_frontier_cov_regularised", condition_number=cond)
+    else:
+        log.info("efficient_frontier_cov_condition", condition_number=round(cond, 2))
+
+    def _portfolio_variance(w: np.ndarray) -> float:
+        return float(w @ cov @ w)
+
+    bounds = [(min_weight, max_weight)] * n
+    sum_to_one = {"type": "eq", "fun": lambda w: float(np.sum(w)) - 1.0}
+    w0 = np.full(n, 1.0 / n)
+
+    # Lower sweep bound — the global minimum-variance portfolio's return.
+    mv = scipy_optimize.minimize(
+        _portfolio_variance, w0, method="SLSQP", bounds=bounds,
+        constraints=[sum_to_one], options={"ftol": 1e-12, "maxiter": 1000},
+    )
+    w_mv = mv.x if mv.success else w0
+    ret_min = float(mu @ w_mv)
+    # Upper sweep bound — the highest achievable return is 100% in the
+    # single highest-return asset (long-only, fully invested).
+    ret_max = float(mu.max())
+
+    if ret_max - ret_min < 1e-9:
+        # Degenerate (all assets identical return) — one point is the frontier.
+        ann_vol = float(np.sqrt(max(_portfolio_variance(w_mv), 0.0)))
+        sharpe = ((ret_min - risk_free) / ann_vol) if ann_vol > 1e-12 else 0.0
+        return [{
+            "volatility": round(ann_vol, 4),
+            "return": round(ret_min, 4),
+            "sharpe": round(sharpe, 4),
+            "weights": {t: round(float(wi), 4) for t, wi in zip(returns.columns, w_mv)},
+        }]
+
+    frontier: list[dict] = []
+    w_prev = w_mv  # warm-start each solve from the previous target's weights
+    for target in np.linspace(ret_min, ret_max, n_points):
+        constraints = [
+            sum_to_one,
+            {"type": "eq", "fun": lambda w, t=float(target): float(mu @ w) - t},
+        ]
+        res = scipy_optimize.minimize(
+            _portfolio_variance, w_prev, method="SLSQP", bounds=bounds,
+            constraints=constraints, options={"ftol": 1e-12, "maxiter": 1000},
+        )
+        w = res.x if res.success else None
+        if w is None:
+            continue
+        w_prev = w
         ann_ret = float(mu @ w)
-        ann_vol = float(np.sqrt(w @ cov @ w))
-        sharpe = (ann_ret / ann_vol) if ann_vol > 0 else 0.0
+        ann_vol = float(np.sqrt(max(w @ cov @ w, 0.0)))
+        sharpe = ((ann_ret - risk_free) / ann_vol) if ann_vol > 1e-12 else 0.0
         frontier.append({
             "volatility": round(ann_vol, 4),
             "return": round(ann_ret, 4),
             "sharpe": round(sharpe, 4),
-            "risk_aversion": round(float(lam), 3),
             "weights": {t: round(float(wi), 4) for t, wi in zip(returns.columns, w)},
         })
 

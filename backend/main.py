@@ -752,6 +752,28 @@ def _build_efficient_frontier(
         max_sharpe_point = max(frontier_points, key=lambda fp: fp["sharpe"])
         min_variance_point = min(frontier_points, key=lambda fp: fp["volatility"])
 
+        # Diagnostic — the frontier's tangency portfolio should dominate
+        # every STATIC strategy dot (each strategy is a long-only 3-asset
+        # portfolio, a subset of the frontier's feasible set). A dynamic
+        # strategy (regime switching, momentum) can legitimately sit above
+        # the static frontier — that timing edge is the project's thesis —
+        # so this is logged, not asserted.
+        strat_sharpes = {
+            p.get("strategy", "?"): p.get("sharpe")
+            for p in portfolio_points if p.get("sharpe") is not None
+        }
+        if strat_sharpes:
+            best_strat = max(strat_sharpes, key=lambda k: strat_sharpes[k])
+            log.info(
+                "efficient_frontier_max_sharpe_check",
+                frontier_max_sharpe=round(max_sharpe_point["sharpe"], 4),
+                frontier_point={"volatility": round(max_sharpe_point["volatility"], 4),
+                                "expected_return": round(max_sharpe_point["expected_return"], 4)},
+                best_strategy=best_strat,
+                best_strategy_sharpe=round(float(strat_sharpes[best_strat]), 4),
+                strategy_sharpes={k: round(float(v), 4) for k, v in strat_sharpes.items()},
+            )
+
     return {
         "frontier_points": frontier_points,
         "portfolio_points": portfolio_points,
@@ -807,10 +829,21 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
             )
 
             result = _optimize(body.method, returns)
+
+            # Annualised risk-free rate for the frontier's Sharpe — the mean
+            # of the monthly DTB3 series, ×12. Using the same rate the
+            # strategy scatter is built on keeps the curve's tangency
+            # (max-Sharpe) point consistent with the strategy dots.
+            rf_monthly = monthly.get("rf") or []
+            rf_annual = (sum(rf_monthly) / len(rf_monthly) * 12) if rf_monthly else 0.0
+            log.info("optimize_frontier_risk_free", risk_free_annual=round(rf_annual, 4))
+
             # Monthly returns → annualise with 12, not 252, so the frontier
             # curve's (volatility, return) coordinates sit on the same
             # scale as the strategy scatter (also annualised from monthly).
-            raw_frontier = _frontier(returns, n_points=100, periods_per_year=12)
+            raw_frontier = _frontier(
+                returns, n_points=100, periods_per_year=12, risk_free=rf_annual,
+            )
 
             # efficient_frontier() returns a flat list keyed `return`, but
             # the EfficientFrontier component reads `expected_return` off a

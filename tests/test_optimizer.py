@@ -392,3 +392,80 @@ def test_efficient_frontier_periods_per_year_scales_annualisation():
     assert f12[-1]["volatility"] < f252[-1]["volatility"]
     ratio = f252[10]["volatility"] / f12[10]["volatility"]
     assert abs(ratio - (252 / 12) ** 0.5) < 0.05
+
+
+# ── Efficient frontier shape (target-return sweep) ────────────────────────────
+# The frontier is computed by sweeping target returns from the minimum-variance
+# portfolio up to the max-return single asset, minimising variance at each.
+# These tests pin the hyperbola shape the chart depends on.
+
+def _three_asset_returns(n_obs: int = 240, seed: int = 42) -> pd.DataFrame:
+    """Realistic equity / IG / HY monthly returns — distinct means and vols
+    so the frontier is a genuine curve, not a degenerate point."""
+    np.random.seed(seed)
+    eq = np.random.normal(0.008, 0.045, n_obs)   # high return, high vol
+    ig = np.random.normal(0.003, 0.012, n_obs)   # low return, low vol
+    hy = np.random.normal(0.005, 0.025, n_obs)   # mid
+    return pd.DataFrame({"EQUITY": eq, "IG": ig, "HY": hy})
+
+
+def test_frontier_spans_min_variance_to_max_return():
+    """First point = global minimum-variance portfolio; last point reaches
+    the highest single-asset return (100% in that asset, long-only)."""
+    from tools.optimizer import efficient_frontier
+    rets = _three_asset_returns()
+    f = efficient_frontier(rets, n_points=100, periods_per_year=12)
+    assert len(f) >= 90, "sweep should yield close to 100 points"
+    vols = [p["volatility"] for p in f]
+    # The first point is the lowest-volatility point on the whole curve.
+    assert f[0]["volatility"] == min(vols)
+    # The last point's return reaches the max single-asset annualised return.
+    max_asset_return = float(rets.mean().max() * 12)
+    assert abs(f[-1]["return"] - max_asset_return) < 1e-3
+
+
+def test_frontier_is_curved_not_straight():
+    """The frontier hyperbola is convex in (return, volatility) space — a
+    mid-curve point sits at LOWER volatility than the straight line joining
+    the endpoints. A straight rendered line means this fails."""
+    from tools.optimizer import efficient_frontier
+    f = efficient_frontier(_three_asset_returns(), n_points=100, periods_per_year=12)
+    lo, hi = f[0], f[-1]
+    mid = f[len(f) // 2]
+    span = hi["return"] - lo["return"]
+    frac = (mid["return"] - lo["return"]) / span
+    straight_line_vol = lo["volatility"] + frac * (hi["volatility"] - lo["volatility"])
+    # Convexity: the real frontier bulges left of the chord.
+    assert mid["volatility"] < straight_line_vol - 1e-4
+
+
+def test_frontier_weights_are_long_only_and_fully_invested():
+    """No shorting, fully invested — every point's weights are in [0, 1]
+    and sum to 1."""
+    from tools.optimizer import efficient_frontier
+    f = efficient_frontier(_three_asset_returns(), n_points=60, periods_per_year=12)
+    for p in f:
+        w = list(p["weights"].values())
+        # Weights are stored rounded to 4 dp — three rounded weights can sum
+        # up to ~1.5e-4 off 1.0 from rounding alone, so allow 2e-4. The
+        # solver's own sum=1 equality constraint is satisfied far tighter.
+        assert abs(sum(w) - 1.0) < 2e-4
+        assert all(wi >= -1e-6 for wi in w), "no negative (short) weights"
+        assert all(wi <= 1.0 + 1e-6 for wi in w)
+
+
+def test_frontier_max_sharpe_point_beats_every_single_asset():
+    """The frontier's tangency (max-Sharpe) point must dominate each
+    single-asset portfolio — a single asset is itself a feasible long-only
+    portfolio, so the optimum cannot be worse than any of them."""
+    from tools.optimizer import efficient_frontier
+    rets = _three_asset_returns()
+    f = efficient_frontier(rets, n_points=100, periods_per_year=12, risk_free=0.0)
+    best_frontier_sharpe = max(p["sharpe"] for p in f)
+    for col in rets.columns:
+        r = rets[col]
+        asset_sharpe = float(r.mean() * 12) / float(r.std(ddof=1) * (12 ** 0.5))
+        assert best_frontier_sharpe >= asset_sharpe - 1e-3, (
+            f"frontier max Sharpe {best_frontier_sharpe:.4f} should beat "
+            f"{col} single-asset Sharpe {asset_sharpe:.4f}"
+        )
