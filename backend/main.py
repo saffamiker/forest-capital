@@ -628,10 +628,15 @@ async def upload_academic_document(
     session: dict = Depends(require_auth),
 ):
     """
-    Uploads a PDF or plain-text reference document (the midpoint rubric,
-    the final-presentation requirements, etc.). Text is extracted
+    Uploads a PDF or Markdown (.md) reference document (the midpoint
+    rubric, the final-presentation requirements, etc.). Text is extracted
     server-side; only the text is persisted. After storage every agent
     injects the document as system context on its next invocation.
+
+    File type is decided by extension, not MIME type — browsers send
+    Markdown as text/plain or text/markdown inconsistently, so the
+    extension is the authoritative check. PDFs go through pypdf; .md
+    files are read directly as UTF-8 (pypdf is bypassed entirely).
     """
     from tools.academic_context import (
         DOCUMENT_TYPES, extract_document_text, insert_academic_document,
@@ -650,23 +655,45 @@ async def upload_academic_document(
     if len(raw) > _ACADEMIC_DOC_MAX_BYTES:
         raise HTTPException(status_code=422, detail="File too large (max 10 MB).")
 
-    try:
-        content_text = extract_document_text(file.filename or "document", raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
+    filename = file.filename or "document"
+    lower_name = filename.lower()
+    if lower_name.endswith(".pdf"):
+        try:
+            content_text = extract_document_text(filename, raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        file_type = "PDF"
+    elif lower_name.endswith(".md"):
+        # Markdown — extension is authoritative. Read directly as UTF-8,
+        # bypassing pypdf entirely; the bytes are the content verbatim.
+        content_text = raw.decode("utf-8", errors="replace").strip()
+        if not content_text:
+            raise HTTPException(status_code=422, detail="Uploaded file is empty.")
+        file_type = "MD"
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="Only PDF and Markdown (.md) files are supported",
+        )
 
-    doc_id = await insert_academic_document(
-        file.filename or "document", document_type, content_text,
-    )
+    doc_id = await insert_academic_document(filename, document_type, content_text)
     if not doc_id:
         raise HTTPException(
             status_code=500,
             detail="Could not store the document — database unavailable.",
         )
+    # Log type + size so ingestion can be verified from the production logs.
+    log.info(
+        "academic_document_ingested",
+        file_type=file_type,
+        char_count=len(content_text),
+        document_type=document_type,
+    )
     return {
         "id": doc_id,
-        "name": file.filename,
+        "name": filename,
         "document_type": document_type,
+        "file_type": file_type,
         "char_count": len(content_text),
     }
 

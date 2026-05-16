@@ -4106,10 +4106,14 @@ GROK MODEL CHURN RUNBOOK:
 ACADEMIC CONTEXT ARCHITECTURE (migration 008, May 16 2026)
 ─────────────────────────────────────────────────────────────────────────────
 
-The academic_documents table (migration 008) stores uploaded PDFs and
-plain-text files — only the server-side-extracted text is persisted,
-never the raw binary. Supported document_type values:
-midpoint_requirements, final_presentation_requirements, other.
+The academic_documents table (migration 008) stores uploaded PDF and
+Markdown (.md) files — only the server-side-extracted text is persisted,
+never the raw binary. File type is decided by extension, not MIME type:
+PDFs go through pypdf; .md files are read directly as UTF-8 (pypdf
+bypassed). Any other extension is rejected with a 400. Supported
+document_type values: midpoint_requirements,
+final_presentation_requirements, midpoint_draft, presentation_slides,
+presentation_script, other.
 
 All agents receive the full text of every stored document as system
 context on every invocation, labelled by document_type. Injection points:
@@ -4128,10 +4132,10 @@ the sync agent call wrappers can use them.
 Purpose: agents are always aware of the academic evaluation criteria
 when generating analysis, feedback, or recommendations.
 
-Endpoints: POST /api/v1/documents/academic/upload (PDF + text, 10 MB
-ceiling), GET /api/v1/documents/academic, DELETE
-/api/v1/documents/academic/{id}. UI: AcademicDocumentsPanel in the
-Reports view.
+Endpoints: POST /api/v1/documents/academic/upload (PDF + Markdown only,
+10 MB ceiling), GET /api/v1/documents/academic, DELETE
+/api/v1/documents/academic/{id}. UI: AcademicDocumentsPanel in
+Settings → Academic Documents.
 
 
 ─────────────────────────────────────────────────────────────────────────────

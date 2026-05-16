@@ -181,3 +181,44 @@ class TestUploadValidation:
 
     def test_list_endpoint_requires_auth(self):
         assert client.get("/api/v1/documents/academic").status_code == 401
+
+
+class TestMarkdownUpload:
+    """Markdown (.md) files are accepted alongside PDFs; .txt is not."""
+
+    def test_md_upload_stores_exact_content(self, monkeypatch):
+        """A .md file is read directly as UTF-8 — content_text is the file
+        content verbatim, with no pypdf extraction artifacts. insert is
+        stubbed because the test environment has no database."""
+        import tools.academic_context as ac
+        captured: dict = {}
+
+        async def _fake_insert(name, document_type, content_text):
+            captured["name"] = name
+            captured["content_text"] = content_text
+            return "fake-doc-id"
+
+        monkeypatch.setattr(ac, "insert_academic_document", _fake_insert)
+
+        md = "# Midpoint Rubric\n\n- 3 pages, double-spaced\n- 12-point font"
+        r = client.post(
+            "/api/v1/documents/academic/upload",
+            files={"file": ("rubric.md", md.encode("utf-8"), "text/plain")},
+            data={"document_type": "midpoint_requirements"},
+            headers=SESSION_HEADERS,
+        )
+        assert r.status_code == 200
+        # Stored content is the file content exactly — no extraction artifacts.
+        assert captured["content_text"] == md
+        assert r.json()["file_type"] == "MD"
+
+    def test_txt_upload_rejected_with_400(self):
+        """Only PDF and Markdown are supported — a .txt file is a 400."""
+        r = client.post(
+            "/api/v1/documents/academic/upload",
+            files={"file": ("notes.txt", b"plain text content", "text/plain")},
+            data={"document_type": "other"},
+            headers=SESSION_HEADERS,
+        )
+        assert r.status_code == 400
+        assert "PDF and Markdown" in r.json()["detail"]

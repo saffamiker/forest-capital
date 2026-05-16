@@ -34,6 +34,15 @@ const TYPE_LABEL: Record<string, string> = Object.fromEntries(
   DOC_TYPE_OPTIONS.map((o) => [o.value, o.label]),
 )
 
+// File-format badge, derived from the filename extension — PDF and
+// Markdown are the two supported formats.
+function fileBadge(name: string): string {
+  const lower = name.toLowerCase()
+  if (lower.endsWith('.pdf')) return 'PDF'
+  if (lower.endsWith('.md')) return 'MD'
+  return 'FILE'
+}
+
 export default function AcademicDocumentsPanel() {
   const [docs, setDocs] = useState<AcademicDoc[]>([])
   const [loading, setLoading] = useState(true)
@@ -122,7 +131,7 @@ export default function AcademicDocumentsPanel() {
         <input
           ref={fileRef}
           type="file"
-          accept=".pdf,.txt,.md,application/pdf,text/plain"
+          accept=".pdf,.md"
           className="text-xs text-muted file:mr-2 file:px-2 file:py-1 file:rounded
                      file:border file:border-border file:bg-navy-800 file:text-white
                      file:text-xs"
@@ -155,7 +164,13 @@ export default function AcademicDocumentsPanel() {
             >
               <FileText className="w-3.5 h-3.5 text-muted shrink-0" />
               <div className="flex-1 min-w-0">
-                <div className="text-white text-xs truncate">{d.name}</div>
+                <div className="flex items-center gap-1.5">
+                  <span className="text-2xs px-1.5 py-0.5 rounded border border-border
+                                    bg-navy-700 text-muted uppercase tracking-wide shrink-0">
+                    {fileBadge(d.name)}
+                  </span>
+                  <span className="text-white text-xs truncate">{d.name}</span>
+                </div>
                 <div className="text-2xs text-muted">
                   {TYPE_LABEL[d.document_type] ?? d.document_type}
                   {' · '}{d.char_count.toLocaleString()} chars
