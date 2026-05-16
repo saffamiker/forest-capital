@@ -187,6 +187,121 @@ async def get_ff_factors() -> list[dict[str, Any]] | None:
     return None
 
 
+async def get_data_status() -> dict[str, Any]:
+    """
+    Read-only status of the data tables feeding the analytics layer:
+    row count, data date range, last-updated timestamp where the table
+    carries one, and a green/amber/red staleness pill.
+
+    Staleness keys off the newest data date vs today:
+      red   — newest data > 30 days behind
+      amber — 15 to 30 days behind
+      green — within 15 days
+    Used by the Settings → Data and Study Period section.
+    """
+    empty = {"available": False, "study_period": None, "tables": []}
+    if not _DB_AVAILABLE:
+        return empty
+
+    from sqlalchemy import text
+
+    now = datetime.now(timezone.utc)
+
+    def _to_dt(v: Any) -> datetime | None:
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+        return datetime(v.year, v.month, v.day, tzinfo=timezone.utc)
+
+    def _staleness(max_dt: datetime | None) -> str:
+        if max_dt is None:
+            return "unknown"
+        days = (now - max_dt).days
+        return "red" if days > 30 else ("amber" if days >= 15 else "green")
+
+    def _ym_to_date(ym: Any) -> datetime | None:
+        """Year-month integer (e.g. 200207) → last day of that month."""
+        if not ym:
+            return None
+        y, m = int(ym) // 100, int(ym) % 100
+        first_next = datetime(y + (m // 12), (m % 12) + 1, 1, tzinfo=timezone.utc)
+        return first_next - timedelta(days=1)
+
+    tables: list[dict[str, Any]] = []
+    try:
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            # Tables keyed by a DATE column. Names are hardcoded constants,
+            # not user input — safe to interpolate.
+            for name in ("market_data_monthly", "market_data_daily"):
+                try:
+                    r = await session.execute(text(
+                        f"SELECT COUNT(*), MIN(date), MAX(date) FROM {name}"))
+                    cnt, mn, mx = r.fetchone()
+                    tables.append({
+                        "name": name,
+                        "row_count": int(cnt or 0),
+                        "min_date": str(mn) if mn else None,
+                        "max_date": str(mx) if mx else None,
+                        "last_updated": None,
+                        "staleness": _staleness(_to_dt(mx)) if cnt else "unknown",
+                    })
+                except Exception as exc:
+                    log.warning("data_status_table_error", table=name, error=str(exc))
+
+            # ff_factors_monthly — keyed by a yyyymm integer.
+            try:
+                r = await session.execute(text(
+                    "SELECT COUNT(*), MIN(yyyymm), MAX(yyyymm) FROM ff_factors_monthly"))
+                cnt, mn, mx = r.fetchone()
+                mx_dt = _ym_to_date(mx)
+                mn_dt = _ym_to_date(mn)
+                tables.append({
+                    "name": "ff_factors_monthly",
+                    "row_count": int(cnt or 0),
+                    "min_date": mn_dt.date().isoformat() if mn_dt else None,
+                    "max_date": mx_dt.date().isoformat() if mx_dt else None,
+                    "last_updated": None,
+                    "staleness": _staleness(mx_dt) if cnt else "unknown",
+                })
+            except Exception as exc:
+                log.warning("data_status_table_error", table="ff_factors_monthly", error=str(exc))
+
+            # Tables keyed by a write-timestamp — strategy results and
+            # uploaded academic documents.
+            for name, tcol in (("strategy_results_cache", "computed_at"),
+                               ("academic_documents", "uploaded_at")):
+                try:
+                    r = await session.execute(text(
+                        f"SELECT COUNT(*), MIN({tcol}), MAX({tcol}) FROM {name}"))
+                    cnt, mn, mx = r.fetchone()
+                    tables.append({
+                        "name": name,
+                        "row_count": int(cnt or 0),
+                        "min_date": mn.date().isoformat() if mn else None,
+                        "max_date": mx.date().isoformat() if mx else None,
+                        "last_updated": mx.isoformat() if mx else None,
+                        "staleness": _staleness(_to_dt(mx)) if cnt else "unknown",
+                    })
+                except Exception as exc:
+                    log.warning("data_status_table_error", table=name, error=str(exc))
+    except Exception as exc:
+        log.warning("data_status_failed", error=str(exc))
+        return empty
+
+    # Study period — derived from market_data_monthly's range.
+    study_period = None
+    mdm = next((t for t in tables if t["name"] == "market_data_monthly"), None)
+    if mdm and mdm["row_count"]:
+        study_period = {
+            "start": mdm["min_date"],
+            "end": mdm["max_date"],
+            "n_months": mdm["row_count"],
+        }
+
+    return {"available": True, "study_period": study_period, "tables": tables}
+
+
 async def set_strategy_cache(
     strategy_hash: str,
     results: dict[str, Any],

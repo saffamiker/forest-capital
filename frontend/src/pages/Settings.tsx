@@ -10,8 +10,9 @@
  * Documents section carries id="academic-documents" so /settings#academic-documents
  * deep-links straight to it.
  */
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useLocation } from 'react-router-dom'
+import axios from 'axios'
 import { Check } from 'lucide-react'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import type { BrandMode } from '../context/BrandContext'
@@ -82,6 +83,95 @@ function OrganisationSection() {
   )
 }
 
+// ── 2. Data and Study Period ──────────────────────────────────────────────────
+
+type Staleness = 'green' | 'amber' | 'red' | 'unknown'
+
+interface TableStatus {
+  name: string
+  row_count: number
+  min_date: string | null
+  max_date: string | null
+  last_updated: string | null
+  staleness: Staleness
+}
+
+interface DataStatus {
+  available: boolean
+  study_period: { start: string; end: string; n_months: number } | null
+  tables: TableStatus[]
+}
+
+const STALENESS_STYLE: Record<Staleness, { cls: string; label: string }> = {
+  green:   { cls: 'bg-success/15 text-success border-success/30', label: 'Current' },
+  amber:   { cls: 'bg-warning/15 text-warning border-warning/30', label: 'Ageing' },
+  red:     { cls: 'bg-danger/15 text-danger border-danger/30',    label: 'Stale' },
+  unknown: { cls: 'bg-navy-700 text-muted border-border',         label: 'Unknown' },
+}
+
+function StalenessPill({ staleness }: { staleness: Staleness }) {
+  const s = STALENESS_STYLE[staleness] ?? STALENESS_STYLE.unknown
+  return (
+    <span className={`text-2xs px-2 py-0.5 rounded-full border ${s.cls}`}>
+      {s.label}
+    </span>
+  )
+}
+
+function DataStudyPeriodSection() {
+  const [data, setData] = useState<DataStatus | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    axios.get<DataStatus>('/api/v1/admin/data-status')
+      .then((res) => { if (!cancelled) setData(res.data) })
+      .catch(() => { if (!cancelled) setData(null) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  if (loading) return <Placeholder>Loading data status…</Placeholder>
+  if (!data || !data.available) {
+    return <Placeholder>Data status unavailable — the database is not reachable.</Placeholder>
+  }
+
+  return (
+    <div className="space-y-3">
+      {data.study_period && (
+        <div className="text-sm text-white font-mono">
+          Study period:{' '}
+          <span className="text-electric">{data.study_period.start}</span>
+          {' to '}
+          <span className="text-electric">{data.study_period.end}</span>
+          {' · '}{data.study_period.n_months} months
+        </div>
+      )}
+      <div className="space-y-2">
+        {data.tables.map((t) => (
+          <div
+            key={t.name}
+            className="flex items-center justify-between gap-3 px-3 py-2.5 rounded
+                       border border-border bg-navy-800"
+          >
+            <div className="min-w-0">
+              <div className="text-sm text-white font-mono truncate">{t.name}</div>
+              <div className="text-2xs text-muted mt-0.5">
+                {t.row_count.toLocaleString()} rows
+                {t.min_date && t.max_date
+                  ? ` · ${t.min_date} → ${t.max_date}`
+                  : ' · no rows'}
+                {t.last_updated ? ` · updated ${t.last_updated.slice(0, 10)}` : ''}
+              </div>
+            </div>
+            <StalenessPill staleness={t.staleness} />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export default function Settings() {
   const location = useLocation()
 
@@ -115,7 +205,7 @@ export default function Settings() {
         title="Data and Study Period"
         description="Read-only status of the data tables feeding the analytics layer."
       >
-        <Placeholder>Data status.</Placeholder>
+        <DataStudyPeriodSection />
       </SettingsSection>
 
       <SettingsSection

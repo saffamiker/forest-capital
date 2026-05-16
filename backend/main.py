@@ -568,6 +568,21 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
         return {"available": False, "note": "analytics computation failed"}
 
 
+# ── Admin: data status ────────────────────────────────────────────────────────
+
+@app.get("/api/v1/admin/data-status")
+async def get_admin_data_status(session: dict = Depends(require_auth)):
+    """
+    Read-only status of the data tables feeding the analytics layer —
+    row counts, date ranges, last-updated timestamps and a green/amber/red
+    staleness pill per table. Surfaced in Settings → Data and Study Period.
+    """
+    if ENVIRONMENT == "test":
+        return {"available": False, "study_period": None, "tables": []}
+    from tools.cache import get_data_status
+    return await get_data_status()
+
+
 # ── Academic documents (agent context) ───────────────────────────────────────
 
 # 10 MB upload ceiling — the rubric / requirements documents are short;
