@@ -12,6 +12,9 @@
  */
 import { useEffect } from 'react'
 import { useLocation } from 'react-router-dom'
+import { Check } from 'lucide-react'
+import { useBrand, BRANDS } from '../context/BrandContext'
+import type { BrandMode } from '../context/BrandContext'
 
 interface SettingsSectionProps {
   id: string
@@ -35,6 +38,49 @@ function SettingsSection({ id, title, description, children }: SettingsSectionPr
 const Placeholder = ({ children }: { children: React.ReactNode }) => (
   <p className="text-xs text-muted italic">{children}</p>
 )
+
+// ── 1. Organisation ───────────────────────────────────────────────────────────
+
+const BRAND_OPTIONS: { value: BrandMode; label: string; sub: string }[] = [
+  { value: BRANDS.MCCOLL, label: 'McColl School of Business',
+    sub: 'Queens University academic context' },
+  { value: BRANDS.FOREST_CAPITAL, label: 'Forest Capital (co-branded)',
+    sub: 'Industry-partner reporting context' },
+]
+
+function OrganisationSection() {
+  // Same brand state as before — relocated from the nav gear dropdown,
+  // logic unchanged: useBrand()/setBrand drive the header branding.
+  const { brand, setBrand } = useBrand()
+  return (
+    <div className="space-y-2">
+      {BRAND_OPTIONS.map((opt) => {
+        const active = brand === opt.value
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => setBrand(opt.value)}
+            className={`w-full flex items-center justify-between px-3 py-2.5 rounded
+                        border transition-colors text-left ${
+              active
+                ? 'border-electric/40 bg-electric/10'
+                : 'border-border bg-navy-800 hover:bg-navy-700'
+            }`}
+          >
+            <span>
+              <span className={`block text-sm ${active ? 'text-white' : 'text-slate-300'}`}>
+                {opt.label}
+              </span>
+              <span className="block text-2xs text-muted mt-0.5">{opt.sub}</span>
+            </span>
+            {active && <Check className="w-4 h-4 text-electric shrink-0" />}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
 
 export default function Settings() {
   const location = useLocation()
@@ -61,7 +107,7 @@ export default function Settings() {
         title="Organisation"
         description="Select the reporting context for this session."
       >
-        <Placeholder>Organisation settings.</Placeholder>
+        <OrganisationSection />
       </SettingsSection>
 
       <SettingsSection
