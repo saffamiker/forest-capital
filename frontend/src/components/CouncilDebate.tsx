@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Bot, TrendingUp, AlertTriangle, Loader2, Send, BookOpen } from 'lucide-react'
 import DisagreementHeatmap from './DisagreementHeatmap'
 import PersonaModal from './PersonaModal'
+import AcademicReviewButton from './AcademicReviewButton'
 import type { AgentMessage } from '../types/agents'
 import { useCouncilStore } from '../stores/councilStore'
 
@@ -176,6 +177,11 @@ export default function CouncilDebate() {
           <span className="hidden sm:inline">Convene</span>
         </button>
       </form>
+
+      {/* Academic Review — a secondary council action that evaluates the
+          project's analytics, findings and deliverables against the
+          uploaded project requirements. */}
+      <AcademicReviewButton />
 
       {/* Tabs */}
       {(result ?? loading) && (
