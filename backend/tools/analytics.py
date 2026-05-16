@@ -103,17 +103,32 @@ def summary_statistics(
     named return series. Used for the equity / IG / HY / BENCHMARK summary
     table — the headline figures the midpoint paper opens with.
     """
-    # Benchmark CAGR — the reference for the excess-return column.
+    # Benchmark series + CAGR — the reference for the excess-return and
+    # information-ratio columns.
+    bench_series: pd.Series | None = None
     bench_cagr: float | None = None
     for name, r in asset_series.items():
         if "BENCHMARK" in name.upper():
-            bench_cagr = _cagr(r.dropna())
+            bench_series = r.dropna()
+            bench_cagr = _cagr(bench_series)
             break
 
     rows: list[dict] = []
     for name, r in asset_series.items():
         r = r.dropna()
         cagr = _cagr(r)
+
+        # Information ratio = annualised mean monthly excess return over the
+        # benchmark / annualised tracking error. Undefined (None) for the
+        # benchmark itself — zero tracking error — and when no benchmark
+        # series is supplied.
+        info_ratio: float | None = None
+        if bench_series is not None:
+            excess_m = (r - bench_series.reindex(r.index)).dropna()
+            te = float(excess_m.std(ddof=1)) if len(excess_m) > 1 else 0.0
+            if te > 1e-12:
+                info_ratio = round(float(excess_m.mean() / te * np.sqrt(_ANN)), 4)
+
         rows.append({
             "asset":          name,
             "cagr":           round(cagr, 4),
@@ -123,6 +138,7 @@ def summary_statistics(
                                if bench_cagr is not None else None),
             "ann_volatility": round(_ann_vol(r), 4),
             "sharpe_ratio":   round(_sharpe(r, rf), 4),
+            "information_ratio": info_ratio,
             "max_drawdown":   round(_max_drawdown(r), 4),
             "skewness":       round(float(r.skew()), 4) if len(r) >= 3 else 0.0,
             "n_months":       int(len(r)),

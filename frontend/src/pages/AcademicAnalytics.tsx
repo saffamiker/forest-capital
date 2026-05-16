@@ -31,6 +31,7 @@ interface SummaryRow {
   excess_return: number | null
   ann_volatility: number
   sharpe_ratio: number
+  information_ratio: number | null
   max_drawdown: number
   skewness: number
   n_months: number
@@ -173,22 +174,23 @@ const TD = ({ children, right = false, mono = false }:
 
 function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
   const headers = ['Asset', 'CAGR', 'Excess Return (ann.)', 'Ann. Volatility',
-                   'Sharpe', 'Max Drawdown', 'Skewness']
+                   'Sharpe', 'Information Ratio', 'Max Drawdown', 'Skewness']
   const exportRows = rows.map((r) => [
     r.asset, pct(r.cagr), pct(r.excess_return), pct(r.ann_volatility),
-    num(r.sharpe_ratio), pct(r.max_drawdown), num(r.skewness),
+    num(r.sharpe_ratio), num(r.information_ratio), pct(r.max_drawdown),
+    num(r.skewness),
   ])
   return (
     <SectionCard
       title="Summary Statistics"
-      subtitle="Full study period — equity, investment-grade bonds, high-yield bonds, and the benchmark. Excess return is annualised CAGR minus the benchmark CAGR."
+      subtitle="Full study period — equity, investment-grade bonds, high-yield bonds, and the benchmark. Excess return is annualised CAGR minus the benchmark CAGR; information ratio is excess return over tracking error."
       exportButton={<TableExportButton tableId="summary_statistics" headers={headers} rows={exportRows} />}
     >
       <table className="w-full">
         <thead><tr className="border-b border-border">
           <TH>Asset</TH><TH right>CAGR</TH><TH right>Excess Return (ann.)</TH>
           <TH right>Ann. Volatility</TH><TH right>Sharpe</TH>
-          <TH right>Max Drawdown</TH><TH right>Skewness</TH>
+          <TH right>Information Ratio</TH><TH right>Max Drawdown</TH><TH right>Skewness</TH>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
@@ -198,6 +200,7 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
               <TD right mono><SignedPct x={r.excess_return} /></TD>
               <TD right mono>{pct(r.ann_volatility)}</TD>
               <TD right mono>{num(r.sharpe_ratio)}</TD>
+              <TD right mono>{r.information_ratio == null ? 'N/A' : num(r.information_ratio)}</TD>
               <TD right mono>{pct(r.max_drawdown)}</TD>
               <TD right mono>{num(r.skewness)}</TD>
             </tr>
