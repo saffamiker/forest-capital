@@ -1,5 +1,4 @@
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
-import { useRef, useState, useEffect } from 'react'
 import { LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle, BarChart3, Activity, FileText, LineChart } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../App'
@@ -63,11 +62,9 @@ function FcLogo() {
 
 export default function MainLayout() {
   const { session, logout } = useAuth()
-  const { brand, setBrand } = useBrand()
+  const { brand } = useBrand()
   const { mode, setMode } = useUI()
   const navigate = useNavigate()
-  const [settingsOpen, setSettingsOpen] = useState(false)
-  const settingsRef = useRef<HTMLDivElement>(null)
   // Read both the legacy qaStatus (driven by the local QA audit panel) and
   // the new tieredStatus (driven by /api/v1/qa/status polling). The Present-mode
   // gate trusts tieredStatus first when available — that's what enforces the
@@ -78,16 +75,6 @@ export default function MainLayout() {
     await logout()
     navigate('/login')
   }
-
-  useEffect(() => {
-    function handleClickOutside(e: MouseEvent) {
-      if (settingsRef.current && !settingsRef.current.contains(e.target as Node)) {
-        setSettingsOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', handleClickOutside)
-    return () => document.removeEventListener('mousedown', handleClickOutside)
-  }, [])
 
   const isMcColl = brand === BRANDS.MCCOLL
 
@@ -232,36 +219,23 @@ export default function MainLayout() {
             <HelpCircle className="w-3.5 h-3.5" />
           </a>
 
-          {/* Settings cog — brand toggle */}
-          <div className="relative" ref={settingsRef}>
-            <button
-              onClick={() => setSettingsOpen(o => !o)}
-              className="flex items-center text-muted hover:text-white p-1 rounded hover:bg-navy-700 transition-colors"
-              title="Brand settings"
-            >
-              <Settings className="w-3.5 h-3.5" />
-            </button>
-
-            {settingsOpen && (
-              <div className="absolute right-0 top-full mt-1.5 w-52 bg-navy-800 border border-border rounded shadow-lg z-50 py-1">
-                <div className="px-3 py-1.5 text-muted text-xs font-medium uppercase tracking-wider">Brand</div>
-                <button
-                  onClick={() => { setBrand(BRANDS.MCCOLL); setSettingsOpen(false) }}
-                  className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-navy-700 transition-colors"
-                >
-                  <span className={isMcColl ? 'text-white' : 'text-muted'}>McColl School of Business</span>
-                  {isMcColl && <span className="text-electric text-xs">✓</span>}
-                </button>
-                <button
-                  onClick={() => { setBrand(BRANDS.FOREST_CAPITAL); setSettingsOpen(false) }}
-                  className="w-full flex items-center justify-between px-3 py-2 text-sm hover:bg-navy-700 transition-colors"
-                >
-                  <span className={!isMcColl ? 'text-white' : 'text-muted'}>Forest Capital (co-branded)</span>
-                  {!isMcColl && <span className="text-electric text-xs">✓</span>}
-                </button>
-              </div>
-            )}
-          </div>
+          {/* Settings — full page at /settings. The gear gains the same
+              active treatment as the nav-ribbon links when /settings is
+              the current route. */}
+          <NavLink
+            to="/settings"
+            aria-label="Settings"
+            title="Settings"
+            className={({ isActive }) =>
+              `flex items-center p-1 rounded transition-colors ${
+                isActive
+                  ? 'text-electric bg-electric/10 border border-electric/20'
+                  : 'text-muted hover:text-white hover:bg-navy-700'
+              }`
+            }
+          >
+            <Settings className="w-3.5 h-3.5" />
+          </NavLink>
 
           <button
             onClick={handleLogout}
