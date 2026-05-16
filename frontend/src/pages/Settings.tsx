@@ -311,6 +311,13 @@ export default function Settings() {
         title="Academic Documents"
         description="Documents uploaded here are injected into every AI agent session."
       >
+        <div className="mb-3 px-3 py-2.5 rounded border border-border bg-navy-800
+                        text-muted text-xs leading-relaxed">
+          Academic Review sessions use the documents uploaded here as context.
+          Upload your project requirements and rubric before running your first
+          review. Midpoint draft, presentation slides, and script can be added
+          as they are written.
+        </div>
         <AcademicDocumentsPanel />
       </SettingsSection>
 

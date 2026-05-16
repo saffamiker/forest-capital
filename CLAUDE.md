@@ -4243,6 +4243,51 @@ months behind "today". This is correct behaviour, not a bug: the pill
 is reporting the dataset's deliberate end date, not a pipeline failure.
 
 
+─────────────────────────────────────────────────────────────────────────────
+ACADEMIC REVIEW ENDPOINT (POST /api/council/academic-review, May 16 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The council evaluates the project's academic readiness. No request body —
+all context is assembled server-side (agents/academic_review.py).
+
+CONTEXT BLOCK injected into every agent prompt:
+  - Analytics inventory — strategy count, performance date range, the
+    DTB3 risk-free rate, and which analytics components are available.
+    Read straight from the cache tables, NOT the full analytics endpoint.
+  - Academic documents — every academic_documents row grouped by
+    document_type: midpoint_requirements, final_presentation_requirements,
+    midpoint_draft, presentation_slides, presentation_script, other.
+    Missing types render "(not yet uploaded)" — never an error.
+
+PEER FAN-OUT: every council agent except the academic advisor — equity,
+fixed-income, risk, quant, CIO, the Gemini independent analyst and the
+Grok contrarian analyst — answers a stock four-part review question (data
+sufficiency, requirements/rubric alignment, deliverable quality, areas
+for further investigation) through its own expert lens, in parallel.
+400-word cap per peer. Peers run on claude-sonnet-4-6; Gemini and Grok on
+their usual models.
+
+ARBITER: the academic advisor receives every peer response plus the
+context block and synthesises a five-section, rubric-mapped verdict, each
+section carrying a Strong / Developing / Needs Work rating:
+  1. Data Sufficiency and Methodology
+  2. Requirements and Rubric Alignment
+  3. Deliverable Quality
+  4. Priority Areas for Further Investigation (numbered, impact-ordered)
+  5. Overall Academic Readiness
+The arbiter runs on claude-opus-4-7 — an Opus upgrade over the advisor's
+usual Sonnet, applied ONLY within this endpoint; the advisor's global
+model is unchanged. (The spec named the dated string
+claude-opus-4-20250514, but that model retires 2026-06-15 — the project
+already moved off it; claude-opus-4-7 is used instead.)
+
+RESPONSE: a text/event-stream — one {"type":"peer_responses","data":{...}}
+frame, then streamed {"type":"arbiter_chunk","text":...} frames, then
+`data: [DONE]`. Frontend: the AcademicReviewButton on the Council screen
+shows "Consulting the council…", then renders the verdict section by
+section as it streams, with peer reviews in a collapsible accordion.
+
+
 ═══════════════════════════════════════════════════════════════════
 KANBAN BOARD — Sprint 6 closed, Kanban adopted (May 16 2026)
 ═══════════════════════════════════════════════════════════════════
@@ -4273,10 +4318,11 @@ was written, so the GitHub board was not updated programmatically).
      (dead non-PDF branch removed)
   ✅ Settings page (/settings) — five sections, nav gear icon rewired
   ✅ Performance Attribution Waterfall verified
+  ✅ Academic Review council endpoint (POST /api/council/academic-review)
   ✅ CLAUDE.md + README brought current
 
 ─── IN PROGRESS ───────────────────────────────────────────────────────
-  □ Academic Review endpoint (dispatched this session)
+  (nothing currently in progress)
 
 ─── BACKLOG ────────────────────────────────────────────────────────────
 
