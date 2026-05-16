@@ -221,16 +221,17 @@ export default function MainLayout() {
 
           {/* Settings — full page at /settings. The gear gains the same
               active treatment as the nav-ribbon links when /settings is
-              the current route. */}
+              the current route. The inactive state carries a transparent
+              border so the active border never shifts the icon by 1px. */}
           <NavLink
             to="/settings"
             aria-label="Settings"
             title="Settings"
             className={({ isActive }) =>
-              `flex items-center p-1 rounded transition-colors ${
+              `flex items-center p-1 rounded border transition-colors ${
                 isActive
-                  ? 'text-electric bg-electric/10 border border-electric/20'
-                  : 'text-muted hover:text-white hover:bg-navy-700'
+                  ? 'text-electric bg-electric/10 border-electric/20'
+                  : 'text-muted border-transparent hover:text-white hover:bg-navy-700'
               }`
             }
           >
