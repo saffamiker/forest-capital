@@ -11,9 +11,10 @@
  * deep-links straight to it.
  */
 import { useEffect, useState } from 'react'
-import { useLocation } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { Check } from 'lucide-react'
+import { Check, LogOut } from 'lucide-react'
+import { useAuth } from '../App'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import type { BrandMode } from '../context/BrandContext'
 import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
@@ -226,6 +227,41 @@ function AnalyticsConfigurationSection() {
   )
 }
 
+// ── 5. Account ────────────────────────────────────────────────────────────────
+
+function AccountSection() {
+  const { session, logout } = useAuth()
+  const navigate = useNavigate()
+
+  // Same behaviour as the nav-ribbon sign-out — this is a convenience
+  // duplicate, not a replacement.
+  const handleSignOut = async () => {
+    await logout()
+    navigate('/login')
+  }
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="text-2xs text-muted uppercase tracking-wide">Signed in as</div>
+        <div className="text-sm text-white font-mono mt-0.5">
+          {session?.email ?? '—'}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={() => void handleSignOut()}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs
+                   border border-border text-slate-300 hover:bg-navy-700
+                   transition-colors"
+      >
+        <LogOut className="w-3.5 h-3.5" />
+        Sign out
+      </button>
+    </div>
+  )
+}
+
 export default function Settings() {
   const location = useLocation()
 
@@ -283,7 +319,7 @@ export default function Settings() {
         title="Account"
         description="The account signed in to this session."
       >
-        <Placeholder>Account.</Placeholder>
+        <AccountSection />
       </SettingsSection>
     </div>
   )
