@@ -79,16 +79,33 @@ interface FactorRow {
   n_months: number
 }
 
+type CumulativePoint = { date: string } & Record<string, number | null>
+
+interface CumulativeReturns {
+  strategies: string[]
+  points: CumulativePoint[]
+}
+
 interface AnalyticsPayload {
   available: boolean
   note?: string
   study_period?: { start: string; end: string; n_months: number }
+  cumulative_returns?: CumulativeReturns
   summary_statistics?: SummaryRow[]
   rolling_correlation?: RollingCorrelation
   regime_conditional?: RegimeRow[]
   drawdown_comparison?: DrawdownRow[]
   factor_loadings?: FactorRow[]
 }
+
+// Distinct line colours assigned by index; the benchmark is rendered as a
+// bold light-grey reference line (detected by name).
+const SERIES_COLORS = [
+  '#3b82f6', '#22c55e', '#f59e0b', '#a78bfa', '#06b6d4',
+  '#ec4899', '#84cc16', '#f97316', '#14b8a6', '#ef4444',
+]
+const BENCHMARK_COLOR = '#e5e7eb'
+const isBenchmark = (name: string): boolean => /benchmark/i.test(name)
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
 
@@ -347,6 +364,79 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
+// ── Cumulative total return chart ─────────────────────────────────────────────
+
+function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
+  const [logScale, setLogScale] = useState(false)
+
+  // Snap the 2022 regime marker to the first plotted month at/after the break.
+  const breakX = data.points.find((p) => p.date >= '2022-01-01')?.date
+
+  const headers = ['Date', ...data.strategies]
+  const exportRows = data.points.map((p) => [
+    p.date, ...data.strategies.map((s) => p[s] ?? ''),
+  ])
+
+  return (
+    <SectionCard
+      title="Cumulative Total Return"
+      subtitle="Growth of $1 invested in each strategy over the full study period. The benchmark (100% equity) is the bold grey reference line."
+      exportButton={
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setLogScale((v) => !v)}
+            className="text-xs px-2 py-1 rounded border border-border text-muted
+                       hover:text-white transition-colors"
+          >
+            {logScale ? 'Linear scale' : 'Log scale'}
+          </button>
+          <TableExportButton tableId="cumulative_returns" headers={headers} rows={exportRows} />
+        </div>
+      }
+    >
+      <ResponsiveContainer width="100%" height={340}>
+        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 4 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} minTickGap={56} />
+          <YAxis
+            scale={logScale ? 'log' : 'linear'}
+            domain={logScale ? ['auto', 'auto'] : [0, 'auto']}
+            allowDataOverflow
+            tick={{ fill: '#64748b', fontSize: 11 }}
+            tickFormatter={(v: number) => `${v.toFixed(1)}x`}
+          />
+          <Tooltip
+            contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c',
+                            borderRadius: 8, fontSize: 12 }}
+          />
+          <Legend wrapperStyle={{ fontSize: 11 }} />
+          {breakX && (
+            <ReferenceLine x={breakX} stroke={ACCENT} strokeDasharray="4 4"
+              label={{ value: 'Correlation Regime Break', fill: ACCENT, fontSize: 11,
+                       position: 'insideTopRight' }} />
+          )}
+          {data.strategies.map((s, i) => {
+            const bench = isBenchmark(s)
+            return (
+              <Line
+                key={s}
+                type="monotone"
+                dataKey={s}
+                name={s}
+                stroke={bench ? BENCHMARK_COLOR : SERIES_COLORS[i % SERIES_COLORS.length]}
+                strokeWidth={bench ? 2.5 : 1.5}
+                dot={false}
+                connectNulls
+              />
+            )
+          })}
+        </LineChart>
+      </ResponsiveContainer>
+    </SectionCard>
+  )
+}
+
 export default function AcademicAnalytics() {
   const [data, setData] = useState<AnalyticsPayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -393,6 +483,8 @@ export default function AcademicAnalytics() {
 
       {!loading && !error && data?.available && (
         <>
+          {data.cumulative_returns && data.cumulative_returns.points.length > 0 &&
+            <CumulativeReturnChart data={data.cumulative_returns} />}
           {data.summary_statistics && data.summary_statistics.length > 0 &&
             <SummaryStatisticsTable rows={data.summary_statistics} />}
           {data.rolling_correlation && data.rolling_correlation.points.length > 0 &&

@@ -118,6 +118,42 @@ def summary_statistics(
     return rows
 
 
+# ── Cumulative total return ───────────────────────────────────────────────────
+
+def cumulative_returns(strategy_results: dict[str, dict]) -> dict:
+    """
+    Growth-of-$1 cumulative total return for every strategy.
+
+    Each series starts at exactly 1.0 on a baseline month one period before
+    the first return, then compounds (1 + r) month by month. All strategies
+    share the aligned monthly index, so the baseline date is common — the
+    points list is directly chartable by a Recharts LineChart.
+    """
+    curves: dict[str, pd.Series] = {}
+    for name, res in strategy_results.items():
+        s = _pairs_to_series(res.get("monthly_returns") or [])
+        if s.empty:
+            continue
+        label = res.get("strategy_name") or name
+        base_date = s.index[0] - pd.offsets.MonthEnd(1)
+        curve = (1.0 + s).cumprod()
+        curves[label] = pd.concat([pd.Series([1.0], index=[base_date]), curve])
+
+    if not curves:
+        return {"strategies": [], "points": []}
+
+    all_dates = sorted(set().union(*[set(c.index) for c in curves.values()]))
+    strategies = sorted(curves.keys())
+    points: list[dict] = []
+    for d in all_dates:
+        row: dict = {"date": str(d.date())}
+        for label in strategies:
+            v = curves[label].get(d)
+            row[label] = None if v is None or pd.isna(v) else round(float(v), 4)
+        points.append(row)
+    return {"strategies": strategies, "points": points}
+
+
 # ── 2. Rolling correlation ────────────────────────────────────────────────────
 
 def rolling_correlation(
