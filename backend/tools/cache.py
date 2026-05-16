@@ -118,8 +118,8 @@ async def get_monthly_returns() -> dict[str, list[Any]] | None:
     Render's cloud IPs, and SPY/TLT/IEF/GLD were a different universe from
     the strategies anyway — the cause of the curve/scatter disconnect).
 
-    Shape: {"dates": [...], "equity": [...], "ig": [...], "hy": [...]}.
-    Returns None if the table is unavailable or empty.
+    Shape: {"dates": [...], "equity": [...], "ig": [...], "hy": [...],
+            "rf": [...]}. Returns None if the table is unavailable or empty.
     """
     if not _DB_AVAILABLE:
         return None
@@ -128,7 +128,8 @@ async def get_monthly_returns() -> dict[str, list[Any]] | None:
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
             rows = await session.execute(
                 text(
-                    "SELECT date, equity_return, ig_return, hy_return "
+                    "SELECT date, equity_return, ig_return, hy_return, "
+                    "       risk_free_rate "
                     "FROM market_data_monthly ORDER BY date"
                 )
             )
@@ -140,9 +141,49 @@ async def get_monthly_returns() -> dict[str, list[Any]] | None:
                 "equity": [float(r[1]) for r in fetched],
                 "ig":     [float(r[2]) for r in fetched],
                 "hy":     [float(r[3]) for r in fetched],
+                "rf":     [float(r[4]) if r[4] is not None else 0.0 for r in fetched],
             }
     except Exception as exc:
         log.warning("monthly_returns_read_error", error=str(exc))
+    return None
+
+
+async def get_ff_factors() -> list[dict[str, Any]] | None:
+    """
+    Returns the Fama-French monthly factors from ff_factors_monthly —
+    [{yyyymm, mkt_rf, smb, hml, rf}, ...] ordered by month.
+
+    Used by the analytics layer's factor-loadings regression. The table
+    holds the three-factor model (no momentum), so consumers run a
+    three-factor — not Carhart four-factor — regression. Returns None if
+    the table is unavailable or empty.
+    """
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            rows = await session.execute(
+                text(
+                    "SELECT yyyymm, mkt_rf, smb, hml, rf "
+                    "FROM ff_factors_monthly ORDER BY yyyymm"
+                )
+            )
+            fetched = rows.fetchall()
+            if not fetched:
+                return None
+            return [
+                {
+                    "yyyymm": int(r[0]),
+                    "mkt_rf": float(r[1]),
+                    "smb":    float(r[2]),
+                    "hml":    float(r[3]),
+                    "rf":     float(r[4]) if r[4] is not None else 0.0,
+                }
+                for r in fetched
+            ]
+    except Exception as exc:
+        log.warning("ff_factors_read_error", error=str(exc))
     return None
 
 

@@ -490,6 +490,72 @@ async def get_chart_data(request: Request, session: dict = Depends(require_auth)
         }
 
 
+# ── Academic analytics ────────────────────────────────────────────────────────
+
+@app.get("/api/v1/analytics/academic")
+@limiter.limit("30/minute")
+async def get_academic_analytics(request: Request, session: dict = Depends(require_auth)):
+    """
+    Bundled academic analytics for the analytics view and the midpoint paper:
+    summary statistics, 12-month rolling correlation, regime-conditional
+    performance, drawdown comparison, and Fama-French factor loadings.
+
+    Every figure is derived from data already in PostgreSQL —
+    market_data_monthly, strategy_results_cache, ff_factors_monthly — so the
+    endpoint is a set of light reads plus pure NumPy/statsmodels compute; it
+    never triggers get_full_history() or run_all_strategies().
+    """
+    if ENVIRONMENT == "test":
+        return {"available": False, "note": "analytics unavailable in test environment"}
+    try:
+        import pandas as pd
+        from tools.cache import (
+            get_monthly_returns, get_latest_strategy_cache, get_ff_factors,
+        )
+        from tools import analytics as an
+
+        monthly = await get_monthly_returns()
+        strategies = await get_latest_strategy_cache()
+        ff = await get_ff_factors()
+
+        if not monthly or not strategies:
+            return {
+                "available": False,
+                "note": "market data or strategy cache not yet populated — "
+                        "load the dashboard once to warm the caches",
+            }
+
+        idx = pd.to_datetime(monthly["dates"])
+        equity = pd.Series(monthly["equity"], index=idx)
+        ig = pd.Series(monthly["ig"], index=idx)
+        hy = pd.Series(monthly["hy"], index=idx)
+        rf = pd.Series(monthly["rf"], index=idx)
+
+        benchmark = strategies.get("BENCHMARK", {})
+        bench_series = an._pairs_to_series(benchmark.get("monthly_returns") or [])
+
+        asset_series = {"EQUITY": equity, "IG": ig, "HY": hy}
+        if not bench_series.empty:
+            asset_series["BENCHMARK"] = bench_series
+
+        return {
+            "available": True,
+            "study_period": {
+                "start": str(idx[0].date()),
+                "end": str(idx[-1].date()),
+                "n_months": len(idx),
+            },
+            "summary_statistics": an.summary_statistics(asset_series, rf),
+            "rolling_correlation": an.rolling_correlation(equity, ig, hy, window=12),
+            "regime_conditional": an.regime_conditional_performance(strategies, rf),
+            "drawdown_comparison": an.drawdown_comparison(strategies),
+            "factor_loadings": an.factor_loadings(strategies, ff or []),
+        }
+    except Exception as exc:
+        log.warning("academic_analytics_failed", error=str(exc))
+        return {"available": False, "note": "analytics computation failed"}
+
+
 # ── Regime ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/regime/current")

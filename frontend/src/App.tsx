@@ -10,6 +10,7 @@ import CouncilDebate from './components/CouncilDebate'
 import QAAuditPanel from './components/QAAuditPanel'
 import StatisticalEvidence from './pages/StatisticalEvidence'
 import RegimeAnalysis from './pages/RegimeAnalysis'
+import AcademicAnalytics from './pages/AcademicAnalytics'
 import Reports from './pages/Reports'
 import StoryboardEditor from './pages/StoryboardEditor'
 import SectionEditor from './pages/SectionEditor'
@@ -181,6 +182,7 @@ export default function App() {
               <Route index element={<Dashboard />} />
               <Route path="statistical-evidence" element={<StatisticalEvidence />} />
               <Route path="regime-analysis" element={<RegimeAnalysis />} />
+              <Route path="analytics" element={<AcademicAnalytics />} />
               <Route path="council" element={<CouncilDebate />} />
               <Route path="qa" element={<QAAuditPanel />} />
               <Route path="reports" element={<Reports />} />

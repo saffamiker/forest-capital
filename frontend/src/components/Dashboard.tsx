@@ -65,6 +65,7 @@ const STRATEGY_TABLE_COLUMNS: StrategyTableColumn[] = [
   { label: 'DSR',              term: 'dsr' },
   { label: 'p (FDR)',          term: 'p_fdr' },
   { label: 'CV Score',         term: 'cv_score' },
+  { label: 'Turnover',         term: null },
   { label: 'Tier 1',           term: 'tier1_gates' },
 ]
 
@@ -158,6 +159,9 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
         <span className={(s.cv_stability_score ?? 0) >= 0.60 ? 'text-success' : 'text-warning'}>
           {s.cv_stability_score != null ? s.cv_stability_score.toFixed(2) : '—'}
         </span>
+      </td>
+      <td className="px-3 py-2 font-mono text-white text-xs">
+        {s.avg_monthly_turnover != null ? (s.avg_monthly_turnover * 12).toFixed(1) : '—'}
       </td>
       <td className="px-3 py-2">
         {isSignificant ? (
