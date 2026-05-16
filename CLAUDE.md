@@ -4102,6 +4102,83 @@ GROK MODEL CHURN RUNBOOK:
 
 
 
+─────────────────────────────────────────────────────────────────────────────
+ACADEMIC CONTEXT ARCHITECTURE (migration 008, May 16 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The academic_documents table (migration 008) stores uploaded PDFs and
+plain-text files — only the server-side-extracted text is persisted,
+never the raw binary. Supported document_type values:
+midpoint_requirements, final_presentation_requirements, other.
+
+All agents receive the full text of every stored document as system
+context on every invocation, labelled by document_type. Injection points:
+  - agents/base.py call_claude() — covers the equity / fixed-income /
+    risk / quant analysts, the CIO, the QA agent (and qa_tiered Tier 2/3
+    via QAAgent), and the academic writer.
+  - explicit inject_academic_context() calls — the academic advisor
+    (its own web-search tool call), the Gemini independent analyst, the
+    Grok contrarian analyst, and the Grok/Haiku explainer. Each provider
+    path injects exactly once.
+tools/academic_context.py holds a process-wide cache refreshed on app
+startup (the lifespan handler) and after every upload/delete;
+get_academic_context() / inject_academic_context() are synchronous so
+the sync agent call wrappers can use them.
+
+Purpose: agents are always aware of the academic evaluation criteria
+when generating analysis, feedback, or recommendations.
+
+Endpoints: POST /api/v1/documents/academic/upload (PDF + text, 10 MB
+ceiling), GET /api/v1/documents/academic, DELETE
+/api/v1/documents/academic/{id}. UI: AcademicDocumentsPanel in the
+Reports view.
+
+
+─────────────────────────────────────────────────────────────────────────────
+ANALYTICS LAYER (May 16 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The Analytics page (/analytics) and GET /api/v1/analytics/academic add
+six components, all derived from data already in PostgreSQL
+(market_data_monthly, strategy_results_cache, ff_factors_monthly) — no
+get_full_history() or run_all_strategies() recompute. tools/analytics.py
+holds the pure compute functions.
+
+  - Summary statistics table — CAGR, annualised volatility, Sharpe, max
+    drawdown, skewness for equity / IG / HY / BENCHMARK over the full
+    study period
+  - Rolling correlation chart — 12-month equity-vs-IG and equity-vs-HY
+    correlation, with the 2022 "Correlation Regime Break" marker and
+    pre/post-2022 averages per pair
+  - Regime-conditional performance table — every strategy split at the
+    2022 break, Sharpe + CAGR per sub-period, sorted by post-2022 Sharpe
+  - Drawdown comparison table — max drawdown and recovery months,
+    sorted by max drawdown ascending
+  - Turnover column — added to the Dashboard strategy comparison table
+  - Fama-French factor loadings table — three-factor OLS regression of
+    each strategy's monthly excess return on MKT-RF / SMB / HML (momentum
+    is not in ff_factors_monthly, so this is a three-factor, not Carhart
+    four-factor, regression); betas, annualised alpha, R², and a p<0.05
+    significance flag per coefficient
+
+Every table exports to CSV for the midpoint paper.
+
+
+─────────────────────────────────────────────────────────────────────────────
+MIDPOINT CHECK-IN
+─────────────────────────────────────────────────────────────────────────────
+
+Date:        June 3, Queens University McColl School of Business
+Weight:      10% of the project grade
+Written:     submission due one week before the meetup
+Format:      3 pages, double-spaced, 12-point font
+Sections:    Data / Methodology (1p), Preliminary Results (1p),
+             Roles (0.5p), Next Steps (0.5p)
+Peer review: 3-4 minute critical review per student + 2-minute Q&A
+Grading:     clarity / rigour, analytical progress, results quality,
+             division of labor, peer feedback quality
+
+
 ═══════════════════════════════════════════════════════════════════
 KANBAN BOARD — POST SPRINT 6 (May 15 onwards)
 ═══════════════════════════════════════════════════════════════════
@@ -4118,6 +4195,9 @@ CRITICAL (must complete before June 3):
   ✅ Fix efficient frontier (auth + chart — commits c86034b, 9765d15,
      e2c03b6; structured EfficientFrontierData, cache-backed scatter)
   ✅ Verify Performance Attribution Waterfall
+  ✅ Academic analytics and visualization layer (6 tables/charts)
+  ✅ Document upload feature for agent context (academic_documents table, migration 008)
+  □ Upload midpoint rubric and final presentation requirements via new UI
   □ optimize_weights 'assets' warning — fires every login
   □ alembic upgrade head to 007 on Render
   □ Level 1 code review audit
