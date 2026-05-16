@@ -19,14 +19,13 @@
  *               the deadline.
  */
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, Link } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, Presentation, Download, Loader2, Calendar, AlertCircle,
-  CheckCircle, Clock, ArrowRight, GraduationCap, Edit3,
+  CheckCircle, Clock, ArrowRight, GraduationCap, Edit3, Info,
 } from 'lucide-react'
 import AdvisorPanel from '../components/AdvisorPanel'
-import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 import type { DeliverableType } from '../types/advisor'
 import type { SectionDocType } from '../types/documents'
 
@@ -377,10 +376,23 @@ export default function Reports() {
         <div className="card p-8 text-center text-muted text-sm">Loading deliverables…</div>
       )}
 
-      {/* Agent context documents — upload the rubric / requirements so every
-          AI agent sees the academic evaluation criteria. Independent of the
-          deliverables manifest, so it renders regardless of manifest state. */}
-      <AcademicDocumentsPanel />
+      {/* Academic documents moved to Settings (commit 5/7). A muted info
+          banner points there; the hash anchor scrolls to the section. */}
+      <div className="flex items-start gap-2 px-3 py-2.5 rounded border border-border
+                      bg-navy-800 text-muted text-xs">
+        <Info className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+        <span>
+          Project requirements and agent context documents are managed in{' '}
+          <Link
+            to="/settings#academic-documents"
+            className="text-electric hover:underline"
+          >
+            Settings
+          </Link>
+          . Documents uploaded there are automatically injected into all AI
+          agent sessions.
+        </span>
+      </div>
 
       {/* Controlled advisor panel — opened from a card's "Get Advisor Feedback"
           button with the card's deliverable type preselected. The global

@@ -31,10 +31,13 @@ try:
 except ImportError:  # pragma: no cover
     log = logging.getLogger(__name__)  # type: ignore[assignment]
 
-# The three document types the upload UI offers.
+# The document types the upload UI offers.
 DOCUMENT_TYPES: tuple[str, ...] = (
     "midpoint_requirements",
     "final_presentation_requirements",
+    "midpoint_draft",
+    "presentation_slides",
+    "presentation_script",
     "other",
 )
 
@@ -42,6 +45,9 @@ DOCUMENT_TYPES: tuple[str, ...] = (
 _TYPE_LABELS: dict[str, str] = {
     "midpoint_requirements": "MIDPOINT CHECK-IN REQUIREMENTS",
     "final_presentation_requirements": "FINAL PRESENTATION REQUIREMENTS",
+    "midpoint_draft": "MIDPOINT DRAFT",
+    "presentation_slides": "PRESENTATION SLIDES",
+    "presentation_script": "PRESENTATION SCRIPT",
     "other": "REFERENCE DOCUMENT",
 }
 

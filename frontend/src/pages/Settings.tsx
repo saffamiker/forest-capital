@@ -16,6 +16,7 @@ import axios from 'axios'
 import { Check } from 'lucide-react'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import type { BrandMode } from '../context/BrandContext'
+import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 
 interface SettingsSectionProps {
   id: string
@@ -274,7 +275,7 @@ export default function Settings() {
         title="Academic Documents"
         description="Documents uploaded here are injected into every AI agent session."
       >
-        <Placeholder>Academic documents.</Placeholder>
+        <AcademicDocumentsPanel />
       </SettingsSection>
 
       <SettingsSection

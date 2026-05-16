@@ -107,9 +107,25 @@ class TestFormatAndInject:
 
     def test_document_types_constant(self):
         from tools.academic_context import DOCUMENT_TYPES
-        assert "midpoint_requirements" in DOCUMENT_TYPES
-        assert "final_presentation_requirements" in DOCUMENT_TYPES
-        assert "other" in DOCUMENT_TYPES
+        # Original three plus the three Academic Review types.
+        for t in ("midpoint_requirements", "final_presentation_requirements",
+                  "midpoint_draft", "presentation_slides", "presentation_script",
+                  "other"):
+            assert t in DOCUMENT_TYPES
+
+    def test_new_document_types_accepted_by_upload(self):
+        """The three Academic Review types must pass upload validation —
+        a wrong type is the only thing the pre-DB branch rejects."""
+        for t in ("midpoint_draft", "presentation_slides", "presentation_script"):
+            r = client.post(
+                "/api/v1/documents/academic/upload",
+                files={"file": ("x.txt", b"content", "text/plain")},
+                data={"document_type": t},
+                headers=SESSION_HEADERS,
+            )
+            # Not 422 — the type is valid (a 500 here is just the test-env
+            # DB being absent, which is fine; the point is type acceptance).
+            assert r.status_code != 422
 
 
 # ── Migration 008 ─────────────────────────────────────────────────────────────

@@ -22,9 +22,12 @@ interface AcademicDoc {
 }
 
 const DOC_TYPE_OPTIONS: { value: string; label: string }[] = [
-  { value: 'midpoint_requirements',          label: 'Midpoint requirements' },
+  { value: 'midpoint_requirements',           label: 'Midpoint requirements' },
   { value: 'final_presentation_requirements', label: 'Final presentation requirements' },
-  { value: 'other',                          label: 'Other' },
+  { value: 'midpoint_draft',                  label: 'Midpoint draft' },
+  { value: 'presentation_slides',             label: 'Presentation slides' },
+  { value: 'presentation_script',             label: 'Presentation script' },
+  { value: 'other',                           label: 'Other' },
 ]
 
 const TYPE_LABEL: Record<string, string> = Object.fromEntries(
