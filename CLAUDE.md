@@ -3074,9 +3074,10 @@ SCREEN SECTIONS:
      [ Clear old attempts ]  — Michael only, deletes >30 days
 
 NAVIGATION:
-  Admin screen accessible from nav bar (settings icon ⚙)
-  Visible to all authenticated users
-  Not shown in Present mode (clean presentation UI)
+  Superseded — the nav-bar gear icon (⚙) now navigates to the /settings
+  page (see SETTINGS PAGE section). Data-table health lives in the
+  Settings → Data and Study Period section, not a separate /admin screen.
+  Visible to all authenticated users; not shown in Present mode.
 
 ─── DATA SOURCES PANEL (Statistical Evidence screen) ────────────────────────
 
@@ -3948,7 +3949,8 @@ Sprint 5 (COMPLETE — commits cec0338, f5bfd33, addendum commits):
     Auth Attempts (see security section below)
   ─ Action buttons: Force Refresh (Michael only),
     Run Sanity Checks, Export Data Profile
-  ─ Settings icon (⚙) in nav bar links to /admin
+  ─ Superseded — the nav-bar gear icon (⚙) links to /settings, not a
+    separate /admin screen (see SETTINGS PAGE section)
   ─ Hidden in Present mode
   ─ All four team members have read access
   SECURITY — AUTH ATTEMPT LOGGING + GEOLOCKING
@@ -4108,10 +4110,21 @@ ACADEMIC CONTEXT ARCHITECTURE (migration 008, May 16 2026)
 
 The academic_documents table (migration 008) stores uploaded PDF and
 Markdown (.md) files — only the server-side-extracted text is persisted,
-never the raw binary. File type is decided by extension, not MIME type:
-PDFs go through pypdf; .md files are read directly as UTF-8 (pypdf
-bypassed). Any other extension is rejected with a 400. Supported
-document_type values: midpoint_requirements,
+never the raw binary. File type is decided by extension, not MIME type
+(browsers send Markdown as text/plain or text/markdown inconsistently —
+the extension is authoritative): PDFs go through pypdf; .md files are
+read directly as UTF-8, pypdf bypassed, content_text is the file
+verbatim. Any other extension is rejected with a 400. A successful
+upload logs `academic_document_ingested` with file_type and char_count
+so ingestion is verifiable in the production logs.
+
+extract_document_text() in tools/academic_context.py is PDF-only — the
+former generic non-PDF text branch was removed (ad8d79c cleanup) once
+.md handling moved into the upload endpoint; the function now only ever
+receives PDF content. The frontend file input accepts ".pdf,.md" and the
+document list shows a PDF / MD format badge per file.
+
+Supported document_type values: midpoint_requirements,
 final_presentation_requirements, midpoint_draft, presentation_slides,
 presentation_script, other.
 
@@ -4220,6 +4233,14 @@ dropdown.
 Document types (academic_documents): the upload dropdown offers
 midpoint_requirements, final_presentation_requirements, midpoint_draft,
 presentation_slides, presentation_script, other.
+
+STALENESS PILLS — EXPECTED BEHAVIOUR: market_data_monthly and
+ff_factors_monthly will legitimately show RED staleness pills. The
+staleness rule measures the newest data date against today (red > 30
+days behind, amber 15-30, green within 15) — and the dataset is
+intentionally locked at December 2025, so the newest row is several
+months behind "today". This is correct behaviour, not a bug: the pill
+is reporting the dataset's deliberate end date, not a pipeline failure.
 
 
 ═══════════════════════════════════════════════════════════════════
@@ -5352,7 +5373,8 @@ BRANDING
 ─────────────────────────────────────────────────────────────────────────────
 
 Two branding modes, togglable on demand. Default is McColl-only.
-Toggle is accessible from the header settings icon (authenticated users).
+The toggle lives in Settings → Organisation (the header gear icon
+navigates to /settings).
 Selection persists in the user's session.
 
 ─── MODE A: McCOLL DEFAULT (active on first load) ───────────────────────────
