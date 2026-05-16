@@ -1,0 +1,167 @@
+"""
+tests/test_academic_documents.py
+
+Tests for the document-upload feature (Feature 2):
+  - tools/academic_context.py text extraction, formatting, injection
+  - migration 008 structure
+  - POST /api/v1/documents/academic/upload request validation
+
+The DB-touching paths (insert / list / delete) are exercised in
+deployment, not here — the test environment has no PostgreSQL, so these
+tests cover the pure functions and the pre-DB validation branches.
+"""
+from __future__ import annotations
+
+import io
+import os
+import sys
+
+import pytest
+from fastapi.testclient import TestClient
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("SECRET_KEY", "test-secret-key-at-least-32-characters-long")
+os.environ.setdefault("MASTER_API_KEY", "test_master_key")
+os.environ.setdefault(
+    "ALLOWED_EMAILS",
+    "ruurdsm@queens.edu,thaob@queens.edu,murdockm@queens.edu,panttserk@queens.edu",
+)
+
+from main import app  # noqa: E402
+from auth import generate_session_token  # noqa: E402
+
+client = TestClient(app)
+SESSION_HEADERS = {"X-API-Key": generate_session_token("ruurdsm@queens.edu")}
+
+
+# ── Text extraction ───────────────────────────────────────────────────────────
+
+class TestTextExtraction:
+    def test_plain_text_file_decodes(self):
+        from tools.academic_context import extract_document_text
+        out = extract_document_text("rubric.txt", b"Midpoint is worth 10%.")
+        assert out == "Midpoint is worth 10%."
+
+    def test_empty_text_file_raises(self):
+        from tools.academic_context import extract_document_text
+        with pytest.raises(ValueError):
+            extract_document_text("empty.txt", b"   ")
+
+    def test_pdf_text_is_extracted(self):
+        """A text-based PDF must round-trip through pypdf."""
+        from reportlab.pdfgen import canvas
+        from tools.academic_context import extract_document_text
+
+        buf = io.BytesIO()
+        c = canvas.Canvas(buf)
+        c.drawString(100, 700, "FINAL PRESENTATION worth thirty five percent")
+        c.save()
+        out = extract_document_text("requirements.pdf", buf.getvalue())
+        assert "thirty five percent" in out
+
+    def test_non_pdf_extension_treated_as_text(self):
+        from tools.academic_context import extract_document_text
+        # A .md file is plain text — decoded, not run through pypdf.
+        assert extract_document_text("notes.md", b"# Heading") == "# Heading"
+
+
+# ── Formatting and injection ──────────────────────────────────────────────────
+
+class TestFormatAndInject:
+    def test_empty_documents_format_to_empty_string(self):
+        from tools.academic_context import format_academic_context
+        assert format_academic_context([]) == ""
+
+    def test_documents_labelled_by_type(self):
+        from tools.academic_context import format_academic_context
+        out = format_academic_context([
+            {"name": "rubric.pdf", "document_type": "midpoint_requirements",
+             "content_text": "3 pages double spaced"},
+            {"name": "final.txt", "document_type": "final_presentation_requirements",
+             "content_text": "18-20 minutes"},
+        ])
+        assert "MIDPOINT CHECK-IN REQUIREMENTS" in out
+        assert "FINAL PRESENTATION REQUIREMENTS" in out
+        assert "3 pages double spaced" in out
+        assert "18-20 minutes" in out
+        assert "ACADEMIC CONTEXT" in out
+
+    def test_inject_is_noop_when_no_documents(self):
+        """With no uploaded documents the system prompt is returned
+        unchanged — every agent can call inject unconditionally."""
+        from tools.academic_context import inject_academic_context, _CONTEXT_CACHE
+        _CONTEXT_CACHE["text"] = ""
+        base = "You are an analyst."
+        assert inject_academic_context(base) == base
+
+    def test_inject_appends_cached_context(self):
+        from tools.academic_context import inject_academic_context, _CONTEXT_CACHE
+        _CONTEXT_CACHE["text"] = "\n\n=== ACADEMIC CONTEXT ===\n..."
+        try:
+            out = inject_academic_context("You are an analyst.")
+            assert out.startswith("You are an analyst.")
+            assert "ACADEMIC CONTEXT" in out
+        finally:
+            _CONTEXT_CACHE["text"] = ""
+
+    def test_document_types_constant(self):
+        from tools.academic_context import DOCUMENT_TYPES
+        assert "midpoint_requirements" in DOCUMENT_TYPES
+        assert "final_presentation_requirements" in DOCUMENT_TYPES
+        assert "other" in DOCUMENT_TYPES
+
+
+# ── Migration 008 ─────────────────────────────────────────────────────────────
+
+class TestMigration008:
+    def test_revision_chains_from_007(self):
+        import importlib.util
+        path = os.path.join(
+            os.path.dirname(__file__), "..", "backend", "migrations", "versions",
+            "008_create_academic_documents.py",
+        )
+        spec = importlib.util.spec_from_file_location("migration_008", path)
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        assert mod.revision == "008"
+        assert mod.down_revision == "007"
+        assert hasattr(mod, "upgrade") and hasattr(mod, "downgrade")
+
+
+# ── Upload endpoint validation ────────────────────────────────────────────────
+
+class TestUploadValidation:
+    """The validation branches fire before any database access, so they
+    are testable without PostgreSQL."""
+
+    def test_unknown_document_type_rejected(self):
+        r = client.post(
+            "/api/v1/documents/academic/upload",
+            files={"file": ("x.txt", b"content", "text/plain")},
+            data={"document_type": "not_a_real_type"},
+            headers=SESSION_HEADERS,
+        )
+        assert r.status_code == 422
+        assert "document_type" in r.text
+
+    def test_empty_file_rejected(self):
+        r = client.post(
+            "/api/v1/documents/academic/upload",
+            files={"file": ("x.txt", b"", "text/plain")},
+            data={"document_type": "other"},
+            headers=SESSION_HEADERS,
+        )
+        assert r.status_code == 422
+
+    def test_upload_requires_auth(self):
+        r = client.post(
+            "/api/v1/documents/academic/upload",
+            files={"file": ("x.txt", b"content", "text/plain")},
+            data={"document_type": "other"},
+        )
+        assert r.status_code == 401
+
+    def test_list_endpoint_requires_auth(self):
+        assert client.get("/api/v1/documents/academic").status_code == 401

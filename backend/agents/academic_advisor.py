@@ -275,10 +275,22 @@ def _call_advisor_with_web_tools(
     if enable_fetch:
         tools.append(_WEB_FETCH_TOOL)
 
+    # Inject any uploaded academic-context documents (midpoint rubric,
+    # final-presentation requirements) so the advisor's feedback is anchored
+    # to the actual evaluation criteria. This agent builds its own
+    # web-search-tool call rather than going through call_claude, so it
+    # injects here. Fail-open.
+    system_prompt = _SYSTEM_PROMPT
+    try:
+        from tools.academic_context import inject_academic_context
+        system_prompt = inject_academic_context(_SYSTEM_PROMPT)
+    except Exception:  # noqa: BLE001
+        pass
+
     response = client.messages.create(
         model=SONNET_MODEL,
         max_tokens=max_tokens,
-        system=_SYSTEM_PROMPT,
+        system=system_prompt,
         tools=tools,
         messages=[{"role": "user", "content": user_message}],
     )

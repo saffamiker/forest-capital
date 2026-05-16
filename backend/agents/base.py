@@ -72,10 +72,29 @@ def call_claude(
     message = client.messages.create(
         model=model,
         max_tokens=max_tokens,
-        system=system_prompt,
+        system=_with_academic_context(system_prompt),
         messages=[{"role": "user", "content": user_message}],
     )
     return message.content[0].text
+
+
+def _with_academic_context(system_prompt: str) -> str:
+    """
+    Appends any uploaded academic reference documents (the midpoint rubric,
+    the final-presentation requirements, etc.) to a system prompt.
+
+    This is the single injection point for every Anthropic agent that goes
+    through call_claude — equity / fixed-income / risk / quant analysts,
+    the CIO, the QA agent and the academic writer. Agents that build their
+    own API call (academic_advisor with web-search tools, the Gemini and
+    Grok agents) call inject_academic_context() at their own call sites.
+    Fail-open: any error here must never block an agent response.
+    """
+    try:
+        from tools.academic_context import inject_academic_context
+        return inject_academic_context(system_prompt)
+    except Exception:  # noqa: BLE001
+        return system_prompt
 
 
 def build_agent_response(

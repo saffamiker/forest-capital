@@ -26,6 +26,7 @@ import {
   CheckCircle, Clock, ArrowRight, GraduationCap, Edit3,
 } from 'lucide-react'
 import AdvisorPanel from '../components/AdvisorPanel'
+import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 import type { DeliverableType } from '../types/advisor'
 import type { SectionDocType } from '../types/documents'
 
@@ -375,6 +376,11 @@ export default function Reports() {
       {loading && (
         <div className="card p-8 text-center text-muted text-sm">Loading deliverables…</div>
       )}
+
+      {/* Agent context documents — upload the rubric / requirements so every
+          AI agent sees the academic evaluation criteria. Independent of the
+          deliverables manifest, so it renders regardless of manifest state. */}
+      <AcademicDocumentsPanel />
 
       {/* Controlled advisor panel — opened from a card's "Get Advisor Feedback"
           button with the card's deliverable type preselected. The global

@@ -32,6 +32,16 @@ from agents._xai_config import build_headers, resolve_xai_config
 
 log = structlog.get_logger(__name__)
 
+
+def _academic_ctx(system_prompt: str) -> str:
+    """Append uploaded academic-context documents to the Grok system
+    prompt so the contrarian sees the evaluation criteria. Fail-open."""
+    try:
+        from tools.academic_context import inject_academic_context
+        return inject_academic_context(system_prompt)
+    except Exception:  # noqa: BLE001
+        return system_prompt
+
 # XAI_API_URL is kept as a backwards-compatible export — older tests that
 # import it for assertion purposes still resolve, but the runtime path
 # routes through resolve_xai_config() so a Render deploy with an
@@ -113,7 +123,7 @@ class ContrarianAnalyst:
                     json={
                         "model": xai.model,
                         "messages": [
-                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "system", "content": _academic_ctx(_SYSTEM_PROMPT)},
                             {"role": "user", "content": user_prompt},
                         ],
                         "max_tokens": 800,

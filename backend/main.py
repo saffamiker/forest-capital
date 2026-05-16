@@ -12,7 +12,10 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI, Depends, HTTPException, Query, Response, WebSocket,
+    WebSocketDisconnect, UploadFile, File, Form,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
@@ -59,6 +62,15 @@ log = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     log.info("forest_capital_starting", environment=ENVIRONMENT, frontend_url=FRONTEND_URL)
+    # Warm the academic-context cache so the first agent invocation after a
+    # restart already carries the uploaded rubric / requirements documents.
+    # Fail-open: a cold cache simply means agents run without that context.
+    if ENVIRONMENT != "test":
+        try:
+            from tools.academic_context import refresh_academic_context
+            await refresh_academic_context()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("academic_context_warm_failed", error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
@@ -554,6 +566,80 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
     except Exception as exc:
         log.warning("academic_analytics_failed", error=str(exc))
         return {"available": False, "note": "analytics computation failed"}
+
+
+# ── Academic documents (agent context) ───────────────────────────────────────
+
+# 10 MB upload ceiling — the rubric / requirements documents are short;
+# anything larger is almost certainly the wrong file.
+_ACADEMIC_DOC_MAX_BYTES = 10 * 1024 * 1024
+
+
+@app.post("/api/v1/documents/academic/upload")
+async def upload_academic_document(
+    file: UploadFile = File(...),
+    document_type: str = Form("other"),
+    session: dict = Depends(require_auth),
+):
+    """
+    Uploads a PDF or plain-text reference document (the midpoint rubric,
+    the final-presentation requirements, etc.). Text is extracted
+    server-side; only the text is persisted. After storage every agent
+    injects the document as system context on its next invocation.
+    """
+    from tools.academic_context import (
+        DOCUMENT_TYPES, extract_document_text, insert_academic_document,
+    )
+
+    if document_type not in DOCUMENT_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown document_type '{document_type}'. "
+                   f"Valid: {', '.join(DOCUMENT_TYPES)}",
+        )
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=422, detail="Uploaded file is empty.")
+    if len(raw) > _ACADEMIC_DOC_MAX_BYTES:
+        raise HTTPException(status_code=422, detail="File too large (max 10 MB).")
+
+    try:
+        content_text = extract_document_text(file.filename or "document", raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    doc_id = await insert_academic_document(
+        file.filename or "document", document_type, content_text,
+    )
+    if not doc_id:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not store the document — database unavailable.",
+        )
+    return {
+        "id": doc_id,
+        "name": file.filename,
+        "document_type": document_type,
+        "char_count": len(content_text),
+    }
+
+
+@app.get("/api/v1/documents/academic")
+async def list_academic_docs(session: dict = Depends(require_auth)):
+    """Lists uploaded academic documents (metadata only — no content text)."""
+    from tools.academic_context import list_academic_documents
+    return {"documents": await list_academic_documents()}
+
+
+@app.delete("/api/v1/documents/academic/{doc_id}")
+async def delete_academic_doc(doc_id: str, session: dict = Depends(require_auth)):
+    """Deletes an academic document and refreshes the agent-context cache."""
+    from tools.academic_context import delete_academic_document
+    ok = await delete_academic_document(doc_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    return {"deleted": True, "id": doc_id}
 
 
 # ── Regime ────────────────────────────────────────────────────────────────────

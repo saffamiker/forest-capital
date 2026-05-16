@@ -37,6 +37,17 @@ import structlog
 from agents.base import HAIKU_MODEL, SCOPE_ENFORCEMENT, call_claude
 
 
+def _inject_academic(system_prompt: str) -> str:
+    """Append uploaded academic-context documents to a Grok system prompt.
+    The Haiku fallback path goes through call_claude, which injects on its
+    own — so each provider path injects exactly once. Fail-open."""
+    try:
+        from tools.academic_context import inject_academic_context
+        return inject_academic_context(system_prompt)
+    except Exception:  # noqa: BLE001
+        return system_prompt
+
+
 # Backwards-compatible exports — older tests import these for assertion
 # purposes. The runtime path now routes through agents/_xai_config so the
 # Explainer transparently supports both direct xAI (`xai-...` keys against
@@ -127,7 +138,7 @@ def _call_grok(
             json={
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": _inject_academic(system_prompt)},
                     {"role": "user", "content": user_message},
                 ],
                 "max_tokens": max_tokens,

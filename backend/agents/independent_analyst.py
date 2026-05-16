@@ -76,9 +76,18 @@ class IndependentAnalyst:
             import google.generativeai as genai  # type: ignore[import-untyped]
 
             genai.configure(api_key=api_key)
+            # Inject any uploaded academic-context documents so the Gemini
+            # dissenter judges the consensus against the same evaluation
+            # criteria the Claude agents see. Fail-open.
+            system_instruction = _SYSTEM_PROMPT
+            try:
+                from tools.academic_context import inject_academic_context
+                system_instruction = inject_academic_context(_SYSTEM_PROMPT)
+            except Exception:  # noqa: BLE001
+                pass
             model = genai.GenerativeModel(
                 "gemini-1.5-pro",
-                system_instruction=_SYSTEM_PROMPT,
+                system_instruction=system_instruction,
             )
 
             evidence = self._build_evidence(council_summary, strategy_results)
