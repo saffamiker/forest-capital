@@ -568,6 +568,37 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
         return {"available": False, "note": "analytics computation failed"}
 
 
+_RISK_FREE_SOURCE = "FRED DTB3 (3-month T-bill, mean monthly rate, annualised)"
+
+
+@app.get("/api/v1/analytics/config")
+async def get_analytics_config(session: dict = Depends(require_auth)):
+    """
+    The analytics assumptions surfaced in Settings → Analytics
+    Configuration. Currently the risk-free rate applied to every Sharpe
+    ratio and to the efficient frontier — the mean monthly DTB3 rate from
+    market_data_monthly, annualised (×12). This is the SAME value the
+    /api/optimize/weights frontier and the analytics layer use. Read-only.
+    """
+    if ENVIRONMENT == "test":
+        return {"available": False, "risk_free_rate": None,
+                "risk_free_source": _RISK_FREE_SOURCE}
+    try:
+        from tools.cache import get_monthly_returns
+        monthly = await get_monthly_returns()
+        rf_list = (monthly or {}).get("rf") or []
+        rf_annual = (sum(rf_list) / len(rf_list) * 12) if rf_list else None
+        return {
+            "available": rf_annual is not None,
+            "risk_free_rate": round(rf_annual, 4) if rf_annual is not None else None,
+            "risk_free_source": _RISK_FREE_SOURCE,
+        }
+    except Exception as exc:
+        log.warning("analytics_config_failed", error=str(exc))
+        return {"available": False, "risk_free_rate": None,
+                "risk_free_source": _RISK_FREE_SOURCE}
+
+
 # ── Admin: data status ────────────────────────────────────────────────────────
 
 @app.get("/api/v1/admin/data-status")

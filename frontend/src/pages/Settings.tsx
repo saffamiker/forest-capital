@@ -172,6 +172,59 @@ function DataStudyPeriodSection() {
   )
 }
 
+// ── 3. Analytics Configuration ────────────────────────────────────────────────
+
+interface AnalyticsConfig {
+  available: boolean
+  risk_free_rate: number | null
+  risk_free_source: string
+}
+
+function AnalyticsConfigurationSection() {
+  const [config, setConfig] = useState<AnalyticsConfig | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    axios.get<AnalyticsConfig>('/api/v1/analytics/config')
+      .then((res) => { if (!cancelled) setConfig(res.data) })
+      .catch(() => { if (!cancelled) setConfig(null) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  const rate = config?.risk_free_rate
+  const source = config?.risk_free_source
+    ?? 'FRED DTB3 (3-month T-bill, mean monthly rate, annualised)'
+
+  return (
+    <div>
+      <h3 className="text-sm font-medium text-white">Risk-Free Rate</h3>
+      <p className="text-xs text-muted mt-0.5">
+        Used for all Sharpe ratio and efficient frontier calculations.
+      </p>
+      <div className="mt-3 px-3 py-3 rounded border border-border bg-navy-800 space-y-1.5">
+        <div className="text-2xs text-muted">
+          Source: <span className="text-slate-300">{source}</span>
+        </div>
+        <div className="text-sm text-white">
+          Current value:{' '}
+          <span className="font-mono text-electric text-base">
+            {loading
+              ? '…'
+              : rate != null
+                ? `${(rate * 100).toFixed(2)}%`
+                : 'unavailable'}
+          </span>
+        </div>
+        <div className="text-2xs text-muted italic">
+          Read-only — not user editable at this stage.
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default function Settings() {
   const location = useLocation()
 
@@ -213,7 +266,7 @@ export default function Settings() {
         title="Analytics Configuration"
         description="Assumptions applied across all analytics and the efficient frontier."
       >
-        <Placeholder>Analytics configuration.</Placeholder>
+        <AnalyticsConfigurationSection />
       </SettingsSection>
 
       <SettingsSection

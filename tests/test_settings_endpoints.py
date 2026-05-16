@@ -43,3 +43,17 @@ class TestDataStatus:
         assert "study_period" in body
         assert "tables" in body
         assert isinstance(body["tables"], list)
+
+
+class TestAnalyticsConfig:
+    def test_requires_auth(self):
+        assert client.get("/api/v1/analytics/config").status_code == 401
+
+    def test_returns_risk_free_contract(self):
+        r = client.get("/api/v1/analytics/config", headers=SESSION_HEADERS)
+        assert r.status_code == 200
+        body = r.json()
+        assert "available" in body
+        assert "risk_free_rate" in body
+        # The source label must name FRED DTB3 — academic transparency.
+        assert "DTB3" in body["risk_free_source"]
