@@ -4244,76 +4244,71 @@ is reporting the dataset's deliberate end date, not a pipeline failure.
 
 
 ═══════════════════════════════════════════════════════════════════
-KANBAN BOARD — POST SPRINT 6 (May 15 onwards)
+KANBAN BOARD — Sprint 6 closed, Kanban adopted (May 16 2026)
 ═══════════════════════════════════════════════════════════════════
 
-Work is no longer sprint-batched. Pull items from BACKLOG as
-time allows. All items are independent unless noted.
+Sprint structure is retired. Work is now Kanban with three columns:
+Backlog | In Progress | Done. A June 3 milestone groups the items that
+must land before the midpoint check-in.
 
-CRITICAL (must complete before June 3):
-  ✅ FF factors warm cache path fixed (893 backend tests)
-  ✅ Opus 4 → Opus 4.7 upgrade (retirement Jun 15 2026)
-  ✅ XAI OpenRouter auto-detection via agents/_xai_config.py
-  ✅ Push memory leak fix (commit 9e9e51e — get_full_history 30s memo,
-     NullPool engine singleton, _TIER2_EXECUTOR singleton)
-  ✅ Fix efficient frontier (auth + chart — commits c86034b, 9765d15,
-     e2c03b6; structured EfficientFrontierData, cache-backed scatter)
-  ✅ Verify Performance Attribution Waterfall
-  ✅ Academic analytics and visualization layer (6 tables/charts)
-  ✅ Document upload feature for agent context (academic_documents table, migration 008)
-  □ Upload midpoint rubric and final presentation requirements via new UI
-  □ optimize_weights 'assets' warning — fires every login
-  □ alembic upgrade head to 007 on Render
-  □ Level 1 code review audit
-  □ Team Test Guide (docs/TEAM_TEST_GUIDE.md)
-  □ Execute test script — all three team members
-  □ Fix punch list from test results
-  □ Professor link sent (~May 20)
-    Add professor email to ALLOWED_EMAILS on Render
-    Send outreach email (two variants drafted)
+This is the board OF RECORD in the repo. A mirror GitHub Projects board
+is maintained separately — creating/updating it requires `gh auth login`
+with the `project` scope (the CLI was unauthenticated when this section
+was written, so the GitHub board was not updated programmatically).
 
-  □ Level 1 code review audit
-    Claude Code prompt: performance, architecture, dead code,
-    consistency audit → CRITICAL/IMPORTANT/LOW report
-  □ Team Test Guide (docs/TEAM_TEST_GUIDE.md)
-    ~52 structured tests for Bob and Molly
-    AI-facilitated, forced evidence collection
-    Email artifact format → ruurdsm@queens.edu
-  □ Execute test script — all three team members
-  □ Fix punch list from test results
-  □ Professor link sent (~May 20)
-    Add professor email to ALLOWED_EMAILS on Render
-    Send outreach email (two variants drafted)
+─── DONE ──────────────────────────────────────────────────────────────
+  Sprints 1–6 in full (see the Sprint history table at the top), plus
+  the post-Sprint-6 stream:
+  ✅ Zero-traffic memory leak fixed — get_full_history 30s memo,
+     NullPool read-only engine singleton, _TIER2_EXECUTOR singleton
+  ✅ Opus 4 → Opus 4.7; Grok grok-3-mini → grok-4 → grok-4.3
+  ✅ XAI OpenRouter auto-detection (agents/_xai_config.py)
+  ✅ Optimizer NaN/Inf guard (_returns_have_finite_moments)
+  ✅ Efficient Frontier — structured payload, market_data_monthly
+     equity/IG/HY universe, target-return sweep over the full
+     long-only space
+  ✅ Academic analytics + visualization layer (6 components, /analytics)
+  ✅ Document upload for agent context (academic_documents, migration 008)
+  ✅ Markdown (.md) upload support; extract_document_text() PDF-only
+     (dead non-PDF branch removed)
+  ✅ Settings page (/settings) — five sections, nav gear icon rewired
+  ✅ Performance Attribution Waterfall verified
+  ✅ CLAUDE.md + README brought current
 
-IMPORTANT (complete before July 1):
-  □ Significance framing — update MetricTile amber note
-    and Present mode "3 strategies outperform" view
-  □ Explainer §2.2 — Council persona explanations
-    "View system prompt" modal on each AgentCard
-    loadPersona namespace consumer
-  ✅ Grok upgrade grok-3-mini → grok-4 → grok-4.3 (earlier aliases retired on OpenRouter, 404)
-  □ Demo rehearsal — Present mode end-to-end
-    Dashboard → Statistical Evidence → Regime Analysis
-    → Council (live query) → QA Audit → Reports
-  □ WCAG AA accessibility audit (axe-core)
-  □ v1.0.0-presentation git tag
-  □ Final README + MANIFEST update
+─── IN PROGRESS ───────────────────────────────────────────────────────
+  □ Academic Review endpoint (dispatched this session)
 
-POLISH (nice to have before July 1):
-  □ Explainer HIGH+trivial items from EXPLAINER_OPPORTUNITIES.md
-    §1.1-1.4 already done — remaining HIGH items:
-    §2.4 Strategy detail card labels
-  □ Team Primer styled modal (replaces static .md file)
-  □ Performance benchmarks (p95 response times)
-  □ Print stylesheet (@media print)
-  □ test_reproducibility.py — pipeline determinism
-  □ test_report_accuracy.py — every number traceable to DB
+─── BACKLOG ────────────────────────────────────────────────────────────
 
-POST JULY 1 (backlog for commercial MDP venture):
-  □ Parameter Explorer panel (/api/explain/parameter consumer)
-  □ Live demo running commentary (Present mode floating panel)
-  □ OpenRouter migration for multi-provider cost optimisation
-  □ Automatic regression alerting (Admin screen)
+  HIGH — must complete before June 3:
+  □ Changelog + What's New modal + CI/CD pipeline (prompt ready,
+    not yet dispatched)
+  □ Site tour with academic rationale framing (prompt not yet written)
+  □ Upload midpoint_requirements.md and final_presentation_requirements.md
+    via Settings (files ready, awaiting dispatch)
+  □ alembic upgrade head on Render for any new migrations
+  □ Visual pass: /settings, anchor scroll, staleness pills, Reports banner
+  □ Written midpoint submission (3 pages, due one week before June 3)
+  □ Code review and refinement pass
+  □ UAT test guide (after code review)
+
+  MEDIUM — improves quality before June 3:
+  □ Midpoint draft upload once written (unlocks the Deliverable Quality
+    section of Academic Review)
+  □ Presentation slides and script upload once prepared
+  □ Connection._cancel warning investigation
+
+  POST-DEADLINE:
+  □ Move to develop → main PR flow with required status checks
+  □ Four-factor (Carhart) FF if MOM data can be sourced
+  □ True portfolio turnover in the backtester
+
+─── JUNE 3 MILESTONE ───────────────────────────────────────────────────
+  Items that must land for the midpoint check-in:
+  □ Written midpoint submission
+  □ Alembic migration applied on Render
+  □ Academic Review endpoint
+  □ Midpoint draft uploaded
 
 
 
