@@ -16,7 +16,7 @@ import { useEffect, useState } from 'react'
 import axios from 'axios'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, ReferenceLine,
+  ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from 'recharts'
 import TableExportButton from '../components/TableExportButton'
 
@@ -28,11 +28,20 @@ const ACCENT = '#7c3aed'
 interface SummaryRow {
   asset: string
   cagr: number
+  excess_return: number | null
   ann_volatility: number
   sharpe_ratio: number
   max_drawdown: number
   skewness: number
   n_months: number
+}
+
+type RollingExcessPoint = { date: string } & Record<string, number | null>
+
+interface RollingExcess {
+  strategies: string[]
+  points: RollingExcessPoint[]
+  window_months: number
 }
 
 interface CorrPoint {
@@ -93,6 +102,7 @@ interface AnalyticsPayload {
   cumulative_returns?: CumulativeReturns
   summary_statistics?: SummaryRow[]
   rolling_correlation?: RollingCorrelation
+  rolling_excess_return?: RollingExcess
   regime_conditional?: RegimeRow[]
   drawdown_comparison?: DrawdownRow[]
   factor_loadings?: FactorRow[]
@@ -113,6 +123,13 @@ const pct = (x: number | null | undefined): string =>
   x == null ? '—' : `${(x * 100).toFixed(2)}%`
 const num = (x: number | null | undefined, dp = 2): string =>
   x == null ? '—' : x.toFixed(dp)
+
+// Percentage with green/red sign colouring — used for excess return.
+function SignedPct({ x }: { x: number | null | undefined }) {
+  if (x == null) return <>—</>
+  const cls = x > 0 ? 'text-success' : x < 0 ? 'text-danger' : 'text-muted'
+  return <span className={cls}>{`${(x * 100).toFixed(2)}%`}</span>
+}
 
 // ── Shared table chrome ───────────────────────────────────────────────────────
 
@@ -155,27 +172,30 @@ const TD = ({ children, right = false, mono = false }:
 // ── 1. Summary statistics table ───────────────────────────────────────────────
 
 function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
-  const headers = ['Asset', 'CAGR', 'Ann. Volatility', 'Sharpe', 'Max Drawdown', 'Skewness']
+  const headers = ['Asset', 'CAGR', 'Excess Return (ann.)', 'Ann. Volatility',
+                   'Sharpe', 'Max Drawdown', 'Skewness']
   const exportRows = rows.map((r) => [
-    r.asset, pct(r.cagr), pct(r.ann_volatility), num(r.sharpe_ratio),
-    pct(r.max_drawdown), num(r.skewness),
+    r.asset, pct(r.cagr), pct(r.excess_return), pct(r.ann_volatility),
+    num(r.sharpe_ratio), pct(r.max_drawdown), num(r.skewness),
   ])
   return (
     <SectionCard
       title="Summary Statistics"
-      subtitle="Full study period — equity, investment-grade bonds, high-yield bonds, and the benchmark."
+      subtitle="Full study period — equity, investment-grade bonds, high-yield bonds, and the benchmark. Excess return is annualised CAGR minus the benchmark CAGR."
       exportButton={<TableExportButton tableId="summary_statistics" headers={headers} rows={exportRows} />}
     >
       <table className="w-full">
         <thead><tr className="border-b border-border">
-          <TH>Asset</TH><TH right>CAGR</TH><TH right>Ann. Volatility</TH>
-          <TH right>Sharpe</TH><TH right>Max Drawdown</TH><TH right>Skewness</TH>
+          <TH>Asset</TH><TH right>CAGR</TH><TH right>Excess Return (ann.)</TH>
+          <TH right>Ann. Volatility</TH><TH right>Sharpe</TH>
+          <TH right>Max Drawdown</TH><TH right>Skewness</TH>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
             <tr key={r.asset} className="border-b border-border/50">
               <TD>{r.asset}</TD>
               <TD right mono>{pct(r.cagr)}</TD>
+              <TD right mono><SignedPct x={r.excess_return} /></TD>
               <TD right mono>{pct(r.ann_volatility)}</TD>
               <TD right mono>{num(r.sharpe_ratio)}</TD>
               <TD right mono>{pct(r.max_drawdown)}</TD>
@@ -184,6 +204,60 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
           ))}
         </tbody>
       </table>
+    </SectionCard>
+  )
+}
+
+// ── Rolling excess return chart ───────────────────────────────────────────────
+
+function RollingExcessReturnChart({ data }: { data: RollingExcess }) {
+  const breakX = data.points.find((p) => p.date >= '2022-01-01')?.date
+  // Numeric bounds for the above/below-zero shading.
+  const vals = data.points.flatMap((p) =>
+    data.strategies.map((s) => p[s]).filter((v): v is number => v != null))
+  const ymax = vals.length ? Math.max(0, ...vals) : 0
+  const ymin = vals.length ? Math.min(0, ...vals) : 0
+
+  const headers = ['Date', ...data.strategies]
+  const exportRows = data.points.map((p) => [
+    p.date, ...data.strategies.map((s) => p[s] ?? ''),
+  ])
+
+  return (
+    <SectionCard
+      title="Rolling Excess Return vs Benchmark"
+      subtitle={`${data.window_months}-month rolling total return of each strategy minus the 100% equity benchmark. Above zero is outperformance, below zero is underperformance.`}
+      exportButton={<TableExportButton tableId="rolling_excess_return" headers={headers} rows={exportRows} />}
+    >
+      <ResponsiveContainer width="100%" height={320}>
+        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 4 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} minTickGap={56} />
+          <YAxis
+            tick={{ fill: '#64748b', fontSize: 11 }}
+            tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
+          />
+          <Tooltip
+            contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c',
+                            borderRadius: 8, fontSize: 12 }}
+          />
+          <Legend wrapperStyle={{ fontSize: 11 }} />
+          {/* Outperformance / underperformance half-plane shading. */}
+          <ReferenceArea y1={0} y2={ymax} fill="#10b981" fillOpacity={0.05} />
+          <ReferenceArea y1={ymin} y2={0} fill="#ef4444" fillOpacity={0.05} />
+          <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1.5} />
+          {breakX && (
+            <ReferenceLine x={breakX} stroke={ACCENT} strokeDasharray="4 4"
+              label={{ value: 'Correlation Regime Break', fill: ACCENT, fontSize: 11,
+                       position: 'insideTopRight' }} />
+          )}
+          {data.strategies.map((s, i) => (
+            <Line key={s} type="monotone" dataKey={s} name={s}
+                  stroke={SERIES_COLORS[i % SERIES_COLORS.length]}
+                  strokeWidth={1.5} dot={false} connectNulls />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
     </SectionCard>
   )
 }
@@ -489,6 +563,8 @@ export default function AcademicAnalytics() {
             <SummaryStatisticsTable rows={data.summary_statistics} />}
           {data.rolling_correlation && data.rolling_correlation.points.length > 0 &&
             <RollingCorrelationChart data={data.rolling_correlation} />}
+          {data.rolling_excess_return && data.rolling_excess_return.points.length > 0 &&
+            <RollingExcessReturnChart data={data.rolling_excess_return} />}
           {data.regime_conditional && data.regime_conditional.length > 0 &&
             <RegimeConditionalTable rows={data.regime_conditional} />}
           {data.drawdown_comparison && data.drawdown_comparison.length > 0 &&

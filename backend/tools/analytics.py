@@ -103,12 +103,24 @@ def summary_statistics(
     named return series. Used for the equity / IG / HY / BENCHMARK summary
     table — the headline figures the midpoint paper opens with.
     """
+    # Benchmark CAGR — the reference for the excess-return column.
+    bench_cagr: float | None = None
+    for name, r in asset_series.items():
+        if "BENCHMARK" in name.upper():
+            bench_cagr = _cagr(r.dropna())
+            break
+
     rows: list[dict] = []
     for name, r in asset_series.items():
         r = r.dropna()
+        cagr = _cagr(r)
         rows.append({
             "asset":          name,
-            "cagr":           round(_cagr(r), 4),
+            "cagr":           round(cagr, 4),
+            # Excess return vs the 100% equity benchmark — the benchmark's
+            # own row is 0.0; None when no benchmark series is supplied.
+            "excess_return":  (round(cagr - bench_cagr, 4)
+                               if bench_cagr is not None else None),
             "ann_volatility": round(_ann_vol(r), 4),
             "sharpe_ratio":   round(_sharpe(r, rf), 4),
             "max_drawdown":   round(_max_drawdown(r), 4),
@@ -116,6 +128,52 @@ def summary_statistics(
             "n_months":       int(len(r)),
         })
     return rows
+
+
+# ── Rolling excess return ─────────────────────────────────────────────────────
+
+def rolling_excess_return(
+    strategy_results: dict[str, dict], window: int = 12,
+) -> dict:
+    """
+    12-month rolling excess total return of each strategy vs the 100%
+    equity benchmark — the strategy's trailing-`window`-month compound
+    return minus the benchmark's, at each month. Surfaces the periods of
+    relative out/under-performance the Part I secondary objective asks for.
+    """
+    empty = {"strategies": [], "points": [], "window_months": window}
+    bench = strategy_results.get("BENCHMARK", {})
+    bench_s = _pairs_to_series(bench.get("monthly_returns") or [])
+    if bench_s.empty:
+        return empty
+
+    def _trailing(s: pd.Series) -> pd.Series:
+        return (1.0 + s).rolling(window).apply(lambda x: x.prod(), raw=True) - 1.0
+
+    bench_roll = _trailing(bench_s)
+    series: dict[str, pd.Series] = {}
+    for name, res in strategy_results.items():
+        if name == "BENCHMARK":
+            continue
+        s = _pairs_to_series(res.get("monthly_returns") or [])
+        if s.empty:
+            continue
+        excess = (_trailing(s) - bench_roll.reindex(s.index)).dropna()
+        if not excess.empty:
+            series[res.get("strategy_name") or name] = excess
+
+    if not series:
+        return empty
+    all_dates = sorted(set().union(*[set(v.index) for v in series.values()]))
+    strategies = sorted(series.keys())
+    points: list[dict] = []
+    for d in all_dates:
+        row: dict = {"date": str(d.date())}
+        for label in strategies:
+            v = series[label].get(d)
+            row[label] = None if v is None or pd.isna(v) else round(float(v), 4)
+        points.append(row)
+    return {"strategies": strategies, "points": points, "window_months": window}
 
 
 # ── Cumulative total return ───────────────────────────────────────────────────
