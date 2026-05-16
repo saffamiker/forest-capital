@@ -19,9 +19,9 @@ interface NavItem {
 
 const NAV_ITEMS: NavItem[] = [
   { to: '/',                      label: 'Dashboard',            icon: LayoutDashboard, end: true },
+  { to: '/analytics',             label: 'Analytics',            icon: LineChart },
   { to: '/statistical-evidence',  label: 'Statistical Evidence', icon: BarChart3 },
   { to: '/regime-analysis',       label: 'Regime Analysis',      icon: Activity },
-  { to: '/analytics',             label: 'Analytics',            icon: LineChart },
   { to: '/council',               label: 'Council',              icon: Users },
   { to: '/qa',                    label: 'QA Audit',             icon: ShieldCheck },
   { to: '/reports',               label: 'Reports',              icon: FileText },
