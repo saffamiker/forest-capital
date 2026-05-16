@@ -1,0 +1,472 @@
+"""
+agents/academic_review.py
+
+Orchestration for POST /api/council/academic-review.
+
+The council evaluates the project's academic readiness:
+  1. A server-assembled context block (analytics inventory + uploaded
+     academic documents) is injected into every agent prompt.
+  2. Every peer agent (all council agents except the academic advisor)
+     answers a stock four-part review question through its own expert
+     lens, in parallel.
+  3. The academic advisor acts as the ARBITER — it receives all peer
+     responses plus the context block and synthesises a five-section,
+     rubric-mapped verdict.
+
+MODEL CHOICE: peers run on the project's current Sonnet (SONNET_MODEL =
+claude-sonnet-4-6); the arbiter runs on the project's current Opus
+(OPUS_MODEL = claude-opus-4-7) — an upgrade over the advisor's usual
+Sonnet, applied only within this flow. The original spec named the dated
+strings claude-sonnet-4-20250514 / claude-opus-4-20250514, but the
+project standardised on -4-6 / -4-7 and deliberately moved off
+claude-opus-4 because it retires 2026-06-15 — using it here would break
+this feature before the July 1 final.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import threading
+from typing import Any
+
+try:
+    import structlog
+    log = structlog.get_logger(__name__)
+except ImportError:  # pragma: no cover
+    import logging
+    log = logging.getLogger(__name__)  # type: ignore[assignment]
+
+from agents.base import SONNET_MODEL, OPUS_MODEL, call_claude, get_anthropic_client
+
+PEER_MODEL = SONNET_MODEL      # claude-sonnet-4-6
+ARBITER_MODEL = OPUS_MODEL     # claude-opus-4-7  (Opus for the arbiter step only)
+PEER_MAX_TOKENS = 800          # ~400-word cap with headroom
+ARBITER_MAX_TOKENS = 2000
+
+# ── Peer agent registry ───────────────────────────────────────────────────────
+# Every council agent EXCEPT the academic advisor (the arbiter). Mirrors
+# main.py _AGENT_META; kept here as config so the peer list is derived, not
+# hardcoded at the call site, and so this module never imports main.py.
+_PEER_AGENTS: dict[str, dict[str, str]] = {
+    "equity_analyst": {
+        "name": "Equity Analyst", "kind": "claude",
+        "lens": "equity market structure, factor exposure, and momentum signals",
+    },
+    "fixed_income_analyst": {
+        "name": "Fixed Income Analyst", "kind": "claude",
+        "lens": "fixed income, duration, credit, and the equity-bond "
+                "diversification question",
+    },
+    "risk_manager": {
+        "name": "Risk Manager", "kind": "claude",
+        "lens": "tail risk, drawdown, stress testing, and statistical rigour",
+    },
+    "quant_backtester": {
+        "name": "Quant Backtester", "kind": "claude",
+        "lens": "backtest methodology, cross-validation, and overfitting control",
+    },
+    "cio": {
+        "name": "Chief Investment Officer", "kind": "claude",
+        "lens": "the overall investment thesis and how the pieces cohere",
+    },
+    "independent_analyst": {
+        "name": "Independent Analyst (Gemini)", "kind": "gemini",
+        "lens": "independent challenge, blind spots, and alternative readings",
+    },
+    "contrarian_analyst": {
+        "name": "Contrarian Analyst (Grok)", "kind": "grok",
+        "lens": "contrarian stress-testing and the strongest case against the work",
+    },
+}
+
+DOC_TYPE_LABELS: dict[str, str] = {
+    "midpoint_requirements": "MIDPOINT CHECK-IN REQUIREMENTS",
+    "final_presentation_requirements": "FINAL PRESENTATION REQUIREMENTS",
+    "midpoint_draft": "MIDPOINT DRAFT",
+    "presentation_slides": "PRESENTATION SLIDES",
+    "presentation_script": "PRESENTATION SCRIPT",
+    "other": "OTHER REFERENCE DOCUMENT",
+}
+
+_DOC_CHAR_CAP = 8000   # per-document, keeps prompts bounded
+
+
+def peer_agent_ids() -> list[str]:
+    """The peer agents — every council agent except the academic advisor
+    (which is the arbiter). Derived from the registry, never hardcoded."""
+    return list(_PEER_AGENTS.keys())
+
+
+def _is_test_env() -> bool:
+    return os.getenv("ENVIRONMENT", "development") == "test"
+
+
+# ── Context assembly ──────────────────────────────────────────────────────────
+
+def group_documents_by_type(docs: list[dict]) -> dict[str, list[dict]]:
+    """
+    Groups uploaded academic documents by document_type. Every type in
+    DOC_TYPE_LABELS appears as a key — types with no uploads map to an
+    empty list, so callers can render "(not yet uploaded)" without a
+    missing-key check.
+    """
+    grouped: dict[str, list[dict]] = {t: [] for t in DOC_TYPE_LABELS}
+    for d in docs or []:
+        dt = d.get("document_type", "other")
+        grouped.setdefault(dt, []).append(d)
+    return grouped
+
+
+def build_review_context_block(
+    analytics: dict[str, Any], docs_by_type: dict[str, list[dict]],
+) -> str:
+    """
+    Renders the analytics inventory and the grouped documents into one
+    structured text block injected into every agent prompt. Missing
+    document types render as "(not yet uploaded)" — never an error.
+    """
+    lines: list[str] = ["=== PROJECT CONTEXT FOR ACADEMIC REVIEW ===", ""]
+
+    # — Analytics inventory —
+    lines.append("ANALYTICS INVENTORY")
+    lines.append(f"- Strategies analysed: {analytics.get('strategy_count', 0)}")
+    pr = analytics.get("performance_range")
+    if pr:
+        lines.append(
+            f"- Performance record: {pr['start']} to {pr['end']} "
+            f"({pr['n_months']} months)"
+        )
+    else:
+        lines.append("- Performance record: (no monthly data loaded)")
+    rf = analytics.get("risk_free_rate")
+    if rf is not None:
+        lines.append(
+            f"- Risk-free rate: {rf * 100:.2f}% "
+            "(FRED DTB3, 3-month T-bill, mean monthly rate annualised)"
+        )
+    comps = analytics.get("analytics_components") or []
+    lines.append(
+        "- Analytics components available: "
+        + (", ".join(comps) if comps else "(none — analytics data not yet loaded)")
+    )
+
+    # — Documents —
+    lines.append("")
+    lines.append("PROJECT DOCUMENTS")
+    for dtype, label in DOC_TYPE_LABELS.items():
+        docs = docs_by_type.get(dtype) or []
+        if not docs:
+            lines.append(f"\n[{label}]\n(not yet uploaded)")
+            continue
+        for d in docs:
+            text = (d.get("content_text") or "").strip()
+            if len(text) > _DOC_CHAR_CAP:
+                text = text[:_DOC_CHAR_CAP] + "\n…[document truncated for review]"
+            lines.append(f"\n[{label}: {d.get('name', 'document')}]\n{text}")
+
+    return "\n".join(lines)
+
+
+async def _gather_analytics_snapshot() -> dict[str, Any]:
+    """
+    Lightweight descriptive snapshot of the analytics layer, read straight
+    from the cache tables — NOT the full /api/v1/analytics/academic compute.
+    """
+    snapshot: dict[str, Any] = {
+        "strategy_count": 0,
+        "performance_range": None,
+        "risk_free_rate": None,
+        "analytics_components": [],
+    }
+    try:
+        from tools.cache import (
+            get_data_status, get_monthly_returns, get_latest_strategy_cache,
+        )
+
+        strategies = await get_latest_strategy_cache()
+        snapshot["strategy_count"] = len(strategies) if strategies else 0
+
+        monthly = await get_monthly_returns()
+        if monthly and monthly.get("dates"):
+            dates = monthly["dates"]
+            snapshot["performance_range"] = {
+                "start": dates[0], "end": dates[-1], "n_months": len(dates),
+            }
+            rf = monthly.get("rf") or []
+            if rf:
+                snapshot["risk_free_rate"] = round(sum(rf) / len(rf) * 12, 4)
+
+        ds = await get_data_status()
+        ff_rows = 0
+        for t in (ds or {}).get("tables", []):
+            if t.get("name") == "ff_factors_monthly":
+                ff_rows = t.get("row_count", 0)
+
+        if snapshot["strategy_count"] and snapshot["performance_range"]:
+            comps = ["summary statistics", "rolling correlation",
+                     "regime-conditional performance", "drawdown comparison",
+                     "turnover"]
+            if ff_rows:
+                comps.append("Fama-French factor loadings")
+            snapshot["analytics_components"] = comps
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_review_analytics_snapshot_failed", error=str(exc))
+    return snapshot
+
+
+async def gather_review_context() -> dict[str, Any]:
+    """
+    Assembles the full review context: the analytics snapshot, the
+    documents grouped by type, and the formatted context block that gets
+    injected into every agent prompt.
+    """
+    analytics = await _gather_analytics_snapshot()
+    docs: list[dict] = []
+    try:
+        from tools.academic_context import _read_all_with_content
+        docs = await _read_all_with_content()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_review_documents_read_failed", error=str(exc))
+    docs_by_type = group_documents_by_type(docs)
+    block = build_review_context_block(analytics, docs_by_type)
+    present = [t for t, v in docs_by_type.items() if v]
+    missing = [t for t, v in docs_by_type.items() if not v]
+    log.info(
+        "academic_review_context_assembled",
+        strategy_count=analytics["strategy_count"],
+        document_types_present=present,
+        document_types_missing=missing,
+    )
+    return {
+        "analytics": analytics,
+        "documents_by_type": docs_by_type,
+        "document_types_present": present,
+        "document_types_missing": missing,
+        "context_block": block,
+    }
+
+
+# ── Peer fan-out ──────────────────────────────────────────────────────────────
+
+_PEER_QUESTION = (
+    "Review this project's academic readiness. Address all four areas "
+    "concisely, from your expert perspective:\n\n"
+    "1. DATA SUFFICIENCY — breadth, depth, time range, factor-model "
+    "coverage; name specific gaps.\n"
+    "2. REQUIREMENTS & RUBRIC ALIGNMENT — does the current work satisfy the "
+    "stated criteria; what is unmet.\n"
+    "3. DELIVERABLE QUALITY — assess any draft materials present; what would "
+    "strengthen them.\n"
+    "4. AREAS FOR FURTHER INVESTIGATION — the highest-leverage actions before "
+    "the deadline; specific, not generic.\n\n"
+    "Keep your whole response under 400 words."
+)
+
+
+def _peer_system_prompt(meta: dict[str, str]) -> str:
+    return (
+        f"You are the {meta['name']} on a quantitative investment council "
+        f"advising an MSFA graduate practicum team. The team is preparing a "
+        f"GRADED academic submission for the Forest Capital portfolio-analysis "
+        f"project. Review the project through your expert lens — {meta['lens']}. "
+        f"Be direct, specific and actionable: the team needs to know what to "
+        f"fix before a graded deadline, not generic encouragement."
+    )
+
+
+def _peer_user_message(context_block: str) -> str:
+    return f"{_PEER_QUESTION}\n\n{context_block}"
+
+
+def _mock_peer_review(meta: dict[str, str]) -> str:
+    return (
+        f"[{meta['name']} — mock review: live model unavailable in this "
+        f"environment] 1. Data sufficiency: the 282-month record is adequate; "
+        f"flag factor-model coverage. 2. Rubric alignment: cannot verify "
+        f"without the uploaded requirements. 3. Deliverable quality: upload "
+        f"drafts to enable assessment. 4. Further investigation: prioritise "
+        f"the {meta['lens']} angle before the deadline."
+    )
+
+
+def _call_gemini_peer(system_prompt: str, user_message: str) -> str:
+    """Replicates agents/independent_analyst.py's Gemini call pattern."""
+    api_key = os.getenv("GOOGLE_API_KEY", "")
+    if _is_test_env() or not api_key:
+        return _mock_peer_review(_PEER_AGENTS["independent_analyst"])
+    import google.generativeai as genai  # type: ignore[import-untyped]
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel("gemini-1.5-pro", system_instruction=system_prompt)
+    return model.generate_content(user_message).text
+
+
+def _call_grok_peer(system_prompt: str, user_message: str) -> str:
+    """Replicates agents/contrarian_analyst.py's Grok (xAI) call pattern."""
+    from agents._xai_config import resolve_xai_config, build_headers
+    xai = resolve_xai_config()
+    if _is_test_env() or xai is None:
+        return _mock_peer_review(_PEER_AGENTS["contrarian_analyst"])
+    import httpx
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.post(
+            xai.chat_url,
+            headers=build_headers(xai.api_key, xai.provider),
+            json={
+                "model": xai.model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                "max_tokens": PEER_MAX_TOKENS,
+                "temperature": 0.7,
+            },
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"]
+
+
+def run_peer_agent(agent_id: str, context_block: str) -> tuple[str, str]:
+    """
+    Runs one peer agent's review. Synchronous — designed to be wrapped in
+    asyncio.to_thread() for the parallel fan-out. Returns (agent_id, text);
+    never raises — a failed agent degrades to a mock review so the council
+    always returns a full set of peer responses.
+    """
+    meta = _PEER_AGENTS[agent_id]
+    # Test environment has no API keys — short-circuit to a deterministic
+    # mock (consistent with stream_arbiter and the Gemini/Grok helpers),
+    # so the fan-out is fast and deterministic under pytest.
+    if _is_test_env():
+        return agent_id, _mock_peer_review(meta)
+    system_prompt = _peer_system_prompt(meta)
+    user_message = _peer_user_message(context_block)
+    try:
+        if meta["kind"] == "claude":
+            return agent_id, call_claude(
+                PEER_MODEL, system_prompt, user_message, max_tokens=PEER_MAX_TOKENS)
+        if meta["kind"] == "gemini":
+            return agent_id, _call_gemini_peer(system_prompt, user_message)
+        if meta["kind"] == "grok":
+            return agent_id, _call_grok_peer(system_prompt, user_message)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_review_peer_failed", agent=agent_id, error=str(exc))
+    return agent_id, _mock_peer_review(meta)
+
+
+async def run_peer_fan_out(context_block: str) -> dict[str, str]:
+    """Fans the review question out to every peer agent in parallel."""
+    ids = peer_agent_ids()
+    results = await asyncio.gather(
+        *[asyncio.to_thread(run_peer_agent, aid, context_block) for aid in ids]
+    )
+    return {aid: text for aid, text in results}
+
+
+# ── Arbiter (academic advisor, Opus) ──────────────────────────────────────────
+
+_ARBITER_INSTRUCTIONS = """=== YOUR TASK — ARBITER VERDICT ===
+You are the arbiter. Integrate and WEIGH the peer review notes above — do
+not restate them. Produce a structured, rubric-mapped verdict with EXACTLY
+five sections, in this exact markdown format so the UI can parse it:
+
+### 1. Data Sufficiency and Methodology
+**Rating:** <Strong | Developing | Needs Work>
+<your assessment>
+
+### 2. Requirements and Rubric Alignment
+**Rating:** <Strong | Developing | Needs Work>
+<your assessment>
+
+### 3. Deliverable Quality
+**Rating:** <Strong | Developing | Needs Work>
+<your assessment>
+
+### 4. Priority Areas for Further Investigation
+**Rating:** <Strong | Developing | Needs Work>
+<a numbered list, ordered by impact — specific actions, not generic advice>
+
+### 5. Overall Academic Readiness
+**Rating:** <Strong | Developing | Needs Work>
+<one paragraph>
+
+Every rating is exactly one of: Strong, Developing, Needs Work. Be direct
+and actionable — the team is preparing a graded submission, so generic
+encouragement is not useful."""
+
+
+def build_arbiter_user_message(
+    context_block: str, peer_responses: dict[str, str],
+) -> str:
+    """Builds the arbiter's user message: the context block, every peer's
+    review notes, and the five-section verdict instructions."""
+    parts = [context_block, "", "=== PEER REVIEW NOTES ==="]
+    for agent_id, text in peer_responses.items():
+        name = _PEER_AGENTS.get(agent_id, {}).get("name", agent_id)
+        parts.append(f"\n--- {name} ---\n{text}")
+    parts.append("")
+    parts.append(_ARBITER_INSTRUCTIONS)
+    return "\n".join(parts)
+
+
+def _mock_arbiter_chunks() -> list[str]:
+    text = (
+        "### 1. Data Sufficiency and Methodology\n"
+        "**Rating:** Developing\n"
+        "Mock verdict — the live arbiter model is unavailable in this "
+        "environment.\n\n"
+        "### 2. Requirements and Rubric Alignment\n**Rating:** Needs Work\n"
+        "Upload the requirements documents to enable a real assessment.\n\n"
+        "### 3. Deliverable Quality\n**Rating:** Developing\n"
+        "Upload draft materials to enable assessment.\n\n"
+        "### 4. Priority Areas for Further Investigation\n**Rating:** Developing\n"
+        "1. Upload the midpoint rubric. 2. Upload draft deliverables.\n\n"
+        "### 5. Overall Academic Readiness\n**Rating:** Developing\n"
+        "This is a deterministic mock verdict for the test environment."
+    )
+    # Emit in word-sized chunks so streaming consumers see progressive text.
+    words = text.split(" ")
+    return [" ".join(words[i:i + 12]) + " " for i in range(0, len(words), 12)]
+
+
+async def stream_arbiter(user_message: str):
+    """
+    Async generator yielding the arbiter verdict in text chunks.
+
+    The Anthropic streaming client is synchronous, so the real path runs
+    it in a worker thread and pushes chunks into an asyncio.Queue — the
+    event loop stays free while the arbiter streams.
+    """
+    if _is_test_env() or not os.getenv("ANTHROPIC_API_KEY"):
+        for chunk in _mock_arbiter_chunks():
+            yield chunk
+        return
+
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    sentinel = object()
+
+    def _worker() -> None:
+        try:
+            from agents.academic_advisor import _SYSTEM_PROMPT as advisor_prompt
+            client = get_anthropic_client()
+            with client.messages.stream(
+                model=ARBITER_MODEL,
+                max_tokens=ARBITER_MAX_TOKENS,
+                system=advisor_prompt,
+                messages=[{"role": "user", "content": user_message}],
+            ) as stream:
+                for text in stream.text_stream:
+                    loop.call_soon_threadsafe(queue.put_nowait, text)
+        except Exception as exc:  # noqa: BLE001
+            log.error("academic_review_arbiter_failed", error=str(exc))
+            loop.call_soon_threadsafe(
+                queue.put_nowait, f"\n[arbiter unavailable: {type(exc).__name__}]")
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, sentinel)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    while True:
+        item = await queue.get()
+        if item is sentinel:
+            break
+        yield item

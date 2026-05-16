@@ -17,6 +17,7 @@ from fastapi import (
     WebSocketDisconnect, UploadFile, File, Form,
 )
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -1140,6 +1141,66 @@ async def council_query(
     response = dict(MOCK_COUNCIL_RESPONSE)
     response["query"] = body.query
     return response
+
+
+# ── Academic review ───────────────────────────────────────────────────────────
+
+def _sse(event_type: str, **payload: Any) -> str:
+    """Format one Server-Sent Events frame: data: {json}\\n\\n."""
+    return f"data: {json.dumps({'type': event_type, **payload})}\n\n"
+
+
+@app.post("/api/council/academic-review")
+@limiter.limit("10/minute")
+async def council_academic_review(request: Request, session: dict = Depends(require_auth)):
+    """
+    Convenes the council to evaluate the project's academic readiness.
+
+    No request body — all context is assembled server-side: an analytics
+    inventory plus the uploaded academic documents. Every peer agent
+    answers a stock four-part review question in parallel; the academic
+    advisor then arbitrates, synthesising a five-section rubric-mapped
+    verdict.
+
+    Streams a text/event-stream response:
+      1. {"type": "peer_responses", "data": {agentId: text}}
+      2. {"type": "arbiter_chunk", "text": chunk}   (streamed)
+      3. data: [DONE]
+    """
+    from agents.academic_review import (
+        gather_review_context, run_peer_fan_out, build_arbiter_user_message,
+        stream_arbiter, ARBITER_MODEL,
+    )
+
+    async def event_stream():
+        try:
+            ctx = await gather_review_context()
+            context_block = ctx["context_block"]
+
+            peer_responses = await run_peer_fan_out(context_block)
+            log.info(
+                "academic_review_peers_complete",
+                agents=list(peer_responses.keys()),
+                response_lengths={k: len(v) for k, v in peer_responses.items()},
+                arbiter_model=ARBITER_MODEL,
+                risk_free_rate=ctx["analytics"].get("risk_free_rate"),
+                document_types_present=ctx["document_types_present"],
+                document_types_missing=ctx["document_types_missing"],
+            )
+            yield _sse("peer_responses", data=peer_responses)
+
+            arbiter_message = build_arbiter_user_message(context_block, peer_responses)
+            arbiter_chars = 0
+            async for chunk in stream_arbiter(arbiter_message):
+                arbiter_chars += len(chunk)
+                yield _sse("arbiter_chunk", text=chunk)
+            log.info("academic_review_arbiter_complete", arbiter_chars=arbiter_chars)
+        except Exception as exc:  # noqa: BLE001
+            log.error("academic_review_failed", error=str(exc))
+            yield _sse("error", message="Academic review failed — please retry.")
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ── Explainer ─────────────────────────────────────────────────────────────────
