@@ -66,29 +66,30 @@ _CONTEXT_CACHE: dict[str, str] = {"text": ""}
 
 def extract_document_text(filename: str, raw: bytes) -> str:
     """
-    Extract plain text from an uploaded file. PDFs go through pypdf;
-    everything else is decoded as UTF-8 text. Raises ValueError when a
-    PDF yields no extractable text (e.g. a scanned image-only PDF) so the
-    upload endpoint can return a clear 422 rather than storing an empty row.
+    Extract plain text from an uploaded PDF via pypdf.
+
+    PDF-ONLY by design. Markdown (.md) uploads are handled entirely
+    upstream in the /api/v1/documents/academic/upload endpoint — it reads
+    .md bytes as UTF-8 directly and never calls this function. Any other
+    extension is rejected with a 400 before reaching here. So this
+    function only ever receives PDF content; it has no text branch.
+
+    Raises ValueError when a PDF yields no extractable text (e.g. a
+    scanned image-only PDF) so the upload endpoint can return a clear 422
+    rather than storing an empty row. `filename` is retained in the
+    signature for call-site stability.
     """
-    name = (filename or "").lower()
-    if name.endswith(".pdf"):
-        try:
-            from pypdf import PdfReader
-        except ImportError as exc:  # pragma: no cover
-            raise ValueError("PDF support unavailable — pypdf not installed") from exc
-        reader = PdfReader(io.BytesIO(raw))
-        text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
-        if not text:
-            raise ValueError(
-                "No text could be extracted from the PDF — it may be a "
-                "scanned image. Upload a text-based PDF or a plain-text file."
-            )
-        return text
-    # Plain text — decode tolerantly so an odd byte never fails the upload.
-    text = raw.decode("utf-8", errors="replace").strip()
+    try:
+        from pypdf import PdfReader
+    except ImportError as exc:  # pragma: no cover
+        raise ValueError("PDF support unavailable — pypdf not installed") from exc
+    reader = PdfReader(io.BytesIO(raw))
+    text = "\n".join((page.extract_text() or "") for page in reader.pages).strip()
     if not text:
-        raise ValueError("The uploaded file is empty.")
+        raise ValueError(
+            "No text could be extracted from the PDF — it may be a "
+            "scanned image. Upload a text-based PDF."
+        )
     return text
 
 

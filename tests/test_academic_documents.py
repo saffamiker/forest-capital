@@ -38,15 +38,9 @@ SESSION_HEADERS = {"X-API-Key": generate_session_token("ruurdsm@queens.edu")}
 # ── Text extraction ───────────────────────────────────────────────────────────
 
 class TestTextExtraction:
-    def test_plain_text_file_decodes(self):
-        from tools.academic_context import extract_document_text
-        out = extract_document_text("rubric.txt", b"Midpoint is worth 10%.")
-        assert out == "Midpoint is worth 10%."
-
-    def test_empty_text_file_raises(self):
-        from tools.academic_context import extract_document_text
-        with pytest.raises(ValueError):
-            extract_document_text("empty.txt", b"   ")
+    """extract_document_text() is PDF-only. The former non-PDF text branch
+    was removed once .md handling moved upstream into the upload endpoint —
+    so this function now only ever receives PDF content."""
 
     def test_pdf_text_is_extracted(self):
         """A text-based PDF must round-trip through pypdf."""
@@ -60,10 +54,14 @@ class TestTextExtraction:
         out = extract_document_text("requirements.pdf", buf.getvalue())
         assert "thirty five percent" in out
 
-    def test_non_pdf_extension_treated_as_text(self):
+    def test_extract_document_text_is_pdf_only(self):
+        """Non-PDF bytes no longer silently decode as text — the text
+        branch is gone. Markdown is handled in the upload endpoint and
+        never reaches this function; passing non-PDF content here raises
+        (pypdf rejects it) rather than returning a decoded string."""
         from tools.academic_context import extract_document_text
-        # A .md file is plain text — decoded, not run through pypdf.
-        assert extract_document_text("notes.md", b"# Heading") == "# Heading"
+        with pytest.raises(Exception):
+            extract_document_text("notes.md", b"# Markdown must not reach here")
 
 
 # ── Formatting and injection ──────────────────────────────────────────────────
