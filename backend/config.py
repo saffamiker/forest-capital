@@ -159,6 +159,34 @@ PROJECT_TEAM_EMAILS = {
     "thaob@queens.edu",     # Bob Thao
 }
 
+# ── PLATFORM USER PERMISSIONS ─────────────────────────────────────────────────
+# Access control is database-managed (the platform_users table, migration
+# 015). PERMISSIONS are the fine-grained capabilities; a user's permissions
+# array is authoritative. ROLE_PRESETS are the convenience presets the
+# sysadmin starts from — a user whose permissions diverge from their role's
+# preset is shown as "Custom".
+#
+# ALLOWED_EMAILS and PROJECT_TEAM_EMAILS above are RETAINED as the
+# emergency fallback: if platform_users is unreachable the auth layer
+# fails open against config so a database issue can never lock everyone
+# out. They are not the primary source of truth — do not delete them.
+PERMISSIONS = {
+    "view_analytics":     "View all analytics and dashboards",
+    "ask_council":        "Ask council questions and use the explainers",
+    "team_member":        "Upload documents, run Academic Review, guided testing",
+    "generate_documents": "Generate the midpoint paper, executive brief, deck",
+    "export_package":     "Export the academic ZIP package",
+    "manage_users":       "Manage platform users (sysadmin only)",
+    "view_admin":         "View failure reports and the feedback backlog",
+}
+
+ROLE_PRESETS = {
+    "viewer":      ["view_analytics", "ask_council"],
+    "team_member": ["view_analytics", "ask_council", "team_member",
+                    "generate_documents", "export_package"],
+    "sysadmin":    list(PERMISSIONS.keys()),
+}
+
 # Git commit author email → platform login email. Michael commits under a
 # personal git identity; resolving it here merges his commit history with
 # his platform activity under one identity in the Team Activity view. A
