@@ -19,8 +19,8 @@ from config import (
     SESSION_EXPIRY_HOURS,
     ENVIRONMENT,
     FRONTEND_URL,
-    ALLOWED_EMAILS,
     PROJECT_TEAM_EMAILS,
+    PERMISSIONS,
 )
 from logger import get_logger
 
@@ -51,7 +51,21 @@ def generate_magic_token(email: str) -> str:
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 
-def generate_session_token(email: str) -> str:
+def generate_session_token(
+    email: str,
+    *,
+    role: str | None = None,
+    display_name: str | None = None,
+    permissions: list[str] | None = None,
+) -> str:
+    """
+    Mints a session JWT. When role / display_name / permissions are
+    supplied (the magic-link login path, which looks them up from
+    platform_users) they are embedded in the token, so require_auth
+    needs no per-request database hit. A token minted without them
+    (an old token, or a test fixture) is resolved by require_auth at
+    verify time instead.
+    """
     session_id = str(uuid.uuid4())
     exp = datetime.now(timezone.utc) + timedelta(hours=SESSION_EXPIRY_HOURS)
     payload = {
@@ -61,6 +75,12 @@ def generate_session_token(email: str) -> str:
         "iat": datetime.now(timezone.utc),
         "exp": exp,
     }
+    if role is not None:
+        payload["role"] = role
+    if display_name is not None:
+        payload["display_name"] = display_name
+    if permissions is not None:
+        payload["permissions"] = permissions
     token = jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
     _sessions[session_id] = {
         "email": email,
@@ -87,7 +107,7 @@ def verify_magic_token(token: str) -> str:
     return payload["sub"]
 
 
-def redeem_magic_token(token: str) -> str:
+def redeem_magic_token(token: str, user_attrs: dict | None = None) -> str:
     """
     Single-use magic-link redemption.
 
@@ -127,8 +147,10 @@ def redeem_magic_token(token: str) -> str:
             detail="This link has already been used. Please request a new one.",
         )
 
-    # First redemption — issue a session and record the jti to detect future reuse
-    session_token = generate_session_token(email)
+    # First redemption — issue a session and record the jti to detect future
+    # reuse. user_attrs (role / display_name / permissions, looked up from
+    # platform_users by the caller) is embedded in the session JWT.
+    session_token = generate_session_token(email, **(user_attrs or {}))
     if jti:
         _used_magic_jtis[jti] = session_token
     return session_token
@@ -150,7 +172,16 @@ def verify_session_token(token: str) -> dict:
     if session_id not in _sessions:
         raise HTTPException(status_code=401, detail="Session not found or already invalidated.")
 
-    return {"email": payload["sub"], "session_id": session_id}
+    # role / display_name / permissions are present on tokens minted by the
+    # post-migration login path; absent on older or test-minted tokens, in
+    # which case require_auth resolves them.
+    return {
+        "email": payload["sub"],
+        "session_id": session_id,
+        "role": payload.get("role"),
+        "display_name": payload.get("display_name"),
+        "permissions": payload.get("permissions"),
+    }
 
 
 def invalidate_session(token: str) -> None:
@@ -218,16 +249,44 @@ async def send_magic_link(email: str, token: str) -> None:
 # ── FastAPI dependencies ──────────────────────────────────────────────────────
 
 async def require_auth(x_api_key: Optional[str] = Header(None)) -> dict:
-    """Validate session token OR master API key. Apply to all protected endpoints."""
+    """
+    Validate a session token OR the master API key. Apply to all
+    protected endpoints. Returns a session dict that always carries
+    `permissions` — the authoritative capability list.
+
+    Permission resolution is three-tier:
+      1. The JWT — tokens minted by the post-migration login path embed
+         role / display_name / permissions; no database hit.
+      2. platform_users — for a token that did not embed them (an older
+         or test-minted token), require_auth looks the user up.
+      3. The config allowlists — if platform_users is unreachable, the
+         lookup falls back to PROJECT_TEAM_EMAILS / ALLOWED_EMAILS, so a
+         database outage never locks the team out.
+    """
     if not x_api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required. Provide X-API-Key header.",
             headers={"WWW-Authenticate": "ApiKey"},
         )
+    # The master API key — the developer/CLI credential — holds every
+    # permission and bypasses the database entirely.
     if x_api_key == MASTER_API_KEY:
-        return {"email": "developer@forest-capital", "role": "developer"}
-    return verify_session_token(x_api_key)
+        return {
+            "email": "developer@forest-capital",
+            "role": "developer",
+            "display_name": "Developer",
+            "permissions": list(PERMISSIONS.keys()),
+        }
+    session = verify_session_token(x_api_key)
+    if session.get("permissions") is None:
+        # Tier 2/3 — the JWT did not carry permissions; resolve them now.
+        from tools.platform_users import resolve_user
+        resolved = await resolve_user(session["email"])
+        session["role"] = resolved["role"]
+        session["display_name"] = resolved["display_name"]
+        session["permissions"] = resolved["permissions"]
+    return session
 
 
 async def require_team_member(session: dict = Depends(require_auth)) -> dict:

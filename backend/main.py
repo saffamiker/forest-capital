@@ -23,7 +23,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from starlette.requests import Request
 
-from config import FRONTEND_URL, ENVIRONMENT, ALLOWED_EMAILS
+from config import FRONTEND_URL, ENVIRONMENT
 from agents.base import SONNET_MODEL, OPUS_MODEL, GEMINI_MODEL
 from logger import configure_logging, get_logger
 from auth import (
@@ -121,7 +121,10 @@ async def request_magic_link(body: MagicLinkRequest, request: Request):
     # Both branches return HTTP 200 with an identical message to prevent email
     # enumeration. The status field is the only difference: the frontend shows a
     # specific "check your inbox" confirmation only when status == "sent".
-    if email not in {e.lower() for e in ALLOWED_EMAILS}:
+    # Authorisation is the platform_users table — is_login_allowed falls back
+    # to the config ALLOWED_EMAILS allowlist only if that table is unreachable.
+    from tools.platform_users import is_login_allowed
+    if not await is_login_allowed(email):
         log.warning("magic_link_unauthorized_email", email_hash=hash(email))
         return MagicLinkResponse(
             message="If that email is authorised, a login link has been sent.",
@@ -161,7 +164,25 @@ async def verify_magic_link(token: str = Query(...), response: Response = None):
         _exp = None
         _email_for_jti = ""
 
-    session_token = redeem_magic_token(token)
+    # Look up the user's role / display_name / permissions so they are
+    # embedded in the session JWT — require_auth then needs no per-request
+    # database hit. A None result (user not found, or database down)
+    # mints a plain token that require_auth resolves via the fallback.
+    user_attrs: dict | None = None
+    if _email_for_jti:
+        try:
+            from tools.platform_users import get_active_user
+            _u = await get_active_user(_email_for_jti)
+            if _u:
+                user_attrs = {
+                    "role": _u["role"],
+                    "display_name": _u["display_name"],
+                    "permissions": _u["permissions"],
+                }
+        except Exception:  # noqa: BLE001
+            user_attrs = None
+
+    session_token = redeem_magic_token(token, user_attrs)
 
     # Persist JTI to DB after first successful redemption (non-blocking — failure is safe)
     if _jti and _exp:
@@ -173,6 +194,12 @@ async def verify_magic_link(token: str = Query(...), response: Response = None):
             pass
 
     email = verify_session_token(session_token)["email"]
+    # Stamp last_login_at — fail-open, never blocks the login response.
+    try:
+        from tools.platform_users import record_login
+        await record_login(email)
+    except Exception:  # noqa: BLE001
+        pass
     log.info("auth_success", email=email)
     # Prevent browsers and intermediary caches from storing the session token.
     # A cached 200 response could replay a stale token on a shared machine.
