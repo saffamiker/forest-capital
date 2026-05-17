@@ -24,6 +24,7 @@ import { useBrand, BRANDS } from '../context/BrandContext'
 import type { BrandMode } from '../context/BrandContext'
 import { useSession } from '../context/SessionContext'
 import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
+import { TestResultsSection, TestAdminSections } from '../components/TestRunnerSettings'
 
 interface SettingsSectionProps {
   id: string
@@ -437,6 +438,10 @@ function ReleaseHistorySection() {
 
 export default function Settings() {
   const location = useLocation()
+  const { session } = useAuth()
+  // The Test Administration section (failure reports + feedback backlog)
+  // is restricted to the test-runner admin.
+  const isTestAdmin = (session?.email ?? '').toLowerCase() === 'ruurdsm@queens.edu'
 
   // Deep-link support — /settings#academic-documents scrolls to that section.
   useEffect(() => {
@@ -509,6 +514,24 @@ export default function Settings() {
       >
         <ReleaseHistorySection />
       </SettingsSection>
+
+      <SettingsSection
+        id="test-results"
+        title="Test Results"
+        description="Your guided UAT test passes — attested results per script, with re-test and an attestation export."
+      >
+        <TestResultsSection />
+      </SettingsSection>
+
+      {isTestAdmin && (
+        <SettingsSection
+          id="test-administration"
+          title="Test Administration"
+          description="All testers' failure reports and the AI-categorised feedback backlog."
+        >
+          <TestAdminSections />
+        </SettingsSection>
+      )}
     </div>
   )
 }
