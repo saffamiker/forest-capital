@@ -15,6 +15,7 @@ import { useStrategiesStore } from '../stores/strategiesStore'
 import { useRegimeStore } from '../stores/regimeStore'
 import { useGlossaryStore } from '../stores/glossaryStore'
 import ExplainableText from './ExplainableText'
+import InfoIcon from './InfoIcon'
 import ChartCommentStrip from './ChartCommentStrip'
 import LearnModeBanner from './LearnModeBanner'
 
@@ -53,20 +54,21 @@ const SIGNIFICANT_STRATEGIES = ['REGIME_SWITCHING', 'VOL_TARGETING', 'BLACK_LITT
 // same identifiers the Explainer Agent prompt expects to emit.
 interface StrategyTableColumn {
   label: string
-  term: string | null
+  /** Key into explainerTooltips.ts — drives the column-header InfoIcon. */
+  infoKey: string | null
 }
 
 const STRATEGY_TABLE_COLUMNS: StrategyTableColumn[] = [
-  { label: '#',                term: null },
-  { label: 'Strategy',         term: null },
-  { label: 'CAGR',             term: 'cagr' },
-  { label: 'Sharpe [95% CI]',  term: 'sharpe_ratio' },
-  { label: 'Max DD',           term: 'max_drawdown' },
-  { label: 'DSR',              term: 'dsr' },
-  { label: 'p (FDR)',          term: 'p_fdr' },
-  { label: 'CV Score',         term: 'cv_score' },
-  { label: 'Turnover (ann.)',  term: null },
-  { label: 'Tier 1',           term: 'tier1_gates' },
+  { label: '#',                infoKey: null },
+  { label: 'Strategy',         infoKey: null },
+  { label: 'CAGR',             infoKey: 'cagr' },
+  { label: 'Sharpe [95% CI]',  infoKey: 'sharpe_ci' },
+  { label: 'Max DD',           infoKey: 'max_drawdown' },
+  { label: 'DSR',              infoKey: 'dsr' },
+  { label: 'p (FDR)',          infoKey: 'p_fdr' },
+  { label: 'CV Score',         infoKey: 'cv_score' },
+  { label: 'Turnover (ann.)',  infoKey: 'turnover' },
+  { label: 'Tier 1',           infoKey: 'tier' },
 ]
 
 // Render a "YYYY–YYYY" label from ISO dates. Falls back to a long em-dash when
@@ -399,19 +401,24 @@ export default function Dashboard() {
               <thead className="sticky top-0 z-10 bg-navy-800">
                 <tr className="border-b border-border">
                   {/*
-                    Column headers carry stable glossary term IDs so clicking
-                    any header in Commentary mode opens the standard
-                    what/why/in-context panel. The '#' and 'Strategy' columns
-                    have no term — they're structural, not metric labels.
+                    Metric columns carry an InfoIcon — hover for the static
+                    tooltip, click for the live explainer. The '#' and
+                    'Strategy' columns are structural, not metric labels, so
+                    they have no infoKey. InfoIcon supersedes the old
+                    Commentary-mode ExplainableText wrap here: it is always
+                    on and needs no prior council session.
                   */}
                   {STRATEGY_TABLE_COLUMNS.map((col) => (
                     <th
                       key={col.label}
                       className="px-3 py-2 text-2xs text-muted uppercase tracking-wide font-medium whitespace-nowrap"
                     >
-                      {col.term
-                        ? <ExplainableText term={col.term}>{col.label}</ExplainableText>
-                        : col.label}
+                      <span className="inline-flex items-center">
+                        {col.label}
+                        {col.infoKey && (
+                          <InfoIcon tooltipKey={col.infoKey} metricLabel={col.label} />
+                        )}
+                      </span>
                     </th>
                   ))}
                 </tr>

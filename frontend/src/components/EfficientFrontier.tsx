@@ -10,6 +10,7 @@ import {
   ComposedChart,
 } from 'recharts'
 import type { EfficientFrontierData, FrontierPoint, PortfolioPoint } from '../types/api'
+import InfoIcon from './InfoIcon'
 
 const STRATEGY_COLORS: Record<string, string> = {
   BENCHMARK:          '#64748b',
@@ -66,12 +67,29 @@ export default function EfficientFrontier({ data }: { data: EfficientFrontierDat
     <div className="card p-4">
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h3 className="text-white font-semibold text-sm">Efficient Frontier</h3>
+          <h3 className="text-white font-semibold text-sm flex items-center">
+            Efficient Frontier
+            <InfoIcon
+              tooltipKey="efficient_frontier"
+              metricLabel="Efficient Frontier"
+              size="md"
+            />
+          </h3>
           <p className="text-muted text-xs mt-0.5">Risk vs expected return — all 10 strategies</p>
         </div>
         {max_sharpe_point && (
           <div className="text-right">
-            <div className="text-2xs text-muted uppercase tracking-wide">Max Sharpe Point</div>
+            <div className="text-2xs text-muted uppercase tracking-wide flex items-center justify-end">
+              Max Sharpe Point
+              <InfoIcon
+                tooltipKey="max_sharpe_point"
+                metricLabel="Max Sharpe Point"
+                currentValue={
+                  `σ=${(max_sharpe_point.volatility * 100).toFixed(1)}% / `
+                  + `μ=${(max_sharpe_point.expected_return * 100).toFixed(1)}%`
+                }
+              />
+            </div>
             <div className="font-mono text-xs text-electric">
               σ={(max_sharpe_point.volatility * 100).toFixed(1)}% / μ={(max_sharpe_point.expected_return * 100).toFixed(1)}%
             </div>
