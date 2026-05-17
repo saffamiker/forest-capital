@@ -4561,10 +4561,11 @@ created a minimal one keyed by email (email PK, last_changelog_seen_at,
 last_tour_version_seen) so the What's New modal has persistent per-user
 state. The changelog endpoints UPSERT into it; no rows are pre-seeded.
 
-TOUR_VERSION (config.py): the current site-tour version, default 1. The
-What's New modal compares it against the user's last_tour_version_seen
-to decide whether to offer the tour. Increment it by 1 whenever the
-site tour is (re)built — the tour itself is a later sprint.
+TOUR_VERSION (config.py): the current site-tour version, currently 2
+(the initial guided tour, migration 013). GET /api/v1/changelog/unseen
+compares it against the user's last_tour_version_seen — when seen is
+lower, has_tour_update is true. See the SITE TOUR section below for the
+increment process.
 
 ENDPOINTS (all require authentication):
   GET  /api/v1/changelog          — all entries, version descending;
@@ -4613,9 +4614,76 @@ develop → main pull-request flow with the ci.yml jobs set as required
 status checks, so nothing reaches main without a green pipeline.
 
 
-═══════════════════════════════════════════════════════════════════
-KANBAN BOARD — Sprint 6 closed, Kanban adopted (May 16 2026)
-═══════════════════════════════════════════════════════════════════
+─────────────────────────────────────────────────────────────────────────────
+SITE TOUR (migration 013, May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+A guided fifteen-step walkthrough of the whole platform. It serves two
+audiences at once: Forest Capital (positioned as a serious analytical
+tool) and McColl faculty (every step ties a feature to a grading
+criterion). Ten steps also carry a muted "Most relevant for:" line
+naming the team member the feature matters most to — the tour is NOT
+forked per role.
+
+COMPONENTS:
+  frontend/src/components/SiteTour.tsx — the tour. A react-joyride v3
+    Joyride run CONTROLLED (the component owns `run` and `stepIndex`).
+    Mounted once in MainLayout so it persists across every route. A
+    custom dark-theme tooltip (TourTooltip) renders the step content,
+    a "Step X of Y" footer, and Back / Skip / Next — "Start Exploring"
+    on the last step.
+  frontend/src/constants/tourSteps.ts — the TourStep[] (TOUR_STEPS).
+    Each step: target (a CSS selector, or "body" for a centred modal),
+    title, a two-paragraph body, placement, route, and optional
+    relevantFor. A step's `route` is the page the tour navigates to
+    before showing it; SiteTour pauses, navigates, and resumes once the
+    new page's target has rendered (multi-route tour).
+  frontend/src/lib/tourBus.ts — a module-level bridge. SiteTour
+    registers its start function via registerTourStarter on mount; any
+    component calls startTour() to force-start the tour.
+
+TRIGGER LOGIC (once per login session):
+  On mount SiteTour reads /api/v1/changelog/unseen. If has_tour_update
+  is true and the user has not skipped the tour this session, it
+  auto-starts — but only directly when no What's New modal will show
+  (no unseen changelog entries). When the modal shows, its "View
+  updated site tour" button calls startTour() instead, so the tour
+  never opens on top of the modal. The Settings → Account "Retake Site
+  Tour" button also calls startTour() — a forced start from step 1
+  regardless of seen/skip state. Completion AND skip both POST
+  /api/v1/changelog/mark-seen with {tour_version_seen: TOUR_VERSION};
+  a mid-tour skip also sets the sessionStorage flag fc_tour_skipped so
+  the tour does not re-trigger on the same login.
+
+THE FIFTEEN STEPS (target — route):
+   1. Welcome                     body (centred)        — /
+   2. Dashboard command centre    [data-tour="nav-dashboard"]      — /
+   3. Strategy rankings table     [data-tour="strategy-table"]     — /
+   4. Efficient frontier          [data-tour="efficient-frontier"] — /
+   5. Academic Analytics intro    [data-tour="analytics-header"]   — /analytics
+   6. Cumulative total return     [data-tour="cumulative-return"]  — /analytics
+   7. 2022 correlation break      [data-tour="rolling-correlation"]— /analytics
+   8. Regime-conditional table    [data-tour="regime-conditional"] — /analytics
+   9. Carhart factor loadings     [data-tour="factor-loadings"]    — /analytics
+  10. AI Council                  [data-tour="council"]            — /council
+  11. Academic Review button      [data-tour="academic-review"]    — /council
+  12. Team Activity               [data-tour="team-activity"]      — /reports
+  13. Academic Documents          #academic-documents              — /settings
+  14. Testing Mode                [data-tour="testing-mode"]       — /settings
+  15. You're Ready                body (centred)        — /
+  The data-tour anchors live on the components named above; the
+  AcademicAnalytics SectionCard takes a `tourId` prop that emits one.
+
+TOUR_VERSION — INCREMENT PROCESS: TOUR_VERSION lives in config.py
+(currently 2). When the tour's steps change materially, increment it
+by 1 and ship a changelog entry in the SAME migration (the changelog
+contract requires the INSERT; migration 013 is the template). The bump
+makes /unseen report has_tour_update for every user below the new
+version, re-surfacing the tour. Changing only wording need not bump it.
+
+The changelog table's tour_step_id column links a changelog entry to a
+tour step by the step's `id` (TourStep.id). Migration 013's row uses
+tour_step_id "welcome" — the id of the tour's first step.
 
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that

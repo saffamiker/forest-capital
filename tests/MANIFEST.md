@@ -947,3 +947,34 @@ Migration: 011 + 012 — operator runs `alembic upgrade head` on Render.
 
 Test counts (cumulative): 1080 backend pass, 15 skipped (HMM/Windows),
                            186 frontend pass.
+
+
+## Site Tour ✅ COMPLETE (2026-05-17)
+A controlled react-joyride walkthrough — fifteen steps across every
+route, framed for Forest Capital and McColl faculty.
+
+Backend:
+  migrations/013_site_tour_changelog.py — changelog entry 32
+    ("Site Tour", tour_step_id "welcome").
+  config.py — TOUR_VERSION bumped 1 → 2.
+
+Frontend:
+  components/SiteTour.tsx — controlled Joyride mounted in MainLayout;
+    custom dark tooltip, cross-route navigate/pause/resume, once-per-
+    session auto-start.
+  constants/tourSteps.ts — the 15 TourStep definitions.
+  lib/tourBus.ts — module-level start-function bridge.
+  components/WhatsNewModal.tsx — "View updated site tour" button wired.
+  pages/Settings.tsx — Account "Retake Site Tour" button.
+
+  __tests__/site-tour.test.tsx — 7 tests: auto-start fires on a pending
+    tour update and is suppressed once seen / while the What's New modal
+    would show; completion and skip POST mark-seen with the tour version
+    (skip also sets the session skip flag); startTour() force-starts
+    regardless of seen state; the What's New tour button is active and
+    starts the tour. react-joyride stubbed to capture Joyride props.
+
+Migration: 013 — operator runs `alembic upgrade head` on Render.
+
+Test counts (cumulative): 1080 backend pass, 15 skipped (HMM/Windows),
+                           193 frontend pass.
