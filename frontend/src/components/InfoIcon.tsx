@@ -70,7 +70,11 @@ export default function InfoIcon({
         onMouseLeave={onLeave}
         onClick={() => { setHovered(false); setPanelOpen(true) }}
         aria-label={`Explain ${metricLabel}`}
-        className="inline-flex items-center text-muted hover:text-electric
+        /* 44px tap target on mobile (the icon itself stays small and
+           centred); reset to the natural inline size from sm: up. */
+        className="inline-flex items-center justify-center
+                   min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0
+                   text-muted hover:text-electric
                    transition-colors ml-1 align-middle"
       >
         <Info className={dim} />

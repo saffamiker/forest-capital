@@ -67,7 +67,9 @@ export default function ChartExportButton({
     <div className={`relative group inline-block ${className}`} data-testid="chart-export-button">
       <button
         aria-label={`Export ${chartId} chart`}
-        className="p-1 rounded text-muted hover:text-white transition-colors"
+        className="flex items-center justify-center min-h-[44px] min-w-[44px]
+                   sm:min-h-0 sm:min-w-0 p-1 rounded text-muted
+                   hover:text-white transition-colors"
       >
         <Download className="w-3.5 h-3.5" />
       </button>

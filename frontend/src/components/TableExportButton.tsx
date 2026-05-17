@@ -44,7 +44,8 @@ export default function TableExportButton({
       onClick={downloadCsv}
       aria-label={`Export ${tableId} table as CSV`}
       className={`flex items-center gap-1 text-xs text-muted hover:text-white
-                  transition-colors p-1 rounded ${className}`}
+                  transition-colors p-1 rounded min-h-[44px] sm:min-h-0
+                  ${className}`}
       data-testid="table-export-button"
     >
       <Download className="w-3.5 h-3.5" />

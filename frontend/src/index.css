@@ -20,6 +20,10 @@
     color: #e2e8f0;
     font-family: 'Inter', system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
+    /* Prevent a stray wide element from horizontally scrolling the whole
+       page on mobile. Tables that genuinely need horizontal scroll do so
+       inside their own overflow-x-auto containers, unaffected by this. */
+    overflow-x: hidden;
   }
 
   /* Number values always in JetBrains Mono */
