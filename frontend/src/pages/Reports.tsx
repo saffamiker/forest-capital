@@ -26,6 +26,7 @@ import {
   CheckCircle, Clock, ArrowRight, GraduationCap, Edit3, Info,
 } from 'lucide-react'
 import AdvisorPanel from '../components/AdvisorPanel'
+import TeamActivityPanel from '../components/TeamActivityPanel'
 import type { DeliverableType } from '../types/advisor'
 import type { SectionDocType } from '../types/documents'
 
@@ -472,6 +473,10 @@ export default function Reports() {
           </section>
         </>
       )}
+
+      {/* Team Activity — independent of the deliverables manifest, so it
+          renders regardless of whether the manifest loaded. */}
+      <TeamActivityPanel />
     </div>
   )
 }
