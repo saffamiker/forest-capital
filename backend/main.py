@@ -23,7 +23,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 from starlette.requests import Request
 
-from config import FRONTEND_URL, ENVIRONMENT
+from config import FRONTEND_URL, ENVIRONMENT, PERMISSIONS, ROLE_PRESETS
 from agents.base import SONNET_MODEL, OPUS_MODEL, GEMINI_MODEL
 from logger import configure_logging, get_logger
 from auth import (
@@ -1762,6 +1762,149 @@ async def testing_quality_check(
                   "passed": verdict.get("passed")},
     )
     return verdict
+
+
+# ── User management ───────────────────────────────────────────────────────────
+#
+# The sysadmin manages platform_users from inside the platform. Every
+# endpoint requires the manage_users permission; the "last sysadmin"
+# guard prevents the platform from being left with no administrator.
+
+
+def _valid_email(email: str) -> bool:
+    """A minimal email-shape check for the create-user form."""
+    return bool(email) and "@" in email and "." in email.split("@")[-1]
+
+
+def _clean_permissions(raw: Any, role: str) -> list[str]:
+    """Validated permissions — the supplied list filtered to known keys,
+    or the role's preset when no explicit list was given."""
+    if isinstance(raw, list):
+        return [p for p in raw if p in PERMISSIONS]
+    return list(ROLE_PRESETS.get(role, ROLE_PRESETS["viewer"]))
+
+
+@app.get("/api/v1/admin/users")
+async def admin_list_users(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Every platform user, with an activity count. Sysadmin only."""
+    from tools.platform_users import list_all_users
+    return {"users": await list_all_users()}
+
+
+@app.post("/api/v1/admin/users")
+async def admin_create_user(
+    body: dict, session: dict = Depends(require_permission("manage_users")),
+):
+    """Adds a platform user. Sysadmin only."""
+    from tools.platform_users import create_user, email_exists
+
+    email = str(body.get("email") or "").strip().lower()
+    if not _valid_email(email):
+        raise HTTPException(status_code=422,
+                            detail="A valid email address is required.")
+    role = str(body.get("role") or "viewer")
+    if role not in ROLE_PRESETS:
+        raise HTTPException(status_code=422,
+                            detail="role must be viewer | team_member | sysadmin")
+    if await email_exists(email):
+        raise HTTPException(
+            status_code=409,
+            detail="A user with that email already exists — edit them instead.")
+    created = await create_user(
+        email=email,
+        display_name=(str(body["display_name"]).strip()
+                      if body.get("display_name") else None),
+        role=role,
+        permissions=_clean_permissions(body.get("permissions"), role),
+        notes=(str(body["notes"]).strip() if body.get("notes") else None),
+        created_by=session.get("email", ""),
+    )
+    if created is None:
+        raise HTTPException(status_code=503,
+                            detail="Could not create the user — database unavailable.")
+    return created
+
+
+@app.patch("/api/v1/admin/users/{user_id}")
+async def admin_update_user(
+    user_id: int, body: dict,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Updates a user's display_name / role / permissions / is_active /
+    notes. email is immutable. The last active sysadmin cannot be
+    demoted or deactivated. Sysadmin only.
+    """
+    from tools.platform_users import (
+        count_active_sysadmins, get_user_by_id, update_user,
+    )
+
+    user = await get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+
+    fields: dict[str, Any] = {}
+    if "display_name" in body:
+        fields["display_name"] = (str(body["display_name"]).strip()
+                                  if body["display_name"] else None)
+    if "notes" in body:
+        fields["notes"] = (str(body["notes"]).strip()
+                           if body["notes"] else None)
+    if "role" in body:
+        if body["role"] not in ROLE_PRESETS:
+            raise HTTPException(status_code=422,
+                                detail="role must be viewer | team_member | sysadmin")
+        fields["role"] = body["role"]
+    if "permissions" in body:
+        fields["permissions"] = _clean_permissions(
+            body["permissions"], fields.get("role", user["role"]))
+    if "is_active" in body:
+        fields["is_active"] = bool(body["is_active"])
+
+    # Last-sysadmin guard — refuse a change that would leave no active
+    # administrator. A "sysadmin" is any active user holding manage_users.
+    new_active = fields.get("is_active", user["is_active"])
+    new_perms = fields.get("permissions", user["permissions"])
+    was_admin = user["is_active"] and "manage_users" in user["permissions"]
+    still_admin = new_active and "manage_users" in new_perms
+    if was_admin and not still_admin and await count_active_sysadmins() <= 1:
+        raise HTTPException(status_code=400,
+                            detail="Cannot remove the last sysadmin.")
+
+    updated = await update_user(user_id, fields)
+    if updated is None:
+        raise HTTPException(status_code=503,
+                            detail="Could not update the user — database unavailable.")
+    return updated
+
+
+@app.delete("/api/v1/admin/users/{user_id}")
+async def admin_delete_user(
+    user_id: int, session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Soft-deletes a user (is_active = false) — the row is kept so activity
+    history stays attributed. The last active sysadmin cannot be deleted.
+    Sysadmin only.
+    """
+    from tools.platform_users import (
+        count_active_sysadmins, get_user_by_id, update_user,
+    )
+
+    user = await get_user_by_id(user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found.")
+    was_admin = user["is_active"] and "manage_users" in user["permissions"]
+    if was_admin and await count_active_sysadmins() <= 1:
+        raise HTTPException(status_code=400,
+                            detail="Cannot remove the last sysadmin.")
+    updated = await update_user(user_id, {"is_active": False})
+    if updated is None:
+        raise HTTPException(status_code=503,
+                            detail="Could not deactivate the user — database unavailable.")
+    return {"deactivated": True, "id": user_id}
 
 
 # ── Team Activity ─────────────────────────────────────────────────────────────
