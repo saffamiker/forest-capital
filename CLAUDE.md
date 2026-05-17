@@ -5183,6 +5183,18 @@ was written, so the GitHub board was not updated programmatically).
   ✅ Two access tiers — TeamGate / require_team_member: any authenticated
      user explores; action features gated to the project team; one-time
      visitor welcome banner
+  ✅ Changelog + What's New modal + CI/CD pipeline (ci.yml, changelog
+     gate, migrations 011-012)
+  ✅ Site tour — 15-step react-joyride walkthrough, academic-rationale
+     framing (migration 013, TOUR_VERSION=2)
+  ✅ Generator-evaluator harness — every agent generation evaluate-and-
+     retried against task-specific criteria
+  ✅ Level 1 code review — security / data-integrity / consistency fixes
+  ✅ UI/UX quality pass — react-markdown for AI output, canonical
+     STRATEGY_COLORS / chartStyle, council error card, presentation polish
+  ✅ Block A/B fixes — strategy-name InfoIcons, Data Explain feature
+     (explain vs explain-data), council hand-off pre-population
+  ✅ UAT test guide — docs/UAT_TEST_GUIDE.md, four sections
   ✅ CLAUDE.md + README brought current
 
 ─── IN PROGRESS ───────────────────────────────────────────────────────
@@ -5190,39 +5202,32 @@ was written, so the GitHub board was not updated programmatically).
 
 ─── BACKLOG ────────────────────────────────────────────────────────────
 
-  HIGH — must complete before June 3:
-  □ Changelog + What's New modal + CI/CD pipeline (prompt ready,
-    not yet dispatched)
-  □ Site tour with academic rationale framing (prompt not yet written)
-  □ Upload midpoint_requirements.md and final_presentation_requirements.md
-    via Settings (files ready, awaiting dispatch)
-  □ alembic upgrade head on Render for any new migrations
-  □ Visual pass: /settings, anchor scroll, staleness pills, Reports banner
-  □ Written midpoint submission (3 pages, due one week before June 3)
-  □ Code review and refinement pass
-  ✅ UAT test guide — docs/UAT_TEST_GUIDE.md. A four-section user
-     acceptance testing guide (all testers, then a role-specific section
-     for Michael / Bob / Molly); also doubles as a functional intro to
-     the platform and as testing-discipline evidence for the Analytical
-     Appendix. Testers enable Testing Mode first so the pass is excluded
-     from the Team Activity analytical view.
-
-  MEDIUM — improves quality before June 3:
-  □ Midpoint draft upload once written (unlocks the Deliverable Quality
-    section of Academic Review)
-  □ Presentation slides and script upload once prepared
+  HIGH — before June 3:
+  □ Visual pass — document generation panel, test runner, Data Explain
+    buttons, strategy InfoIcons
+  □ Bob — run an Academic Review before writing the midpoint draft
+  □ Bob — upload the midpoint draft once written (Settings → Academic
+    Documents)
+  □ Bob — midpoint paper submission (3 pages, due May 27)
+  □ Michael — UAT Section 2 test pass
+  □ Bob — UAT Section 3 test pass
+  □ Molly — UAT Section 4 test pass + presentation review pass
+  □ All — UAT Section 1 test pass
+  □ alembic upgrade head on Render for migration 014
 
   POST-DEADLINE:
   □ Move to develop → main PR flow with required status checks
-  ✅ Four-factor (Carhart) FF — MOM backfilled into ff_factors_monthly
-  ✅ True portfolio turnover in the backtester
+  □ S3 (or equivalent) for screenshot storage — currently local disk,
+    ephemeral on Render
+  □ True portfolio turnover computed in the backtester itself (the
+    analytics layer already surfaces it)
 
 ─── JUNE 3 MILESTONE ───────────────────────────────────────────────────
   Items that must land for the midpoint check-in:
-  □ Written midpoint submission
-  □ Alembic migration applied on Render
-  □ Academic Review endpoint
+  □ Midpoint paper submitted (May 27)
+  □ An Academic Review session run
   □ Midpoint draft uploaded
+  □ All UAT sections attested via the guided test runner
 
 
 
