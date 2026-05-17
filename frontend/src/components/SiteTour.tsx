@@ -12,8 +12,10 @@
  *   - On mount it reads /api/v1/changelog/unseen for has_tour_update.
  *   - If a tour update is pending and the user has not skipped this
  *     session: it auto-starts — but only directly when no What's New
- *     modal is showing. When the modal IS showing, the modal calls
- *     startTour() on close so the tour never opens on top of it.
+ *     modal is showing. When the modal IS showing, auto-start is
+ *     suppressed so the tour never opens on top of it; the modal's
+ *     "View updated site tour" button calls startTour() instead, and a
+ *     later session auto-starts directly once the modal is dismissed.
  *   - The Settings "Retake" button and the modal's "View updated tour"
  *     button both call startTour() (via tourBus), which force-starts
  *     regardless of seen state.

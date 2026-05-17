@@ -13,11 +13,12 @@
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { Check, LogOut, Sparkles } from 'lucide-react'
+import { Check, Compass, LogOut, Sparkles } from 'lucide-react'
 import type {
   ChangelogEntry, AllChangelogResponse, UnseenChangelogResponse,
 } from '../types/changelog'
 import { useAuth } from '../App'
+import { startTour } from '../lib/tourBus'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import type { BrandMode } from '../context/BrandContext'
 import { useSession } from '../context/SessionContext'
@@ -294,6 +295,27 @@ function AccountSection() {
 
       <div className="border-t border-border pt-3">
         <TestingModeToggle />
+      </div>
+
+      {/* Site Tour — startTour() (via tourBus) force-starts SiteTour from
+          step 1 regardless of seen/skip state: it clears the session skip
+          flag, navigates to the Dashboard, and runs. */}
+      <div className="border-t border-border pt-3 space-y-2">
+        <div className="text-sm text-white">Site Tour</div>
+        <p className="text-xs text-muted leading-relaxed">
+          Relaunches the full platform tour. The tour covers every feature
+          and how it maps to your project deliverables and grading criteria.
+        </p>
+        <button
+          type="button"
+          onClick={() => startTour()}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs
+                     border border-electric/30 bg-electric/10 text-electric
+                     hover:bg-electric/20 transition-colors"
+        >
+          <Compass className="w-3.5 h-3.5" />
+          Retake Site Tour
+        </button>
       </div>
 
       {/* Jump to the Release History section below. */}

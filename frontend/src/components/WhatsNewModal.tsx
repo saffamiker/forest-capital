@@ -8,14 +8,19 @@
  * reappear for already-seen entries. The modal never blocks the app:
  * every path is closeable, and any failure simply leaves it closed.
  *
- * The tour version is intentionally NOT recorded on close — the site
- * tour does not exist yet, so has_tour_update stays true until the tour
- * is built and actually viewed.
+ * The tour version is intentionally NOT recorded on close — that is
+ * SiteTour's job, done when the tour itself completes or is skipped.
+ * Closing the modal only marks the changelog entries seen.
+ *
+ * When a tour update is pending, the footer's "View updated site tour"
+ * button closes the modal and force-starts the tour via tourBus, so the
+ * tour never opens on top of the modal.
  */
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 import { Sparkles, X, GraduationCap } from 'lucide-react'
 import type { ChangelogEntry, UnseenChangelogResponse } from '../types/changelog'
+import { startTour } from '../lib/tourBus'
 
 export default function WhatsNewModal() {
   const [entries, setEntries] = useState<ChangelogEntry[]>([])
@@ -126,10 +131,10 @@ export default function WhatsNewModal() {
           {hasTourUpdate ? (
             <button
               type="button"
-              disabled
-              title="Tour coming soon"
-              className="flex items-center gap-1.5 text-2xs text-muted/60
-                         cursor-not-allowed"
+              onClick={() => { close(); startTour() }}
+              title="Replay the site tour to see what's new"
+              className="flex items-center gap-1.5 text-2xs text-electric
+                         hover:text-blue-300 transition-colors"
             >
               <GraduationCap className="w-3.5 h-3.5" />
               View updated site tour
