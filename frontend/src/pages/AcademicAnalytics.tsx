@@ -45,6 +45,26 @@ interface RollingExcess {
   window_months: number
 }
 
+// Sensitivity analysis comes from its own endpoint (/api/v1/analytics/
+// sensitivity), not the bundled /academic payload — it is a ~23-backtest
+// compute that must not run on every analytics page load.
+interface SensitivityPoint {
+  value: number
+  sharpe: number | null
+}
+
+interface SensitivityStrategy {
+  strategy: string
+  parameter: string
+  current_value: number
+  points: SensitivityPoint[]
+}
+
+interface SensitivityPayload {
+  available: boolean
+  strategies: SensitivityStrategy[]
+}
+
 interface CorrPoint {
   date: string
   equity_ig: number | null
@@ -514,6 +534,78 @@ function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
   )
 }
 
+// ── Sensitivity analysis ──────────────────────────────────────────────────────
+
+function SensitivityChart({ s }: { s: SensitivityStrategy }) {
+  return (
+    <div className="bg-navy-800 rounded p-3">
+      <div className="text-sm text-white font-medium">{s.strategy}</div>
+      <div className="text-2xs text-muted mb-2">{s.parameter}</div>
+      <ResponsiveContainer width="100%" height={200}>
+        <LineChart data={s.points} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <XAxis dataKey="value" type="number" domain={['dataMin', 'dataMax']}
+                 tick={{ fill: '#64748b', fontSize: 10 }} />
+          <YAxis tick={{ fill: '#64748b', fontSize: 10 }}
+                 tickFormatter={(v: number) => v.toFixed(2)}
+                 label={{ value: 'Sharpe', angle: -90, position: 'insideLeft',
+                          fill: '#64748b', fontSize: 10 }} />
+          <Tooltip
+            contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c',
+                            borderRadius: 8, fontSize: 12 }}
+          />
+          <ReferenceLine x={s.current_value} stroke={ACCENT} strokeDasharray="4 4"
+            label={{ value: 'current', fill: ACCENT, fontSize: 10,
+                     position: 'top' }} />
+          <Line type="monotone" dataKey="sharpe" stroke="#3b82f6"
+                strokeWidth={2} dot={{ r: 3 }} connectNulls />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
+
+function SensitivityAnalysis() {
+  const [data, setData] = useState<SensitivityPayload | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    axios.get<SensitivityPayload>('/api/v1/analytics/sensitivity')
+      .then((res) => { if (!cancelled) setData(res.data) })
+      .catch(() => { if (!cancelled) setData(null) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  const strategies = data?.strategies ?? []
+  const headers = ['Strategy', 'Parameter', 'Value', 'Sharpe']
+  const exportRows = strategies.flatMap((s) =>
+    s.points.map((p) => [s.strategy, s.parameter, p.value, p.sharpe ?? '']))
+
+  return (
+    <SectionCard
+      title="Sensitivity Analysis"
+      subtitle="How sensitive is each dynamic strategy's risk-adjusted performance to its key parameter? The vertical line marks the current setting."
+      exportButton={strategies.length > 0
+        ? <TableExportButton tableId="sensitivity_analysis" headers={headers} rows={exportRows} />
+        : undefined}
+    >
+      {loading ? (
+        <p className="text-xs text-muted">
+          Computing sensitivity — runs ~23 backtests, first load only…
+        </p>
+      ) : strategies.length === 0 ? (
+        <p className="text-xs text-muted italic">Sensitivity analysis unavailable.</p>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+          {strategies.map((s) => <SensitivityChart key={s.strategy} s={s} />)}
+        </div>
+      )}
+    </SectionCard>
+  )
+}
+
 export default function AcademicAnalytics() {
   const [data, setData] = useState<AnalyticsPayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -574,6 +666,7 @@ export default function AcademicAnalytics() {
             <DrawdownComparisonTable rows={data.drawdown_comparison} />}
           {data.factor_loadings && data.factor_loadings.length > 0 &&
             <FactorLoadingsTable rows={data.factor_loadings} />}
+          <SensitivityAnalysis />
         </>
       )}
     </div>

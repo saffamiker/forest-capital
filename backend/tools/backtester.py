@@ -713,7 +713,7 @@ def run_equal_weight(history: dict) -> dict:
 
 # ── MOMENTUM ROTATION ─────────────────────────────────────────────────────────
 
-def run_momentum_rotation(history: dict) -> dict:
+def run_momentum_rotation(history: dict, lookback_scale: float = 1.0) -> dict:
     """
     Composite momentum rotation: long top 2 of {equity, IG, HY} by momentum score.
     Lookbacks [1, 3, 6, 12] months (monthly equivalents of MOMENTUM_LOOKBACKS=[21,
@@ -731,16 +731,20 @@ def run_momentum_rotation(history: dict) -> dict:
     qtr_dates = _quarterly_dates(returns_df)
     schedule = []
 
+    # lookback_scale (default 1.0 — current behaviour) scales all four
+    # momentum lookbacks uniformly; used by the sensitivity sweep.
+    lookbacks = [max(1, round(lb * lookback_scale)) for lb in _MOMENTUM_LOOKBACKS_M]
+
     for date in qtr_dates:
         available = returns_df[returns_df.index < date]
-        if len(available) < max(_MOMENTUM_LOOKBACKS_M):
+        if len(available) < max(lookbacks):
             continue
 
         scores: dict[str, float] = {}
         for asset, col in [("equity", "equity_return"), ("ig", "ig_return"), ("hy", "hy_return")]:
             series = available[col].dropna()
             composite = 0.0
-            for lb, wt in zip(_MOMENTUM_LOOKBACKS_M, MOMENTUM_WEIGHTS):
+            for lb, wt in zip(lookbacks, MOMENTUM_WEIGHTS):
                 if len(series) >= lb:
                     compound = float((1 + series.iloc[-lb:]).prod() - 1)
                     composite += wt * compound
@@ -773,7 +777,7 @@ def run_momentum_rotation(history: dict) -> dict:
 
 # ── REGIME SWITCHING ──────────────────────────────────────────────────────────
 
-def run_regime_switching(history: dict) -> dict:
+def run_regime_switching(history: dict, regime_window_m: int = _REGIME_WINDOW_M) -> dict:
     """
     Threshold-based regime switching using equity trend as the primary signal.
     CLAUDE.md allocations exactly:
@@ -804,10 +808,10 @@ def run_regime_switching(history: dict) -> dict:
 
     for date in qtr_dates:
         available = returns_df[returns_df.index < date]
-        if len(available) < _REGIME_WINDOW_M:
+        if len(available) < regime_window_m:
             continue
 
-        window_eq = available["equity_return"].iloc[-_REGIME_WINDOW_M:]
+        window_eq = available["equity_return"].iloc[-regime_window_m:]
         equity_trend = float((1 + window_eq).prod() - 1)
 
         regime = _classify_threshold(
@@ -840,7 +844,7 @@ def run_regime_switching(history: dict) -> dict:
 
 # ── VOLATILITY TARGETING ──────────────────────────────────────────────────────
 
-def run_vol_targeting(history: dict) -> dict:
+def run_vol_targeting(history: dict, target_volatility: float = TARGET_VOLATILITY) -> dict:
     """
     Scale equity to TARGET_VOLATILITY=10% annualised; remainder to IG bonds.
     Vol signal uses the trailing 21-day realised volatility of equity_daily —
@@ -877,7 +881,7 @@ def run_vol_targeting(history: dict) -> dict:
         if vol_21d <= 0:
             eq_weight = MAX_WEIGHT
         else:
-            eq_weight = min(TARGET_VOLATILITY / vol_21d, MAX_WEIGHT)
+            eq_weight = min(target_volatility / vol_21d, MAX_WEIGHT)
             eq_weight = max(eq_weight, MIN_WEIGHT)
 
         weights = {"equity": eq_weight, "ig": 1.0 - eq_weight}
@@ -954,7 +958,7 @@ def run_black_litterman(history: dict) -> dict:
 
 # ── MAX SHARPE ROLLING ────────────────────────────────────────────────────────
 
-def run_max_sharpe_rolling(history: dict) -> dict:
+def run_max_sharpe_rolling(history: dict, optimization_window: int = OPTIMIZATION_WINDOW) -> dict:
     """
     Maximum-Sharpe portfolio on a rolling 36-month window, quarterly rebalanced.
     SLSQP directly maximises Sharpe under box constraints [MIN_WEIGHT, MAX_WEIGHT].
@@ -981,9 +985,9 @@ def run_max_sharpe_rolling(history: dict) -> dict:
 
     for date in qtr_dates:
         available = returns_df[returns_df.index < date]
-        if len(available) < OPTIMIZATION_WINDOW:
+        if len(available) < optimization_window:
             continue
-        window = _make_opt_df(available.iloc[-OPTIMIZATION_WINDOW:])
+        window = _make_opt_df(available.iloc[-optimization_window:])
 
         # Use risk-free level from data available before this rebalance date
         rf_available = rf[rf.index < date]

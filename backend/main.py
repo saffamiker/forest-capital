@@ -600,6 +600,32 @@ async def get_analytics_config(session: dict = Depends(require_auth)):
                 "risk_free_source": _RISK_FREE_SOURCE}
 
 
+@app.get("/api/v1/analytics/sensitivity")
+@limiter.limit("10/minute")
+async def get_analytics_sensitivity(request: Request, session: dict = Depends(require_auth)):
+    """
+    Parameter sensitivity analysis for the four dynamic strategies — the
+    Sharpe ratio swept across a range of each strategy's key parameter.
+
+    This is a ~23-backtest computation, so it has its OWN endpoint rather
+    than being bundled into the light /api/v1/analytics/academic payload —
+    bundling would make every analytics page load run 23 backtests. The
+    result is memoised in-process (tools/sensitivity.compute_sensitivity):
+    the first call after a restart pays the cost once, then it is instant.
+    The frontend section shows its own loading state.
+    """
+    if ENVIRONMENT == "test":
+        return {"available": False, "strategies": []}
+    try:
+        from tools.data_fetcher import get_full_history
+        from tools.sensitivity import compute_sensitivity
+        result = compute_sensitivity(get_full_history())
+        return {"available": True, **result}
+    except Exception as exc:
+        log.warning("analytics_sensitivity_failed", error=str(exc))
+        return {"available": False, "strategies": []}
+
+
 # ── Admin: data status ────────────────────────────────────────────────────────
 
 @app.get("/api/v1/admin/data-status")
