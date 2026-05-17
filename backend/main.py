@@ -510,13 +510,16 @@ async def get_chart_data(request: Request, session: dict = Depends(require_auth)
 async def get_academic_analytics(request: Request, session: dict = Depends(require_auth)):
     """
     Bundled academic analytics for the analytics view and the midpoint paper:
-    summary statistics, 12-month rolling correlation, regime-conditional
-    performance, drawdown comparison, and Fama-French factor loadings.
+    summary statistics, cumulative total return, 12-month rolling correlation,
+    rolling excess return, regime-conditional performance, drawdown comparison,
+    Carhart four-factor loadings, and the source-controlled strategy metadata.
 
     Every figure is derived from data already in PostgreSQL —
     market_data_monthly, strategy_results_cache, ff_factors_monthly — so the
     endpoint is a set of light reads plus pure NumPy/statsmodels compute; it
-    never triggers get_full_history() or run_all_strategies().
+    never triggers get_full_history() or run_all_strategies(). Parameter
+    sensitivity is deliberately NOT bundled here — it re-runs ~23 backtests
+    and has its own endpoint, /api/v1/analytics/sensitivity.
     """
     if ENVIRONMENT == "test":
         return {"available": False, "note": "analytics unavailable in test environment"}
@@ -551,6 +554,8 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
         if not bench_series.empty:
             asset_series["BENCHMARK"] = bench_series
 
+        from strategy_metadata import STRATEGY_METADATA
+
         return {
             "available": True,
             "study_period": {
@@ -559,10 +564,13 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
                 "n_months": len(idx),
             },
             "summary_statistics": an.summary_statistics(asset_series, rf),
+            "cumulative_returns": an.cumulative_returns(strategies),
             "rolling_correlation": an.rolling_correlation(equity, ig, hy, window=12),
+            "rolling_excess_return": an.rolling_excess_return(strategies, window=12),
             "regime_conditional": an.regime_conditional_performance(strategies, rf),
             "drawdown_comparison": an.drawdown_comparison(strategies),
             "factor_loadings": an.factor_loadings(strategies, ff or []),
+            "strategy_metadata": STRATEGY_METADATA,
         }
     except Exception as exc:
         log.warning("academic_analytics_failed", error=str(exc))
