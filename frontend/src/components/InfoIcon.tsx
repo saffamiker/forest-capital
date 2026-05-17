@@ -14,8 +14,9 @@
  * icon fails silent rather than showing an empty tooltip.
  */
 import { useRef, useState } from 'react'
-import { Info, X } from 'lucide-react'
+import { Info } from 'lucide-react'
 import { getTooltip } from '../constants/explainerTooltips'
+import ExplainerPanel from './ExplainerPanel'
 
 interface InfoIconProps {
   /** Key into explainerTooltips.ts — supplies the static hover text. */
@@ -88,35 +89,15 @@ export default function InfoIcon({
         </span>
       )}
 
-      {/* Click panel — commit 3 replaces this inline shell with the live
-          ExplainerPanel (streamed agent explanation). Until then it shows
-          the static text expanded so the click is never a dead end. */}
+      {/* Click — the live, streamed explainer drawer. currentValue is
+          spread so it is omitted (not passed as undefined) when absent —
+          exactOptionalPropertyTypes forbids an explicit undefined. */}
       {panelOpen && (
-        <span
-          role="dialog"
-          className="absolute z-50 left-0 top-full mt-1.5 w-72 rounded-md
-                     border border-border bg-navy-800 p-3 shadow-lg"
-        >
-          <span className="flex items-start justify-between gap-2">
-            <span className="text-xs font-semibold text-white">{metricLabel}</span>
-            <button
-              type="button"
-              onClick={() => setPanelOpen(false)}
-              aria-label="Close"
-              className="text-muted hover:text-white"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </span>
-          {currentValue && (
-            <span className="block text-2xs text-muted font-mono mt-1">
-              Current value: {currentValue}
-            </span>
-          )}
-          <span className="block text-2xs text-slate-300 leading-relaxed mt-1.5">
-            {tooltip}
-          </span>
-        </span>
+        <ExplainerPanel
+          metricLabel={metricLabel}
+          {...(currentValue !== undefined ? { currentValue } : {})}
+          onClose={() => setPanelOpen(false)}
+        />
       )}
     </span>
   )
