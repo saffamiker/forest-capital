@@ -291,12 +291,13 @@ async def upsert_commits(commits: list[dict]) -> int:
 # activity_type filter → which sources to include.
 _TYPE_SOURCES: dict[str, set[str]] = {
     "all":             {"commits", "council", "academic_review", "qa",
-                        "uploads", "page_views"},
+                        "uploads", "page_views", "test_events"},
     "council":         {"council"},
     "academic_review": {"academic_review"},
     "commits":         {"commits"},
     "page_views":      {"page_views"},
     "uploads":         {"uploads"},
+    "test_activity":   {"test_events"},
 }
 
 
@@ -348,6 +349,9 @@ async def get_team_activity(
                 merged += await _read_page_views(
                     session, text, session_type, date_from, date_to,
                     user_id, fetch_n)
+            if "test_events" in sources:
+                merged += await _read_test_events(
+                    session, text, user_id, fetch_n)
     except Exception as exc:  # noqa: BLE001
         log.warning("team_activity_query_failed", error=str(exc))
         return empty
@@ -443,6 +447,76 @@ async def _read_interactions(session, text, wanted, session_type,
     return out
 
 
+async def _read_test_events(session, text, user_id, fetch_n):
+    """
+    Timeline events from the guided UAT test runner — test_results and
+    test_feedback (migration 014). Emits four event kinds:
+      test_pass    — one aggregate per (tester, script): pass/fail/skip
+      test_failure — one per failed step, with the failure report
+      test_failure_resolved — one per resolved failure
+      test_feedback — one per feedback submission
+    Test activity is inherently testing-band, so it is not session_type
+    filtered — it is shown whenever the test_events source is selected.
+    """
+    out: list[dict] = []
+    res_clause = (" WHERE user_email = :uid" if user_id else "")
+    params: dict[str, Any] = {"n": fetch_n}
+    if user_id:
+        params["uid"] = user_id
+
+    rows = await session.execute(text(
+        "SELECT user_email, script_id, step_id, result, severity, "
+        " failure_description, attested_at, resolved_at, resolved_by "
+        "FROM test_results" + res_clause
+        + " ORDER BY attested_at DESC LIMIT :n"), params)
+    # Aggregate pass/fail/skip per (tester, script) for the test_pass event.
+    agg: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in rows.fetchall():
+        email, script_id, step_id, result = r[0], r[1], r[2], r[3]
+        a = agg.setdefault((email, script_id), {
+            "pass": 0, "fail": 0, "skip": 0, "latest": None})
+        if result in ("pass", "fail", "skip"):
+            a[result] += 1
+        a["latest"] = _max_iso(a["latest"], _ts(r[6]))
+        if result == "fail":
+            out.append({
+                "kind": "test_failure", "timestamp": _ts(r[6]),
+                "user": email, "user_name": display_name(email),
+                "session_type": "testing",
+                "metadata": {"script_id": script_id, "step_id": step_id,
+                             "severity": r[4],
+                             "failure_description": r[5]},
+            })
+        if r[7] is not None:
+            out.append({
+                "kind": "test_failure_resolved", "timestamp": _ts(r[7]),
+                "user": r[8] or email, "user_name": display_name(r[8] or email),
+                "session_type": "testing",
+                "metadata": {"script_id": script_id, "step_id": step_id},
+            })
+    for (email, script_id), a in agg.items():
+        out.append({
+            "kind": "test_pass", "timestamp": a["latest"],
+            "user": email, "user_name": display_name(email),
+            "session_type": "testing",
+            "metadata": {"script_id": script_id, "passed": a["pass"],
+                         "failed": a["fail"], "skipped": a["skip"]},
+        })
+
+    fb = await session.execute(text(
+        "SELECT user_email, title, ai_category, submitted_at "
+        "FROM test_feedback" + res_clause
+        + " ORDER BY submitted_at DESC LIMIT :n"), params)
+    for r in fb.fetchall():
+        out.append({
+            "kind": "test_feedback", "timestamp": _ts(r[3]),
+            "user": r[0], "user_name": display_name(r[0]),
+            "session_type": "testing",
+            "metadata": {"title": r[1], "ai_category": r[2]},
+        })
+    return out
+
+
 async def _read_page_views(session, text, session_type, date_from, date_to,
                            user_id, fetch_n):
     clauses = ["event_type = 'page_view'"]
@@ -491,6 +565,7 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
         "per_member": [], "commits": {"total": 0, "this_week": 0, "by_author": {}},
         "most_active_agents": [], "last_academic_review": None,
         "total_interactions": 0, "analytical_sessions_only": analytical_only,
+        "test_coverage": {"steps_attested": 0, "testers": 0},
     }
     if not _DB_AVAILABLE:
         return empty
@@ -527,6 +602,11 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
                 "SELECT user_email, timestamp, metadata FROM agent_interactions "
                 "WHERE interaction_type = 'academic_review'" + st_clause
                 + " ORDER BY timestamp DESC LIMIT 1"
+            ))
+            # Test coverage — attested steps and distinct testers. Not
+            # session_type filtered: test attestations are the test record.
+            test_cov = await session.execute(text(
+                "SELECT COUNT(*), COUNT(DISTINCT user_email) FROM test_results"
             ))
 
             members: dict[str, dict] = {}
@@ -601,6 +681,8 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
                     "overall_rating": meta.get("overall_rating"),
                 }
 
+            cov_row = test_cov.fetchone()
+
         return {
             "per_member": sorted(members.values(), key=lambda m: m["user"]),
             "commits": {"total": total_commits, "this_week": this_week,
@@ -609,6 +691,10 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
             "last_academic_review": last_review,
             "total_interactions": total_interactions,
             "analytical_sessions_only": analytical_only,
+            "test_coverage": {
+                "steps_attested": int(cov_row[0]) if cov_row else 0,
+                "testers": int(cov_row[1]) if cov_row else 0,
+            },
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("activity_summary_failed", error=str(exc))

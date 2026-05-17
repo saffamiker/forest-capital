@@ -14,7 +14,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
 import {
   GitCommit, Users, GraduationCap, ShieldCheck, FileText, Eye,
-  Loader2, AlertCircle, RefreshCw,
+  Loader2, AlertCircle, RefreshCw, ClipboardCheck, Bug, CheckCircle2,
+  Lightbulb,
 } from 'lucide-react'
 import type {
   ActivityEvent, ActivityKind, ActivitySummary, TeamActivityResponse,
@@ -28,6 +29,7 @@ const PAGE_LIMIT = 100
 // high-volume, low-signal rows, opt-in via the filter.
 const DEFAULT_KINDS: ActivityKind[] = [
   'commit', 'council', 'academic_review', 'qa', 'document_upload',
+  'test_pass', 'test_failure', 'test_failure_resolved', 'test_feedback',
 ]
 const ALL_KINDS: ActivityKind[] = [...DEFAULT_KINDS, 'page_view']
 
@@ -38,6 +40,10 @@ const KIND_META: Record<ActivityKind, { label: string; icon: typeof GitCommit; c
   qa:               { label: 'QA Audit',        icon: ShieldCheck,   color: '#be123c' },
   document_upload:  { label: 'Upload',          icon: FileText,      color: '#0d9488' },
   page_view:        { label: 'Page View',       icon: Eye,           color: '#64748b' },
+  test_pass:             { label: 'Test Attestations', icon: ClipboardCheck, color: '#10b981' },
+  test_failure:          { label: 'Test Failure',      icon: Bug,            color: '#ef4444' },
+  test_failure_resolved: { label: 'Test Resolved',     icon: CheckCircle2,   color: '#10b981' },
+  test_feedback:         { label: 'Test Feedback',     icon: Lightbulb,      color: '#3b82f6' },
 }
 
 // Council agent id → short label for the timeline / "most active agents".
@@ -165,6 +171,14 @@ function SummaryPanel({ summary }: { summary: ActivitySummary }) {
             </div>
           ) : (
             <p className="text-2xs text-muted italic">No review run yet.</p>
+          )}
+          {summary.test_coverage && (
+            <p className="text-2xs text-muted mt-2 pt-2 border-t border-border/50">
+              Test coverage: {summary.test_coverage.steps_attested} step
+              {summary.test_coverage.steps_attested === 1 ? '' : 's'} attested
+              {' '}across {summary.test_coverage.testers} team member
+              {summary.test_coverage.testers === 1 ? '' : 's'}
+            </p>
           )}
         </div>
       </div>
@@ -364,6 +378,55 @@ function RowBody({ ev }: { ev: ActivityEvent }) {
       <div className="text-sm text-white">
         Uploaded <span className="font-mono text-slate-300">{fn}</span>
         {dt && <span className="text-2xs text-muted"> · {dt}</span>}
+      </div>
+    )
+  }
+  if (ev.kind === 'test_pass') {
+    const m = ev.metadata ?? {}
+    return (
+      <div>
+        <div className="text-sm text-white">Test Pass Completed</div>
+        <div className="text-2xs text-muted mt-0.5">
+          {String(m.script_id ?? '')}: {Number(m.passed ?? 0)} passed,
+          {' '}{Number(m.failed ?? 0)} failed, {Number(m.skipped ?? 0)} skipped
+        </div>
+      </div>
+    )
+  }
+  if (ev.kind === 'test_failure') {
+    const m = ev.metadata ?? {}
+    return (
+      <div>
+        <div className="text-sm text-white">
+          Test Failure Reported
+          {m.severity ? <span className="text-2xs text-danger"> · {String(m.severity)}</span> : null}
+        </div>
+        {m.failure_description ? (
+          <div className="text-2xs text-muted mt-0.5">
+            {String(m.failure_description)}
+          </div>
+        ) : null}
+      </div>
+    )
+  }
+  if (ev.kind === 'test_failure_resolved') {
+    return (
+      <div className="text-sm text-white">
+        Test Failure Resolved
+        <span className="text-2xs text-muted">
+          {' '}· {String(ev.metadata?.step_id ?? '')}
+        </span>
+      </div>
+    )
+  }
+  if (ev.kind === 'test_feedback') {
+    const m = ev.metadata ?? {}
+    return (
+      <div className="text-sm text-white">
+        Feedback Submitted — {String(m.title ?? 'feedback')}
+        {m.ai_category ? (
+          <span className="text-2xs text-muted"> · {String(m.ai_category)}</span>
+        ) : null}
       </div>
     )
   }

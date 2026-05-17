@@ -7,6 +7,7 @@
 export type ActivityKind =
   | 'commit' | 'council' | 'academic_review' | 'qa'
   | 'document_upload' | 'page_view'
+  | 'test_pass' | 'test_failure' | 'test_failure_resolved' | 'test_feedback'
 
 /** One row of the unified timeline. Kind-specific fields are optional —
  *  which ones are populated depends on `kind`. */
@@ -72,4 +73,5 @@ export interface ActivitySummary {
   last_academic_review: LastAcademicReview | null
   total_interactions: number
   analytical_sessions_only: boolean
+  test_coverage?: { steps_attested: number; testers: number }
 }

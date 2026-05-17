@@ -26,12 +26,14 @@ import type { ChartTheme } from '../lib/exportTheme'
 import { DARK_CHART_THEME } from '../lib/exportTheme'
 
 // Stacked activity types for chart 1 — page_view is the lightest layer.
+// Test attestations are their own distinct stack colour.
 const STACK_KINDS: { key: ActivityKind; label: string; color: string }[] = [
-  { key: 'commit',          label: 'Commits',         color: '#6366f1' },
-  { key: 'council',         label: 'Council',         color: '#3b82f6' },
-  { key: 'academic_review', label: 'Academic Review', color: '#f59e0b' },
-  { key: 'document_upload', label: 'Uploads',         color: '#0d9488' },
-  { key: 'page_view',       label: 'Page Views',      color: '#475569' },
+  { key: 'commit',          label: 'Commits',          color: '#6366f1' },
+  { key: 'council',         label: 'Council',          color: '#3b82f6' },
+  { key: 'academic_review', label: 'Academic Review',  color: '#f59e0b' },
+  { key: 'document_upload', label: 'Uploads',          color: '#0d9488' },
+  { key: 'test_pass',       label: 'Test Attestations', color: '#10b981' },
+  { key: 'page_view',       label: 'Page Views',       color: '#475569' },
 ]
 
 const MEMBER_COLORS = ['#3b82f6', '#f59e0b', '#10b981', '#8b5cf6', '#06b6d4']
