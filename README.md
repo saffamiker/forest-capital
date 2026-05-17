@@ -229,37 +229,21 @@ See `backend/.env.example` for all required variables. Key ones:
 
 ## Known Issues
 
-**Issue #2 — HMM on Windows**  
-`hmmlearn` requires Microsoft C++ Build Tools on Windows. 10 HMM tests are marked skip on Windows; they run and pass in CI on Ubuntu. Install Visual Studio Build Tools or use WSL to run locally.
+**Issue #2 — HMM on Windows.** `hmmlearn` requires Microsoft C++ Build Tools on Windows. The HMM tests are marked skip on Windows; they run and pass in CI on Ubuntu. Install Visual Studio Build Tools or use WSL to run locally.
 
 ## Known Limitations
 
+- **UAT screenshots are ephemeral.** Test-runner failure-report screenshots are stored on Render's ephemeral filesystem and do not survive a redeploy. The `test_results` attestation row (result, description, severity, timestamps) is the durable record — screenshots are supporting evidence only. An object store (S3 or equivalent) is the post-deadline fix.
+- **Two agent-registry structures in `main.py` are not merged.** The model strings were centralised, but the two registry tables remain separate — merging them is a deferred refactor (code review M2/M7).
+- **`schemas.py` example model strings are literals.** They do not reference the agent-model constants, to avoid a `models → agents` import cycle (code review M16).
 - **`extract_document_text()` is PDF-only.** Markdown handling lives upstream in the `/api/v1/documents/academic/upload` endpoint (raw UTF-8 decode); the function's former non-PDF text branch was removed as dead code.
-- **Single `main` branch.** Development currently commits directly to `main`. A `develop → main` PR flow with required status checks is recommended post-deadline.
+- **Single `main` branch.** Development currently commits directly to `main`. A `develop → main` PR flow with the `ci.yml` jobs as required status checks is the recommended post-deadline upgrade.
 
-## Sprint 6 Roadmap
+*Resolved since earlier drafts:* the `Connection._cancel` warning (NullPool engines on both the production off-loop write path and the test environment); three-factor Fama-French (now the Carhart four-factor model, MOM backfilled); the turnover proxy (the analytics layer now surfaces true `sum(|Δw|)/2` portfolio turnover); the Dashboard cumulative chart (now real growth-of-$1 data, not a synthetic series); and the hardcoded Sharpe confidence interval (now real intervals, or `[—]`).
 
-**Shipped to date** (Phases 1–5):
-- All 12 Statistical Evidence + Regime Analysis charts driven by `/api/v1/charts/data`
-- Tiered QA system (deterministic Tier 1, Sonnet Tier 2 background, Opus Tier 3 manual) with nav-bar badge and Present-mode gate
-- Commentary mode bridge — `glossaryStore`, `ExplainableText`, `ChartCommentStrip` with always-visible Sources line
-- Grok contrarian analyst alongside Gemini independent analyst
-- Council Debate narrative bug fixed; navigation persistence across all 5 stores
-- Reports screen + Priority 1 midpoint paper generator (`/api/reports/midpoint-template`) with `python-docx`, Academic Writer prose, AI DRAFT banner — addresses June 3 deadline
-- Alembic migrations 003 (`qa_results_cache`) and 004 (`documents` / `document_versions` / `document_drafts`)
+## Roadmap
 
-**Remaining for Sprint 6 close (target Jul 1)**:
-- Executive Brief + Analytical Appendix generators (Bob's remaining deliverables)
-- Full regression suite + performance benchmarks (p95 response times)
-- Accessibility audit (axe-core, WCAG AA)
-- Final git tag: `v1.0.0-presentation`
-
-**Shipped in Phase 6** (this commit):
-- Storyboard Editor UI — drag-reorder, slide editor, timing bar, 30s auto-save, Version History sidebar
-- `POST /api/documents/storyboard/draft` + full CRUD on `documents` / `document_versions` / `document_drafts`
-- `POST /api/reports/generate-from-storyboard/:id` — `.pptx` deck, full-team / Molly / Michael / Bob / rehearsal scripts, Q&A `.docx`
-- Presentation Script Writer at 130 wpm with voice differentiation per owner
-- Gemini Assistant panel with red/green paragraph diff and per-message Apply/Skip
+Work is tracked as a Kanban board (Backlog | In Progress | Done) — the board of record is in `CLAUDE.md`. The near-term focus is the June 3 midpoint: the written submission, an Academic Review session, and the per-member UAT passes through the guided test runner.
 
 ## Team
 
