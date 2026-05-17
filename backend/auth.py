@@ -20,6 +20,7 @@ from config import (
     ENVIRONMENT,
     FRONTEND_URL,
     ALLOWED_EMAILS,
+    PROJECT_TEAM_EMAILS,
 )
 from logger import get_logger
 
@@ -227,6 +228,29 @@ async def require_auth(x_api_key: Optional[str] = Header(None)) -> dict:
     if x_api_key == MASTER_API_KEY:
         return {"email": "developer@forest-capital", "role": "developer"}
     return verify_session_token(x_api_key)
+
+
+async def require_team_member(session: dict = Depends(require_auth)) -> dict:
+    """
+    Extends require_auth with the project-team check — the platform's
+    second access tier. Any authenticated user may explore the analytics
+    and ask the council; the action features (document upload, the
+    export endpoints, Academic Review, the test runner) are restricted
+    to PROJECT_TEAM_EMAILS.
+
+    The master API key (role "developer") is Michael's CLI key and
+    bypasses the check — it is the most privileged credential. A non-team
+    authenticated user gets 403.
+    """
+    if session.get("role") == "developer":
+        return session
+    email = (session.get("email") or "").strip().lower()
+    if email not in {e.lower() for e in PROJECT_TEAM_EMAILS}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This action is restricted to the project team.",
+        )
+    return session
 
 
 async def require_master_key(x_api_key: Optional[str] = Header(None)) -> dict:

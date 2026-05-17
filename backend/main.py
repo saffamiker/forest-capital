@@ -28,6 +28,7 @@ from agents.base import SONNET_MODEL, OPUS_MODEL, GEMINI_MODEL
 from logger import configure_logging, get_logger
 from auth import (
     require_auth,
+    require_team_member,
     require_master_key,
     generate_magic_token,
     generate_session_token,
@@ -675,7 +676,7 @@ async def upload_academic_document(
     request: Request,
     file: UploadFile = File(...),
     document_type: str = Form("other"),
-    session: dict = Depends(require_auth),
+    session: dict = Depends(require_team_member),
 ):
     """
     Uploads a PDF or Markdown (.md) reference document (the midpoint
@@ -766,7 +767,7 @@ async def list_academic_docs(session: dict = Depends(require_auth)):
 
 
 @app.delete("/api/v1/documents/academic/{doc_id}")
-async def delete_academic_doc(doc_id: str, session: dict = Depends(require_auth)):
+async def delete_academic_doc(doc_id: str, session: dict = Depends(require_team_member)):
     """Deletes an academic document and refreshes the agent-context cache."""
     from tools.academic_context import delete_academic_document
     ok = await delete_academic_document(doc_id)
@@ -1295,7 +1296,7 @@ def _parse_overall_rating(verdict: str) -> str | None:
 
 @app.post("/api/council/academic-review")
 @limiter.limit("10/minute")
-async def council_academic_review(request: Request, session: dict = Depends(require_auth)):
+async def council_academic_review(request: Request, session: dict = Depends(require_team_member)):
     """
     Convenes the council to evaluate the project's academic readiness.
 
@@ -1479,16 +1480,9 @@ async def council_explain_data(
 
 _TESTING_ADMIN = "ruurdsm@queens.edu"
 
-
-def _require_test_team(session: dict) -> str:
-    """Returns the caller's email if they are a project team member,
-    else raises 403 — the test runner is team-only."""
-    from tools.activity_log import is_team_member
-    email = session.get("email", "")
-    if not is_team_member(email):
-        raise HTTPException(status_code=403,
-                            detail="The test runner is restricted to the project team.")
-    return email
+# Team-gating is the require_team_member FastAPI dependency on every
+# /api/v1/testing/* endpoint. _require_test_admin narrows the admin
+# views further to ruurdsm@.
 
 
 def _require_test_admin(session: dict) -> str:
@@ -1532,14 +1526,15 @@ async def testing_record_result(
     override_reason: str = Form(default=""),
     low_quality: bool = Form(default=False),
     screenshots: list[UploadFile] = File(default=[]),
-    session: dict = Depends(require_auth),
+    session: dict = Depends(require_team_member),
 ):
     """
     Records (upserts) one attested test-step result. Always multipart so
     a step with or without screenshots uses one content type. A
-    re-attestation overwrites the row and flips `overridden`. Team-only.
+    re-attestation overwrites the row and flips `overridden`. Team-only
+    (require_team_member).
     """
-    email = _require_test_team(session)
+    email = session.get("email", "")
     if result not in {"pass", "fail", "skip"}:
         raise HTTPException(status_code=422, detail="result must be pass | fail | skip")
 
@@ -1562,9 +1557,9 @@ async def testing_record_result(
 
 
 @app.get("/api/v1/testing/results")
-async def testing_get_results(session: dict = Depends(require_auth)):
+async def testing_get_results(session: dict = Depends(require_team_member)):
     """The current user's test results, grouped by script_id. Team-only."""
-    email = _require_test_team(session)
+    email = session.get("email", "")
     from tools.test_runner import get_results
     grouped: dict[str, list] = {}
     for row in await get_results(email):
@@ -1573,25 +1568,25 @@ async def testing_get_results(session: dict = Depends(require_auth)):
 
 
 @app.get("/api/v1/testing/unseen")
-async def testing_unseen(session: dict = Depends(require_auth)):
+async def testing_unseen(session: dict = Depends(require_team_member)):
     """Per-script attested-step inventory — the frontend diffs it against
     testScripts.ts to surface scripts with new/changed steps. Team-only."""
-    email = _require_test_team(session)
+    email = session.get("email", "")
     from tools.test_runner import get_unseen
     return await get_unseen(email)
 
 
 @app.get("/api/v1/testing/summary")
-async def testing_summary(session: dict = Depends(require_auth)):
+async def testing_summary(session: dict = Depends(require_team_member)):
     """Per-script pass/fail/skip counts for the current user. The frontend
     derives total and pending from its own step inventory. Team-only."""
-    email = _require_test_team(session)
+    email = session.get("email", "")
     from tools.test_runner import get_summary
     return {"summary": await get_summary(email)}
 
 
 @app.get("/api/v1/testing/failures")
-async def testing_failures(session: dict = Depends(require_auth)):
+async def testing_failures(session: dict = Depends(require_team_member)):
     """Every failed step across all testers, severity-sorted. Admin-only."""
     _require_test_admin(session)
     from tools.test_runner import get_all_failures
@@ -1600,7 +1595,7 @@ async def testing_failures(session: dict = Depends(require_auth)):
 
 @app.post("/api/v1/testing/failures/{failure_id}/resolve")
 async def testing_resolve_failure(
-    failure_id: int, body: dict, session: dict = Depends(require_auth),
+    failure_id: int, body: dict, session: dict = Depends(require_team_member),
 ):
     """
     Marks a failure resolved. The row is kept (the resolution is the audit
@@ -1630,7 +1625,7 @@ async def testing_submit_feedback(
     browser_info: str = Form(default=""),
     low_quality: bool = Form(default=False),
     screenshots: list[UploadFile] = File(default=[]),
-    session: dict = Depends(require_auth),
+    session: dict = Depends(require_team_member),
 ):
     """
     Accepts a feedback submission, runs AI categorisation, and stores it.
@@ -1640,7 +1635,7 @@ async def testing_submit_feedback(
     """
     import asyncio
 
-    email = _require_test_team(session)
+    email = session.get("email", "")
     from tools.test_runner import categorize_feedback, submit_feedback
 
     step_context = f"{script_id or 'free-form'} / {step_id or source_route or 'n/a'}"
@@ -1665,7 +1660,7 @@ async def testing_get_feedback(
     category: str | None = None, severity: str | None = None,
     effort: str | None = None, status: str | None = None,
     user_email: str | None = None,
-    session: dict = Depends(require_auth),
+    session: dict = Depends(require_team_member),
 ):
     """All tester feedback, newest first, with optional filters. Admin-only."""
     _require_test_admin(session)
@@ -1679,7 +1674,7 @@ async def testing_get_feedback(
 
 @app.post("/api/v1/testing/feedback/{feedback_id}/resolve")
 async def testing_resolve_feedback(
-    feedback_id: int, body: dict, session: dict = Depends(require_auth),
+    feedback_id: int, body: dict, session: dict = Depends(require_team_member),
 ):
     """Updates a feedback row's status. The submitter sees a login
     notification on the next visit. Admin-only."""
@@ -1698,14 +1693,14 @@ async def testing_resolve_feedback(
 
 
 @app.get("/api/v1/testing/notifications")
-async def testing_notifications(session: dict = Depends(require_auth)):
+async def testing_notifications(session: dict = Depends(require_team_member)):
     """
     The current tester's operational login notifications — failures an
     admin resolved (pending re-test) and feedback an admin responded to.
     The "new tests available" notification is computed on the frontend
     from /unseen. Team-only.
     """
-    email = _require_test_team(session)
+    email = session.get("email", "")
     from tools.test_runner import get_notifications
     return await get_notifications(email)
 
@@ -1713,7 +1708,7 @@ async def testing_notifications(session: dict = Depends(require_auth)):
 @app.post("/api/v1/testing/quality-check")
 @limiter.limit("120/minute")
 async def testing_quality_check(
-    request: Request, body: dict, session: dict = Depends(require_auth),
+    request: Request, body: dict, session: dict = Depends(require_team_member),
 ):
     """
     The quality gate — scores a failure report or feedback submission
@@ -1723,7 +1718,6 @@ async def testing_quality_check(
     """
     import asyncio
 
-    _require_test_team(session)
     submission_type = str(body.get("type") or "feedback")
     description = str(body.get("description") or "")
     step_context = str(body.get("step_context") or "")
@@ -2525,7 +2519,7 @@ async def export_package(
     charts: list[UploadFile] = File(default=[]),
     tables: list[UploadFile] = File(default=[]),
     metadata: str = Form(default="{}"),
-    session: dict = Depends(require_auth),
+    session: dict = Depends(require_team_member),
 ):
     """
     Assembles an academic export ZIP from client-rendered chart PNGs and
@@ -2709,7 +2703,7 @@ async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
 @app.post("/api/v1/export/midpoint-paper")
 @limiter.limit("6/minute")
 async def export_midpoint_paper(
-    request: Request, session: dict = Depends(require_auth),
+    request: Request, session: dict = Depends(require_team_member),
 ):
     """
     Generates the three-page midpoint submission as a .docx download.
@@ -2823,7 +2817,7 @@ async def export_midpoint_paper(
 @app.post("/api/v1/export/executive-brief")
 @limiter.limit("6/minute")
 async def export_executive_brief(
-    request: Request, session: dict = Depends(require_auth),
+    request: Request, session: dict = Depends(require_team_member),
 ):
     """
     Generates the five-page executive brief as a .docx download.
@@ -2954,7 +2948,7 @@ async def export_executive_brief(
 @app.post("/api/v1/export/presentation-deck")
 @limiter.limit("4/minute")
 async def export_presentation_deck(
-    request: Request, session: dict = Depends(require_auth),
+    request: Request, session: dict = Depends(require_team_member),
 ):
     """
     Generates the 16-slide final presentation deck as a .pptx download.
