@@ -57,3 +57,37 @@ push delivers commits into `commit_activity`.
 **Verify:** push a commit, then check the Render logs for
 `activity_webhook_push` — or open Team Activity in the Reports view and
 confirm the commit appears in the timeline.
+
+---
+
+## 3. Backfill historical commits
+
+The webhook only delivers commits made *after* it is registered. To
+populate `commit_activity` with the project's full history, call the
+manual sync endpoint once after deploy. It pulls the last 100 commits
+from the GitHub REST API and **upserts on SHA**, so it is safe to run
+repeatedly — re-running it never duplicates a row and also catches up
+anything the webhook missed.
+
+Authenticated as any signed-in team member:
+
+```bash
+curl -H "X-API-Key: <your-session-token>" \
+  https://forest-capital.onrender.com/api/v1/activity/commits/sync
+```
+
+A successful run returns `{"synced": <n>, "fetched": <n>}`. If
+`GITHUB_TOKEN` is not set the response is
+`{"synced": 0, "error": "GITHUB_TOKEN is not set …"}` — set the token
+(step 1) and retry.
+
+The first sync fetches each commit's detail for the
+additions/deletions/files-changed stats, so it takes ~15–40 seconds
+for 100 commits; later syncs are faster as unchanged rows simply
+re-upsert.
+
+**Verify:** open Team Activity in the Reports view — the timeline and
+the "Activity over time" chart should show the historical commits,
+attributed to Michael Ruurds (his git author email resolves through
+`GIT_AUTHOR_EMAIL_MAP` to his platform identity).
+
