@@ -18,6 +18,7 @@ import os
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import NullPool
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:770519@localhost:5432/forestcapital")
 
@@ -28,8 +29,21 @@ elif DATABASE_URL and not DATABASE_URL.startswith("postgresql+asyncpg://"):
     # Ensure asyncpg driver is specified — plain postgresql:// uses psycopg2.
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
+# In the test environment the engine uses NullPool. Tests reach the DB
+# both through asyncio.run() (the DB round-trip tests) and through
+# Starlette's TestClient, which runs each request on its own per-request
+# portal event loop. A POOLED asyncpg connection returned to the pool is
+# orphaned when that loop closes; a later pool_pre_ping probe of the
+# cross-loop connection is interrupted, and asyncpg schedules a
+# Connection._cancel task on the dead loop — the "coroutine
+# 'Connection._cancel' was never awaited" RuntimeWarning. NullPool keeps
+# no connection between checkouts, so every connection opens and closes
+# inside its own loop. Production keeps the pooled, pool_pre_ping engine.
+_IS_TEST = os.getenv("ENVIRONMENT") == "test"
 engine: AsyncEngine | None = (
-    create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True)
+    (create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+     if _IS_TEST
+     else create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True))
     if DATABASE_URL
     else None
 )

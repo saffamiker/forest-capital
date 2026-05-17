@@ -4073,34 +4073,44 @@ MEMORY LEAK FIX (commit 9e9e51e):
      schedule_tier2_background() call. The worker (_tier2_run_and_cache)
      is a top-level function so it captures nothing via closure.
 
-NULLPOOL WRITE ENGINE — Connection._cancel warning:
+NULLPOOL WRITE ENGINE — Connection._cancel warning (fully resolved):
   Symptom: "RuntimeWarning: coroutine 'Connection._cancel' was never
   awaited" — emitted at GC time, so the line it is attributed to is
-  noise (the real coroutine is asyncpg connection teardown).
+  noise. tracemalloc pins the real allocation at asyncpg
+  connection.py:1682 (_cancel_current_command: create_task(_cancel)).
   Cause: an asyncpg connection is bound to the event loop it was created
-  on. database.py's engine is a pooled engine (AsyncAdaptedQueuePool).
-  Code that runs a DB write inside a background-thread asyncio.run()
-  checks a pooled connection back in still open; when that loop closes
-  the connection is orphaned on a dead loop, and its eventual teardown
-  emits the warning. No data risk — the transaction commits inside the
-  loop before it closes, and pool_pre_ping discards a dead connection
-  before reuse.
-  Production trigger: the QA Tier 2/3 cache write. main.py's _writer
-  wraps set_qa_cache() in asyncio.run() on the _TIER2_EXECUTOR thread.
-  Fix: tools/cache.py._get_write_engine() — a process-wide NullPool
-  write-engine singleton, the write-side sibling of
-  data_fetcher._get_readonly_engine(). set_qa_cache(..., off_loop=True)
-  routes through it; NullPool retains no connection between checkouts,
-  so the write opens and closes a fresh connection entirely within its
-  own loop. On-loop callers (await set_qa_cache(...) on the FastAPI
-  loop — main.py Tier 1 and the manual Tier 3 review) leave off_loop
-  False and keep using the pooled AsyncSessionLocal.
-  Residual: the warning still surfaces ONCE EACH in test_changelog.py
-  and test_activity.py output. Those DB round-trip tests drive
-  production-correct async functions (changelog.py / activity_log.py,
-  which run on the FastAPI loop in production) through the test
-  harness's own asyncio.run() wrapper. It is a test-harness artifact,
-  not a production code path — left as-is, with no warning suppressor.
+  on. database.py's production engine is a pooled engine
+  (AsyncAdaptedQueuePool). When a pooled connection is checked back in
+  still open and its event loop then closes, the connection is orphaned
+  on a dead loop; a later pool_pre_ping probe of that cross-loop
+  connection is interrupted, asyncpg schedules a Connection._cancel task
+  on the dead loop, and it is never awaited. No data risk — transactions
+  commit before the loop closes, and pool_pre_ping discards the dead
+  connection before reuse.
+
+  Two triggers, two fixes:
+
+  1. PRODUCTION — the QA Tier 2/3 cache write. main.py's _writer wraps
+     set_qa_cache() in asyncio.run() on the _TIER2_EXECUTOR thread.
+     Fix: tools/cache.py._get_write_engine() — a process-wide NullPool
+     write-engine singleton, the write-side sibling of
+     data_fetcher._get_readonly_engine(). set_qa_cache(..., off_loop=True)
+     routes through it; NullPool retains no connection between checkouts,
+     so the write opens and closes a fresh connection entirely within its
+     own loop. On-loop callers (await set_qa_cache(...) on the FastAPI
+     loop — main.py Tier 1 and the manual Tier 3 review) leave off_loop
+     False and keep using the pooled AsyncSessionLocal.
+
+  2. TESTS — Starlette's TestClient runs each request on its own
+     per-request portal event loop, so the endpoint-contract tests
+     orphaned pooled connections the same way. Fix: database.py's engine
+     uses NullPool when ENVIRONMENT == "test" (the production engine is
+     unchanged — still pooled with pool_pre_ping). NullPool keeps no
+     connection between checkouts, so no connection outlives its loop
+     under asyncio.run() OR TestClient.
+
+  Verified: the full backend suite (1080 passed) emits zero
+  Connection._cancel warnings. No warning suppressor is used anywhere.
 
 EFFICIENT FRONTIER (commits 9765d15, e2c03b6, 7ca5545):
   - /api/optimize/weights returns a structured EfficientFrontierData object
