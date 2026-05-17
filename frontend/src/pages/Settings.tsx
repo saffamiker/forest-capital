@@ -26,7 +26,7 @@ import { useSession } from '../context/SessionContext'
 import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 import { TestResultsSection, TestAdminSections } from '../components/TestRunnerSettings'
 import TeamGate from '../components/TeamGate'
-import { useIsTeamMember } from '../hooks/useIsTeamMember'
+import { useIsTeamMember, useIsSysadmin } from '../hooks/usePermissions'
 
 interface SettingsSectionProps {
   id: string
@@ -451,11 +451,9 @@ function ReleaseHistorySection() {
 
 export default function Settings() {
   const location = useLocation()
-  const { session } = useAuth()
   const isTeam = useIsTeamMember()
-  // The Test Administration section (failure reports + feedback backlog)
-  // is restricted to the test-runner admin.
-  const isTestAdmin = (session?.email ?? '').toLowerCase() === 'ruurdsm@queens.edu'
+  // The Test Administration and Users sections are sysadmin-only.
+  const isSysadmin = useIsSysadmin()
 
   // Deep-link support — /settings#academic-documents scrolls to that section.
   useEffect(() => {
@@ -541,7 +539,7 @@ export default function Settings() {
         </SettingsSection>
       )}
 
-      {isTestAdmin && (
+      {isSysadmin && (
         <SettingsSection
           id="test-administration"
           title="Test Administration"

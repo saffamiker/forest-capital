@@ -187,6 +187,12 @@ ROLE_PRESETS = {
     "sysadmin":    list(PERMISSIONS.keys()),
 }
 
+# The platform sysadmin(s). This seeds migration 015 and is the config
+# fallback's sysadmin set when platform_users is unreachable — so the
+# fallback faithfully mirrors the seeded role assignments and Michael is
+# not locked out of administration during a database outage.
+SYSADMIN_EMAILS = {"ruurdsm@queens.edu"}
+
 # Git commit author email → platform login email. Michael commits under a
 # personal git identity; resolving it here merges his commit history with
 # his platform activity under one identity in the Team Activity view. A

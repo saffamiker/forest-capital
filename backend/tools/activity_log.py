@@ -62,9 +62,24 @@ _SESSION_TYPES = {"analytical", "testing"}
 
 # ── Identity helpers ──────────────────────────────────────────────────────────
 
-def is_team_member(email: str | None) -> bool:
-    """True when this email is on the project-team allowlist."""
-    return bool(email) and email in PROJECT_TEAM_EMAILS
+async def is_team_member(email: str | None) -> bool:
+    """
+    True when this email holds the "team_member" permission — the gate
+    that decides whether an interaction / event is recorded as team
+    activity. Resolved from platform_users; falls back to the config
+    PROJECT_TEAM_EMAILS allowlist when that table is unreachable.
+    """
+    if not email:
+        return False
+    try:
+        from tools.platform_users import get_active_user
+        user = await get_active_user(email)
+        if user is not None:
+            return "team_member" in (user.get("permissions") or [])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("is_team_member_lookup_failed", error=str(exc))
+    # Fallback — the table is unreachable or has no row for this email.
+    return email in PROJECT_TEAM_EMAILS
 
 
 def resolve_git_author(git_email: str | None) -> str:
@@ -110,7 +125,7 @@ async def insert_session_events(events: list[dict], user_email: str) -> int:
     if not _DB_AVAILABLE or not events:
         return 0
 
-    team = is_team_member(user_email)
+    team = await is_team_member(user_email)
     rows: list[dict] = []
     for ev in events:
         etype = str(ev.get("event_type", "")).strip()
@@ -179,7 +194,7 @@ async def log_agent_interaction(
     """
     if not _DB_AVAILABLE:
         return False
-    if not is_team_member(user_email):
+    if not await is_team_member(user_email):
         return False
     if interaction_type not in _INTERACTION_TYPES:
         log.warning("agent_interaction_unknown_type", interaction_type=interaction_type)

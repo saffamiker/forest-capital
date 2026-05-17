@@ -25,6 +25,18 @@ import { trackLogout } from './lib/activityLogger'
 interface Session {
   token: string
   email: string
+  // Populated from GET /api/auth/me after login / on restore. Until that
+  // resolves they are undefined and the permission hooks read false.
+  role?: string
+  displayName?: string | null
+  permissions?: string[]
+}
+
+interface MeResponse {
+  email: string
+  role: string
+  display_name: string | null
+  permissions: string[]
 }
 
 interface AuthContextType {
@@ -66,11 +78,26 @@ function AuthProvider({ children }: { children: ReactNode }) {
     setSession(null)
   }, [])
 
+  // Merges the GET /api/auth/me response (role, display name, permissions)
+  // into the session so the permission hooks can gate the UI.
+  const applyMe = useCallback((data: MeResponse) => {
+    setSession((prev) => (prev ? {
+      ...prev,
+      role: data.role,
+      displayName: data.display_name,
+      permissions: data.permissions,
+    } : prev))
+  }, [])
+
   const login = (token: string, email: string) => {
     localStorage.setItem('fc_session_token', token)
     localStorage.setItem('fc_email', email)
     axios.defaults.headers.common['X-API-Key'] = token
     setSession({ token, email })
+    // Pull role + permissions so the UI gates correctly.
+    void axios.get<MeResponse>('/api/auth/me')
+      .then((res) => applyMe(res.data))
+      .catch(() => { /* permissions stay unset — hooks read false */ })
   }
 
   const logout = async () => {
@@ -107,8 +134,8 @@ function AuthProvider({ children }: { children: ReactNode }) {
 
     axios.defaults.headers.common['X-API-Key'] = token
 
-    void axios.get('/api/auth/me')
-      .then(() => { /* token valid — keep session as-is */ })
+    void axios.get<MeResponse>('/api/auth/me')
+      .then((res) => { if (!cancelled) applyMe(res.data) })
       .catch(() => {
         // 401 expired/invalid token, or network error: clear all local state.
         // RequireAuth will redirect to /login once isVerifying flips false.
@@ -117,7 +144,7 @@ function AuthProvider({ children }: { children: ReactNode }) {
       .finally(() => { if (!cancelled) setIsVerifying(false) })
 
     return () => { cancelled = true }
-  }, []) // intentionally empty — runs once on mount only
+  }, [applyMe]) // applyMe is stable (useCallback) — effect runs once on mount
 
   // 401 interceptor — redirect to /login when the backend rejects a session.
   // Auth endpoints (/api/auth/*) are excluded: their 401 responses are handled

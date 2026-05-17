@@ -19,14 +19,18 @@
  */
 import type { ReactNode } from 'react'
 import { Lock } from 'lucide-react'
-import { useIsTeamMember } from '../hooks/useIsTeamMember'
+import { useHasPermission } from '../hooks/usePermissions'
 
 interface TeamGateProps {
   children: ReactNode
-  /** Tooltip shown on the gated element for non-team users. */
+  /** The permission required to use the wrapped element. Default
+   *  "team_member"; pass "generate_documents", "export_package",
+   *  "view_admin" etc. for the more specific gates. */
+  permission?: string
+  /** Tooltip shown on the gated element for users who lack the permission. */
   tooltip?: string
-  /** When false, the element is hidden entirely for non-team users
-   *  instead of shown disabled. Default true. */
+  /** When false, the element is hidden entirely instead of shown
+   *  disabled. Default true. */
   showDisabled?: boolean
   /** Block geometry — for full-width cards/panels. Default inline. */
   block?: boolean
@@ -34,13 +38,14 @@ interface TeamGateProps {
 
 export default function TeamGate({
   children,
+  permission = 'team_member',
   tooltip = 'Available to project team',
   showDisabled = true,
   block = false,
 }: TeamGateProps) {
-  const isTeam = useIsTeamMember()
+  const allowed = useHasPermission(permission)
 
-  if (isTeam) return <>{children}</>
+  if (allowed) return <>{children}</>
   if (!showDisabled) return null
 
   if (block) {

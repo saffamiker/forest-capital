@@ -372,7 +372,8 @@ export default function Reports() {
         </div>
         {/* Academic Export Package — light-mode charts + CSV tables zipped
             for paper submission. A team action. */}
-        <TeamGate tooltip="Exporting the academic package is available to the project team">
+        <TeamGate permission="export_package"
+          tooltip="Exporting the academic package is available to the project team">
           <button
             type="button"
             onClick={() => setExporting(true)}

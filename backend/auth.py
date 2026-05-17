@@ -19,7 +19,6 @@ from config import (
     SESSION_EXPIRY_HOURS,
     ENVIRONMENT,
     FRONTEND_URL,
-    PROJECT_TEAM_EMAILS,
     PERMISSIONS,
 )
 from logger import get_logger
@@ -289,27 +288,34 @@ async def require_auth(x_api_key: Optional[str] = Header(None)) -> dict:
     return session
 
 
-async def require_team_member(session: dict = Depends(require_auth)) -> dict:
+def require_permission(permission: str):
     """
-    Extends require_auth with the project-team check — the platform's
-    second access tier. Any authenticated user may explore the analytics
-    and ask the council; the action features (document upload, the
-    export endpoints, Academic Review, the test runner) are restricted
-    to PROJECT_TEAM_EMAILS.
+    A dependency factory — returns a FastAPI dependency that admits only
+    a user whose authoritative `permissions` array contains `permission`,
+    and 403s everyone else. Permissions come from the session resolved by
+    require_auth (the JWT, or the platform_users / config fallback). The
+    master API key holds every permission.
 
-    The master API key (role "developer") is Michael's CLI key and
-    bypasses the check — it is the most privileged credential. A non-team
-    authenticated user gets 403.
+    Endpoint → permission map: document upload/delete, Academic Review
+    and the testing endpoints require "team_member"; the three
+    document-generation endpoints require "generate_documents"; the
+    academic-package export requires "export_package"; the failure
+    reports / feedback backlog require "view_admin"; user management
+    requires "manage_users".
     """
-    if session.get("role") == "developer":
+    async def _dependency(session: dict = Depends(require_auth)) -> dict:
+        if permission not in (session.get("permissions") or []):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This action is restricted to the project team.",
+            )
         return session
-    email = (session.get("email") or "").strip().lower()
-    if email not in {e.lower() for e in PROJECT_TEAM_EMAILS}:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This action is restricted to the project team.",
-        )
-    return session
+    return _dependency
+
+
+# require_team_member is the "team_member" permission check — kept as a
+# named dependency so existing imports and call sites need no change.
+require_team_member = require_permission("team_member")
 
 
 async def require_master_key(x_api_key: Optional[str] = Header(None)) -> dict:

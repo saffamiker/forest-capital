@@ -185,7 +185,7 @@ export default function DocumentGenerationPanel() {
                 )}
               </div>
 
-              <TeamGate block
+              <TeamGate block permission="generate_documents"
                 tooltip="Document generation is available to the project team">
                 <button
                   type="button"

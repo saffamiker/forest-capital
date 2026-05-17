@@ -14,7 +14,7 @@
  */
 import { useState } from 'react'
 import { Compass, X } from 'lucide-react'
-import { useIsTeamMember } from '../hooks/useIsTeamMember'
+import { useIsTeamMember } from '../hooks/usePermissions'
 import { startTour } from '../lib/tourBus'
 
 const SEEN_KEY = 'fc_visitor_welcomed'

@@ -16,7 +16,9 @@ from typing import Any
 
 import structlog
 
-from config import ALLOWED_EMAILS, PROJECT_TEAM_EMAILS, ROLE_PRESETS
+from config import (
+    ALLOWED_EMAILS, PROJECT_TEAM_EMAILS, ROLE_PRESETS, SYSADMIN_EMAILS,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -48,16 +50,17 @@ def _iso(value: Any) -> str | None:
 def config_fallback(email: str) -> dict[str, Any]:
     """
     Resolves a user's role and permissions from the config allowlists —
-    used when platform_users is unreachable. PROJECT_TEAM_EMAILS →
-    team_member; any other ALLOWED_EMAILS address → viewer. Sysadmin is
-    deliberately NOT granted here: during a database outage the master
-    API key (developer role) is the emergency admin path.
+    used when platform_users is unreachable. Faithfully mirrors the
+    migration-015 seed: SYSADMIN_EMAILS → sysadmin, PROJECT_TEAM_EMAILS →
+    team_member, any other ALLOWED_EMAILS address → viewer. Mirroring the
+    seed means a database outage degrades gracefully — Michael keeps
+    administration, the team keep their access.
     """
     el = (email or "").strip().lower()
-    if el in {e.lower() for e in PROJECT_TEAM_EMAILS}:
+    if el in {e.lower() for e in SYSADMIN_EMAILS}:
+        role = "sysadmin"
+    elif el in {e.lower() for e in PROJECT_TEAM_EMAILS}:
         role = "team_member"
-    elif el in {e.lower() for e in ALLOWED_EMAILS}:
-        role = "viewer"
     else:
         role = "viewer"
     return {"role": role, "display_name": None,

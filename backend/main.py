@@ -29,6 +29,7 @@ from logger import configure_logging, get_logger
 from auth import (
     require_auth,
     require_team_member,
+    require_permission,
     require_master_key,
     generate_magic_token,
     generate_session_token,
@@ -221,7 +222,14 @@ async def logout(body: LogoutRequest):
 
 @app.get("/api/auth/me")
 async def get_me(session: dict = Depends(require_auth)):
-    return {"email": session["email"], "role": session.get("role", "user")}
+    """The signed-in user — email, role, display name, and the
+    authoritative permissions array the frontend gates the UI on."""
+    return {
+        "email": session["email"],
+        "role": session.get("role") or "viewer",
+        "display_name": session.get("display_name"),
+        "permissions": session.get("permissions") or [],
+    }
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -1505,21 +1513,9 @@ async def council_explain_data(
 # (constants/testScripts.ts) — only results and feedback are persisted
 # here. All endpoints are team-gated; the admin views are ruurdsm@ only.
 
-_TESTING_ADMIN = "ruurdsm@queens.edu"
-
-# Team-gating is the require_team_member FastAPI dependency on every
-# /api/v1/testing/* endpoint. _require_test_admin narrows the admin
-# views further to ruurdsm@.
-
-
-def _require_test_admin(session: dict) -> str:
-    """Returns the caller's email if they are the test-runner admin
-    (ruurdsm@), else raises 403."""
-    email = session.get("email", "")
-    if email.lower() != _TESTING_ADMIN:
-        raise HTTPException(status_code=403,
-                            detail="This view is restricted to the test-runner administrator.")
-    return email
+# Team-gating is the require_team_member dependency on the testing
+# endpoints; the failure-reports and feedback-backlog views require the
+# view_admin permission. Both are permission checks — no hardcoded email.
 
 
 async def _read_screenshots(files: list[UploadFile]) -> list[str]:
@@ -1613,26 +1609,29 @@ async def testing_summary(session: dict = Depends(require_team_member)):
 
 
 @app.get("/api/v1/testing/failures")
-async def testing_failures(session: dict = Depends(require_team_member)):
-    """Every failed step across all testers, severity-sorted. Admin-only."""
-    _require_test_admin(session)
+async def testing_failures(
+    session: dict = Depends(require_permission("view_admin")),
+):
+    """Every failed step across all testers, severity-sorted. Requires the
+    view_admin permission."""
     from tools.test_runner import get_all_failures
     return {"failures": await get_all_failures()}
 
 
 @app.post("/api/v1/testing/failures/{failure_id}/resolve")
 async def testing_resolve_failure(
-    failure_id: int, body: dict, session: dict = Depends(require_team_member),
+    failure_id: int, body: dict,
+    session: dict = Depends(require_permission("view_admin")),
 ):
     """
     Marks a failure resolved. The row is kept (the resolution is the audit
     trail) and the step re-appears as a pending re-test for the tester —
-    which the login-notification check surfaces. Admin-only.
+    which the login-notification check surfaces. Requires view_admin.
     """
-    admin = _require_test_admin(session)
     from tools.test_runner import resolve_failure
     resolved = await resolve_failure(
-        failure_id, admin, str(body.get("resolution_note") or ""))
+        failure_id, session.get("email", ""),
+        str(body.get("resolution_note") or ""))
     if resolved is None:
         raise HTTPException(status_code=404, detail="Failure not found.")
     return {"resolved": True, **resolved}
@@ -1687,10 +1686,10 @@ async def testing_get_feedback(
     category: str | None = None, severity: str | None = None,
     effort: str | None = None, status: str | None = None,
     user_email: str | None = None,
-    session: dict = Depends(require_team_member),
+    session: dict = Depends(require_permission("view_admin")),
 ):
-    """All tester feedback, newest first, with optional filters. Admin-only."""
-    _require_test_admin(session)
+    """All tester feedback, newest first, with optional filters. Requires
+    the view_admin permission."""
     from tools.test_runner import get_all_feedback
     feedback = await get_all_feedback({
         "category": category, "severity": severity, "effort": effort,
@@ -1701,11 +1700,12 @@ async def testing_get_feedback(
 
 @app.post("/api/v1/testing/feedback/{feedback_id}/resolve")
 async def testing_resolve_feedback(
-    feedback_id: int, body: dict, session: dict = Depends(require_team_member),
+    feedback_id: int, body: dict,
+    session: dict = Depends(require_permission("view_admin")),
 ):
     """Updates a feedback row's status. The submitter sees a login
-    notification on the next visit. Admin-only."""
-    admin = _require_test_admin(session)
+    notification on the next visit. Requires the view_admin permission."""
+    admin = session.get("email", "")
     status = str(body.get("status") or "")
     if status not in {"noted", "planned", "wont_do", "resolved"}:
         raise HTTPException(
@@ -2546,7 +2546,7 @@ async def export_package(
     charts: list[UploadFile] = File(default=[]),
     tables: list[UploadFile] = File(default=[]),
     metadata: str = Form(default="{}"),
-    session: dict = Depends(require_team_member),
+    session: dict = Depends(require_permission("export_package")),
 ):
     """
     Assembles an academic export ZIP from client-rendered chart PNGs and
@@ -2730,7 +2730,8 @@ async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
 @app.post("/api/v1/export/midpoint-paper")
 @limiter.limit("6/minute")
 async def export_midpoint_paper(
-    request: Request, session: dict = Depends(require_team_member),
+    request: Request,
+    session: dict = Depends(require_permission("generate_documents")),
 ):
     """
     Generates the three-page midpoint submission as a .docx download.
@@ -2844,7 +2845,8 @@ async def export_midpoint_paper(
 @app.post("/api/v1/export/executive-brief")
 @limiter.limit("6/minute")
 async def export_executive_brief(
-    request: Request, session: dict = Depends(require_team_member),
+    request: Request,
+    session: dict = Depends(require_permission("generate_documents")),
 ):
     """
     Generates the five-page executive brief as a .docx download.
@@ -2975,7 +2977,8 @@ async def export_executive_brief(
 @app.post("/api/v1/export/presentation-deck")
 @limiter.limit("4/minute")
 async def export_presentation_deck(
-    request: Request, session: dict = Depends(require_team_member),
+    request: Request,
+    session: dict = Depends(require_permission("generate_documents")),
 ):
     """
     Generates the 16-slide final presentation deck as a .pptx download.

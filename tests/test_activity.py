@@ -92,17 +92,20 @@ def _db_ready() -> bool:
 # ── Pure logic — identity and the team-email filter ───────────────────────────
 
 class TestIdentityHelpers:
+    # is_team_member is async — it resolves the team_member permission
+    # from platform_users, falling back to the config allowlist when that
+    # table is unreachable (the case in this test environment).
     def test_team_member_recognised(self):
         from tools.activity_log import is_team_member
-        assert is_team_member("ruurdsm@queens.edu") is True
-        assert is_team_member("murdockm@queens.edu") is True
+        assert _run(is_team_member("ruurdsm@queens.edu")) is True
+        assert _run(is_team_member("murdockm@queens.edu")) is True
 
     def test_non_team_email_excluded(self):
         from tools.activity_log import is_team_member
         # Dr. Panttser is an authorised login but not a logged team member.
-        assert is_team_member("panttserk@queens.edu") is False
-        assert is_team_member("stranger@example.com") is False
-        assert is_team_member(None) is False
+        assert _run(is_team_member("panttserk@queens.edu")) is False
+        assert _run(is_team_member("stranger@example.com")) is False
+        assert _run(is_team_member(None)) is False
 
     def test_git_author_resolves_to_platform_identity(self):
         from tools.activity_log import resolve_git_author
