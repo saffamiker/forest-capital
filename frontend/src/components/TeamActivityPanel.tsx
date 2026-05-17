@@ -20,6 +20,7 @@ import type {
   ActivityEvent, ActivityKind, ActivitySummary, TeamActivityResponse,
 } from '../types/activity'
 import TableExportButton from './TableExportButton'
+import TeamActivityCharts from './TeamActivityCharts'
 
 const PAGE_LIMIT = 100
 
@@ -387,6 +388,7 @@ export default function TeamActivityPanel() {
   const [error, setError] = useState<string | null>(null)
   const [offset, setOffset] = useState(0)
   const [hasMore, setHasMore] = useState(false)
+  const [presentMode, setPresentMode] = useState(false)
   const [filters, setFilters] = useState<Filters>({
     userId: '', kinds: DEFAULT_KINDS, dateFrom: '', dateTo: '', includeTesting: false,
   })
@@ -480,14 +482,27 @@ export default function TeamActivityPanel() {
             Platform engagement · AI use evidence
           </span>
         </div>
-        <button
-          type="button"
-          onClick={() => { loadSummary(); loadTimeline(true) }}
-          aria-label="Refresh team activity"
-          className="text-muted hover:text-white p-1 rounded transition-colors"
-        >
-          <RefreshCw className="w-3.5 h-3.5" />
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPresentMode((p) => !p)}
+            className={`text-2xs px-2 py-1 rounded border transition-colors ${
+              presentMode
+                ? 'border-warning/40 bg-warning/10 text-warning'
+                : 'border-border text-muted hover:text-white'
+            }`}
+          >
+            {presentMode ? 'Exit Presentation View' : 'Presentation View'}
+          </button>
+          <button
+            type="button"
+            onClick={() => { loadSummary(); loadTimeline(true) }}
+            aria-label="Refresh team activity"
+            className="text-muted hover:text-white p-1 rounded transition-colors"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -505,51 +520,65 @@ export default function TeamActivityPanel() {
         </div>
       ) : (
         <div className="space-y-3">
-          {summary && <SummaryPanel summary={summary} />}
+          {/* Summary panel — hidden in Presentation View, which shows
+              only the three charts full-width. */}
+          {summary && !presentMode && <SummaryPanel summary={summary} />}
 
-          <FilterBar
-            filters={filters}
-            members={summary?.per_member ?? []}
-            onChange={setFilters}
+          {/* Visualisation dashboard. */}
+          <TeamActivityCharts
+            events={events}
+            summary={summary}
+            presentMode={presentMode}
           />
 
-          <div className="card overflow-hidden">
-            <div className="flex items-center justify-between px-3 py-2
-                            border-b border-border">
-              <span className="text-2xs text-muted uppercase tracking-wide">
-                Timeline · {visible.length} shown
-              </span>
-              <TableExportButton
-                tableId="team_activity"
-                headers={['Timestamp', 'Kind', 'User', 'Session Type', 'Summary',
-                          'SHA', 'Files Changed', 'Insertions', 'Deletions']}
-                rows={exportRows}
+          {/* Filters + timeline — suppressed in Presentation View. */}
+          {!presentMode && (
+            <>
+              <FilterBar
+                filters={filters}
+                members={summary?.per_member ?? []}
+                onChange={setFilters}
               />
-            </div>
-            {visible.length === 0 ? (
-              <p className="px-3 py-6 text-center text-xs text-muted italic">
-                No activity matches the current filters.
-              </p>
-            ) : (
-              visible.map((ev, i) => (
-                <TimelineRow key={`${ev.kind}-${ev.timestamp}-${i}`} ev={ev} />
-              ))
-            )}
-            {hasMore && (
-              <button
-                type="button"
-                onClick={() => loadTimeline(false)}
-                disabled={loadingMore}
-                className="w-full py-2 text-xs text-electric hover:bg-navy-700
-                           transition-colors border-t border-border
-                           disabled:opacity-50"
-              >
-                {loadingMore
-                  ? <Loader2 className="w-3.5 h-3.5 animate-spin inline" />
-                  : 'Load more'}
-              </button>
-            )}
-          </div>
+
+              <div className="card overflow-hidden">
+                <div className="flex items-center justify-between px-3 py-2
+                                border-b border-border">
+                  <span className="text-2xs text-muted uppercase tracking-wide">
+                    Timeline · {visible.length} shown
+                  </span>
+                  <TableExportButton
+                    tableId="team_activity"
+                    headers={['Timestamp', 'Kind', 'User', 'Session Type', 'Summary',
+                              'SHA', 'Files Changed', 'Insertions', 'Deletions']}
+                    rows={exportRows}
+                  />
+                </div>
+                {visible.length === 0 ? (
+                  <p className="px-3 py-6 text-center text-xs text-muted italic">
+                    No activity matches the current filters.
+                  </p>
+                ) : (
+                  visible.map((ev, i) => (
+                    <TimelineRow key={`${ev.kind}-${ev.timestamp}-${i}`} ev={ev} />
+                  ))
+                )}
+                {hasMore && (
+                  <button
+                    type="button"
+                    onClick={() => loadTimeline(false)}
+                    disabled={loadingMore}
+                    className="w-full py-2 text-xs text-electric hover:bg-navy-700
+                               transition-colors border-t border-border
+                               disabled:opacity-50"
+                  >
+                    {loadingMore
+                      ? <Loader2 className="w-3.5 h-3.5 animate-spin inline" />
+                      : 'Load more'}
+                  </button>
+                )}
+              </div>
+            </>
+          )}
         </div>
       )}
     </section>
