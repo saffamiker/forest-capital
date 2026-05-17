@@ -739,9 +739,10 @@ export default function AcademicAnalytics() {
       <div>
         <h1 className="text-xl font-semibold text-white">Academic Analytics</h1>
         <p className="text-sm text-muted mt-1">
-          Summary statistics, the equity-bond correlation regime break, regime-conditional
-          performance, drawdowns, and Fama-French factor loadings — the analytical backbone
-          of the midpoint paper. Every table exports to CSV.
+          Cumulative return, summary statistics, the equity-bond correlation regime break,
+          rolling excess return, regime-conditional performance, drawdowns, Carhart
+          four-factor loadings, parameter sensitivity, and strategy methodology — the
+          analytical backbone of the midpoint paper. Every table exports to CSV.
         </p>
         {data?.study_period && (
           <p className="text-xs text-muted mt-1 font-mono">
