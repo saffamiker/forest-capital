@@ -264,7 +264,7 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
         </tr></thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.asset} className="border-b border-border/50">
+            <tr key={r.asset} className="border-b border-border/50 hover:bg-navy-800/40 transition-colors">
               <TD>{r.asset}</TD>
               <TD right mono>{pct(r.cagr)}</TD>
               <TD right mono><SignedPct x={r.excess_return} /></TD>
@@ -305,14 +305,14 @@ function RollingExcessReturnChart({ data }: { data: RollingExcess }) {
     >
       <ResponsiveContainer width="100%" height={320}>
         <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#1e2d47" />
           <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} minTickGap={56} />
           <YAxis
             tick={{ fill: '#64748b', fontSize: 11 }}
             tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
           />
           <Tooltip
-            contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c',
+            contentStyle={{ background: '#0d1424', border: '1px solid #1e2d47',
                             borderRadius: 8, fontSize: 12 }}
           />
           <Legend wrapperStyle={{ fontSize: 11 }} />
@@ -354,12 +354,12 @@ function RollingCorrelationChart({ data }: { data: RollingCorrelation }) {
     >
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#1e2d47" />
           <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }}
                  minTickGap={48} />
           <YAxis domain={[-1, 1]} tick={{ fill: '#64748b', fontSize: 11 }} />
           <Tooltip
-            contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c',
+            contentStyle={{ background: '#0d1424', border: '1px solid #1e2d47',
                             borderRadius: 8, fontSize: 12 }}
           />
           <Legend wrapperStyle={{ fontSize: 12 }} />
@@ -418,7 +418,7 @@ function RegimeConditionalTable({ rows }: { rows: RegimeRow[] }) {
         </tr></thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.strategy} className="border-b border-border/50">
+            <tr key={r.strategy} className="border-b border-border/50 hover:bg-navy-800/40 transition-colors">
               <TD>{r.strategy}</TD>
               <TD right mono>{num(r.pre_2022_sharpe)}</TD>
               <TD right mono>{num(r.post_2022_sharpe)}</TD>
@@ -453,7 +453,7 @@ function DrawdownComparisonTable({ rows }: { rows: DrawdownRow[] }) {
         </tr></thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.strategy} className="border-b border-border/50">
+            <tr key={r.strategy} className="border-b border-border/50 hover:bg-navy-800/40 transition-colors">
               <TD>{r.strategy}</TD>
               <TD right mono>{pct(r.max_drawdown)}</TD>
               <TD right mono>
@@ -514,7 +514,7 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
         </tr></thead>
         <tbody>
           {rows.map((r) => (
-            <tr key={r.strategy} className="border-b border-border/50">
+            <tr key={r.strategy} className="border-b border-border/50 hover:bg-navy-800/40 transition-colors">
               <TD>{r.strategy}</TD>
               <TD right mono>
                 <span className={r.alpha_significant ? 'text-electric font-semibold' : ''}>
@@ -526,7 +526,7 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
               <TD right mono><Beta v={r.hml} sig={r.hml_significant} /></TD>
               <TD right mono>
                 {r.mom === null
-                  ? <span className="text-text-muted">—</span>
+                  ? <span className="text-muted">—</span>
                   : <Beta v={r.mom} sig={r.mom_significant} />}
               </TD>
               <TD right mono>{num(r.r_squared)}</TD>
@@ -575,7 +575,7 @@ function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
     >
       <ResponsiveContainer width="100%" height={340}>
         <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#1e2d47" />
           <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} minTickGap={56} />
           <YAxis
             scale={logScale ? 'log' : 'linear'}
@@ -585,7 +585,7 @@ function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
             tickFormatter={(v: number) => `${v.toFixed(1)}x`}
           />
           <Tooltip
-            contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c',
+            contentStyle={{ background: '#0d1424', border: '1px solid #1e2d47',
                             borderRadius: 8, fontSize: 12 }}
           />
           <Legend wrapperStyle={{ fontSize: 11 }} />
@@ -624,7 +624,7 @@ function SensitivityChart({ s }: { s: SensitivityStrategy }) {
       <div className="text-2xs text-muted mb-2">{s.parameter}</div>
       <ResponsiveContainer width="100%" height={200}>
         <LineChart data={s.points} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+          <CartesianGrid strokeDasharray="3 3" stroke="#1e2d47" />
           <XAxis dataKey="value" type="number" domain={['dataMin', 'dataMax']}
                  tick={{ fill: '#64748b', fontSize: 10 }} />
           <YAxis tick={{ fill: '#64748b', fontSize: 10 }}
@@ -632,7 +632,7 @@ function SensitivityChart({ s }: { s: SensitivityStrategy }) {
                  label={{ value: 'Sharpe', angle: -90, position: 'insideLeft',
                           fill: '#64748b', fontSize: 10 }} />
           <Tooltip
-            contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c',
+            contentStyle={{ background: '#0d1424', border: '1px solid #1e2d47',
                             borderRadius: 8, fontSize: 12 }}
           />
           <ReferenceLine x={s.current_value} stroke={ACCENT} strokeDasharray="4 4"

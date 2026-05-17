@@ -15,6 +15,7 @@
  */
 import { useState, useRef } from 'react'
 import { GraduationCap, Loader2, X, ChevronDown, ChevronRight } from 'lucide-react'
+import Markdown from './Markdown'
 import { trackFeature } from '../lib/activityLogger'
 
 type Phase = 'idle' | 'consulting' | 'streaming' | 'done' | 'error'
@@ -169,40 +170,59 @@ export default function AcademicReviewButton() {
 
   return (
     <div className="space-y-3">
-      {/* Trigger row */}
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          data-tour="academic-review"
-          onClick={() => void runReview()}
-          disabled={running}
-          title="Have the council evaluate your analytics, findings, and deliverables against project requirements"
-          className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium
-                     border border-electric/30 bg-electric/10 text-electric
-                     hover:bg-electric/20 disabled:opacity-50 disabled:cursor-not-allowed
-                     transition-colors"
-        >
-          {running
-            ? <Loader2 className="w-4 h-4 animate-spin" />
-            : <GraduationCap className="w-4 h-4" />}
-          Academic Review
-        </button>
-        {running && (
-          <>
-            <span className="text-xs text-muted">
-              {phase === 'consulting'
-                ? 'Consulting the council…'
-                : 'Synthesising the verdict…'}
-            </span>
+      {/* Trigger — a prominent bordered card. Academic Review is the
+          platform's flagship evaluation feature; it must not read as a
+          minor action next to the routine "Convene" query button. */}
+      <div className="card p-4 border border-warning/30 bg-warning/5">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <h3 className="text-white font-semibold text-sm flex items-center gap-1.5">
+              <GraduationCap className="w-4 h-4 text-warning" />
+              Academic Review
+            </h3>
+            {phase === 'idle' && (
+              <p className="text-muted text-xs mt-1 leading-relaxed">
+                Have the full council evaluate your analytics, methodology and
+                deliverables against the project rubric — a five-section,
+                rubric-mapped verdict (Strong / Developing / Needs Work). Run it
+                before each deadline to see exactly where the project stands.
+              </p>
+            )}
+            {running && (
+              <p className="text-xs text-muted mt-1">
+                {phase === 'consulting'
+                  ? 'Step 1 of 2 — consulting the council (peer fan-out)…'
+                  : 'Step 2 of 2 — synthesising the arbiter verdict…'}
+              </p>
+            )}
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            {running && (
+              <button
+                type="button"
+                onClick={cancel}
+                className="flex items-center gap-1 text-xs text-muted hover:text-danger transition-colors"
+              >
+                <X className="w-3.5 h-3.5" /> Cancel
+              </button>
+            )}
             <button
               type="button"
-              onClick={cancel}
-              className="flex items-center gap-1 text-xs text-muted hover:text-danger transition-colors"
+              data-tour="academic-review"
+              onClick={() => void runReview()}
+              disabled={running}
+              title="Have the council evaluate your analytics, findings, and deliverables against project requirements"
+              className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold
+                         bg-warning text-navy-900 hover:bg-amber-400
+                         disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              <X className="w-3.5 h-3.5" /> Cancel
+              {running
+                ? <Loader2 className="w-4 h-4 animate-spin" />
+                : <GraduationCap className="w-4 h-4" />}
+              {running ? 'Reviewing…' : 'Run Academic Review'}
             </button>
-          </>
-        )}
+          </div>
+        </div>
       </div>
 
       {phase === 'error' && (
@@ -227,11 +247,7 @@ export default function AcademicReviewButton() {
                   <h4 className="text-white font-medium text-sm">{s.heading}</h4>
                   <RatingBadge rating={s.rating} />
                 </div>
-                {s.body && (
-                  <p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap mt-1">
-                    {s.body}
-                  </p>
-                )}
+                {s.body && <Markdown content={s.body} className="mt-1" />}
               </div>
             ))}
           </div>
@@ -260,9 +276,7 @@ export default function AcademicReviewButton() {
                   <div className="text-xs font-semibold text-electric mb-1">
                     {PEER_NAMES[agentId] ?? agentId}
                   </div>
-                  <p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
-                    {text}
-                  </p>
+                  <Markdown content={text} />
                 </div>
               ))}
             </div>

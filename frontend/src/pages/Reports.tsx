@@ -377,6 +377,12 @@ export default function Reports() {
         <div className="card p-8 text-center text-muted text-sm">Loading deliverables…</div>
       )}
 
+      {/* Team Activity — the evidence behind the Roles & Division-of-Labor
+          deliverable and the AI-use narrative, so it leads the page.
+          Independent of the deliverables manifest — renders regardless of
+          whether the manifest loaded. */}
+      <TeamActivityPanel />
+
       {/* Academic documents moved to Settings (commit 5/7). A muted info
           banner points there; the hash anchor scrolls to the section. */}
       <div className="flex items-start gap-2 px-3 py-2.5 rounded border border-border
@@ -473,10 +479,6 @@ export default function Reports() {
           </section>
         </>
       )}
-
-      {/* Team Activity — independent of the deliverables manifest, so it
-          renders regardless of whether the manifest loaded. */}
-      <TeamActivityPanel />
     </div>
   )
 }

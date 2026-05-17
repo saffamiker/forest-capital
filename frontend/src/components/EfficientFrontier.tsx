@@ -9,21 +9,12 @@ import {
   Line,
   ComposedChart,
 } from 'recharts'
+import { useRef } from 'react'
 import type { EfficientFrontierData, FrontierPoint, PortfolioPoint } from '../types/api'
 import InfoIcon from './InfoIcon'
-
-const STRATEGY_COLORS: Record<string, string> = {
-  BENCHMARK:          '#64748b',
-  CLASSIC_60_40:      '#60a5fa',
-  RISK_PARITY:        '#34d399',
-  MIN_VARIANCE:       '#a78bfa',
-  EQUAL_WEIGHT:       '#fb923c',
-  MOMENTUM_ROTATION:  '#f472b6',
-  REGIME_SWITCHING:   '#22c55e',
-  VOL_TARGETING:      '#3b82f6',
-  BLACK_LITTERMAN:    '#fbbf24',
-  MAX_SHARPE_ROLLING: '#e879f9',
-}
+import ChartExportButton from './ChartExportButton'
+// Canonical strategy-colour map — one source of truth (was duplicated here).
+import { STRATEGY_COLORS } from '../lib/strategyColors'
 
 interface TooltipEntry {
   payload?: FrontierPoint & { strategy?: string }
@@ -62,10 +53,11 @@ export default function EfficientFrontier({ data }: { data: EfficientFrontierDat
     portfolio_points = [],
     max_sharpe_point,
   } = data
+  const containerRef = useRef<HTMLDivElement>(null)
 
   return (
-    <div className="card p-4" data-tour="efficient-frontier">
-      <div className="flex items-center justify-between mb-4">
+    <div className="card p-4" data-tour="efficient-frontier" ref={containerRef}>
+      <div className="flex items-start justify-between mb-4 gap-3">
         <div>
           <h3 className="text-white font-semibold text-sm flex items-center">
             Efficient Frontier
@@ -77,6 +69,7 @@ export default function EfficientFrontier({ data }: { data: EfficientFrontierDat
           </h3>
           <p className="text-muted text-xs mt-0.5">Risk vs expected return — all 10 strategies</p>
         </div>
+        <div className="flex items-start gap-3">
         {max_sharpe_point && (
           <div className="text-right">
             <div className="text-2xs text-muted uppercase tracking-wide flex items-center justify-end">
@@ -95,6 +88,8 @@ export default function EfficientFrontier({ data }: { data: EfficientFrontierDat
             </div>
           </div>
         )}
+          <ChartExportButton chartId="efficient_frontier" containerRef={containerRef} />
+        </div>
       </div>
 
       <ResponsiveContainer width="100%" height={320}>

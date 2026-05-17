@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import InfoIcon from '../components/InfoIcon'
 import ExplainerPanel from '../components/ExplainerPanel'
 import { EXPLAINER_TOOLTIPS } from '../constants/explainerTooltips'
@@ -55,11 +56,13 @@ describe('ExplainerPanel', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     render(
-      <ExplainerPanel
-        metricLabel="Sharpe Ratio"
-        currentValue="0.63"
-        onClose={() => {}}
-      />,
+      <MemoryRouter>
+        <ExplainerPanel
+          metricLabel="Sharpe Ratio"
+          currentValue="0.63"
+          onClose={() => {}}
+        />
+      </MemoryRouter>,
     )
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())

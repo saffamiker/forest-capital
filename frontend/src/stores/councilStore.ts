@@ -28,8 +28,13 @@ interface CouncilState {
 
   setQuery: (q: string) => void
   runQuery: (q: string) => Promise<void>
+  abort: () => void
   clear: () => void
 }
+
+// Module-level so abort() can reach the in-flight request without
+// threading a non-serialisable AbortController through Zustand state.
+let _controller: AbortController | null = null
 
 export const useCouncilStore = create<CouncilState>((set, get) => ({
   query: '',
@@ -43,11 +48,19 @@ export const useCouncilStore = create<CouncilState>((set, get) => ({
   runQuery: async (q) => {
     const trimmed = q.trim()
     if (!trimmed || get().loading) return
+    _controller = new AbortController()
     set({ loading: true, error: null, result: null, lastQuery: trimmed })
     try {
-      const res = await axios.post<CouncilResponse>('/api/council/query', { query: trimmed })
+      const res = await axios.post<CouncilResponse>(
+        '/api/council/query', { query: trimmed }, { signal: _controller.signal },
+      )
       set({ result: res.data, loading: false })
     } catch (err) {
+      // A user-initiated cancel is not an error — clear loading, show nothing.
+      if (axios.isCancel(err)) {
+        set({ loading: false })
+        return
+      }
       const msg = axios.isAxiosError(err)
         ? (err.response?.data?.detail ?? err.message)
         : 'Council query failed'
@@ -56,9 +69,20 @@ export const useCouncilStore = create<CouncilState>((set, get) => ({
         error: String(msg),
         result: { error: true, query: trimmed, messages: [], final_recommendation: '', consensus_reached: false },
       })
+    } finally {
+      _controller = null
     }
   },
 
-  clear: () =>
-    set({ query: '', lastQuery: '', result: null, loading: false, error: null }),
+  abort: () => {
+    _controller?.abort()
+    _controller = null
+    set({ loading: false })
+  },
+
+  clear: () => {
+    _controller?.abort()
+    _controller = null
+    set({ query: '', lastQuery: '', result: null, loading: false, error: null })
+  },
 }))

@@ -6,8 +6,11 @@
  * Custom SVG: recharts has RadarChart but small-multiples grid layout is
  * cleaner with hand-drawn SVG sized exactly for our use case.
  */
+import { useRef } from 'react'
 import type { CVRadarPoint } from '../../types/charts'
 import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 const AXES: (keyof CVRadarPoint)[] = [
   'walk_forward', 'cpcv', 'permutation', 'regime', 'oos', 'stability',
@@ -100,10 +103,11 @@ function RadarSmall({ name, point }: { name: string; point: CVRadarPoint }) {
 }
 
 export default function CVStabilityRadar({ radar }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const entries = Object.entries(radar)
   if (entries.length === 0) {
     return (
-      <div className="card p-4" data-testid="cv-stability-radar">
+      <div className="card p-4" data-testid="cv-stability-radar" ref={containerRef}>
         <h3 className="text-white font-semibold text-sm">CV Stability Radar</h3>
         <p className="text-muted text-xs mt-3">Loading CV data…</p>
       </div>
@@ -111,9 +115,15 @@ export default function CVStabilityRadar({ radar }: Props) {
   }
 
   return (
-    <div className="card p-4" data-testid="cv-stability-radar">
+    <div className="card p-4" data-testid="cv-stability-radar" ref={containerRef}>
       <div className="mb-3">
-        <h3 className="text-white font-semibold text-sm">CV Stability Radar</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-white font-semibold text-sm">
+            CV Stability Radar
+            <InfoIcon tooltipKey="cv_stability_radar" metricLabel="CV Stability Radar" size="md" />
+          </h3>
+          <ChartExportButton chartId="cv_stability_radar" containerRef={containerRef} />
+        </div>
         <p className="text-muted text-xs mt-0.5">
           Six axes per strategy — walk-forward, CPCV, permutation, regime, OOS, composite stability
         </p>

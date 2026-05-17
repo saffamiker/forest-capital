@@ -9,9 +9,12 @@
  * unexplained outperformance; R² shows how much of the strategy's
  * return variance the factor model captures.
  */
+import { useRef } from 'react'
 import type { FactorLoadings } from '../../types/charts'
 import { prettyName, tooltipLine } from '../../lib/strategyColors'
 import StrategyTypeBadge from '../StrategyTypeBadge'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 interface Props {
   factorLoadings: Record<string, FactorLoadings>
@@ -36,10 +39,11 @@ function cellColor(value: number, max: number): string {
 }
 
 export default function FactorExposureHeatmap({ factorLoadings }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const entries = Object.entries(factorLoadings)
   if (entries.length === 0) {
     return (
-      <div className="card p-4" data-testid="factor-exposure-heatmap">
+      <div className="card p-4" data-testid="factor-exposure-heatmap" ref={containerRef}>
         <h3 className="text-white font-semibold text-sm">Factor Exposure Heatmap</h3>
         <p className="text-muted text-xs mt-3">Loading factor loadings…</p>
       </div>
@@ -53,9 +57,15 @@ export default function FactorExposureHeatmap({ factorLoadings }: Props) {
   )
 
   return (
-    <div className="card p-4" data-testid="factor-exposure-heatmap">
+    <div className="card p-4" data-testid="factor-exposure-heatmap" ref={containerRef}>
       <div className="mb-3">
-        <h3 className="text-white font-semibold text-sm">Factor Exposure Heatmap</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-white font-semibold text-sm">
+            Factor Exposure Heatmap
+            <InfoIcon tooltipKey="factor_exposure_heatmap" metricLabel="Factor Exposure Heatmap" size="md" />
+          </h3>
+          <ChartExportButton chartId="factor_exposure_heatmap" containerRef={containerRef} />
+        </div>
         <p className="text-muted text-xs mt-0.5">
           Fama-French 3-factor OLS loadings · blue = positive, red = negative
         </p>
@@ -93,10 +103,10 @@ export default function FactorExposureHeatmap({ factorLoadings }: Props) {
                     </span>
                   </td>
                 ))}
-                <td className="text-right px-2 py-1.5 font-mono text-cbd5e1">
+                <td className="text-right px-2 py-1.5 font-mono text-slate-300">
                   {(loadings.alpha * 10000).toFixed(0)} bps
                 </td>
-                <td className="text-right px-2 py-1.5 font-mono text-cbd5e1">
+                <td className="text-right px-2 py-1.5 font-mono text-slate-300">
                   {loadings.r_squared.toFixed(2)}
                 </td>
               </tr>

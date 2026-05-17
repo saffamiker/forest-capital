@@ -425,11 +425,11 @@ function SlideCard({
           <div className="flex items-center gap-1.5 text-2xs">
             <span className="font-mono text-muted">#{slide.order}</span>
             <span className="text-muted">·</span>
-            <span className="text-cbd5e1">{slide.owner}</span>
+            <span className="text-slate-300">{slide.owner}</span>
             <span className="text-muted">·</span>
-            <span className="text-cbd5e1 font-mono">{slide.timing_mins.toFixed(1)}m</span>
+            <span className="text-slate-300 font-mono">{slide.timing_mins.toFixed(1)}m</span>
           </div>
-          <div className={`text-xs mt-0.5 truncate ${selected ? 'text-white' : 'text-cbd5e1'}`}>
+          <div className={`text-xs mt-0.5 truncate ${selected ? 'text-white' : 'text-slate-300'}`}>
             {slide.headline}
           </div>
         </div>
@@ -518,7 +518,7 @@ function SlideEditor({
       </Field>
 
       <div className="flex items-center gap-4">
-        <label className="flex items-center gap-2 text-xs text-cbd5e1">
+        <label className="flex items-center gap-2 text-xs text-slate-300">
           <input
             type="checkbox"
             checked={slide.live_demo}
@@ -563,7 +563,7 @@ function VersionRow({
   return (
     <div className="bg-navy-800/50 border border-border/40 rounded px-2 py-1.5 text-2xs">
       <div className="flex items-center justify-between mb-0.5">
-        <span className="font-mono text-cbd5e1">
+        <span className="font-mono text-slate-300">
           v{version.version_number}
         </span>
         <button

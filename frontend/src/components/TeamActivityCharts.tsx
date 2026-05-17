@@ -59,15 +59,18 @@ interface ChartCardProps {
   title: string
   subtitle: string
   children: React.ReactNode
-  full?: boolean
+  // In Presentation View titles and padding scale up for projector legibility.
+  presentMode?: boolean
 }
 
-function ChartCard({ title, subtitle, children, full }: ChartCardProps) {
+function ChartCard({ title, subtitle, children, presentMode }: ChartCardProps) {
   return (
-    <div className={`card p-4 ${full ? '' : ''}`}>
-      <div className="mb-2">
-        <h3 className="text-sm font-semibold text-white">{title}</h3>
-        <p className="text-2xs text-muted">{subtitle}</p>
+    <div className={`card ${presentMode ? 'p-6' : 'p-4'}`}>
+      <div className={presentMode ? 'mb-4' : 'mb-2'}>
+        <h3 className={`font-semibold text-white ${presentMode ? 'text-xl' : 'text-sm'}`}>
+          {title}
+        </h3>
+        <p className={`text-muted ${presentMode ? 'text-sm' : 'text-2xs'}`}>{subtitle}</p>
       </div>
       {children}
     </div>
@@ -133,19 +136,27 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
       .sort((a, b) => b.count - a.count)
   }, [events])
 
+  // Presentation View scales every chart up for 1920×1080 projector
+  // legibility — taller charts, larger axis ticks/legends, thicker marks.
+  const chartHeight = presentMode ? 480 : 240
+  const axisFontSize = presentMode ? 16 : 11
+  const legendFontSize = presentMode ? 16 : 11
+  const barLabelFontSize = presentMode ? 15 : 11
+
   const axisProps = {
-    tick: { fill: '#64748b', fontSize: 11 },
+    tick: { fill: '#64748b', fontSize: axisFontSize },
     stroke: '#1f2937',
   }
   const tooltipStyle = {
     contentStyle: {
       background: '#1a2438', border: '1px solid #1e3a5c',
-      borderRadius: 8, fontSize: 12,
+      borderRadius: 8, fontSize: presentMode ? 15 : 12,
     },
     labelStyle: { color: '#f9fafb' },
   }
-
-  const hasData = events.length > 0 || contribution.length > 0
+  const legendProps = {
+    wrapperStyle: { fontSize: legendFontSize },
+  }
 
   return (
     <div className={presentMode
@@ -156,16 +167,20 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
         <ChartCard
           title="Activity over time"
           subtitle="Weekly platform activity by type — analytical sessions unless testing is included"
+          presentMode={presentMode}
         >
           {weekly.length === 0 ? (
             <EmptyChart />
           ) : (
             <>
-              <ResponsiveContainer width="100%" height={presentMode ? 320 : 240}>
+              <ResponsiveContainer width="100%" height={chartHeight}>
                 <BarChart data={weekly}>
                   <XAxis dataKey="week" {...axisProps} />
                   <YAxis allowDecimals={false} {...axisProps} />
                   <Tooltip {...tooltipStyle} cursor={{ fill: '#ffffff08' }} />
+                  {/* Present mode adds a recharts Legend; normal mode relies
+                      on the interactive custom legend below the chart. */}
+                  {presentMode && <Legend {...legendProps} />}
                   {STACK_KINDS.filter((s) => !hidden.has(s.key)).map((s) => (
                     <Bar key={s.key} dataKey={s.key} stackId="a"
                          name={s.label} fill={s.color} />
@@ -173,7 +188,9 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
                 </BarChart>
               </ResponsiveContainer>
               {/* Custom legend — click to show/hide a stack */}
-              <div className="flex items-center gap-3 flex-wrap mt-2">
+              <div className={`flex items-center flex-wrap ${
+                presentMode ? 'gap-5 mt-4' : 'gap-3 mt-2'
+              }`}>
                 {STACK_KINDS.map((s) => {
                   const off = hidden.has(s.key)
                   return (
@@ -181,12 +198,13 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
                       key={s.key}
                       type="button"
                       onClick={() => toggle(s.key)}
-                      className={`flex items-center gap-1.5 text-2xs transition-opacity ${
-                        off ? 'opacity-40' : 'opacity-100'
-                      }`}
+                      className={`flex items-center transition-opacity ${
+                        presentMode ? 'gap-2 text-base' : 'gap-1.5 text-2xs'
+                      } ${off ? 'opacity-40' : 'opacity-100'}`}
                     >
-                      <span className="w-2.5 h-2.5 rounded-sm"
-                            style={{ background: s.color }} />
+                      <span className={`rounded-sm ${
+                        presentMode ? 'w-4 h-4' : 'w-2.5 h-2.5'
+                      }`} style={{ background: s.color }} />
                       <span className="text-slate-300">{s.label}</span>
                     </button>
                   )
@@ -201,11 +219,12 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
       <ChartCard
         title="Team contribution split"
         subtitle="Share of substantive interactions — council, academic review, uploads"
+        presentMode={presentMode}
       >
         {contribution.length === 0 ? (
           <EmptyChart />
         ) : (
-          <ResponsiveContainer width="100%" height={presentMode ? 320 : 240}>
+          <ResponsiveContainer width="100%" height={chartHeight}>
             <PieChart>
               <Pie
                 data={contribution}
@@ -213,17 +232,20 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
                 nameKey="name"
                 cx="50%"
                 cy="50%"
-                innerRadius={presentMode ? 70 : 50}
-                outerRadius={presentMode ? 110 : 80}
+                innerRadius={presentMode ? 110 : 50}
+                outerRadius={presentMode ? 175 : 80}
+                stroke="#0a0e1a"
+                strokeWidth={presentMode ? 4 : 2}
                 label={(e) => `${e.name}: ${e.value}`}
                 labelLine={false}
+                style={{ fontSize: barLabelFontSize }}
               >
                 {contribution.map((_, i) => (
                   <Cell key={i} fill={MEMBER_COLORS[i % MEMBER_COLORS.length]} />
                 ))}
               </Pie>
               <Tooltip {...tooltipStyle} />
-              <Legend wrapperStyle={{ fontSize: 11 }} />
+              <Legend {...legendProps} />
             </PieChart>
           </ResponsiveContainer>
         )}
@@ -233,23 +255,25 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
       <ChartCard
         title="Agent engagement"
         subtitle="Times each council agent was consulted across all sessions"
+        presentMode={presentMode}
       >
         {agentEngagement.length === 0 ? (
           <EmptyChart />
         ) : (
-          <ResponsiveContainer width="100%" height={presentMode ? 320 : 240}>
+          <ResponsiveContainer width="100%" height={chartHeight}>
             <BarChart data={agentEngagement} layout="vertical"
-                      margin={{ left: 24 }}>
+                      margin={{ left: presentMode ? 40 : 24 }}>
               <XAxis type="number" allowDecimals={false} {...axisProps} />
-              <YAxis type="category" dataKey="agent" width={120} {...axisProps} />
+              <YAxis type="category" dataKey="agent"
+                     width={presentMode ? 180 : 120} {...axisProps} />
               <Tooltip {...tooltipStyle} cursor={{ fill: '#ffffff08' }} />
-              <Bar dataKey="count" name="Times consulted" fill="#3b82f6" />
+              {presentMode && <Legend {...legendProps} />}
+              <Bar dataKey="count" name="Times consulted" fill="#3b82f6"
+                   {...(presentMode ? { barSize: 36 } : {})} />
             </BarChart>
           </ResponsiveContainer>
         )}
       </ChartCard>
-
-      {!hasData && !presentMode && null}
     </div>
   )
 }

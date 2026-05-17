@@ -4,9 +4,12 @@
  * p-value fails the threshold — exactly the cases the FDR correction was
  * designed to catch.
  */
+import { useRef } from 'react'
 import type { StrategyResult } from '../../types/strategies'
 import { prettyName } from '../../lib/strategyColors'
 import StrategyTypeBadge from '../StrategyTypeBadge'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 interface Props {
   strategies: StrategyResult[]
@@ -25,14 +28,21 @@ function classifyMovement(raw: number, corrected: number): {
 }
 
 export default function MultipleComparisonTable({ strategies }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const sorted = [...strategies].sort(
     (a, b) => (a.p_value_ttest ?? 1) - (b.p_value_ttest ?? 1),
   )
 
   return (
-    <div className="card p-4" data-testid="multiple-comparison-table">
+    <div className="card p-4" data-testid="multiple-comparison-table" ref={containerRef}>
       <div className="mb-3">
-        <h3 className="text-white font-semibold text-sm">Multiple Comparison Correction</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-white font-semibold text-sm">
+            Multiple Comparison Correction
+            <InfoIcon tooltipKey="multiple_comparison_table" metricLabel="Multiple Comparison Correction" size="md" />
+          </h3>
+          <ChartExportButton chartId="multiple_comparison_correction" containerRef={containerRef} />
+        </div>
         <p className="text-muted text-xs mt-0.5">
           Raw vs Benjamini-Hochberg FDR-corrected p-values · threshold p &lt; 0.005
         </p>
@@ -41,7 +51,7 @@ export default function MultipleComparisonTable({ strategies }: Props) {
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
-            <tr className="text-muted text-2xs uppercase tracking-wide">
+            <tr className="text-muted text-2xs uppercase tracking-wide border-b border-border">
               <th className="text-left py-2 pr-3">Strategy</th>
               <th className="text-right px-2 py-2">Raw p</th>
               <th className="px-2 py-2"></th>
@@ -56,14 +66,14 @@ export default function MultipleComparisonTable({ strategies }: Props) {
               const verdict = classifyMovement(raw, corrected)
               const arrow = corrected > raw ? '→' : '='
               return (
-                <tr key={s.strategy_name} className="border-t border-border/50">
+                <tr key={s.strategy_name} className="border-t border-border/50 hover:bg-navy-800/40 transition-colors">
                   <td className="py-1.5 pr-3">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-white font-mono">{prettyName(s.strategy_name)}</span>
                       <StrategyTypeBadge strategy={s.strategy_name} />
                     </div>
                   </td>
-                  <td className="text-right px-2 py-1.5 font-mono text-cbd5e1">
+                  <td className="text-right px-2 py-1.5 font-mono text-slate-300">
                     {raw.toFixed(4)}
                   </td>
                   <td className="px-2 py-1.5 text-center text-muted">{arrow}</td>

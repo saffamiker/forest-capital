@@ -7,10 +7,13 @@
  * Reads gates directly from StrategyResult so it works offline of the
  * chart-data endpoint — useful when /api/v1/charts/data is cold.
  */
+import { useRef } from 'react'
 import type { StrategyResult } from '../../types/strategies'
 import { prettyName, tooltipLine } from '../../lib/strategyColors'
 import StrategyTypeBadge from '../StrategyTypeBadge'
 import ExplainableText from '../ExplainableText'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 interface Gate {
   label: string
@@ -71,14 +74,25 @@ interface Props {
 }
 
 export default function SignificanceJourneyMatrix({ strategies }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const sorted = [...strategies].sort(
     (a, b) => (b.tier1_gates_passed ?? 0) - (a.tier1_gates_passed ?? 0),
   )
 
   return (
-    <div className="card p-4" data-testid="significance-journey-matrix">
+    <div className="card p-4" data-testid="significance-journey-matrix" ref={containerRef}>
       <div className="mb-3">
-        <h3 className="text-white font-semibold text-sm">Significance Journey Matrix</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-white font-semibold text-sm">
+            Significance Journey Matrix
+            <InfoIcon
+              tooltipKey="significance_journey_matrix"
+              metricLabel="Significance Journey Matrix"
+              size="md"
+            />
+          </h3>
+          <ChartExportButton chartId="significance_journey_matrix" containerRef={containerRef} />
+        </div>
         <p className="text-muted text-xs mt-0.5">
           Five Tier 1 gates per strategy — all five must pass for is_significant
         </p>

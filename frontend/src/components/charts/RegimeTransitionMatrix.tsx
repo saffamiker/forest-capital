@@ -8,7 +8,10 @@
  * we're still in BULL next month" — supports the persistence narrative
  * for regime-switching strategies.
  */
+import { useRef } from 'react'
 import type { TransitionMatrix, Regime } from '../../types/charts'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 interface Props {
   matrix: TransitionMatrix
@@ -28,11 +31,12 @@ function cellColor(p: number): string {
 }
 
 export default function RegimeTransitionMatrix({ matrix }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const isEmpty = !matrix.BULL || Object.values(matrix.BULL).every((v) => v === 0)
 
   if (isEmpty) {
     return (
-      <div className="card p-4" data-testid="regime-transition-matrix">
+      <div className="card p-4" data-testid="regime-transition-matrix" ref={containerRef}>
         <h3 className="text-white font-semibold text-sm">Regime Transition Matrix</h3>
         <p className="text-muted text-xs mt-3">Loading transition data…</p>
       </div>
@@ -40,9 +44,15 @@ export default function RegimeTransitionMatrix({ matrix }: Props) {
   }
 
   return (
-    <div className="card p-4" data-testid="regime-transition-matrix">
+    <div className="card p-4" data-testid="regime-transition-matrix" ref={containerRef}>
       <div className="mb-3">
-        <h3 className="text-white font-semibold text-sm">Regime Transition Matrix</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-white font-semibold text-sm">
+            Regime Transition Matrix
+            <InfoIcon tooltipKey="regime_transition_matrix" metricLabel="Regime Transition Matrix" size="md" />
+          </h3>
+          <ChartExportButton chartId="regime_transition_matrix" containerRef={containerRef} />
+        </div>
         <p className="text-muted text-xs mt-0.5">
           Empirical P(next month regime | current regime) · diagonal = persistence
         </p>

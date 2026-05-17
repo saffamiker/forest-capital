@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
@@ -18,6 +18,11 @@ import ExplainableText from './ExplainableText'
 import InfoIcon from './InfoIcon'
 import ChartCommentStrip from './ChartCommentStrip'
 import LearnModeBanner from './LearnModeBanner'
+import ChartExportButton from './ChartExportButton'
+import TableExportButton from './TableExportButton'
+// Canonical strategy-colour map — one source of truth shared with every
+// chart component (was duplicated locally in this file).
+import { STRATEGY_COLORS } from '../lib/strategyColors'
 
 // ── Real cumulative-return series ──────────────────────────────────────────
 // Growth of $1, one point per month, served by /api/v1/analytics/academic
@@ -36,19 +41,6 @@ const STALENESS_PILL: Record<Staleness, { cls: string; label: string }> = {
   amber:   { cls: 'bg-warning/15 text-warning border-warning/30', label: 'Ageing' },
   red:     { cls: 'bg-danger/15 text-danger border-danger/30',    label: 'Stale' },
   unknown: { cls: 'bg-navy-700 text-muted border-border',         label: 'Unknown' },
-}
-
-const STRATEGY_COLORS: Record<string, string> = {
-  BENCHMARK:          '#64748b',
-  CLASSIC_60_40:      '#60a5fa',
-  RISK_PARITY:        '#34d399',
-  MIN_VARIANCE:       '#a78bfa',
-  EQUAL_WEIGHT:       '#fb923c',
-  MOMENTUM_ROTATION:  '#f472b6',
-  REGIME_SWITCHING:   '#22c55e',
-  VOL_TARGETING:      '#3b82f6',
-  BLACK_LITTERMAN:    '#fbbf24',
-  MAX_SHARPE_ROLLING: '#e879f9',
 }
 
 const SIGNIFICANT_STRATEGIES = ['REGIME_SWITCHING', 'VOL_TARGETING', 'BLACK_LITTERMAN', 'MAX_SHARPE_ROLLING']
@@ -201,6 +193,7 @@ export default function Dashboard() {
     { last_updated: string | null; staleness: Staleness } | null
   >(null)
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
+  const cumulativeChartRef = useRef<HTMLDivElement>(null)
   const [visibleStrategies, setVisibleStrategies] = useState<Set<string>>(
     new Set([...SIGNIFICANT_STRATEGIES, 'BENCHMARK'])
   )
@@ -256,6 +249,28 @@ export default function Dashboard() {
   const bestSharpe = sorted[0]
   const bestOos = [...strategies].sort((a, b) => (b.oos_sharpe ?? 0) - (a.oos_sharpe ?? 0))[0]
   const benchmark = strategies.find((s) => s.strategy_name === 'BENCHMARK')
+
+  // CSV export of the strategy comparison table — the flagship table for
+  // Forest Capital; every other data table already offers CSV export.
+  const STRATEGY_EXPORT_HEADERS = [
+    '#', 'Strategy', 'Type', 'CAGR %', 'Sharpe', 'Sharpe CI Low', 'Sharpe CI High',
+    'Max Drawdown %', 'DSR p-value', 'P (FDR)', 'CV Score', 'Tier 1 Gates', 'Significant',
+  ]
+  const strategyExportRows = sorted.map((s, i) => [
+    i + 1,
+    s.strategy_name.replace(/_/g, ' '),
+    (s.strategy_type ?? 'static').toUpperCase(),
+    s.cagr != null ? (s.cagr * 100).toFixed(2) : '',
+    s.sharpe_ratio != null ? s.sharpe_ratio.toFixed(3) : '',
+    s.sharpe_ci_95?.[0] ?? '',
+    s.sharpe_ci_95?.[1] ?? '',
+    s.max_drawdown != null ? (s.max_drawdown * 100).toFixed(2) : '',
+    s.dsr_p_value ?? '',
+    s.p_value_corrected ?? '',
+    s.cv_stability_score ?? '',
+    s.tier1_gates_passed != null ? `${s.tier1_gates_passed}/5` : '',
+    s.is_significant ? 'YES' : 'NO',
+  ])
 
   const toggleStrategy = (name: string) => {
     setVisibleStrategies((prev) => {
@@ -327,6 +342,15 @@ export default function Dashboard() {
       )}
 
       <div className="p-4 md:p-6 space-y-5">
+        {/* Page header — consistent with every other screen's title block. */}
+        <div>
+          <h1 className="text-xl font-semibold text-white">Dashboard</h1>
+          <p className="text-sm text-muted mt-1">
+            Ten portfolio strategies ranked by risk-adjusted performance against
+            the 100% equity benchmark.
+          </p>
+        </div>
+
         {/* Commentary-mode banner — renders only when mode === 'commentary'.
             Renders nothing in Analyst/Present, so adding it here is free. */}
         <LearnModeBanner />
@@ -364,14 +388,22 @@ export default function Dashboard() {
         </div>
 
         {/* Cumulative returns chart */}
-        <div className="card p-4">
-          <div className="flex items-center justify-between mb-3">
+        <div className="card p-4" ref={cumulativeChartRef}>
+          <div className="flex items-start justify-between mb-3">
             <div>
-              <h3 className="text-white font-semibold text-sm">
+              <h3 className="text-white font-semibold text-sm flex items-center">
                 Cumulative Returns — {formatDateRange(dataRange?.start, dataRange?.end)}
+                <InfoIcon
+                  tooltipKey="cumulative_return_chart"
+                  metricLabel="Cumulative Returns"
+                  size="md"
+                />
               </h3>
-              <p className="text-muted text-xs mt-0.5">Log scale available · Click legend to toggle</p>
+              <p className="text-muted text-xs mt-0.5">
+                Growth of $1 invested · use the buttons below to show or hide a strategy
+              </p>
             </div>
+            <ChartExportButton chartId="cumulative_returns" containerRef={cumulativeChartRef} />
           </div>
           {/* Toggle buttons */}
           <div className="flex flex-wrap gap-1.5 mb-3">
@@ -451,21 +483,28 @@ export default function Dashboard() {
                 Tier 1 significance: p &lt; 0.005 · FDR corrected · All 5 gates must pass for SIGNIFICANT
               </p>
             </div>
-            {/* Data freshness — server-side computed_at + staleness pill,
-                consistent with Settings → Data and Study Period. */}
-            {dataFreshness && (
-              <div className="flex items-center gap-2 shrink-0">
-                {dataFreshness.last_updated && (
-                  <span className="text-2xs text-muted font-mono">
-                    computed {dataFreshness.last_updated.slice(0, 10)}
+            {/* Data freshness + CSV export — freshness mirrors Settings →
+                Data and Study Period; CSV export matches every other table. */}
+            <div className="flex items-center gap-2 shrink-0">
+              {dataFreshness && (
+                <>
+                  {dataFreshness.last_updated && (
+                    <span className="text-2xs text-muted font-mono">
+                      computed {dataFreshness.last_updated.slice(0, 10)}
+                    </span>
+                  )}
+                  <span className={`text-2xs px-2 py-0.5 rounded-full border ${
+                    STALENESS_PILL[dataFreshness.staleness].cls}`}>
+                    {STALENESS_PILL[dataFreshness.staleness].label}
                   </span>
-                )}
-                <span className={`text-2xs px-2 py-0.5 rounded-full border ${
-                  STALENESS_PILL[dataFreshness.staleness].cls}`}>
-                  {STALENESS_PILL[dataFreshness.staleness].label}
-                </span>
-              </div>
-            )}
+                </>
+              )}
+              <TableExportButton
+                tableId="strategy_comparison"
+                headers={STRATEGY_EXPORT_HEADERS}
+                rows={strategyExportRows}
+              />
+            </div>
           </div>
           <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: 'calc(100vh - 380px)' }}>
             <table className="w-full text-left">

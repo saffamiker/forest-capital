@@ -6,18 +6,22 @@
  * Custom SVG rather than recharts because recharts doesn't ship a box plot
  * primitive and a hand-drawn box is < 30 lines.
  */
+import { useRef } from 'react'
 import type { CPCVStats } from '../../types/charts'
 import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 interface Props {
   cpcv: Record<string, CPCVStats>
 }
 
 export default function CPCVSharpePlot({ cpcv }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const entries = Object.entries(cpcv).filter(([, v]) => v.n_paths > 0)
   if (entries.length === 0) {
     return (
-      <div className="card p-4" data-testid="cpcv-sharpe-plot">
+      <div className="card p-4" data-testid="cpcv-sharpe-plot" ref={containerRef}>
         <h3 className="text-white font-semibold text-sm">CPCV Sharpe Distribution</h3>
         <p className="text-muted text-xs mt-3">Loading CPCV data…</p>
       </div>
@@ -45,9 +49,15 @@ export default function CPCVSharpePlot({ cpcv }: Props) {
   const xPos = (v: number) => PAD_LEFT + ((v - xMin) / span) * innerW
 
   return (
-    <div className="card p-4" data-testid="cpcv-sharpe-plot">
+    <div className="card p-4" data-testid="cpcv-sharpe-plot" ref={containerRef}>
       <div className="mb-3">
-        <h3 className="text-white font-semibold text-sm">CPCV Sharpe Distribution</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-white font-semibold text-sm">
+            CPCV Sharpe Distribution
+            <InfoIcon tooltipKey="cpcv_sharpe_plot" metricLabel="CPCV Sharpe Distribution" size="md" />
+          </h3>
+          <ChartExportButton chartId="cpcv_sharpe_distribution" containerRef={containerRef} />
+        </div>
         <p className="text-muted text-xs mt-0.5">
           Sharpe ratio across 8 non-overlapping blocks — whisker shows min/Q1/median/Q3/max
         </p>

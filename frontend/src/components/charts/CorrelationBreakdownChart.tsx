@@ -6,9 +6,15 @@
  *
  * Reference lines at the pre/post 2022 averages anchor the narrative.
  */
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea } from 'recharts'
 import type { CorrelationPoint } from '../../types/charts'
+import {
+  GRID_STROKE, AXIS_TICK, TOOLTIP_CONTENT_STYLE, TOOLTIP_LABEL_STYLE,
+  REGIME_BREAK_DATE, REGIME_BREAK_COLOR, REGIME_BREAK_LABEL,
+} from '../../lib/chartStyle'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 interface Props {
   correlation: CorrelationPoint[]
@@ -18,6 +24,7 @@ interface Props {
 }
 
 export default function CorrelationBreakdownChart({ correlation, pre2022, post2022 }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   // Compute summary if backend didn't provide
   const summary = useMemo(() => {
     if (correlation.length === 0) return { pre: pre2022 ?? null, post: post2022 ?? null }
@@ -31,7 +38,7 @@ export default function CorrelationBreakdownChart({ correlation, pre2022, post20
 
   if (correlation.length === 0) {
     return (
-      <div className="card p-4" data-testid="correlation-breakdown-chart">
+      <div className="card p-4" data-testid="correlation-breakdown-chart" ref={containerRef}>
         <h3 className="text-white font-semibold text-sm">Equity-Bond Correlation — Rolling 12-Month</h3>
         <p className="text-muted text-xs mt-3">Loading correlation series…</p>
       </div>
@@ -39,45 +46,51 @@ export default function CorrelationBreakdownChart({ correlation, pre2022, post20
   }
 
   return (
-    <div className="card p-4" data-testid="correlation-breakdown-chart">
+    <div className="card p-4" data-testid="correlation-breakdown-chart" ref={containerRef}>
       <div className="mb-3 flex items-end justify-between">
         <div>
           <h3 className="text-white font-semibold text-sm">
             Equity-Bond Correlation — Rolling 12-Month
+            <InfoIcon
+              tooltipKey="rolling_correlation_chart"
+              metricLabel="Equity-Bond Correlation — Rolling 12-Month"
+              size="md"
+            />
           </h3>
           <p className="text-muted text-xs mt-0.5">
             The central project finding: diversification broke down in 2022
           </p>
         </div>
-        <div className="flex gap-4 text-2xs font-mono">
+        <div className="flex items-center gap-4 text-2xs font-mono">
           <div className="text-muted">
             Pre-2022 avg: <span className="text-electric">{summary.pre?.toFixed(2) ?? '—'}</span>
           </div>
           <div className="text-muted">
             Post-2022 avg: <span className="text-warning">{summary.post?.toFixed(2) ?? '—'}</span>
           </div>
+          <ChartExportButton chartId="correlation_breakdown" containerRef={containerRef} />
         </div>
       </div>
 
       <div style={{ width: '100%', height: 280 }}>
         <ResponsiveContainer>
           <LineChart data={correlation} margin={{ top: 8, right: 20, left: 0, bottom: 8 }}>
-            <CartesianGrid stroke="#1e3a5c" strokeDasharray="3 3" />
+            <CartesianGrid stroke={GRID_STROKE} strokeDasharray="3 3" />
             <XAxis
               dataKey="date"
-              tick={{ fill: '#64748b', fontSize: 10 }}
+              tick={AXIS_TICK}
               tickFormatter={(v) => String(v).slice(0, 4)}
-              stroke="#1e3a5c"
+              stroke={GRID_STROKE}
             />
             <YAxis
               domain={[-0.8, 0.8]}
-              tick={{ fill: '#64748b', fontSize: 10 }}
-              stroke="#1e3a5c"
+              tick={AXIS_TICK}
+              stroke={GRID_STROKE}
               tickFormatter={(v) => v.toFixed(1)}
             />
             <Tooltip
-              contentStyle={{ background: '#0d1929', border: '1px solid #1e3a5c', fontSize: 11 }}
-              labelStyle={{ color: '#cbd5e1' }}
+              contentStyle={TOOLTIP_CONTENT_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
               // Non-strategy chart — header is the date, single metric per row.
               // Keeps the same "Label · Metric: value" shape as the strategy
               // charts so the visual cadence is identical product-wide.
@@ -91,6 +104,12 @@ export default function CorrelationBreakdownChart({ correlation, pre2022, post20
               <ReferenceLine y={summary.post} stroke="#f59e0b" strokeOpacity={0.6} strokeDasharray="4 2" label={{ value: 'post-2022', position: 'left', fill: '#f59e0b', fontSize: 9 }} />
             )}
             <ReferenceArea x1="2022-01-31" x2="2022-12-31" fill="#f59e0b" fillOpacity={0.1} />
+            <ReferenceLine
+              x={REGIME_BREAK_DATE}
+              stroke={REGIME_BREAK_COLOR}
+              strokeDasharray="4 3"
+              label={{ value: REGIME_BREAK_LABEL, fill: REGIME_BREAK_COLOR, fontSize: 10, position: 'top' }}
+            />
             <Line
               type="monotone"
               dataKey="rolling_12m"

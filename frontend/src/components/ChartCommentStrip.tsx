@@ -127,7 +127,7 @@ export default function ChartCommentStrip({
             <MessageSquare className="w-3 h-3" />
             <span className="uppercase tracking-wide">Purpose</span>
             {explanation?.hover_summary && (
-              <span className="text-cbd5e1 normal-case tracking-normal">
+              <span className="text-slate-300 normal-case tracking-normal">
                 {explanation.hover_summary}
               </span>
             )}
@@ -187,7 +187,7 @@ export default function ChartCommentStrip({
           <span className="text-2xs uppercase tracking-wide text-muted mr-2">
             Sources
           </span>
-          <span className="text-2xs text-cbd5e1 font-normal">
+          <span className="text-2xs text-slate-300 font-normal">
             {sourcesText}
           </span>
         </div>

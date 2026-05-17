@@ -4,21 +4,25 @@
  * audience sees not just the point estimate but the precision: wide CI =
  * uncertain estimate, narrow CI = sample size was sufficient.
  */
+import { useRef } from 'react'
 import type { StrategyResult } from '../../types/strategies'
 import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 interface Props {
   strategies: StrategyResult[]
 }
 
 export default function ProbabilisticSharpeChart({ strategies }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const usable = strategies
     .filter((s) => s.sharpe_ci_95 && s.sharpe_ci_95.length === 2)
     .sort((a, b) => (a.sharpe_ratio ?? 0) - (b.sharpe_ratio ?? 0))
 
   if (usable.length === 0) {
     return (
-      <div className="card p-4" data-testid="probabilistic-sharpe-chart">
+      <div className="card p-4" data-testid="probabilistic-sharpe-chart" ref={containerRef}>
         <h3 className="text-white font-semibold text-sm">Probabilistic Sharpe — 95% Confidence Intervals</h3>
         <p className="text-muted text-xs mt-3">No CI data available yet.</p>
       </div>
@@ -43,11 +47,19 @@ export default function ProbabilisticSharpeChart({ strategies }: Props) {
   const xPos = (v: number) => PAD_LEFT + ((v - xMin) / span) * innerW
 
   return (
-    <div className="card p-4" data-testid="probabilistic-sharpe-chart">
+    <div className="card p-4" data-testid="probabilistic-sharpe-chart" ref={containerRef}>
       <div className="mb-3">
-        <h3 className="text-white font-semibold text-sm">
-          Probabilistic Sharpe — 95% Confidence Intervals
-        </h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-white font-semibold text-sm">
+            Probabilistic Sharpe — 95% Confidence Intervals
+            <InfoIcon
+              tooltipKey="probabilistic_sharpe_chart"
+              metricLabel="Probabilistic Sharpe — 95% Confidence Intervals"
+              size="md"
+            />
+          </h3>
+          <ChartExportButton chartId="probabilistic_sharpe" containerRef={containerRef} />
+        </div>
         <p className="text-muted text-xs mt-0.5">
           Wide intervals indicate Sharpe estimate is uncertain even when point estimate is high
         </p>

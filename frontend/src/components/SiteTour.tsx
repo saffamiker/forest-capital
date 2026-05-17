@@ -74,7 +74,7 @@ function TourTooltip({
         <div className="flex items-center gap-1.5">
           <button
             {...skipProps}
-            className="px-2 py-1 text-2xs text-muted hover:text-white
+            className="px-2.5 py-1.5 text-xs text-muted hover:text-white
                        transition-colors"
           >
             Skip
@@ -82,7 +82,7 @@ function TourTooltip({
           {index > 0 && (
             <button
               {...backProps}
-              className="px-2.5 py-1 text-2xs rounded border border-border
+              className="px-3 py-1.5 text-xs rounded border border-border
                          text-slate-300 hover:bg-navy-700 transition-colors"
             >
               Back
@@ -90,7 +90,7 @@ function TourTooltip({
           )}
           <button
             {...primaryProps}
-            className="px-3 py-1 text-2xs rounded font-medium bg-electric/15
+            className="px-3.5 py-1.5 text-xs rounded font-medium bg-electric/15
                        text-electric border border-electric/30
                        hover:bg-electric/25 transition-colors"
           >

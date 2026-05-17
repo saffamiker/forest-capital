@@ -152,7 +152,10 @@ export default function AcademicDocumentsPanel() {
 
       {/* Document list */}
       {loading ? (
-        <div className="text-muted text-xs">Loading…</div>
+        <div className="flex items-center gap-2 text-muted text-xs">
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+          Loading documents…
+        </div>
       ) : docs.length === 0 ? (
         <div className="text-muted text-xs italic">No documents uploaded yet.</div>
       ) : (

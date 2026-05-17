@@ -109,10 +109,7 @@ export default function WhatsNewModal() {
                 {e.description}
               </p>
               {/* Academic rationale — distinct treatment, amber left accent. */}
-              <div
-                className="mt-2 pl-3 py-1.5"
-                style={{ borderLeft: '3px solid #f59e0b' }}
-              >
+              <div className="mt-2 pl-3 py-1.5 border-l-[3px] border-warning">
                 <div className="text-2xs uppercase tracking-wide text-warning
                                 font-medium">
                   Why this matters for your grade

@@ -9,8 +9,10 @@
  * the X button, a backdrop click, or Escape.
  */
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { X, Loader2 } from 'lucide-react'
+import { X, Loader2, Users } from 'lucide-react'
+import Markdown from './Markdown'
 
 interface ExplainerPanelProps {
   /** Metric/chart name — sent to the explainer and shown as the title. */
@@ -20,16 +22,6 @@ interface ExplainerPanelProps {
   onClose: () => void
 }
 
-/** Minimal markdown: render **bold** spans, keep everything else literal. */
-function renderInline(line: string): React.ReactNode {
-  const parts = line.split(/(\*\*[^*]+\*\*)/g)
-  return parts.map((p, i) =>
-    p.startsWith('**') && p.endsWith('**')
-      ? <strong key={i} className="text-white">{p.slice(2, -2)}</strong>
-      : <span key={i}>{p}</span>,
-  )
-}
-
 export default function ExplainerPanel({
   metricLabel, currentValue, onClose,
 }: ExplainerPanelProps) {
@@ -37,6 +29,19 @@ export default function ExplainerPanel({
   const [streaming, setStreaming] = useState(true)
   const [error, setError] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  const navigate = useNavigate()
+
+  // Hand off to the council with a contextual question pre-filled. The
+  // council screen sets the field and focuses it — it never auto-submits,
+  // so the user reviews and confirms before convening the council.
+  const askCouncil = () => {
+    const valuePart = currentValue ? ` (${currentValue})` : ''
+    const prefillQuestion =
+      `Can you explain ${metricLabel}${valuePart} in the context of our `
+      + 'asset allocation analysis and the 2022 correlation regime break?'
+    navigate('/council', { state: { prefillQuestion } })
+    onClose()
+  }
 
   // Stream the explanation on mount.
   useEffect(() => {
@@ -145,16 +150,29 @@ export default function ExplainerPanel({
             </div>
           )}
           {text && (
-            <div className="text-slate-200 space-y-2">
-              {text.split('\n').filter((l) => l.trim()).map((line, i) => (
-                <p key={i}>{renderInline(line)}</p>
-              ))}
+            <div>
+              <Markdown content={text} />
               {streaming && (
                 <span className="inline-block w-1.5 h-3.5 bg-electric/60
                                  animate-pulse align-middle ml-0.5" />
               )}
             </div>
           )}
+        </div>
+
+        {/* Hand-off to the council — continue this metric as a full
+            council question, pre-filled and focused (never auto-sent). */}
+        <div className="border-t border-border px-4 py-3 shrink-0">
+          <button
+            type="button"
+            onClick={askCouncil}
+            className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg
+                       text-sm font-medium border border-electric/30 bg-electric/10
+                       text-electric hover:bg-electric/20 transition-colors"
+          >
+            <Users className="w-4 h-4" />
+            Ask the Council about this
+          </button>
         </div>
       </aside>
     </>

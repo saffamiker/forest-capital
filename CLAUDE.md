@@ -4772,6 +4772,55 @@ Deliberately NOT changed: agent-call error-handling asymmetry
   deferred pending a vulture/ruff pass.
 
 
+─────────────────────────────────────────────────────────────────────────────
+UI/UX REVIEW — frontend quality pass (May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+A presentation-quality pass over the frontend — the bar is "professional
+investment tool" for Forest Capital and McColl faculty. Findings: 2 HIGH,
+21 MEDIUM, 10 LOW. The full visual checklist for the manual browser pass
+lives at docs/ui_ux_checklist.md.
+
+HIGH:
+ - A failed council query previously rendered a blank screen (the empty
+   state was gated on a falsy result, but an errored run set a truthy
+   result). CouncilDebate now shows an error card with the store error
+   and a Retry button.
+ - All AI output (council messages, the Academic Review verdict and peer
+   reviews, the Explainer panel) was rendered as raw text — markdown
+   lists/emphasis showed as literal characters. A shared <Markdown>
+   component (react-markdown, dark-theme styled) now renders them.
+
+MEDIUM — fixed: a council Cancel button + AbortController in councilStore;
+ the Academic Review trigger elevated to a prominent amber card with an
+ idle description and a clearer two-step loading message; the stale
+ grok-3-mini badge corrected to grok-4.3; the Dashboard strategy table
+ and every chart now carry an export button; the Dashboard cumulative
+ chart's false "log scale" caption corrected; a single shared
+ lib/chartStyle.ts unifies gridline / tooltip / axis colours and the
+ 2022 regime-break marker across charts; the local STRATEGY_COLORS
+ duplicates in Dashboard/EfficientFrontier replaced by the canonical
+ lib/strategyColors.ts; the invalid `text-cbd5e1` class replaced;
+ a consistent page header added to the Dashboard; the Settings staleness
+ legend and the Academic Documents file-type note added;
+ AcademicDocumentsPanel loading state given a spinner; Presentation View
+ charts scaled to genuine screen-share size; Team Activity promoted to
+ the top of the Reports page; table headers and row-hover unified.
+
+NEW WORKFLOW LINK: the Explainer panel now has an "Ask the Council about
+this" button — it navigates to /council with a contextual question
+(metric + value + the 2022 regime-break framing) pre-filled in the query
+field and focused, but never auto-submitted. The council screen reads the
+question from react-router route state on mount.
+
+LOW — fixed: the dead, unused styles/tokens.ts removed; tour/modal
+button click targets enlarged; the WhatsNewModal amber accent moved off
+an inline hex literal. L9 (extending green/red colour coding to
+CAGR/Sharpe) was deliberately skipped — those metrics are near-always
+positive for these strategies, so colouring every cell green would add
+noise, not consistency.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.

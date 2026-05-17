@@ -9,7 +9,11 @@
  * fetch is too slow; this is acceptable for Sprint 6 because the threshold
  * series captures the headline regime story.
  */
+import { useRef } from 'react'
 import type { RegimeTimelinePoint } from '../../types/charts'
+import { REGIME_BREAK_COLOR, REGIME_BREAK_LABEL } from '../../lib/chartStyle'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 interface Props {
   timeline: RegimeTimelinePoint[]
@@ -22,9 +26,10 @@ const REGIME_COLORS = {
 } as const
 
 export default function RegimeTimeline({ timeline }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   if (timeline.length === 0) {
     return (
-      <div className="card p-4" data-testid="regime-timeline">
+      <div className="card p-4" data-testid="regime-timeline" ref={containerRef}>
         <h3 className="text-white font-semibold text-sm">Regime Timeline</h3>
         <p className="text-muted text-xs mt-3">Loading regime classifications…</p>
       </div>
@@ -51,22 +56,30 @@ export default function RegimeTimeline({ timeline }: Props) {
     return acc
   }, {})
 
+  // 2022 regime-break marker — index of the first month in or after
+  // January 2022, used to place the standard dashed vertical line.
+  const breakIndex = timeline.findIndex((p) => p.date >= '2022-01')
+
   return (
     <div className="card p-4" data-testid="regime-timeline">
       <div className="mb-3 flex items-end justify-between">
         <div>
-          <h3 className="text-white font-semibold text-sm">Regime Timeline</h3>
+          <h3 className="text-white font-semibold text-sm">
+            Regime Timeline
+            <InfoIcon tooltipKey="regime_timeline" metricLabel="Regime Timeline" size="md" />
+          </h3>
           <p className="text-muted text-xs mt-0.5">
             Threshold classification per month · {timeline[0]?.date.slice(0, 7)} → {timeline[timeline.length - 1]?.date.slice(0, 7)}
           </p>
         </div>
-        <div className="flex gap-3 text-2xs">
+        <div className="flex items-center gap-3 text-2xs">
           {(['BULL', 'BEAR', 'TRANSITION'] as const).map((r) => (
             <div key={r} className="flex items-center gap-1.5">
               <span className="w-2 h-2 inline-block rounded-sm" style={{ background: REGIME_COLORS[r] }} />
-              <span className="text-muted">{r}: <span className="text-cbd5e1 font-mono">{counts[r] ?? 0}</span></span>
+              <span className="text-muted">{r}: <span className="text-slate-300 font-mono">{counts[r] ?? 0}</span></span>
             </div>
           ))}
+          <ChartExportButton chartId="regime_timeline" containerRef={containerRef} />
         </div>
       </div>
 
@@ -105,6 +118,28 @@ export default function RegimeTimeline({ timeline }: Props) {
             </text>
           </g>
         ))}
+        {breakIndex >= 0 && (
+          <g>
+            <line
+              x1={PAD_LEFT + breakIndex * cellW}
+              x2={PAD_LEFT + breakIndex * cellW}
+              y1={PAD_TOP - 6}
+              y2={PAD_TOP + innerH + 3}
+              stroke={REGIME_BREAK_COLOR}
+              strokeWidth={1}
+              strokeDasharray="4 3"
+            />
+            <text
+              x={PAD_LEFT + breakIndex * cellW}
+              y={PAD_TOP - 9}
+              fill={REGIME_BREAK_COLOR}
+              fontSize="10"
+              textAnchor="middle"
+            >
+              {REGIME_BREAK_LABEL}
+            </text>
+          </g>
+        )}
       </svg>
     </div>
   )

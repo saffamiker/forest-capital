@@ -4,9 +4,13 @@
  * strategies hold up across regimes (similar bar heights) vs which only
  * work in bull markets (BULL tall, BEAR short).
  */
+import { useRef } from 'react'
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend } from 'recharts'
 import type { RegimeConditional } from '../../types/charts'
 import { prettyName, typeFor } from '../../lib/strategyColors'
+import { GRID_STROKE, AXIS_TICK, AXIS_TICK_COLOR, TOOLTIP_CONTENT_STYLE, TOOLTIP_LABEL_STYLE } from '../../lib/chartStyle'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 interface Props {
   regimeConditional: Record<string, RegimeConditional>
@@ -19,10 +23,11 @@ const REGIME_COLORS = {
 } as const
 
 export default function RegimeConditionalPerformance({ regimeConditional }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const entries = Object.entries(regimeConditional)
   if (entries.length === 0) {
     return (
-      <div className="card p-4" data-testid="regime-conditional-performance">
+      <div className="card p-4" data-testid="regime-conditional-performance" ref={containerRef}>
         <h3 className="text-white font-semibold text-sm">Regime-Conditional Performance</h3>
         <p className="text-muted text-xs mt-3">Loading regime data…</p>
       </div>
@@ -40,9 +45,19 @@ export default function RegimeConditionalPerformance({ regimeConditional }: Prop
   }))
 
   return (
-    <div className="card p-4" data-testid="regime-conditional-performance">
+    <div className="card p-4" data-testid="regime-conditional-performance" ref={containerRef}>
       <div className="mb-3">
-        <h3 className="text-white font-semibold text-sm">Regime-Conditional Performance</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-white font-semibold text-sm">
+            Regime-Conditional Performance
+            <InfoIcon
+              tooltipKey="regime_conditional_performance"
+              metricLabel="Regime-Conditional Performance"
+              size="md"
+            />
+          </h3>
+          <ChartExportButton chartId="regime_conditional_performance" containerRef={containerRef} />
+        </div>
         <p className="text-muted text-xs mt-0.5">
           Sharpe ratio per strategy by regime — balanced bars indicate all-weather strategies
         </p>
@@ -51,24 +66,24 @@ export default function RegimeConditionalPerformance({ regimeConditional }: Prop
       <div style={{ width: '100%', height: 320 }}>
         <ResponsiveContainer>
           <BarChart data={data} margin={{ top: 8, right: 20, left: 0, bottom: 60 }}>
-            <CartesianGrid stroke="#1e3a5c" strokeDasharray="3 3" />
+            <CartesianGrid stroke={GRID_STROKE} strokeDasharray="3 3" />
             <XAxis
               dataKey="strategy"
-              tick={{ fill: '#64748b', fontSize: 9 }}
-              stroke="#1e3a5c"
+              tick={AXIS_TICK}
+              stroke={GRID_STROKE}
               angle={-30}
               textAnchor="end"
               interval={0}
               height={70}
             />
             <YAxis
-              tick={{ fill: '#64748b', fontSize: 10 }}
-              stroke="#1e3a5c"
-              label={{ value: 'Sharpe', angle: -90, position: 'insideLeft', fill: '#64748b', fontSize: 10 }}
+              tick={AXIS_TICK}
+              stroke={GRID_STROKE}
+              label={{ value: 'Sharpe', angle: -90, position: 'insideLeft', fill: AXIS_TICK_COLOR, fontSize: 10 }}
             />
             <Tooltip
-              contentStyle={{ background: '#0d1929', border: '1px solid #1e3a5c', fontSize: 11 }}
-              labelStyle={{ color: '#cbd5e1' }}
+              contentStyle={TOOLTIP_CONTENT_STYLE}
+              labelStyle={TOOLTIP_LABEL_STYLE}
               // Custom label: "Strategy Name DYNAMIC" — same shape as the
               // tooltipLine helper but split into label (header) + per-regime
               // rows because recharts renders multi-series tooltips natively.

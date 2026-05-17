@@ -7,8 +7,11 @@
  * sees which strategies earn outperformance from asset allocation vs
  * timing (selection).
  */
+import { useRef } from 'react'
 import type { AttributionResult } from '../../types/charts'
 import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
+import ChartExportButton from '../ChartExportButton'
+import InfoIcon from '../InfoIcon'
 
 interface Props {
   attribution: Record<string, AttributionResult>
@@ -90,10 +93,11 @@ function WaterfallSmall({ name, attr }: { name: string; attr: AttributionResult 
 }
 
 export default function PerformanceAttributionWaterfall({ attribution }: Props) {
+  const containerRef = useRef<HTMLDivElement>(null)
   const entries = Object.entries(attribution)
   if (entries.length === 0) {
     return (
-      <div className="card p-4" data-testid="performance-attribution-waterfall">
+      <div className="card p-4" data-testid="performance-attribution-waterfall" ref={containerRef}>
         <h3 className="text-white font-semibold text-sm">Performance Attribution Waterfall</h3>
         <p className="text-muted text-xs mt-3">Loading attribution data…</p>
       </div>
@@ -106,9 +110,19 @@ export default function PerformanceAttributionWaterfall({ attribution }: Props) 
     .slice(0, 6)
 
   return (
-    <div className="card p-4" data-testid="performance-attribution-waterfall">
+    <div className="card p-4" data-testid="performance-attribution-waterfall" ref={containerRef}>
       <div className="mb-3">
-        <h3 className="text-white font-semibold text-sm">Performance Attribution Waterfall</h3>
+        <div className="flex items-center justify-between">
+          <h3 className="text-white font-semibold text-sm">
+            Performance Attribution Waterfall
+            <InfoIcon
+              tooltipKey="performance_attribution_waterfall"
+              metricLabel="Performance Attribution Waterfall"
+              size="md"
+            />
+          </h3>
+          <ChartExportButton chartId="performance_attribution_waterfall" containerRef={containerRef} />
+        </div>
         <p className="text-muted text-xs mt-0.5">
           Brinson-Hood-Beebower decomposition · top 6 by total active return · values in %
         </p>

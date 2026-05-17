@@ -119,6 +119,52 @@ export const EXPLAINER_TOOLTIPS: Record<string, string> = {
     'Strategy ranking tier based on the composite score. Tier 1 is the '
     + 'highest performing — used to group strategies for presentation.',
 
+  // ── Statistical Evidence page — charts ─────────────────────────────────────
+  cpcv_sharpe_plot:
+    'Sharpe ratio across non-overlapping CPCV blocks per strategy. A tight '
+    + 'whisker box means the result is robust; a wide box means it is '
+    + 'path-dependent and less reliable.',
+  cv_stability_radar:
+    "A six-axis robustness profile per strategy — walk-forward, CPCV, "
+    + 'permutation, regime, OOS, and composite stability. A balanced hexagon '
+    + 'indicates an all-round robust strategy.',
+  factor_exposure_heatmap:
+    'Fama-French three-factor OLS loadings per strategy. Blue cells are '
+    + 'positive exposure, red negative; the alpha column shows return not '
+    + 'explained by the factors.',
+  multiple_comparison_table:
+    'Raw versus Benjamini-Hochberg FDR-corrected p-values. Highlights '
+    + 'strategies that look significant raw but fail once corrected for the '
+    + 'number of strategies tested.',
+  performance_attribution_waterfall:
+    'Brinson-Hood-Beebower decomposition of active return into allocation, '
+    + 'selection, and interaction effects — shows where each strategy earns '
+    + 'its outperformance.',
+  probabilistic_sharpe_chart:
+    'Sharpe point estimates with 95% confidence intervals per strategy. Wide '
+    + 'intervals mean the Sharpe estimate is uncertain even when the point '
+    + 'estimate looks high.',
+  regime_conditional_performance:
+    'Sharpe ratio per strategy split by BULL, BEAR, and TRANSITION regimes. '
+    + 'Balanced bar heights indicate an all-weather strategy rather than one '
+    + 'that only works in bull markets.',
+  regime_timeline:
+    'Threshold-classified market regime for every month of the study '
+    + 'period. Long colour blocks show regime persistence; red bars cluster '
+    + 'around historical crises.',
+  regime_transition_matrix:
+    'Empirical probability of moving from one regime to another next month. '
+    + 'The diagonal measures regime persistence — high values support '
+    + 'regime-switching strategies.',
+  significance_journey_matrix:
+    'The five Tier 1 statistical gates per strategy with the actual metric '
+    + 'value in each cell. A strategy must pass all five to count as '
+    + 'statistically significant.',
+  walk_forward_chart:
+    'Rolling out-of-sample Sharpe per strategy across walk-forward windows. '
+    + 'Stable lines indicate a strategy robust across different time periods '
+    + 'rather than one lucky window.',
+
   // ── Dashboard page — efficient frontier ────────────────────────────────────
   efficient_frontier:
     'The set of portfolios offering maximum return for each level of '
