@@ -1,4 +1,5 @@
 import { Download } from 'lucide-react'
+import { trackExport } from '../lib/activityLogger'
 
 interface TableExportButtonProps {
   /** Used for the downloaded filename. */
@@ -45,6 +46,7 @@ export default function TableExportButton({
     a.download = `${tableId}_${timestamp()}.csv`
     a.click()
     URL.revokeObjectURL(url)
+    trackExport(`table:${tableId}`, { format: 'csv', rows: rows.length })
   }
 
   return (

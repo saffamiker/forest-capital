@@ -18,6 +18,7 @@ import SectionEditor from './pages/SectionEditor'
 import { BrandProvider } from './context/BrandContext'
 import { UIProvider } from './context/UIContext'
 import { SessionProvider } from './context/SessionContext'
+import { trackLogout } from './lib/activityLogger'
 
 // ── Auth context ──────────────────────────────────────────────────────────────
 
@@ -74,6 +75,9 @@ function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = async () => {
     const token = session?.token
+    // Queue + flush the logout event while the auth header is still on
+    // the axios defaults — clearSession() below removes it.
+    trackLogout()
     if (token) {
       try { await axios.post('/api/auth/logout', { session_token: token }) } catch (_) { /* logout errors are safe to ignore */ }
     }

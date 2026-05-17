@@ -15,6 +15,7 @@
  */
 import { useState, useRef } from 'react'
 import { GraduationCap, Loader2, X, ChevronDown, ChevronRight } from 'lucide-react'
+import { trackFeature } from '../lib/activityLogger'
 
 type Phase = 'idle' | 'consulting' | 'streaming' | 'done' | 'error'
 
@@ -93,6 +94,7 @@ export default function AcademicReviewButton() {
   }
 
   const runReview = async () => {
+    trackFeature('academic_review_trigger')
     setPhase('consulting')
     setPeerResponses({})
     setArbiterText('')

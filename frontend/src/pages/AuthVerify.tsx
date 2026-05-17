@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom'
 import axios from 'axios'
 import { TrendingUp, CheckCircle, XCircle } from 'lucide-react'
 import { useAuth } from '../App'
+import { trackLogin } from '../lib/activityLogger'
 
 type VerifyStatus = 'verifying' | 'success' | 'error'
 
@@ -30,6 +31,10 @@ export default function AuthVerify() {
       .get<SessionResponse>(`/api/auth/verify?token=${encodeURIComponent(token)}`)
       .then((res) => {
         login(res.data.session_token, res.data.email)
+        // Queue the login event — it flushes once the dashboard mounts
+        // and starts the logger; SessionContext mints the session_id in
+        // the same render, so the batch carries it.
+        trackLogin()
         setStatus('success')
         setTimeout(() => navigate('/'), 1200)
       })

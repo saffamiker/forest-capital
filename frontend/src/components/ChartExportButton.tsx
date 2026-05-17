@@ -1,5 +1,6 @@
 import { useRef } from 'react'
 import { Download } from 'lucide-react'
+import { trackExport } from '../lib/activityLogger'
 
 interface ChartExportButtonProps {
   /** Identifies the chart for filename generation. */
@@ -39,6 +40,7 @@ export default function ChartExportButton({
       a.href = url
       a.download = `${chartId}_${timestamp()}.png`
       a.click()
+      trackExport(`chart:${chartId}`, { format: 'png' })
     } catch {
       // html2canvas dynamic import failed (offline, bundle issue) —
       // silently no-op so the export menu stays usable. SVG export
@@ -58,6 +60,7 @@ export default function ChartExportButton({
     a.download = `${chartId}_${timestamp()}.svg`
     a.click()
     URL.revokeObjectURL(url)
+    trackExport(`chart:${chartId}`, { format: 'svg' })
   }
 
   return (

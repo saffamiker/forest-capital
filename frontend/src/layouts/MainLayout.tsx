@@ -3,6 +3,7 @@ import { LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle, BarChart3, A
 import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../App'
 import { useSession } from '../context/SessionContext'
+import { useActivityTracking } from '../lib/useActivityTracking'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import { useUI } from '../context/UIContext'
 import type { UIMode } from '../context/UIContext'
@@ -72,6 +73,10 @@ export default function MainLayout() {
   // gate trusts tieredStatus first when available — that's what enforces the
   // ≥WARN + 48h + hash-match contract from CLAUDE.md Section 14.
   const { status: qaStatus, tieredStatus } = useQAStore()
+
+  // Starts the batched activity logger and emits a page_view on every
+  // route change. Mounted here so it runs for the whole authenticated app.
+  useActivityTracking()
 
   const handleLogout = async () => {
     await logout()

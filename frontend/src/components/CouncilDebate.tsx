@@ -5,6 +5,7 @@ import PersonaModal from './PersonaModal'
 import AcademicReviewButton from './AcademicReviewButton'
 import type { AgentMessage } from '../types/agents'
 import { useCouncilStore } from '../stores/councilStore'
+import { trackFeature } from '../lib/activityLogger'
 
 interface AgentStyleConfig {
   accent: string
@@ -140,6 +141,7 @@ export default function CouncilDebate() {
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault()
+    if (query.trim()) trackFeature('council_query_submit')
     void runQuery(query)
   }
 
