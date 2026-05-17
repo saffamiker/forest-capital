@@ -88,6 +88,19 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Uploads mount — serves UAT test-runner screenshots read-only.
+# NOTE: Render's filesystem is ephemeral; these image files do not
+# survive a redeploy. The attestation row in test_results is the durable
+# record — screenshots are supporting evidence only. The directory is
+# created on startup so the mount always resolves.
+try:
+    from fastapi.staticfiles import StaticFiles
+    _uploads_dir = os.path.join(os.path.dirname(__file__), "data", "uploads")
+    os.makedirs(_uploads_dir, exist_ok=True)
+    app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
+except Exception as _exc:  # noqa: BLE001
+    log.warning("uploads_mount_failed", error=str(_exc))
+
 # CORS — dev allows localhost:5173 only; prod allows Vercel URL only
 origins = [FRONTEND_URL] if FRONTEND_URL else ["http://localhost:5173"]
 app.add_middleware(
@@ -1455,6 +1468,266 @@ async def council_explain_data(
         )
 
     return StreamingResponse(gen(), media_type="text/plain")
+
+
+# ── Guided UAT test runner ────────────────────────────────────────────────────
+#
+# Records attested test-step results, structured failure reports, and
+# AI-categorised tester feedback. Test SCRIPTS are frontend config
+# (constants/testScripts.ts) — only results and feedback are persisted
+# here. All endpoints are team-gated; the admin views are ruurdsm@ only.
+
+_TESTING_ADMIN = "ruurdsm@queens.edu"
+
+
+def _require_test_team(session: dict) -> str:
+    """Returns the caller's email if they are a project team member,
+    else raises 403 — the test runner is team-only."""
+    from tools.activity_log import is_team_member
+    email = session.get("email", "")
+    if not is_team_member(email):
+        raise HTTPException(status_code=403,
+                            detail="The test runner is restricted to the project team.")
+    return email
+
+
+def _require_test_admin(session: dict) -> str:
+    """Returns the caller's email if they are the test-runner admin
+    (ruurdsm@), else raises 403."""
+    email = session.get("email", "")
+    if email.lower() != _TESTING_ADMIN:
+        raise HTTPException(status_code=403,
+                            detail="This view is restricted to the test-runner administrator.")
+    return email
+
+
+async def _read_screenshots(files: list[UploadFile]) -> list[str]:
+    """Reads uploaded screenshot files and saves them to local storage,
+    returning their relative paths. Fail-open — never raises."""
+    from tools.test_runner import save_screenshots
+    pairs: list[tuple[str, bytes]] = []
+    for f in files or []:
+        try:
+            content = await f.read()
+            if content:
+                pairs.append((f.filename or "shot.png", content))
+        except Exception:  # noqa: BLE001
+            continue
+    return save_screenshots(pairs) if pairs else []
+
+
+@app.post("/api/v1/testing/results")
+@limiter.limit("120/minute")
+async def testing_record_result(
+    request: Request,
+    script_id: str = Form(...),
+    step_id: str = Form(...),
+    result: str = Form(...),
+    notes: str = Form(default=""),
+    failure_description: str = Form(default=""),
+    expected_result: str = Form(default=""),
+    actual_result: str = Form(default=""),
+    severity: str = Form(default=""),
+    browser_info: str = Form(default=""),
+    override_reason: str = Form(default=""),
+    low_quality: bool = Form(default=False),
+    screenshots: list[UploadFile] = File(default=[]),
+    session: dict = Depends(require_auth),
+):
+    """
+    Records (upserts) one attested test-step result. Always multipart so
+    a step with or without screenshots uses one content type. A
+    re-attestation overwrites the row and flips `overridden`. Team-only.
+    """
+    email = _require_test_team(session)
+    if result not in {"pass", "fail", "skip"}:
+        raise HTTPException(status_code=422, detail="result must be pass | fail | skip")
+
+    from tools.test_runner import record_result
+    paths = await _read_screenshots(screenshots)
+    stored = await record_result(
+        user_email=email,
+        session_type=request.headers.get("x-session-type") or "testing",
+        script_id=script_id, step_id=step_id, result=result,
+        notes=notes or None, failure_description=failure_description or None,
+        expected_result=expected_result or None,
+        actual_result=actual_result or None, severity=severity or None,
+        browser_info=browser_info or None, screenshot_paths=paths or None,
+        low_quality=low_quality, override_reason=override_reason or None,
+    )
+    if stored is None:
+        raise HTTPException(status_code=503,
+                            detail="Could not record the result — database unavailable.")
+    return stored
+
+
+@app.get("/api/v1/testing/results")
+async def testing_get_results(session: dict = Depends(require_auth)):
+    """The current user's test results, grouped by script_id. Team-only."""
+    email = _require_test_team(session)
+    from tools.test_runner import get_results
+    grouped: dict[str, list] = {}
+    for row in await get_results(email):
+        grouped.setdefault(row["script_id"], []).append(row)
+    return {"results": grouped}
+
+
+@app.get("/api/v1/testing/unseen")
+async def testing_unseen(session: dict = Depends(require_auth)):
+    """Per-script attested-step inventory — the frontend diffs it against
+    testScripts.ts to surface scripts with new/changed steps. Team-only."""
+    email = _require_test_team(session)
+    from tools.test_runner import get_unseen
+    return await get_unseen(email)
+
+
+@app.get("/api/v1/testing/summary")
+async def testing_summary(session: dict = Depends(require_auth)):
+    """Per-script pass/fail/skip counts for the current user. The frontend
+    derives total and pending from its own step inventory. Team-only."""
+    email = _require_test_team(session)
+    from tools.test_runner import get_summary
+    return {"summary": await get_summary(email)}
+
+
+@app.get("/api/v1/testing/failures")
+async def testing_failures(session: dict = Depends(require_auth)):
+    """Every failed step across all testers, severity-sorted. Admin-only."""
+    _require_test_admin(session)
+    from tools.test_runner import get_all_failures
+    return {"failures": await get_all_failures()}
+
+
+@app.post("/api/v1/testing/failures/{failure_id}/resolve")
+async def testing_resolve_failure(
+    failure_id: int, body: dict, session: dict = Depends(require_auth),
+):
+    """
+    Marks a failure resolved. The row is kept (the resolution is the audit
+    trail) and the step re-appears as a pending re-test for the tester —
+    which the login-notification check surfaces. Admin-only.
+    """
+    admin = _require_test_admin(session)
+    from tools.test_runner import resolve_failure
+    resolved = await resolve_failure(
+        failure_id, admin, str(body.get("resolution_note") or ""))
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Failure not found.")
+    return {"resolved": True, **resolved}
+
+
+@app.post("/api/v1/testing/feedback")
+@limiter.limit("60/minute")
+async def testing_submit_feedback(
+    request: Request,
+    feedback_type: str = Form(...),
+    title: str = Form(...),
+    description: str = Form(...),
+    script_id: str = Form(default=""),
+    step_id: str = Form(default=""),
+    source_route: str = Form(default=""),
+    priority: str = Form(default=""),
+    browser_info: str = Form(default=""),
+    low_quality: bool = Form(default=False),
+    screenshots: list[UploadFile] = File(default=[]),
+    session: dict = Depends(require_auth),
+):
+    """
+    Accepts a feedback submission, runs AI categorisation, and stores it.
+    A submission is step-linked (script_id + step_id) or free-form
+    (neither — source_route set, the "Suggest an enhancement" path).
+    Returns the stored row including the AI categorisation. Team-only.
+    """
+    import asyncio
+
+    email = _require_test_team(session)
+    from tools.test_runner import categorize_feedback, submit_feedback
+
+    step_context = f"{script_id or 'free-form'} / {step_id or source_route or 'n/a'}"
+    ai = await asyncio.to_thread(
+        categorize_feedback, feedback_type, title, description, step_context)
+    paths = await _read_screenshots(screenshots)
+    stored = await submit_feedback(
+        user_email=email, script_id=script_id or None, step_id=step_id or None,
+        source_route=source_route or None, feedback_type=feedback_type,
+        title=title, description=description, priority=priority or None,
+        screenshot_paths=paths or None, browser_info=browser_info or None,
+        low_quality=low_quality, ai=ai,
+    )
+    if stored is None:
+        raise HTTPException(status_code=503,
+                            detail="Could not store the feedback — database unavailable.")
+    return stored
+
+
+@app.get("/api/v1/testing/feedback")
+async def testing_get_feedback(
+    category: str | None = None, severity: str | None = None,
+    effort: str | None = None, status: str | None = None,
+    user_email: str | None = None,
+    session: dict = Depends(require_auth),
+):
+    """All tester feedback, newest first, with optional filters. Admin-only."""
+    _require_test_admin(session)
+    from tools.test_runner import get_all_feedback
+    feedback = await get_all_feedback({
+        "category": category, "severity": severity, "effort": effort,
+        "status": status, "user_email": user_email,
+    })
+    return {"feedback": feedback}
+
+
+@app.post("/api/v1/testing/feedback/{feedback_id}/resolve")
+async def testing_resolve_feedback(
+    feedback_id: int, body: dict, session: dict = Depends(require_auth),
+):
+    """Updates a feedback row's status. The submitter sees a login
+    notification on the next visit. Admin-only."""
+    admin = _require_test_admin(session)
+    status = str(body.get("status") or "")
+    if status not in {"noted", "planned", "wont_do", "resolved"}:
+        raise HTTPException(
+            status_code=422,
+            detail="status must be noted | planned | wont_do | resolved")
+    from tools.test_runner import resolve_feedback
+    resolved = await resolve_feedback(
+        feedback_id, status, str(body.get("resolution_note") or "") or None, admin)
+    if resolved is None:
+        raise HTTPException(status_code=404, detail="Feedback not found.")
+    return {"resolved": True, **resolved}
+
+
+@app.post("/api/v1/testing/quality-check")
+@limiter.limit("120/minute")
+async def testing_quality_check(
+    request: Request, body: dict, session: dict = Depends(require_auth),
+):
+    """
+    The quality gate — scores a failure report or feedback submission
+    before the frontend stores it. Fail-open: an evaluator error returns
+    passed=true so a flaky evaluator never blocks a submission. Team-only;
+    logs an interaction of type test_quality_eval.
+    """
+    import asyncio
+
+    _require_test_team(session)
+    submission_type = str(body.get("type") or "feedback")
+    description = str(body.get("description") or "")
+    step_context = str(body.get("step_context") or "")
+    actual_result = body.get("actual_result")
+
+    from tools.test_runner import quality_check
+    verdict = await asyncio.to_thread(
+        quality_check, submission_type, step_context, description,
+        str(actual_result) if actual_result else None)
+
+    _log_interaction_bg(
+        request, session, "test_quality_eval",
+        question_text=f"{submission_type}: {step_context}"[:500],
+        metadata={"overall": verdict.get("overall"),
+                  "passed": verdict.get("passed")},
+    )
+    return verdict
 
 
 # ── Team Activity ─────────────────────────────────────────────────────────────
