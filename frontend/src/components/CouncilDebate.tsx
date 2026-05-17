@@ -5,6 +5,7 @@ import DisagreementHeatmap from './DisagreementHeatmap'
 import PersonaModal from './PersonaModal'
 import AcademicReviewButton from './AcademicReviewButton'
 import Markdown from './Markdown'
+import TeamGate from './TeamGate'
 import type { AgentMessage } from '../types/agents'
 import { useCouncilStore } from '../stores/councilStore'
 import { trackFeature } from '../lib/activityLogger'
@@ -214,8 +215,11 @@ export default function CouncilDebate() {
 
       {/* Academic Review — a secondary council action that evaluates the
           project's analytics, findings and deliverables against the
-          uploaded project requirements. */}
-      <AcademicReviewButton />
+          uploaded project requirements. A team feature; the Ask Council
+          input above stays open to every authenticated user. */}
+      <TeamGate block tooltip="Academic Review is available to the project team">
+        <AcademicReviewButton />
+      </TeamGate>
 
       {/* Council failure — a failed query previously left a blank screen
           (the empty state is gated on `!result`, and an errored run sets

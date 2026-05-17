@@ -12,6 +12,7 @@
 import { useEffect, useState, useRef } from 'react'
 import axios from 'axios'
 import { Upload, Trash2, FileText, Loader2, AlertCircle } from 'lucide-react'
+import TeamGate from './TeamGate'
 
 interface AcademicDoc {
   id: string
@@ -117,7 +118,8 @@ export default function AcademicDocumentsPanel() {
         </div>
       )}
 
-      {/* Upload row */}
+      {/* Upload row — uploading agent-context documents is a team action. */}
+      <TeamGate tooltip="Uploading documents is available to the project team">
       <div className="flex flex-wrap items-center gap-2 mb-4">
         <select
           value={docType}
@@ -149,6 +151,7 @@ export default function AcademicDocumentsPanel() {
             : <><Upload className="w-3 h-3" /> Upload</>}
         </button>
       </div>
+      </TeamGate>
 
       {/* Document list */}
       {loading ? (
@@ -180,6 +183,7 @@ export default function AcademicDocumentsPanel() {
                   {d.uploaded_at ? ` · ${d.uploaded_at.slice(0, 10)}` : ''}
                 </div>
               </div>
+              <TeamGate tooltip="Deleting documents is available to the project team">
               <button
                 type="button"
                 onClick={() => void handleDelete(d.id)}
@@ -188,6 +192,7 @@ export default function AcademicDocumentsPanel() {
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
+              </TeamGate>
             </li>
           ))}
         </ul>

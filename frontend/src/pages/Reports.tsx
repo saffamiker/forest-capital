@@ -29,6 +29,7 @@ import AdvisorPanel from '../components/AdvisorPanel'
 import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
+import TeamGate from '../components/TeamGate'
 import type { DeliverableType } from '../types/advisor'
 import type { SectionDocType } from '../types/documents'
 
@@ -370,16 +371,18 @@ export default function Reports() {
           </p>
         </div>
         {/* Academic Export Package — light-mode charts + CSV tables zipped
-            for paper submission. A primary action. */}
-        <button
-          type="button"
-          onClick={() => setExporting(true)}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold
-                     bg-electric text-white hover:bg-blue-500 transition-colors shrink-0"
-        >
-          <FileArchive className="w-4 h-4" />
-          Export Academic Package
-        </button>
+            for paper submission. A team action. */}
+        <TeamGate tooltip="Exporting the academic package is available to the project team">
+          <button
+            type="button"
+            onClick={() => setExporting(true)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold
+                       bg-electric text-white hover:bg-blue-500 transition-colors shrink-0"
+          >
+            <FileArchive className="w-4 h-4" />
+            Export Academic Package
+          </button>
+        </TeamGate>
       </div>
 
       {exporting && <AcademicExportModal onClose={() => setExporting(false)} />}

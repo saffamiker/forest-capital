@@ -22,6 +22,7 @@ import axios from 'axios'
 import {
   FileText, Presentation, Download, Loader2, AlertCircle, CheckCircle,
 } from 'lucide-react'
+import TeamGate from './TeamGate'
 
 interface DocSpec {
   id: string
@@ -184,21 +185,24 @@ export default function DocumentGenerationPanel() {
                 )}
               </div>
 
-              <button
-                type="button"
-                disabled={anyBusy}
-                onClick={() => void handleGenerate(doc)}
-                className="w-full flex items-center justify-center gap-1.5 px-3 py-2
-                           rounded text-xs font-semibold transition-colors
-                           bg-electric text-white hover:bg-blue-500
-                           disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {busy ? (
-                  <><Loader2 className="w-3 h-3 animate-spin" /> Generating… 30–60 seconds</>
-                ) : (
-                  <><Download className="w-3 h-3" /> {ts ? 'Regenerate' : 'Generate'}</>
-                )}
-              </button>
+              <TeamGate block
+                tooltip="Document generation is available to the project team">
+                <button
+                  type="button"
+                  disabled={anyBusy}
+                  onClick={() => void handleGenerate(doc)}
+                  className="w-full flex items-center justify-center gap-1.5 px-3 py-2
+                             rounded text-xs font-semibold transition-colors
+                             bg-electric text-white hover:bg-blue-500
+                             disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {busy ? (
+                    <><Loader2 className="w-3 h-3 animate-spin" /> Generating… 30–60 seconds</>
+                  ) : (
+                    <><Download className="w-3 h-3" /> {ts ? 'Regenerate' : 'Generate'}</>
+                  )}
+                </button>
+              </TeamGate>
 
               {error && (
                 <div

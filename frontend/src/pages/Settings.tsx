@@ -25,6 +25,8 @@ import type { BrandMode } from '../context/BrandContext'
 import { useSession } from '../context/SessionContext'
 import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 import { TestResultsSection, TestAdminSections } from '../components/TestRunnerSettings'
+import TeamGate from '../components/TeamGate'
+import { useIsTeamMember } from '../hooks/useIsTeamMember'
 
 interface SettingsSectionProps {
   id: string
@@ -61,8 +63,10 @@ const BRAND_OPTIONS: { value: BrandMode; label: string; sub: string }[] = [
 function OrganisationSection() {
   // Same brand state as before — relocated from the nav gear dropdown,
   // logic unchanged: useBrand()/setBrand drive the header branding.
+  // The switcher is a team action — gated for guests.
   const { brand, setBrand } = useBrand()
   return (
+    <TeamGate block tooltip="Brand switching is available to the project team">
     <div className="space-y-2">
       {BRAND_OPTIONS.map((opt) => {
         const active = brand === opt.value
@@ -89,6 +93,7 @@ function OrganisationSection() {
         )
       })}
     </div>
+    </TeamGate>
   )
 }
 
@@ -255,6 +260,7 @@ function TestingModeToggle() {
     <div className="space-y-2" data-tour="testing-mode">
       <div className="flex items-center justify-between gap-3">
         <span className="text-sm text-white">Testing Mode</span>
+        <TeamGate tooltip="The test runner is available to the project team">
         <button
           type="button"
           role="switch"
@@ -275,6 +281,7 @@ function TestingModeToggle() {
             }`}
           />
         </button>
+        </TeamGate>
       </div>
       <p className="text-2xs text-muted leading-relaxed">
         When enabled, all activity in this session is logged as testing and
@@ -284,6 +291,7 @@ function TestingModeToggle() {
       {/* Start Test Pass — only while Testing Mode is active, so a test
           run's activity is always banded as testing. */}
       {testing && (
+        <TeamGate tooltip="The test runner is available to the project team">
         <button
           type="button"
           onClick={() => startTestRun()}
@@ -295,6 +303,7 @@ function TestingModeToggle() {
           <ClipboardList className="w-3.5 h-3.5" />
           Start Test Pass
         </button>
+        </TeamGate>
       )}
     </div>
   )
@@ -333,6 +342,9 @@ function AccountSection() {
           Relaunches the full platform tour. The tour covers every feature
           and how it maps to your project deliverables and grading criteria.
         </p>
+        {/* Guests still auto-see the tour on first login; manual replay
+            is a team action. */}
+        <TeamGate tooltip="Replaying the tour is available to the project team">
         <button
           type="button"
           onClick={() => startTour()}
@@ -343,6 +355,7 @@ function AccountSection() {
           <Compass className="w-3.5 h-3.5" />
           Retake Site Tour
         </button>
+        </TeamGate>
       </div>
 
       {/* Jump to the Release History section below. */}
@@ -439,6 +452,7 @@ function ReleaseHistorySection() {
 export default function Settings() {
   const location = useLocation()
   const { session } = useAuth()
+  const isTeam = useIsTeamMember()
   // The Test Administration section (failure reports + feedback backlog)
   // is restricted to the test-runner admin.
   const isTestAdmin = (session?.email ?? '').toLowerCase() === 'ruurdsm@queens.edu'
@@ -515,13 +529,17 @@ export default function Settings() {
         <ReleaseHistorySection />
       </SettingsSection>
 
-      <SettingsSection
-        id="test-results"
-        title="Test Results"
-        description="Your guided UAT test passes — attested results per script, with re-test and an attestation export."
-      >
-        <TestResultsSection />
-      </SettingsSection>
+      {/* Test Results — hidden entirely for non-team users (the test
+          runner is a team feature, so a guest has no results). */}
+      {isTeam && (
+        <SettingsSection
+          id="test-results"
+          title="Test Results"
+          description="Your guided UAT test passes — attested results per script, with re-test and an attestation export."
+        >
+          <TestResultsSection />
+        </SettingsSection>
+      )}
 
       {isTestAdmin && (
         <SettingsSection
