@@ -882,3 +882,31 @@ Frontend:
 
 Test counts (cumulative): 1059 backend pass, 15 skipped (HMM/Windows),
                            186 frontend pass.
+
+
+## Generator-Evaluator Harness ✅ COMPLETE (2026-05-17)
+A reusable evaluate-and-retry quality harness wrapping agent text
+generation — infrastructure, invisible to the end user.
+
+Backend:
+  agents/harness.py — GeneratorEvaluatorHarness (sync run(), HarnessResult,
+    fail-open) + the per-request ContextVar metrics capture.
+  agents/evaluator_prompts.py — three evaluator system-prompt builders
+    (council, academic-review peer, academic-review arbiter).
+  config.py — EVALUATOR_THRESHOLD / EVALUATOR_MAX_RETRIES /
+    EVALUATOR_MODEL / EVALUATOR_PASSTHROUGH_ON_ERROR.
+  agents/equity_analyst | fixed_income_analyst | risk_manager |
+    quant_backtester — each routes its call_claude through the harness.
+  agents/academic_review.py — peers route through the harness;
+    stream_arbiter replaced by run_arbiter_with_harness (full generate +
+    evaluate + retry) and chunk_arbiter_text for streaming.
+  main.py — academic-review endpoint streams the harness-accepted
+    verdict; council + academic-review endpoints attach the `harness`
+    metrics block to the agent_interactions metadata.
+
+  tests/test_harness.py — 12 tests: 7 unit (mocked evaluator), 2 metrics
+    capture, 3 integration (council + academic-review API shape, arbiter
+    five-section verdict).
+
+Test counts (cumulative): 1071 backend pass, 15 skipped (HMM/Windows),
+                           186 frontend pass.

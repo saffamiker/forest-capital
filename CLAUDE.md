@@ -4454,6 +4454,84 @@ ENDPOINT:
   log_agent_interaction.
 
 
+─────────────────────────────────────────────────────────────────────────────
+GENERATOR-EVALUATOR HARNESS (May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+A reusable quality harness that wraps an agent's text generation in an
+evaluate-and-retry loop. It is infrastructure — invisible to the end
+user: no UI change, no API response-shape change. Only the quality of
+agent output improves.
+
+MODULE: agents/harness.py — GeneratorEvaluatorHarness.run() generates a
+response, scores it 0-10 with the evaluator, and — if the score is
+below the threshold — regenerates with the evaluator's feedback
+injected into the prompt, up to the retry cap. The best-scoring attempt
+is always returned (HarnessResult).
+
+EVALUATOR PROMPTS: agents/evaluator_prompts.py — three system-prompt
+builders, each naming five 0-10 criteria and their weights and sharing
+one JSON-only output contract {scores, overall, passed, feedback}:
+  - council_evaluator_prompt — evidence_based, specificity, relevance,
+    accuracy, actionability (weights .20 / .25 / .30 / .10 / .15).
+  - academic_review_peer_evaluator_prompt — rubric_mapped,
+    data_specific, requirements_aligned, role_authentic,
+    actionable_next_steps (weights .20 / .25 / .20 / .10 / .25).
+  - academic_review_arbiter_evaluator_prompt — all_sections_present,
+    all_sections_rated, synthesis_quality, investigation_specificity,
+    overall_readiness_substance (weights .30 / .25 / .15 / .20 / .10).
+
+CONFIG (config.py):
+  EVALUATOR_THRESHOLD = 7.0          # accept at or above this score
+  EVALUATOR_MAX_RETRIES = 2          # 3 generation attempts at most
+  EVALUATOR_MODEL = "claude-sonnet-4-6"   # the scoring model
+  EVALUATOR_PASSTHROUGH_ON_ERROR = True   # evaluator error → assume pass
+
+SYNCHRONOUS BY DESIGN. Every generator (call_claude, the Gemini/Grok
+helpers) and the evaluator is synchronous, and the council runs
+synchronously; the harness is therefore a sync `run()`. Inside the
+academic-review fan-out it runs within each peer's existing
+asyncio.to_thread task, so peers still retry concurrently.
+
+FAIL-OPEN — harness errors are silent, the original response is used:
+  - An evaluator error scores the response 8.0 (passthrough), so a
+    flaky evaluator never blocks or downgrades good output.
+  - A generator error on a RETRY returns the best earlier response.
+  - A generator error on the FIRST attempt re-raises, so the caller's
+    existing try/except falls back exactly as before.
+
+COUNCIL INTEGRATION: each of the four specialist agents (equity, fixed
+income, risk, quant) routes its call_claude generation through the
+harness with council_evaluator_prompt. Integration is inside the agents
+— cio.py and the /api/council/query endpoint are unchanged — because
+the council is synchronous and sequential and its specialists return
+dicts, so the peer call_claude is the only clean seam.
+
+ACADEMIC REVIEW — TWO HARNESS PASSES:
+  Pass 1 (peers): run_peer_agent routes each Claude/Gemini/Grok call
+  through the harness with academic_review_peer_evaluator_prompt,
+  inside the existing parallel asyncio.to_thread fan-out.
+  Pass 2 (arbiter): the verdict is generated IN FULL (run_arbiter_with_
+  harness, non-streaming call_claude), harness-evaluated against
+  academic_review_arbiter_evaluator_prompt, and retried with feedback
+  below threshold. Only the accepted verdict is streamed — a failed
+  attempt is never shown. The endpoint runs it in asyncio.to_thread,
+  then emits the accepted text as arbiter_chunk SSE frames. The
+  stream-order contract (peer_responses → arbiter_chunk* → [DONE]) is
+  unchanged.
+
+METRICS: each completed harness run is recorded into a per-request
+ContextVar; the council and academic-review endpoints attach the
+aggregate to the agent_interactions metadata as a `harness` block
+(agents_retried, average_initial_score, average_final_score,
+improvement_rate). Omitted when no run was captured.
+
+LATENCY: the evaluate-and-retry loop adds roughly 10-15s to a council
+query and, worst case (a full arbiter retry), 30-45s to an Academic
+Review — three full generations plus three evaluations. The frontend
+loading state covers the wait.
+
+
 ═══════════════════════════════════════════════════════════════════
 KANBAN BOARD — Sprint 6 closed, Kanban adopted (May 16 2026)
 ═══════════════════════════════════════════════════════════════════
