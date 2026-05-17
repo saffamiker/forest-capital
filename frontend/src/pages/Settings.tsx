@@ -13,12 +13,13 @@
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { Check, Compass, LogOut, Sparkles } from 'lucide-react'
+import { Check, Compass, LogOut, Sparkles, ClipboardList } from 'lucide-react'
 import type {
   ChangelogEntry, AllChangelogResponse, UnseenChangelogResponse,
 } from '../types/changelog'
 import { useAuth } from '../App'
 import { startTour } from '../lib/tourBus'
+import { startTestRun } from '../lib/testRunnerBus'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import type { BrandMode } from '../context/BrandContext'
 import { useSession } from '../context/SessionContext'
@@ -279,6 +280,21 @@ function TestingModeToggle() {
         excluded from the Team Activity analytical view by default. Testing
         Mode resets automatically on your next login.
       </p>
+      {/* Start Test Pass — only while Testing Mode is active, so a test
+          run's activity is always banded as testing. */}
+      {testing && (
+        <button
+          type="button"
+          onClick={() => startTestRun()}
+          className="mt-1 flex items-center gap-1.5 px-3 py-1.5 rounded
+                     text-xs font-medium bg-warning/15 text-warning
+                     border border-warning/30 hover:bg-warning/25
+                     transition-colors"
+        >
+          <ClipboardList className="w-3.5 h-3.5" />
+          Start Test Pass
+        </button>
+      )}
     </div>
   )
 }

@@ -13,6 +13,7 @@ import LearnModeToggle from '../components/LearnModeToggle'
 import AdvisorPanel from '../components/AdvisorPanel'
 import WhatsNewModal from '../components/WhatsNewModal'
 import SiteTour from '../components/SiteTour'
+import TestRunner from '../components/TestRunner'
 
 interface NavItem {
   to: string
@@ -299,6 +300,11 @@ export default function MainLayout() {
           update is pending; the Settings "Retake" button and the
           What's New modal both force-start it via tourBus. */}
       <SiteTour />
+
+      {/* Guided UAT test runner — never auto-starts; triggered from the
+          Settings "Start Test Pass" button and the login notifications
+          via testRunnerBus. */}
+      <TestRunner />
     </div>
   )
 }
