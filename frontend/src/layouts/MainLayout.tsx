@@ -11,6 +11,7 @@ import { useQAStore } from '../stores/qaStore'
 import QAStatusBadge from '../components/QAStatusBadge'
 import LearnModeToggle from '../components/LearnModeToggle'
 import AdvisorPanel from '../components/AdvisorPanel'
+import WhatsNewModal from '../components/WhatsNewModal'
 
 interface NavItem {
   to: string
@@ -286,6 +287,10 @@ export default function MainLayout() {
           and any deliverable-specific dialog can dismiss into the same
           floating affordance. */}
       <AdvisorPanel />
+
+      {/* What's New — opens once after login if the changelog has
+          entries this user has not seen; self-dismissing. */}
+      <WhatsNewModal />
     </div>
   )
 }

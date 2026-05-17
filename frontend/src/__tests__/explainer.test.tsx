@@ -16,7 +16,7 @@ describe('explainerTooltips content', () => {
 })
 
 describe('InfoIcon', () => {
-  afterEach(() => vi.useRealTimers())
+  afterEach(() => { vi.useRealTimers() })
 
   it('renders the ⓘ icon button', () => {
     render(<InfoIcon tooltipKey="cagr" metricLabel="CAGR" />)
@@ -41,7 +41,7 @@ describe('InfoIcon', () => {
 })
 
 describe('ExplainerPanel', () => {
-  afterEach(() => vi.restoreAllMocks())
+  afterEach(() => { vi.restoreAllMocks() })
 
   it('calls POST /api/council/explain on mount', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
