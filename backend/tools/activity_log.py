@@ -238,11 +238,17 @@ async def upsert_commits(commits: list[dict]) -> int:
         sha = str(c.get("sha", "")).strip()
         if not sha:
             continue
+        # commit_activity.timestamp is NOT NULL — GitHub always supplies
+        # an ISO string; a commit we cannot date is malformed, so skip it.
+        ts = _to_datetime(c.get("timestamp"))
+        if ts is None:
+            log.warning("commit_upsert_bad_timestamp", sha=sha[:7])
+            continue
         rows.append({
             "sha": sha[:40],
             "author": str(c.get("author") or "unknown")[:255],
             "message": str(c.get("message") or ""),
-            "timestamp": c.get("timestamp"),
+            "timestamp": ts,
             "files_changed": _int_or_none(c.get("files_changed")),
             "insertions": _int_or_none(c.get("insertions")),
             "deletions": _int_or_none(c.get("deletions")),
@@ -622,6 +628,23 @@ def _json_or_none(value: Any) -> str | None:
 
 def _int_or_none(value: Any) -> int | None:
     return int(value) if isinstance(value, (int, float)) else None
+
+
+def _to_datetime(value: Any) -> datetime | None:
+    """
+    Coerces a commit timestamp to a datetime — asyncpg binds the
+    TIMESTAMP column from a datetime, not an ISO string. Accepts an
+    existing datetime or an ISO-8601 string (GitHub's trailing 'Z' is
+    normalised to +00:00). Returns None when the value cannot be parsed.
+    """
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
 
 
 def _max_iso(a: str | None, b: str | None) -> str | None:
