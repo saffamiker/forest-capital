@@ -151,12 +151,13 @@ async def get_monthly_returns() -> dict[str, list[Any]] | None:
 async def get_ff_factors() -> list[dict[str, Any]] | None:
     """
     Returns the Fama-French monthly factors from ff_factors_monthly —
-    [{yyyymm, mkt_rf, smb, hml, rf}, ...] ordered by month.
+    [{yyyymm, mkt_rf, smb, hml, mom, rf}, ...] ordered by month.
 
-    Used by the analytics layer's factor-loadings regression. The table
-    holds the three-factor model (no momentum), so consumers run a
-    three-factor — not Carhart four-factor — regression. Returns None if
-    the table is unavailable or empty.
+    Used by the analytics layer's factor-loadings regression. mom is
+    nullable — it is absent for the earliest months that predate the
+    momentum-factor backfill — so it is returned as None where missing
+    and the regression drops those rows. Returns None if the table is
+    unavailable or empty.
     """
     if not _DB_AVAILABLE:
         return None
@@ -165,7 +166,7 @@ async def get_ff_factors() -> list[dict[str, Any]] | None:
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
             rows = await session.execute(
                 text(
-                    "SELECT yyyymm, mkt_rf, smb, hml, rf "
+                    "SELECT yyyymm, mkt_rf, smb, hml, mom, rf "
                     "FROM ff_factors_monthly ORDER BY yyyymm"
                 )
             )
@@ -178,7 +179,8 @@ async def get_ff_factors() -> list[dict[str, Any]] | None:
                     "mkt_rf": float(r[1]),
                     "smb":    float(r[2]),
                     "hml":    float(r[3]),
-                    "rf":     float(r[4]) if r[4] is not None else 0.0,
+                    "mom":    float(r[4]) if r[4] is not None else None,
+                    "rf":     float(r[5]) if r[5] is not None else 0.0,
                 }
                 for r in fetched
             ]

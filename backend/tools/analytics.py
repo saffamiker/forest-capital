@@ -333,10 +333,14 @@ def factor_loadings(
     ff_factors: list[dict],
 ) -> list[dict]:
     """
-    OLS regression of each strategy's monthly excess return on the Fama-French
-    factors. ff_factors_monthly stores the three-factor model (MKT-RF, SMB,
-    HML) — momentum is not in the dataset, so this is a three-factor (not
-    Carhart four-factor) regression; the table is labelled accordingly.
+    OLS regression of each strategy's monthly excess return on the
+    Carhart (1997) four factors: MKT-RF, SMB, HML and MOM (momentum).
+
+    MOM is nullable in ff_factors_monthly — the earliest months predate
+    the momentum-factor backfill. Rows with no MOM are dropped per
+    strategy, so a strategy whose history lies entirely before the
+    backfill falls back to a three-factor regression; `model` records
+    which form was used.
 
     Returns per strategy: factor betas, annualised alpha, R², and a
     significant flag per coefficient (p < 0.05).
@@ -349,9 +353,9 @@ def factor_loadings(
     if "yyyymm" not in ff.columns or ff.empty:
         return []
     ff = ff.set_index("yyyymm")
-    for col in ("mkt_rf", "smb", "hml", "rf"):
+    for col in ("mkt_rf", "smb", "hml", "mom", "rf"):
         if col in ff.columns:
-            ff[col] = ff[col].astype(float) / 100.0
+            ff[col] = pd.to_numeric(ff[col], errors="coerce") / 100.0
 
     try:
         import statsmodels.api as sm
@@ -368,18 +372,29 @@ def factor_loadings(
             series.to_numpy(),
             index=[d.year * 100 + d.month for d in series.index],
         )
-        joined = pd.concat([s_ym.rename("ret"), ff], axis=1, join="inner").dropna()
-        if len(joined) < 12:
+        joined = pd.concat([s_ym.rename("ret"), ff], axis=1, join="inner")
+        # MOM present and non-null on enough rows → four-factor; else fall back.
+        with_mom = joined.dropna(subset=["ret", "mkt_rf", "smb", "hml",
+                                         "mom", "rf"]) \
+            if "mom" in joined.columns else joined.iloc[0:0]
+        if len(with_mom) >= 12:
+            fit_df, factors, model_label = with_mom, \
+                ["mkt_rf", "smb", "hml", "mom"], "carhart_4factor"
+        else:
+            fit_df = joined.dropna(subset=["ret", "mkt_rf", "smb", "hml", "rf"])
+            factors, model_label = ["mkt_rf", "smb", "hml"], "ff_3factor"
+        if len(fit_df) < 12:
             continue
 
-        excess = joined["ret"] - joined["rf"]
-        x = sm.add_constant(joined[["mkt_rf", "smb", "hml"]])
+        excess = fit_df["ret"] - fit_df["rf"]
+        x = sm.add_constant(fit_df[factors])
         model = sm.OLS(excess, x).fit()
 
         params = model.params
         pvals = model.pvalues
-        rows.append({
+        row: dict = {
             "strategy":   res.get("strategy_name") or name,
+            "model":      model_label,
             "alpha_annualized": round(float(params["const"]) * _ANN, 4),
             "alpha_significant": bool(pvals["const"] < 0.05),
             "mkt_rf":     round(float(params["mkt_rf"]), 4),
@@ -389,7 +404,14 @@ def factor_loadings(
             "hml":        round(float(params["hml"]), 4),
             "hml_significant": bool(pvals["hml"] < 0.05),
             "r_squared":  round(float(model.rsquared), 4),
-            "n_months":   int(len(joined)),
-        })
+            "n_months":   int(len(fit_df)),
+        }
+        if "mom" in factors:
+            row["mom"] = round(float(params["mom"]), 4)
+            row["mom_significant"] = bool(pvals["mom"] < 0.05)
+        else:
+            row["mom"] = None
+            row["mom_significant"] = False
+        rows.append(row)
     rows.sort(key=lambda r: r["strategy"])
     return rows
