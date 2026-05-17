@@ -12,6 +12,7 @@ import QAStatusBadge from '../components/QAStatusBadge'
 import LearnModeToggle from '../components/LearnModeToggle'
 import AdvisorPanel from '../components/AdvisorPanel'
 import WhatsNewModal from '../components/WhatsNewModal'
+import SiteTour from '../components/SiteTour'
 
 interface NavItem {
   to: string
@@ -291,6 +292,12 @@ export default function MainLayout() {
       {/* What's New — opens once after login if the changelog has
           entries this user has not seen; self-dismissing. */}
       <WhatsNewModal />
+
+      {/* Guided platform walkthrough — controlled Joyride that spans
+          every route. Auto-starts once per login session when a tour
+          update is pending; the Settings "Retake" button and the
+          What's New modal both force-start it via tourBus. */}
+      <SiteTour />
     </div>
   )
 }
