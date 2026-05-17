@@ -178,3 +178,10 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 # Shared secret for validating GitHub push-webhook signatures (X-Hub-Signature-256).
 # Optional locally; REQUIRED on Render before the webhook endpoint accepts events.
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+
+# ── SITE TOUR ─────────────────────────────────────────────────────────────────
+# The current site-tour version. The What's New modal compares this against
+# each user's last_tour_version_seen to decide whether to offer the tour.
+# Increment this by 1 whenever the site tour is rebuilt — the next bump is
+# scheduled for when the tour itself is built.
+TOUR_VERSION = 1
