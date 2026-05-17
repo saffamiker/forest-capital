@@ -1,0 +1,92 @@
+name: Forest Capital — CI/CD
+
+# Database-backed CI: runs the Alembic migrations against a throwaway
+# PostgreSQL service, the full pytest suite (so the DB round-trip tests
+# actually execute), the changelog gate, and the frontend checks.
+# Complements test.yml, which covers branch pushes / PRs and the live
+# E2E run.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  backend:
+    name: Backend — migrations, pytest, changelog gate
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: test_forestcapital
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # The test database is the ephemeral service container above — the
+      # URL is deterministic and non-sensitive, so it is a literal here
+      # rather than a repository secret. env.py rewrites postgresql:// to
+      # the asyncpg driver.
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/test_forestcapital
+      ENVIRONMENT: test
+      SECRET_KEY: test_secret_key_for_ci_at_least_32_chars
+      MASTER_API_KEY: test_master_key
+      ALLOWED_EMAILS: ruurdsm@queens.edu,thaob@queens.edu,murdockm@queens.edu,panttserk@queens.edu
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # The changelog gate diffs HEAD~1..HEAD — it needs the parent commit.
+          fetch-depth: 2
+
+      - name: Set up Python
+        uses: actions/setup-python@v5.6.0
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Run database migrations
+        working-directory: backend
+        run: alembic upgrade head
+
+      - name: Run pytest with coverage
+        run: pytest tests/ --cov=backend --cov-report=term-missing
+
+      - name: Changelog gate
+        run: python scripts/changelog_gate.py
+
+  frontend:
+    name: Frontend — typecheck and Vitest
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript check
+        run: npx tsc --noEmit
+
+      - name: Run Vitest
+        run: npm run test
