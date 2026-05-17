@@ -658,6 +658,7 @@ _ACADEMIC_DOC_MAX_BYTES = 10 * 1024 * 1024
 
 @app.post("/api/v1/documents/academic/upload")
 async def upload_academic_document(
+    request: Request,
     file: UploadFile = File(...),
     document_type: str = Form("other"),
     session: dict = Depends(require_auth),
@@ -723,6 +724,16 @@ async def upload_academic_document(
         file_type=file_type,
         char_count=len(content_text),
         document_type=document_type,
+    )
+    # Team Activity — record the upload as an interaction (non-blocking).
+    _log_interaction_bg(
+        request, session, "document_upload",
+        metadata={
+            "document_type": document_type,
+            "filename": filename,
+            "file_type": file_type,
+            "char_count": len(content_text),
+        },
     )
     return {
         "id": doc_id,
@@ -1028,6 +1039,49 @@ def _log_council_session(
     )
 
 
+# ── Non-blocking interaction logging ──────────────────────────────────────────
+# Background tasks must be referenced or the event loop may GC them mid-run;
+# the set holds a strong ref and the done-callback drops it on completion.
+_activity_bg_tasks: set = set()
+
+
+def _log_interaction_bg(
+    request: Request,
+    session: dict,
+    interaction_type: str,
+    *,
+    question_text: str | None = None,
+    agents_involved: list[str] | None = None,
+    response_summary: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """
+    Fire-and-forget agent_interactions logging — schedules the DB write
+    on the running loop and returns immediately. The session_id and
+    session_type travel from the frontend as request headers. Wrapped
+    so a scheduling or DB failure never touches the primary response.
+    """
+    try:
+        import asyncio
+        from tools.activity_log import log_agent_interaction
+
+        task = asyncio.create_task(log_agent_interaction(
+            user_email=session.get("email", ""),
+            session_id=request.headers.get("x-session-id"),
+            session_type=request.headers.get("x-session-type"),
+            interaction_type=interaction_type,
+            question_text=question_text,
+            agents_involved=agents_involved,
+            response_summary=response_summary,
+            metadata=metadata,
+        ))
+        _activity_bg_tasks.add(task)
+        task.add_done_callback(_activity_bg_tasks.discard)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("interaction_log_schedule_failed",
+                    interaction_type=interaction_type, error=str(exc))
+
+
 # Maps cio.deliberate() agent keys to the display name/role/model the frontend expects.
 # The frontend's AGENT_STYLE dict in CouncilDebate.tsx is keyed by these exact display names.
 _AGENT_META: dict[str, tuple[str, str, str]] = {
@@ -1155,14 +1209,23 @@ async def council_query(
                 history=history,
             )
 
+            council_agents = ["equity_analyst", "fixed_income_analyst",
+                              "risk_manager", "quant_backtester",
+                              "independent_analyst", "contrarian_analyst", "cio"]
             _log_council_session(
                 query=body.query,
-                agents_called=["equity_analyst", "fixed_income_analyst",
-                               "risk_manager", "quant_backtester",
-                               "independent_analyst", "cio"],
+                agents_called=council_agents,
                 response=council_response,
                 start_time=start_time,
                 user_email=session["email"],
+            )
+            # Team Activity — non-blocking; the council response is already
+            # assembled, so this never delays what the user sees.
+            _log_interaction_bg(
+                request, session, "council",
+                question_text=body.query,
+                agents_involved=council_agents,
+                response_summary=council_response.get("final_recommendation", ""),
             )
 
             return _deliberate_to_frontend(body.query, council_response)
@@ -1182,6 +1245,21 @@ async def council_query(
 def _sse(event_type: str, **payload: Any) -> str:
     """Format one Server-Sent Events frame: data: {json}\\n\\n."""
     return f"data: {json.dumps({'type': event_type, **payload})}\n\n"
+
+
+def _parse_overall_rating(verdict: str) -> str | None:
+    """
+    Pulls the section-5 readiness rating (Strong | Developing | Needs
+    Work) out of the arbiter verdict so the Team Activity summary can
+    show it without re-parsing the markdown. Returns None if the
+    verdict is malformed or unavailable.
+    """
+    import re
+    m = re.search(
+        r"###\s*5\.[^\n]*\n\s*\*\*Rating:\*\*\s*(Strong|Developing|Needs Work)",
+        verdict or "", re.IGNORECASE,
+    )
+    return m.group(1) if m else None
 
 
 @app.post("/api/council/academic-review")
@@ -1224,11 +1302,23 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             yield _sse("peer_responses", data=peer_responses)
 
             arbiter_message = build_arbiter_user_message(context_block, peer_responses)
-            arbiter_chars = 0
+            arbiter_text = ""
             async for chunk in stream_arbiter(arbiter_message):
-                arbiter_chars += len(chunk)
+                arbiter_text += chunk
                 yield _sse("arbiter_chunk", text=chunk)
-            log.info("academic_review_arbiter_complete", arbiter_chars=arbiter_chars)
+            log.info("academic_review_arbiter_complete",
+                     arbiter_chars=len(arbiter_text))
+
+            # Team Activity — log the completed review. The overall
+            # readiness rating is parsed out of the verdict so the
+            # summary panel can show it without re-reading the text.
+            agents = list(peer_responses.keys()) + ["academic_advisor"]
+            _log_interaction_bg(
+                request, session, "academic_review",
+                agents_involved=agents,
+                response_summary=arbiter_text,
+                metadata={"overall_rating": _parse_overall_rating(arbiter_text)},
+            )
         except Exception as exc:  # noqa: BLE001
             log.error("academic_review_failed", error=str(exc))
             yield _sse("error", message="Academic review failed — please retry.")
@@ -1628,7 +1718,14 @@ async def qa_audit(request: Request, session: dict = Depends(require_auth)):
             strategy_results = run_all_strategies(history)
 
             qa = QAAgent()
-            return qa.run_audit(strategy_results, run_full_checklist=True)
+            audit = qa.run_audit(strategy_results, run_full_checklist=True)
+            # Team Activity — record the audit run (non-blocking).
+            _log_interaction_bg(
+                request, session, "qa",
+                response_summary=str(audit.get("summary", "")),
+                metadata={"verdict": audit.get("verdict")},
+            )
+            return audit
 
         except Exception as exc:
             log.error("qa_audit_error", error=str(exc))
@@ -1818,6 +1915,13 @@ async def qa_run(request: Request, session: dict = Depends(require_auth)):
         def _writer(h: str, v: dict, tier: int) -> None:
             _asyncio.run(set_qa_cache(h, v, tier=tier))
         schedule_tier2_background(results_dict, strategy_hash, _writer)
+
+        # Team Activity — record the QA run (non-blocking).
+        _log_interaction_bg(
+            request, session, "qa",
+            response_summary=str(t1.get("summary", "")),
+            metadata={"verdict": t1.get("verdict"), "tier": 1},
+        )
 
         return {
             "verdict": t1["verdict"],
