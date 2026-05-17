@@ -1278,10 +1278,16 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
       1. {"type": "peer_responses", "data": {agentId: text}}
       2. {"type": "arbiter_chunk", "text": chunk}   (streamed)
       3. data: [DONE]
+
+    Both the peer responses and the arbiter verdict are produced through
+    the generator-evaluator harness. The arbiter is generated IN FULL and
+    harness-evaluated before any chunk is streamed — a failed attempt is
+    never shown, only the accepted verdict.
     """
+    import asyncio
     from agents.academic_review import (
-        gather_review_context, run_peer_fan_out, build_arbiter_user_message,
-        stream_arbiter, ARBITER_MODEL,
+        gather_review_context, run_peer_fan_out, run_arbiter_with_harness,
+        chunk_arbiter_text, ARBITER_MODEL,
     )
 
     async def event_stream():
@@ -1302,11 +1308,13 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             )
             yield _sse("peer_responses", data=peer_responses)
 
-            arbiter_message = build_arbiter_user_message(
-                context_block, peer_responses, multi_user)
-            arbiter_text = ""
-            async for chunk in stream_arbiter(arbiter_message):
-                arbiter_text += chunk
+            # Arbiter — generated in full and harness-evaluated in a worker
+            # thread (the harness is synchronous), then streamed as chunks.
+            # The loading state on the frontend covers the evaluation wait.
+            arbiter_text = await asyncio.to_thread(
+                run_arbiter_with_harness, context_block, peer_responses,
+                multi_user)
+            for chunk in chunk_arbiter_text(arbiter_text):
                 yield _sse("arbiter_chunk", text=chunk)
             log.info("academic_review_arbiter_complete",
                      arbiter_chars=len(arbiter_text))

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import threading
 from typing import Any
 
 try:
@@ -36,7 +35,7 @@ except ImportError:  # pragma: no cover
     import logging
     log = logging.getLogger(__name__)  # type: ignore[assignment]
 
-from agents.base import SONNET_MODEL, OPUS_MODEL, call_claude, get_anthropic_client
+from agents.base import SONNET_MODEL, OPUS_MODEL, call_claude
 
 PEER_MODEL = SONNET_MODEL      # claude-sonnet-4-6
 ARBITER_MODEL = OPUS_MODEL     # claude-opus-4-7  (Opus for the arbiter step only)
@@ -443,20 +442,40 @@ def run_peer_agent(
     """
     meta = _PEER_AGENTS[agent_id]
     # Test environment has no API keys — short-circuit to a deterministic
-    # mock (consistent with stream_arbiter and the Gemini/Grok helpers),
-    # so the fan-out is fast and deterministic under pytest.
+    # mock (consistent with the Gemini/Grok helpers), so the fan-out is
+    # fast and deterministic under pytest.
     if _is_test_env():
         return agent_id, _mock_peer_review(meta)
     system_prompt = _peer_system_prompt(meta)
     user_message = _peer_user_message(context_block, multi_user)
-    try:
+
+    # The agent call is routed through the generator-evaluator harness.
+    # _generate dispatches on the agent kind; the harness retries it with
+    # evaluator feedback when the response scores below threshold. This
+    # runs inside the peer's own asyncio.to_thread task, so a retry never
+    # blocks the other peers in the fan-out.
+    def _generate(prompt: str) -> str:
         if meta["kind"] == "claude":
-            return agent_id, call_claude(
-                PEER_MODEL, system_prompt, user_message, max_tokens=PEER_MAX_TOKENS)
+            return call_claude(PEER_MODEL, system_prompt, prompt,
+                               max_tokens=PEER_MAX_TOKENS)
         if meta["kind"] == "gemini":
-            return agent_id, _call_gemini_peer(system_prompt, user_message)
+            return _call_gemini_peer(system_prompt, prompt)
         if meta["kind"] == "grok":
-            return agent_id, _call_grok_peer(system_prompt, user_message)
+            return _call_grok_peer(system_prompt, prompt)
+        raise ValueError(f"unknown peer kind: {meta['kind']}")
+
+    try:
+        from agents.harness import GeneratorEvaluatorHarness
+        from agents.evaluator_prompts import academic_review_peer_evaluator_prompt
+        harness = GeneratorEvaluatorHarness()
+        result = harness.run(
+            generator_fn=_generate,
+            evaluator_prompt=academic_review_peer_evaluator_prompt(meta["name"]),
+            generator_prompt=user_message,
+            context=context_block[:6000],
+            agent_id=agent_id,
+        )
+        return agent_id, result.response
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_review_peer_failed", agent=agent_id, error=str(exc))
     return agent_id, _mock_peer_review(meta)
@@ -538,8 +557,9 @@ def build_arbiter_user_message(
     return "\n".join(parts)
 
 
-def _mock_arbiter_chunks() -> list[str]:
-    text = (
+def _mock_arbiter_text() -> str:
+    """Deterministic five-section verdict for the test environment."""
+    return (
         "### 1. Data Sufficiency and Methodology\n"
         "**Rating:** Developing\n"
         "Mock verdict — the live arbiter model is unavailable in this "
@@ -553,50 +573,56 @@ def _mock_arbiter_chunks() -> list[str]:
         "### 5. Overall Academic Readiness\n**Rating:** Developing\n"
         "This is a deterministic mock verdict for the test environment."
     )
-    # Emit in word-sized chunks so streaming consumers see progressive text.
+
+
+def chunk_arbiter_text(text: str) -> list[str]:
+    """Splits the completed verdict into word-group chunks so the SSE
+    consumer still sees the verdict arrive progressively."""
     words = text.split(" ")
     return [" ".join(words[i:i + 12]) + " " for i in range(0, len(words), 12)]
 
 
-async def stream_arbiter(user_message: str):
+def run_arbiter_with_harness(
+    context_block: str,
+    peer_responses: dict[str, str],
+    multi_user: bool = False,
+) -> str:
     """
-    Async generator yielding the arbiter verdict in text chunks.
+    Generates the arbiter verdict IN FULL and runs it through the
+    generator-evaluator harness — a verdict scoring below threshold is
+    regenerated with the evaluator's feedback. Returns the best-scoring
+    verdict text.
 
-    The Anthropic streaming client is synchronous, so the real path runs
-    it in a worker thread and pushes chunks into an asyncio.Queue — the
-    event loop stays free while the arbiter streams.
+    The verdict is generated in full (non-streaming) before the endpoint
+    streams it, so a failed attempt is never shown to the client — only
+    the accepted verdict is streamed. Synchronous (the harness is sync);
+    the endpoint runs this in asyncio.to_thread so the event loop stays
+    free. Fail-open: an arbiter generation failure returns the
+    deterministic mock verdict rather than raising.
     """
+    user_message = build_arbiter_user_message(
+        context_block, peer_responses, multi_user)
     if _is_test_env() or not os.getenv("ANTHROPIC_API_KEY"):
-        for chunk in _mock_arbiter_chunks():
-            yield chunk
-        return
+        return _mock_arbiter_text()
 
-    queue: asyncio.Queue = asyncio.Queue()
-    loop = asyncio.get_running_loop()
-    sentinel = object()
+    from agents.academic_advisor import _SYSTEM_PROMPT as advisor_prompt
+    from agents.harness import GeneratorEvaluatorHarness
+    from agents.evaluator_prompts import academic_review_arbiter_evaluator_prompt
 
-    def _worker() -> None:
-        try:
-            from agents.academic_advisor import _SYSTEM_PROMPT as advisor_prompt
-            client = get_anthropic_client()
-            with client.messages.stream(
-                model=ARBITER_MODEL,
-                max_tokens=ARBITER_MAX_TOKENS,
-                system=advisor_prompt,
-                messages=[{"role": "user", "content": user_message}],
-            ) as stream:
-                for text in stream.text_stream:
-                    loop.call_soon_threadsafe(queue.put_nowait, text)
-        except Exception as exc:  # noqa: BLE001
-            log.error("academic_review_arbiter_failed", error=str(exc))
-            loop.call_soon_threadsafe(
-                queue.put_nowait, f"\n[arbiter unavailable: {type(exc).__name__}]")
-        finally:
-            loop.call_soon_threadsafe(queue.put_nowait, sentinel)
+    def _generate(prompt: str) -> str:
+        return call_claude(ARBITER_MODEL, advisor_prompt, prompt,
+                           max_tokens=ARBITER_MAX_TOKENS)
 
-    threading.Thread(target=_worker, daemon=True).start()
-    while True:
-        item = await queue.get()
-        if item is sentinel:
-            break
-        yield item
+    try:
+        harness = GeneratorEvaluatorHarness()
+        result = harness.run(
+            generator_fn=_generate,
+            evaluator_prompt=academic_review_arbiter_evaluator_prompt(),
+            generator_prompt=user_message,
+            context=context_block[:6000],
+            agent_id="academic_advisor",
+        )
+        return result.response
+    except Exception as exc:  # noqa: BLE001
+        log.error("academic_review_arbiter_failed", error=str(exc))
+        return _mock_arbiter_text()
