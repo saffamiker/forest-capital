@@ -2,6 +2,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import { LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle, BarChart3, Activity, FileText, LineChart } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../App'
+import { useSession } from '../context/SessionContext'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import { useUI } from '../context/UIContext'
 import type { UIMode } from '../context/UIContext'
@@ -62,6 +63,7 @@ function FcLogo() {
 
 export default function MainLayout() {
   const { session, logout } = useAuth()
+  const { sessionType } = useSession()
   const { brand } = useBrand()
   const { mode, setMode } = useUI()
   const navigate = useNavigate()
@@ -205,6 +207,26 @@ export default function MainLayout() {
               Click to open the QA Audit screen. Hidden on mobile to
               keep the nav uncluttered at narrow breakpoints. */}
           <QAStatusBadge />
+
+          {/* Testing Mode indicator — only shown when the session is banded
+              as testing. Amber pill with a soft glow; clicking it jumps to
+              the toggle in Settings → Account. Absent entirely in an
+              analytical session, so the nav bar is unchanged by default. */}
+          {sessionType === 'testing' && (
+            <button
+              type="button"
+              onClick={() => navigate('/settings#account')}
+              title="Testing Mode active — this session's activity is logged as testing. Click to manage."
+              className="flex items-center gap-1 px-2 py-1 rounded-full text-2xs
+                         font-medium bg-warning/15 text-warning border
+                         border-warning/40 hover:bg-warning/25 transition-colors
+                         whitespace-nowrap shrink-0"
+              style={{ boxShadow: '0 0 10px rgba(245,158,11,0.35)' }}
+            >
+              <span aria-hidden="true">🧪</span>
+              <span>Testing Mode</span>
+            </button>
+          )}
 
           <span className="text-muted text-xs hidden sm:inline font-mono">{session?.email}</span>
 
