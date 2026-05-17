@@ -50,3 +50,28 @@ repos:
         entry: detect-secrets scan
         language: python
         pass_filenames: false
+
+      # Changelog contract — a new migration must include a changelog
+      # INSERT. Fast, so it runs on every commit.
+      - id: changelog-gate
+        name: Changelog gate
+        entry: python scripts/changelog_gate.py
+        language: system
+        pass_filenames: false
+
+      # Heavier checks run at push time, not on every commit.
+      # language: system so they use the developer's installed tools
+      # (an isolated hook env would not have pytest or the frontend deps).
+      - id: pytest
+        name: pytest
+        entry: pytest
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
+
+      - id: frontend-typecheck
+        name: TypeScript check
+        entry: npm run typecheck --prefix frontend
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
