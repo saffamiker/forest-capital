@@ -1569,6 +1569,47 @@ async def activity_summary(
     return await get_activity_summary(analytical_only=not include_testing)
 
 
+# ── Changelog ─────────────────────────────────────────────────────────────────
+
+@app.get("/api/v1/changelog")
+async def changelog_all(session: dict = Depends(require_auth)):
+    """Every changelog entry, newest version first — the Settings Release
+    History. Returns {entries: [...]}."""
+    from tools.changelog import get_all_changelog
+    return {"entries": await get_all_changelog()}
+
+
+@app.get("/api/v1/changelog/unseen")
+async def changelog_unseen(session: dict = Depends(require_auth)):
+    """
+    Changelog entries released after the calling user last dismissed the
+    What's New modal, plus has_tour_update and the current tour_version.
+    Drives the What's New modal's trigger.
+    """
+    from tools.changelog import get_unseen_changelog
+    return await get_unseen_changelog(session["email"])
+
+
+@app.post("/api/v1/changelog/mark-seen")
+async def changelog_mark_seen(
+    body: dict | None = None,
+    session: dict = Depends(require_auth),
+):
+    """
+    Records that the user has seen the changelog up to now. An optional
+    body {"tour_version_seen": int} also records the site-tour version
+    the user has completed.
+    """
+    from tools.changelog import mark_changelog_seen
+    tour_seen: int | None = None
+    if isinstance(body, dict):
+        tv = body.get("tour_version_seen")
+        if isinstance(tv, int) and not isinstance(tv, bool):
+            tour_seen = tv
+    ok = await mark_changelog_seen(session["email"], tour_seen)
+    return {"ok": ok}
+
+
 # ── Explainer ─────────────────────────────────────────────────────────────────
 
 @app.post("/api/explain/terms")
