@@ -4483,14 +4483,36 @@ STATIC TOOLTIP CONTENT (frontend/src/constants/explainerTooltips.ts):
 
 ENDPOINT:
   POST /api/council/explain — body {metric, current_value, context}.
-  Builds a four-part explanation prompt (what it measures, how to read
-  the current value, what it means for the equity / IG / HY allocation
-  question, why it matters to the 2022 regime-break thesis) and streams
-  a text/plain response via the Explainer agent's system prompt
-  (stream_metric_explanation — Anthropic Haiku streaming). Auth
-  required. The completed explanation is logged to agent_interactions
-  as interaction_type "explain" — team-gated and non-blocking inside
-  log_agent_interaction.
+  The InfoIcon (ⓘ) click path. Tightly scoped: a three-part prompt
+  (what the metric measures, how to read the current value, one
+  sentence on the 2022 regime-break thesis) capped at 150 words — no
+  extended academic framing, no next-steps. Streams a text/plain
+  response via the Explainer agent (stream_metric_explanation —
+  Anthropic Haiku streaming). Auth required. Logged to
+  agent_interactions as interaction_type "explain" — team-gated and
+  non-blocking inside log_agent_interaction.
+
+DATA EXPLAIN (the ✨ "Explain this data" button — May 17 2026):
+  POST /api/council/explain-data — same body shape {metric,
+  current_value, context}, same text/plain token stream, but a
+  deliberately DIFFERENT interaction from the InfoIcon:
+    ⓘ InfoIcon  → "what does this metric mean?"        (explain)
+    ✨ Data Explain → "what do these specific values mean?" (explain_data)
+  stream_data_explanation builds a contextual prompt (≤250 words) that
+  reads the specific on-screen values together — for a strategy: the
+  risk-return profile, cohort positioning, CV/Tier implications, the
+  2022 thesis, and whether it is worth highlighting in the midpoint
+  paper; for a chart: what the current view shows. Logged as
+  interaction_type "explain_data" (team-gated; in _INTERACTION_TYPES).
+  Frontend: DataExplainButton opens a DataExplainPanel drawer (the
+  ExplainerPanel pattern) — placed on the strategy detail subscreen
+  (StrategyCard, between the metrics and the More-detail accordion) and
+  on every Analytics chart (via SectionCard's dataExplain prop,
+  suppressed in light/export mode). The strategy detail subscreen's
+  single council hand-off (the strategy-specific link in StrategyCard)
+  navigates to /council with a data-anchored question pre-filled in
+  route state — the former generic top-right "Ask the Council" link was
+  a duplicate and has been removed.
 
 
 ─────────────────────────────────────────────────────────────────────────────

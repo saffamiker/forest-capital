@@ -2,6 +2,7 @@ import { CheckCircle, XCircle, ChevronDown, ChevronUp } from 'lucide-react'
 import { useState } from 'react'
 import type { StrategyResult, StressResults } from '../types/strategies'
 import ExplainableText from './ExplainableText'
+import DataExplainButton from './DataExplainButton'
 
 function pct(v: number | undefined, decimals = 1) {
   return v != null ? `${(v * 100).toFixed(decimals)}%` : '—'
@@ -98,12 +99,36 @@ function StressBar({ results }: { results: StressResults }) {
 
 interface StrategyCardProps {
   strategy: StrategyResult
-  onAskCouncil?: (strategyName: string) => void
+  /** Receives a fully-formed, data-anchored council question — the host
+   *  navigates to /council with it pre-filled in route state. */
+  onAskCouncil?: (question: string) => void
 }
 
 export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardProps) {
   const [expanded, setExpanded] = useState(false)
   const s = strategy
+
+  // Both council hand-off strings are built from the strategy's own data —
+  // no hardcoded values. ci is the 95% Sharpe confidence interval.
+  const displayName = s.strategy_name.replace(/_/g, ' ')
+  const ci = `${fmt(s.sharpe_ci_95?.[0])}–${fmt(s.sharpe_ci_95?.[1])}`
+  const councilQuestion =
+    `Can you analyse ${displayName} in the context of our asset allocation `
+    + `project? Key metrics: Sharpe ${fmt(s.sharpe_ratio)} (${ci} 95% CI), `
+    + `CAGR ${pct(s.cagr)}, max drawdown ${pct(s.max_drawdown)}, volatility `
+    + `${pct(s.volatility)}, CV score ${fmt(s.cv_stability_score)}, `
+    + `Tier ${s.tier1_gates_passed ?? '?'}/5. How does this strategy's `
+    + `risk-return profile compare to the cohort, and what does it imply for `
+    + `our thesis that diversification broke down in 2022?`
+  // The Data Explain value blob carries the on-screen metrics for the
+  // contextual "what do these specific numbers mean?" explanation.
+  const dataExplainValue =
+    `Sharpe ${fmt(s.sharpe_ratio)} (${ci} 95% CI), CAGR ${pct(s.cagr)}, `
+    + `max drawdown ${pct(s.max_drawdown)}, volatility ${pct(s.volatility)}, `
+    + `CV score ${fmt(s.cv_stability_score)}, `
+    + `Tier ${s.tier1_gates_passed ?? '?'}/5, `
+    + `DSR ${fmt(s.deflated_sharpe_ratio)}, `
+    + `p-value ${pFmt(s.p_value_corrected)}`
 
   const typeBadge = s.strategy_type === 'dynamic'
     ? 'bg-electric/10 text-electric border-electric/20'
@@ -181,6 +206,17 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
         <StabilityGauge score={s.cv_stability_score} />
       </div>
 
+      {/* Data Explain — a contextual reading of THIS strategy's specific
+          numbers, distinct from the per-metric ⓘ tooltips above. Sits
+          between the metrics and the More-detail accordion. */}
+      <div className="px-4 pb-3">
+        <DataExplainButton
+          metric={`${displayName} strategy performance analysis`}
+          currentValue={dataExplainValue}
+          context="academic_project"
+        />
+      </div>
+
       {/* Expand toggle */}
       <button
         onClick={() => setExpanded(!expanded)}
@@ -255,13 +291,14 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
         </div>
       )}
 
-      {/* Ask council */}
+      {/* Ask council — hands off a fully-formed, data-anchored question;
+          the host navigates to /council with it pre-filled. */}
       <div className="px-4 pb-3 mt-1">
         <button
-          onClick={() => onAskCouncil?.(s.strategy_name)}
+          onClick={() => onAskCouncil?.(councilQuestion)}
           className="w-full text-xs text-electric border border-electric/20 rounded py-1.5 hover:bg-electric/10 transition-colors"
         >
-          Ask the Council about {s.strategy_name.replace(/_/g, ' ')} →
+          Ask the Council about {displayName} →
         </button>
       </div>
     </div>

@@ -90,6 +90,30 @@ class TestExplainEndpoint:
         assert resp.status_code == 422
 
 
+# ── Data Explain endpoint ─────────────────────────────────────────────────────
+
+class TestExplainDataEndpoint:
+    def test_returns_200_with_valid_metric_and_auth(self):
+        resp = client.post(
+            "/api/council/explain-data",
+            json={"metric": "REGIME_SWITCHING strategy performance analysis",
+                  "current_value": "Sharpe 0.63 (0.41-0.85 95% CI), Tier 4/5",
+                  "context": "academic_project"},
+            headers=SESSION_HEADERS)
+        assert resp.status_code == 200
+        # Test env streams the deterministic mock data explanation.
+        assert "REGIME_SWITCHING" in resp.text
+
+    def test_returns_401_without_authentication(self):
+        resp = client.post("/api/council/explain-data", json={"metric": "x"})
+        assert resp.status_code == 401
+
+    def test_returns_422_when_metric_missing(self):
+        resp = client.post("/api/council/explain-data", json={},
+                            headers=SESSION_HEADERS)
+        assert resp.status_code == 422
+
+
 # ── Interaction logging ───────────────────────────────────────────────────────
 
 class TestExplainInteractionLogging:
@@ -98,6 +122,12 @@ class TestExplainInteractionLogging:
         # validated set or log_agent_interaction would drop the row.
         from tools.activity_log import _INTERACTION_TYPES
         assert "explain" in _INTERACTION_TYPES
+
+    def test_explain_data_is_a_valid_interaction_type(self):
+        # /api/council/explain-data logs interaction_type "explain_data" —
+        # it must be in the validated set or the row would be dropped.
+        from tools.activity_log import _INTERACTION_TYPES
+        assert "explain_data" in _INTERACTION_TYPES
 
     def test_explain_logged_for_team_not_for_non_team(self):
         if not _db_ready():

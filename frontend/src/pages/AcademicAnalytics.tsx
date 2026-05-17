@@ -21,6 +21,7 @@ import {
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import TableExportButton from '../components/TableExportButton'
 import InfoIcon from '../components/InfoIcon'
+import DataExplainButton from '../components/DataExplainButton'
 import type { ChartTheme } from '../lib/exportTheme'
 import { DARK_CHART_THEME } from '../lib/exportTheme'
 
@@ -172,7 +173,7 @@ function SignedPct({ x }: { x: number | null | undefined }) {
 
 function SectionCard({
   title, subtitle, exportButton, infoKey, tourId, theme = DARK_CHART_THEME,
-  children,
+  dataExplain, children,
 }: {
   title: string
   subtitle: string
@@ -186,6 +187,10 @@ function SectionCard({
   /** Light mode is used by the off-screen academic-export renderer; the
    *  default (dark) leaves the live UI pixel-identical. */
   theme?: ChartTheme
+  /** When set, an "Explain this data" button is placed in the header —
+   *  a contextual reading of the chart's current values. Suppressed in
+   *  light (export) mode, where interactive chrome must not render. */
+  dataExplain?: { currentValue?: string; context?: string }
   children: React.ReactNode
 }) {
   // In light mode the dark `card` class is bypassed entirely — the export
@@ -223,7 +228,17 @@ function SectionCard({
             {subtitle}
           </p>
         </div>
-        {exportButton}
+        <div className="flex items-center gap-2 shrink-0">
+          {dataExplain && !light && (
+            <DataExplainButton
+              metric={title}
+              {...(dataExplain.currentValue !== undefined
+                ? { currentValue: dataExplain.currentValue } : {})}
+              context={dataExplain.context ?? 'academic_project'}
+            />
+          )}
+          {exportButton}
+        </div>
       </div>
       {children}
     </div>
@@ -325,6 +340,11 @@ export function RollingExcessReturnChart(
       infoKey="rolling_excess_return"
       theme={theme}
       subtitle={`${data.window_months}-month rolling total return of each strategy minus the 100% equity benchmark. Above zero is outperformance, below zero is underperformance.`}
+      dataExplain={{ currentValue:
+        `${data.window_months}-month rolling excess return vs the 100% `
+        + `equity benchmark for ${data.strategies.length} strategies across `
+        + `${data.points.length} months`
+        + (breakX ? `; correlation regime break near ${breakX}.` : '.') }}
       exportButton={<TableExportButton tableId="rolling_excess_return" headers={headers} rows={exportRows} />}
     >
       <ResponsiveContainer width="100%" height={320}>
@@ -379,6 +399,11 @@ export function RollingCorrelationChart(
       infoKey="rolling_correlation_chart"
       theme={theme}
       subtitle={`${data.window_months}-month rolling correlation. The 2022 hiking cycle is where equity-bond diversification broke down.`}
+      dataExplain={{ currentValue:
+        `Equity-IG rolling correlation: pre-2022 avg ${avg(data.pre_2022.equity_ig)}, `
+        + `post-2022 avg ${avg(data.post_2022.equity_ig)}. Equity-HY: pre `
+        + `${avg(data.pre_2022.equity_hy)}, post ${avg(data.post_2022.equity_hy)}. `
+        + `${data.window_months}-month window; regime break ${data.regime_break}.` }}
     >
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 0 }}>
@@ -442,6 +467,12 @@ function RegimeConditionalTable({ rows }: { rows: RegimeRow[] }) {
       tourId="regime-conditional"
       infoKey="regime_conditional_table"
       subtitle="Each strategy split at the 2022 break. Sorted by post-2022 Sharpe — which strategies held up once diversification stopped working."
+      dataExplain={{ currentValue:
+        'Sharpe and CAGR by strategy, split at the 2022 break — '
+        + rows.map((r) =>
+            `${r.strategy}: post-2022 Sharpe ${num(r.post_2022_sharpe)} `
+            + `(pre ${num(r.pre_2022_sharpe)}), post-2022 CAGR `
+            + `${pct(r.post_2022_cagr)}`).join('; ') }}
       exportButton={<TableExportButton tableId="regime_conditional" headers={headers} rows={exportRows} />}
     >
       <table className="w-full">
@@ -478,6 +509,12 @@ function DrawdownComparisonTable({ rows }: { rows: DrawdownRow[] }) {
       title="Drawdown Comparison"
       infoKey="drawdown_table"
       subtitle="Max peak-to-trough loss and months to a new equity high. Sorted by max drawdown — deepest loss first."
+      dataExplain={{ currentValue:
+        'Max drawdown and recovery by strategy — '
+        + rows.map((r) =>
+            `${r.strategy}: ${pct(r.max_drawdown)}, recovery `
+            + `${r.recovery_months == null
+                ? 'not recovered' : `${r.recovery_months} months`}`).join('; ') }}
       exportButton={<TableExportButton tableId="drawdown_comparison" headers={headers} rows={exportRows} />}
     >
       <table className="w-full">
@@ -533,6 +570,13 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
             + 'the momentum-factor data — those rows use a three-factor fit.'
           : '')
       }
+      dataExplain={{ currentValue:
+        'Carhart four-factor loadings by strategy — '
+        + rows.map((r) =>
+            `${r.strategy}: alpha ${pct(r.alpha_annualized)}, MKT-RF `
+            + `${num(r.mkt_rf)}, SMB ${num(r.smb)}, HML ${num(r.hml)}, `
+            + `MOM ${r.mom === null ? '—' : num(r.mom)}, `
+            + `R² ${num(r.r_squared)}`).join('; ') }}
       exportButton={<TableExportButton tableId="factor_loadings" headers={headers} rows={exportRows} />}
     >
       <table className="w-full">
@@ -589,6 +633,17 @@ export function CumulativeReturnChart(
     p.date, ...data.strategies.map((s) => p[s] ?? ''),
   ])
 
+  // Terminal growth-of-$1 multiples from the last plotted month — the
+  // headline figures the Data Explain reading is anchored to.
+  const lastPoint = data.points[data.points.length - 1]
+  const cumulativeSummary =
+    `Growth of $1 over ${data.points.length} months for `
+    + `${data.strategies.length} strategies. Terminal multiples: `
+    + data.strategies.map((s) => {
+        const v = lastPoint ? lastPoint[s] : undefined
+        return `${s} ${typeof v === 'number' ? v.toFixed(2) : '—'}x`
+      }).join(', ')
+
   return (
     <SectionCard
       title="Cumulative Total Return"
@@ -596,6 +651,7 @@ export function CumulativeReturnChart(
       infoKey="cumulative_return_chart"
       theme={theme}
       subtitle="Growth of $1 invested in each strategy over the full study period. The benchmark (100% equity) is the bold grey reference line."
+      dataExplain={{ currentValue: cumulativeSummary }}
       exportButton={
         <div className="flex items-center gap-2">
           <button
@@ -729,6 +785,12 @@ export function SensitivityAnalysis(
       infoKey="sensitivity_analysis"
       theme={theme}
       subtitle="How sensitive is each dynamic strategy's risk-adjusted performance to its key parameter? The vertical line marks the current setting."
+      {...(strategies.length > 0
+        ? { dataExplain: { currentValue:
+            `Sharpe-ratio sensitivity to the key parameter for `
+            + `${strategies.length} dynamic strategies — `
+            + strategies.map((s) => `${s.strategy} (${s.parameter})`).join('; ') } }
+        : {})}
       exportButton={strategies.length > 0
         ? <TableExportButton tableId="sensitivity_analysis" headers={headers} rows={exportRows} />
         : undefined}

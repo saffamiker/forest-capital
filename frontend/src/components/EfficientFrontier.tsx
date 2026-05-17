@@ -79,7 +79,16 @@ export default function EfficientFrontier({
           <h3 className="font-semibold text-sm flex items-center" style={{ color: theme.textPrimary }}>
             Efficient Frontier
             {!light && (
-              <InfoIcon tooltipKey="efficient_frontier" metricLabel="Efficient Frontier" size="md" />
+              <InfoIcon
+                tooltipKey="efficient_frontier"
+                metricLabel="Efficient Frontier"
+                size="md"
+                {...(max_sharpe_point
+                  ? { currentValue:
+                      `Max Sharpe Point: σ=${(max_sharpe_point.volatility * 100).toFixed(1)}%, `
+                      + `μ=${(max_sharpe_point.expected_return * 100).toFixed(1)}%` }
+                  : {})}
+              />
             )}
           </h3>
           <p className="text-xs mt-0.5" style={{ color: theme.textSecondary }}>

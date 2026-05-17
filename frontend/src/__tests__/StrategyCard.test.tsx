@@ -151,11 +151,26 @@ describe('StrategyCard', () => {
     expect(screen.getByText('More detail')).toBeInTheDocument()
   })
 
-  it('calls onAskCouncil with strategy name when Ask button clicked', () => {
+  it('hands off a data-anchored council question when the Ask link is clicked', () => {
+    // The detail subscreen's council link calls onAskCouncil — the host
+    // (Dashboard) navigates to /council with this string in route state.
     const onAskCouncil = vi.fn()
     render(<UIProvider><StrategyCard strategy={mockStrategy} onAskCouncil={onAskCouncil} /></UIProvider>)
     fireEvent.click(screen.getByText(/Ask the Council about VOL TARGETING/i))
-    expect(onAskCouncil).toHaveBeenCalledWith('VOL_TARGETING')
+    expect(onAskCouncil).toHaveBeenCalledTimes(1)
+    const question = onAskCouncil.mock.calls[0][0] as string
+    // Route state must carry a non-empty question naming the strategy.
+    expect(typeof question).toBe('string')
+    expect(question.length).toBeGreaterThan(0)
+    expect(question).toContain('VOL TARGETING')
+    // And it must be anchored to the strategy's actual metrics.
+    expect(question).toContain('Sharpe 0.83')
+    expect(question).toContain('Tier 5/5')
+  })
+
+  it('renders the Data Explain button on the detail subscreen', () => {
+    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    expect(screen.getByText('Explain this data')).toBeInTheDocument()
   })
 
   it('renders static type badge for static strategy', () => {

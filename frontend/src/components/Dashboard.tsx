@@ -5,7 +5,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer
 } from 'recharts'
-import { AlertTriangle, ArrowRight, RefreshCw } from 'lucide-react'
+import { AlertTriangle, RefreshCw } from 'lucide-react'
 import RegimeIndicator from './RegimeIndicator'
 import EfficientFrontier from './EfficientFrontier'
 import StrategyCard from './StrategyCard'
@@ -548,21 +548,20 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Selected strategy detail card */}
+        {/* Selected strategy detail card. The single council hand-off is
+            the strategy-specific link inside StrategyCard — the former
+            generic top-right "Ask the Council" link was a duplicate and
+            has been removed. */}
         {selectedData && (
           <div>
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-white font-semibold text-sm">
-                {selectedData.strategy_name.replace(/_/g, ' ')} — Detail
-              </h3>
-              <button
-                onClick={() => navigate('/council')}
-                className="flex items-center gap-1 text-xs text-electric hover:underline"
-              >
-                Ask the Council <ArrowRight className="w-3 h-3" />
-              </button>
-            </div>
-            <StrategyCard strategy={selectedData} onAskCouncil={() => navigate('/council')} />
+            <h3 className="text-white font-semibold text-sm mb-2">
+              {selectedData.strategy_name.replace(/_/g, ' ')} — Detail
+            </h3>
+            <StrategyCard
+              strategy={selectedData}
+              onAskCouncil={(question) =>
+                navigate('/council', { state: { prefillQuestion: question } })}
+            />
           </div>
         )}
 

@@ -1412,6 +1412,51 @@ async def council_explain(
     return StreamingResponse(gen(), media_type="text/plain")
 
 
+@app.post("/api/council/explain-data")
+@limiter.limit("30/minute")
+async def council_explain_data(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_auth),
+):
+    """
+    Streams a contextual explanation of the SPECIFIC values currently on
+    screen — backs the "Explain this data" (✨) button on the strategy
+    detail subscreen and the Analytics charts.
+
+    Deliberately distinct from /api/council/explain: the InfoIcon answers
+    "what does this metric mean?" in 150 words; this answers "what do
+    these specific values mean together?" with the deeper, academic
+    framing. The completed explanation is logged to agent_interactions as
+    interaction_type "explain_data" (team-gated inside log_agent_interaction).
+
+    Like /api/council/explain this is a raw text/plain token stream — no
+    SSE framing, no [DONE] sentinel.
+    """
+    metric = str(body.get("metric") or "").strip()
+    if not metric:
+        raise HTTPException(status_code=422, detail="metric is required")
+    current_value = body.get("current_value")
+    context = body.get("context")
+
+    from agents.explainer_agent import stream_data_explanation
+
+    async def gen():
+        collected: list[str] = []
+        async for chunk in stream_data_explanation(metric, current_value, context):
+            collected.append(chunk)
+            yield chunk
+        _log_interaction_bg(
+            request, session, "explain_data",
+            question_text=metric,
+            response_summary="".join(collected),
+            metadata=({"current_value": str(current_value)}
+                      if current_value not in (None, "") else None),
+        )
+
+    return StreamingResponse(gen(), media_type="text/plain")
+
+
 # ── Team Activity ─────────────────────────────────────────────────────────────
 
 @app.post("/api/v1/activity/events")

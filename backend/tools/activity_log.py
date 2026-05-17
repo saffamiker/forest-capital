@@ -56,7 +56,7 @@ _SESSION_EVENT_TYPES = {
     "login", "logout", "page_view", "feature_click", "export", "login_failed",
 }
 _INTERACTION_TYPES = {"council", "academic_review", "qa", "document_upload",
-                      "explain", "export"}
+                      "explain", "explain_data", "export"}
 _SESSION_TYPES = {"analytical", "testing"}
 
 

@@ -628,25 +628,77 @@ class ExplainerAgent:
 # ── Inline metric explainer — streamed ────────────────────────────────────────
 
 def _metric_explain_prompt(metric: str, current_value: Any) -> str:
-    """Builds the user message for POST /api/council/explain. Anchors the
-    explanation to the value on screen and to the project's central thesis."""
+    """
+    Builds the user message for POST /api/council/explain — the InfoIcon
+    (ⓘ) click path. Deliberately tightly scoped: the InfoIcon answers
+    "what does this metric mean?", so the prompt is capped at 150 words
+    and three parts. The deeper, contextual explanation belongs to the
+    separate Data Explain feature (POST /api/council/explain-data).
+    """
     value_str = "not shown" if current_value in (None, "") else str(current_value)
     return (
-        f"You are explaining the {metric} metric to a senior investment "
-        f"professional who is evaluating portfolio strategies.\n\n"
+        f"Explain the {metric} metric to a senior investment professional.\n\n"
         f"Current value: {value_str}\n\n"
-        f"Explain in plain English:\n"
-        f"1. What this metric measures and why it matters\n"
-        f"2. How to interpret the current value shown ({value_str}) — is it "
-        f"good, concerning, or typical?\n"
-        f"3. What this means specifically for an asset allocation strategy "
-        f"comparing equity, investment-grade bonds, and high-yield bonds\n"
-        f"4. One sentence on why this is relevant to the academic project's "
-        f"central thesis (the 2022 correlation regime break and its impact "
-        f"on diversification)\n\n"
-        f"Be direct and specific. No more than 200 words. Plain English "
-        f"throughout."
+        f"Cover exactly three things, in order:\n"
+        f"1. What this metric or chart measures — one short paragraph.\n"
+        f"2. How to interpret the current value shown ({value_str}) — one "
+        f"short paragraph: is it good, concerning, or typical?\n"
+        f"3. One sentence connecting it to the project thesis (the 2022 "
+        f"equity-bond correlation regime break).\n\n"
+        f"Hard limits: maximum 150 words total. Plain English. No extended "
+        f"academic framing. Do not discuss what the team should do next."
     )
+
+
+def _data_explain_prompt(metric: str, current_value: Any, context: Any) -> str:
+    """
+    Builds the user message for POST /api/council/explain-data — the
+    "Explain this data" (✨) click path.
+
+    Unlike the InfoIcon, which explains what a metric *means*, this
+    explains what the *specific values currently on screen* mean together.
+    It is allowed the academic framing the InfoIcon prompt forbids.
+    """
+    value_str = "not shown" if current_value in (None, "") else str(current_value)
+    context_str = "" if context in (None, "") else str(context)
+    is_strategy = "strategy" in f"{metric} {context_str}".lower()
+
+    lines = [
+        f"Explain what these specific on-screen values mean — not what the "
+        f"metric type means in general — for: {metric}.",
+        "",
+        f"Values currently shown: {value_str}",
+    ]
+    if context_str:
+        lines.append(f"Context: {context_str}")
+    lines.append("")
+    if is_strategy:
+        lines += [
+            "Cover, grounded in the numbers above:",
+            "1. What these numbers mean together as a risk-return profile.",
+            "2. How this strategy compares to the cohort (relative "
+            "positioning).",
+            "3. What the CV score and Tier ranking imply.",
+            "4. What this means for the 2022 correlation regime-break thesis.",
+            "5. One sentence on whether this strategy is worth highlighting "
+            "in the midpoint paper.",
+        ]
+    else:
+        lines += [
+            "Cover, grounded in the values above:",
+            "1. What the viewer is looking at right now — the key statistics "
+            "and what stands out.",
+            "2. How to read the notable findings (date ranges, pre/post-2022 "
+            "values, outliers).",
+            "3. What this view implies for the 2022 correlation regime-break "
+            "thesis.",
+        ]
+    lines += [
+        "",
+        "Be direct and specific, every claim tied to a number above. "
+        "Maximum 250 words. Plain English.",
+    ]
+    return "\n".join(lines)
 
 
 def _mock_metric_explanation(metric: str) -> list[str]:
@@ -662,27 +714,37 @@ def _mock_metric_explanation(metric: str) -> list[str]:
     return [" ".join(words[i:i + 8]) + " " for i in range(0, len(words), 8)]
 
 
-async def stream_metric_explanation(metric: str, current_value: Any):
-    """
-    Async generator yielding a plain-English explanation of one metric in
-    text chunks — backs POST /api/council/explain.
+def _mock_data_explanation(metric: str) -> list[str]:
+    """Deterministic Data Explain chunks for the test environment / no key."""
+    text = (
+        f"[mock data explanation — the live explainer model is unavailable "
+        f"in this environment] The values shown for {metric} describe a "
+        f"specific risk-return profile. Read them together against the "
+        f"cohort, and against the 2022 equity-bond correlation regime break "
+        f"— the central question of whether diversification still holds."
+    )
+    words = text.split(" ")
+    return [" ".join(words[i:i + 8]) + " " for i in range(0, len(words), 8)]
 
-    Uses the Explainer's system prompt and streams via Anthropic Haiku
-    (HAIKU_MODEL). The Anthropic streaming client is synchronous, so the
-    real path runs it in a worker thread and pushes chunks onto an
-    asyncio.Queue, keeping the event loop free. Test environments and a
-    missing key fall back to a deterministic mock.
+
+async def _stream_haiku(user_message: str, mock_chunks: list[str],
+                        label: str, max_tokens: int):
+    """
+    Shared streamer for the explainer's text endpoints. Yields the
+    explanation in text chunks via Anthropic Haiku. The Anthropic
+    streaming client is synchronous, so the real path runs it in a worker
+    thread and pushes chunks onto an asyncio.Queue, keeping the event loop
+    free. Test environments and a missing key fall back to mock_chunks.
     """
     import asyncio
     import threading
 
     if os.getenv("ENVIRONMENT", "development") == "test" \
             or not os.getenv("ANTHROPIC_API_KEY"):
-        for chunk in _mock_metric_explanation(metric):
+        for chunk in mock_chunks:
             yield chunk
         return
 
-    user_message = _metric_explain_prompt(metric, current_value)
     queue: asyncio.Queue = asyncio.Queue()
     loop = asyncio.get_running_loop()
     sentinel = object()
@@ -693,14 +755,14 @@ async def stream_metric_explanation(metric: str, current_value: Any):
             client = get_anthropic_client()
             with client.messages.stream(
                 model=HAIKU_MODEL,
-                max_tokens=400,
+                max_tokens=max_tokens,
                 system=_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_message}],
             ) as stream:
                 for text in stream.text_stream:
                     loop.call_soon_threadsafe(queue.put_nowait, text)
         except Exception as exc:  # noqa: BLE001
-            log.error("explainer_metric_stream_failed", metric=metric, error=str(exc))
+            log.error("explainer_stream_failed", label=label, error=str(exc))
             loop.call_soon_threadsafe(
                 queue.put_nowait,
                 "The explainer is temporarily unavailable. The hover tooltip "
@@ -714,3 +776,33 @@ async def stream_metric_explanation(metric: str, current_value: Any):
         if item is sentinel:
             break
         yield item
+
+
+async def stream_metric_explanation(metric: str, current_value: Any):
+    """
+    Async generator yielding a plain-English explanation of one metric in
+    text chunks — backs POST /api/council/explain (the InfoIcon click).
+    """
+    async for chunk in _stream_haiku(
+        _metric_explain_prompt(metric, current_value),
+        _mock_metric_explanation(metric),
+        label=f"metric:{metric}",
+        max_tokens=400,
+    ):
+        yield chunk
+
+
+async def stream_data_explanation(metric: str, current_value: Any, context: Any):
+    """
+    Async generator yielding a contextual explanation of the specific
+    values currently on screen — backs POST /api/council/explain-data
+    (the "Explain this data" click). Allowed the academic framing the
+    InfoIcon prompt forbids, and given a larger token budget.
+    """
+    async for chunk in _stream_haiku(
+        _data_explain_prompt(metric, current_value, context),
+        _mock_data_explanation(metric),
+        label=f"data:{metric}",
+        max_tokens=600,
+    ):
+        yield chunk
