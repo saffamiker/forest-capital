@@ -18,6 +18,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from 'recharts'
+import { ChevronDown, ChevronRight } from 'lucide-react'
 import TableExportButton from '../components/TableExportButton'
 
 // Purple accent — analytics sits alongside the academic-rigour screens.
@@ -116,6 +117,19 @@ interface CumulativeReturns {
   points: CumulativePoint[]
 }
 
+interface StrategyMeta {
+  id: string
+  name: string
+  type: 'static' | 'dynamic'
+  rebalancing: string
+  weights: { equity: number; ig: number; hy: number } | null
+  signal_logic: string | null
+  economic_intuition: string | null
+  key_parameter: string | null
+  parameter_value: string | null
+  rationale: string
+}
+
 interface AnalyticsPayload {
   available: boolean
   note?: string
@@ -127,6 +141,7 @@ interface AnalyticsPayload {
   regime_conditional?: RegimeRow[]
   drawdown_comparison?: DrawdownRow[]
   factor_loadings?: FactorRow[]
+  strategy_metadata?: StrategyMeta[]
 }
 
 // Distinct line colours assigned by index; the benchmark is rendered as a
@@ -606,6 +621,85 @@ function SensitivityAnalysis() {
   )
 }
 
+// ── Strategy methodology panel ────────────────────────────────────────────────
+
+function MetaField({ label, value }: { label: string; value: string }) {
+  return (
+    <div>
+      <span className="text-2xs uppercase tracking-wider text-muted">{label}</span>
+      <p className="text-xs text-slate-300 leading-relaxed">{value}</p>
+    </div>
+  )
+}
+
+function StrategyMethodologyPanel({ rows }: { rows: StrategyMeta[] }) {
+  const [openId, setOpenId] = useState<string | null>(null)
+  const fmtWeights = (w: StrategyMeta['weights']): string =>
+    w == null
+      ? 'Optimised — weights are solved each rebalance, not fixed'
+      : `Equity ${(w.equity * 100).toFixed(0)}% · IG ${(w.ig * 100).toFixed(0)}%`
+        + ` · HY ${(w.hy * 100).toFixed(0)}%`
+
+  return (
+    <SectionCard
+      title="Strategy Rules and Methodology"
+      subtitle="The construction logic of every strategy — and, for the dynamic strategies, the signal and the economic intuition behind it."
+    >
+      <div className="space-y-1.5">
+        {rows.map((s) => {
+          const open = openId === s.id
+          return (
+            <div key={s.id} className="border border-border rounded overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setOpenId(open ? null : s.id)}
+                className="w-full flex items-center gap-2 px-3 py-2 hover:bg-navy-700 transition-colors"
+              >
+                {open
+                  ? <ChevronDown className="w-4 h-4 text-muted shrink-0" />
+                  : <ChevronRight className="w-4 h-4 text-muted shrink-0" />}
+                <span className="text-white text-sm">{s.name}</span>
+                <span className={`text-2xs px-1.5 py-0.5 rounded-full border ${
+                  s.type === 'dynamic'
+                    ? 'bg-electric/15 text-electric border-electric/30'
+                    : 'bg-navy-700 text-muted border-border'
+                }`}>
+                  {s.type}
+                </span>
+              </button>
+              {open && (
+                <div className="px-3 py-2.5 border-t border-border space-y-2">
+                  {s.type === 'dynamic' ? (
+                    <>
+                      {s.signal_logic && <MetaField label="Signal logic" value={s.signal_logic} />}
+                      {s.economic_intuition &&
+                        <MetaField label="Economic intuition" value={s.economic_intuition} />}
+                      <MetaField label="Rebalancing" value={s.rebalancing} />
+                      {s.key_parameter && (
+                        <MetaField
+                          label="Key parameter"
+                          value={`${s.key_parameter} — ${s.parameter_value ?? '—'}`}
+                        />
+                      )}
+                      <MetaField label="Rationale" value={s.rationale} />
+                    </>
+                  ) : (
+                    <>
+                      <MetaField label="Weights" value={fmtWeights(s.weights)} />
+                      <MetaField label="Rebalancing" value={s.rebalancing} />
+                      <MetaField label="Construction rationale" value={s.rationale} />
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </SectionCard>
+  )
+}
+
 export default function AcademicAnalytics() {
   const [data, setData] = useState<AnalyticsPayload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -667,6 +761,8 @@ export default function AcademicAnalytics() {
           {data.factor_loadings && data.factor_loadings.length > 0 &&
             <FactorLoadingsTable rows={data.factor_loadings} />}
           <SensitivityAnalysis />
+          {data.strategy_metadata && data.strategy_metadata.length > 0 &&
+            <StrategyMethodologyPanel rows={data.strategy_metadata} />}
         </>
       )}
     </div>
