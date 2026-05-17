@@ -910,3 +910,40 @@ Backend:
 
 Test counts (cumulative): 1071 backend pass, 15 skipped (HMM/Windows),
                            186 frontend pass.
+
+
+## Changelog, What's New, and CI/CD ✅ COMPLETE (2026-05-17)
+Changelog infrastructure, the What's New modal, and a database-backed
+GitHub Actions pipeline.
+
+Backend:
+  migrations/011_create_changelog.py — changelog table + 30-entry
+    historical seed.
+  migrations/012_create_users.py — users table (email PK,
+    last_changelog_seen_at, last_tour_version_seen) + changelog entry 31.
+  config.py — TOUR_VERSION.
+  tools/changelog.py — get_all / get_unseen / mark_seen (fail-open).
+  main.py — GET /api/v1/changelog, /unseen, POST /mark-seen.
+
+  tests/test_changelog.py — 9 tests: endpoint auth + shape contracts;
+    DB round-trips for unseen filtering, all-seen empty, mark-seen
+    timestamp + tour-version persistence, and the has_tour_update flag.
+
+Frontend:
+  components/WhatsNewModal.tsx — login-triggered modal of unseen
+    entries, mounted in MainLayout.
+  pages/Settings.tsx — Release History section (sixth) + a What's New
+    link in Account.
+  types/changelog.ts — ChangelogEntry / response types.
+
+CI/CD:
+  .github/workflows/ci.yml — postgres-service backend job (migrations +
+    pytest + changelog gate) and a frontend typecheck + Vitest job.
+  scripts/changelog_gate.py — fails a migration with no changelog INSERT.
+  .pre-commit-config.yaml — changelog-gate / pytest / frontend-typecheck
+    hooks appended to the existing local block.
+
+Migration: 011 + 012 — operator runs `alembic upgrade head` on Render.
+
+Test counts (cumulative): 1080 backend pass, 15 skipped (HMM/Windows),
+                           186 frontend pass.

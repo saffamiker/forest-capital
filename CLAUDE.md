@@ -4532,6 +4532,87 @@ Review — three full generations plus three evaluations. The frontend
 loading state covers the wait.
 
 
+─────────────────────────────────────────────────────────────────────────────
+CHANGELOG, WHAT'S NEW, AND CI/CD (May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+CHANGELOG TABLE (migration 011):
+  id                  integer primary key
+  version             integer, not null, unique — the ordering key
+  released_at         timestamptz, not null
+  title               varchar(200), not null
+  description         text, not null
+  academic_rationale  text, not null — why the feature helps the team
+                      earn higher marks
+  tour_step_id        varchar(100), nullable — links to a site-tour step
+
+Migration 011 seeds 30 entries (the full feature history reconstructed
+from the git log); migration 012 adds entry 31.
+
+CHANGELOG CONTRACT: every database migration from 011 onward MUST insert
+at least one changelog row, each with a meaningful academic_rationale.
+scripts/changelog_gate.py enforces this in CI and as a pre-commit hook —
+it fails (exit 1) when a new migration under backend/migrations/versions/
+is added without a changelog INSERT (op.bulk_insert into the changelog
+table, or INSERT INTO changelog).
+
+USERS TABLE (migration 012): the project had no users table — it
+created a minimal one keyed by email (email PK, last_changelog_seen_at,
+last_tour_version_seen) so the What's New modal has persistent per-user
+state. The changelog endpoints UPSERT into it; no rows are pre-seeded.
+
+TOUR_VERSION (config.py): the current site-tour version, default 1. The
+What's New modal compares it against the user's last_tour_version_seen
+to decide whether to offer the tour. Increment it by 1 whenever the
+site tour is (re)built — the tour itself is a later sprint.
+
+ENDPOINTS (all require authentication):
+  GET  /api/v1/changelog          — all entries, version descending;
+                                    backs Settings → Release History.
+  GET  /api/v1/changelog/unseen   — entries released after the caller's
+                                    last_changelog_seen_at, plus
+                                    has_tour_update and tour_version;
+                                    backs the What's New modal trigger.
+  POST /api/v1/changelog/mark-seen — sets last_changelog_seen_at to now();
+                                    an optional body {tour_version_seen}
+                                    records the tour version seen.
+
+FRONTEND: WhatsNewModal (mounted in MainLayout) opens once per
+authenticated load when /unseen has entries; closing it marks the
+changelog seen. Settings gains a sixth section, Release History, listing
+every entry with its academic rationale and a "New" badge on unseen
+entries.
+
+CI/CD — .github/workflows/ci.yml (on push to main):
+  backend job  — a postgres:15 service; installs deps; runs
+                 `alembic upgrade head`; runs pytest with coverage (the
+                 DB round-trip tests execute because the DB is present);
+                 runs the changelog gate.
+  frontend job — npm ci; tsc --noEmit; Vitest.
+This complements .github/workflows/test.yml (branch pushes, PRs, the
+live-deployment E2E run).
+
+REQUIRED GITHUB ACTIONS SECRETS: none new for ci.yml — the test
+database is the ephemeral postgres service container, so DATABASE_URL
+is a literal workflow env (postgresql://postgres:postgres@localhost:
+5432/test_forestcapital), not a secret. ANTHROPIC_API_KEY and
+GOOGLE_API_KEY (consumed by test.yml) remain optional repository
+secrets — the suite runs under ENVIRONMENT=test and tolerates them
+being absent.
+
+PRE-COMMIT HOOKS — install after cloning:
+  pip install pre-commit
+  pre-commit install
+  pre-commit install --hook-type pre-push
+The changelog gate runs on every commit; pytest and the frontend
+typecheck run at push time.
+
+RECOMMENDED POST-DEADLINE UPGRADE: development currently commits
+directly to a single `main` branch. After July 1, move to a
+develop → main pull-request flow with the ci.yml jobs set as required
+status checks, so nothing reaches main without a green pipeline.
+
+
 ═══════════════════════════════════════════════════════════════════
 KANBAN BOARD — Sprint 6 closed, Kanban adopted (May 16 2026)
 ═══════════════════════════════════════════════════════════════════
