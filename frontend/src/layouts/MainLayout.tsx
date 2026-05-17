@@ -15,6 +15,7 @@ import WhatsNewModal from '../components/WhatsNewModal'
 import SiteTour from '../components/SiteTour'
 import TestRunner from '../components/TestRunner'
 import TestNotifications from '../components/TestNotifications'
+import VisitorWelcomeBanner from '../components/VisitorWelcomeBanner'
 
 interface NavItem {
   to: string
@@ -311,6 +312,10 @@ export default function MainLayout() {
           resolved failures, and feedback responses. Separate from the
           changelog What's New modal. */}
       <TestNotifications />
+
+      {/* One-time welcome for non-team guests — sets expectations about
+          the two access tiers. Team members never see it. */}
+      <VisitorWelcomeBanner />
     </div>
   )
 }
