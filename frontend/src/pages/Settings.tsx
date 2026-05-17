@@ -13,7 +13,10 @@
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { Check, LogOut } from 'lucide-react'
+import { Check, LogOut, Sparkles } from 'lucide-react'
+import type {
+  ChangelogEntry, AllChangelogResponse, UnseenChangelogResponse,
+} from '../types/changelog'
 import { useAuth } from '../App'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import type { BrandMode } from '../context/BrandContext'
@@ -293,6 +296,18 @@ function AccountSection() {
         <TestingModeToggle />
       </div>
 
+      {/* Jump to the Release History section below. */}
+      <button
+        type="button"
+        onClick={() => document.getElementById('release-history')
+          ?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+        className="flex items-center gap-1.5 text-2xs text-electric
+                   hover:text-blue-300 transition-colors"
+      >
+        <Sparkles className="w-3 h-3" />
+        What's New — see the release history
+      </button>
+
       <button
         type="button"
         onClick={() => void handleSignOut()}
@@ -303,6 +318,71 @@ function AccountSection() {
         <LogOut className="w-3.5 h-3.5" />
         Sign out
       </button>
+    </div>
+  )
+}
+
+// ── 6. Release History ────────────────────────────────────────────────────────
+
+function ReleaseHistorySection() {
+  const [entries, setEntries] = useState<ChangelogEntry[]>([])
+  const [unseenVersions, setUnseenVersions] = useState<Set<number>>(new Set())
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    // All entries for display; the unseen set drives the "New" badge.
+    void Promise.allSettled([
+      axios.get<AllChangelogResponse>('/api/v1/changelog'),
+      axios.get<UnseenChangelogResponse>('/api/v1/changelog/unseen'),
+    ]).then(([all, unseen]) => {
+      if (cancelled) return
+      if (all.status === 'fulfilled') {
+        setEntries(all.value.data.entries ?? [])
+      }
+      if (unseen.status === 'fulfilled') {
+        setUnseenVersions(
+          new Set((unseen.value.data.entries ?? []).map((e) => e.version)))
+      }
+    }).finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  if (loading) return <Placeholder>Loading release history…</Placeholder>
+  if (entries.length === 0) {
+    return <Placeholder>No release history available.</Placeholder>
+  }
+
+  return (
+    <div className="space-y-3">
+      {entries.map((e) => (
+        <div key={e.id} className="rounded border border-border bg-navy-800 p-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm text-white font-semibold">{e.title}</span>
+            {unseenVersions.has(e.version) && (
+              <span className="text-2xs px-1.5 py-0.5 rounded-full
+                               bg-electric/15 text-electric border border-electric/30">
+                New
+              </span>
+            )}
+            <span className="text-2xs text-muted font-mono ml-auto">
+              v{e.version} · {new Date(e.released_at).toLocaleDateString()}
+            </span>
+          </div>
+          <p className="text-xs text-slate-300 leading-relaxed mt-1">
+            {e.description}
+          </p>
+          <div className="mt-2 pl-3 py-1" style={{ borderLeft: '3px solid #f59e0b' }}>
+            <div className="text-2xs uppercase tracking-wide text-warning
+                            font-medium">
+              Why this matters for your grade
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed mt-0.5">
+              {e.academic_rationale}
+            </p>
+          </div>
+        </div>
+      ))}
     </div>
   )
 }
@@ -372,6 +452,14 @@ export default function Settings() {
         description="The account signed in to this session."
       >
         <AccountSection />
+      </SettingsSection>
+
+      <SettingsSection
+        id="release-history"
+        title="Release History"
+        description="Every feature shipped to the platform, newest first — and why each one matters for your grade."
+      >
+        <ReleaseHistorySection />
       </SettingsSection>
     </div>
   )
