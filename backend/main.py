@@ -1237,6 +1237,174 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ── Team Activity ─────────────────────────────────────────────────────────────
+
+@app.post("/api/v1/activity/events")
+@limiter.limit("120/minute")
+async def activity_events(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_auth),
+):
+    """
+    Receives a batch of UI telemetry events from the frontend and
+    inserts them into session_events in one transaction.
+
+    Always returns 200 — the UI must never be blocked or shown an
+    error by activity logging. The PROJECT_TEAM_EMAILS allowlist is
+    enforced inside insert_session_events: a non-team user's events are
+    dropped silently. login / logout events are stamped server-side
+    with the request IP (and user agent, for login) rather than trusting
+    the client.
+    """
+    try:
+        from tools.activity_log import insert_session_events
+
+        events = body.get("events")
+        if not isinstance(events, list):
+            return {"accepted": 0}
+
+        sid = request.headers.get("x-session-id")
+        stype = request.headers.get("x-session-type")
+        ip = request.client.host if request.client else None
+        ua = request.headers.get("user-agent")
+
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            ev.setdefault("session_id", sid)
+            ev.setdefault("session_type", stype)
+            # Server-authoritative IP / UA for the auth-boundary events.
+            if ev.get("event_type") in ("login", "logout"):
+                ev["ip_address"] = ip
+            if ev.get("event_type") == "login":
+                ev["user_agent"] = ua
+
+        written = await insert_session_events(
+            [e for e in events if isinstance(e, dict)], session["email"])
+        return {"accepted": written}
+    except Exception as exc:  # noqa: BLE001
+        # Logging must never surface an error to the UI.
+        log.warning("activity_events_failed", error=str(exc))
+        return {"accepted": 0}
+
+
+@app.post("/api/v1/activity/commits/webhook")
+async def activity_commits_webhook(request: Request):
+    """
+    GitHub push-event webhook receiver. Validates the X-Hub-Signature-256
+    HMAC against GITHUB_WEBHOOK_SECRET, parses the push payload, and
+    upserts every commit into commit_activity.
+
+    Non-push events (notably the `ping` GitHub sends at registration)
+    are acknowledged and ignored. An invalid or missing signature is a
+    401. GITHUB_WEBHOOK_SECRET must be set on the server before the
+    endpoint will accept any event.
+    """
+    from config import GITHUB_WEBHOOK_SECRET
+    from tools.github_sync import verify_signature, parse_push_payload
+
+    raw = await request.body()
+    sig = request.headers.get("x-hub-signature-256")
+    if not verify_signature(GITHUB_WEBHOOK_SECRET, raw, sig):
+        raise HTTPException(status_code=401, detail="Invalid webhook signature.")
+
+    if request.headers.get("x-github-event") != "push":
+        return {"status": "ignored", "reason": "not a push event"}
+
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail="Malformed JSON payload.")
+
+    commits = parse_push_payload(payload)
+    if not commits:
+        return {"status": "ok", "synced": 0}
+
+    from tools.activity_log import upsert_commits
+    written = await upsert_commits(commits)
+    log.info("activity_webhook_push", commits=len(commits), upserted=written)
+    return {"status": "ok", "synced": written}
+
+
+@app.get("/api/v1/activity/commits/sync")
+@limiter.limit("6/minute")
+async def activity_commits_sync(
+    request: Request,
+    session: dict = Depends(require_auth),
+):
+    """
+    Manual sync of the last 100 commits from the GitHub REST API.
+    Upserts on sha, so it is safe to run repeatedly — used to backfill
+    history and to catch up anything the webhook missed. Requires
+    GITHUB_TOKEN (the repository is private).
+    """
+    from config import GITHUB_REPO, GITHUB_TOKEN
+    from tools.github_sync import fetch_recent_commits
+    from tools.activity_log import upsert_commits
+
+    try:
+        commits = await fetch_recent_commits(GITHUB_REPO, GITHUB_TOKEN, limit=100)
+    except RuntimeError as exc:
+        return {"synced": 0, "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("activity_sync_failed", error=str(exc))
+        return {"synced": 0, "error": "Commit sync failed — see server logs."}
+
+    written = await upsert_commits(commits)
+    log.info("activity_commits_synced", fetched=len(commits), upserted=written)
+    return {"synced": written, "fetched": len(commits)}
+
+
+@app.get("/api/v1/activity/team")
+async def activity_team(
+    request: Request,
+    user_id: Optional[str] = Query(None),
+    activity_type: str = Query("all"),
+    session_type: str = Query("analytical"),
+    date_from: Optional[str] = Query(None),
+    date_to: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    session: dict = Depends(require_auth),
+):
+    """
+    Unified Team Activity timeline — commit_activity, agent_interactions
+    and session_events interleaved and sorted by timestamp descending.
+
+    session_type defaults to "analytical"; pass "all" to include
+    Testing Mode activity. commit history is session-agnostic and is
+    always included when the activity_type filter permits commits.
+    """
+    from tools.activity_log import get_team_activity
+
+    return await get_team_activity(
+        user_id=user_id,
+        activity_type=activity_type,
+        session_type=session_type,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@app.get("/api/v1/activity/summary")
+async def activity_summary(
+    request: Request,
+    include_testing: bool = Query(False),
+    session: dict = Depends(require_auth),
+):
+    """
+    Per-member interaction and commit counts, the most-consulted agents,
+    and the latest academic-review verdict — the Team Activity summary
+    panel. Analytical sessions only unless include_testing is set.
+    """
+    from tools.activity_log import get_activity_summary
+
+    return await get_activity_summary(analytical_only=not include_testing)
+
+
 # ── Explainer ─────────────────────────────────────────────────────────────────
 
 @app.post("/api/explain/terms")

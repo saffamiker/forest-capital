@@ -126,3 +126,43 @@ ALLOWED_EMAILS           = set(
     if e.strip()
 )
 DAILY_CREDIT_CAP_USD     = float(os.getenv("DAILY_CREDIT_CAP_USD", "5.00"))
+
+# ── TEAM ACTIVITY LOGGING ─────────────────────────────────────────────────────
+# Only the three project-team accounts have their UI and agent activity
+# logged. Any other authenticated email (e.g. Dr. Panttser reviewing the
+# platform) is silently skipped — the filter runs before every
+# session_events / agent_interactions insert. It deliberately does NOT
+# gate commit_activity (commits are attributed by git author, logged
+# regardless) or login_failed events (kept for security visibility).
+# Expanding this set later automatically starts logging the new accounts;
+# anything not in it stays excluded.
+PROJECT_TEAM_EMAILS = {
+    "ruurdsm@queens.edu",   # Michael Ruurds
+    "murdockm@queens.edu",  # Molly Murdock
+    "thaob@queens.edu",     # Bob Thao
+}
+
+# Git commit author email → platform login email. Michael commits under a
+# personal git identity; resolving it here merges his commit history with
+# his platform activity under one identity in the Team Activity view. A
+# git author with no mapping is displayed by its git email as-is.
+GIT_AUTHOR_EMAIL_MAP = {
+    "mikeruurds@gmail.com": "ruurdsm@queens.edu",
+}
+
+# Platform email → display name, for the Team Activity summary and timeline.
+TEAM_MEMBER_NAMES = {
+    "ruurdsm@queens.edu": "Michael Ruurds",
+    "murdockm@queens.edu": "Molly Murdock",
+    "thaob@queens.edu": "Bob Thao",
+}
+
+# GitHub repository the commit-sync endpoint and push webhook target.
+GITHUB_REPO = os.getenv("GITHUB_REPO", "saffamiker/forest-capital")
+# Personal access token for the commit-sync endpoint — the repo is private,
+# so the GitHub API needs a token to read its commits. Optional: when unset
+# the sync endpoint returns a clear "token required" message rather than 500.
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+# Shared secret for validating GitHub push-webhook signatures (X-Hub-Signature-256).
+# Optional locally; REQUIRED on Render before the webhook endpoint accepts events.
+GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
