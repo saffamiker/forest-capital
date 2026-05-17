@@ -4401,6 +4401,59 @@ Webhook registration and the historical backfill are post-deploy
 operator steps — see docs/TEAM_ACTIVITY_SETUP.md.
 
 
+─────────────────────────────────────────────────────────────────────────────
+CONTEXTUAL EXPLAINER TOOLTIPS (May 16 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+Every chart title, table column header and key metric label on the
+Analytics and Dashboard pages carries a small ⓘ InfoIcon — the
+explainer agent made accessible inline, not only through the Council
+screen. Two interaction levels:
+
+  HOVER (300ms delay) — a lightweight tooltip with pre-written static
+  text. No API call. The tooltip flips above the icon when it sits low
+  in the viewport.
+
+  CLICK — opens ExplainerPanel, a right-side slide-in drawer that
+  streams a live, data-anchored explanation from the explainer agent.
+
+COMPONENTS:
+  InfoIcon (frontend/src/components/InfoIcon.tsx)
+    Props: tooltipKey (key into explainerTooltips.ts — supplies the
+    static hover text), metricLabel (the name sent to the explainer on
+    click), currentValue? (the on-screen value, injected into the
+    explainer prompt — omitted for column headers), size? ('sm'
+    default for table headers, 'md' for chart titles). Renders nothing
+    when tooltipKey has no static entry, so a mis-keyed icon fails
+    silent.
+  ExplainerPanel (frontend/src/components/ExplainerPanel.tsx)
+    Props: metricLabel, currentValue?, onClose. On mount it POSTs to
+    /api/council/explain and streams the text/plain response token by
+    token, showing an "Explaining {metric}…" state until the first
+    token. A right drawer is used so it never obscures the chart or
+    table. Closes on the X, a backdrop click, or Escape.
+
+STATIC TOOLTIP CONTENT (frontend/src/constants/explainerTooltips.ts):
+  EXPLAINER_TOOLTIPS maps snake_case keys to one-to-two-sentence
+  strings. Key convention: chart keys carry no suffix
+  (cumulative_return_chart, rolling_correlation_chart); table-column
+  keys are the bare metric name (cagr, sharpe, dsr, p_fdr); Carhart
+  factor keys are ff_-prefixed (ff_alpha, ff_mkt_rf). Every key wired
+  into an InfoIcon must have a non-empty entry — a frontend test
+  enforces it. getTooltip() is the lookup.
+
+ENDPOINT:
+  POST /api/council/explain — body {metric, current_value, context}.
+  Builds a four-part explanation prompt (what it measures, how to read
+  the current value, what it means for the equity / IG / HY allocation
+  question, why it matters to the 2022 regime-break thesis) and streams
+  a text/plain response via the Explainer agent's system prompt
+  (stream_metric_explanation — Anthropic Haiku streaming). Auth
+  required. The completed explanation is logged to agent_interactions
+  as interaction_type "explain" — team-gated and non-blocking inside
+  log_agent_interaction.
+
+
 ═══════════════════════════════════════════════════════════════════
 KANBAN BOARD — Sprint 6 closed, Kanban adopted (May 16 2026)
 ═══════════════════════════════════════════════════════════════════

@@ -850,5 +850,35 @@ Migration:
   on Render. Webhook registration + commit backfill are post-deploy
   operator steps — see docs/TEAM_ACTIVITY_SETUP.md.
 
-Test counts (cumulative): 1054 backend pass, 15 skipped (HMM/Windows),
-                           181 frontend pass.
+
+## Contextual Explainer Tooltips ✅ COMPLETE (2026-05-16)
+Inline ⓘ explainer affordances across the Analytics and Dashboard
+pages — hover for static text, click for a live streamed explanation.
+
+Backend:
+  agents/explainer_agent.py — stream_metric_explanation(), an async
+    generator streaming a metric explanation via Haiku.
+  main.py — POST /api/council/explain (auth, streamed text/plain,
+    logs an "explain" agent_interaction).
+  tools/activity_log.py — "explain" added to _INTERACTION_TYPES.
+
+  tests/test_explainer_endpoint.py — 5 tests: endpoint 200 / 401 / 422
+    contracts; "explain" is a registered interaction type; the explain
+    interaction logs for a team email and is gated out for a non-team
+    email (DB round-trip, skips without a database).
+
+Frontend:
+  constants/explainerTooltips.ts — static hover content per metric/chart.
+  components/InfoIcon.tsx — ⓘ affordance: 300ms hover tooltip + click.
+  components/ExplainerPanel.tsx — right-side drawer streaming the live
+    explanation from POST /api/council/explain.
+  Wired into AcademicAnalytics (chart titles, table titles, metric
+    columns) and Dashboard (strategy-table columns, efficient frontier).
+
+  __tests__/explainer.test.tsx — 5 tests: every EXPLAINER_TOOLTIPS key
+    has content; InfoIcon renders the button / nothing for an unknown
+    key / the static tooltip on hover; ExplainerPanel calls the endpoint
+    on mount.
+
+Test counts (cumulative): 1059 backend pass, 15 skipped (HMM/Windows),
+                           186 frontend pass.
