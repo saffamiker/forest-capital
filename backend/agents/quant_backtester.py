@@ -22,7 +22,16 @@ from agents.base import (
     build_agent_response,
     call_claude,
 )
+from agents.harness import GeneratorEvaluatorHarness
+from agents.evaluator_prompts import council_evaluator_prompt
 from config import TRANSACTION_COST_BPS, WALK_FORWARD_TRAIN, WALK_FORWARD_TEST
+
+# The analyst's task, phrased as a question — the harness evaluator scores
+# the response's relevance against it.
+_EVALUATOR_QUESTION = (
+    "Do the backtest results hold out of sample, and is the methodology "
+    "free of overfitting and look-ahead bias?"
+)
 
 log = structlog.get_logger(__name__)
 
@@ -84,8 +93,18 @@ class QuantBacktester:
         log.info("quant_backtester_called", n_strategies=len(strategy_results))
 
         try:
-            response_text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message)
-            return self._parse_response(response_text, strategy_results, quant_summary)
+            # Routed through the generator-evaluator harness — see
+            # equity_analyst for the rationale.
+            harness = GeneratorEvaluatorHarness()
+            result = harness.run(
+                generator_fn=lambda p: call_claude(SONNET_MODEL, _SYSTEM_PROMPT, p),
+                evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
+                generator_prompt=user_message,
+                context=str(context)[:4000],
+                agent_id="quant_backtester",
+            )
+            return self._parse_response(result.response, strategy_results,
+                                        quant_summary)
         except Exception as exc:
             log.error("quant_backtester_error", error=str(exc))
             return self._fallback_response(strategy_results, quant_summary)

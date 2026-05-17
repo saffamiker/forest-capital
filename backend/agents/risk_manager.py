@@ -22,7 +22,16 @@ from agents.base import (
     build_agent_response,
     call_claude,
 )
+from agents.harness import GeneratorEvaluatorHarness
+from agents.evaluator_prompts import council_evaluator_prompt
 from config import P_THRESHOLD_PRIMARY, FDR_Q_VALUE, STRESS_SCENARIOS
+
+# The analyst's task, phrased as a question — the harness evaluator scores
+# the response's relevance against it.
+_EVALUATOR_QUESTION = (
+    "What are the tail risks, drawdowns, and stress-test outcomes across "
+    "the strategies, and are the statistical results sound?"
+)
 
 log = structlog.get_logger(__name__)
 
@@ -87,8 +96,18 @@ class RiskManager:
         log.info("risk_manager_called", n_strategies=len(strategy_results))
 
         try:
-            response_text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message)
-            return self._parse_response(response_text, strategy_results, risk_summary)
+            # Routed through the generator-evaluator harness — see
+            # equity_analyst for the rationale.
+            harness = GeneratorEvaluatorHarness()
+            result = harness.run(
+                generator_fn=lambda p: call_claude(SONNET_MODEL, _SYSTEM_PROMPT, p),
+                evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
+                generator_prompt=user_message,
+                context=str(context)[:4000],
+                agent_id="risk_manager",
+            )
+            return self._parse_response(result.response, strategy_results,
+                                        risk_summary)
         except Exception as exc:
             log.error("risk_manager_error", error=str(exc))
             return self._fallback_response(strategy_results, risk_summary)

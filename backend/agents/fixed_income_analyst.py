@@ -22,8 +22,18 @@ from agents.base import (
     build_agent_response,
     call_claude,
 )
+from agents.harness import GeneratorEvaluatorHarness
+from agents.evaluator_prompts import council_evaluator_prompt
 
 log = structlog.get_logger(__name__)
+
+# The analyst's task, phrased as a question — the harness evaluator scores
+# the response's relevance against it.
+_EVALUATOR_QUESTION = (
+    "Is fixed income genuinely diversifying the portfolio, including the "
+    "2022 equity-bond correlation breakdown, and what does that imply for "
+    "the strategies?"
+)
 
 _SYSTEM_PROMPT = f"""You are a quantitative fixed income analyst. Your most critical \
 responsibility is testing whether fixed income is actually providing diversification \
@@ -91,8 +101,18 @@ class FixedIncomeAnalyst:
         log.info("fi_analyst_called", has_history=history is not None)
 
         try:
-            response_text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message)
-            return self._parse_response(response_text, strategy_results, correlation_data)
+            # Routed through the generator-evaluator harness — see
+            # equity_analyst for the rationale.
+            harness = GeneratorEvaluatorHarness()
+            result = harness.run(
+                generator_fn=lambda p: call_claude(SONNET_MODEL, _SYSTEM_PROMPT, p),
+                evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
+                generator_prompt=user_message,
+                context=str(context)[:4000],
+                agent_id="fixed_income_analyst",
+            )
+            return self._parse_response(result.response, strategy_results,
+                                        correlation_data)
         except Exception as exc:
             log.error("fi_analyst_error", error=str(exc))
             return self._fallback_response(strategy_results, correlation_data)

@@ -21,8 +21,18 @@ from agents.base import (
     build_agent_response,
     call_claude,
 )
+from agents.harness import GeneratorEvaluatorHarness
+from agents.evaluator_prompts import council_evaluator_prompt
 
 log = structlog.get_logger(__name__)
+
+# The analyst's task, phrased as a question — the harness evaluator scores
+# the response's relevance against it.
+_EVALUATOR_QUESTION = (
+    "Which equity-heavy strategies outperformed on a risk-adjusted basis, "
+    "how effective were the momentum signals, and what factor-exposure "
+    "patterns appear?"
+)
 
 _SYSTEM_PROMPT = f"""You are a quantitative equity analyst. You analyse equity market \
 conditions, factor exposures, momentum signals, and regime classification using only \
@@ -86,8 +96,19 @@ class EquityAnalyst:
         log.info("equity_analyst_called", n_strategies=len(strategy_results))
 
         try:
-            response_text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message)
-            return self._parse_response(response_text, strategy_results)
+            # The call_claude generation is routed through the
+            # generator-evaluator harness — a low-scoring response is
+            # regenerated with feedback. A first-attempt failure re-raises
+            # so the except below still falls back exactly as before.
+            harness = GeneratorEvaluatorHarness()
+            result = harness.run(
+                generator_fn=lambda p: call_claude(SONNET_MODEL, _SYSTEM_PROMPT, p),
+                evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
+                generator_prompt=user_message,
+                context=str(context)[:4000],
+                agent_id="equity_analyst",
+            )
+            return self._parse_response(result.response, strategy_results)
         except Exception as exc:
             log.error("equity_analyst_error", error=str(exc))
             return self._fallback_response(strategy_results)
