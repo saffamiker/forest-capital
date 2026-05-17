@@ -470,6 +470,58 @@ async def resolve_feedback(
     return None
 
 
+async def get_notifications(user_email: str) -> dict[str, Any]:
+    """
+    The operational login notifications for one tester, derived (no
+    notifications table):
+
+      resolved_failures  — the tester's failed steps an admin has marked
+        resolved and that have not yet been re-attested (a re-attestation
+        upsert clears resolved_at, so these self-clear).
+      responded_feedback — the tester's feedback an admin has moved off
+        'new'. Bounded to the last 21 days so it does not nag forever.
+
+    The "new tests available" notification is computed on the frontend by
+    diffing testScripts.ts against /api/v1/testing/unseen.
+    """
+    empty: dict[str, Any] = {"resolved_failures": [], "responded_feedback": []}
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return empty
+        async with AsyncSessionLocal() as session:
+            failures = await session.execute(text("""
+                SELECT script_id, step_id, resolution_note, resolved_at
+                FROM test_results
+                WHERE user_email = :e AND result = 'fail'
+                  AND resolved_at IS NOT NULL
+                ORDER BY resolved_at DESC
+            """), {"e": user_email})
+            feedback = await session.execute(text("""
+                SELECT id, title, status, resolution_note
+                FROM test_feedback
+                WHERE user_email = :e AND status <> 'new'
+                  AND resolved_at IS NOT NULL
+                  AND resolved_at > now() - interval '21 days'
+                ORDER BY resolved_at DESC
+            """), {"e": user_email})
+            return {
+                "resolved_failures": [{
+                    "script_id": r[0], "step_id": r[1],
+                    "resolution_note": r[2], "resolved_at": _iso(r[3]),
+                } for r in failures.fetchall()],
+                "responded_feedback": [{
+                    "id": r[0], "title": r[1], "status": r[2],
+                    "resolution_note": r[3],
+                } for r in feedback.fetchall()],
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("test_notifications_read_failed", error=str(exc))
+        return empty
+
+
 # ── AI helpers — quality gate and categorisation ──────────────────────────────
 
 def _parse_json(raw: str) -> dict[str, Any]:

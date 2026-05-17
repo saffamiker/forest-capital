@@ -14,6 +14,7 @@ import AdvisorPanel from '../components/AdvisorPanel'
 import WhatsNewModal from '../components/WhatsNewModal'
 import SiteTour from '../components/SiteTour'
 import TestRunner from '../components/TestRunner'
+import TestNotifications from '../components/TestNotifications'
 
 interface NavItem {
   to: string
@@ -305,6 +306,11 @@ export default function MainLayout() {
           Settings "Start Test Pass" button and the login notifications
           via testRunnerBus. */}
       <TestRunner />
+
+      {/* Operational test-runner login notifications — new test cases,
+          resolved failures, and feedback responses. Separate from the
+          changelog What's New modal. */}
+      <TestNotifications />
     </div>
   )
 }

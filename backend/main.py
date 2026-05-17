@@ -1697,6 +1697,19 @@ async def testing_resolve_feedback(
     return {"resolved": True, **resolved}
 
 
+@app.get("/api/v1/testing/notifications")
+async def testing_notifications(session: dict = Depends(require_auth)):
+    """
+    The current tester's operational login notifications — failures an
+    admin resolved (pending re-test) and feedback an admin responded to.
+    The "new tests available" notification is computed on the frontend
+    from /unseen. Team-only.
+    """
+    email = _require_test_team(session)
+    from tools.test_runner import get_notifications
+    return await get_notifications(email)
+
+
 @app.post("/api/v1/testing/quality-check")
 @limiter.limit("120/minute")
 async def testing_quality_check(
