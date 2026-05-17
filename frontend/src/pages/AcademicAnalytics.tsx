@@ -20,6 +20,7 @@ import {
 } from 'recharts'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import TableExportButton from '../components/TableExportButton'
+import InfoIcon from '../components/InfoIcon'
 
 // Purple accent — analytics sits alongside the academic-rigour screens.
 const ACCENT = '#7c3aed'
@@ -173,18 +174,26 @@ function SignedPct({ x }: { x: number | null | undefined }) {
 // ── Shared table chrome ───────────────────────────────────────────────────────
 
 function SectionCard({
-  title, subtitle, exportButton, children,
+  title, subtitle, exportButton, infoKey, children,
 }: {
   title: string
   subtitle: string
   exportButton?: React.ReactNode
+  /** When set, an InfoIcon is placed after the title — hover for the
+   *  static tooltip, click for the live explainer. */
+  infoKey?: string
   children: React.ReactNode
 }) {
   return (
     <div className="card p-5" style={{ borderLeft: `3px solid ${ACCENT}` }}>
       <div className="flex items-start justify-between mb-3">
         <div>
-          <h2 className="text-base font-semibold text-white">{title}</h2>
+          <h2 className="text-base font-semibold text-white flex items-center">
+            {title}
+            {infoKey && (
+              <InfoIcon tooltipKey={infoKey} metricLabel={title} size="md" />
+            )}
+          </h2>
           <p className="text-xs text-muted mt-0.5">{subtitle}</p>
         </div>
         {exportButton}
@@ -194,10 +203,21 @@ function SectionCard({
   )
 }
 
-const TH = ({ children, right = false }: { children: React.ReactNode; right?: boolean }) => (
+const TH = ({ children, right = false, infoKey, infoLabel }: {
+  children: React.ReactNode
+  right?: boolean
+  /** When set, an InfoIcon is placed after the header label. */
+  infoKey?: string
+  infoLabel?: string
+}) => (
   <th className={`px-3 py-2 text-xs font-medium uppercase tracking-wider text-muted
                   ${right ? 'text-right' : 'text-left'}`}>
-    {children}
+    <span className={`inline-flex items-center ${right ? 'flex-row-reverse' : ''}`}>
+      {children}
+      {infoKey && (
+        <InfoIcon tooltipKey={infoKey} metricLabel={infoLabel ?? infoKey} />
+      )}
+    </span>
   </th>
 )
 const TD = ({ children, right = false, mono = false }:
@@ -226,9 +246,14 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
     >
       <table className="w-full">
         <thead><tr className="border-b border-border">
-          <TH>Asset</TH><TH right>CAGR</TH><TH right>Excess Return (ann.)</TH>
-          <TH right>Ann. Volatility</TH><TH right>Sharpe</TH>
-          <TH right>Information Ratio</TH><TH right>Max Drawdown</TH><TH right>Skewness</TH>
+          <TH>Asset</TH>
+          <TH right infoKey="cagr" infoLabel="CAGR">CAGR</TH>
+          <TH right infoKey="excess_return" infoLabel="Excess Return">Excess Return (ann.)</TH>
+          <TH right infoKey="volatility" infoLabel="Annualised Volatility">Ann. Volatility</TH>
+          <TH right infoKey="sharpe" infoLabel="Sharpe Ratio">Sharpe</TH>
+          <TH right infoKey="information_ratio" infoLabel="Information Ratio">Information Ratio</TH>
+          <TH right infoKey="max_drawdown" infoLabel="Maximum Drawdown">Max Drawdown</TH>
+          <TH right infoKey="skewness" infoLabel="Skewness">Skewness</TH>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
@@ -267,6 +292,7 @@ function RollingExcessReturnChart({ data }: { data: RollingExcess }) {
   return (
     <SectionCard
       title="Rolling Excess Return vs Benchmark"
+      infoKey="rolling_excess_return"
       subtitle={`${data.window_months}-month rolling total return of each strategy minus the 100% equity benchmark. Above zero is outperformance, below zero is underperformance.`}
       exportButton={<TableExportButton tableId="rolling_excess_return" headers={headers} rows={exportRows} />}
     >
@@ -315,6 +341,7 @@ function RollingCorrelationChart({ data }: { data: RollingCorrelation }) {
   return (
     <SectionCard
       title="Rolling Correlation — Equity vs Bonds"
+      infoKey="rolling_correlation_chart"
       subtitle={`${data.window_months}-month rolling correlation. The 2022 hiking cycle is where equity-bond diversification broke down.`}
     >
       <ResponsiveContainer width="100%" height={300}>
@@ -371,6 +398,7 @@ function RegimeConditionalTable({ rows }: { rows: RegimeRow[] }) {
   return (
     <SectionCard
       title="Regime-Conditional Performance"
+      infoKey="regime_conditional_table"
       subtitle="Each strategy split at the 2022 break. Sorted by post-2022 Sharpe — which strategies held up once diversification stopped working."
       exportButton={<TableExportButton tableId="regime_conditional" headers={headers} rows={exportRows} />}
     >
@@ -406,6 +434,7 @@ function DrawdownComparisonTable({ rows }: { rows: DrawdownRow[] }) {
   return (
     <SectionCard
       title="Drawdown Comparison"
+      infoKey="drawdown_table"
       subtitle="Max peak-to-trough loss and months to a new equity high. Sorted by max drawdown — deepest loss first."
       exportButton={<TableExportButton tableId="drawdown_comparison" headers={headers} rows={exportRows} />}
     >
@@ -451,6 +480,7 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
   return (
     <SectionCard
       title="Carhart Four-Factor Loadings"
+      infoKey="ff_factor_loadings"
       subtitle={
         'OLS regression of each strategy\'s monthly excess return on the '
         + 'Carhart four-factor model (MKT-RF, SMB, HML, MOM). * marks loadings '
@@ -464,8 +494,13 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
     >
       <table className="w-full">
         <thead><tr className="border-b border-border">
-          <TH>Strategy</TH><TH right>Alpha (annualized)</TH><TH right>MKT-RF</TH>
-          <TH right>SMB</TH><TH right>HML</TH><TH right>MOM</TH><TH right>R²</TH>
+          <TH>Strategy</TH>
+          <TH right infoKey="ff_alpha" infoLabel="Carhart Alpha">Alpha (annualized)</TH>
+          <TH right infoKey="ff_mkt_rf" infoLabel="Market Beta (MKT-RF)">MKT-RF</TH>
+          <TH right infoKey="ff_smb" infoLabel="SMB Factor Loading">SMB</TH>
+          <TH right infoKey="ff_hml" infoLabel="HML Factor Loading">HML</TH>
+          <TH right infoKey="ff_mom" infoLabel="Momentum Factor Loading">MOM</TH>
+          <TH right infoKey="ff_r2" infoLabel="R-squared">R²</TH>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
@@ -511,6 +546,7 @@ function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
   return (
     <SectionCard
       title="Cumulative Total Return"
+      infoKey="cumulative_return_chart"
       subtitle="Growth of $1 invested in each strategy over the full study period. The benchmark (100% equity) is the bold grey reference line."
       exportButton={
         <div className="flex items-center gap-2">
@@ -620,6 +656,7 @@ function SensitivityAnalysis() {
   return (
     <SectionCard
       title="Sensitivity Analysis"
+      infoKey="sensitivity_analysis"
       subtitle="How sensitive is each dynamic strategy's risk-adjusted performance to its key parameter? The vertical line marks the current setting."
       exportButton={strategies.length > 0
         ? <TableExportButton tableId="sensitivity_analysis" headers={headers} rows={exportRows} />
