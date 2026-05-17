@@ -1288,8 +1288,9 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
         try:
             ctx = await gather_review_context()
             context_block = ctx["context_block"]
+            multi_user = ctx.get("multi_user_activity", False)
 
-            peer_responses = await run_peer_fan_out(context_block)
+            peer_responses = await run_peer_fan_out(context_block, multi_user)
             log.info(
                 "academic_review_peers_complete",
                 agents=list(peer_responses.keys()),
@@ -1301,7 +1302,8 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             )
             yield _sse("peer_responses", data=peer_responses)
 
-            arbiter_message = build_arbiter_user_message(context_block, peer_responses)
+            arbiter_message = build_arbiter_user_message(
+                context_block, peer_responses, multi_user)
             arbiter_text = ""
             async for chunk in stream_arbiter(arbiter_message):
                 arbiter_text += chunk

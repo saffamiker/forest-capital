@@ -393,6 +393,49 @@ class TestActivityLogDB:
 
         _run(scenario())
 
+    def test_testing_sessions_excluded_from_agent_context(self):
+        """Agent context uses get_activity_summary(analytical_only=True);
+        a testing-session interaction must not reach the agents."""
+        if not _db_ready():
+            pytest.skip("no live database")
+        from tools.activity_log import log_agent_interaction, get_activity_summary
+        from sqlalchemy import text
+
+        async def scenario():
+            from database import engine, AsyncSessionLocal
+            await engine.dispose()
+            sid_a = str(uuid.uuid4())
+            sid_t = str(uuid.uuid4())
+            try:
+                # Baseline analytical council count for this user.
+                base = await get_activity_summary(analytical_only=True)
+                before = next((m["council_interactions"]
+                               for m in base["per_member"]
+                               if m["user"] == TEAM_EMAIL), 0)
+                # One analytical, one testing.
+                await log_agent_interaction(
+                    user_email=TEAM_EMAIL, session_id=sid_a,
+                    session_type="analytical", interaction_type="council",
+                    question_text="analytical")
+                await log_agent_interaction(
+                    user_email=TEAM_EMAIL, session_id=sid_t,
+                    session_type="testing", interaction_type="council",
+                    question_text="testing")
+                after = await get_activity_summary(analytical_only=True)
+                now = next((m["council_interactions"]
+                            for m in after["per_member"]
+                            if m["user"] == TEAM_EMAIL), 0)
+                # Only the analytical interaction is counted (+1, not +2).
+                assert now == before + 1
+            finally:
+                async with AsyncSessionLocal() as s:
+                    await s.execute(
+                        text("DELETE FROM agent_interactions WHERE session_id "
+                             "IN (:a, :b)"), {"a": sid_a, "b": sid_t})
+                    await s.commit()
+
+        _run(scenario())
+
     def test_summary_counts_per_member(self):
         if not _db_ready():
             pytest.skip("no live database")
@@ -422,3 +465,74 @@ class TestActivityLogDB:
                     await s.commit()
 
         _run(scenario())
+
+
+# ── 11b — Team Activity as agent context ──────────────────────────────────────
+
+class TestTeamActivityAgentContext:
+    def _multi_user_summary(self) -> dict:
+        return {
+            "per_member": [
+                {"user": "ruurdsm@queens.edu", "user_name": "Michael Ruurds",
+                 "council_interactions": 8, "academic_review_sessions": 2,
+                 "document_uploads": 3, "qa_audits": 1, "page_views": 40,
+                 "last_active": "2026-05-16T10:00:00Z",
+                 "most_used_features": ["csv_export"]},
+                {"user": "thaob@queens.edu", "user_name": "Bob Thao",
+                 "council_interactions": 2, "academic_review_sessions": 1,
+                 "document_uploads": 0, "qa_audits": 0, "page_views": 12,
+                 "last_active": "2026-05-15T09:00:00Z", "most_used_features": []},
+            ],
+            "commits": {"total": 142, "this_week": 18,
+                        "by_author": {"ruurdsm@queens.edu": 142}},
+            "most_active_agents": [{"agent": "cio", "count": 9}],
+            "last_academic_review": None,
+            "total_interactions": 17,
+            "analytical_sessions_only": True,
+        }
+
+    def test_team_activity_block_assembles_with_multiple_users(self):
+        from agents.academic_review import (
+            format_team_activity_block, _team_activity_multi_user,
+        )
+        summary = self._multi_user_summary()
+        block = "\n".join(format_team_activity_block(summary))
+        # Every team member is listed — the two active ones with their
+        # counts, plus Molly (no activity) noted neutrally.
+        assert "Michael Ruurds" in block
+        assert "Bob Thao" in block
+        assert "Molly Murdock" in block
+        assert "no recorded platform activity" in block
+        assert "8 council" in block
+        assert "142 total" in block
+        # Two members are active -> the division-of-labour dimension fires.
+        assert _team_activity_multi_user(summary) is True
+
+    def test_single_active_user_does_not_trigger_division_dimension(self):
+        from agents.academic_review import _team_activity_multi_user
+        single = {
+            "per_member": [
+                {"user": "ruurdsm@queens.edu", "council_interactions": 5,
+                 "academic_review_sessions": 0, "document_uploads": 0,
+                 "qa_audits": 0, "page_views": 20},
+            ],
+            "commits": {"total": 0, "this_week": 0, "by_author": {}},
+            "total_interactions": 5,
+        }
+        # Only one member active -> the dimension must be omitted so a
+        # not-yet-adopted platform is not penalised.
+        assert _team_activity_multi_user(single) is False
+
+    def test_peer_question_gains_dimension_only_when_multi_user(self):
+        from agents.academic_review import _peer_question
+        assert "TEAM ENGAGEMENT AND TASK SHARING" in _peer_question(True)
+        assert "TEAM ENGAGEMENT AND TASK SHARING" not in _peer_question(False)
+
+    def test_arbiter_message_gains_section_6_only_when_multi_user(self):
+        from agents.academic_review import build_arbiter_user_message
+        with_team = build_arbiter_user_message("ctx", {"cio": "note"},
+                                               multi_user=True)
+        without = build_arbiter_user_message("ctx", {"cio": "note"},
+                                             multi_user=False)
+        assert "### 6. Team Engagement and Division of Labour" in with_team
+        assert "### 6. Team Engagement and Division of Labour" not in without

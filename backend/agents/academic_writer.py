@@ -72,6 +72,16 @@ ABSOLUTE PROHIBITIONS:
 - Never use first person
 - Never omit the 'AI DRAFT — REQUIRES HUMAN REVIEW' label
 
+TEAM ACTIVITY DATA:
+When a team activity summary is supplied in the input, you have access to
+each member's interactions with the platform — documents uploaded, council
+sessions run, academic reviews triggered, and commits made (analytical
+sessions only; testing-session activity is never shown to you). Use it as
+objective evidence when drafting the Roles and Division of Labor section or
+the AI-use narrative for the final presentation. Reference specific activity
+counts and patterns rather than making generic claims about team
+collaboration.
+
 {GLOBAL_AGENT_RULE}
 
 {SCOPE_ENFORCEMENT}"""
@@ -96,6 +106,7 @@ class AcademicWriter:
         data_sources: dict[str, Any],
         strategies: list[str],
         statistical_tests: list[str],
+        team_activity: dict[str, Any] | None = None,
     ) -> str:
         """
         Generates the Data & Methodology section (~1 page, APA format).
@@ -103,22 +114,24 @@ class AcademicWriter:
         Describes data hierarchy, provenance, statistical framework,
         tiered p-value thresholds, CPCV, block bootstrap, and DSR.
         References strategies and test names passed as input — never invents them.
+
+        When team_activity is supplied it is included so the section can
+        ground any Roles / Division-of-Labor prose in real engagement data.
         """
-        context = json.dumps(
-            {
-                "data_sources": data_sources,
-                "strategies": strategies,
-                "statistical_tests": statistical_tests,
-                "references_available": list(_REFERENCES.keys()),
-                "p_threshold_primary": 0.005,
-                "p_threshold_subperiod": 0.05,
-                "n_strategies": len(strategies),
-                "walk_forward_train": 36,
-                "walk_forward_test": 12,
-            },
-            indent=2,
-            default=str,
-        )
+        payload: dict[str, Any] = {
+            "data_sources": data_sources,
+            "strategies": strategies,
+            "statistical_tests": statistical_tests,
+            "references_available": list(_REFERENCES.keys()),
+            "p_threshold_primary": 0.005,
+            "p_threshold_subperiod": 0.05,
+            "n_strategies": len(strategies),
+            "walk_forward_train": 36,
+            "walk_forward_test": 12,
+        }
+        if team_activity:
+            payload["team_activity"] = team_activity
+        context = json.dumps(payload, indent=2, default=str)
 
         user_message = (
             "Write the Data & Methodology section in APA 7th edition format. "
@@ -191,23 +204,26 @@ class AcademicWriter:
         limitations: list[str],
         regime_analysis: dict[str, Any],
         recommendations: str,
+        team_activity: dict[str, Any] | None = None,
     ) -> str:
         """
         Generates the Discussion and Limitations section (~0.5 pages).
 
         Frames limitations honestly — no minimising. Draws from QA Agent
         limitations[] and Risk Manager regime_caveats[].
+
+        When team_activity is supplied it is included so the AI-use
+        narrative can cite real platform-engagement counts.
         """
-        context = json.dumps(
-            {
-                "limitations": limitations,
-                "regime_analysis": regime_analysis,
-                "recommendations": recommendations,
-                "references_available": list(_REFERENCES.keys()),
-            },
-            indent=2,
-            default=str,
-        )
+        payload: dict[str, Any] = {
+            "limitations": limitations,
+            "regime_analysis": regime_analysis,
+            "recommendations": recommendations,
+            "references_available": list(_REFERENCES.keys()),
+        }
+        if team_activity:
+            payload["team_activity"] = team_activity
+        context = json.dumps(payload, indent=2, default=str)
 
         user_message = (
             "Write the Discussion and Limitations section in APA 7th edition format. "

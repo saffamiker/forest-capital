@@ -117,13 +117,80 @@ def group_documents_by_type(docs: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
+def format_team_activity_block(team_activity: dict[str, Any] | None) -> list[str]:
+    """
+    Renders the team-activity summary into context lines for the agent
+    prompt. Analytical sessions ONLY — testing-session activity is never
+    shown to agents. Every project-team member is listed, including any
+    with no recorded activity, so the division-of-labour assessment is
+    fair. Returns [] when no activity data is available.
+    """
+    if not team_activity:
+        return []
+    from config import PROJECT_TEAM_EMAILS, TEAM_MEMBER_NAMES
+
+    per_member = {m["user"]: m for m in team_activity.get("per_member", [])}
+    lines: list[str] = ["", "TEAM ENGAGEMENT (analytical sessions only)"]
+    for email in sorted(PROJECT_TEAM_EMAILS):
+        name = TEAM_MEMBER_NAMES.get(email, email)
+        m = per_member.get(email)
+        if not m:
+            lines.append(f"- {name}: no recorded platform activity")
+            continue
+        lines.append(
+            f"- {name}: {m.get('council_interactions', 0)} council, "
+            f"{m.get('academic_review_sessions', 0)} academic review, "
+            f"{m.get('document_uploads', 0)} uploads, "
+            f"{m.get('qa_audits', 0)} QA, {m.get('page_views', 0)} page views"
+            + (f" — last active {str(m['last_active'])[:10]}"
+               if m.get("last_active") else "")
+        )
+    commits = team_activity.get("commits", {})
+    if commits.get("total"):
+        by_author = ", ".join(
+            f"{TEAM_MEMBER_NAMES.get(a, a)} {n}"
+            for a, n in (commits.get("by_author") or {}).items()
+        )
+        lines.append(
+            f"Commits: {commits.get('total', 0)} total, "
+            f"{commits.get('this_week', 0)} in the last 7 days — {by_author}"
+        )
+    lines.append(
+        f"Total substantive interactions: {team_activity.get('total_interactions', 0)}"
+    )
+    return lines
+
+
+def _team_activity_multi_user(team_activity: dict[str, Any] | None) -> bool:
+    """
+    True when more than one team member has recorded activity — gates
+    the division-of-labour review dimension. With a single active user
+    the dimension is omitted (a not-yet-adopted platform must not be
+    penalised), so this check decides whether it appears at all.
+    """
+    if not team_activity:
+        return False
+    active: set[str] = set()
+    for m in team_activity.get("per_member", []):
+        substantive = (m.get("council_interactions", 0)
+                       + m.get("academic_review_sessions", 0)
+                       + m.get("document_uploads", 0) + m.get("qa_audits", 0))
+        if substantive > 0:
+            active.add(m["user"])
+    for author in (team_activity.get("commits", {}).get("by_author") or {}):
+        active.add(author)
+    return len(active) > 1
+
+
 def build_review_context_block(
     analytics: dict[str, Any], docs_by_type: dict[str, list[dict]],
+    team_activity: dict[str, Any] | None = None,
 ) -> str:
     """
-    Renders the analytics inventory and the grouped documents into one
-    structured text block injected into every agent prompt. Missing
-    document types render as "(not yet uploaded)" — never an error.
+    Renders the analytics inventory, the grouped documents and the
+    team-activity summary into one structured text block injected into
+    every agent prompt. Missing document types render as "(not yet
+    uploaded)" — never an error.
     """
     lines: list[str] = ["=== PROJECT CONTEXT FOR ACADEMIC REVIEW ===", ""]
 
@@ -163,6 +230,9 @@ def build_review_context_block(
             if len(text) > _DOC_CHAR_CAP:
                 text = text[:_DOC_CHAR_CAP] + "\n…[document truncated for review]"
             lines.append(f"\n[{label}: {d.get('name', 'document')}]\n{text}")
+
+    # — Team engagement —
+    lines.extend(format_team_activity_block(team_activity))
 
     return "\n".join(lines)
 
@@ -228,7 +298,18 @@ async def gather_review_context() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_review_documents_read_failed", error=str(exc))
     docs_by_type = group_documents_by_type(docs)
-    block = build_review_context_block(analytics, docs_by_type)
+
+    # Team-activity summary — analytical sessions only; testing-session
+    # activity is never injected into agent context.
+    team_activity: dict[str, Any] | None = None
+    try:
+        from tools.activity_log import get_activity_summary
+        team_activity = await get_activity_summary(analytical_only=True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_review_team_activity_failed", error=str(exc))
+    multi_user = _team_activity_multi_user(team_activity)
+
+    block = build_review_context_block(analytics, docs_by_type, team_activity)
     present = [t for t, v in docs_by_type.items() if v]
     missing = [t for t, v in docs_by_type.items() if not v]
     log.info(
@@ -236,20 +317,23 @@ async def gather_review_context() -> dict[str, Any]:
         strategy_count=analytics["strategy_count"],
         document_types_present=present,
         document_types_missing=missing,
+        team_activity_multi_user=multi_user,
     )
     return {
         "analytics": analytics,
         "documents_by_type": docs_by_type,
         "document_types_present": present,
         "document_types_missing": missing,
+        "team_activity": team_activity,
+        "multi_user_activity": multi_user,
         "context_block": block,
     }
 
 
 # ── Peer fan-out ──────────────────────────────────────────────────────────────
 
-_PEER_QUESTION = (
-    "Review this project's academic readiness. Address all four areas "
+_PEER_QUESTION_BASE = (
+    "Review this project's academic readiness. Address all areas "
     "concisely, from your expert perspective:\n\n"
     "1. DATA SUFFICIENCY — breadth, depth, time range, factor-model "
     "coverage; name specific gaps.\n"
@@ -258,9 +342,32 @@ _PEER_QUESTION = (
     "3. DELIVERABLE QUALITY — assess any draft materials present; what would "
     "strengthen them.\n"
     "4. AREAS FOR FURTHER INVESTIGATION — the highest-leverage actions before "
-    "the deadline; specific, not generic.\n\n"
-    "Keep your whole response under 400 words."
+    "the deadline; specific, not generic.\n"
 )
+
+# Fifth dimension — appended only when more than one team member has
+# recorded activity. With a single active user the platform may simply
+# not be in use by the whole team yet; assessing task-sharing then would
+# penalise an adoption gap, not a division-of-labour problem.
+_PEER_DIMENSION_5 = (
+    "5. TEAM ENGAGEMENT AND TASK SHARING — Based on the team activity "
+    "summary provided, assess whether the team's engagement with the "
+    "platform reflects genuine shared effort. Is analytical work "
+    "distributed across team members or concentrated? Does the pattern of "
+    "interactions suggest coordinated division of labour?\n"
+)
+
+_PEER_QUESTION_CLOSE = "\nKeep your whole response under 400 words."
+
+
+def _peer_question(multi_user: bool) -> str:
+    """The peer review question — gains the team-engagement dimension
+    only when more than one member has platform activity."""
+    parts = [_PEER_QUESTION_BASE]
+    if multi_user:
+        parts.append(_PEER_DIMENSION_5)
+    parts.append(_PEER_QUESTION_CLOSE)
+    return "".join(parts)
 
 
 def _peer_system_prompt(meta: dict[str, str]) -> str:
@@ -274,8 +381,8 @@ def _peer_system_prompt(meta: dict[str, str]) -> str:
     )
 
 
-def _peer_user_message(context_block: str) -> str:
-    return f"{_PEER_QUESTION}\n\n{context_block}"
+def _peer_user_message(context_block: str, multi_user: bool = False) -> str:
+    return f"{_peer_question(multi_user)}\n\n{context_block}"
 
 
 def _mock_peer_review(meta: dict[str, str]) -> str:
@@ -325,7 +432,9 @@ def _call_grok_peer(system_prompt: str, user_message: str) -> str:
         return resp.json()["choices"][0]["message"]["content"]
 
 
-def run_peer_agent(agent_id: str, context_block: str) -> tuple[str, str]:
+def run_peer_agent(
+    agent_id: str, context_block: str, multi_user: bool = False,
+) -> tuple[str, str]:
     """
     Runs one peer agent's review. Synchronous — designed to be wrapped in
     asyncio.to_thread() for the parallel fan-out. Returns (agent_id, text);
@@ -339,7 +448,7 @@ def run_peer_agent(agent_id: str, context_block: str) -> tuple[str, str]:
     if _is_test_env():
         return agent_id, _mock_peer_review(meta)
     system_prompt = _peer_system_prompt(meta)
-    user_message = _peer_user_message(context_block)
+    user_message = _peer_user_message(context_block, multi_user)
     try:
         if meta["kind"] == "claude":
             return agent_id, call_claude(
@@ -353,11 +462,14 @@ def run_peer_agent(agent_id: str, context_block: str) -> tuple[str, str]:
     return agent_id, _mock_peer_review(meta)
 
 
-async def run_peer_fan_out(context_block: str) -> dict[str, str]:
+async def run_peer_fan_out(
+    context_block: str, multi_user: bool = False,
+) -> dict[str, str]:
     """Fans the review question out to every peer agent in parallel."""
     ids = peer_agent_ids()
     results = await asyncio.gather(
-        *[asyncio.to_thread(run_peer_agent, aid, context_block) for aid in ids]
+        *[asyncio.to_thread(run_peer_agent, aid, context_block, multi_user)
+          for aid in ids]
     )
     return {aid: text for aid, text in results}
 
@@ -393,18 +505,36 @@ Every rating is exactly one of: Strong, Developing, Needs Work. Be direct
 and actionable — the team is preparing a graded submission, so generic
 encouragement is not useful."""
 
+# Section 6 — appended only when more than one team member has recorded
+# activity. With a single active user, assessing division of labour would
+# penalise an adoption gap rather than a real task-sharing problem.
+_ARBITER_SECTION_6 = """
+
+### 6. Team Engagement and Division of Labour
+**Rating:** <Strong | Developing | Needs Work>
+<Assess task sharing from the team activity summary in the context block.
+Reference specific engagement patterns — who is active, who is not,
+whether the distribution of interactions supports the division-of-labour
+claims the midpoint paper makes.>"""
+
 
 def build_arbiter_user_message(
     context_block: str, peer_responses: dict[str, str],
+    multi_user: bool = False,
 ) -> str:
     """Builds the arbiter's user message: the context block, every peer's
-    review notes, and the five-section verdict instructions."""
+    review notes, and the verdict instructions. The sixth section —
+    division of labour — is included only when more than one team member
+    has platform activity."""
     parts = [context_block, "", "=== PEER REVIEW NOTES ==="]
     for agent_id, text in peer_responses.items():
         name = _PEER_AGENTS.get(agent_id, {}).get("name", agent_id)
         parts.append(f"\n--- {name} ---\n{text}")
     parts.append("")
-    parts.append(_ARBITER_INSTRUCTIONS)
+    instructions = _ARBITER_INSTRUCTIONS
+    if multi_user:
+        instructions += _ARBITER_SECTION_6
+    parts.append(instructions)
     return "\n".join(parts)
 
 
