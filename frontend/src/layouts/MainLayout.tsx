@@ -107,6 +107,7 @@ export default function MainLayout() {
               key={to}
               to={to}
               end={end ?? false}
+              data-tour={to === '/' ? 'nav-dashboard' : undefined}
               className={({ isActive }) =>
                 `flex items-center gap-1.5 px-3 py-1.5 rounded text-sm transition-colors ${
                   isActive

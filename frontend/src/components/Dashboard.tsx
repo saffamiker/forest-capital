@@ -389,7 +389,7 @@ export default function Dashboard() {
         />
 
         {/* Strategy comparison table */}
-        <div className="card overflow-hidden">
+        <div className="card overflow-hidden" data-tour="strategy-table">
           <div className="px-4 py-3 border-b border-border">
             <h3 className="text-white font-semibold text-sm">Strategy Comparison — Ranked by Sharpe</h3>
             <p className="text-muted text-xs mt-0.5">

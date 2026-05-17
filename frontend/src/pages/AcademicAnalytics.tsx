@@ -174,7 +174,7 @@ function SignedPct({ x }: { x: number | null | undefined }) {
 // ── Shared table chrome ───────────────────────────────────────────────────────
 
 function SectionCard({
-  title, subtitle, exportButton, infoKey, children,
+  title, subtitle, exportButton, infoKey, tourId, children,
 }: {
   title: string
   subtitle: string
@@ -182,10 +182,17 @@ function SectionCard({
   /** When set, an InfoIcon is placed after the title — hover for the
    *  static tooltip, click for the live explainer. */
   infoKey?: string
+  /** When set, the card carries a data-tour attribute the site tour
+   *  anchors a step to. */
+  tourId?: string
   children: React.ReactNode
 }) {
   return (
-    <div className="card p-5" style={{ borderLeft: `3px solid ${ACCENT}` }}>
+    <div
+      className="card p-5"
+      style={{ borderLeft: `3px solid ${ACCENT}` }}
+      {...(tourId ? { 'data-tour': tourId } : {})}
+    >
       <div className="flex items-start justify-between mb-3">
         <div>
           <h2 className="text-base font-semibold text-white flex items-center">
@@ -341,6 +348,7 @@ function RollingCorrelationChart({ data }: { data: RollingCorrelation }) {
   return (
     <SectionCard
       title="Rolling Correlation — Equity vs Bonds"
+      tourId="rolling-correlation"
       infoKey="rolling_correlation_chart"
       subtitle={`${data.window_months}-month rolling correlation. The 2022 hiking cycle is where equity-bond diversification broke down.`}
     >
@@ -398,6 +406,7 @@ function RegimeConditionalTable({ rows }: { rows: RegimeRow[] }) {
   return (
     <SectionCard
       title="Regime-Conditional Performance"
+      tourId="regime-conditional"
       infoKey="regime_conditional_table"
       subtitle="Each strategy split at the 2022 break. Sorted by post-2022 Sharpe — which strategies held up once diversification stopped working."
       exportButton={<TableExportButton tableId="regime_conditional" headers={headers} rows={exportRows} />}
@@ -480,6 +489,7 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
   return (
     <SectionCard
       title="Carhart Four-Factor Loadings"
+      tourId="factor-loadings"
       infoKey="ff_factor_loadings"
       subtitle={
         'OLS regression of each strategy\'s monthly excess return on the '
@@ -546,6 +556,7 @@ function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
   return (
     <SectionCard
       title="Cumulative Total Return"
+      tourId="cumulative-return"
       infoKey="cumulative_return_chart"
       subtitle="Growth of $1 invested in each strategy over the full study period. The benchmark (100% equity) is the bold grey reference line."
       exportButton={
@@ -774,7 +785,7 @@ export default function AcademicAnalytics() {
   return (
     <div className="p-4 md:p-6 space-y-5">
       <div>
-        <h1 className="text-xl font-semibold text-white">Academic Analytics</h1>
+        <h1 className="text-xl font-semibold text-white" data-tour="analytics-header">Academic Analytics</h1>
         <p className="text-sm text-muted mt-1">
           Cumulative return, summary statistics, the equity-bond correlation regime break,
           rolling excess return, regime-conditional performance, drawdowns, Carhart

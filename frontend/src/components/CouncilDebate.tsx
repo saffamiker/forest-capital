@@ -152,7 +152,7 @@ export default function CouncilDebate() {
     .filter((m): m is AgentMessage => m !== undefined)
 
   return (
-    <div className="p-4 md:p-6 max-w-screen-xl mx-auto space-y-4">
+    <div className="p-4 md:p-6 max-w-screen-xl mx-auto space-y-4" data-tour="council">
       <div>
         <h1 className="text-white font-bold text-xl">Investment Council</h1>
         <p className="text-muted text-sm mt-0.5">

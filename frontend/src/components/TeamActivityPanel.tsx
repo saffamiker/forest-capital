@@ -474,7 +474,7 @@ export default function TeamActivityPanel() {
   )
 
   return (
-    <section>
+    <section data-tour="team-activity">
       <div className="flex items-baseline justify-between gap-3 mb-3 flex-wrap">
         <div className="flex items-baseline gap-3">
           <h2 className="text-white font-semibold text-sm">Team Activity</h2>

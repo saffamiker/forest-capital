@@ -173,6 +173,7 @@ export default function AcademicReviewButton() {
       <div className="flex items-center gap-2">
         <button
           type="button"
+          data-tour="academic-review"
           onClick={() => void runReview()}
           disabled={running}
           title="Have the council evaluate your analytics, findings, and deliverables against project requirements"

@@ -239,7 +239,7 @@ function TestingModeToggle() {
   const { sessionType, setTestingMode } = useSession()
   const testing = sessionType === 'testing'
   return (
-    <div className="space-y-2">
+    <div className="space-y-2" data-tour="testing-mode">
       <div className="flex items-center justify-between gap-3">
         <span className="text-sm text-white">Testing Mode</span>
         <button

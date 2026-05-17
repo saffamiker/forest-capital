@@ -64,7 +64,7 @@ export default function EfficientFrontier({ data }: { data: EfficientFrontierDat
   } = data
 
   return (
-    <div className="card p-4">
+    <div className="card p-4" data-tour="efficient-frontier">
       <div className="flex items-center justify-between mb-4">
         <div>
           <h3 className="text-white font-semibold text-sm flex items-center">
