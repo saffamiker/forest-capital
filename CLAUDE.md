@@ -4298,6 +4298,108 @@ frame, then streamed {"type":"arbiter_chunk","text":...} frames, then
 shows "Consulting the council…", then renders the verdict section by
 section as it streams, with peer reviews in a collapsible accordion.
 
+MODEL STRINGS: the peer agents run on claude-sonnet-4-6 and the arbiter
+on claude-opus-4-7 — the project's current Sonnet/Opus constants
+(SONNET_MODEL / OPUS_MODEL in agents/base.py), NOT dated strings. The
+original spec named claude-sonnet-4-20250514 / claude-opus-4-20250514;
+the project standardised on -4-6 / -4-7 and deliberately moved off
+claude-opus-4 because it retires 2026-06-15.
+
+NAV ORDER (commit e87f5f6): the top-nav order is Dashboard → Analytics
+→ Statistical Evidence → Regime Analysis → Council → QA Audit →
+Reports — Analytics sits second, directly after Dashboard.
+
+
+─────────────────────────────────────────────────────────────────────────────
+TEAM ACTIVITY (migration 010, May 16 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+Team Activity is the objective record of how the practicum team engaged
+with the platform — the evidence behind the Roles & Division of Labor
+deliverable and the AI-use narrative for the July 1 presentation. It
+lives as a section on the Reports screen.
+
+THREE TABLES (migration 010):
+  session_events     — UI telemetry: login, logout, page_view,
+                       feature_click, export, login_failed. Batched
+                       from the frontend.
+  agent_interactions — substantive AI work: council, academic_review,
+                       qa, document_upload. Logged server-side.
+  commit_activity    — git history, upserted on SHA by the GitHub push
+                       webhook and the manual sync endpoint.
+A user is identified by EMAIL (user_email column) — the project has no
+users table. commit_activity.author holds the git author email.
+
+TEAM-EMAIL ALLOWLIST: config.PROJECT_TEAM_EMAILS holds the three
+project accounts (Michael, Molly, Bob). The filter runs inside
+tools/activity_log.py BEFORE every session_events / agent_interactions
+insert — a non-team authenticated user (e.g. Dr. Panttser) produces no
+rows, so the Team Activity view is naturally team-only with no query-
+layer filtering. The allowlist deliberately does NOT gate
+commit_activity (commits are logged regardless, attributed by git
+author) or login_failed events (kept for security visibility).
+GIT_AUTHOR_EMAIL_MAP merges Michael's personal git identity
+(mikeruurds@gmail.com) onto his platform login so his commit history
+and platform activity show as one identity. TEAM_MEMBER_NAMES maps
+each platform email to a display name.
+
+ENDPOINTS (all /api/v1/activity/):
+  POST events           — batched UI telemetry; always returns 200 so
+                          logging never blocks the UI.
+  POST commits/webhook  — GitHub push receiver; validates the
+                          X-Hub-Signature-256 HMAC against
+                          GITHUB_WEBHOOK_SECRET.
+  GET  commits/sync     — manual REST backfill of the last 100 commits,
+                          upserts on SHA; needs GITHUB_TOKEN (private repo).
+  GET  team             — unified timeline (commits + interactions +
+                          page views) interleaved, timestamp desc.
+  GET  summary          — per-member counts, commits, most-active agents.
+
+NON-BLOCKING LOGGING: the council, academic-review, document-upload and
+QA endpoints log to agent_interactions via _log_interaction_bg in
+main.py — a fire-and-forget asyncio task (a strong reference is held so
+it is not GC'd mid-run). Every activity write is fail-open: a DB error
+is logged and swallowed, never raised into the primary response.
+
+SESSION IDENTITY (frontend): SessionContext mints an in-memory
+session_id (UUID) per login and carries a session_type
+("analytical" | "testing"). Both ride every request as the
+X-Session-ID / X-Session-Type headers. session_id is never persisted —
+a reload mints a new one; logout clears it.
+
+TESTING MODE: a toggle in Settings → Account. When on, session_type is
+"testing" and the session's activity is excluded from the Team Activity
+analytical view by default. It is session-scoped, never persisted, and
+auto-resets to analytical on the next login. An amber "🧪 Testing Mode"
+pill shows in the nav bar while it is on (absent otherwise); clicking
+it jumps to the Settings toggle.
+
+UI EVENT TRACKER: frontend/src/lib/activityLogger.ts batches events,
+flushes every 30s / on a 50-event cap / on page unload (the unload
+flush uses fetch keepalive, not sendBeacon — sendBeacon cannot carry
+the auth headers). useActivityTracking emits a page_view per route
+change; login/logout and explicit feature events (exports, council
+submit, academic-review trigger) are tracked at their call sites.
+
+TEAM ACTIVITY AS AGENT CONTEXT: the Academic Review context block
+includes a team-activity summary — analytical sessions ONLY; testing
+activity is never shown to agents. When more than one team member has
+recorded activity, the peer question gains a fifth dimension (team
+engagement / task sharing) and the arbiter verdict a sixth section
+(division of labour); both are omitted for a single active user so a
+not-yet-adopted platform is not penalised. The Academic Writer's system
+prompt describes the summary, and write_methodology / write_discussion
+accept an optional team_activity argument.
+
+ENVIRONMENT VARIABLES (Render):
+  GITHUB_REPO            — default saffamiker/forest-capital
+  GITHUB_TOKEN           — PAT with repo scope; the commits/sync
+                           endpoint needs it (the repo is private)
+  GITHUB_WEBHOOK_SECRET  — REQUIRED before the webhook endpoint accepts
+                           any event; it 401s every push until set
+Webhook registration and the historical backfill are post-deploy
+operator steps — see docs/TEAM_ACTIVITY_SETUP.md.
+
 
 ═══════════════════════════════════════════════════════════════════
 KANBAN BOARD — Sprint 6 closed, Kanban adopted (May 16 2026)

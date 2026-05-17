@@ -792,5 +792,63 @@ Migration:
   009_add_mom_to_ff_factors.py — operator runs `alembic upgrade head`
   on Render before the next deploy.
 
-Test counts (cumulative): 1026 backend pass, 15 skipped (HMM/Windows),
-                           178 frontend pass.
+
+## Team Activity Build ✅ COMPLETE (2026-05-16)
+UI event tracking, interaction logging, login logging, Testing Mode,
+and the Team Activity view — 14 commits.
+
+Backend:
+  migrations/010_create_activity_tables.py — session_events,
+    agent_interactions, commit_activity (users keyed by email; no
+    users table).
+  tools/activity_log.py — the data layer: team-allowlist-gated inserts,
+    git-author resolution, the unified timeline query, the per-member
+    summary. Every write fail-open.
+  tools/github_sync.py — webhook HMAC verification, push-payload
+    parsing, the REST commit sync.
+  main.py — five /api/v1/activity/* endpoints; non-blocking interaction
+    logging hooked into council / academic-review / upload / QA.
+  agents/academic_review.py — team-activity block in the context
+    assembly; the multi-user-gated peer dimension 5 and arbiter
+    section 6.
+  agents/academic_writer.py — team-activity-aware system prompt;
+    optional team_activity argument on write_methodology / write_discussion.
+
+  tests/test_activity.py — 28 tests:
+    Pure logic: is_team_member / resolve_git_author / display_name;
+      webhook signature accept/reject, push-payload parse.
+    Endpoint contracts: webhook 401 on a bad signature, non-push
+      ignored, valid push accepted; events endpoint always 200 and
+      auth-gated; team / summary response shapes; council endpoint
+      unaffected by its logging hook.
+    DB round-trips (skip without a live database): session-event
+      insert + team filter, agent-interaction insert + team gate,
+      commit upsert dedup on SHA, timeline sort + session_type filter,
+      per-member summary counts, testing sessions excluded from the
+      agent-context summary.
+    Agent context: the team-activity block assembles with multiple
+      users, a single active user does not trigger the division
+      dimension, the peer question / arbiter message gain their extra
+      section only when multi-user.
+
+Frontend:
+  context/SessionContext.tsx — per-login session_id + session_type,
+    mirrored onto the axios X-Session-* headers.
+  lib/activityLogger.ts + lib/useActivityTracking.ts — batched UI
+    telemetry, 30s / 50-event / unload flush, route page_views.
+  components/TeamActivityPanel.tsx + TeamActivityCharts.tsx — the
+    Reports Team Activity section: summary, three charts, timeline,
+    filters, Presentation View, CSV export.
+  Testing Mode toggle (Settings → Account) + nav-bar indicator.
+
+  __tests__/session.test.tsx — 3 tests: sessionType defaults to
+    analytical, a session_id is minted for an authenticated session,
+    setTestingMode toggles the band and back.
+
+Migration:
+  010_create_activity_tables.py — operator runs `alembic upgrade head`
+  on Render. Webhook registration + commit backfill are post-deploy
+  operator steps — see docs/TEAM_ACTIVITY_SETUP.md.
+
+Test counts (cumulative): 1054 backend pass, 15 skipped (HMM/Windows),
+                           181 frontend pass.
