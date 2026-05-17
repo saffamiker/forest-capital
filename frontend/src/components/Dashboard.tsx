@@ -65,7 +65,7 @@ const STRATEGY_TABLE_COLUMNS: StrategyTableColumn[] = [
   { label: 'DSR',              term: 'dsr' },
   { label: 'p (FDR)',          term: 'p_fdr' },
   { label: 'CV Score',         term: 'cv_score' },
-  { label: 'Turnover',         term: null },
+  { label: 'Turnover (ann.)',  term: null },
   { label: 'Tier 1',           term: 'tier1_gates' },
 ]
 
@@ -160,8 +160,11 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
           {s.cv_stability_score != null ? s.cv_stability_score.toFixed(2) : '—'}
         </span>
       </td>
-      <td className="px-3 py-2 font-mono text-white text-xs">
-        {s.avg_monthly_turnover != null ? (s.avg_monthly_turnover * 12).toFixed(1) : '—'}
+      <td
+        className="px-3 py-2 font-mono text-white text-xs"
+        title="Average annual portfolio turnover — sum of absolute weight changes at each quarterly rebalance, annualised."
+      >
+        {s.true_turnover != null ? `${(s.true_turnover * 100).toFixed(0)}%` : '—'}
       </td>
       <td className="px-3 py-2">
         {isSignificant ? (

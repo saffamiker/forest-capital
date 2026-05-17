@@ -70,6 +70,7 @@ export interface StrategyResult {
   beta?: number
   r_squared?: number
   avg_monthly_turnover?: number
+  true_turnover?: number
   avg_equity_weight?: number
   avg_bond_weight?: number
   is_economically_significant?: boolean
