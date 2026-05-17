@@ -429,6 +429,10 @@ async def get_regime_cache() -> dict[str, Any] | None:
                         "equity_trend": result[7],
                         "pre_2022_avg_correlation": result[8],
                         "post_2022_avg_correlation": result[9],
+                        # When these signals were fetched — lets the UI show
+                        # an "as of" time so a 15-min-cached value is never
+                        # mistaken for a live reading.
+                        "as_of": result[10].isoformat() if result[10] else None,
                     }
     except Exception as exc:
         log.warning("regime_db_cache_read_error", error=str(exc))

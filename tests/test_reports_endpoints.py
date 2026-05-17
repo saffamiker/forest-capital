@@ -446,7 +446,7 @@ class TestSectionDocumentEndpoints:
             headers=_auth_headers(),
             json={"doc_type": "midpoint_paper"},
         )
-        assert r.status_code == 200
+        assert r.status_code == 201  # creation endpoint (Level 1 review M10)
         body = r.json()
         # Without a DATABASE_URL the endpoint returns persistence=unavailable
         # but still surfaces the content for the UI to render. Both paths
@@ -464,7 +464,7 @@ class TestSectionDocumentEndpoints:
             headers=_auth_headers(),
             json={"doc_type": "executive_brief"},
         )
-        assert r.status_code == 200
+        assert r.status_code == 201  # creation endpoint (Level 1 review M10)
         content = r.json()["content"]
         section_ids = [s["id"] for s in content["sections"]]
         assert len(section_ids) == 6
@@ -480,7 +480,7 @@ class TestSectionDocumentEndpoints:
             headers=_auth_headers(),
             json={"doc_type": "analytical_appendix"},
         )
-        assert r.status_code == 200
+        assert r.status_code == 201  # creation endpoint (Level 1 review M10)
         content = r.json()["content"]
         section_ids = [s["id"] for s in content["sections"]]
         for expected in (

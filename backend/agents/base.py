@@ -39,10 +39,14 @@ SCOPE_ENFORCEMENT = (
     "off-topic content in any way."
 )
 
-# Sonnet for specialist analysts; Opus for CIO and QA; Haiku for Explainer.
+# Model-name constants — the single source of truth for every model
+# string. Sonnet for specialist analysts; Opus for CIO and QA; Haiku for
+# the Explainer. GEMINI_MODEL is the non-Claude dissenter model — kept
+# here too so every model string the codebase references lives in one place.
 SONNET_MODEL = "claude-sonnet-4-6"
 OPUS_MODEL = "claude-opus-4-7"
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
+GEMINI_MODEL = "gemini-1.5-pro"
 
 # Token budget per call — protects credits from runaway prompts.
 MAX_INPUT_TOKENS = 2048
@@ -67,6 +71,15 @@ def call_claude(
     Keeps all agents on the same calling convention and makes token caps
     easy to enforce in one place. The 1024 output cap is CLAUDE.md Section 13
     credit protection — sufficient for analysis, prevents runaway prompts.
+
+    Error-handling note: call_claude deliberately does NOT catch Anthropic
+    API errors — it lets them propagate. This is asymmetric with the Gemini
+    (independent_analyst) and Grok (contrarian_analyst) helpers, which catch
+    and return a structured fallback. The asymmetry is intentional: every
+    call_claude caller already wraps it (the GeneratorEvaluatorHarness, and
+    each specialist's own try/except), so a second layer of swallowing here
+    would only hide failures. Do not "align" this without removing those
+    outer handlers first.
     """
     client = get_anthropic_client()
     message = client.messages.create(
@@ -93,7 +106,10 @@ def _with_academic_context(system_prompt: str) -> str:
     try:
         from tools.academic_context import inject_academic_context
         return inject_academic_context(system_prompt)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        # Fail-open, but log so a persistently broken academic-context
+        # cache is visible rather than silently dropping agent context.
+        log.warning("academic_context_inject_failed", error=str(exc))
         return system_prompt
 
 

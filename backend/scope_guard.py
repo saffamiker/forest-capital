@@ -20,10 +20,12 @@ from dataclasses import dataclass, field
 import anthropic
 import structlog
 
+from agents.base import HAIKU_MODEL
+
 log = structlog.get_logger(__name__)
 
 # Haiku is fast and cheap for classification — does not block the council debate.
-_CLASSIFIER_MODEL = "claude-haiku-4-5-20251001"
+_CLASSIFIER_MODEL = HAIKU_MODEL
 
 # Injection patterns that bypass the LLM classifier — no API call needed.
 _INJECTION_PATTERNS = re.compile(

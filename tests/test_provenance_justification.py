@@ -32,8 +32,12 @@ REQUIRED_SOURCES = {"spy_daily", "vixcls", "dgs2", "lqd_bridge"}
 
 
 def _client() -> TestClient:
+    # The provenance endpoints require auth (Level 1 review M15) — the
+    # session token rides on every request as a TestClient default header.
     from main import app  # type: ignore[import]
-    return TestClient(app)
+    from auth import generate_session_token
+    token = generate_session_token("ruurdsm@queens.edu")
+    return TestClient(app, headers={"X-API-Key": token})
 
 
 class TestProvenanceJustificationEndpoint:

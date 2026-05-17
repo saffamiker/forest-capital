@@ -341,7 +341,10 @@ def _build_result(
 
     # Probabilistic Sharpe Ratio: P(true SR > benchmark SR) and 95% CI
     psr_res = _psr_fn(sr, bm_sr, n, skewness=r_skew, kurtosis=r_kurt)
-    sharpe_ci = psr_res.get("sharpe_ci_95", (round(sr - 0.1, 4), round(sr + 0.1, 4)))
+    # No synthetic fallback: if the probabilistic-Sharpe routine returns no
+    # interval, sharpe_ci is None and the result reports sharpe_ci_95 = None.
+    # A fabricated ±0.10 band would present as a real statistical CI.
+    sharpe_ci = psr_res.get("sharpe_ci_95")
 
     # Paired t-test: strategy vs benchmark on active monthly returns
     bm_aligned = bm_returns.reindex(r_clean.index).dropna()
@@ -443,7 +446,10 @@ def _build_result(
         "dsr_p_value": round(dsr_res.get("p_value", 1.0), 6),
         # PSR + CI
         "probabilistic_sharpe_ratio": round(psr_res.get("psr", 0.0), 4),
-        "sharpe_ci_95": [round(sharpe_ci[0], 4), round(sharpe_ci[1], 4)],
+        "sharpe_ci_95": (
+            [round(sharpe_ci[0], 4), round(sharpe_ci[1], 4)]
+            if sharpe_ci else None
+        ),
         # SPA — populated by run_all_strategies after all strategies computed
         "spa_p_value": 1.0,
         "passes_spa": False,

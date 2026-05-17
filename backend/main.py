@@ -24,6 +24,7 @@ from slowapi.errors import RateLimitExceeded
 from starlette.requests import Request
 
 from config import FRONTEND_URL, ENVIRONMENT, ALLOWED_EMAILS
+from agents.base import SONNET_MODEL, OPUS_MODEL, GEMINI_MODEL
 from logger import configure_logging, get_logger
 from auth import (
     require_auth,
@@ -202,7 +203,7 @@ _PROVENANCE_PATH = Path(__file__).parent / "data" / "provenance.json"
 
 
 @app.get("/api/v1/provenance")
-async def get_provenance():
+async def get_provenance(session: dict = Depends(require_auth)):
     """
     Returns the full data_series_registry as JSON.
 
@@ -222,7 +223,7 @@ async def get_provenance():
 
 
 @app.get("/api/v1/provenance/justification")
-async def get_provenance_justification():
+async def get_provenance_justification(session: dict = Depends(require_auth)):
     """
     Structured justification for each supplemental data source.
 
@@ -1085,13 +1086,13 @@ def _log_interaction_bg(
 # Maps cio.deliberate() agent keys to the display name/role/model the frontend expects.
 # The frontend's AGENT_STYLE dict in CouncilDebate.tsx is keyed by these exact display names.
 _AGENT_META: dict[str, tuple[str, str, str]] = {
-    "equity_analyst":       ("Equity Analyst",               "specialist", "claude-sonnet-4-6"),
-    "fixed_income_analyst": ("Fixed Income Analyst",          "specialist", "claude-sonnet-4-6"),
-    "risk_manager":         ("Risk Manager",                  "specialist", "claude-sonnet-4-6"),
-    "quant_backtester":     ("Quant Backtester",              "specialist", "claude-sonnet-4-6"),
-    "independent_analyst":  ("Independent Analyst (Gemini)",  "dissenter",  "gemini-1.5-pro"),
+    "equity_analyst":       ("Equity Analyst",               "specialist", SONNET_MODEL),
+    "fixed_income_analyst": ("Fixed Income Analyst",          "specialist", SONNET_MODEL),
+    "risk_manager":         ("Risk Manager",                  "specialist", SONNET_MODEL),
+    "quant_backtester":     ("Quant Backtester",              "specialist", SONNET_MODEL),
+    "independent_analyst":  ("Independent Analyst (Gemini)",  "dissenter",  GEMINI_MODEL),
     "contrarian_analyst":   ("Contrarian Analyst (Grok)",     "dissenter",  "grok-4.3"),
-    "cio":                  ("CIO",                           "cio",        "claude-opus-4-7"),
+    "cio":                  ("CIO",                           "cio",        OPUS_MODEL),
 }
 
 
@@ -1149,6 +1150,9 @@ def _deliberate_to_frontend(query: str, council_response: dict[str, Any]) -> dic
         "messages":             messages,
         "final_recommendation": council_response.get("final_recommendation", ""),
         "consensus_reached":    True,
+        # "live" = real council run; the mock-fallback path sets "fallback"
+        # so a consumer can tell genuine analysis from demo data.
+        "mode":                 "live",
     }
 
 
@@ -1245,8 +1249,12 @@ async def council_query(
             # Fall through to mock response rather than returning 500 —
             # a demo-critical endpoint should degrade gracefully.
 
+    # Mock fallback — reached in the test environment, or when the real
+    # pipeline raised above. "mode": "fallback" flags it so a consumer
+    # never mistakes demo data for a genuine council run.
     response = dict(MOCK_COUNCIL_RESPONSE)
     response["query"] = body.query
+    response["mode"] = "fallback"
     return response
 
 
@@ -1373,9 +1381,12 @@ async def council_explain(
     Dashboard screens.
 
     Uses the Explainer agent's system prompt and streams via Haiku. The
-    response is a text/plain stream of explanation chunks. The completed
-    explanation is logged to agent_interactions as interaction_type
-    "explain" (team-gated inside log_agent_interaction).
+    response is a raw text/plain stream of explanation chunks — NOT
+    Server-Sent-Events: there is no `data:` framing and no `[DONE]`
+    sentinel, unlike /api/council/academic-review. Consumers read it as
+    a plain token stream. The completed explanation is logged to
+    agent_interactions as interaction_type "explain" (team-gated inside
+    log_agent_interaction).
     """
     metric = str(body.get("metric") or "").strip()
     if not metric:
@@ -1510,10 +1521,15 @@ async def activity_commits_sync(
     try:
         commits = await fetch_recent_commits(GITHUB_REPO, GITHUB_TOKEN, limit=100)
     except RuntimeError as exc:
-        return {"synced": 0, "error": str(exc)}
+        # Misconfiguration (e.g. GITHUB_TOKEN unset). The message is a
+        # deliberate, safe operator hint — surfaced via a proper 503 so the
+        # client can detect the failure from the status code.
+        raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:  # noqa: BLE001
-        log.warning("activity_sync_failed", error=str(exc))
-        return {"synced": 0, "error": "Commit sync failed — see server logs."}
+        ref = uuid.uuid4().hex[:8]
+        log.warning("activity_sync_failed", ref=ref, error=str(exc))
+        raise HTTPException(
+            status_code=502, detail=f"Commit sync failed (ref: {ref})")
 
     written = await upsert_commits(commits)
     log.info("activity_commits_synced", fetched=len(commits), upserted=written)
@@ -2053,8 +2069,9 @@ async def qa_run(request: Request, session: dict = Depends(require_auth)):
             "summary": t1["summary"],
         }
     except Exception as exc:
-        log.error("qa_run_error", error=str(exc))
-        raise HTTPException(status_code=500, detail=f"QA run failed: {exc}")
+        ref = uuid.uuid4().hex[:8]
+        log.error("qa_run_error", ref=ref, error=str(exc))
+        raise HTTPException(status_code=500, detail=f"QA run failed (ref: {ref})")
 
 
 @app.post("/api/v1/qa/full-review")
@@ -2091,8 +2108,9 @@ async def qa_full_review(request: Request, session: dict = Depends(require_auth)
             "strategy_hash": strategy_hash,
         }
     except Exception as exc:
-        log.error("qa_full_review_error", error=str(exc))
-        raise HTTPException(status_code=500, detail=f"Full review failed: {exc}")
+        ref = uuid.uuid4().hex[:8]
+        log.error("qa_full_review_error", ref=ref, error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Full review failed (ref: {ref})")
 
 
 # ── Report ────────────────────────────────────────────────────────────────────
@@ -2246,8 +2264,9 @@ async def midpoint_template(request: Request, session: dict = Depends(require_au
         )
 
     except Exception as exc:
-        log.error("midpoint_template_error", error=str(exc))
-        raise HTTPException(status_code=500, detail=f"Midpoint generation failed: {exc}")
+        ref = uuid.uuid4().hex[:8]
+        log.error("midpoint_template_error", ref=ref, error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Midpoint generation failed (ref: {ref})")
 
 
 # ── Bob's remaining report generators ─────────────────────────────────────────
@@ -2495,7 +2514,8 @@ async def analytical_appendix(request: Request, session: dict = Depends(require_
             references = sorted(
                 r["apa"] for r in references_db.values() if r.get("apa")
             )
-        except Exception:
+        except Exception as exc:
+            log.warning("references_load_failed", error=str(exc))
             references = None
 
         html_str = build_html_report(
@@ -2520,8 +2540,9 @@ async def analytical_appendix(request: Request, session: dict = Depends(require_
         )
 
     except Exception as exc:
-        log.error("analytical_appendix_error", error=str(exc))
-        raise HTTPException(status_code=500, detail=f"Appendix generation failed: {exc}")
+        ref = uuid.uuid4().hex[:8]
+        log.error("analytical_appendix_error", ref=ref, error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Appendix generation failed (ref: {ref})")
 
 
 @app.post("/api/reports/executive-brief-template")
@@ -2714,7 +2735,8 @@ async def executive_brief_template(request: Request, session: dict = Depends(req
             references = sorted(
                 r["apa"] for r in references_db.values() if r.get("apa")
             )
-        except Exception:
+        except Exception as exc:
+            log.warning("references_load_failed", error=str(exc))
             references = None
 
         docx_bytes = build_docx(
@@ -2741,8 +2763,9 @@ async def executive_brief_template(request: Request, session: dict = Depends(req
         )
 
     except Exception as exc:
-        log.error("executive_brief_error", error=str(exc))
-        raise HTTPException(status_code=500, detail=f"Brief generation failed: {exc}")
+        ref = uuid.uuid4().hex[:8]
+        log.error("executive_brief_error", ref=ref, error=str(exc))
+        raise HTTPException(status_code=500, detail=f"Brief generation failed (ref: {ref})")
 
 
 # ── Agent personas (Council View → "View system prompt") ──────────────────────
@@ -2757,13 +2780,13 @@ async def executive_brief_template(request: Request, session: dict = Depends(req
 # Centralised here so adding a new agent only requires one edit, and the
 # names match _AGENT_META above (the council-debate display layer).
 _AGENT_PERSONA_REGISTRY: list[tuple[str, str, str]] = [
-    ("Equity Analyst",              "claude-sonnet-4-6", "agents.equity_analyst"),
-    ("Fixed Income Analyst",        "claude-sonnet-4-6", "agents.fixed_income_analyst"),
-    ("Risk Manager",                "claude-sonnet-4-6", "agents.risk_manager"),
-    ("Quant Backtester",            "claude-sonnet-4-6", "agents.quant_backtester"),
-    ("Independent Analyst (Gemini)","gemini-1.5-pro",    "agents.independent_analyst"),
-    ("Contrarian Analyst (Grok)",   "grok-4.3",          "agents.contrarian_analyst"),
-    ("CIO",                         "claude-opus-4-7",   "agents.cio"),
+    ("Equity Analyst",              SONNET_MODEL,  "agents.equity_analyst"),
+    ("Fixed Income Analyst",        SONNET_MODEL,  "agents.fixed_income_analyst"),
+    ("Risk Manager",                SONNET_MODEL,  "agents.risk_manager"),
+    ("Quant Backtester",            SONNET_MODEL,  "agents.quant_backtester"),
+    ("Independent Analyst (Gemini)",GEMINI_MODEL,  "agents.independent_analyst"),
+    ("Contrarian Analyst (Grok)",   "grok-4.3",    "agents.contrarian_analyst"),
+    ("CIO",                         OPUS_MODEL,    "agents.cio"),
 ]
 
 
@@ -2921,7 +2944,7 @@ async def reports_manifest(request: Request, session: dict = Depends(require_aut
 # Auth scope: any logged-in team member can read / mutate any document —
 # we trust the four-person ALLOWED_EMAILS list, not row-level ACLs.
 
-@app.post("/api/documents/storyboard/draft")
+@app.post("/api/documents/storyboard/draft", status_code=201)
 @limiter.limit("10/minute")
 async def storyboard_draft(request: Request, session: dict = Depends(require_auth)):
     """
@@ -3039,7 +3062,7 @@ async def patch_document_draft(
     return {"saved_at": "now", "document_id": document_id}
 
 
-@app.post("/api/documents/{document_id}/versions")
+@app.post("/api/documents/{document_id}/versions", status_code=201)
 @limiter.limit("30/minute")
 async def post_document_version(
     document_id: str,
@@ -3255,7 +3278,7 @@ def _build_section_doc_content(
     }
 
 
-@app.post("/api/documents/section-doc/draft")
+@app.post("/api/documents/section-doc/draft", status_code=201)
 @limiter.limit("10/minute")
 async def section_doc_draft(
     request: Request,
@@ -3288,8 +3311,9 @@ async def section_doc_draft(
         results_dict, data_range = await _load_results_async()
         content = _build_section_doc_content(doc_type, results_dict, data_range)
     except Exception as exc:
-        log.error("section_doc_build_failed", error=str(exc), doc_type=doc_type)
-        raise HTTPException(status_code=500, detail=f"Draft creation failed: {exc}")
+        ref = uuid.uuid4().hex[:8]
+        log.error("section_doc_build_failed", ref=ref, error=str(exc), doc_type=doc_type)
+        raise HTTPException(status_code=500, detail=f"Draft creation failed (ref: {ref})")
 
     doc_id = await create_document(
         doc_type=doc_type,
@@ -3386,8 +3410,9 @@ async def regenerate_section(
         return {"ai_draft": new_text, "section_id": section_id}
 
     except Exception as exc:
-        log.error("section_regenerate_failed", error=str(exc), section=section_id)
-        raise HTTPException(status_code=500, detail=f"Regenerate failed: {exc}")
+        ref = uuid.uuid4().hex[:8]
+        log.error("section_regenerate_failed", ref=ref, error=str(exc), section=section_id)
+        raise HTTPException(status_code=500, detail=f"Regenerate failed (ref: {ref})")
 
 
 @app.post("/api/documents/{document_id}/export")
@@ -3664,7 +3689,7 @@ async def document_assistant(
 
         genai.configure(api_key=api_key)
         model = genai.GenerativeModel(
-            "gemini-1.5-pro",
+            GEMINI_MODEL,
             system_instruction=_GEMINI_ASSISTANT_SYSTEM_PROMPT,
         )
 

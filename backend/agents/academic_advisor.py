@@ -284,8 +284,8 @@ def _call_advisor_with_web_tools(
     try:
         from tools.academic_context import inject_academic_context
         system_prompt = inject_academic_context(_SYSTEM_PROMPT)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_context_inject_failed", error=str(exc))
 
     response = client.messages.create(
         model=SONNET_MODEL,

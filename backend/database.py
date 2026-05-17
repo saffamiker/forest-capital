@@ -20,7 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engin
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import NullPool
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:770519@localhost:5432/forestcapital")
+# The default is a non-secret local placeholder — set the real DATABASE_URL
+# in .env (gitignored). Never commit a real credential to this default.
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql+asyncpg://postgres:postgres@localhost:5432/forestcapital",
+)
 
 # Swap postgres:// → postgresql+asyncpg:// if Render provides the legacy scheme.
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):

@@ -35,7 +35,7 @@ except ImportError:  # pragma: no cover
     import logging
     log = logging.getLogger(__name__)  # type: ignore[assignment]
 
-from agents.base import SONNET_MODEL, OPUS_MODEL, call_claude
+from agents.base import SONNET_MODEL, OPUS_MODEL, GEMINI_MODEL, call_claude
 
 PEER_MODEL = SONNET_MODEL      # claude-sonnet-4-6
 ARBITER_MODEL = OPUS_MODEL     # claude-opus-4-7  (Opus for the arbiter step only)
@@ -402,7 +402,7 @@ def _call_gemini_peer(system_prompt: str, user_message: str) -> str:
         return _mock_peer_review(_PEER_AGENTS["independent_analyst"])
     import google.generativeai as genai  # type: ignore[import-untyped]
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel("gemini-1.5-pro", system_instruction=system_prompt)
+    model = genai.GenerativeModel(GEMINI_MODEL, system_instruction=system_prompt)
     return model.generate_content(user_message).text
 
 

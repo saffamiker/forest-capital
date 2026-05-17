@@ -178,13 +178,19 @@ def test_provenance_json_vix_is_fred():
 
 # ── API endpoint test ─────────────────────────────────────────────────────────
 
+def _provenance_auth() -> dict[str, str]:
+    """Provenance requires auth (Level 1 review M15)."""
+    from auth import generate_session_token
+    return {"X-API-Key": generate_session_token("ruurdsm@queens.edu")}
+
+
 def test_provenance_api_endpoint_returns_200():
     """GET /api/v1/provenance must return 200 (even with empty series)."""
     from fastapi.testclient import TestClient
     import importlib
     import main as main_module
     importlib.reload(main_module)
-    client = TestClient(main_module.app)
+    client = TestClient(main_module.app, headers=_provenance_auth())
     resp = client.get("/api/v1/provenance")
     assert resp.status_code == 200
 
@@ -195,7 +201,7 @@ def test_provenance_api_endpoint_returns_series_key():
     import importlib
     import main as main_module
     importlib.reload(main_module)
-    client = TestClient(main_module.app)
+    client = TestClient(main_module.app, headers=_provenance_auth())
     resp = client.get("/api/v1/provenance")
     data = resp.json()
     assert "series" in data

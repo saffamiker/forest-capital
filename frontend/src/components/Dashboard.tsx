@@ -19,18 +19,23 @@ import InfoIcon from './InfoIcon'
 import ChartCommentStrip from './ChartCommentStrip'
 import LearnModeBanner from './LearnModeBanner'
 
-// ── Simulated cumulative return series (mock) ──────────────────────────────
-function buildCumulativeReturns(strategies: StrategyResult[]): Record<string, string | number>[] {
-  const years = Array.from({ length: 25 }, (_, i) => 2000 + i)
-  return years.map((year, i) => {
-    const entry: Record<string, string | number> = { year: String(year) }
-    strategies.forEach((s) => {
-      const base = Math.pow(1 + (s.cagr ?? 0), i)
-      const noise = 1 + (Math.sin(i * 3.7 + (s.sharpe_ratio ?? 0) * 10) * 0.04)
-      entry[s.strategy_name] = parseFloat((base * noise).toFixed(3))
-    })
-    return entry
-  })
+// ── Real cumulative-return series ──────────────────────────────────────────
+// Growth of $1, one point per month, served by /api/v1/analytics/academic
+// (analytics.cumulative_returns — computed from market_data_monthly). The
+// Dashboard chart renders these verbatim; it never synthesises a curve.
+type CumulativePoint = { date: string } & Record<string, number | null>
+interface CumulativeReturns {
+  strategies: string[]
+  points: CumulativePoint[]
+}
+
+// ── Data-freshness pill — mirrors Settings → Data and Study Period ─────────
+type Staleness = 'green' | 'amber' | 'red' | 'unknown'
+const STALENESS_PILL: Record<Staleness, { cls: string; label: string }> = {
+  green:   { cls: 'bg-success/15 text-success border-success/30', label: 'Current' },
+  amber:   { cls: 'bg-warning/15 text-warning border-warning/30', label: 'Ageing' },
+  red:     { cls: 'bg-danger/15 text-danger border-danger/30',    label: 'Stale' },
+  unknown: { cls: 'bg-navy-700 text-muted border-border',         label: 'Unknown' },
 }
 
 const STRATEGY_COLORS: Record<string, string> = {
@@ -143,7 +148,7 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
         <span className="text-muted">
           {s.sharpe_ci_95 != null && s.sharpe_ci_95[0] != null && s.sharpe_ci_95[1] != null
             ? ` [${s.sharpe_ci_95[0].toFixed(2)}–${s.sharpe_ci_95[1].toFixed(2)}]`
-            : ''}
+            : ' [—]'}
         </span>
       </td>
       <td className="px-3 py-2 font-mono text-danger text-xs">{s.max_drawdown != null ? (s.max_drawdown * 100).toFixed(1) : '—'}%</td>
@@ -191,6 +196,10 @@ export default function Dashboard() {
   // fires at most once per session.
   const loadTerms = useGlossaryStore((s) => s.loadTerms)
   const [frontier, setFrontier] = useState<EfficientFrontierData | null>(null)
+  const [cumulative, setCumulative] = useState<CumulativeReturns | null>(null)
+  const [dataFreshness, setDataFreshness] = useState<
+    { last_updated: string | null; staleness: Staleness } | null
+  >(null)
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
   const [visibleStrategies, setVisibleStrategies] = useState<Set<string>>(
     new Set([...SIGNIFICANT_STRATEGIES, 'BENCHMARK'])
@@ -213,9 +222,35 @@ export default function Dashboard() {
       } catch (_) { /* frontier is decorative — failures are silent */ }
     }
     void loadFrontier()
+
+    // Real cumulative-return series for the chart below. Sourced from the
+    // analytics endpoint (computed from market_data_monthly) — never
+    // synthesised. On failure the chart shows an empty state, not a fake curve.
+    const loadCumulative = async () => {
+      try {
+        const res = await axios.get<{ cumulative_returns?: CumulativeReturns }>(
+          '/api/v1/analytics/academic'
+        )
+        setCumulative(res.data.cumulative_returns ?? null)
+      } catch (_) { /* chart falls back to an empty state */ }
+    }
+    void loadCumulative()
+
+    // Strategy-data freshness — reuses the Settings data-status endpoint so
+    // the Dashboard shows the same server-side computed_at + staleness.
+    const loadDataStatus = async () => {
+      try {
+        const res = await axios.get<{
+          tables: { name: string; last_updated: string | null; staleness: Staleness }[]
+        }>('/api/v1/admin/data-status')
+        const t = res.data.tables?.find((x) => x.name === 'strategy_results_cache')
+        if (t) setDataFreshness({ last_updated: t.last_updated, staleness: t.staleness })
+      } catch (_) { /* freshness line is omitted on failure */ }
+    }
+    void loadDataStatus()
   }, [loadStrategies, loadRegime, loadTerms])
 
-  const cumulativeData = strategies.length ? buildCumulativeReturns(strategies) : []
+  const cumulativeData = cumulative?.points ?? []
   const sorted = [...strategies].sort((a, b) => (b.sharpe_ratio ?? 0) - (a.sharpe_ratio ?? 0))
   const significant = strategies.filter((s) => s.is_significant)
   const bestSharpe = sorted[0]
@@ -267,18 +302,26 @@ export default function Dashboard() {
               </ExplainableText>:{' '}
             </span>
             <span className="text-slate-300">
+              {/* Correlation values are computed from market_data_monthly.
+                  When absent (cold start / test env) render "—" — never a
+                  hardcoded number that would read as a computed result. */}
               Pre-2022 rolling correlation averaged{' '}
               {regime.pre_2022_avg_correlation != null
                 ? (regime.pre_2022_avg_correlation >= 0 ? '+' : '') + regime.pre_2022_avg_correlation.toFixed(2)
-                : '−0.31'}.
+                : '—'}.
               {' '}Post-2022 it rose to{' '}
               {regime.post_2022_avg_correlation != null
                 ? (regime.post_2022_avg_correlation >= 0 ? '+' : '') + regime.post_2022_avg_correlation.toFixed(2)
-                : '+0.48'}{' '}
+                : '—'}{' '}
               during the rate-hiking cycle.
               Fixed income did not provide diversification benefit precisely when most needed.
               Dynamic strategies that adapt to regime are therefore preferred over static 60/40.
             </span>
+            {regime.as_of && (
+              <div className="text-2xs text-muted mt-1">
+                Regime signals as of {regime.as_of.slice(0, 16).replace('T', ' ')} UTC
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -351,10 +394,16 @@ export default function Dashboard() {
               </button>
             ))}
           </div>
+          {cumulativeData.length > 0 ? (
           <ResponsiveContainer width="100%" height={280}>
             <LineChart data={cumulativeData} margin={{ top: 5, right: 20, bottom: 5, left: 10 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#1e2d47" />
-              <XAxis dataKey="year" tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'JetBrains Mono' }} />
+              <XAxis
+                dataKey="date"
+                tickFormatter={(d: unknown) => typeof d === 'string' ? d.slice(0, 4) : ''}
+                minTickGap={50}
+                tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'JetBrains Mono' }}
+              />
               <YAxis
                 tickFormatter={(v: unknown) => typeof v === 'number' ? `${v.toFixed(1)}x` : ''}
                 tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'JetBrains Mono' }}
@@ -379,6 +428,11 @@ export default function Dashboard() {
               ))}
             </LineChart>
           </ResponsiveContainer>
+          ) : (
+            <div className="h-[280px] flex items-center justify-center text-muted text-xs">
+              Cumulative return series unavailable
+            </div>
+          )}
         </div>
 
         {/* Annotation strip + always-on Sources line */}
@@ -390,11 +444,28 @@ export default function Dashboard() {
 
         {/* Strategy comparison table */}
         <div className="card overflow-hidden" data-tour="strategy-table">
-          <div className="px-4 py-3 border-b border-border">
-            <h3 className="text-white font-semibold text-sm">Strategy Comparison — Ranked by Sharpe</h3>
-            <p className="text-muted text-xs mt-0.5">
-              Tier 1 significance: p &lt; 0.005 · FDR corrected · All 5 gates must pass for SIGNIFICANT
-            </p>
+          <div className="px-4 py-3 border-b border-border flex items-start justify-between gap-3">
+            <div>
+              <h3 className="text-white font-semibold text-sm">Strategy Comparison — Ranked by Sharpe</h3>
+              <p className="text-muted text-xs mt-0.5">
+                Tier 1 significance: p &lt; 0.005 · FDR corrected · All 5 gates must pass for SIGNIFICANT
+              </p>
+            </div>
+            {/* Data freshness — server-side computed_at + staleness pill,
+                consistent with Settings → Data and Study Period. */}
+            {dataFreshness && (
+              <div className="flex items-center gap-2 shrink-0">
+                {dataFreshness.last_updated && (
+                  <span className="text-2xs text-muted font-mono">
+                    computed {dataFreshness.last_updated.slice(0, 10)}
+                  </span>
+                )}
+                <span className={`text-2xs px-2 py-0.5 rounded-full border ${
+                  STALENESS_PILL[dataFreshness.staleness].cls}`}>
+                  {STALENESS_PILL[dataFreshness.staleness].label}
+                </span>
+              </div>
+            )}
           </div>
           <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: 'calc(100vh - 380px)' }}>
             <table className="w-full text-left">

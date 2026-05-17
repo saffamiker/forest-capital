@@ -4724,6 +4724,54 @@ The changelog table's tour_step_id column links a changelog entry to a
 tour step by the step's `id` (TourStep.id). Migration 013's row uses
 tour_step_id "welcome" — the id of the tour's first step.
 
+
+─────────────────────────────────────────────────────────────────────────────
+CODE REVIEW — Level 1 quality pass (May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+A surface-level review across ten areas (security, error handling, dead
+code, API consistency, async correctness, configuration, agent patterns,
+frontend, test coverage, and data integrity). Findings: 5 HIGH, 16
+MEDIUM, 8 LOW. All HIGH and MEDIUM and five LOW fixes landed in one
+commit; backend 1080 tests pass, frontend 193.
+
+HIGH — fixed:
+  - config.py fails fast in production when SECRET_KEY or MASTER_API_KEY
+    is unset or still the committed dev default (forged-session risk).
+  - database.py's default DATABASE_URL no longer carries a real password
+    — it is a non-secret placeholder; the real URL goes in .env.
+  - The Dashboard "Cumulative Returns" chart was a Math.sin() synthetic
+    mock rendered under a real header. It now renders the real
+    growth-of-$1 series from /api/v1/analytics/academic (283 monthly
+    points); an empty state shows when that data is unavailable.
+  - backtester.py no longer fabricates a ±0.10 Sharpe CI when the
+    probabilistic-Sharpe routine returns none — sharpe_ci_95 is None and
+    the strategy table renders "[—]".
+
+MEDIUM — fixed: generic client error messages with a logged ref id (no
+  exception text leaked); explainer Haiku-fallback logging symmetry;
+  references.json / auth-logout silent-swallow logging; a single
+  GEMINI_MODEL constant + model-string centralisation in the agent
+  registries and scope_guard; five missing env vars added to
+  .env.example; 201 on the three document-creation endpoints; the commit
+  sync endpoint returns proper 5xx; the council query response carries a
+  "mode": "live"|"fallback" flag; Dashboard data-freshness + regime
+  "as_of" indicators; auth added to the two /api/v1/provenance endpoints.
+
+LOW — fixed: hardcoded correlation fallbacks render "—"; the
+  X-Session-Type advisory-header behaviour is documented; the
+  /api/council/explain non-SSE contract is noted in its docstring.
+
+Deliberately NOT changed: agent-call error-handling asymmetry
+  (call_claude raises while the Gemini/Grok helpers return mocks) — left
+  asymmetric by design and documented in call_claude's docstring; the
+  two main.py agent registries were left as separate structures
+  (model strings centralised, but merging them is a refactor); model
+  strings in schemas.py example data (referencing constants risks a
+  models→agents import cycle); unused-import / dead-constant cleanup
+  deferred pending a vulture/ruff pass.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.

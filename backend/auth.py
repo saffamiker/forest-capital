@@ -157,8 +157,10 @@ def invalidate_session(token: str) -> None:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         session_id = payload.get("session_id", "")
         _sessions.pop(session_id, None)
-    except Exception:
-        pass
+    except Exception as exc:
+        # A malformed/expired token on logout is harmless (nothing to
+        # invalidate) — but log it so a real decode regression is visible.
+        log.debug("invalidate_session_decode_failed", error=str(exc))
 
 
 # ── Magic link delivery ───────────────────────────────────────────────────────

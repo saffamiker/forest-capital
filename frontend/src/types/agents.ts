@@ -11,6 +11,9 @@ export interface CouncilResponse {
   messages: AgentMessage[]
   final_recommendation: string
   consensus_reached: boolean
+  /** "live" = a real council run; "fallback" = demo/mock data returned
+   *  because the pipeline failed or the request ran in the test env. */
+  mode?: 'live' | 'fallback'
 }
 
 export type Verdict = 'PASS' | 'WARN' | 'FAIL'

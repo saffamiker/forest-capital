@@ -81,9 +81,11 @@ def _minimal_storyboard() -> dict:
 class TestStoryboardDraftEndpoint:
     """POST /api/documents/storyboard/draft generates a 15-slide AI draft."""
 
-    def test_endpoint_returns_200(self, client: TestClient) -> None:
+    def test_endpoint_returns_201(self, client: TestClient) -> None:
+        # 201 Created — the endpoint creates a new storyboard draft
+        # (Level 1 review M10).
         r = client.post("/api/documents/storyboard/draft", headers=_auth_headers())
-        assert r.status_code == 200, r.text[:300]
+        assert r.status_code == 201, r.text[:300]
 
     def test_response_contains_storyboard(self, client: TestClient) -> None:
         r = client.post("/api/documents/storyboard/draft", headers=_auth_headers())

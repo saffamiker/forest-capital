@@ -78,6 +78,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     }
   }, [sessionId])
 
+  // X-Session-Type is an ADVISORY, client-trusted header — it lets a user
+  // opt their own session out of the analytical activity view (Testing
+  // Mode). It is not a security boundary: any authenticated user could
+  // send "testing" directly. That is acceptable — it only affects
+  // self-attribution of activity, and team-email gating remains the
+  // authoritative server-side filter.
   useEffect(() => {
     axios.defaults.headers.common['X-Session-Type'] = sessionType
   }, [sessionType])

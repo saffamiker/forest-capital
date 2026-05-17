@@ -19,6 +19,8 @@ from typing import Any
 
 import structlog
 
+from agents.base import GEMINI_MODEL
+
 log = structlog.get_logger(__name__)
 
 _SYSTEM_PROMPT = """You are an independent investment analyst reviewing recommendations \
@@ -83,10 +85,10 @@ class IndependentAnalyst:
             try:
                 from tools.academic_context import inject_academic_context
                 system_instruction = inject_academic_context(_SYSTEM_PROMPT)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                log.warning("academic_context_inject_failed", error=str(exc))
             model = genai.GenerativeModel(
-                "gemini-1.5-pro",
+                GEMINI_MODEL,
                 system_instruction=system_instruction,
             )
 

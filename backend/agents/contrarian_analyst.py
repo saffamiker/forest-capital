@@ -39,7 +39,8 @@ def _academic_ctx(system_prompt: str) -> str:
     try:
         from tools.academic_context import inject_academic_context
         return inject_academic_context(system_prompt)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_context_inject_failed", error=str(exc))
         return system_prompt
 
 # XAI_API_URL is kept as a backwards-compatible export — older tests that

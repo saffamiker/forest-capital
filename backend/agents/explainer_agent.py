@@ -44,7 +44,8 @@ def _inject_academic(system_prompt: str) -> str:
     try:
         from tools.academic_context import inject_academic_context
         return inject_academic_context(system_prompt)
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_context_inject_failed", error=str(exc))
         return system_prompt
 
 
@@ -193,7 +194,14 @@ def _call_llm(system_prompt: str, user_message: str, max_tokens: int = 800) -> s
 
     # Haiku fallback — generous token cap so JSON responses complete fully.
     fallback_tokens = max(max_tokens, HAIKU_FALLBACK_MAX_TOKENS)
-    return call_claude(HAIKU_MODEL, system_prompt, user_message, fallback_tokens)
+    try:
+        return call_claude(HAIKU_MODEL, system_prompt, user_message, fallback_tokens)
+    except Exception as exc:
+        # Both providers are down. Logged symmetrically with the Grok path
+        # above so the failure surface is consistent; re-raised so the
+        # caller's per-method try/except handles it exactly as before.
+        log.error("explainer_haiku_fallback_failed", error=str(exc))
+        raise
 
 
 def _repair_common_json_mistakes(text: str) -> str:

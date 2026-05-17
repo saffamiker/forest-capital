@@ -88,7 +88,7 @@ export interface StrategyResult {
   deflated_sharpe_ratio?: number
   dsr_p_value?: number
   probabilistic_sharpe_ratio?: number
-  sharpe_ci_95?: [number, number]
+  sharpe_ci_95?: [number, number] | null
   spa_p_value?: number
   passes_spa?: boolean
   cross_validation?: CrossValidation

@@ -23,6 +23,10 @@ os.environ.setdefault(
     "ruurdsm@queens.edu,thaob@queens.edu,murdockm@queens.edu,panttserk@queens.edu",
 )
 
+# The /api/v1/provenance endpoint requires auth (Level 1 review M15).
+from auth import generate_session_token  # noqa: E402
+_PROVENANCE_AUTH = {"X-API-Key": generate_session_token("ruurdsm@queens.edu")}
+
 # ── Fixture helpers ───────────────────────────────────────────────────────────
 
 SAMPLE_PROVENANCE = {
@@ -95,7 +99,7 @@ def _client_with_provenance(tmp_prov: Path):
 
     # Patch the path used by the endpoint
     with patch.object(main_module, "_PROVENANCE_PATH", tmp_prov):
-        client = TestClient(main_module.app)
+        client = TestClient(main_module.app, headers=_PROVENANCE_AUTH)
         yield client
 
 
@@ -111,7 +115,7 @@ def test_provenance_endpoint_returns_200_when_file_exists():
         import main as main_module
         importlib.reload(main_module)
         with patch.object(main_module, "_PROVENANCE_PATH", tmp):
-            client = TestClient(main_module.app)
+            client = TestClient(main_module.app, headers=_PROVENANCE_AUTH)
             resp = client.get("/api/v1/provenance")
         assert resp.status_code == 200
     finally:
@@ -128,7 +132,7 @@ def test_provenance_endpoint_returns_series_list():
         import main as main_module
         importlib.reload(main_module)
         with patch.object(main_module, "_PROVENANCE_PATH", tmp):
-            client = TestClient(main_module.app)
+            client = TestClient(main_module.app, headers=_PROVENANCE_AUTH)
             resp = client.get("/api/v1/provenance")
             data = resp.json()
         assert "series" in data
@@ -146,7 +150,7 @@ def test_provenance_endpoint_returns_200_when_file_missing():
     importlib.reload(main_module)
     missing = Path("/nonexistent/path/provenance.json")
     with patch.object(main_module, "_PROVENANCE_PATH", missing):
-        client = TestClient(main_module.app)
+        client = TestClient(main_module.app, headers=_PROVENANCE_AUTH)
         resp = client.get("/api/v1/provenance")
     assert resp.status_code == 200
     data = resp.json()
@@ -163,7 +167,7 @@ def test_provenance_endpoint_series_have_required_fields():
         import main as main_module
         importlib.reload(main_module)
         with patch.object(main_module, "_PROVENANCE_PATH", tmp):
-            client = TestClient(main_module.app)
+            client = TestClient(main_module.app, headers=_PROVENANCE_AUTH)
             resp = client.get("/api/v1/provenance")
             data = resp.json()
         required = {"series_id", "display_name", "source_type", "source_detail", "frequency"}
@@ -174,8 +178,10 @@ def test_provenance_endpoint_series_have_required_fields():
         tmp.unlink(missing_ok=True)
 
 
-def test_provenance_endpoint_no_auth_required():
-    """Provenance is a GET endpoint — no authentication required."""
+def test_provenance_endpoint_requires_auth():
+    """Provenance requires authentication (Level 1 review M15) — an
+    unauthenticated request is rejected with 401, consistent with every
+    other /api/v1/* route."""
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(SAMPLE_PROVENANCE, f)
         tmp = Path(f.name)
@@ -185,9 +191,8 @@ def test_provenance_endpoint_no_auth_required():
         import main as main_module
         importlib.reload(main_module)
         with patch.object(main_module, "_PROVENANCE_PATH", tmp):
-            client = TestClient(main_module.app)
-            # No Authorization header — should still return 200
+            client = TestClient(main_module.app)  # no auth header
             resp = client.get("/api/v1/provenance")
-        assert resp.status_code == 200
+        assert resp.status_code == 401
     finally:
         tmp.unlink(missing_ok=True)

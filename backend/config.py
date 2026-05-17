@@ -115,6 +115,23 @@ ENVIRONMENT              = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL             = os.getenv("FRONTEND_URL", "http://localhost:5173")
 SECRET_KEY               = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
 MASTER_API_KEY           = os.getenv("MASTER_API_KEY", "michael_dev_key_here")
+
+# Fail fast in production if either security-critical secret was never set.
+# The dev defaults above are committed to the repo, so running production on
+# them would allow anyone to forge session tokens / magic links (SECRET_KEY)
+# or use a publicly known master key (MASTER_API_KEY). config.py is imported
+# at startup, so an unset secret aborts the process before it serves traffic.
+if ENVIRONMENT == "production":
+    if SECRET_KEY == "dev-secret-key-change-in-production":
+        raise RuntimeError(
+            "SECRET_KEY must be set in production — the committed dev default "
+            "is public and would allow forged session tokens."
+        )
+    if MASTER_API_KEY == "michael_dev_key_here":
+        raise RuntimeError(
+            "MASTER_API_KEY must be set in production — the committed dev "
+            "default is public."
+        )
 MAGIC_LINK_EXPIRY_MINUTES = int(os.getenv("MAGIC_LINK_EXPIRY_MINUTES", "15"))
 SESSION_EXPIRY_HOURS     = int(os.getenv("SESSION_EXPIRY_HOURS", "8"))
 ALLOWED_EMAILS           = set(
