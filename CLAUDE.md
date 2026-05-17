@@ -4171,12 +4171,23 @@ holds the pure compute functions.
     2022 break, Sharpe + CAGR per sub-period, sorted by post-2022 Sharpe
   - Drawdown comparison table — max drawdown and recovery months,
     sorted by max drawdown ascending
-  - Turnover column — added to the Dashboard strategy comparison table
-  - Fama-French factor loadings table — three-factor OLS regression of
-    each strategy's monthly excess return on MKT-RF / SMB / HML (momentum
-    is not in ff_factors_monthly, so this is a three-factor, not Carhart
-    four-factor, regression); betas, annualised alpha, R², and a p<0.05
-    significance flag per coefficient
+  - Turnover column — added to the Dashboard strategy comparison table.
+    Shows true_turnover, the genuine sum-of-absolute-weight-change
+    figure (sum(|Δw|)/2 per rebalance, annualised), alongside the
+    legacy rebalance-count proxy avg_monthly_turnover
+  - Carhart four-factor loadings table — OLS regression of each
+    strategy's monthly excess return on MKT-RF / SMB / HML / MOM; betas,
+    annualised alpha, R², and a p<0.05 significance flag per coefficient.
+    MOM is backfilled into ff_factors_monthly from Ken French's momentum
+    series (direct HTTP, F-F_Momentum_Factor_CSV.zip); a strategy whose
+    history predates the backfill falls back to a three-factor fit
+
+The combined analytics enhancement pass (May 16 2026) also added:
+cumulative total return and rolling excess return to the /academic
+payload, a source-controlled strategy_metadata record per strategy,
+and parameter sensitivity on its own endpoint
+(GET /api/v1/analytics/sensitivity — kept off the light /academic path
+because it re-runs ~23 backtests).
 
 Every table exports to CSV for the midpoint paper.
 
@@ -4346,8 +4357,8 @@ was written, so the GitHub board was not updated programmatically).
 
   POST-DEADLINE:
   □ Move to develop → main PR flow with required status checks
-  □ Four-factor (Carhart) FF if MOM data can be sourced
-  □ True portfolio turnover in the backtester
+  ✅ Four-factor (Carhart) FF — MOM backfilled into ff_factors_monthly
+  ✅ True portfolio turnover in the backtester
 
 ─── JUNE 3 MILESTONE ───────────────────────────────────────────────────
   Items that must land for the midpoint check-in:
