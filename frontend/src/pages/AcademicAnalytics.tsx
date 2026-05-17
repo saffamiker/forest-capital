@@ -98,6 +98,7 @@ interface DrawdownRow {
 
 interface FactorRow {
   strategy: string
+  model: string
   alpha_annualized: number
   alpha_significant: boolean
   mkt_rf: number
@@ -106,6 +107,8 @@ interface FactorRow {
   smb_significant: boolean
   hml: number
   hml_significant: boolean
+  mom: number | null
+  mom_significant: boolean
   r_squared: number
   n_months: number
 }
@@ -431,10 +434,10 @@ function DrawdownComparisonTable({ rows }: { rows: DrawdownRow[] }) {
 // ── 5. Fama-French factor loadings table ──────────────────────────────────────
 
 function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
-  const headers = ['Strategy', 'Alpha (annualized)', 'MKT-RF', 'SMB', 'HML', 'R-squared']
+  const headers = ['Strategy', 'Alpha (annualized)', 'MKT-RF', 'SMB', 'HML', 'MOM', 'R-squared']
   const exportRows = rows.map((r) => [
     r.strategy, pct(r.alpha_annualized), num(r.mkt_rf), num(r.smb), num(r.hml),
-    num(r.r_squared),
+    r.mom === null ? '—' : num(r.mom), num(r.r_squared),
   ])
   // A loading is rendered bold + with a * suffix when p < 0.05.
   const Beta = ({ v, sig }: { v: number; sig: boolean }) => (
@@ -442,16 +445,27 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
       {num(v)}{sig ? ' *' : ''}
     </span>
   )
+  // A strategy whose history predates the momentum backfill falls back to a
+  // three-factor fit — flag the table when any row did.
+  const anyThreeFactor = rows.some((r) => r.model !== 'carhart_4factor')
   return (
     <SectionCard
-      title="Fama-French Factor Loadings"
-      subtitle="OLS regression of each strategy's monthly excess return on the three-factor model. * marks loadings significant at p < 0.05. Momentum is not in the dataset — this is a three-factor, not Carhart four-factor, regression."
+      title="Carhart Four-Factor Loadings"
+      subtitle={
+        'OLS regression of each strategy\'s monthly excess return on the '
+        + 'Carhart four-factor model (MKT-RF, SMB, HML, MOM). * marks loadings '
+        + 'significant at p < 0.05.'
+        + (anyThreeFactor
+          ? ' A dash in the MOM column marks a strategy whose history predates '
+            + 'the momentum-factor data — those rows use a three-factor fit.'
+          : '')
+      }
       exportButton={<TableExportButton tableId="factor_loadings" headers={headers} rows={exportRows} />}
     >
       <table className="w-full">
         <thead><tr className="border-b border-border">
           <TH>Strategy</TH><TH right>Alpha (annualized)</TH><TH right>MKT-RF</TH>
-          <TH right>SMB</TH><TH right>HML</TH><TH right>R²</TH>
+          <TH right>SMB</TH><TH right>HML</TH><TH right>MOM</TH><TH right>R²</TH>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
@@ -465,6 +479,11 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
               <TD right mono><Beta v={r.mkt_rf} sig={r.mkt_rf_significant} /></TD>
               <TD right mono><Beta v={r.smb} sig={r.smb_significant} /></TD>
               <TD right mono><Beta v={r.hml} sig={r.hml_significant} /></TD>
+              <TD right mono>
+                {r.mom === null
+                  ? <span className="text-text-muted">—</span>
+                  : <Beta v={r.mom} sig={r.mom_significant} />}
+              </TD>
               <TD right mono>{num(r.r_squared)}</TD>
             </tr>
           ))}
