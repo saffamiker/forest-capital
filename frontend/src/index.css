@@ -50,6 +50,17 @@
   }
 }
 
+/* Mobile nav drawer entrance — referenced via Tailwind arbitrary
+   animate-[fc-slide-in-left_…] / animate-[fc-fade-in_…] utilities. */
+@keyframes fc-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+@keyframes fc-slide-in-left {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+
 @layer components {
   .card {
     @apply bg-navy-800 border border-border rounded-lg;
