@@ -650,7 +650,7 @@ export function CumulativeReturnChart(
       tourId="cumulative-return"
       infoKey="cumulative_return_chart"
       theme={theme}
-      subtitle="Growth of $1 invested in each strategy over the full study period. The benchmark (100% equity) is the bold grey reference line."
+      subtitle="Growth of $1 invested in each strategy over the full study period. The benchmark (100% equity) is the bold grey reference line. Use the scale button above to switch the Y axis between linear and logarithmic."
       dataExplain={{ currentValue: cumulativeSummary }}
       exportButton={
         <div className="flex items-center gap-2">

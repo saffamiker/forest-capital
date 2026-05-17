@@ -23,6 +23,9 @@ import TableExportButton from './TableExportButton'
 // Canonical strategy-colour map — one source of truth shared with every
 // chart component (was duplicated locally in this file).
 import { STRATEGY_COLORS } from '../lib/strategyColors'
+import {
+  STRATEGY_METADATA, strategyTooltipKey, strategyMetaSummary,
+} from '../constants/strategyMetadata'
 
 // ── Real cumulative-return series ──────────────────────────────────────────
 // Growth of $1, one point per month, served by /api/v1/analytics/academic
@@ -115,6 +118,8 @@ interface StrategyTableRowProps {
 function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps) {
   const isSignificant = s.is_significant
   const pFmt = (p: number | undefined) => p == null ? '—' : p >= 0.01 ? p.toFixed(3) : p.toFixed(4)
+  // Strategy-rules metadata behind the ⓘ icon on the strategy name.
+  const meta = STRATEGY_METADATA[s.strategy_name]
   return (
     <tr
       className={`border-t border-border cursor-pointer transition-colors ${
@@ -125,7 +130,22 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
       <td className="px-3 py-2 font-mono text-muted text-xs">{rank}</td>
       <td className="px-3 py-2">
         <div className="flex items-center gap-2">
-          <span className="text-white text-xs font-medium">{s.strategy_name.replace(/_/g, ' ')}</span>
+          <span className="inline-flex items-center">
+            <span className="text-white text-xs font-medium">{s.strategy_name.replace(/_/g, ' ')}</span>
+            {/* ⓘ — hover for the strategy type + one-line description,
+                click for the full rules explanation. Wrapped so the
+                click does not also select the table row. */}
+            <span
+              className="inline-flex"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <InfoIcon
+                tooltipKey={strategyTooltipKey(s.strategy_name)}
+                metricLabel={`${s.strategy_name.replace(/_/g, ' ')} strategy`}
+                {...(meta ? { currentValue: strategyMetaSummary(meta) } : {})}
+              />
+            </span>
+          </span>
           <span className={`text-2xs px-1 py-0.5 rounded ${
             s.strategy_type === 'dynamic'
               ? 'text-electric bg-electric/10 border border-electric/20'

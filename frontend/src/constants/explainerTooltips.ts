@@ -13,7 +13,20 @@
  * suffix (e.g. cumulative_return_chart); table-column keys are the bare
  * metric name (e.g. cagr, sharpe). Every key wired into an InfoIcon
  * must have a non-empty entry here — test_explainer_tooltips enforces it.
+ *
+ * The per-strategy entries (strategy_*) are derived from strategyMetadata
+ * so the type + one-line description stay a single source of truth with
+ * the ExplainerPanel click data.
  */
+import { STRATEGY_METADATA, strategyTooltipKey } from './strategyMetadata'
+
+// One hover tooltip per strategy: "Static/Dynamic strategy. <description>".
+const STRATEGY_TOOLTIPS: Record<string, string> = Object.fromEntries(
+  Object.entries(STRATEGY_METADATA).map(([id, m]) => [
+    strategyTooltipKey(id),
+    `${m.type === 'dynamic' ? 'Dynamic' : 'Static'} strategy. ${m.description}`,
+  ]),
+)
 
 export const EXPLAINER_TOOLTIPS: Record<string, string> = {
   // ── Analytics page — charts ────────────────────────────────────────────────
@@ -175,6 +188,9 @@ export const EXPLAINER_TOOLTIPS: Record<string, string> = {
     'The tangency portfolio — the static mix of equity, IG bonds, and HY '
     + 'bonds that maximises the Sharpe ratio. Dynamic strategies that plot '
     + 'above this point outperform the theoretical static optimum.',
+
+  // ── Dashboard page — strategy names (derived from strategyMetadata) ────────
+  ...STRATEGY_TOOLTIPS,
 }
 
 /** A tooltip key with a guaranteed non-empty entry. */
