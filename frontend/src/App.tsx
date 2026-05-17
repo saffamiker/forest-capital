@@ -17,6 +17,7 @@ import StoryboardEditor from './pages/StoryboardEditor'
 import SectionEditor from './pages/SectionEditor'
 import { BrandProvider } from './context/BrandContext'
 import { UIProvider } from './context/UIContext'
+import { SessionProvider } from './context/SessionContext'
 
 // ── Auth context ──────────────────────────────────────────────────────────────
 
@@ -167,33 +168,35 @@ function RequireAuth({ children }: { children: ReactNode }) {
 export default function App() {
   return (
     <AuthProvider>
-      <BrandProvider>
-        <UIProvider>
-          <Routes>
-            <Route path="/login" element={<LoginPage />} />
-            <Route path="/auth/verify" element={<AuthVerify />} />
-            <Route
-              path="/*"
-              element={
-                <RequireAuth>
-                  <MainLayout />
-                </RequireAuth>
-              }
-            >
-              <Route index element={<Dashboard />} />
-              <Route path="statistical-evidence" element={<StatisticalEvidence />} />
-              <Route path="regime-analysis" element={<RegimeAnalysis />} />
-              <Route path="analytics" element={<AcademicAnalytics />} />
-              <Route path="council" element={<CouncilDebate />} />
-              <Route path="qa" element={<QAAuditPanel />} />
-              <Route path="reports" element={<Reports />} />
-              <Route path="settings" element={<Settings />} />
-              <Route path="reports/storyboard" element={<StoryboardEditor />} />
-              <Route path="reports/document/:documentId" element={<SectionEditor />} />
-            </Route>
-          </Routes>
-        </UIProvider>
-      </BrandProvider>
+      <SessionProvider>
+        <BrandProvider>
+          <UIProvider>
+            <Routes>
+              <Route path="/login" element={<LoginPage />} />
+              <Route path="/auth/verify" element={<AuthVerify />} />
+              <Route
+                path="/*"
+                element={
+                  <RequireAuth>
+                    <MainLayout />
+                  </RequireAuth>
+                }
+              >
+                <Route index element={<Dashboard />} />
+                <Route path="statistical-evidence" element={<StatisticalEvidence />} />
+                <Route path="regime-analysis" element={<RegimeAnalysis />} />
+                <Route path="analytics" element={<AcademicAnalytics />} />
+                <Route path="council" element={<CouncilDebate />} />
+                <Route path="qa" element={<QAAuditPanel />} />
+                <Route path="reports" element={<Reports />} />
+                <Route path="settings" element={<Settings />} />
+                <Route path="reports/storyboard" element={<StoryboardEditor />} />
+                <Route path="reports/document/:documentId" element={<SectionEditor />} />
+              </Route>
+            </Routes>
+          </UIProvider>
+        </BrandProvider>
+      </SessionProvider>
     </AuthProvider>
   )
 }
