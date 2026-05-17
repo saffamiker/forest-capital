@@ -180,8 +180,11 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 
 # ── SITE TOUR ─────────────────────────────────────────────────────────────────
-# The current site-tour version. The What's New modal compares this against
-# each user's last_tour_version_seen to decide whether to offer the tour.
-# Increment this by 1 whenever the site tour is rebuilt — the next bump is
-# scheduled for when the tour itself is built.
-TOUR_VERSION = 1
+# The current site-tour version. /api/v1/changelog/unseen compares this
+# against each user's last_tour_version_seen: when last_tour_version_seen is
+# lower, has_tour_update is true — the What's New modal offers the tour and
+# SiteTour auto-starts once per login session.
+# Increment this by 1 whenever the tour's steps change materially, and ship
+# a changelog entry in the same migration (see migration 013). Version 2
+# corresponds to the initial guided tour built in migration 013.
+TOUR_VERSION = 2
