@@ -615,3 +615,94 @@ class ExplainerAgent:
             "narrative": "See the technical findings panel for detailed statistics.",
             "what_to_watch": "Focus on strategy lines vs the benchmark (red).",
         }
+
+
+# ── Inline metric explainer — streamed ────────────────────────────────────────
+
+def _metric_explain_prompt(metric: str, current_value: Any) -> str:
+    """Builds the user message for POST /api/council/explain. Anchors the
+    explanation to the value on screen and to the project's central thesis."""
+    value_str = "not shown" if current_value in (None, "") else str(current_value)
+    return (
+        f"You are explaining the {metric} metric to a senior investment "
+        f"professional who is evaluating portfolio strategies.\n\n"
+        f"Current value: {value_str}\n\n"
+        f"Explain in plain English:\n"
+        f"1. What this metric measures and why it matters\n"
+        f"2. How to interpret the current value shown ({value_str}) — is it "
+        f"good, concerning, or typical?\n"
+        f"3. What this means specifically for an asset allocation strategy "
+        f"comparing equity, investment-grade bonds, and high-yield bonds\n"
+        f"4. One sentence on why this is relevant to the academic project's "
+        f"central thesis (the 2022 correlation regime break and its impact "
+        f"on diversification)\n\n"
+        f"Be direct and specific. No more than 200 words. Plain English "
+        f"throughout."
+    )
+
+
+def _mock_metric_explanation(metric: str) -> list[str]:
+    """Deterministic explanation chunks for the test environment / no API key."""
+    text = (
+        f"[mock explanation — the live explainer model is unavailable in this "
+        f"environment] {metric} is a standard portfolio-analysis metric. "
+        f"Interpret the value shown against the benchmark, and read it in the "
+        f"context of the 2022 equity-bond correlation regime break — the "
+        f"central question of whether diversification still holds."
+    )
+    words = text.split(" ")
+    return [" ".join(words[i:i + 8]) + " " for i in range(0, len(words), 8)]
+
+
+async def stream_metric_explanation(metric: str, current_value: Any):
+    """
+    Async generator yielding a plain-English explanation of one metric in
+    text chunks — backs POST /api/council/explain.
+
+    Uses the Explainer's system prompt and streams via Anthropic Haiku
+    (HAIKU_MODEL). The Anthropic streaming client is synchronous, so the
+    real path runs it in a worker thread and pushes chunks onto an
+    asyncio.Queue, keeping the event loop free. Test environments and a
+    missing key fall back to a deterministic mock.
+    """
+    import asyncio
+    import threading
+
+    if os.getenv("ENVIRONMENT", "development") == "test" \
+            or not os.getenv("ANTHROPIC_API_KEY"):
+        for chunk in _mock_metric_explanation(metric):
+            yield chunk
+        return
+
+    user_message = _metric_explain_prompt(metric, current_value)
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+    sentinel = object()
+
+    def _worker() -> None:
+        try:
+            from agents.base import get_anthropic_client
+            client = get_anthropic_client()
+            with client.messages.stream(
+                model=HAIKU_MODEL,
+                max_tokens=400,
+                system=_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_message}],
+            ) as stream:
+                for text in stream.text_stream:
+                    loop.call_soon_threadsafe(queue.put_nowait, text)
+        except Exception as exc:  # noqa: BLE001
+            log.error("explainer_metric_stream_failed", metric=metric, error=str(exc))
+            loop.call_soon_threadsafe(
+                queue.put_nowait,
+                "The explainer is temporarily unavailable. The hover tooltip "
+                "still describes this metric.")
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, sentinel)
+
+    threading.Thread(target=_worker, daemon=True).start()
+    while True:
+        item = await queue.get()
+        if item is sentinel:
+            break
+        yield item

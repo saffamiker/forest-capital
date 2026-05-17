@@ -1329,6 +1329,49 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ── Inline metric explainer ───────────────────────────────────────────────────
+
+@app.post("/api/council/explain")
+@limiter.limit("30/minute")
+async def council_explain(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_auth),
+):
+    """
+    Streams a plain-English explanation of one metric or chart — backs
+    the InfoIcon → ExplainerPanel click path on the Analytics and
+    Dashboard screens.
+
+    Uses the Explainer agent's system prompt and streams via Haiku. The
+    response is a text/plain stream of explanation chunks. The completed
+    explanation is logged to agent_interactions as interaction_type
+    "explain" (team-gated inside log_agent_interaction).
+    """
+    metric = str(body.get("metric") or "").strip()
+    if not metric:
+        raise HTTPException(status_code=422, detail="metric is required")
+    current_value = body.get("current_value")
+
+    from agents.explainer_agent import stream_metric_explanation
+
+    async def gen():
+        collected: list[str] = []
+        async for chunk in stream_metric_explanation(metric, current_value):
+            collected.append(chunk)
+            yield chunk
+        # Team Activity — non-blocking, team-gated inside log_agent_interaction.
+        _log_interaction_bg(
+            request, session, "explain",
+            question_text=metric,
+            response_summary="".join(collected),
+            metadata=({"current_value": str(current_value)}
+                      if current_value not in (None, "") else None),
+        )
+
+    return StreamingResponse(gen(), media_type="text/plain")
+
+
 # ── Team Activity ─────────────────────────────────────────────────────────────
 
 @app.post("/api/v1/activity/events")

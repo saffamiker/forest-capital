@@ -55,7 +55,8 @@ except Exception:  # pragma: no cover
 _SESSION_EVENT_TYPES = {
     "login", "logout", "page_view", "feature_click", "export", "login_failed",
 }
-_INTERACTION_TYPES = {"council", "academic_review", "qa", "document_upload"}
+_INTERACTION_TYPES = {"council", "academic_review", "qa", "document_upload",
+                      "explain"}
 _SESSION_TYPES = {"analytical", "testing"}
 
 
