@@ -2323,6 +2323,409 @@ async def export_package(
         )
 
 
+# ── Academic deliverable generation — first-draft .docx / .pptx ───────────────
+#
+# POST /api/v1/export/midpoint-paper     → 3-page midpoint submission (.docx)
+# POST /api/v1/export/executive-brief    → 5-page executive brief (.docx)
+# POST /api/v1/export/presentation-deck  → 16-slide final deck (.pptx)
+#
+# Each assembles a graded deliverable as a FIRST DRAFT for Bob to refine:
+# every figure is real platform data (tools/academic_export.gather_document_
+# data — light cache reads, never a pipeline run), and every narrative
+# section is written by the Academic Writer agent run through the generator-
+# evaluator harness. A section whose source data is unavailable is filled
+# with a [DATA PENDING] marker — a missing input never fails the document.
+
+_DOCX_MEDIA = ("application/vnd.openxmlformats-officedocument."
+               "wordprocessingml.document")
+_PPTX_MEDIA = ("application/vnd.openxmlformats-officedocument."
+               "presentationml.presentation")
+
+
+async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
+    """
+    Generates a set of narrative sections concurrently.
+
+    Each spec is {key, agent_id, task, context, available, pending?}.
+    Sections with available=False skip the LLM entirely and take their
+    [DATA PENDING] marker directly; the rest run through harness_narrative
+    in worker threads (the harness is synchronous) and complete in
+    parallel — the same asyncio.to_thread fan-out the Academic Review
+    peer agents use.
+    """
+    import asyncio
+
+    from tools.academic_export import DATA_PENDING, harness_narrative
+
+    out: dict[str, str] = {}
+    jobs: list[tuple[str, Any]] = []
+    for spec in specs:
+        if not spec.get("available", True):
+            out[spec["key"]] = spec.get(
+                "pending", f"{DATA_PENDING} — source data unavailable.")
+            continue
+        jobs.append((spec["key"], asyncio.to_thread(
+            harness_narrative, spec["agent_id"], spec["task"], spec["context"])))
+    if jobs:
+        results = await asyncio.gather(*[j for _, j in jobs],
+                                       return_exceptions=True)
+        for (key, _), res in zip(jobs, results):
+            out[key] = res if isinstance(res, str) else (
+                f"{DATA_PENDING} — narrative generation failed.")
+    return out
+
+
+@app.post("/api/v1/export/midpoint-paper")
+@limiter.limit("6/minute")
+async def export_midpoint_paper(
+    request: Request, session: dict = Depends(require_auth),
+):
+    """
+    Generates the three-page midpoint submission as a .docx download.
+
+    Four sections per the FNA 670 brief — Data & Methodology, Preliminary
+    Results (with the summary-statistics and regime-conditional tables
+    embedded), Roles & Division of Labor (from real Team Activity counts),
+    and Next Steps (from the last Academic Review verdict). Double-spaced,
+    12 pt Times New Roman, 1-inch margins, page numbers. The four narrative
+    sections are written by the Academic Writer agent through the harness;
+    the call can take 30-60 seconds.
+    """
+    import asyncio
+    from datetime import date
+
+    from tools.academic_docx import build_midpoint_paper
+    from tools.academic_export import DATA_PENDING, gather_document_data
+
+    try:
+        data = await gather_document_data()
+        period = data["study_period"]
+        has_results = bool(data["summary_statistics"] or data["regime_conditional"])
+        has_team = bool((data["team_summary"] or {}).get("per_member"))
+        has_review = bool(data["last_review_text"])
+
+        specs = [
+            {"key": "methodology", "available": True,
+             "agent_id": "midpoint_methodology",
+             "task": (
+                 "Write the Data and Methodology section of a graduate "
+                 "finance midpoint paper — about 250 words, APA style, past "
+                 "tense, third person. Cover the data sources (aligned "
+                 "monthly returns for equity, investment-grade and high-yield "
+                 "bonds; Carhart factor series), the study period, the "
+                 "portfolio constraints (long-only, fully invested, no cash, "
+                 "quarterly rebalancing), the ten strategies grouped as "
+                 "static versus dynamic, and the Carhart four-factor "
+                 "attribution model."),
+             "context": {"study_period": period,
+                         "strategy_metadata": data.get("strategy_metadata"),
+                         "risk_free_rate": data["risk_free_rate"]}},
+            {"key": "results", "available": has_results,
+             "pending": (f"{DATA_PENDING} — preliminary results require the "
+                         "analytics caches. Load the dashboard once to warm "
+                         "them, then regenerate this paper."),
+             "agent_id": "midpoint_results",
+             "task": (
+                 "Write the Preliminary Results section — about 250 words. "
+                 "Interpret the summary statistics and the regime-conditional "
+                 "performance; do not merely list numbers. You MUST explicitly "
+                 "discuss the 2022 equity-bond correlation break and what the "
+                 "pre- versus post-2022 Sharpe ratios reveal. Reference "
+                 "Table 1 (summary statistics) and Table 2 (regime-conditional "
+                 "performance)."),
+             "context": {"summary_statistics": data["summary_statistics"],
+                         "regime_conditional": data["regime_conditional"],
+                         "correlation_pre_post": {
+                             "pre_2022": data["rolling_correlation"].get("pre_2022"),
+                             "post_2022": data["rolling_correlation"].get("post_2022")}}},
+            {"key": "roles", "available": has_team,
+             "pending": (f"{DATA_PENDING} — Team Activity data unavailable. "
+                         "State roles manually: Michael Ruurds (engineering "
+                         "lead), Bob Thao (written deliverables lead), Molly "
+                         "Murdock (presentation lead)."),
+             "agent_id": "midpoint_roles",
+             "task": (
+                 "Write the Roles and Division of Labor section — about 150 "
+                 "words. The team: Michael Ruurds (engineering lead), Bob "
+                 "Thao (written deliverables lead), Molly Murdock "
+                 "(presentation lead). Ground the coordination narrative in "
+                 "the supplied platform-activity counts — commits, council "
+                 "sessions, academic reviews — rather than generic claims."),
+             "context": {"team_summary": data["team_summary"]}},
+            {"key": "next_steps", "available": has_review,
+             "pending": (f"{DATA_PENDING} — no Academic Review verdict on "
+                         "record. Run an Academic Review on the Council "
+                         "screen, then regenerate; meanwhile list next steps "
+                         "as planned work."),
+             "agent_id": "midpoint_next_steps",
+             "task": (
+                 "Write the Next Steps and Open Questions section — about 150 "
+                 "words. Convert the supplied Academic Review verdict — its "
+                 "Priority Areas for Further Investigation and any Developing "
+                 "or Needs Work ratings — into a forward-looking next-steps "
+                 "narrative."),
+             "context": {"academic_review_verdict":
+                         (data["last_review_text"] or "")[:4000]}},
+        ]
+        narratives = await _generate_narratives(specs)
+        docx_bytes = await asyncio.to_thread(build_midpoint_paper, data, narratives)
+
+        _log_interaction_bg(
+            request, session, "export", agents_involved=["academic_writer"],
+            response_summary="Midpoint paper generated",
+            metadata={"deliverable": "midpoint_paper",
+                      "data_available": data["available"]})
+
+        filename = f"forest-capital-midpoint-paper-{date.today().isoformat()}.docx"
+        return Response(
+            content=docx_bytes, media_type=_DOCX_MEDIA,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("midpoint_paper_export_error", ref=ref, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Midpoint paper generation failed (ref: {ref})")
+
+
+@app.post("/api/v1/export/executive-brief")
+@limiter.limit("6/minute")
+async def export_executive_brief(
+    request: Request, session: dict = Depends(require_auth),
+):
+    """
+    Generates the five-page executive brief as a .docx download.
+
+    A title page, then Executive Summary, Methodology Overview, four Key
+    Findings (the 2022 correlation break, static results, dynamic results,
+    factor analysis — with the regime-conditional, summary-statistics,
+    drawdown and factor-loadings tables embedded), Limitations and Risks,
+    and Final Recommendations. Senior-investment-audience tone. The eight
+    narrative sections run through the Academic Writer harness and the
+    call can take 45-90 seconds.
+    """
+    import asyncio
+    from datetime import date
+
+    from tools.academic_docx import build_executive_brief
+    from tools.academic_export import DATA_PENDING, gather_document_data
+
+    try:
+        data = await gather_document_data()
+        avail = data["available"]
+        pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
+                   "dashboard once, then regenerate this brief.")
+
+        specs = [
+            {"key": "exec_summary", "available": avail, "pending": pending,
+             "agent_id": "brief_exec_summary",
+             "task": (
+                 "Write the Executive Summary of an investment brief — about "
+                 "180 words, for a senior investment audience. State the "
+                 "central question (does diversification across equities and "
+                 "fixed income improve risk-adjusted performance, and does "
+                 "that answer change after 2022), the key finding (the 2022 "
+                 "equity-bond correlation break), the best-performing "
+                 "strategies with their metrics, and the strategic "
+                 "recommendation."),
+             "context": {"summary_statistics": data["summary_statistics"],
+                         "regime_conditional": data["regime_conditional"],
+                         "study_period": data["study_period"]}},
+            {"key": "methodology", "available": True,
+             "agent_id": "brief_methodology",
+             "task": (
+                 "Write the Methodology Overview — about 280 words. Cover the "
+                 "data sources and study period, the portfolio constraints "
+                 "(long-only, fully invested, no cash), the ten strategies "
+                 "(static versus dynamic), the Carhart four-factor model, the "
+                 "benchmark definition (100% S&P 500), and the key "
+                 "assumptions."),
+             "context": {"study_period": data["study_period"],
+                         "strategy_metadata": data.get("strategy_metadata"),
+                         "risk_free_rate": data["risk_free_rate"]}},
+            {"key": "finding_1", "available": avail, "pending": pending,
+             "agent_id": "brief_finding_2022",
+             "task": (
+                 "Write Finding 1: The 2022 Correlation Break — about 220 "
+                 "words. Interpret the pre- and post-2022 equity-bond "
+                 "correlation and the regime-conditional Sharpe ratios. "
+                 "Explain why the diversification benefit broke down and what "
+                 "it means for a static 60/40 allocation."),
+             "context": {"regime_conditional": data["regime_conditional"],
+                         "correlation_pre_post": {
+                             "pre_2022": data["rolling_correlation"].get("pre_2022"),
+                             "post_2022": data["rolling_correlation"].get("post_2022")}}},
+            {"key": "finding_2", "available": avail, "pending": pending,
+             "agent_id": "brief_finding_static",
+             "task": (
+                 "Write Finding 2: Static Allocation Results — about 220 "
+                 "words. Using the summary statistics, identify the best "
+                 "static strategy and justify it, comparing it to the 100% "
+                 "equity benchmark."),
+             "context": {"summary_statistics": data["summary_statistics"]}},
+            {"key": "finding_3", "available": avail, "pending": pending,
+             "agent_id": "brief_finding_dynamic",
+             "task": (
+                 "Write Finding 3: Dynamic Allocation Results — about 220 "
+                 "words. Assess the dynamic strategies' performance and "
+                 "drawdown behaviour, and justify the rules-based logic."),
+             "context": {"regime_conditional": data["regime_conditional"],
+                         "drawdown_comparison": data["drawdown_comparison"]}},
+            {"key": "finding_4", "available": avail, "pending": pending,
+             "agent_id": "brief_finding_factor",
+             "task": (
+                 "Write Finding 4: Factor Analysis — about 220 words. "
+                 "Interpret the Carhart four-factor loadings: assess alpha "
+                 "generation and explain what the factor exposures reveal "
+                 "about each strategy's return drivers."),
+             "context": {"factor_loadings": data["factor_loadings"]}},
+            {"key": "limitations", "available": True,
+             "agent_id": "brief_limitations",
+             "task": (
+                 "Write the Limitations and Risks section — about 160 words. "
+                 "Be honest, not defensive. Cover backtesting limitations, "
+                 "transaction-cost modelling, out-of-sample considerations, "
+                 "and the constraints of the data period."),
+             "context": {"study_period": data["study_period"]}},
+            {"key": "recommendations", "available": avail, "pending": pending,
+             "agent_id": "brief_recommendations",
+             "task": (
+                 "Write the Final Recommendations section — about 160 words. "
+                 "Give a strategic allocation recommendation grounded in the "
+                 "results, with supporting evidence."),
+             "context": {"regime_conditional": data["regime_conditional"],
+                         "summary_statistics": data["summary_statistics"]}},
+        ]
+        narratives = await _generate_narratives(specs)
+        docx_bytes = await asyncio.to_thread(
+            build_executive_brief, data, narratives)
+
+        _log_interaction_bg(
+            request, session, "export", agents_involved=["academic_writer"],
+            response_summary="Executive brief generated",
+            metadata={"deliverable": "executive_brief",
+                      "data_available": data["available"]})
+
+        filename = f"forest-capital-executive-brief-{date.today().isoformat()}.docx"
+        return Response(
+            content=docx_bytes, media_type=_DOCX_MEDIA,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("executive_brief_export_error", ref=ref, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Executive brief generation failed (ref: {ref})")
+
+
+@app.post("/api/v1/export/presentation-deck")
+@limiter.limit("4/minute")
+async def export_presentation_deck(
+    request: Request, session: dict = Depends(require_auth),
+):
+    """
+    Generates the 16-slide final presentation deck as a .pptx download.
+
+    A professional navy/white theme — deliberately not the platform's
+    dark UI. Charts are rendered server-side as light-mode PNGs with
+    matplotlib (no browser is available to rasterise the recharts
+    charts); a chart whose data or matplotlib is unavailable degrades to
+    a [DATA PENDING] note. The conclusions, recommendations, thesis and
+    AI-leverage prose run through the Academic Writer harness. The call
+    can take 45-90 seconds; the first run also warms the sensitivity
+    memo.
+    """
+    import asyncio
+    from datetime import date
+
+    from tools.academic_deck import build_presentation_deck, render_deck_charts
+    from tools.academic_export import DATA_PENDING, gather_document_data
+
+    try:
+        data = await gather_document_data()
+        avail = data["available"]
+        pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
+                   "dashboard once, then regenerate the deck.")
+
+        # Sensitivity is a heavier compute — best-effort, memoised. A
+        # failure (or the test environment) leaves the slide [DATA PENDING].
+        sensitivity: dict | None = None
+        if avail and ENVIRONMENT != "test":
+            try:
+                from tools.data_fetcher import get_full_history
+                from tools.sensitivity import compute_sensitivity
+                sensitivity = await asyncio.to_thread(
+                    lambda: compute_sensitivity(get_full_history()))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("deck_sensitivity_unavailable", error=str(exc))
+
+        specs = [
+            {"key": "thesis", "available": avail, "pending": pending,
+             "agent_id": "deck_thesis",
+             "task": (
+                 "Write a single-sentence thesis statement — at most 30 "
+                 "words — on what the 2022 equity-bond correlation break "
+                 "means for diversification. Return only the sentence."),
+             "context": {"correlation_pre_post": {
+                 "pre_2022": data["rolling_correlation"].get("pre_2022"),
+                 "post_2022": data["rolling_correlation"].get("post_2022")}}},
+            {"key": "conclusions", "available": avail, "pending": pending,
+             "agent_id": "deck_conclusions",
+             "task": (
+                 "Write exactly five concise conclusion bullet points for a "
+                 "presentation slide — one per line, each starting with "
+                 "'- ', each under 22 words. They must directly address "
+                 "whether diversification improves risk-adjusted performance "
+                 "and whether 2022 changed the answer."),
+             "context": {"regime_conditional": data["regime_conditional"],
+                         "summary_statistics": data["summary_statistics"]}},
+            {"key": "recommendations", "available": avail, "pending": pending,
+             "agent_id": "deck_recommendations",
+             "task": (
+                 "Write a strategic allocation recommendation as four to "
+                 "five concise bullet points for a presentation slide — one "
+                 "per line, each starting with '- ', each under 22 words, "
+                 "grounded in the supplied results."),
+             "context": {"regime_conditional": data["regime_conditional"],
+                         "summary_statistics": data["summary_statistics"]}},
+            {"key": "ai_leverage", "available": True,
+             "agent_id": "deck_ai_leverage",
+             "task": (
+                 "Write a brief two-to-three-sentence narrative on how the "
+                 "team used AI to build and check this work: a multi-model "
+                 "council (Claude, Gemini, Grok), a generator-evaluator "
+                 "quality harness, and an academic-review quality gate. End "
+                 "on the idea that the AI interrogated the work so faculty "
+                 "can."),
+             "context": {"team_summary": data["team_summary"]}},
+        ]
+        narratives = await _generate_narratives(specs)
+        charts = await asyncio.to_thread(render_deck_charts, data, sensitivity)
+        pptx_bytes = await asyncio.to_thread(
+            build_presentation_deck, data, narratives, charts)
+
+        _log_interaction_bg(
+            request, session, "export", agents_involved=["academic_writer"],
+            response_summary="Presentation deck generated",
+            metadata={"deliverable": "presentation_deck",
+                      "data_available": data["available"],
+                      "charts_rendered": sum(1 for v in charts.values() if v)})
+
+        filename = f"forest-capital-presentation-deck-{date.today().isoformat()}.pptx"
+        return Response(
+            content=pptx_bytes, media_type=_PPTX_MEDIA,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("presentation_deck_export_error", ref=ref, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Presentation deck generation failed (ref: {ref})")
+
+
 # Sprint 6 Priority 1 — midpoint paper for June 3 deadline.
 # Academic Writer composes the prose; tools/docx_generator assembles the
 # .docx around it. Every page carries the AI DRAFT banner so Bob can never

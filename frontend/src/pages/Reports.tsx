@@ -28,6 +28,7 @@ import {
 import AdvisorPanel from '../components/AdvisorPanel'
 import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
+import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
 import type { DeliverableType } from '../types/advisor'
 import type { SectionDocType } from '../types/documents'
 
@@ -393,6 +394,11 @@ export default function Reports() {
       {loading && (
         <div className="card p-8 text-center text-muted text-sm">Loading deliverables…</div>
       )}
+
+      {/* Generate Documents — one-click first-draft .docx / .pptx of the
+          three graded deliverables, assembled server-side from real
+          platform data. Sits above Team Activity per the spec. */}
+      <DocumentGenerationPanel />
 
       {/* Team Activity — the evidence behind the Roles & Division-of-Labor
           deliverable and the AI-use narrative, so it leads the page.

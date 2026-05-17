@@ -1,0 +1,654 @@
+"""
+tools/academic_deck.py
+
+Assembles the 16-slide final presentation deck (.pptx) from a data
+bundle, a set of generated narrative sections, and light-mode chart
+images.
+
+Two halves:
+
+  render_deck_charts()  — renders the deck's charts as light-mode PNGs
+    with matplotlib (white background, navy ink — NOT the platform's dark
+    theme). matplotlib is a declared dependency but is imported lazily
+    and guarded: if it is unavailable, or the underlying data is missing,
+    the renderer returns None for that chart and the slide falls back to
+    a [DATA PENDING] note. (The platform's recharts charts cannot be
+    rasterised server-side — there is no browser — and the Option B
+    export-package endpoint only zips client-rendered PNGs; an inline
+    matplotlib render is the spec's named fallback.)
+
+  build_presentation_deck()  — lays out the 16 slides in a professional
+    navy/white theme and returns the .pptx bytes. Pure assembly: no LLM
+    calls, no database reads.
+
+Every slide carries the AI DRAFT footer — the deck is a first draft for
+the team to refine before the July 1 presentation.
+"""
+from __future__ import annotations
+
+import io
+from datetime import datetime, timezone
+from typing import Any
+
+import structlog
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
+from pptx.util import Inches, Pt
+
+from tools.academic_export import (
+    table_drawdown, table_factor_loadings, table_regime_conditional,
+    table_summary_statistics,
+)
+
+log = structlog.get_logger(__name__)
+
+# ── Professional navy/white theme — deliberately NOT the platform dark UI ─────
+_NAVY = RGBColor(0x1A, 0x2A, 0x4A)
+_NAVY_SOFT = RGBColor(0x2D, 0x4A, 0x6B)
+_WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+_INK = RGBColor(0x1A, 0x1A, 0x2E)
+_GREY = RGBColor(0x4A, 0x4A, 0x6A)
+_ACCENT = RGBColor(0x1D, 0x4E, 0xD8)
+_AMBER = RGBColor(0xB4, 0x53, 0x09)
+
+_SLIDE_W = Inches(13.333)
+_SLIDE_H = Inches(7.5)
+
+_AI_DRAFT_FOOTER = ("AI DRAFT — REQUIRES HUMAN REVIEW · "
+                    "first-draft deck; verify every figure before presenting")
+
+# matplotlib hex equivalents of the theme — light mode for print/projection.
+_MPL_INK = "#1A1A2E"
+_MPL_GREY = "#4A4A6A"
+_MPL_GRID = "#E2E8F0"
+_MPL_ACCENT = "#1D4ED8"
+_MPL_SERIES = ["#1D4ED8", "#059669", "#B45309", "#7C3AED", "#DB2777",
+               "#0891B2", "#CA8A04", "#15803D", "#9333EA", "#374151"]
+
+
+# ── Chart rendering (matplotlib, light mode) ──────────────────────────────────
+
+def render_deck_charts(
+    data: dict[str, Any], sensitivity: dict[str, Any] | None = None,
+) -> dict[str, bytes | None]:
+    """
+    Renders every deck chart to a light-mode PNG. Returns a dict keyed by
+    slide role — rolling_correlation, cumulative_returns, risk_return,
+    sensitivity, team_activity — with PNG bytes or None when the chart
+    cannot be drawn (matplotlib missing, or no source data).
+    """
+    charts: dict[str, bytes | None] = {
+        "rolling_correlation": None, "cumulative_returns": None,
+        "risk_return": None, "sensitivity": None, "team_activity": None,
+    }
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # headless — no display on the server
+        import matplotlib.pyplot as plt
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_charts_matplotlib_unavailable", error=str(exc))
+        return charts
+
+    def _finish(fig) -> bytes:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=150, bbox_inches="tight",
+                    facecolor="white")
+        plt.close(fig)
+        return buf.getvalue()
+
+    def _style(ax) -> None:
+        ax.set_facecolor("white")
+        ax.grid(True, color=_MPL_GRID, linewidth=0.7)
+        ax.tick_params(colors=_MPL_GREY, labelsize=9)
+        for spine in ax.spines.values():
+            spine.set_color(_MPL_GRID)
+        ax.title.set_color(_MPL_INK)
+        ax.xaxis.label.set_color(_MPL_GREY)
+        ax.yaxis.label.set_color(_MPL_GREY)
+
+    # ── Rolling correlation — the 2022 regime break ───────────────────────
+    try:
+        rc = data.get("rolling_correlation") or {}
+        pts = rc.get("points") or []
+        if pts:
+            import pandas as pd
+            dates = [pd.to_datetime(p["date"]) for p in pts]
+            fig, ax = plt.subplots(figsize=(8, 4.2))
+            ax.plot(dates, [p.get("equity_ig") for p in pts],
+                    color=_MPL_ACCENT, linewidth=1.6, label="Equity vs IG bonds")
+            ax.plot(dates, [p.get("equity_hy") for p in pts],
+                    color="#059669", linewidth=1.6, label="Equity vs HY bonds")
+            ax.axhline(0, color=_MPL_GREY, linewidth=0.8)
+            if rc.get("regime_break"):
+                ax.axvline(pd.to_datetime(rc["regime_break"]), color=_AMBER_HEX,
+                           linestyle="--", linewidth=1.4, label="2022 regime break")
+            ax.set_title("Rolling 12-Month Equity–Bond Correlation", fontsize=11)
+            ax.set_ylabel("Correlation")
+            ax.legend(fontsize=8, frameon=False)
+            _style(ax)
+            charts["rolling_correlation"] = _finish(fig)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_chart_rolling_correlation_failed", error=str(exc))
+
+    # ── Cumulative returns — growth of $1 ─────────────────────────────────
+    try:
+        cr = data.get("cumulative_returns") or {}
+        pts = cr.get("points") or []
+        strategies = cr.get("strategies") or []
+        if pts and strategies:
+            import pandas as pd
+            dates = [pd.to_datetime(p["date"]) for p in pts]
+            fig, ax = plt.subplots(figsize=(8, 4.2))
+            for i, name in enumerate(strategies):
+                ax.plot(dates, [p.get(name) for p in pts],
+                        color=_MPL_SERIES[i % len(_MPL_SERIES)],
+                        linewidth=1.3, label=name)
+            ax.set_title("Cumulative Total Return — Growth of $1", fontsize=11)
+            ax.set_ylabel("Growth of $1")
+            ax.legend(fontsize=6.5, frameon=False, ncol=2)
+            _style(ax)
+            charts["cumulative_returns"] = _finish(fig)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_chart_cumulative_returns_failed", error=str(exc))
+
+    # ── Risk-return scatter — strategy volatility vs CAGR ──────────────────
+    try:
+        results = data.get("strategy_results") or {}
+        xs, ys, labels, best = [], [], [], None
+        best_sharpe = float("-inf")
+        for name, r in results.items():
+            vol, cagr = r.get("volatility"), r.get("cagr")
+            if isinstance(vol, (int, float)) and isinstance(cagr, (int, float)):
+                xs.append(vol * 100)
+                ys.append(cagr * 100)
+                labels.append(r.get("strategy_name") or name)
+                sh = r.get("sharpe_ratio")
+                if isinstance(sh, (int, float)) and sh > best_sharpe:
+                    best_sharpe, best = sh, len(xs) - 1
+        if xs:
+            fig, ax = plt.subplots(figsize=(8, 4.4))
+            ax.scatter(xs, ys, color=_MPL_ACCENT, s=70, zorder=3)
+            for i, lab in enumerate(labels):
+                ax.annotate(lab, (xs[i], ys[i]), fontsize=6.5,
+                            color=_MPL_GREY, xytext=(4, 4),
+                            textcoords="offset points")
+            if best is not None:
+                ax.scatter([xs[best]], [ys[best]], color=_AMBER_HEX, s=130,
+                           zorder=4, label="Highest Sharpe")
+                ax.legend(fontsize=8, frameon=False)
+            ax.set_title("Risk–Return Profile by Strategy", fontsize=11)
+            ax.set_xlabel("Annualised volatility (%)")
+            ax.set_ylabel("CAGR (%)")
+            _style(ax)
+            charts["risk_return"] = _finish(fig)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_chart_risk_return_failed", error=str(exc))
+
+    # ── Sensitivity — parameter robustness ────────────────────────────────
+    try:
+        strat_sens = (sensitivity or {}).get("strategies") or []
+        if strat_sens:
+            fig, ax = plt.subplots(figsize=(8, 4.2))
+            for i, s in enumerate(strat_sens[:4]):
+                xs = [p.get("value") for p in s.get("points", [])]
+                ys = [p.get("sharpe") for p in s.get("points", [])]
+                if xs and ys:
+                    ax.plot(xs, ys, marker="o", markersize=3,
+                            color=_MPL_SERIES[i % len(_MPL_SERIES)],
+                            linewidth=1.4, label=s.get("strategy", f"Strategy {i+1}"))
+            ax.set_title("Parameter Sensitivity — Sharpe vs Key Parameter",
+                         fontsize=11)
+            ax.set_ylabel("Sharpe ratio")
+            ax.legend(fontsize=7, frameon=False)
+            _style(ax)
+            charts["sensitivity"] = _finish(fig)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_chart_sensitivity_failed", error=str(exc))
+
+    # ── Team activity — per-member contribution ───────────────────────────
+    try:
+        members = (data.get("team_summary") or {}).get("per_member") or []
+        if members:
+            names = [m.get("user_name") or m.get("user", "—") for m in members]
+            councils = [m.get("council_interactions", 0) for m in members]
+            reviews = [m.get("academic_review_sessions", 0) for m in members]
+            views = [m.get("page_views", 0) for m in members]
+            fig, ax = plt.subplots(figsize=(7.5, 4.0))
+            import numpy as np
+            x = np.arange(len(names))
+            ax.bar(x - 0.25, councils, 0.25, color=_MPL_ACCENT, label="Council")
+            ax.bar(x, reviews, 0.25, color="#059669", label="Academic reviews")
+            ax.bar(x + 0.25, views, 0.25, color="#B45309", label="Page views")
+            ax.set_xticks(x)
+            ax.set_xticklabels(names, fontsize=8)
+            ax.set_title("Team Platform Engagement", fontsize=11)
+            ax.legend(fontsize=8, frameon=False)
+            _style(ax)
+            charts["team_activity"] = _finish(fig)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_chart_team_activity_failed", error=str(exc))
+
+    return charts
+
+
+# matplotlib needs a hex string for the amber accent.
+_AMBER_HEX = "#B45309"
+
+
+# ── Slide primitives ──────────────────────────────────────────────────────────
+
+def _blank(prs: Presentation):
+    """A fully blank slide — every element is drawn manually for theme control."""
+    return prs.slides.add_slide(prs.slide_layouts[6])
+
+
+def _bg(slide, color: RGBColor) -> None:
+    """Fills the whole slide background with a solid colour."""
+    shape = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE, 0, 0, _SLIDE_W, _SLIDE_H)
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = color
+    shape.line.fill.background()
+    shape.shadow.inherit = False
+    slide.shapes._spTree.remove(shape._element)
+    slide.shapes._spTree.insert(2, shape._element)
+
+
+def _textbox(slide, left, top, width, height, text, *, size=18, bold=False,
+             color=_INK, align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.TOP):
+    """Adds a single-paragraph textbox."""
+    box = slide.shapes.add_textbox(left, top, width, height)
+    tf = box.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = anchor
+    p = tf.paragraphs[0]
+    p.alignment = align
+    run = p.add_run()
+    run.text = text
+    run.font.size = Pt(size)
+    run.font.bold = bold
+    run.font.color.rgb = color
+    return box
+
+
+def _title_bar(slide, text: str) -> None:
+    """A navy band across the top of a content slide with the slide title."""
+    bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, _SLIDE_W, Inches(1.0))
+    bar.fill.solid()
+    bar.fill.fore_color.rgb = _NAVY
+    bar.line.fill.background()
+    bar.shadow.inherit = False
+    tf = bar.text_frame
+    tf.margin_left = Inches(0.5)
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    p = tf.paragraphs[0]
+    run = p.add_run()
+    run.text = text
+    run.font.size = Pt(26)
+    run.font.bold = True
+    run.font.color.rgb = _WHITE
+
+
+def _bullets(slide, items: list[str], *, left=Inches(0.7), top=Inches(1.4),
+             width=Inches(12.0), height=Inches(5.4), size=18) -> None:
+    """A bulleted list. Items already prefixed with '- ' are de-prefixed."""
+    box = slide.shapes.add_textbox(left, top, width, height)
+    tf = box.text_frame
+    tf.word_wrap = True
+    for i, item in enumerate(items):
+        text = item.lstrip("-• ").strip()
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        p.space_after = Pt(10)
+        bullet = p.add_run()
+        bullet.text = "▪  "
+        bullet.font.size = Pt(size)
+        bullet.font.color.rgb = _ACCENT
+        run = p.add_run()
+        run.text = text
+        run.font.size = Pt(size)
+        run.font.color.rgb = _INK
+
+
+def _image(slide, png: bytes | None, *, left, top, width, fallback="chart"):
+    """Places a PNG, or a [DATA PENDING] note when the render was unavailable."""
+    if png:
+        slide.shapes.add_picture(io.BytesIO(png), left, top, width=width)
+    else:
+        _textbox(slide, left, top, width, Inches(1.0),
+                 f"[DATA PENDING] — {fallback} chart unavailable. "
+                 "Warm the analytics caches, then regenerate the deck.",
+                 size=14, color=_AMBER, anchor=MSO_ANCHOR.MIDDLE)
+
+
+def _callout(slide, left, top, width, height, heading, value, *,
+             color=_ACCENT) -> None:
+    """A small coloured callout box — a label over a large value."""
+    box = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE,
+                                 left, top, width, height)
+    box.fill.solid()
+    box.fill.fore_color.rgb = color
+    box.line.fill.background()
+    box.shadow.inherit = False
+    tf = box.text_frame
+    tf.word_wrap = True
+    tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    p1 = tf.paragraphs[0]
+    p1.alignment = PP_ALIGN.CENTER
+    r1 = p1.add_run()
+    r1.text = heading
+    r1.font.size = Pt(12)
+    r1.font.color.rgb = _WHITE
+    p2 = tf.add_paragraph()
+    p2.alignment = PP_ALIGN.CENTER
+    r2 = p2.add_run()
+    r2.text = value
+    r2.font.size = Pt(24)
+    r2.font.bold = True
+    r2.font.color.rgb = _WHITE
+
+
+def _table(slide, headers: list[str], rows: list[list[str]], *,
+           left=Inches(0.7), top=Inches(1.4), width=Inches(12.0),
+           max_rows=11) -> None:
+    """A light-styled native PowerPoint table. [DATA PENDING] when empty."""
+    if not rows:
+        _textbox(slide, left, top, width, Inches(1.0),
+                 "[DATA PENDING] — table data unavailable. Warm the "
+                 "analytics caches, then regenerate the deck.",
+                 size=16, color=_AMBER)
+        return
+    rows = rows[:max_rows]
+    n_rows, n_cols = len(rows) + 1, len(headers)
+    height = Inches(0.4 * n_rows)
+    tbl_shape = slide.shapes.add_table(n_rows, n_cols, left, top, width, height)
+    table = tbl_shape.table
+    for c, label in enumerate(headers):
+        cell = table.cell(0, c)
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = _NAVY
+        para = cell.text_frame.paragraphs[0]
+        run = para.add_run()
+        run.text = label
+        run.font.size = Pt(11)
+        run.font.bold = True
+        run.font.color.rgb = _WHITE
+    for r, row in enumerate(rows, start=1):
+        for c, value in enumerate(row):
+            cell = table.cell(r, c)
+            cell.fill.solid()
+            cell.fill.fore_color.rgb = (
+                _WHITE if r % 2 else RGBColor(0xF1, 0xF5, 0xF9))
+            para = cell.text_frame.paragraphs[0]
+            run = para.add_run()
+            run.text = str(value)
+            run.font.size = Pt(10)
+            run.font.color.rgb = _INK
+
+
+def _footer(slide, idx: int, total: int) -> None:
+    """The AI DRAFT footer plus a slide counter, on every slide."""
+    box = slide.shapes.add_textbox(Inches(0.4), Inches(7.05),
+                                   Inches(12.5), Inches(0.35))
+    p = box.text_frame.paragraphs[0]
+    run = p.add_run()
+    run.text = f"{_AI_DRAFT_FOOTER}   ·   Slide {idx}/{total}"
+    run.font.size = Pt(8)
+    run.font.italic = True
+    run.font.color.rgb = _AMBER
+
+
+# ── Deck builder ──────────────────────────────────────────────────────────────
+
+def build_presentation_deck(
+    data: dict[str, Any],
+    narratives: dict[str, str],
+    charts: dict[str, bytes | None],
+) -> bytes:
+    """
+    Lays out the 16-slide final presentation deck and returns the .pptx
+    bytes. narratives supplies the conclusions, recommendations, thesis
+    and AI-leverage prose; charts supplies the light-mode PNGs from
+    render_deck_charts(). Pure assembly — no LLM, no DB.
+    """
+    prs = Presentation()
+    prs.slide_width = _SLIDE_W
+    prs.slide_height = _SLIDE_H
+    total = 16
+
+    period = data.get("study_period", {})
+    team = data.get("team_summary", {}) or {}
+    commits = (team.get("commits") or {}).get("total", 0)
+    n_council = sum(m.get("council_interactions", 0)
+                    for m in team.get("per_member", []))
+    n_reviews = sum(m.get("academic_review_sessions", 0)
+                    for m in team.get("per_member", []))
+
+    def _bullet_list(key: str, fallback: list[str]) -> list[str]:
+        """Splits a generated narrative into bullet lines, or uses a fallback."""
+        text = narratives.get(key, "")
+        lines = [ln.strip() for ln in text.split("\n")
+                 if ln.strip() and "[DATA PENDING]" not in ln]
+        return lines if lines else fallback
+
+    # ── Slide 1 — Title ───────────────────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _NAVY)
+    _textbox(s, Inches(1.0), Inches(2.4), Inches(11.3), Inches(1.6),
+             "Asset Allocation Strategies and Risk-Adjusted Performance",
+             size=40, bold=True, color=_WHITE, align=PP_ALIGN.CENTER)
+    _textbox(s, Inches(1.0), Inches(4.2), Inches(11.3), Inches(0.6),
+             "Forest Capital / McColl School of Business",
+             size=22, color=RGBColor(0x9C, 0xB3, 0xD6), align=PP_ALIGN.CENTER)
+    _textbox(s, Inches(1.0), Inches(4.9), Inches(11.3), Inches(0.5),
+             "FNA 670 — Summer 2026", size=18,
+             color=RGBColor(0x9C, 0xB3, 0xD6), align=PP_ALIGN.CENTER)
+    _footer(s, 1, total)
+
+    # ── Slide 2 — Agenda ──────────────────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Agenda")
+    _bullets(s, [
+        "The Question", "Data and Methodology", "The 2022 Regime Break",
+        "Static Allocation Results", "Dynamic Allocation Results",
+        "Factor Analysis", "Portfolio Optimisation",
+        "Conclusions and Recommendations", "How We Built This",
+    ])
+    _footer(s, 2, total)
+
+    # ── Slide 3 — The Question ────────────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "The Question")
+    _textbox(s, Inches(0.8), Inches(1.6), Inches(11.7), Inches(2.0),
+             "“Does diversification across equities and fixed income improve "
+             "risk-adjusted performance — and does that answer change after "
+             "2022?”", size=26, bold=True, color=_NAVY)
+    _bullets(s, [
+        "Benchmark: 100% S&P 500 equity index.",
+        "Key constraint: long-only, fully invested — no cash, no leverage.",
+        "Study period: "
+        f"{period.get('start', '—')} to {period.get('end', '—')} "
+        f"({period.get('n_months', 0)} monthly observations).",
+    ], top=Inches(3.9), height=Inches(2.8))
+    _footer(s, 3, total)
+
+    # ── Slide 4 — Data and Methodology ────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Data and Methodology")
+    _bullets(s, [
+        "Aligned monthly returns: equity, investment-grade and high-yield "
+        "bonds — the three-asset universe.",
+        f"Study period {period.get('start', '—')} to "
+        f"{period.get('end', '—')} ({period.get('n_months', 0)} months).",
+        "Ten strategies — five static (e.g. 60/40, risk parity) and five "
+        "dynamic (e.g. regime switching, momentum rotation).",
+        "Constraints: long-only, fully invested, quarterly rebalancing.",
+        "Attribution: Carhart four-factor model (MKT-RF, SMB, HML, MOM).",
+        "Benchmark: 100% S&P 500.",
+    ])
+    _footer(s, 4, total)
+
+    # ── Slide 5 — The 2022 Regime Break ───────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "The 2022 Regime Break")
+    _image(s, charts.get("rolling_correlation"), left=Inches(0.6),
+           top=Inches(1.3), width=Inches(8.2), fallback="rolling correlation")
+    rc = data.get("rolling_correlation") or {}
+    pre = (rc.get("pre_2022") or {}).get("equity_ig")
+    post = (rc.get("post_2022") or {}).get("equity_ig")
+    _callout(s, Inches(9.1), Inches(1.5), Inches(3.6), Inches(1.3),
+             "Pre-2022 equity–IG correlation",
+             f"{pre:+.2f}" if isinstance(pre, (int, float)) else "—")
+    _callout(s, Inches(9.1), Inches(3.0), Inches(3.6), Inches(1.3),
+             "Post-2022 equity–IG correlation",
+             f"{post:+.2f}" if isinstance(post, (int, float)) else "—",
+             color=_AMBER)
+    thesis = narratives.get("thesis", "")
+    if thesis and "[DATA PENDING]" not in thesis:
+        _textbox(s, Inches(9.1), Inches(4.5), Inches(3.6), Inches(2.2),
+                 thesis, size=13, color=_INK)
+    _footer(s, 5, total)
+
+    # ── Slide 6 — Static Allocation Results ───────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Static Allocation Results")
+    h, r = table_summary_statistics(data.get("summary_statistics", []))
+    _table(s, h, r, top=Inches(1.4), width=Inches(8.0))
+    _textbox(s, Inches(9.0), Inches(1.5), Inches(3.7), Inches(4.5),
+             "Summary statistics across the asset classes. Static "
+             "diversification reduces volatility and drawdown but, post-2022, "
+             "no longer reliably improves the risk-adjusted return over a "
+             "100% equity benchmark.", size=14, color=_INK)
+    _footer(s, 6, total)
+
+    # ── Slide 7 — Dynamic Allocation Results ──────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Dynamic Allocation Results")
+    h, r = table_regime_conditional(data.get("regime_conditional", []))
+    _table(s, h, r, top=Inches(1.3), width=Inches(12.0))
+    _textbox(s, Inches(0.7), Inches(6.4), Inches(12.0), Inches(0.6),
+             "Sorted by post-2022 Sharpe — the strategies that held up once "
+             "equity–bond diversification stopped working.",
+             size=13, color=_GREY)
+    _footer(s, 7, total)
+
+    # ── Slide 8 — Cumulative Returns ──────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Cumulative Returns — Growth of $1")
+    _image(s, charts.get("cumulative_returns"), left=Inches(1.6),
+           top=Inches(1.3), width=Inches(10.0), fallback="cumulative returns")
+    _footer(s, 8, total)
+
+    # ── Slide 9 — Risk-Return Profile ─────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Risk–Return Profile")
+    _image(s, charts.get("risk_return"), left=Inches(1.6), top=Inches(1.3),
+           width=Inches(10.0), fallback="risk-return")
+    _textbox(s, Inches(1.6), Inches(6.5), Inches(10.0), Inches(0.5),
+             "Each point is one strategy; the highest-Sharpe strategy is "
+             "marked. Strategies toward the upper-left are the most "
+             "efficient.", size=13, color=_GREY)
+    _footer(s, 9, total)
+
+    # ── Slide 10 — Factor Analysis ────────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Factor Analysis")
+    h, r = table_factor_loadings(data.get("factor_loadings", []))
+    _table(s, h, r, top=Inches(1.3), width=Inches(12.0))
+    _textbox(s, Inches(0.7), Inches(6.4), Inches(12.0), Inches(0.6),
+             "Carhart four-factor loadings — a trailing * marks significance "
+             "at p < .05. Alpha is annualised.", size=13, color=_GREY)
+    _footer(s, 10, total)
+
+    # ── Slide 11 — Drawdown Analysis ──────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Drawdown Analysis")
+    h, r = table_drawdown(data.get("drawdown_comparison", []))
+    _table(s, h, r, top=Inches(1.4), width=Inches(9.0))
+    _textbox(s, Inches(10.0), Inches(1.5), Inches(2.8), Inches(4.5),
+             "Worst peak-to-trough loss and the months taken to recover a "
+             "prior high. The deepest loss is listed first.",
+             size=14, color=_INK)
+    _footer(s, 11, total)
+
+    # ── Slide 12 — Sensitivity Analysis ───────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Sensitivity Analysis")
+    _image(s, charts.get("sensitivity"), left=Inches(1.6), top=Inches(1.3),
+           width=Inches(10.0), fallback="sensitivity")
+    _textbox(s, Inches(1.6), Inches(6.5), Inches(10.0), Inches(0.5),
+             "Sharpe ratio as each dynamic strategy's key parameter is swept "
+             "— flat curves indicate the result is not an artefact of one "
+             "parameter choice.", size=13, color=_GREY)
+    _footer(s, 12, total)
+
+    # ── Slide 13 — Conclusions ────────────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Conclusions")
+    _bullets(s, _bullet_list("conclusions", [
+        "[DATA PENDING] — conclusions are generated from the live results; "
+        "warm the analytics caches and regenerate the deck.",
+    ]))
+    _footer(s, 13, total)
+
+    # ── Slide 14 — Recommendations ────────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "Recommendations")
+    _bullets(s, _bullet_list("recommendations", [
+        "[DATA PENDING] — the strategic recommendation is generated from the "
+        "live results; warm the analytics caches and regenerate the deck.",
+    ]))
+    _footer(s, 14, total)
+
+    # ── Slide 15 — How We Built This ──────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    _title_bar(s, "How We Built This — AI Leverage")
+    _image(s, charts.get("team_activity"), left=Inches(0.6), top=Inches(1.3),
+           width=Inches(7.2), fallback="team activity")
+    _callout(s, Inches(8.2), Inches(1.4), Inches(2.3), Inches(1.0),
+             "Council sessions", str(n_council))
+    _callout(s, Inches(10.7), Inches(1.4), Inches(2.3), Inches(1.0),
+             "Academic reviews", str(n_reviews), color=_NAVY_SOFT)
+    _callout(s, Inches(8.2), Inches(2.6), Inches(2.3), Inches(1.0),
+             "Commits", str(commits), color=_AMBER)
+    ai_text = narratives.get("ai_leverage", "")
+    if "[DATA PENDING]" in ai_text or not ai_text:
+        ai_text = ("A multi-model AI council, a generator-evaluator quality "
+                   "harness and an academic-review gate interrogated this "
+                   "work — so faculty can.")
+    _textbox(s, Inches(8.2), Inches(3.9), Inches(4.6), Inches(2.8),
+             ai_text, size=14, color=_INK)
+    _footer(s, 15, total)
+
+    # ── Slide 16 — Questions ──────────────────────────────────────────────
+    s = _blank(prs)
+    _bg(s, _NAVY)
+    _textbox(s, Inches(1.0), Inches(2.8), Inches(11.3), Inches(1.2),
+             "Questions", size=44, bold=True, color=_WHITE,
+             align=PP_ALIGN.CENTER)
+    _textbox(s, Inches(1.0), Inches(4.1), Inches(11.3), Inches(0.6),
+             "Thank you", size=22, color=RGBColor(0x9C, 0xB3, 0xD6),
+             align=PP_ALIGN.CENTER)
+    _textbox(s, Inches(1.0), Inches(4.8), Inches(11.3), Inches(0.5),
+             "Forest Capital Practicum Team · [contact information]",
+             size=14, color=RGBColor(0x9C, 0xB3, 0xD6), align=PP_ALIGN.CENTER)
+    _footer(s, 16, total)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()

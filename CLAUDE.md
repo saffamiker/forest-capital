@@ -4881,6 +4881,93 @@ FRONTEND FLOW — AcademicExportModal renders the six export charts off-screen
   progress modal.
 
 
+─────────────────────────────────────────────────────────────────────────────
+ACADEMIC DOCUMENT GENERATION (May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+Three endpoints assemble the project's graded deliverables as FIRST
+DRAFTS for Bob to refine — every figure is real platform data, every
+narrative section is written by the Academic Writer agent, and every
+file carries the AI DRAFT banner. These are distinct from, and coexist
+with, the older /api/reports/* generators.
+
+  POST /api/v1/export/midpoint-paper     → 3-page midpoint paper (.docx)
+  POST /api/v1/export/executive-brief    → 5-page executive brief (.docx)
+  POST /api/v1/export/presentation-deck  → 16-slide final deck (.pptx)
+
+All three are auth-required and rate-limited, and log an `export`
+interaction (team-gated, fire-and-forget) with the deliverable name in
+metadata.
+
+SHARED LAYER — tools/academic_export.py:
+  - gather_document_data() — one async call that pulls every figure the
+    documents cite from data ALREADY in PostgreSQL (market_data_monthly,
+    strategy_results_cache, ff_factors_monthly via the analytics layer;
+    the Team Activity tables; the last academic_review verdict from
+    agent_interactions; the academic_documents rows). Light reads only —
+    never get_full_history() or run_all_strategies(). Never raises: a
+    cold cache or the test environment returns available=False with
+    empty collections.
+  - harness_narrative() — generates one section of prose through the
+    Academic Writer agent (agents/academic_writer._SYSTEM_PROMPT, Sonnet)
+    wrapped in the GeneratorEvaluatorHarness with the academic_review
+    peer-evaluator criteria — the spec mandates the harness for every
+    academic_writer call. Fail-open: the test environment (no API key)
+    and any generation error return a [DATA PENDING] marker.
+  - table adapters (table_summary_statistics / table_regime_conditional /
+    table_factor_loadings / table_drawdown) — convert the analytics dicts
+    to a (headers, rows-of-strings) pair, shared by the .docx and .pptx
+    builders.
+
+[DATA PENDING] — graceful degradation. Any section whose source data is
+unavailable is filled with a "[DATA PENDING] — …" marker rather than
+failing the document. A document therefore ALWAYS assembles into a
+valid, parseable file; a grep for the marker tells Bob exactly what he
+still has to supply. In the test environment (cold caches, no academic
+documents, no API key) every data-dependent section is [DATA PENDING] —
+which is also how the contract tests exercise the degradation path.
+
+.docx BUILDERS — tools/academic_docx.py:
+  Pure assembly (no LLM, no DB). build_midpoint_paper() and
+  build_executive_brief() produce 12 pt Times New Roman, double-spaced,
+  1-inch-margin documents with a live PAGE field in the footer (built
+  from raw OOXML — python-docx has no page-number API) and the AI DRAFT
+  banner repeated in the header of every page. The midpoint paper has
+  the brief's four sections (Data & Methodology, Preliminary Results
+  with the summary-statistics and regime-conditional tables embedded,
+  Roles & Division of Labor from real Team Activity counts, Next Steps
+  from the last Academic Review verdict). The executive brief has a
+  title page then Executive Summary, Methodology, four Key Findings
+  (regime-conditional / summary-statistics / drawdown / factor-loadings
+  tables embedded) plus Limitations and Final Recommendations.
+
+.pptx DECK — tools/academic_deck.py:
+  build_presentation_deck() lays out 16 slides in a professional
+  navy/white theme — deliberately NOT the platform dark UI — with the
+  AI DRAFT footer on every slide. render_deck_charts() renders the
+  deck's charts as light-mode PNGs with matplotlib (a declared
+  dependency, imported lazily and guarded). The backend has no browser,
+  so the recharts charts cannot be rasterised server-side and the
+  Option B export-package endpoint only zips client-rendered PNGs — an
+  inline matplotlib render is the spec's named fallback. matplotlib
+  missing, or missing data, degrades a chart to a [DATA PENDING] note;
+  the four tabular slides use native PowerPoint tables; sensitivity is a
+  best-effort memoised compute. The conclusions, recommendations, thesis
+  and AI-leverage prose run through the harness.
+
+FRONTEND — frontend/src/components/DocumentGenerationPanel.tsx:
+  A "Generate Documents" section on the Reports screen, above Team
+  Activity. Three cards (one per deliverable) — each a Generate button
+  that POSTs for a blob download, shows a "Generating… 30–60 seconds"
+  state, surfaces an error with a Retry, and records the last-generated
+  timestamp in localStorage.
+
+SKILL FILES: the docx/pptx skill files named in the build brief
+(/mnt/skills/public/{docx,pptx}/SKILL.md) do not exist in this
+environment. The builders follow the proven, test-covered patterns
+already established in tools/docx_generator.py and tools/pptx_generator.py.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -4911,6 +4998,9 @@ was written, so the GitHub board was not updated programmatically).
   ✅ Settings page (/settings) — five sections, nav gear icon rewired
   ✅ Performance Attribution Waterfall verified
   ✅ Academic Review council endpoint (POST /api/council/academic-review)
+  ✅ Academic Export Package — light-mode chart/table ZIP
+  ✅ Academic document generation — midpoint paper, executive brief and
+     16-slide presentation deck assembled from real data + AI narrative
   ✅ CLAUDE.md + README brought current
 
 ─── IN PROGRESS ───────────────────────────────────────────────────────
