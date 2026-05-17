@@ -157,6 +157,18 @@ TEAM_MEMBER_NAMES = {
     "thaob@queens.edu": "Bob Thao",
 }
 
+# ── GENERATOR-EVALUATOR HARNESS ───────────────────────────────────────────────
+# The harness wraps an agent's text generation in an evaluate-and-retry
+# loop: a response scoring below EVALUATOR_THRESHOLD is regenerated with
+# the evaluator's feedback injected, up to EVALUATOR_MAX_RETRIES times.
+# Invisible to the end user — only output quality changes.
+EVALUATOR_THRESHOLD = 7.0       # 0-10; at or above this, a response is accepted
+EVALUATOR_MAX_RETRIES = 2       # 2 retries → 3 generation attempts at most
+EVALUATOR_MODEL = "claude-sonnet-4-6"   # the scoring model — not a persona agent
+# When the evaluator itself errors, assume a passing score rather than
+# blocking the primary response on an evaluator failure.
+EVALUATOR_PASSTHROUGH_ON_ERROR = True
+
 # GitHub repository the commit-sync endpoint and push webhook target.
 GITHUB_REPO = os.getenv("GITHUB_REPO", "saffamiker/forest-capital")
 # Personal access token for the commit-sync endpoint — the repo is private,
