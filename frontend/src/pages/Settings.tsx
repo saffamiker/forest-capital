@@ -17,6 +17,7 @@ import { Check, LogOut } from 'lucide-react'
 import { useAuth } from '../App'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import type { BrandMode } from '../context/BrandContext'
+import { useSession } from '../context/SessionContext'
 import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 
 interface SettingsSectionProps {
@@ -229,6 +230,45 @@ function AnalyticsConfigurationSection() {
 
 // ── 5. Account ────────────────────────────────────────────────────────────────
 
+function TestingModeToggle() {
+  // Reads and writes SessionContext only — no API call, no persistence.
+  // Testing Mode is session-scoped and resets to analytical on next login.
+  const { sessionType, setTestingMode } = useSession()
+  const testing = sessionType === 'testing'
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-sm text-white">Testing Mode</span>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={testing}
+          aria-label="Testing Mode"
+          onClick={() => setTestingMode(!testing)}
+          className={`relative inline-flex h-5 w-9 items-center rounded-full
+                      shrink-0 transition-colors ${
+            testing
+              ? 'bg-warning'
+              : 'bg-navy-700 border border-border'
+          }`}
+        >
+          <span
+            className={`inline-block h-3.5 w-3.5 rounded-full bg-white
+                        transition-transform ${
+              testing ? 'translate-x-4' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
+      </div>
+      <p className="text-2xs text-muted leading-relaxed">
+        When enabled, all activity in this session is logged as testing and
+        excluded from the Team Activity analytical view by default. Testing
+        Mode resets automatically on your next login.
+      </p>
+    </div>
+  )
+}
+
 function AccountSection() {
   const { session, logout } = useAuth()
   const navigate = useNavigate()
@@ -241,13 +281,18 @@ function AccountSection() {
   }
 
   return (
-    <div className="space-y-3">
+    <div className="space-y-4">
       <div>
         <div className="text-2xs text-muted uppercase tracking-wide">Signed in as</div>
         <div className="text-sm text-white font-mono mt-0.5">
           {session?.email ?? '—'}
         </div>
       </div>
+
+      <div className="border-t border-border pt-3">
+        <TestingModeToggle />
+      </div>
+
       <button
         type="button"
         onClick={() => void handleSignOut()}
