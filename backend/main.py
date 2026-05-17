@@ -1198,16 +1198,23 @@ async def council_query(
             from tools.data_fetcher import get_full_history
             from tools.backtester import run_all_strategies
             from agents.cio import CIO
+            from agents.harness import (
+                start_harness_capture, collect_harness_metrics,
+            )
 
             history = get_full_history()
             strategy_results = run_all_strategies(history)
 
+            # Capture every specialist's harness run for the Team Activity
+            # metrics — the specialists run synchronously in this context.
+            start_harness_capture()
             cio = CIO()
             council_response = cio.deliberate(
                 query=body.query,
                 strategy_results=strategy_results,
                 history=history,
             )
+            harness_meta = collect_harness_metrics()
 
             council_agents = ["equity_analyst", "fixed_income_analyst",
                               "risk_manager", "quant_backtester",
@@ -1220,12 +1227,15 @@ async def council_query(
                 user_email=session["email"],
             )
             # Team Activity — non-blocking; the council response is already
-            # assembled, so this never delays what the user sees.
+            # assembled, so this never delays what the user sees. The
+            # harness block is attached only when at least one harness run
+            # was captured.
             _log_interaction_bg(
                 request, session, "council",
                 question_text=body.query,
                 agents_involved=council_agents,
                 response_summary=council_response.get("final_recommendation", ""),
+                metadata=({"harness": harness_meta} if harness_meta else None),
             )
 
             return _deliberate_to_frontend(body.query, council_response)
@@ -1289,9 +1299,14 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
         gather_review_context, run_peer_fan_out, run_arbiter_with_harness,
         chunk_arbiter_text, ARBITER_MODEL,
     )
+    from agents.harness import start_harness_capture, collect_harness_metrics
 
     async def event_stream():
         try:
+            # Capture the peer + arbiter harness runs for Team Activity.
+            # The ContextVar list is shared into the asyncio.to_thread peer
+            # and arbiter tasks, so every run is recorded.
+            start_harness_capture()
             ctx = await gather_review_context()
             context_block = ctx["context_block"]
             multi_user = ctx.get("multi_user_activity", False)
@@ -1320,14 +1335,20 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                      arbiter_chars=len(arbiter_text))
 
             # Team Activity — log the completed review. The overall
-            # readiness rating is parsed out of the verdict so the
-            # summary panel can show it without re-reading the text.
+            # readiness rating is parsed out of the verdict; the harness
+            # block aggregates the peer + arbiter quality runs.
             agents = list(peer_responses.keys()) + ["academic_advisor"]
+            review_metadata: dict[str, Any] = {
+                "overall_rating": _parse_overall_rating(arbiter_text),
+            }
+            harness_meta = collect_harness_metrics()
+            if harness_meta:
+                review_metadata["harness"] = harness_meta
             _log_interaction_bg(
                 request, session, "academic_review",
                 agents_involved=agents,
                 response_summary=arbiter_text,
-                metadata={"overall_rating": _parse_overall_rating(arbiter_text)},
+                metadata=review_metadata,
             )
         except Exception as exc:  # noqa: BLE001
             log.error("academic_review_failed", error=str(exc))

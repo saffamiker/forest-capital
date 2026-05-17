@@ -31,6 +31,7 @@ FAIL-OPEN. The harness never makes output worse than no harness:
 from __future__ import annotations
 
 import json
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Callable
 
@@ -49,6 +50,57 @@ from agents.base import call_claude
 # Score assumed when the evaluator itself fails — above any threshold, so
 # an evaluator outage never blocks or downgrades the primary response.
 _PASSTHROUGH_SCORE = 8.0
+
+# Per-request capture of harness runs, for the Team Activity metrics.
+# A ContextVar holding a shared list: the endpoint seeds it, and every
+# harness.run() in the same request — including those copied into
+# asyncio.to_thread peer tasks, which share the same list object —
+# appends its result. Unset (None) outside a captured request, so the
+# harness adds nothing when no one is collecting.
+_harness_run_log: ContextVar[list[dict] | None] = ContextVar(
+    "harness_run_log", default=None)
+
+
+def start_harness_capture() -> None:
+    """Begins capturing harness runs for the current request."""
+    _harness_run_log.set([])
+
+
+def collect_harness_metrics() -> dict:
+    """
+    Aggregates the harness runs captured since start_harness_capture()
+    into the Team Activity `harness` metadata block. Returns {} when no
+    runs were captured (e.g. the test environment, where agents fall
+    back before the harness completes an attempt).
+    """
+    buf = _harness_run_log.get()
+    if not buf:
+        return {}
+    n = len(buf)
+    return {
+        "agents_retried": sum(1 for r in buf if r["attempts"] > 1),
+        "average_initial_score": round(
+            sum(r["initial_score"] for r in buf) / n, 2),
+        "average_final_score": round(
+            sum(r["final_score"] for r in buf) / n, 2),
+        "improvement_rate": round(sum(1 for r in buf if r["improved"]) / n, 2),
+    }
+
+
+def _record_harness_run(
+    agent_id: str, initial_score: float, final_score: float,
+    attempts: int, improved: bool,
+) -> None:
+    """Appends one completed harness run to the per-request capture, if active."""
+    buf = _harness_run_log.get()
+    if buf is not None:
+        buf.append({
+            "agent_id": agent_id,
+            "initial_score": initial_score,
+            "final_score": final_score,
+            "attempts": attempts,
+            "improved": improved,
+        })
 
 
 @dataclass
@@ -146,6 +198,8 @@ class GeneratorEvaluatorHarness:
             attempts=attempts,
             improved=improved,
         )
+        _record_harness_run(agent_id, initial_score, best_score,
+                            attempts, improved)
         return HarnessResult(
             response=best_response,
             final_score=best_score,
