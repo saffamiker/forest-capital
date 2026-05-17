@@ -28,6 +28,11 @@ def _pairs(values: list[float], start: str = "2002-01-31") -> list:
     return [[str(d.date()), v] for d, v in zip(idx, values)]
 
 
+# A non-constant 24-month return series — used where the regression needs a
+# dependent variable with variance (a flat series gives a 0/0 R²).
+_VARYING_24 = [round(0.01 + 0.003 * ((i % 5) - 2), 4) for i in range(24)]
+
+
 # ── Series helpers ────────────────────────────────────────────────────────────
 
 class TestHelpers:
@@ -200,3 +205,144 @@ class TestFactorLoadings:
     def test_empty_ff_factors_returns_empty_list(self):
         from tools.analytics import factor_loadings
         assert factor_loadings({"A": {"monthly_returns": _pairs([0.01] * 24)}}, []) == []
+
+    def test_four_factor_recovers_unit_mom_beta(self):
+        """When MOM is present and the strategy's excess return is exactly
+        1.0 x MOM, the Carhart regression must recover mom beta ~= 1.0 and
+        record model == 'carhart_4factor'."""
+        from tools.analytics import factor_loadings
+        mkt = [2.0, -1.5, 0.8, 3.1, -2.2, 1.0] * 6
+        smb = [0.5, -0.7, 1.2, -0.3, 0.9, -1.1] * 6
+        hml = [-0.4, 1.1, -0.9, 0.6, -1.3, 0.7] * 6
+        mom = [1.3, -0.6, 0.4, -1.0, 0.8, -0.2] * 6
+        rf_pct = [0.3] * 36
+        ym_list = [y * 100 + m for y in (2002, 2003, 2004) for m in range(1, 13)]
+        ff = [
+            {"yyyymm": ym, "mkt_rf": mkt[i], "smb": smb[i], "hml": hml[i],
+             "mom": mom[i], "rf": rf_pct[i]}
+            for i, ym in enumerate(ym_list)
+        ]
+        idx = pd.date_range("2002-01-31", periods=36, freq="ME")
+        strat_pairs = [
+            [str(d.date()), (rf_pct[i] + mom[i]) / 100.0]
+            for i, d in enumerate(idx)
+        ]
+        out = factor_loadings(
+            {"MOM_CLONE": {"strategy_name": "MOM_CLONE",
+                           "monthly_returns": strat_pairs}},
+            ff,
+        )
+        assert len(out) == 1
+        row = out[0]
+        assert row["model"] == "carhart_4factor"
+        assert abs(row["mom"] - 1.0) < 0.01
+        assert row["mom_significant"] is True
+        assert abs(row["mkt_rf"]) < 0.01
+        assert row["r_squared"] > 0.99
+
+    def test_falls_back_to_three_factor_when_mom_absent(self):
+        """A ff dataset with no mom key must regress as a three-factor model
+        and report mom == None with model == 'ff_3factor'."""
+        from tools.analytics import factor_loadings
+        mkt = [2.0, -1.5, 0.8, 3.1, -2.2, 1.0] * 4
+        smb = [0.5, -0.7, 1.2, -0.3, 0.9, -1.1] * 4
+        hml = [-0.4, 1.1, -0.9, 0.6, -1.3, 0.7] * 4
+        ym_list = [y * 100 + m for y in (2002, 2003) for m in range(1, 13)]
+        ff = [{"yyyymm": ym, "mkt_rf": mkt[i], "smb": smb[i], "hml": hml[i],
+               "rf": 0.3} for i, ym in enumerate(ym_list)]
+        out = factor_loadings(
+            {"A": {"strategy_name": "A", "monthly_returns": _pairs(_VARYING_24)}},
+            ff,
+        )
+        assert len(out) == 1
+        assert out[0]["model"] == "ff_3factor"
+        assert out[0]["mom"] is None
+        assert out[0]["mom_significant"] is False
+
+    def test_null_mom_rows_drop_to_three_factor(self):
+        """When mom is present but null on every row, the regression must
+        drop those rows and fall back to the three-factor model."""
+        from tools.analytics import factor_loadings
+        mkt = [2.0, -1.5, 0.8, 3.1, -2.2, 1.0] * 4
+        smb = [0.5, -0.7, 1.2, -0.3, 0.9, -1.1] * 4
+        hml = [-0.4, 1.1, -0.9, 0.6, -1.3, 0.7] * 4
+        ym_list = [y * 100 + m for y in (2002, 2003) for m in range(1, 13)]
+        ff = [{"yyyymm": ym, "mkt_rf": mkt[i], "smb": smb[i], "hml": hml[i],
+               "mom": None, "rf": 0.3} for i, ym in enumerate(ym_list)]
+        out = factor_loadings(
+            {"A": {"strategy_name": "A", "monthly_returns": _pairs(_VARYING_24)}},
+            ff,
+        )
+        assert len(out) == 1
+        assert out[0]["model"] == "ff_3factor"
+        assert out[0]["mom"] is None
+
+
+# ── 7. Cumulative returns ─────────────────────────────────────────────────────
+
+class TestCumulativeReturns:
+    def test_every_series_starts_at_one(self):
+        from tools.analytics import cumulative_returns
+        out = cumulative_returns({
+            "A": {"strategy_name": "A", "monthly_returns": _pairs([0.02] * 12)},
+            "B": {"strategy_name": "B", "monthly_returns": _pairs([-0.01] * 12)},
+        })
+        # The baseline month (one period before the first return) is 1.0 for all.
+        first = out["points"][0]
+        assert first["A"] == 1.0
+        assert first["B"] == 1.0
+
+    def test_constant_return_compounds_correctly(self):
+        from tools.analytics import cumulative_returns
+        out = cumulative_returns(
+            {"A": {"strategy_name": "A", "monthly_returns": _pairs([0.10] * 3)}})
+        # Baseline 1.0, then 1.10, 1.21, 1.331.
+        vals = [p["A"] for p in out["points"]]
+        assert vals[0] == 1.0
+        assert abs(vals[-1] - 1.331) < 1e-6
+
+    def test_empty_input_returns_empty(self):
+        from tools.analytics import cumulative_returns
+        assert cumulative_returns({}) == {"strategies": [], "points": []}
+
+
+# ── 8. Excess return and information ratio ────────────────────────────────────
+
+class TestExcessAndInformationRatio:
+    def test_benchmark_excess_return_is_zero(self):
+        from tools.analytics import summary_statistics
+        out = summary_statistics(
+            {"BENCHMARK": _monthly_series([0.01] * 24),
+             "OTHER": _monthly_series([0.02] * 24)},
+            None,
+        )
+        bench = next(r for r in out if r["asset"] == "BENCHMARK")
+        assert bench["excess_return"] == 0.0
+
+    def test_benchmark_information_ratio_is_null(self):
+        from tools.analytics import summary_statistics
+        out = summary_statistics(
+            {"BENCHMARK": _monthly_series([0.01] * 24),
+             "OTHER": _monthly_series([0.02] * 24)},
+            None,
+        )
+        # The benchmark has zero tracking error against itself — IR undefined.
+        bench = next(r for r in out if r["asset"] == "BENCHMARK")
+        assert bench["information_ratio"] is None
+
+    def test_excess_return_none_without_benchmark(self):
+        from tools.analytics import summary_statistics
+        out = summary_statistics({"A": _monthly_series([0.01] * 24)}, None)
+        assert out[0]["excess_return"] is None
+        assert out[0]["information_ratio"] is None
+
+    def test_rolling_excess_benchmark_excluded_from_series(self):
+        from tools.analytics import rolling_excess_return
+        out = rolling_excess_return({
+            "BENCHMARK": {"strategy_name": "BENCHMARK",
+                          "monthly_returns": _pairs([0.01] * 24)},
+            "A": {"strategy_name": "A", "monthly_returns": _pairs([0.02] * 24)},
+        }, window=12)
+        # The benchmark is the reference line, never a plotted series.
+        assert "BENCHMARK" not in out["strategies"]
+        assert "A" in out["strategies"]

@@ -710,3 +710,87 @@ Migration:
   004_create_documents_tables.py applied at storyboard endpoint
   rollout — operator runs `alembic upgrade head` on Render before
   the next deploy.
+
+
+## Combined Analytics Enhancement Pass ✅ COMPLETE (2026-05-16)
+The final analytical build before code-review lockdown — 12 commits
+across two passes plus finalize. Derived-metric analytics, the Carhart
+momentum factor, true portfolio turnover, parameter sensitivity, and
+source-controlled strategy metadata.
+
+Backend:
+  migrations/009_add_mom_to_ff_factors.py — adds the nullable `mom`
+    column to ff_factors_monthly (down_revision 008). Nullable, not
+    NOT NULL: months predating the momentum backfill carry no value.
+  tools/data_fetcher.py — MOM factor fetch + backfill. Direct HTTP of
+    Ken French's F-F_Momentum_Factor_CSV.zip (no pandas-datareader).
+    backfill_momentum_factor() populates `mom` where NULL; wired into
+    _load_ff_factors_with_cache so a cold cache self-heals.
+  tools/backtester.py — _true_turnover(schedule, n_months): the genuine
+    sum-of-absolute-weight-change figure, sum(|Δw|)/2 per rebalance
+    annualised. Added to every strategy result alongside the legacy
+    rebalance-count proxy avg_monthly_turnover. The four dynamic
+    strategy runners gained optional parameters (lookback_scale,
+    regime_window_m, target_volatility, optimization_window) with
+    config defaults — additive, behaviour unchanged at the defaults.
+  tools/sensitivity.py — compute_sensitivity(history): sweeps each
+    dynamic strategy's key parameter around its current setting and
+    records the Sharpe ratio. ~23 backtests, memoised in-process by
+    history length. Served by GET /api/v1/analytics/sensitivity (its
+    own endpoint — deliberately NOT bundled into the light /academic).
+  strategy_metadata.py — STRATEGY_METADATA: source-controlled record
+    of all 10 strategies (construction logic, signal, economic
+    intuition, key parameter). Optimised strategies described as
+    optimised; their `weights` field is None.
+  tools/analytics.py — factor_loadings() extended to the Carhart
+    four-factor model (MKT-RF, SMB, HML, MOM). MOM-null rows are
+    dropped per strategy; a strategy whose history predates the
+    backfill falls back to a three-factor fit, recorded in `model`.
+  tools/cache.py — get_ff_factors() now SELECTs `mom` (nullable).
+  main.py — GET /api/v1/analytics/academic also returns
+    cumulative_returns, rolling_excess_return, and strategy_metadata.
+
+  tests/test_momentum_factor.py — 6 tests: Ken French momentum CSV
+    parse, backfill update path, NULL-count query, end-to-end backfill
+    return shape.
+  tests/test_analytics.py — +10 tests:
+    Factor loadings: four-factor regression recovers a unit MOM beta
+      and records model == 'carhart_4factor'; falls back to
+      'ff_3factor' when MOM is absent or NULL on every row.
+    Cumulative returns: every series starts at exactly 1.0, a constant
+      return compounds correctly, empty input returns empty.
+    Excess return / information ratio: the benchmark's own excess is
+      0.0 and its information ratio is null (zero tracking error);
+      both are null when no benchmark series is supplied; the
+      benchmark is excluded from the rolling-excess series list.
+  tests/test_strategy_enhancements.py — 8 tests:
+    True turnover: every strategy reports true_turnover, it is never
+      negative, fixed-weight statics are ~0, and dynamic strategies
+      turn over more than fixed-weight statics (a warning, not a hard
+      failure — a degenerate synthetic path could violate it).
+    Sensitivity: the sweep covers all four dynamic strategies, every
+      sweep carries points + current_value + parameter, each yields
+      at least one real Sharpe, and the result is memoised by
+      history length.
+
+Frontend:
+  pages/AcademicAnalytics.tsx — CumulativeReturnChart,
+    RollingExcessReturnChart, SensitivityAnalysis,
+    StrategyMethodologyPanel; FactorLoadingsTable gains a MOM column
+    and the Carhart subtitle (a dash marks a three-factor fallback);
+    summary table gains excess-return and information-ratio columns.
+
+Deviations from spec (flagged and approved):
+  - `mom` left NULLABLE, not NOT NULL — a conditional ALTER outside
+    Alembic is unsafe and migration 010 was not authorised. The
+    regression drops NULL-mom rows, which is correct regardless.
+  - Parameter sensitivity sits on its own endpoint rather than being
+    bundled into /api/v1/analytics/academic — bundling ~23 backtests
+    into the light read path would defeat its purpose.
+
+Migration:
+  009_add_mom_to_ff_factors.py — operator runs `alembic upgrade head`
+  on Render before the next deploy.
+
+Test counts (cumulative): 1026 backend pass, 15 skipped (HMM/Windows),
+                           178 frontend pass.
