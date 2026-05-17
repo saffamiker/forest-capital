@@ -5084,6 +5084,65 @@ from the changelog What's New modal — 🧪 new test cases available,
 /unseen; session-dismissible.
 
 
+─────────────────────────────────────────────────────────────────────────────
+TWO ACCESS TIERS — TeamGate (May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The platform has two access tiers so it can be shared safely with
+guests (Dr. Panttser, reviewers) without exposing the action features:
+
+  EXPLORE — any authenticated user. The analytics, all dashboards and
+    charts, the AI council (ask a question, the inline explainers), and
+    the Team Activity read view.
+  ACT — project team only (config.PROJECT_TEAM_EMAILS — Michael, Bob,
+    Molly). Document upload/delete, all four export endpoints, Academic
+    Review, the guided test runner, and the Settings modifications
+    (brand switcher, Retake Site Tour, Testing Mode).
+
+FRONTEND:
+  - constants/team.ts — PROJECT_TEAM_EMAILS, the frontend mirror of the
+    backend allowlist, and an isTeamMember predicate.
+  - hooks/useIsTeamMember.ts — true when the signed-in user is on the
+    team (reads useAuth).
+  - components/TeamGate.tsx — wraps an action element. Team member →
+    children render normally. Non-team, showDisabled (default) →
+    children render muted and pointer-events:none, with a lock icon and
+    a tooltip; non-team, showDisabled false → nothing renders. A `block`
+    prop selects inline geometry (lock beside the control) vs block
+    (lock floats in the corner, the child's width preserved). Gated in
+    the UI: the Settings brand switcher / Retake Tour / Testing Mode /
+    Start Test Pass, the academic-document upload row and delete
+    buttons, the Council Academic Review card, the three
+    document-generation buttons and Export Academic Package. The Test
+    Results Settings section is hidden entirely for non-team users.
+  - components/VisitorWelcomeBanner.tsx — a one-time guest welcome
+    (localStorage flag fc_visitor_welcomed); team members never see it.
+
+BACKEND:
+  auth.require_team_member extends require_auth with the team check —
+  403 "This action is restricted to the project team" for a non-team
+  authenticated user; the master API key (developer role) bypasses it.
+
+  TEAM-GATED (require_team_member): POST /api/v1/documents/academic/
+  upload, DELETE /api/v1/documents/academic/{id}, POST /api/v1/export/
+  {package,midpoint-paper,executive-brief,presentation-deck}, POST
+  /api/council/academic-review, and every /api/v1/testing/* endpoint
+  (the admin views are narrowed further to ruurdsm@ by
+  _require_test_admin).
+
+  AUTH-ONLY (require_auth, open to every authenticated user): POST
+  /api/council/query, POST /api/council/explain, POST
+  /api/council/explain-data, all GET analytics and dashboard endpoints,
+  GET /api/v1/changelog/*, and GET /api/v1/activity/team.
+
+  COUNCIL EXCEPTION: the council query and the inline explainers are
+  deliberately open. The council is the platform's headline analytical
+  capability and the safest possible surface — it is read-only, scope-
+  guarded, and rate-limited. Letting a guest ask the council to explain
+  a finding is the whole point of sharing the platform; gating it would
+  defeat the "explore" tier.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -5121,6 +5180,9 @@ was written, so the GitHub board was not updated programmatically).
      with structured failure reports, AI-categorised feedback, a quality
      gate, login notifications, and Team Activity integration
      (migration 014)
+  ✅ Two access tiers — TeamGate / require_team_member: any authenticated
+     user explores; action features gated to the project team; one-time
+     visitor welcome banner
   ✅ CLAUDE.md + README brought current
 
 ─── IN PROGRESS ───────────────────────────────────────────────────────
