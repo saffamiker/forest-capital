@@ -5018,7 +5018,12 @@ was written, so the GitHub board was not updated programmatically).
   □ Visual pass: /settings, anchor scroll, staleness pills, Reports banner
   □ Written midpoint submission (3 pages, due one week before June 3)
   □ Code review and refinement pass
-  □ UAT test guide (after code review)
+  ✅ UAT test guide — docs/UAT_TEST_GUIDE.md. A four-section user
+     acceptance testing guide (all testers, then a role-specific section
+     for Michael / Bob / Molly); also doubles as a functional intro to
+     the platform and as testing-discipline evidence for the Analytical
+     Appendix. Testers enable Testing Mode first so the pass is excluded
+     from the Team Activity analytical view.
 
   MEDIUM — improves quality before June 3:
   □ Midpoint draft upload once written (unlocks the Deliverable Quality
