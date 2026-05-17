@@ -205,3 +205,12 @@ GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 # a changelog entry in the same migration (see migration 013). Version 2
 # corresponds to the initial guided tour built in migration 013.
 TOUR_VERSION = 2
+
+# The current UAT test-script version. The guided test runner's scripts
+# live in frontend/src/constants/testScripts.ts, versioned with the code.
+# GET /api/v1/testing/unseen compares this against each tester's most
+# recent attestation: when a tester has results below this version (or
+# none), the script's steps need re-attestation and a login notification
+# surfaces. Increment by 1 whenever a test script's steps change
+# materially, and bump the matching `version` field in testScripts.ts.
+TEST_SCRIPT_VERSION = 1
