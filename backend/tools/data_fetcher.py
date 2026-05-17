@@ -369,6 +369,203 @@ def _kenfrench_direct_fetch(
     return df
 
 
+# ── Momentum (MOM) factor — Carhart fourth factor ────────────────────────────
+
+_KEN_FRENCH_MOM_ZIP_URL = (
+    "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/ftp/"
+    "F-F_Momentum_Factor_CSV.zip"
+)
+
+
+def _parse_kenfrench_momentum_csv(raw_text: str) -> pd.DataFrame:
+    """
+    Parse the monthly block of the Ken French momentum CSV. Rows are
+    `yyyymm, Mom` (two fields) — the same prose-preamble + annual-block
+    structure as the 3-factor file, so the parsing heuristic mirrors
+    _kenfrench_direct_fetch: capture rows whose first field is a 6-digit
+    YYYYMM, stop at the first non-matching line once the block has begun.
+    Returns a DataFrame indexed by YYYYMM integers with one column, Mom.
+    """
+    rows: list[tuple[int, float]] = []
+    in_block = False
+    for line in raw_text.splitlines():
+        fields = [f.strip() for f in line.split(",")]
+        if len(fields) < 2:
+            if in_block:
+                break
+            continue
+        date_field = fields[0]
+        if len(date_field) == 6 and date_field.isdigit():
+            yyyymm = int(date_field)
+            if 192501 <= yyyymm <= 209912 and 1 <= yyyymm % 100 <= 12:
+                try:
+                    rows.append((yyyymm, float(fields[1])))
+                    in_block = True
+                    continue
+                except ValueError:
+                    if in_block:
+                        break
+                    continue
+        if in_block:
+            break
+    if not rows:
+        raise ValueError(
+            "Ken French Momentum CSV contained no monthly rows — "
+            "the upstream format may have changed."
+        )
+    return pd.DataFrame(rows, columns=["yyyymm", "Mom"]).set_index("yyyymm")
+
+
+def _kenfrench_momentum_fetch(url: str = _KEN_FRENCH_MOM_ZIP_URL) -> pd.DataFrame:
+    """
+    Direct HTTP fetch of the Ken French momentum factor — same pattern as
+    _kenfrench_direct_fetch (NOT pandas-datareader, which the project
+    abandoned). Returns a DataFrame indexed by YYYYMM with column Mom,
+    values in percent (the caller converts to decimal).
+    """
+    import io
+    import zipfile
+
+    log.info("kenfrench_momentum_fetch_start", url=url)
+    response = requests.get(url, timeout=_KEN_FRENCH_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+    with zipfile.ZipFile(io.BytesIO(response.content)) as zf:
+        csv_name = next(
+            (n for n in zf.namelist() if n.lower().endswith(".csv")),
+            None,
+        )
+        if csv_name is None:
+            raise ValueError(f"No CSV file found in momentum zip at {url}")
+        raw_text = zf.read(csv_name).decode("utf-8", errors="ignore")
+
+    df = _parse_kenfrench_momentum_csv(raw_text)
+    log.info(
+        "kenfrench_momentum_fetch_complete",
+        rows=len(df),
+        first=int(df.index.min()),
+        last=int(df.index.max()),
+    )
+    return df
+
+
+def _count_null_mom() -> int:
+    """Number of ff_factors_monthly rows with a NULL mom — drives the
+    one-time backfill after migration 009. 0 means fully populated."""
+    from database import DATABASE_URL
+    if not DATABASE_URL:
+        return 0
+
+    async def _query() -> int:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        eng = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+        try:
+            async with eng.connect() as conn:
+                result = await conn.execute(text(
+                    "SELECT COUNT(*) FROM ff_factors_monthly WHERE mom IS NULL"
+                ))
+                return int(result.scalar() or 0)
+        except Exception:
+            return 0
+        finally:
+            await eng.dispose()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(_query())).result(timeout=15)
+    except Exception:
+        return 0
+
+
+def _update_mom_in_db(updates: list[tuple[int, float]]) -> int:
+    """UPDATE ff_factors_monthly.mom for the given (yyyymm, mom) pairs.
+    Returns rows updated, 0 on any DB error."""
+    from database import DATABASE_URL
+    if not DATABASE_URL or not updates:
+        return 0
+
+    async def _run() -> int:
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        eng = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+        try:
+            async with eng.begin() as conn:
+                for yyyymm, mom in updates:
+                    await conn.execute(
+                        text("UPDATE ff_factors_monthly SET mom = :m "
+                             "WHERE yyyymm = :y"),
+                        {"m": mom, "y": yyyymm},
+                    )
+            return len(updates)
+        except Exception as exc:
+            log.warning("mom_update_error", error=str(exc))
+            return 0
+        finally:
+            await eng.dispose()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(_run())).result(timeout=30)
+    except Exception:
+        return 0
+
+
+def backfill_momentum_factor() -> dict:
+    """
+    Fetches the Ken French momentum factor and backfills
+    ff_factors_monthly.mom for every existing row, joined on yyyymm.
+
+    Returns {rows_updated, date_range, gaps} — gaps lists any existing
+    yyyymm for which the momentum file has no value (logged, not fatal:
+    the momentum series starts 1927-01, after the 3-factor series, so a
+    handful of the very earliest 3-factor rows can legitimately lack a
+    momentum value). The mom column is left NULLABLE — tightening it to
+    NOT NULL would need a further migration; the four-factor regression
+    drops any row whose mom is null, so a NULL is handled cleanly.
+    """
+    summary: dict = {"rows_updated": 0, "date_range": None, "gaps": []}
+    from database import DATABASE_URL
+    if not DATABASE_URL:
+        log.warning("momentum_backfill_skipped", reason="no DATABASE_URL")
+        return summary
+
+    try:
+        mom_df = _kenfrench_momentum_fetch()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("momentum_backfill_fetch_failed", error=str(exc))
+        return summary
+
+    existing = [r[0] for r in _read_ff_factors_from_db()]
+    if not existing:
+        log.info("momentum_backfill_no_rows")
+        return summary
+
+    mom_index = set(mom_df.index)
+    updates = [
+        (int(ym), float(mom_df.loc[ym, "Mom"]))
+        for ym in existing if ym in mom_index
+    ]
+    gaps = sorted(ym for ym in existing if ym not in mom_index)
+
+    n = _update_mom_in_db(updates)
+    summary["rows_updated"] = n
+    if updates:
+        yms = sorted(u[0] for u in updates)
+        summary["date_range"] = {"start": yms[0], "end": yms[-1]}
+    summary["gaps"] = gaps
+    log.info(
+        "momentum_backfill_complete",
+        rows_updated=n,
+        date_range=summary["date_range"],
+        n_gaps=len(gaps),
+        gaps=gaps[:12],
+    )
+    return summary
+
+
 # Backward-compatible alias for any test that still monkey-patches the
 # old name. The new code path goes through _kenfrench_direct_fetch.
 def _famafrench_fetch(dataset: str = "F-F_Research_Data_Factors") -> pd.DataFrame:
@@ -1327,6 +1524,16 @@ def _load_ff_factors_with_cache(
                     rows_written=len(to_write),
                     mode="initial" if needs_initial_fetch else "incremental",
                 )
+
+    # Momentum (Carhart fourth factor) — backfill ff_factors_monthly.mom
+    # whenever any row is missing it. This fires once after migration 009
+    # adds the (nullable) mom column; once every row is populated
+    # _count_null_mom() returns 0 and this is a cheap no-op COUNT on the
+    # cold path (the warm in-process cache above short-circuits most calls
+    # before reaching here).
+    if DATABASE_URL and _count_null_mom() > 0:
+        log.info("momentum_backfill_triggered")
+        backfill_momentum_factor()
 
     # Re-read so the returned DataFrame reflects whatever's now in the
     # DB (post-write). When DATABASE_URL is unset we fall through to the
