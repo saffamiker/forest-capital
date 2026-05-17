@@ -5088,6 +5088,16 @@ from the changelog What's New modal — 🧪 new test cases available,
 TWO ACCESS TIERS — TeamGate (May 17 2026)
 ─────────────────────────────────────────────────────────────────────────────
 
+SUPERSEDED — see DATABASE-MANAGED ACCESS CONTROL below. The two-tier
+model described here was the first access-control pass; access is now
+permission-based and database-managed (migration 015). The TeamGate
+component, the explore/act split and the require_team_member dependency
+all still exist, but the team check is now a permission check
+(require_team_member == require_permission("team_member")) resolved from
+the platform_users table, not the config.PROJECT_TEAM_EMAILS allowlist.
+This section is retained for the design rationale of the explore/act
+split; the implementation details below are out of date.
+
 The platform has two access tiers so it can be shared safely with
 guests (Dr. Panttser, reviewers) without exposing the action features:
 
@@ -5143,6 +5153,134 @@ BACKEND:
   defeat the "explore" tier.
 
 
+─────────────────────────────────────────────────────────────────────────────
+DATABASE-MANAGED ACCESS CONTROL (migration 015, May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+Access control moved from the hardcoded config allowlists to a
+database-managed user system. Michael Ruurds is the sysadmin and
+manages every user from inside the platform — Settings → Users.
+
+PERMISSION MODEL — roles are presets, permissions are authoritative.
+Each user carries a `permissions` text[] array; that array is the
+capability set every gate checks. A `role` is just a named preset that
+seeds the array. The seven permissions (config.PERMISSIONS):
+  view_analytics, ask_council, team_member, generate_documents,
+  export_package, view_admin, manage_users.
+The three role presets (config.ROLE_PRESETS):
+  viewer       — view_analytics, ask_council
+  team_member  — the above + team_member, generate_documents,
+                 export_package
+  sysadmin     — every permission, including view_admin and manage_users
+A user whose permissions diverge from their role's preset is shown as
+"Custom" in the UI — the role label is informational, the array rules.
+
+platform_users TABLE (migration 015): id, email (unique), display_name,
+role, permissions text[] (default '{}'), is_active, created_at,
+created_by, last_login_at, notes. Migration 015 seeds the table from the
+config allowlists — ruurdsm@ → sysadmin, the other PROJECT_TEAM_EMAILS →
+team_member, the remaining ALLOWED_EMAILS → viewer — and inserts
+changelog entry 34.
+
+THREE-TIER PERMISSION RESOLUTION (auth.require_auth):
+  1. The JWT — the magic-link login path looks the user up in
+     platform_users and embeds role / display_name / permissions in the
+     session token, so a normal request needs no database hit.
+  2. platform_users — a token minted without them (an older or
+     test-minted token) is resolved by a per-request DB lookup
+     (tools.platform_users.resolve_user).
+  3. The config fallback — if platform_users is unreachable,
+     config_fallback resolves the user from the config allowlists. It
+     mirrors the migration-015 seed exactly (SYSADMIN_EMAILS → sysadmin,
+     PROJECT_TEAM_EMAILS → team_member, any other ALLOWED_EMAILS address
+     → viewer), so a database outage degrades gracefully — Michael keeps
+     administration, the team keep their access.
+  The master API key (developer) holds every permission and bypasses the
+  database entirely.
+
+FAIL-OPEN BY DESIGN: every tools/platform_users.py read swallows
+database errors and returns a safe default — get_active_user → None,
+list_all_users → [], count_active_sysadmins → 0. A database problem must
+never lock the whole team out. CRITICAL: config.ALLOWED_EMAILS and
+config.PROJECT_TEAM_EMAILS are RETAINED as the emergency fallback —
+never remove them; the platform must never be in a state where a
+database issue causes a complete lockout.
+
+config.SYSADMIN_EMAILS = {"ruurdsm@queens.edu"} — the fallback's source
+of truth for who is a sysadmin when the database is down.
+
+GATING:
+  auth.require_permission(perm) — a FastAPI dependency factory; admits a
+  user whose resolved permissions contain `perm`, 403s everyone else.
+  require_team_member is require_permission("team_member") — kept as a
+  named dependency so existing call sites need no change.
+  Per-endpoint map: document upload/delete, Academic Review and the
+  /api/v1/testing/* endpoints require team_member; the three
+  document-generation endpoints require generate_documents; the
+  academic-package export requires export_package; the failure-reports /
+  feedback-backlog views require view_admin; the /api/v1/admin/users
+  endpoints require manage_users. (_require_test_admin / _TESTING_ADMIN
+  are removed — the admin testing views are now view_admin-gated.)
+
+USER-MANAGEMENT ENDPOINTS (all manage_users-gated):
+  GET    /api/v1/admin/users          — every user + an activity_count
+  POST   /api/v1/admin/users          — add a user (422 on a bad email /
+                                        role, 409 on a duplicate email)
+  PATCH  /api/v1/admin/users/{id}     — edit display_name / role /
+                                        permissions / is_active / notes
+                                        (email immutable)
+  DELETE /api/v1/admin/users/{id}     — soft-delete (is_active = false;
+                                        the row is kept so activity stays
+                                        attributed)
+  LAST-SYSADMIN GUARD: PATCH and DELETE refuse any change that would
+  leave the platform with no active manage_users holder
+  (count_active_sysadmins <= 1) — 400 "Cannot remove the last sysadmin."
+
+AUTH ENDPOINTS: the magic-link request gates on
+tools.platform_users.is_login_allowed (an active platform_users row is
+required when the table is reachable, so a deactivated user is correctly
+refused; falls back to ALLOWED_EMAILS only when the table is down).
+/api/auth/verify looks the user up and threads role / display_name /
+permissions into the session JWT, then stamps last_login_at.
+/api/auth/me returns {email, role, display_name, permissions} — the
+frontend gates its UI on the permissions array.
+
+FRONTEND:
+  - hooks/usePermissions.ts — useHasPermission(perm) is the primitive;
+    useIsTeamMember / useIsSysadmin / useCanGenerateDocuments /
+    useCanExport are convenience wrappers. All read the session
+    permissions array from AuthContext (populated by /api/auth/me); they
+    read false until that resolves — a brief, safe window. The old
+    hooks/useIsTeamMember.ts is removed.
+  - components/TeamGate.tsx — gains a `permission` prop (default
+    "team_member"); pass "generate_documents", "export_package" etc. for
+    the specific gates.
+  - constants/permissions.ts — PERMISSIONS, ROLE_PRESETS,
+    ASSIGNABLE_ROLES (viewer / team_member only — sysadmin is
+    migration-assigned, never offered in the UI) and matchesPreset() —
+    the frontend mirror of config.PERMISSIONS / config.ROLE_PRESETS.
+  - components/UserManagementPanel.tsx — the Settings → Users table
+    (name, role badge with a Custom indicator, status, last login,
+    activity count) with add / edit / deactivate. The add/edit modal
+    carries a per-permission checklist seeded by the role preset;
+    manage_users is shown disabled (sysadmin-only) and a sysadmin user's
+    role is shown read-only.
+  - App.tsx — the Session interface carries role / displayName /
+    permissions; login and the mount restore both fetch /api/auth/me.
+  - pages/Settings.tsx — a sysadmin-only Users section between Analytics
+    Configuration and Academic Documents; completely hidden for
+    non-sysadmin users.
+
+ENDPOINTS: GET/POST/PATCH/DELETE /api/v1/admin/users.
+UI: Settings → Users (sysadmin only).
+Migration: 015 — operator runs `alembic upgrade head` on Render.
+
+FORWARD ITEM: agents/academic_review.py builds its team-member list from
+config.PROJECT_TEAM_EMAILS — it should eventually read the active
+team_member users from platform_users instead. Left as-is for now; the
+config list and the seeded table agree, so there is no behavioural gap.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -5183,6 +5321,10 @@ was written, so the GitHub board was not updated programmatically).
   ✅ Two access tiers — TeamGate / require_team_member: any authenticated
      user explores; action features gated to the project team; one-time
      visitor welcome banner
+  ✅ Database-managed access control — platform_users table, a
+     permission model (roles are presets over a permissions array),
+     three-tier resolution (JWT → DB → config fallback), the sysadmin
+     Settings → Users management UI, last-sysadmin guards (migration 015)
   ✅ Changelog + What's New modal + CI/CD pipeline (ci.yml, changelog
      gate, migrations 011-012)
   ✅ Site tour — 15-step react-joyride walkthrough, academic-rationale
@@ -5204,7 +5346,7 @@ was written, so the GitHub board was not updated programmatically).
 
   HIGH — before June 3:
   □ Visual pass — document generation panel, test runner, Data Explain
-    buttons, strategy InfoIcons
+    buttons, strategy InfoIcons, Settings → Users
   □ Bob — run an Academic Review before writing the midpoint draft
   □ Bob — upload the midpoint draft once written (Settings → Academic
     Documents)
@@ -5213,7 +5355,7 @@ was written, so the GitHub board was not updated programmatically).
   □ Bob — UAT Section 3 test pass
   □ Molly — UAT Section 4 test pass + presentation review pass
   □ All — UAT Section 1 test pass
-  □ alembic upgrade head on Render for migration 014
+  □ alembic upgrade head on Render for migrations 014 and 015
 
   POST-DEADLINE:
   □ Move to develop → main PR flow with required status checks
