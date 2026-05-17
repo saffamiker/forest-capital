@@ -15,6 +15,14 @@ Intelligence System. It serves three purposes:
 
 Production app: **https://forest-capital.vercel.app**
 
+> **This document is the source of truth for test cases.** The in-platform
+> guided test runner (Settings → Testing Mode → Start Test Pass) runs these
+> same cases interactively, with automated logging and attested results —
+> navigating you to each screen, recording your pass/fail/skip, capturing
+> structured failure reports and AI-categorised feedback. Use the runner for
+> an attested pass; this document remains the readable reference and the
+> place test cases are authored.
+
 ---
 
 ## Before You Start (ALL TESTERS)

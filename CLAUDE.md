@@ -4990,6 +4990,100 @@ environment. The builders follow the proven, test-covered patterns
 already established in tools/docx_generator.py and tools/pptx_generator.py.
 
 
+─────────────────────────────────────────────────────────────────────────────
+GUIDED UAT TEST RUNNER (migration 014, May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+An interactive, logged, attested in-platform test runner — the
+operational counterpart to docs/UAT_TEST_GUIDE.md. It walks a tester
+through each test case, records an attested pass/fail/skip, captures
+structured failure reports and AI-categorised feedback, and surfaces
+resolution back to the tester.
+
+ARCHITECTURE: test SCRIPTS are code (frontend/src/constants/testScripts.
+ts), versioned with the codebase, not user-editable. Test RESULTS and
+FEEDBACK are database rows (migration 014). The runner reuses the
+SiteTour controlled-step + cross-route navigation PATTERN but NOT a
+second react-joyride instance — Joyride's overlay gates page
+interaction, which a UAT runner (the tester must freely exercise the
+real app) cannot tolerate; a lightweight pointer-events:none spotlight
+replaces it.
+
+TABLES (migration 014):
+  test_results — one attested row per (user_email, script_id, step_id),
+    unique on that triple so a re-attestation UPSERTs and flips
+    `overridden` true. Holds the structured failure report
+    (failure_description, expected/actual, severity, browser_info,
+    screenshot_paths) and resolution fields (resolved_at/by, note).
+  test_feedback — step-linked (script_id+step_id) or free-form
+    (source_route only) tester feedback, with AI categorisation
+    (ai_category, ai_severity, ai_effort_estimate, ai_tags, ai_summary,
+    ai_confidence) and a status (new | noted | planned | wont_do |
+    resolved).
+
+FOUR TEST SCRIPTS, each checklist item in UAT_TEST_GUIDE.md a TestStep:
+  all_testers_v1     → "all"      (core navigation and platform basics)
+  michael_ruurds_v1  → "michael"  (engineering and analytics validation)
+  bob_thao_v1        → "bob"      (written deliverables and council)
+  molly_murdock_v1   → "molly"    (presentation and visualisation)
+
+TEST_SCRIPT_VERSION (config.py, currently 1): the version gate.
+GET /api/v1/testing/unseen returns each tester's attested-step
+inventory; the frontend diffs it against testScripts.ts to surface
+scripts with new/changed steps as a login notification. When a script's
+steps change materially, bump TEST_SCRIPT_VERSION in config.py AND the
+matching `version` field in testScripts.ts together.
+
+QUALITY GATE: every failure report and feedback submission is scored by
+POST /api/v1/testing/quality-check before storage — a single
+claude-sonnet-4-6 call scoring clarity / specificity / actionability,
+threshold 7.0. Below threshold the tester sees the evaluator's
+clarification question (revise once, or "submit as-is" → low_quality
+flag); the tester never sees a score. FAIL-OPEN: an evaluator error, or
+the test environment (no API key), passes the submission — a flaky
+evaluator never blocks. Logged as interaction_type test_quality_eval.
+
+AI CATEGORISATION: POST /api/v1/testing/feedback runs the feedback
+through claude-sonnet-4-6 (category / severity / effort / ≤3 tags /
+summary / confidence) before storing — fail-open to empty
+categorisation.
+
+ENDPOINTS (all /api/v1/testing/, team-gated; the admin views are
+ruurdsm@ only): results (multipart upsert) + results (read) + unseen +
+summary + failures + failures/{id}/resolve + feedback + feedback (read)
++ feedback/{id}/resolve + quality-check + notifications.
+
+SCREENSHOTS: stored to the local backend/data/uploads directory, served
+read-only via the /uploads StaticFiles mount; the DB holds relative
+paths, never BLOBs. EPHEMERAL on Render — the filesystem resets on
+redeploy, so screenshot image files do NOT survive a redeploy. The
+test_results attestation row (result, description, severity,
+timestamps) is the durable record; screenshots are supporting evidence
+only. If storage is unavailable the result is stored without
+screenshots — never blocked.
+
+SETTINGS: a "Test Results" section (every tester — per-script progress,
+step accordion, re-test, attestation CSV) and a "Test Administration"
+section (ruurdsm@ only — the Failure Reports list with resolution and
+the Feedback Backlog with AI categorisation, status control and
+filters). The "Start Test Pass" button sits in Settings → Account,
+shown only while Testing Mode is active.
+
+TEAM ACTIVITY: activity_log._read_test_events interleaves four event
+kinds into the unified timeline — test_pass (one aggregate per
+tester/script), test_failure, test_failure_resolved, test_feedback —
+under the "test_activity" filter source (not session_type filtered).
+get_activity_summary gains a test_coverage block; _test_coverage()
+queries it in its own guarded session so a database without the
+migration-014 tables cannot poison the summary.
+
+LOGIN NOTIFICATIONS: three operational notification types, separate
+from the changelog What's New modal — 🧪 new test cases available,
+✅ a reported failure resolved (re-test), 💬 feedback responded. Derived
+(no notifications table) from GET /api/v1/testing/notifications and
+/unseen; session-dismissible.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -5023,6 +5117,10 @@ was written, so the GitHub board was not updated programmatically).
   ✅ Academic Export Package — light-mode chart/table ZIP
   ✅ Academic document generation — midpoint paper, executive brief and
      16-slide presentation deck assembled from real data + AI narrative
+  ✅ Guided UAT test runner — interactive, logged, attested test runner
+     with structured failure reports, AI-categorised feedback, a quality
+     gate, login notifications, and Team Activity integration
+     (migration 014)
   ✅ CLAUDE.md + README brought current
 
 ─── IN PROGRESS ───────────────────────────────────────────────────────
