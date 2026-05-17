@@ -38,6 +38,38 @@ except Exception:
     pass
 
 
+# ── Off-loop write engine ─────────────────────────────────────────────────────
+# database.py's engine uses a connection POOL. An asyncpg connection is bound to
+# the event loop it was created on; checked back into the pool after an
+# asyncio.run() loop closes, it is orphaned on a dead loop, and its eventual
+# teardown emits "coroutine 'Connection._cancel' was never awaited".
+#
+# QA Tier 2/3 cache writes run in a background thread via asyncio.run() (see
+# main.py's _writer and qa_tiered._tier2_run_and_cache) — exactly that case.
+# This NullPool engine retains no connection between checkouts, so each write
+# opens and closes a fresh connection entirely within its own loop. It mirrors
+# data_fetcher._get_readonly_engine; the engine object lives for the process.
+_write_engine = None  # lazily-created NullPool AsyncEngine | None
+
+
+def _get_write_engine():
+    """Process-wide NullPool engine for DB writes issued OUTSIDE the FastAPI
+    event loop (a background-thread asyncio.run). None when DATABASE_URL is
+    unset — callers fall back gracefully."""
+    global _write_engine
+    from database import DATABASE_URL
+    if not DATABASE_URL:
+        return None
+    if _write_engine is None:
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        _write_engine = create_async_engine(
+            DATABASE_URL, echo=False, poolclass=NullPool,
+        )
+        log.info("write_engine_created")
+    return _write_engine
+
+
 def _compute_data_hash(n_rows: int, last_date: str, n_strategies: int) -> str:
     """
     Stable hash of pipeline inputs.  Changes only when new monthly rows
@@ -565,6 +597,7 @@ async def set_qa_cache(
     strategy_hash: str,
     verdict_payload: dict[str, Any],
     tier: int,
+    off_loop: bool = False,
 ) -> None:
     """
     Appends a new QA verdict row. Never updates an existing row — the
@@ -573,6 +606,12 @@ async def set_qa_cache(
 
     TTL hours per tier come from qa_tiered.TIER_TTL_HOURS so the two
     modules can never disagree on freshness windows.
+
+    off_loop=True routes the write through the NullPool _get_write_engine
+    instead of the pooled AsyncSessionLocal — required when the caller runs
+    this inside a background-thread asyncio.run() (QA Tier 2/3), where a
+    pooled connection would be orphaned across the loop boundary. On-loop
+    callers (awaited on the FastAPI loop) leave off_loop False.
     """
     if not _DB_AVAILABLE:
         return
@@ -581,7 +620,15 @@ async def set_qa_cache(
         from tools.qa_tiered import TIER_TTL_HOURS
         ttl_hours = TIER_TTL_HOURS.get(int(tier), 24)
         expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
-        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+        if off_loop:
+            from sqlalchemy.ext.asyncio import AsyncSession
+            write_engine = _get_write_engine()
+            if write_engine is None:
+                return
+            session_ctx: Any = AsyncSession(write_engine)
+        else:
+            session_ctx = AsyncSessionLocal()  # type: ignore[union-attr]
+        async with session_ctx as session:
             await session.execute(
                 text(
                     "INSERT INTO qa_results_cache "

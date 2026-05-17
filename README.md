@@ -194,7 +194,7 @@ See `backend/.env.example` for all required variables. Key ones:
 ## Known Limitations
 
 - **`extract_document_text()` is PDF-only.** Markdown handling lives upstream in the `/api/v1/documents/academic/upload` endpoint (raw UTF-8 decode); the function's former non-PDF text branch was removed as dead code.
-- **`Connection._cancel` RuntimeWarning** surfaces in some test runs (asyncpg connection teardown across `asyncio.run()` boundaries) — under investigation; does not affect correctness.
+- **`Connection._cancel` RuntimeWarning** surfaces once each from `test_changelog.py` and `test_activity.py` — DB round-trip tests that drive production-correct async functions through the harness's own `asyncio.run()` wrapper. A test-harness artifact, not a production path; does not affect correctness. The one production trigger (the QA off-loop cache write) is fixed via the NullPool write engine (`tools/cache.py._get_write_engine`). See `CLAUDE.md` → NullPool Write Engine.
 - **Single `main` branch.** Development currently commits directly to `main`. A `develop → main` PR flow with required status checks is recommended post-deadline.
 
 ## Sprint 6 Roadmap

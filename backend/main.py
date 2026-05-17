@@ -2026,9 +2026,12 @@ async def qa_run(request: Request, session: dict = Depends(require_auth)):
         await set_qa_cache(strategy_hash, t1, tier=1)
 
         # Tier 2 — fire and forget. Need a sync wrapper for the writer.
+        # off_loop=True: _writer runs in a background thread via asyncio.run(),
+        # so set_qa_cache must use the NullPool write engine — a pooled
+        # connection would be orphaned when that loop closes.
         import asyncio as _asyncio
         def _writer(h: str, v: dict, tier: int) -> None:
-            _asyncio.run(set_qa_cache(h, v, tier=tier))
+            _asyncio.run(set_qa_cache(h, v, tier=tier, off_loop=True))
         schedule_tier2_background(results_dict, strategy_hash, _writer)
 
         # Team Activity — record the QA run (non-blocking).

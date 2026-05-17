@@ -4073,6 +4073,35 @@ MEMORY LEAK FIX (commit 9e9e51e):
      schedule_tier2_background() call. The worker (_tier2_run_and_cache)
      is a top-level function so it captures nothing via closure.
 
+NULLPOOL WRITE ENGINE — Connection._cancel warning:
+  Symptom: "RuntimeWarning: coroutine 'Connection._cancel' was never
+  awaited" — emitted at GC time, so the line it is attributed to is
+  noise (the real coroutine is asyncpg connection teardown).
+  Cause: an asyncpg connection is bound to the event loop it was created
+  on. database.py's engine is a pooled engine (AsyncAdaptedQueuePool).
+  Code that runs a DB write inside a background-thread asyncio.run()
+  checks a pooled connection back in still open; when that loop closes
+  the connection is orphaned on a dead loop, and its eventual teardown
+  emits the warning. No data risk — the transaction commits inside the
+  loop before it closes, and pool_pre_ping discards a dead connection
+  before reuse.
+  Production trigger: the QA Tier 2/3 cache write. main.py's _writer
+  wraps set_qa_cache() in asyncio.run() on the _TIER2_EXECUTOR thread.
+  Fix: tools/cache.py._get_write_engine() — a process-wide NullPool
+  write-engine singleton, the write-side sibling of
+  data_fetcher._get_readonly_engine(). set_qa_cache(..., off_loop=True)
+  routes through it; NullPool retains no connection between checkouts,
+  so the write opens and closes a fresh connection entirely within its
+  own loop. On-loop callers (await set_qa_cache(...) on the FastAPI
+  loop — main.py Tier 1 and the manual Tier 3 review) leave off_loop
+  False and keep using the pooled AsyncSessionLocal.
+  Residual: the warning still surfaces ONCE EACH in test_changelog.py
+  and test_activity.py output. Those DB round-trip tests drive
+  production-correct async functions (changelog.py / activity_log.py,
+  which run on the FastAPI loop in production) through the test
+  harness's own asyncio.run() wrapper. It is a test-harness artifact,
+  not a production code path — left as-is, with no warning suppressor.
+
 EFFICIENT FRONTIER (commits 9765d15, e2c03b6, 7ca5545):
   - /api/optimize/weights returns a structured EfficientFrontierData object
     — {frontier_points, portfolio_points, max_sharpe_point,
@@ -4699,6 +4728,9 @@ was written, so the GitHub board was not updated programmatically).
   the post-Sprint-6 stream:
   ✅ Zero-traffic memory leak fixed — get_full_history 30s memo,
      NullPool read-only engine singleton, _TIER2_EXECUTOR singleton
+  ✅ Connection._cancel warning — investigated; QA off-loop cache write
+     fixed with the NullPool _get_write_engine singleton (see the
+     NULLPOOL WRITE ENGINE architecture note)
   ✅ Opus 4 → Opus 4.7; Grok grok-3-mini → grok-4 → grok-4.3
   ✅ XAI OpenRouter auto-detection (agents/_xai_config.py)
   ✅ Optimizer NaN/Inf guard (_returns_have_finite_moments)
@@ -4735,7 +4767,6 @@ was written, so the GitHub board was not updated programmatically).
   □ Midpoint draft upload once written (unlocks the Deliverable Quality
     section of Academic Review)
   □ Presentation slides and script upload once prepared
-  □ Connection._cancel warning investigation
 
   POST-DEADLINE:
   □ Move to develop → main PR flow with required status checks
