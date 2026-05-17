@@ -24,6 +24,7 @@ import { useBrand, BRANDS } from '../context/BrandContext'
 import type { BrandMode } from '../context/BrandContext'
 import { useSession } from '../context/SessionContext'
 import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
+import UserManagementPanel from '../components/UserManagementPanel'
 import { TestResultsSection, TestAdminSections } from '../components/TestRunnerSettings'
 import TeamGate from '../components/TeamGate'
 import { useIsTeamMember, useIsSysadmin } from '../hooks/usePermissions'
@@ -495,6 +496,18 @@ export default function Settings() {
       >
         <AnalyticsConfigurationSection />
       </SettingsSection>
+
+      {/* Users — sysadmin-only. Completely hidden for non-sysadmin users:
+          a viewer or team member never sees that this section exists. */}
+      {isSysadmin && (
+        <SettingsSection
+          id="users"
+          title="Users"
+          description="Manage who can access the platform and their permission level."
+        >
+          <UserManagementPanel />
+        </SettingsSection>
+      )}
 
       <SettingsSection
         id="academic-documents"
