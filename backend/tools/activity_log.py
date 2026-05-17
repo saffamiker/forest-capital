@@ -603,11 +603,6 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
                 "WHERE interaction_type = 'academic_review'" + st_clause
                 + " ORDER BY timestamp DESC LIMIT 1"
             ))
-            # Test coverage — attested steps and distinct testers. Not
-            # session_type filtered: test attestations are the test record.
-            test_cov = await session.execute(text(
-                "SELECT COUNT(*), COUNT(DISTINCT user_email) FROM test_results"
-            ))
 
             members: dict[str, dict] = {}
 
@@ -681,8 +676,6 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
                     "overall_rating": meta.get("overall_rating"),
                 }
 
-            cov_row = test_cov.fetchone()
-
         return {
             "per_member": sorted(members.values(), key=lambda m: m["user"]),
             "commits": {"total": total_commits, "this_week": this_week,
@@ -691,10 +684,10 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
             "last_academic_review": last_review,
             "total_interactions": total_interactions,
             "analytical_sessions_only": analytical_only,
-            "test_coverage": {
-                "steps_attested": int(cov_row[0]) if cov_row else 0,
-                "testers": int(cov_row[1]) if cov_row else 0,
-            },
+            # Queried separately (its own session + guard) so a database
+            # without the migration-014 test_results table cannot poison
+            # the rest of the summary.
+            "test_coverage": await _test_coverage(),
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("activity_summary_failed", error=str(exc))
@@ -702,6 +695,25 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
 
 
 # ── small helpers ─────────────────────────────────────────────────────────────
+
+async def _test_coverage() -> dict[str, int]:
+    """
+    Attested test steps and distinct testers — the Team Activity summary's
+    test-coverage figure. Its own session and guard: a database without
+    the migration-014 test_results table simply yields zeros.
+    """
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(text(
+                "SELECT COUNT(*), COUNT(DISTINCT user_email) FROM test_results"))
+            found = row.fetchone()
+            return {"steps_attested": int(found[0]) if found else 0,
+                    "testers": int(found[1]) if found else 0}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("test_coverage_query_failed", error=str(exc))
+        return {"steps_attested": 0, "testers": 0}
+
 
 def _json_or_none(value: Any) -> str | None:
     if value is None:
