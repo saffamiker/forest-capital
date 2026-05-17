@@ -1,5 +1,6 @@
 import { Download } from 'lucide-react'
 import { trackExport } from '../lib/activityLogger'
+import { toCsv } from '../lib/csv'
 
 interface TableExportButtonProps {
   /** Used for the downloaded filename. */
@@ -26,20 +27,9 @@ export default function TableExportButton({
 }: TableExportButtonProps) {
   const timestamp = () => new Date().toISOString().slice(0, 10).replace(/-/g, '')
 
-  const toCsvRow = (vals: (string | number | boolean | null | undefined)[]) =>
-    vals
-      .map((v) => {
-        const s = v == null ? '' : String(v)
-        return s.includes(',') || s.includes('"') || s.includes('\n')
-          ? `"${s.replace(/"/g, '""')}"`
-          : s
-      })
-      .join(',')
-
   const downloadCsv = () => {
-    const lines = [headers, ...rows].map(toCsvRow).join('\r\n')
     // UTF-8 BOM ensures Excel reads the file correctly
-    const blob = new Blob(['﻿' + lines], { type: 'text/csv;charset=utf-8;' })
+    const blob = new Blob(['﻿' + toCsv(headers, rows)], { type: 'text/csv;charset=utf-8;' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url

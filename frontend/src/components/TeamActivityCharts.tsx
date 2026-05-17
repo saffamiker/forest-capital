@@ -22,6 +22,8 @@ import {
   PieChart, Pie, Cell, Legend,
 } from 'recharts'
 import type { ActivityEvent, ActivityKind, ActivitySummary } from '../types/activity'
+import type { ChartTheme } from '../lib/exportTheme'
+import { DARK_CHART_THEME } from '../lib/exportTheme'
 
 // Stacked activity types for chart 1 — page_view is the lightest layer.
 const STACK_KINDS: { key: ActivityKind; label: string; color: string }[] = [
@@ -61,16 +63,24 @@ interface ChartCardProps {
   children: React.ReactNode
   // In Presentation View titles and padding scale up for projector legibility.
   presentMode?: boolean
+  theme?: ChartTheme
 }
 
-function ChartCard({ title, subtitle, children, presentMode }: ChartCardProps) {
+function ChartCard({ title, subtitle, children, presentMode, theme = DARK_CHART_THEME }: ChartCardProps) {
+  const light = theme.mode === 'light'
   return (
-    <div className={`card ${presentMode ? 'p-6' : 'p-4'}`}>
+    <div
+      className={light ? `${presentMode ? 'p-6' : 'p-4'} rounded-lg` : `card ${presentMode ? 'p-6' : 'p-4'}`}
+      style={light ? { background: theme.background, border: `1px solid ${theme.border}` } : undefined}
+    >
       <div className={presentMode ? 'mb-4' : 'mb-2'}>
-        <h3 className={`font-semibold text-white ${presentMode ? 'text-xl' : 'text-sm'}`}>
+        <h3 className={`font-semibold ${presentMode ? 'text-xl' : 'text-sm'}`}
+            style={{ color: theme.textPrimary }}>
           {title}
         </h3>
-        <p className={`text-muted ${presentMode ? 'text-sm' : 'text-2xs'}`}>{subtitle}</p>
+        <p className={presentMode ? 'text-sm' : 'text-2xs'} style={{ color: theme.textSecondary }}>
+          {subtitle}
+        </p>
       </div>
       {children}
     </div>
@@ -81,9 +91,13 @@ interface Props {
   events: ActivityEvent[]
   summary: ActivitySummary | null
   presentMode: boolean
+  /** Light theme renders the charts on white for the academic export. */
+  theme?: ChartTheme
 }
 
-export default function TeamActivityCharts({ events, summary, presentMode }: Props) {
+export default function TeamActivityCharts({
+  events, summary, presentMode, theme = DARK_CHART_THEME,
+}: Props) {
   // Chart-1 stack visibility — clicking the legend toggles a type off.
   const [hidden, setHidden] = useState<Set<ActivityKind>>(new Set())
   const toggle = (k: ActivityKind) => {
@@ -144,15 +158,17 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
   const barLabelFontSize = presentMode ? 15 : 11
 
   const axisProps = {
-    tick: { fill: '#64748b', fontSize: axisFontSize },
-    stroke: '#1f2937',
+    tick: { fill: theme.axisTick.fill, fontSize: axisFontSize },
+    stroke: theme.gridStroke,
   }
   const tooltipStyle = {
     contentStyle: {
-      background: '#1a2438', border: '1px solid #1e3a5c',
+      background: theme.tooltipContentStyle.backgroundColor as string,
+      border: `1px solid ${theme.border}`,
       borderRadius: 8, fontSize: presentMode ? 15 : 12,
+      color: theme.textPrimary,
     },
-    labelStyle: { color: '#f9fafb' },
+    labelStyle: { color: theme.textPrimary },
   }
   const legendProps = {
     wrapperStyle: { fontSize: legendFontSize },
@@ -205,7 +221,7 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
                       <span className={`rounded-sm ${
                         presentMode ? 'w-4 h-4' : 'w-2.5 h-2.5'
                       }`} style={{ background: s.color }} />
-                      <span className="text-slate-300">{s.label}</span>
+                      <span style={{ color: theme.textSecondary }}>{s.label}</span>
                     </button>
                   )
                 })}
@@ -220,6 +236,7 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
         title="Team contribution split"
         subtitle="Share of substantive interactions — council, academic review, uploads"
         presentMode={presentMode}
+        theme={theme}
       >
         {contribution.length === 0 ? (
           <EmptyChart />
@@ -256,6 +273,7 @@ export default function TeamActivityCharts({ events, summary, presentMode }: Pro
         title="Agent engagement"
         subtitle="Times each council agent was consulted across all sessions"
         presentMode={presentMode}
+        theme={theme}
       >
         {agentEngagement.length === 0 ? (
           <EmptyChart />

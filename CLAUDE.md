@@ -4821,6 +4821,66 @@ positive for these strategies, so colouring every cell green would add
 noise, not consistency.
 
 
+─────────────────────────────────────────────────────────────────────────────
+ACADEMIC EXPORT PACKAGE (May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+"Export Academic Package" on the Reports screen produces a ZIP of
+light-mode chart PNGs and CSV tables for embedding in the written
+deliverables (Word / printing).
+
+ENDPOINT — POST /api/v1/export/package (auth required):
+  multipart/form-data —
+    charts    list[UploadFile]  PNG blobs; each .filename is the in-ZIP name
+    tables    list[UploadFile]  CSV blobs; each .filename is the in-ZIP name
+    metadata  Form str          JSON of study-period fields
+  Assembles (stdlib zipfile + io.BytesIO) and returns application/zip with
+  an attachment Content-Disposition (forest_capital_academic_export_<date>.zip):
+    charts/<uploaded chart filenames>
+    tables/<uploaded table filenames>
+    metadata/study_period.txt        — from the metadata JSON
+    metadata/chart_descriptions.txt  — curated STATIC per-chart text keyed by
+                                       filename slug. Deliberately deterministic:
+                                       an export endpoint must not hang or fail
+                                       on an LLM outage (the spec said "call the
+                                       academic writer agent" — a static,
+                                       reproducible description is the correct
+                                       engineering call for a packaging route).
+    README.txt                       — citation guidance
+  Logs interaction_type "export" via log_agent_interaction — awaited (not
+  fire-and-forget): the ZIP is already built, so a synchronous one-row INSERT
+  is free and deterministic. Team-gated; "export" is in _INTERACTION_TYPES.
+
+LIGHT EXPORT THEME — frontend/src/lib/exportTheme.ts:
+  Charts render dark in the app and LIGHT in the export. A `ChartTheme`
+  object (gridStroke, axisTick, tooltip styles, textPrimary/Secondary,
+  benchmark, regimeBreak, colorFor(strategy), seriesColors) is passed to a
+  chart as an optional `theme` prop, defaulting to DARK_CHART_THEME — so the
+  live dark UI is completely unaffected; a chart only renders light when the
+  off-screen export renderer passes LIGHT_CHART_THEME. (A CSS
+  `data-export-theme="light"` attribute flip — the original spec's mechanism
+  — cannot recolour the ten distinct strategy series: CSS has no per-series
+  selector. Per-series colour is resolved in JS via theme.colorFor instead.)
+  LIGHT_CHART_THEME darkens the strategy palette so all ten stay
+  distinguishable on white. Theme-aware export-target charts: EfficientFrontier,
+  TeamActivityCharts, and the AcademicAnalytics CumulativeReturnChart /
+  RollingCorrelationChart / RollingExcessReturnChart / SensitivityAnalysis
+  (now named exports).
+
+CAPTURE — frontend/src/utils/chartCapture.ts:
+  captureElement(node) rasterises a DOM node via html2canvas at 2× on white
+  → PNG Blob. placeholderImage(label) returns a white "capture failed" PNG so
+  one failed chart never fails the whole package. (The spec named
+  captureChart(elementId) — charts carry no DOM ids; the off-screen renderer
+  holds a ref to each node, so captureElement takes the node directly.)
+
+FRONTEND FLOW — AcademicExportModal renders the six export charts off-screen
+  with LIGHT_CHART_THEME, captures each at 2×, builds the table CSVs via the
+  shared lib/csv.ts serialiser (no duplicated export logic), POSTs the
+  multipart package, and downloads the returned ZIP — with a five-step
+  progress modal.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.

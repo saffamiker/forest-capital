@@ -23,10 +23,11 @@ import { useNavigate, Link } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, Presentation, Download, Loader2, Calendar, AlertCircle,
-  CheckCircle, Clock, ArrowRight, GraduationCap, Edit3, Info,
+  CheckCircle, Clock, ArrowRight, GraduationCap, Edit3, Info, FileArchive,
 } from 'lucide-react'
 import AdvisorPanel from '../components/AdvisorPanel'
 import TeamActivityPanel from '../components/TeamActivityPanel'
+import AcademicExportModal from '../components/AcademicExportModal'
 import type { DeliverableType } from '../types/advisor'
 import type { SectionDocType } from '../types/documents'
 
@@ -273,6 +274,7 @@ export default function Reports() {
   // here so the panel opens to the right card's context rather than the
   // default midpoint deliverable that the floating button would pick.
   const [advisorDeliverable, setAdvisorDeliverable] = useState<DeliverableType | null>(null)
+  const [exporting, setExporting] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -357,14 +359,29 @@ export default function Reports() {
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-screen-xl mx-auto">
-      <div>
-        <h1 className="text-xl font-semibold text-white">Reports & Deliverables</h1>
-        <p className="text-sm text-muted mt-1">
-          AI-drafted documents for the FNA 670 practicum. Every output is
-          labelled <strong className="text-warning">AI DRAFT — REQUIRES HUMAN REVIEW</strong> —
-          edit before submitting.
-        </p>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <h1 className="text-xl font-semibold text-white">Reports & Deliverables</h1>
+          <p className="text-sm text-muted mt-1">
+            AI-drafted documents for the FNA 670 practicum. Every output is
+            labelled <strong className="text-warning">AI DRAFT — REQUIRES HUMAN REVIEW</strong> —
+            edit before submitting.
+          </p>
+        </div>
+        {/* Academic Export Package — light-mode charts + CSV tables zipped
+            for paper submission. A primary action. */}
+        <button
+          type="button"
+          onClick={() => setExporting(true)}
+          className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold
+                     bg-electric text-white hover:bg-blue-500 transition-colors shrink-0"
+        >
+          <FileArchive className="w-4 h-4" />
+          Export Academic Package
+        </button>
       </div>
+
+      {exporting && <AcademicExportModal onClose={() => setExporting(false)} />}
 
       {error && (
         <div className="flex items-start gap-2 px-3 py-2 rounded border border-danger/30 bg-danger/5 text-danger text-xs">

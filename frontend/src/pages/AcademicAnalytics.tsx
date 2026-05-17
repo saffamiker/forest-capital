@@ -21,6 +21,8 @@ import {
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import TableExportButton from '../components/TableExportButton'
 import InfoIcon from '../components/InfoIcon'
+import type { ChartTheme } from '../lib/exportTheme'
+import { DARK_CHART_THEME } from '../lib/exportTheme'
 
 // Purple accent — analytics sits alongside the academic-rigour screens.
 const ACCENT = '#7c3aed'
@@ -134,7 +136,7 @@ interface StrategyMeta {
   rationale: string
 }
 
-interface AnalyticsPayload {
+export interface AnalyticsPayload {
   available: boolean
   note?: string
   study_period?: { start: string; end: string; n_months: number }
@@ -148,13 +150,8 @@ interface AnalyticsPayload {
   strategy_metadata?: StrategyMeta[]
 }
 
-// Distinct line colours assigned by index; the benchmark is rendered as a
-// bold light-grey reference line (detected by name).
-const SERIES_COLORS = [
-  '#3b82f6', '#22c55e', '#f59e0b', '#a78bfa', '#06b6d4',
-  '#ec4899', '#84cc16', '#f97316', '#14b8a6', '#ef4444',
-]
-const BENCHMARK_COLOR = '#e5e7eb'
+// Series line colours and the benchmark colour now come from the active
+// ChartTheme (theme.seriesColors / theme.benchmark) — see exportTheme.ts.
 const isBenchmark = (name: string): boolean => /benchmark/i.test(name)
 
 // ── Formatting helpers ────────────────────────────────────────────────────────
@@ -174,7 +171,8 @@ function SignedPct({ x }: { x: number | null | undefined }) {
 // ── Shared table chrome ───────────────────────────────────────────────────────
 
 function SectionCard({
-  title, subtitle, exportButton, infoKey, tourId, children,
+  title, subtitle, exportButton, infoKey, tourId, theme = DARK_CHART_THEME,
+  children,
 }: {
   title: string
   subtitle: string
@@ -185,23 +183,45 @@ function SectionCard({
   /** When set, the card carries a data-tour attribute the site tour
    *  anchors a step to. */
   tourId?: string
+  /** Light mode is used by the off-screen academic-export renderer; the
+   *  default (dark) leaves the live UI pixel-identical. */
+  theme?: ChartTheme
   children: React.ReactNode
 }) {
+  // In light mode the dark `card` class is bypassed entirely — the export
+  // package needs a white background, so card chrome is set inline instead.
+  const light = theme.mode === 'light'
   return (
     <div
-      className="card p-5"
-      style={{ borderLeft: `3px solid ${ACCENT}` }}
+      className={light ? 'p-5 rounded-lg' : 'card p-5'}
+      style={
+        light
+          ? {
+              borderLeft: `3px solid ${ACCENT}`,
+              background: theme.background,
+              border: `1px solid ${theme.border}`,
+            }
+          : { borderLeft: `3px solid ${ACCENT}` }
+      }
       {...(tourId ? { 'data-tour': tourId } : {})}
     >
       <div className="flex items-start justify-between mb-3">
         <div>
-          <h2 className="text-base font-semibold text-white flex items-center">
+          <h2
+            className={`text-base font-semibold flex items-center ${light ? '' : 'text-white'}`}
+            {...(light ? { style: { color: theme.textPrimary } } : {})}
+          >
             {title}
             {infoKey && (
               <InfoIcon tooltipKey={infoKey} metricLabel={title} size="md" />
             )}
           </h2>
-          <p className="text-xs text-muted mt-0.5">{subtitle}</p>
+          <p
+            className={`text-xs mt-0.5 ${light ? '' : 'text-muted'}`}
+            {...(light ? { style: { color: theme.textSecondary } } : {})}
+          >
+            {subtitle}
+          </p>
         </div>
         {exportButton}
       </div>
@@ -283,7 +303,10 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
 
 // ── Rolling excess return chart ───────────────────────────────────────────────
 
-function RollingExcessReturnChart({ data }: { data: RollingExcess }) {
+export function RollingExcessReturnChart(
+  { data, theme = DARK_CHART_THEME }:
+  { data: RollingExcess; theme?: ChartTheme },
+) {
   const breakX = data.points.find((p) => p.date >= '2022-01-01')?.date
   // Numeric bounds for the above/below-zero shading.
   const vals = data.points.flatMap((p) =>
@@ -300,34 +323,35 @@ function RollingExcessReturnChart({ data }: { data: RollingExcess }) {
     <SectionCard
       title="Rolling Excess Return vs Benchmark"
       infoKey="rolling_excess_return"
+      theme={theme}
       subtitle={`${data.window_months}-month rolling total return of each strategy minus the 100% equity benchmark. Above zero is outperformance, below zero is underperformance.`}
       exportButton={<TableExportButton tableId="rolling_excess_return" headers={headers} rows={exportRows} />}
     >
       <ResponsiveContainer width="100%" height={320}>
         <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1e2d47" />
-          <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} minTickGap={56} />
+          <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
+          <XAxis dataKey="date" tick={theme.axisTick} minTickGap={56} />
           <YAxis
-            tick={{ fill: '#64748b', fontSize: 11 }}
+            tick={theme.axisTick}
             tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
           />
           <Tooltip
-            contentStyle={{ background: '#0d1424', border: '1px solid #1e2d47',
-                            borderRadius: 8, fontSize: 12 }}
+            contentStyle={theme.tooltipContentStyle}
+            labelStyle={theme.tooltipLabelStyle}
           />
           <Legend wrapperStyle={{ fontSize: 11 }} />
           {/* Outperformance / underperformance half-plane shading. */}
-          <ReferenceArea y1={0} y2={ymax} fill="#10b981" fillOpacity={0.05} />
-          <ReferenceArea y1={ymin} y2={0} fill="#ef4444" fillOpacity={0.05} />
+          <ReferenceArea y1={0} y2={ymax} fill={theme.positive} fillOpacity={0.05} />
+          <ReferenceArea y1={ymin} y2={0} fill={theme.negative} fillOpacity={0.05} />
           <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1.5} />
           {breakX && (
-            <ReferenceLine x={breakX} stroke={ACCENT} strokeDasharray="4 4"
-              label={{ value: 'Correlation Regime Break', fill: ACCENT, fontSize: 11,
+            <ReferenceLine x={breakX} stroke={theme.regimeBreak} strokeDasharray="4 4"
+              label={{ value: 'Correlation Regime Break', fill: theme.regimeBreak, fontSize: 11,
                        position: 'insideTopRight' }} />
           )}
           {data.strategies.map((s, i) => (
             <Line key={s} type="monotone" dataKey={s} name={s}
-                  stroke={SERIES_COLORS[i % SERIES_COLORS.length]}
+                  stroke={theme.seriesColors[i % theme.seriesColors.length]}
                   strokeWidth={1.5} dot={false} connectNulls />
           ))}
         </LineChart>
@@ -338,7 +362,10 @@ function RollingExcessReturnChart({ data }: { data: RollingExcess }) {
 
 // ── 2. Rolling correlation chart ──────────────────────────────────────────────
 
-function RollingCorrelationChart({ data }: { data: RollingCorrelation }) {
+export function RollingCorrelationChart(
+  { data, theme = DARK_CHART_THEME }:
+  { data: RollingCorrelation; theme?: ChartTheme },
+) {
   // The vertical regime marker must land on an actual x value — snap it to
   // the first plotted month at or after the 2022 break.
   const breakX = data.points.find((p) => p.date >= data.regime_break)?.date
@@ -350,27 +377,33 @@ function RollingCorrelationChart({ data }: { data: RollingCorrelation }) {
       title="Rolling Correlation — Equity vs Bonds"
       tourId="rolling-correlation"
       infoKey="rolling_correlation_chart"
+      theme={theme}
       subtitle={`${data.window_months}-month rolling correlation. The 2022 hiking cycle is where equity-bond diversification broke down.`}
     >
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1e2d47" />
-          <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }}
+          <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
+          <XAxis dataKey="date" tick={theme.axisTick}
                  minTickGap={48} />
-          <YAxis domain={[-1, 1]} tick={{ fill: '#64748b', fontSize: 11 }} />
+          <YAxis domain={[-1, 1]} tick={theme.axisTick} />
           <Tooltip
-            contentStyle={{ background: '#0d1424', border: '1px solid #1e2d47',
-                            borderRadius: 8, fontSize: 12 }}
+            contentStyle={theme.tooltipContentStyle}
+            labelStyle={theme.tooltipLabelStyle}
           />
           <Legend wrapperStyle={{ fontSize: 12 }} />
           <ReferenceLine y={0} stroke="#475569" />
-          <ReferenceLine x={breakX} stroke={ACCENT} strokeDasharray="4 4"
-            label={{ value: 'Correlation Regime Break', fill: ACCENT, fontSize: 11,
+          <ReferenceLine x={breakX} stroke={theme.regimeBreak} strokeDasharray="4 4"
+            label={{ value: 'Correlation Regime Break', fill: theme.regimeBreak, fontSize: 11,
                      position: 'insideTopRight' }} />
+          {/* The two pair lines use fixed blue/amber hues; dark keeps the
+              original literals, light routes through the theme palette so
+              they stay distinguishable on white. */}
           <Line type="monotone" dataKey="equity_ig" name="Equity vs IG"
-                stroke="#3b82f6" dot={false} strokeWidth={2} connectNulls />
+                stroke={theme.mode === 'light' ? theme.seriesColors[0] : '#3b82f6'}
+                dot={false} strokeWidth={2} connectNulls />
           <Line type="monotone" dataKey="equity_hy" name="Equity vs HY"
-                stroke="#f59e0b" dot={false} strokeWidth={2} connectNulls />
+                stroke={theme.mode === 'light' ? theme.seriesColors[3] : '#f59e0b'}
+                dot={false} strokeWidth={2} connectNulls />
         </LineChart>
       </ResponsiveContainer>
       <div className="grid grid-cols-2 gap-3 mt-3 text-xs">
@@ -542,7 +575,10 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
 
 // ── Cumulative total return chart ─────────────────────────────────────────────
 
-function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
+export function CumulativeReturnChart(
+  { data, theme = DARK_CHART_THEME }:
+  { data: CumulativeReturns; theme?: ChartTheme },
+) {
   const [logScale, setLogScale] = useState(false)
 
   // Snap the 2022 regime marker to the first plotted month at/after the break.
@@ -558,6 +594,7 @@ function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
       title="Cumulative Total Return"
       tourId="cumulative-return"
       infoKey="cumulative_return_chart"
+      theme={theme}
       subtitle="Growth of $1 invested in each strategy over the full study period. The benchmark (100% equity) is the bold grey reference line."
       exportButton={
         <div className="flex items-center gap-2">
@@ -575,23 +612,23 @@ function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
     >
       <ResponsiveContainer width="100%" height={340}>
         <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 4 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1e2d47" />
-          <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }} minTickGap={56} />
+          <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
+          <XAxis dataKey="date" tick={theme.axisTick} minTickGap={56} />
           <YAxis
             scale={logScale ? 'log' : 'linear'}
             domain={logScale ? ['auto', 'auto'] : [0, 'auto']}
             allowDataOverflow
-            tick={{ fill: '#64748b', fontSize: 11 }}
+            tick={theme.axisTick}
             tickFormatter={(v: number) => `${v.toFixed(1)}x`}
           />
           <Tooltip
-            contentStyle={{ background: '#0d1424', border: '1px solid #1e2d47',
-                            borderRadius: 8, fontSize: 12 }}
+            contentStyle={theme.tooltipContentStyle}
+            labelStyle={theme.tooltipLabelStyle}
           />
           <Legend wrapperStyle={{ fontSize: 11 }} />
           {breakX && (
-            <ReferenceLine x={breakX} stroke={ACCENT} strokeDasharray="4 4"
-              label={{ value: 'Correlation Regime Break', fill: ACCENT, fontSize: 11,
+            <ReferenceLine x={breakX} stroke={theme.regimeBreak} strokeDasharray="4 4"
+              label={{ value: 'Correlation Regime Break', fill: theme.regimeBreak, fontSize: 11,
                        position: 'insideTopRight' }} />
           )}
           {data.strategies.map((s, i) => {
@@ -602,7 +639,7 @@ function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
                 type="monotone"
                 dataKey={s}
                 name={s}
-                stroke={bench ? BENCHMARK_COLOR : SERIES_COLORS[i % SERIES_COLORS.length]}
+                stroke={bench ? theme.benchmark : theme.seriesColors[i % theme.seriesColors.length]}
                 strokeWidth={bench ? 2.5 : 1.5}
                 dot={false}
                 connectNulls
@@ -617,28 +654,48 @@ function CumulativeReturnChart({ data }: { data: CumulativeReturns }) {
 
 // ── Sensitivity analysis ──────────────────────────────────────────────────────
 
-function SensitivityChart({ s }: { s: SensitivityStrategy }) {
+function SensitivityChart(
+  { s, theme = DARK_CHART_THEME }:
+  { s: SensitivityStrategy; theme?: ChartTheme },
+) {
+  const light = theme.mode === 'light'
   return (
-    <div className="bg-navy-800 rounded p-3">
-      <div className="text-sm text-white font-medium">{s.strategy}</div>
-      <div className="text-2xs text-muted mb-2">{s.parameter}</div>
+    <div
+      className={light ? 'rounded p-3' : 'bg-navy-800 rounded p-3'}
+      {...(light ? { style: { background: theme.background, border: `1px solid ${theme.border}` } } : {})}
+    >
+      <div
+        className={`text-sm font-medium ${light ? '' : 'text-white'}`}
+        {...(light ? { style: { color: theme.textPrimary } } : {})}
+      >
+        {s.strategy}
+      </div>
+      <div
+        className={`text-2xs mb-2 ${light ? '' : 'text-muted'}`}
+        {...(light ? { style: { color: theme.textSecondary } } : {})}
+      >
+        {s.parameter}
+      </div>
       <ResponsiveContainer width="100%" height={200}>
         <LineChart data={s.points} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#1e2d47" />
+          <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
           <XAxis dataKey="value" type="number" domain={['dataMin', 'dataMax']}
-                 tick={{ fill: '#64748b', fontSize: 10 }} />
-          <YAxis tick={{ fill: '#64748b', fontSize: 10 }}
+                 tick={{ fill: theme.axisTick.fill, fontSize: 10 }} />
+          <YAxis tick={{ fill: theme.axisTick.fill, fontSize: 10 }}
                  tickFormatter={(v: number) => v.toFixed(2)}
                  label={{ value: 'Sharpe', angle: -90, position: 'insideLeft',
-                          fill: '#64748b', fontSize: 10 }} />
+                          fill: theme.axisTick.fill, fontSize: 10 }} />
           <Tooltip
-            contentStyle={{ background: '#0d1424', border: '1px solid #1e2d47',
-                            borderRadius: 8, fontSize: 12 }}
+            contentStyle={theme.tooltipContentStyle}
+            labelStyle={theme.tooltipLabelStyle}
           />
-          <ReferenceLine x={s.current_value} stroke={ACCENT} strokeDasharray="4 4"
-            label={{ value: 'current', fill: ACCENT, fontSize: 10,
+          <ReferenceLine x={s.current_value} stroke={theme.regimeBreak} strokeDasharray="4 4"
+            label={{ value: 'current', fill: theme.regimeBreak, fontSize: 10,
                      position: 'top' }} />
-          <Line type="monotone" dataKey="sharpe" stroke="#3b82f6"
+          {/* Single fixed-blue series; dark keeps the original literal,
+              light routes through the theme palette. */}
+          <Line type="monotone" dataKey="sharpe"
+                stroke={light ? theme.seriesColors[0] : '#3b82f6'}
                 strokeWidth={2} dot={{ r: 3 }} connectNulls />
         </LineChart>
       </ResponsiveContainer>
@@ -646,7 +703,9 @@ function SensitivityChart({ s }: { s: SensitivityStrategy }) {
   )
 }
 
-function SensitivityAnalysis() {
+export function SensitivityAnalysis(
+  { theme = DARK_CHART_THEME }: { theme?: ChartTheme },
+) {
   const [data, setData] = useState<SensitivityPayload | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -668,6 +727,7 @@ function SensitivityAnalysis() {
     <SectionCard
       title="Sensitivity Analysis"
       infoKey="sensitivity_analysis"
+      theme={theme}
       subtitle="How sensitive is each dynamic strategy's risk-adjusted performance to its key parameter? The vertical line marks the current setting."
       exportButton={strategies.length > 0
         ? <TableExportButton tableId="sensitivity_analysis" headers={headers} rows={exportRows} />
@@ -681,7 +741,7 @@ function SensitivityAnalysis() {
         <p className="text-xs text-muted italic">Sensitivity analysis unavailable.</p>
       ) : (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-          {strategies.map((s) => <SensitivityChart key={s.strategy} s={s} />)}
+          {strategies.map((s) => <SensitivityChart key={s.strategy} s={s} theme={theme} />)}
         </div>
       )}
     </SectionCard>
