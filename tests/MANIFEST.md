@@ -978,3 +978,79 @@ Migration: 013 — operator runs `alembic upgrade head` on Render.
 
 Test counts (cumulative): 1080 backend pass, 15 skipped (HMM/Windows),
                            193 frontend pass.
+
+
+## Two access tiers — TeamGate ✅ COMPLETE (2026-05-17)
+The first access-control pass: any authenticated user explores the
+analytics; the action endpoints (document upload, the export endpoints,
+Academic Review, the test runner) are restricted to the project team.
+
+Backend:
+  auth.py — require_team_member dependency.
+  main.py — require_team_member applied to the team-gated endpoints.
+
+  tests/test_team_gate.py — require_team_member 403s a non-team user,
+    admits a team member, and 401s an unauthenticated request; the open
+    tier (council query / explain) admits any authenticated user.
+
+Frontend:
+  components/TeamGate.tsx — gates an action element (disabled+lock, or
+    hidden) for non-team users.
+
+  __tests__/team-gate.test.tsx — TeamGate renders, gates and hides per
+    the caller's permission.
+
+
+## Database-managed access control ✅ COMPLETE (2026-05-17)
+Access control migrated from the hardcoded config allowlists to a
+database-managed user system. Roles (viewer / team_member / sysadmin)
+are presets over an authoritative `permissions` array; Michael Ruurds
+is the sysadmin and manages every user from inside the platform.
+
+Backend:
+  migrations/015_create_platform_users.py — platform_users table +
+    config-seed (sysadmin / team_member / viewer) + changelog entry 34.
+  config.py — PERMISSIONS, ROLE_PRESETS, SYSADMIN_EMAILS. ALLOWED_EMAILS
+    and PROJECT_TEAM_EMAILS retained as the emergency config fallback.
+  tools/platform_users.py — the platform_users data layer; config_fallback
+    mirrors the migration-015 seed so a database outage never locks the
+    team out.
+  auth.py — three-tier permission resolution (JWT → platform_users →
+    config fallback); require_permission(perm) factory; require_team_member
+    is require_permission("team_member").
+  main.py — per-endpoint permission gates; GET/POST/PATCH/DELETE
+    /api/v1/admin/users (manage_users-gated, with last-sysadmin guards).
+
+  tests/test_platform_users.py — 35 tests: the manage_users gate on the
+    /api/v1/admin/users endpoints (viewer / team member 403, sysadmin and
+    master key admitted, unauthenticated 401); create-user validation
+    (422 on a bad email / role, 503 past validation with no database);
+    404 on an unknown user id; /api/auth/me carrying the authoritative
+    permissions; config_fallback mirroring the seed (case-insensitive);
+    every platform_users read failing open with no database; the
+    magic-link request never enumerating; _valid_email / _clean_permissions.
+
+Frontend:
+  hooks/usePermissions.ts — useHasPermission and the convenience hooks
+    (useIsTeamMember / useIsSysadmin / useCanGenerateDocuments /
+    useCanExport). hooks/useIsTeamMember.ts removed.
+  components/TeamGate.tsx — gains a `permission` prop (default
+    "team_member").
+  constants/permissions.ts — PERMISSIONS, ROLE_PRESETS, ASSIGNABLE_ROLES,
+    matchesPreset (the frontend mirror of the config).
+  components/UserManagementPanel.tsx — the Settings → Users table with
+    add / edit / deactivate and a per-permission checklist.
+  pages/Settings.tsx — sysadmin-only Users section between Analytics
+    Configuration and Academic Documents.
+
+  __tests__/user-management.test.tsx — 12 tests: the permission hooks
+    read the session permissions array; ASSIGNABLE_ROLES omits sysadmin
+    and manage_users is sysadmin-only; matchesPreset detects a Custom
+    set; UserManagementPanel renders the table, gates Add-User on a
+    valid email, and never offers sysadmin as a role preset.
+  __tests__/team-gate.test.tsx — updated to the permission-based model.
+
+Migration: 015 — operator runs `alembic upgrade head` on Render.
+
+Test counts (cumulative): 1157 backend pass, 21 skipped (HMM/Windows +
+                           deployment), 220 frontend pass.
