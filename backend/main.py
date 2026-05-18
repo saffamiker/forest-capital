@@ -1857,6 +1857,81 @@ async def testing_get_latest_triage_report(
     return {"report": await get_latest_triage_report()}
 
 
+# ── Statistical audit — sysadmin only ─────────────────────────────────────────
+
+@app.post("/api/v1/audit/run")
+async def audit_run(
+    body: dict | None = None,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Triggers a full three-layer statistical audit in the background and
+    returns immediately with the audit_id. A concurrent run is refused
+    with already_running. `triggered_by` may be "manual" (default) or
+    "pre_submission" — the latter marks an Analytical-Appendix audit.
+    Sysadmin only.
+    """
+    from tools.audit_engine import start_audit
+    triggered_by = str((body or {}).get("triggered_by") or "manual")
+    if triggered_by not in ("manual", "scheduled", "pre_submission"):
+        triggered_by = "manual"
+    return await start_audit(triggered_by, session.get("email", ""))
+
+
+@app.get("/api/v1/audit/runs")
+async def audit_get_runs(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Every audit run with summary stats, newest first. Sysadmin only."""
+    from tools.audit_engine import get_audit_runs
+    return {"runs": await get_audit_runs()}
+
+
+@app.get("/api/v1/audit/runs/latest")
+async def audit_get_latest_run(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """The most recent audit run with its findings, or null. Sysadmin only."""
+    from tools.audit_engine import get_latest_audit_run
+    return {"run": await get_latest_audit_run()}
+
+
+@app.get("/api/v1/audit/runs/{run_id}")
+async def audit_get_run(
+    run_id: int,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """One audit run with all findings grouped by layer. Sysadmin only."""
+    from tools.audit_engine import get_audit_run
+    run = await get_audit_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Audit run not found.")
+    return run
+
+
+@app.get("/api/v1/audit/runs/{run_id}/export")
+async def audit_export_run(
+    run_id: int,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    The audit run as a downloadable plain-text report — suitable for the
+    Analytical Appendix as evidence of independent statistical
+    verification. Sysadmin only.
+    """
+    from tools.audit_engine import format_audit_report, get_audit_run
+    run = await get_audit_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Audit run not found.")
+    report = format_audit_report(run)
+    return Response(
+        content=report,
+        media_type="text/plain",
+        headers={"Content-Disposition":
+                 f'attachment; filename="audit_report_{run_id}.txt"'},
+    )
+
+
 # ── User management ───────────────────────────────────────────────────────────
 #
 # The sysadmin manages platform_users from inside the platform. Every
