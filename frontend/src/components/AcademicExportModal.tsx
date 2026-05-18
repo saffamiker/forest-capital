@@ -219,13 +219,15 @@ export default function AcademicExportModal({ onClose }: { onClose: () => void }
       )}
 
       {/* Progress modal */}
-      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4"
+      <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-0 sm:p-4"
            role="presentation" onClick={done || error ? onClose : undefined}>
+        {/* Full-screen on mobile; a centred card from sm: up. */}
         <div
           role="dialog"
           aria-label="Academic export package"
           onClick={(e) => e.stopPropagation()}
-          className="w-full max-w-md rounded-lg border border-border bg-navy-800 shadow-2xl"
+          className="w-full h-full rounded-none border-0 sm:h-auto sm:max-w-md
+                     sm:rounded-lg sm:border sm:border-border bg-navy-800 shadow-2xl"
         >
           <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-border">
             <div>

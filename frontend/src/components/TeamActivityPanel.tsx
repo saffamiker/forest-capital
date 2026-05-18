@@ -210,13 +210,13 @@ function FilterBar({
     onChange({ ...filters, kinds: next })
   }
   return (
-    <div className="card p-3 flex flex-wrap items-center gap-3">
+    <div className="card p-3 flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-3">
       {/* Team member */}
       <select
         value={filters.userId}
         onChange={(e) => onChange({ ...filters, userId: e.target.value })}
         aria-label="Filter by team member"
-        className="bg-navy-800 border border-border rounded text-xs text-white px-2 py-1"
+        className="w-full sm:w-auto bg-navy-800 border border-border rounded text-xs text-white px-2 py-1.5"
       >
         <option value="">All members</option>
         {members.map((m) => (
@@ -245,14 +245,14 @@ function FilterBar({
         })}
       </div>
 
-      {/* Date range */}
-      <div className="flex items-center gap-1 text-2xs text-muted">
+      {/* Date range — full-width on mobile, the two inputs sharing the row */}
+      <div className="flex items-center gap-1 text-2xs text-muted w-full sm:w-auto">
         <input
           type="date"
           value={filters.dateFrom}
           onChange={(e) => onChange({ ...filters, dateFrom: e.target.value })}
           aria-label="From date"
-          className="bg-navy-800 border border-border rounded text-xs text-white px-1.5 py-1"
+          className="flex-1 sm:flex-none bg-navy-800 border border-border rounded text-xs text-white px-1.5 py-1.5"
         />
         <span>→</span>
         <input
@@ -260,7 +260,7 @@ function FilterBar({
           value={filters.dateTo}
           onChange={(e) => onChange({ ...filters, dateTo: e.target.value })}
           aria-label="To date"
-          className="bg-navy-800 border border-border rounded text-xs text-white px-1.5 py-1"
+          className="flex-1 sm:flex-none bg-navy-800 border border-border rounded text-xs text-white px-1.5 py-1.5"
         />
       </div>
 
@@ -630,9 +630,9 @@ export default function TeamActivityPanel() {
                     type="button"
                     onClick={() => loadTimeline(false)}
                     disabled={loadingMore}
-                    className="w-full py-2 text-xs text-electric hover:bg-navy-700
-                               transition-colors border-t border-border
-                               disabled:opacity-50"
+                    className="w-full py-2 min-h-[44px] text-xs text-electric
+                               hover:bg-navy-700 transition-colors border-t
+                               border-border disabled:opacity-50"
                   >
                     {loadingMore
                       ? <Loader2 className="w-3.5 h-3.5 animate-spin inline" />

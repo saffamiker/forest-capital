@@ -16,7 +16,8 @@
  * shows these three charts full-width — the visual evidence shown
  * during the AI-use narrative of the final presentation.
  */
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState } from 'react'
+import { ChevronLeft, ChevronRight } from 'lucide-react'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
@@ -176,12 +177,7 @@ export default function TeamActivityCharts({
     wrapperStyle: { fontSize: legendFontSize },
   }
 
-  return (
-    <div className={presentMode
-      ? 'space-y-4'
-      : 'grid grid-cols-1 lg:grid-cols-2 gap-3'}>
-      {/* Chart 1 — full width even in the grid */}
-      <div className={presentMode ? '' : 'lg:col-span-2'}>
+  const chartActivity = (
         <ChartCard
           title="Activity over time"
           subtitle="Weekly platform activity by type — analytical sessions unless testing is included"
@@ -231,9 +227,9 @@ export default function TeamActivityCharts({
             </>
           )}
         </ChartCard>
-      </div>
+  )
 
-      {/* Chart 2 — contribution split */}
+  const chartContribution = (
       <ChartCard
         title="Team contribution split"
         subtitle="Share of substantive interactions — council, academic review, uploads"
@@ -269,8 +265,9 @@ export default function TeamActivityCharts({
           </ResponsiveContainer>
         )}
       </ChartCard>
+  )
 
-      {/* Chart 3 — agent engagement */}
+  const chartAgent = (
       <ChartCard
         title="Agent engagement"
         subtitle="Times each council agent was consulted across all sessions"
@@ -294,7 +291,82 @@ export default function TeamActivityCharts({
           </ResponsiveContainer>
         )}
       </ChartCard>
+  )
+
+  // Presentation View — a one-at-a-time swipeable carousel on mobile, the
+  // three charts stacked full-width from sm: up.
+  if (presentMode) {
+    return <PresentationCarousel charts={[chartActivity, chartContribution, chartAgent]} />
+  }
+
+  // Normal mode — chart 1 spans both columns, charts 2 and 3 side by side
+  // from lg: up; all three stack on a narrow screen.
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+      <div className="lg:col-span-2">{chartActivity}</div>
+      {chartContribution}
+      {chartAgent}
     </div>
+  )
+}
+
+/**
+ * PresentationCarousel — Presentation View chart container. On a phone
+ * the three charts are shown one at a time, swipeable left/right, with a
+ * ●○○ index indicator; from sm: up they stack full-width.
+ */
+function PresentationCarousel({ charts }: { charts: React.ReactNode[] }) {
+  const [i, setI] = useState(0)
+  const touchX = useRef<number | null>(null)
+  const go = (d: number) => setI((p) => (p + d + charts.length) % charts.length)
+
+  return (
+    <>
+      {/* Mobile — one chart, swipeable. */}
+      <div className="sm:hidden">
+        <div
+          onTouchStart={(e) => { touchX.current = e.touches[0]?.clientX ?? null }}
+          onTouchEnd={(e) => {
+            if (touchX.current == null) return
+            const dx = (e.changedTouches[0]?.clientX ?? 0) - touchX.current
+            if (dx > 40) go(-1)
+            else if (dx < -40) go(1)
+            touchX.current = null
+          }}
+        >
+          {charts[i]}
+        </div>
+        <div className="flex items-center justify-center gap-4 mt-3">
+          <button
+            type="button" onClick={() => go(-1)} aria-label="Previous chart"
+            className="w-11 h-11 flex items-center justify-center
+                       text-muted hover:text-white"
+          >
+            <ChevronLeft className="w-5 h-5" />
+          </button>
+          <div className="flex gap-2" aria-hidden="true">
+            {charts.map((_, n) => (
+              <span
+                key={n}
+                className={`w-2 h-2 rounded-full ${
+                  n === i ? 'bg-electric' : 'bg-border'}`}
+              />
+            ))}
+          </div>
+          <button
+            type="button" onClick={() => go(1)} aria-label="Next chart"
+            className="w-11 h-11 flex items-center justify-center
+                       text-muted hover:text-white"
+          >
+            <ChevronRight className="w-5 h-5" />
+          </button>
+        </div>
+      </div>
+      {/* sm and up — all three stacked full-width. */}
+      <div className="hidden sm:block space-y-4">
+        {charts.map((c, n) => <div key={n}>{c}</div>)}
+      </div>
+    </>
   )
 }
 
