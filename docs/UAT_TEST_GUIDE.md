@@ -274,11 +274,16 @@ deliverables lead.*
       callout appear at the top.
 - [ ] Verify `[[VERIFY]]` markers render as amber-highlighted spans in the
       document body.
-- [ ] Verify `[[BOB]]` callouts render as amber-highlighted spans.
-- [ ] Click a `[[BOB]]` callout and confirm the prompt — verify the marker
-      is removed and the left-panel section progress bar advances.
-- [ ] Click a `[[VERIFY]]` marker and confirm the prompt — verify the amber
-      highlight is removed.
+- [ ] Verify `[[BOB]]` callouts render as full-width amber block panels
+      with a [Mark as Complete] button.
+- [ ] Click [Mark as Complete] on a `[[BOB]]` panel — verify the panel
+      collapses and the section progress bar in the left panel updates.
+- [ ] Click a `[[VERIFY]]` marker — verify a popup opens with the message
+      "Verify this value against the Analytics page before removing this
+      marker." and two buttons: [Mark as Verified] and [Cancel]. Click
+      [Mark as Verified] — verify the amber highlight and marker text are
+      removed. Click a second `[[VERIFY]]` marker and click [Cancel] —
+      verify the popup closes and the marker remains intact.
 - [ ] Type a sentence anywhere in the document body — verify the header
       shows "Saving…" then "Saved [time]" (auto-save runs every 30s).
 - [ ] In the Writing Assistant panel (right), type *"Is my methodology
@@ -455,6 +460,6 @@ Send the completed sign-off and any failure notes to **ruurdsm@queens.edu**.
   the author has edited. It does not re-embed the regenerated data
   tables; the table-rich version is the one produced by Reports →
   Generate Documents.
-- In the editor, a `[[VERIFY]]` or `[[BOB]]` marker is resolved by clicking
-  it and confirming the prompt (which deletes the marker text) — there is
-  no separate "Mark as Complete" button.
+- `[[BOB]]` callouts render as block panels resolved via [Mark as
+  Complete]. `[[VERIFY]]` markers resolve via a popup with
+  [Mark as Verified] / [Cancel].
