@@ -1899,9 +1899,21 @@ async def audit_get_latest_run(
     authenticated user — viewers see the read-only audit summary in the
     QA tab; the full findings panel is gated to the project team in the
     frontend.
+
+    Carries the smart-audit-caching verdict: is_current is True when the
+    live data fingerprint matches the last completed run's data_hash, so
+    the QA tab can show a cached result instead of an unnecessary re-run.
     """
+    from tools.audit_assembler import is_audit_current
     from tools.audit_engine import get_latest_audit_run
-    return {"run": await get_latest_audit_run()}
+    run = await get_latest_audit_run()
+    currency = await is_audit_current()
+    return {
+        "run": run,
+        "is_current": currency["is_current"],
+        "current_data_hash": currency["current_data_hash"],
+        "last_hash": currency["last_hash"],
+    }
 
 
 @app.get("/api/v1/audit/runs/{run_id}")

@@ -136,6 +136,78 @@ def _payload_hash(raw_data: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# ── Smart audit caching — the data fingerprint ────────────────────────────────
+#
+# An audit run independently recomputes every metric with claude-opus-4-7 —
+# it is the most expensive operation on the platform. Re-running it on
+# unchanged data spends the Opus budget and tells the team nothing new.
+# current_data_hash() is a CHEAP fingerprint of the data the audit verifies
+# (three COUNT/MAX queries via get_data_status — never the full payload),
+# so the QA tab can call it on every mount and is_audit_current() can decide
+# whether the last completed audit still holds.
+
+
+async def current_data_hash() -> str:
+    """
+    A lightweight fingerprint of the data the statistical audit verifies:
+    the row counts and newest dates of market_data_monthly,
+    ff_factors_monthly and strategy_results_cache. It changes only when
+    new rows are appended or the strategy cache is recomputed — not on a
+    restart — so a matching hash means the audit is genuinely still current.
+
+    Cheap by design (get_data_status issues only COUNT/MAX queries, never
+    a full payload assembly). Returns "" on any failure — an empty hash
+    never matches, so the audit is treated as stale rather than wrongly
+    served from cache.
+    """
+    try:
+        from tools.cache import get_data_status
+
+        status = await get_data_status()
+        if not status.get("available"):
+            return ""
+        relevant = ("market_data_monthly", "ff_factors_monthly",
+                    "strategy_results_cache")
+        parts: list[str] = []
+        for t in status.get("tables", []):
+            if t.get("name") in relevant:
+                parts.append(
+                    f"{t.get('name')}:{t.get('row_count')}:"
+                    f"{t.get('max_date')}:{t.get('last_updated')}")
+        if not parts:
+            # No relevant table reported — treat as "nothing to fingerprint"
+            # rather than hashing an empty string into a matchable value.
+            return ""
+        parts.sort()
+        canonical = "|".join(parts)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("current_data_hash_failed", error=str(exc))
+        return ""
+
+
+async def is_audit_current() -> dict[str, Any]:
+    """
+    Whether the last completed statistical audit still reflects the
+    current data. Compares current_data_hash() to the data_hash stored on
+    the most recent COMPLETED audit_runs row.
+
+    Returns {is_current, current_data_hash, last_hash}. is_current is
+    False when there is no prior completed run, when either hash is empty
+    (fail-open), or when the two hashes differ.
+    """
+    from tools.audit_engine import get_last_completed_audit_hash
+
+    current = await current_data_hash()
+    last = await get_last_completed_audit_hash()
+    is_current = bool(current) and bool(last) and current == last
+    return {
+        "is_current": is_current,
+        "current_data_hash": current,
+        "last_hash": last,
+    }
+
+
 def _list_to_dict(rows: list[dict], key: str) -> dict[str, dict]:
     """Turns a list of analytics rows into a dict keyed by `key` (e.g.
     'asset' or 'strategy') — the per-entity shape the auditor expects."""

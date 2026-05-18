@@ -109,8 +109,11 @@ async def _store_findings(run_id: int, findings: list[dict[str, Any]]) -> None:
 async def _finalise_audit(
     run_id: int, *, status: str, layer_statuses: dict[str, str],
     counts: dict[str, int], metadata: dict[str, Any],
+    data_hash: str | None = None,
 ) -> None:
-    """Writes the completed audit_runs row. Fail-open."""
+    """Writes the completed audit_runs row. data_hash is the lightweight
+    fingerprint of the data this run verified — smart audit caching
+    compares it against the live fingerprint. Fail-open."""
     try:
         from sqlalchemy import text
 
@@ -123,15 +126,38 @@ async def _finalise_audit(
                 "layer_1_status = :l1, layer_2_status = :l2, "
                 "layer_3_status = :l3, total_checks = :tc, passed = :p, "
                 "failed = :fl, warnings = :w, completed_at = now(), "
+                "data_hash = :dh, "
                 "metadata = CAST(:md AS jsonb) WHERE id = :id"
             ), {"st": status, "l1": layer_statuses.get("1"),
                 "l2": layer_statuses.get("2"), "l3": layer_statuses.get("3"),
                 "tc": counts["total"], "p": counts["passed"],
                 "fl": counts["failed"], "w": counts["warnings"],
+                "dh": data_hash,
                 "md": json.dumps(metadata), "id": run_id})
             await session.commit()
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_finalise_failed", run_id=run_id, error=str(exc))
+
+
+async def get_last_completed_audit_hash() -> str | None:
+    """The data_hash of the most recent COMPLETED audit run — what smart
+    audit caching compares the live data fingerprint against. None when
+    there is no completed run yet (or on a database error — fail-open)."""
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(text(
+                "SELECT data_hash FROM audit_runs WHERE status = 'complete' "
+                "ORDER BY id DESC LIMIT 1"))
+            found = row.fetchone()
+            return str(found[0]) if found and found[0] else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_last_hash_check_failed", error=str(exc))
+        return None
 
 
 async def get_audit_runs() -> list[dict[str, Any]]:
@@ -147,7 +173,8 @@ async def get_audit_runs() -> list[dict[str, Any]]:
                 "SELECT id, triggered_by, triggered_at, triggered_by_email, "
                 "status, layer_1_status, layer_2_status, layer_3_status, "
                 "total_checks, passed, failed, warnings, completed_at, "
-                "metadata FROM audit_runs ORDER BY triggered_at DESC"))
+                "metadata, data_hash FROM audit_runs "
+                "ORDER BY triggered_at DESC"))
             return [_run_row(r) for r in rows.fetchall()]
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_runs_read_failed", error=str(exc))
@@ -161,7 +188,7 @@ def _run_row(r: Any) -> dict[str, Any]:
         "layer_1_status": r[5], "layer_2_status": r[6],
         "layer_3_status": r[7], "total_checks": r[8], "passed": r[9],
         "failed": r[10], "warnings": r[11], "completed_at": _iso(r[12]),
-        "metadata": r[13] or {},
+        "metadata": r[13] or {}, "data_hash": r[14],
     }
 
 
@@ -178,7 +205,8 @@ async def get_audit_run(run_id: int) -> dict[str, Any] | None:
                 "SELECT id, triggered_by, triggered_at, triggered_by_email, "
                 "status, layer_1_status, layer_2_status, layer_3_status, "
                 "total_checks, passed, failed, warnings, completed_at, "
-                "metadata FROM audit_runs WHERE id = :id"), {"id": run_id})
+                "metadata, data_hash FROM audit_runs WHERE id = :id"),
+                {"id": run_id})
             found = run.fetchone()
             if not found:
                 return None
@@ -234,7 +262,9 @@ async def _execute_audit(run_id: int) -> None:
     """The three-layer audit body — runs in the background after the
     endpoint has returned the audit_id. Fail-open: a layer failure still
     finalises the run with status 'failed' and whatever completed."""
-    from tools.audit_assembler import assemble_audit_payload
+    from tools.audit_assembler import (
+        assemble_audit_payload, current_data_hash,
+    )
     from tools.audit_layer1 import layer_1_raw_data_audit
     from tools.audit_layer2 import layer_2_metric_audit
     from tools.audit_layer3 import layer_3_consistency_audit
@@ -243,7 +273,12 @@ async def _execute_audit(run_id: int) -> None:
     layer_statuses = {"1": "skip", "2": "skip", "3": "skip"}
     all_findings: list[dict[str, Any]] = []
     metadata: dict[str, Any] = {}
+    data_hash: str | None = None
     try:
+        # The lightweight fingerprint of the data this run verifies —
+        # stored on the run so smart audit caching can tell, cheaply,
+        # whether a later request still reflects the same data.
+        data_hash = await current_data_hash() or None
         payload = await assemble_audit_payload()
         metadata = {
             "available": payload.get("available"),
@@ -267,8 +302,9 @@ async def _execute_audit(run_id: int) -> None:
     counts = _tally(all_findings)
     await _finalise_audit(run_id, status=status,
                           layer_statuses=layer_statuses, counts=counts,
-                          metadata=metadata)
-    log.info("audit_complete", run_id=run_id, status=status, **counts)
+                          metadata=metadata, data_hash=data_hash)
+    log.info("audit_complete", run_id=run_id, status=status,
+             data_hash=data_hash, **counts)
 
 
 async def start_audit(
