@@ -17,6 +17,7 @@ import {
 import RichTextEditor from '../components/editor/RichTextEditor'
 import SlideEditor, { slideComplete } from '../components/editor/SlideEditor'
 import EditorNavigator from '../components/editor/EditorNavigator'
+import EditorTasksCallout from '../components/editor/EditorTasksCallout'
 import type { NavSection } from '../components/editor/EditorNavigator'
 import WritingAssistant from '../components/editor/WritingAssistant'
 import { countMarkers } from '../lib/editorMarkers'
@@ -271,6 +272,10 @@ export default function DocumentEditor() {
           </button>
         </div>
       </div>
+
+      {/* Tasks callout — the tracking note + the checklist for this
+          document type, dismissible per draft. */}
+      <EditorTasksCallout documentType={draft.document_type} draftId={id} />
 
       {/* Three panels */}
       <div className="flex flex-1 min-h-0">

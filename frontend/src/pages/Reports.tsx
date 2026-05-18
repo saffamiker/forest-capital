@@ -29,6 +29,7 @@ import AdvisorPanel from '../components/AdvisorPanel'
 import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
+import SubmissionGuides from '../components/SubmissionGuides'
 import TeamGate from '../components/TeamGate'
 import type { DeliverableType } from '../types/advisor'
 import type { SectionDocType } from '../types/documents'
@@ -403,6 +404,10 @@ export default function Reports() {
           three graded deliverables, assembled server-side from real
           platform data. Sits above Team Activity per the spec. */}
       <DocumentGenerationPanel />
+
+      {/* Submission Guides — the editor-based workflow for the midpoint
+          paper (Bob) and the final presentation (Molly). */}
+      <SubmissionGuides />
 
       {/* Team Activity — the evidence behind the Roles & Division-of-Labor
           deliverable and the AI-use narrative, so it leads the page.
