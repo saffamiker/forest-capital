@@ -69,29 +69,33 @@ function TourTooltip({
         </p>
       )}
       <div className="mt-3 pt-2.5 border-t border-border flex items-center
-                      justify-between gap-2">
+                      justify-between gap-2 flex-wrap">
         <span className="text-2xs text-muted">Step {index + 1} of {size}</span>
         <div className="flex items-center gap-1.5">
           <button
             {...skipProps}
-            className="px-2.5 py-1.5 text-xs text-muted hover:text-white
-                       transition-colors"
+            className="inline-flex items-center justify-center px-2.5 py-1.5
+                       min-h-[44px] sm:min-h-0 text-xs text-muted
+                       hover:text-white transition-colors"
           >
             Skip
           </button>
           {index > 0 && (
             <button
               {...backProps}
-              className="px-3 py-1.5 text-xs rounded border border-border
-                         text-slate-300 hover:bg-navy-700 transition-colors"
+              className="inline-flex items-center justify-center px-3 py-1.5
+                         min-h-[44px] sm:min-h-0 text-xs rounded border
+                         border-border text-slate-300 hover:bg-navy-700
+                         transition-colors"
             >
               Back
             </button>
           )}
           <button
             {...primaryProps}
-            className="px-3.5 py-1.5 text-xs rounded font-medium bg-electric/15
-                       text-electric border border-electric/30
+            className="inline-flex items-center justify-center px-3.5 py-1.5
+                       min-h-[44px] sm:min-h-0 text-xs rounded font-medium
+                       bg-electric/15 text-electric border border-electric/30
                        hover:bg-electric/25 transition-colors"
           >
             {isLastStep ? 'Start Exploring' : 'Next'}
@@ -109,6 +113,10 @@ export default function SiteTour() {
   const location = useLocation()
   const [run, setRun] = useState(false)
   const [stepIndex, setStepIndex] = useState(0)
+  // On a phone the tooltip is centred on screen rather than pinned to the
+  // step target — a target-anchored popover is unreliable at 320–640px.
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth < 640)
   // Set when a cross-route step needs the page to change before resuming.
   const pendingIndex = useRef<number | null>(null)
   // tour_version from /unseen — recorded on completion / skip.
@@ -120,7 +128,8 @@ export default function SiteTour() {
   const joyrideSteps: Step[] = TOUR_STEPS.map((s) => ({
     target: s.target,
     content: s.title,                   // satisfies the type; the custom
-    placement: s.placement ?? 'bottom', // tooltip renders from step.data
+    // Centre every tooltip on mobile; pin to the target from sm: up.
+    placement: isMobile ? 'center' : (s.placement ?? 'bottom'),
     data: s,
   }))
 
@@ -157,6 +166,14 @@ export default function SiteTour() {
     registerTourStarter(beginTour)
     return () => registerTourStarter(null)
   }, [beginTour])
+
+  // Track the viewport so the tooltip placement flips between centred
+  // (mobile) and target-anchored (sm+) on a resize or rotation.
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < 640)
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   // Auto-start once per login session.
   useEffect(() => {

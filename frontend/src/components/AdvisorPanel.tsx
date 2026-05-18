@@ -154,7 +154,7 @@ export default function AdvisorPanel({
           role="complementary"
           aria-label="Academic Advisor panel"
           data-testid="advisor-panel"
-          className="fixed top-14 right-0 bottom-0 w-96 bg-navy-800 border-l shadow-2xl z-40 flex flex-col"
+          className="fixed top-14 right-0 bottom-0 w-96 max-w-[92vw] bg-navy-800 border-l shadow-2xl z-40 flex flex-col"
           style={{ borderLeftColor: GOLD, borderLeftWidth: '3px' }}
         >
           {/* Header */}
