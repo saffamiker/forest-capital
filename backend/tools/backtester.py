@@ -187,27 +187,60 @@ def _turnover(prev: dict, curr: dict) -> float:
     return sum(abs(curr.get(k, 0.0) - prev.get(k, 0.0)) for k in all_keys)
 
 
+_RETURN_COL = {"equity": "equity_return", "ig": "ig_return", "hy": "hy_return"}
+
+
 def _true_turnover(
-    schedule: list[tuple["pd.Timestamp", dict]], n_months: int,
+    schedule: list[tuple["pd.Timestamp", dict]],
+    returns_df: "pd.DataFrame",
+    n_months: int,
 ) -> float:
     """
-    Average annual portfolio turnover: the sum of absolute target-weight
-    changes at each rebalance — turnover_t = sum(|w_t - w_{t-1}|) / 2 —
-    totalled across the backtest and divided by the number of years.
+    Genuine annualised portfolio turnover — the one-way trading at every
+    rebalance, INCLUDING drift correction.
 
-    A fixed-weight static strategy rebalances back to the SAME targets, so
-    consecutive schedule entries are identical and its true turnover is ~0;
-    a strategy that re-optimises or rotates produces positive turnover.
-    This is the genuine weight-change figure, not the rebalance-count proxy
-    avg_monthly_turnover carried alongside it.
+    Between two rebalances the realised weights drift away from the
+    previous target as the assets earn different returns; at the next
+    rebalance the portfolio is traded from those drifted weights back to
+    the new target. So turnover is measured drifted → new target, not
+    target → target:
+
+        growth_i   = product over the inter-rebalance months of (1 + r_i)
+        drifted_i  = prev_target_i * growth_i
+                     / sum_j(prev_target_j * growth_j)
+        turnover_t = sum_i |drifted_i - new_target_i| / 2   (one-way)
+
+    A fixed-weight strategy therefore has non-zero turnover — it trades
+    each quarter to correct drift — even though its target never changes.
+    The figure is the total across the backtest divided by the number of
+    years. The initial build-from-cash at the first schedule entry is a
+    one-off and is not counted.
     """
     if not schedule or n_months < 1:
         return 0.0
     sched = sorted(schedule, key=lambda x: x[0])
-    total = sum(
-        _turnover(sched[i - 1][1], sched[i][1]) / 2.0
-        for i in range(1, len(sched))
-    )
+    total = 0.0
+    for i in range(1, len(sched)):
+        prev_date, prev_w = sched[i - 1]
+        cur_date, cur_w = sched[i]
+        window = returns_df[(returns_df.index > prev_date)
+                            & (returns_df.index <= cur_date)]
+        drifted_raw: dict[str, float] = {}
+        for asset in set(prev_w) | set(cur_w):
+            growth = 1.0
+            col = _RETURN_COL.get(asset)
+            if col is not None and col in window.columns:
+                for r in window[col]:
+                    growth *= 1.0 + float(r)
+            drifted_raw[asset] = prev_w.get(asset, 0.0) * growth
+        denom = sum(drifted_raw.values())
+        if denom <= 0:
+            # Degenerate window (no months between, or total wipe-out) —
+            # fall back to the target-to-target delta.
+            total += _turnover(prev_w, cur_w) / 2.0
+            continue
+        drifted = {a: v / denom for a, v in drifted_raw.items()}
+        total += _turnover(drifted, cur_w) / 2.0
     n_years = n_months / 12.0
     return round(total / n_years, 4) if n_years > 0 else 0.0
 
@@ -601,7 +634,7 @@ def run_classic_6040(history: dict) -> dict:
     n_rebalances = len(schedule)
     result = _build_result("Classic 60/40", "static", port_r, rf, bm, fixed_weights)
     result["avg_monthly_turnover"] = round(n_rebalances / max(len(port_r), 1) * 1.0, 4)
-    result["true_turnover"] = _true_turnover(schedule, len(port_r))
+    result["true_turnover"] = _true_turnover(schedule, returns_df, len(port_r))
     return result
 
 
@@ -639,7 +672,7 @@ def run_risk_parity(history: dict) -> dict:
 
     result = _build_result("Risk Parity", "static", port_r, rf, bm, weights)
     result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
-    result["true_turnover"] = _true_turnover(schedule, len(port_r))
+    result["true_turnover"] = _true_turnover(schedule, returns_df, len(port_r))
     return result
 
 
@@ -682,7 +715,7 @@ def run_min_variance(history: dict) -> dict:
     avg_weights = {k: float(np.mean([w[k] for _, w in schedule if k in w])) for k in ["equity", "ig", "hy"]}
     result = _build_result("Minimum Variance", "static", port_r, rf, bm, avg_weights)
     result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
-    result["true_turnover"] = _true_turnover(schedule, len(port_r))
+    result["true_turnover"] = _true_turnover(schedule, returns_df, len(port_r))
     return result
 
 
@@ -713,7 +746,7 @@ def run_equal_weight(history: dict) -> dict:
 
     result = _build_result("Equal Weight", "static", port_r, rf, bm, fixed_weights)
     result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
-    result["true_turnover"] = _true_turnover(schedule, len(port_r))
+    result["true_turnover"] = _true_turnover(schedule, returns_df, len(port_r))
     return result
 
 
@@ -777,7 +810,7 @@ def run_momentum_rotation(history: dict, lookback_scale: float = 1.0) -> dict:
 
     result = _build_result("Momentum Rotation", "dynamic", port_r, rf, bm, avg_weights)
     result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
-    result["true_turnover"] = _true_turnover(schedule, len(port_r))
+    result["true_turnover"] = _true_turnover(schedule, returns_df, len(port_r))
     return result
 
 
@@ -844,7 +877,7 @@ def run_regime_switching(history: dict, regime_window_m: int = _REGIME_WINDOW_M)
 
     result = _build_result("Regime Switching", "dynamic", port_r, rf, bm, avg_weights)
     result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
-    result["true_turnover"] = _true_turnover(schedule, len(port_r))
+    result["true_turnover"] = _true_turnover(schedule, returns_df, len(port_r))
     return result
 
 
@@ -907,7 +940,7 @@ def run_vol_targeting(history: dict, target_volatility: float = TARGET_VOLATILIT
 
     result = _build_result("Volatility Targeting", "dynamic", port_r, rf, bm, avg_weights)
     result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
-    result["true_turnover"] = _true_turnover(schedule, len(port_r))
+    result["true_turnover"] = _true_turnover(schedule, returns_df, len(port_r))
     return result
 
 
@@ -958,7 +991,7 @@ def run_black_litterman(history: dict) -> dict:
 
     result = _build_result("Black-Litterman", "dynamic", port_r, rf, bm, avg_weights)
     result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
-    result["true_turnover"] = _true_turnover(schedule, len(port_r))
+    result["true_turnover"] = _true_turnover(schedule, returns_df, len(port_r))
     return result
 
 
@@ -1023,7 +1056,7 @@ def run_max_sharpe_rolling(history: dict, optimization_window: int = OPTIMIZATIO
 
     result = _build_result("Max Sharpe Rolling", "dynamic", port_r, rf, bm, avg_weights)
     result["avg_monthly_turnover"] = round(len(schedule) / max(len(port_r), 1), 4)
-    result["true_turnover"] = _true_turnover(schedule, len(port_r))
+    result["true_turnover"] = _true_turnover(schedule, returns_df, len(port_r))
     return result
 
 

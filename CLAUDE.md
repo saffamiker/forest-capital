@@ -4211,9 +4211,10 @@ holds the pure compute functions.
   - Drawdown comparison table — max drawdown and recovery months,
     sorted by max drawdown ascending
   - Turnover column — added to the Dashboard strategy comparison table.
-    Shows true_turnover, the genuine sum-of-absolute-weight-change
-    figure (sum(|Δw|)/2 per rebalance, annualised), alongside the
-    legacy rebalance-count proxy avg_monthly_turnover
+    Shows true_turnover, the genuine annualised one-way trading figure
+    (see TRUE TURNOVER below); the legacy rebalance-count proxy
+    avg_monthly_turnover is still stored on every result (the audit
+    layer references it) but is no longer displayed
   - Carhart four-factor loadings table — OLS regression of each
     strategy's monthly excess return on MKT-RF / SMB / HML / MOM; betas,
     annualised alpha, R², and a p<0.05 significance flag per coefficient.
@@ -5676,6 +5677,40 @@ PERMISSION SUMMARY:
   Statistical Audit full panel     — team_member+
   Run Full QA / Presentation View  — team_member+
   Non-team viewer                  — read-only audit summary only
+
+
+─────────────────────────────────────────────────────────────────────────────
+TRUE TURNOVER — DRIFT-INCLUSIVE (May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+backtester._true_turnover() measures genuine annualised portfolio
+turnover — the one-way trading at every rebalance, INCLUDING drift
+correction.
+
+The earlier version compared consecutive schedule entries (target →
+target), so a fixed-weight strategy — whose target never changes —
+reported ~0 turnover even though it trades every quarter to correct
+drift. The fix: between two rebalances the realised weights drift as
+the assets earn different returns, and the rebalance trades from those
+drifted weights back to the new target.
+
+  growth_i   = product over the inter-rebalance months of (1 + r_i)
+  drifted_i  = prev_target_i * growth_i / sum_j(prev_target_j * growth_j)
+  turnover_t = sum_i |drifted_i - new_target_i| / 2     (one-way)
+  true_turnover = sum_t(turnover_t) / n_years
+
+_true_turnover(schedule, returns_df, n_months) takes returns_df so it
+can compound the inter-rebalance returns; it derives the drifted
+weights itself rather than reshaping the (date, weights) schedule tuple
+— so _portfolio_returns_monthly and every strategy's schedule
+construction are unchanged. The initial build-from-cash at the first
+schedule entry is a one-off and is not counted. BENCHMARK is 100%
+equity and never rebalances — its true_turnover is 0.0, which is
+correct and left as-is.
+
+Every result still also carries the legacy rebalance-count proxy
+avg_monthly_turnover (the statistical-audit layer references that
+field); only true_turnover is shown on the Dashboard, with no fallback.
 
 
 Sprint structure is retired. Work is now Kanban with three columns:

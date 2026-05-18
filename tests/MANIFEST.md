@@ -726,9 +726,10 @@ Backend:
     Ken French's F-F_Momentum_Factor_CSV.zip (no pandas-datareader).
     backfill_momentum_factor() populates `mom` where NULL; wired into
     _load_ff_factors_with_cache so a cold cache self-heals.
-  tools/backtester.py — _true_turnover(schedule, n_months): the genuine
-    sum-of-absolute-weight-change figure, sum(|Δw|)/2 per rebalance
-    annualised. Added to every strategy result alongside the legacy
+  tools/backtester.py — _true_turnover(schedule, returns_df, n_months):
+    the genuine annualised turnover — drifted-weight → new-target at each
+    rebalance, so drift correction is included, sum(|Δw|)/2 per rebalance.
+    Added to every strategy result alongside the legacy
     rebalance-count proxy avg_monthly_turnover. The four dynamic
     strategy runners gained optional parameters (lookback_scale,
     regime_window_m, target_volatility, optimization_window) with
@@ -765,8 +766,10 @@ Backend:
       benchmark is excluded from the rolling-excess series list.
   tests/test_strategy_enhancements.py — 8 tests:
     True turnover: every strategy reports true_turnover, it is never
-      negative, fixed-weight statics are ~0, and dynamic strategies
-      turn over more than fixed-weight statics (a warning, not a hard
+      negative, BENCHMARK is 0 (never rebalances), fixed-weight statics
+      have a genuine positive drift-correction figure, and dynamic
+      strategies turn over more than fixed-weight statics (a warning,
+      not a hard
       failure — a degenerate synthetic path could violate it).
     Sensitivity: the sweep covers all four dynamic strategies, every
       sweep carries points + current_value + parameter, each yields
