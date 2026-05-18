@@ -964,6 +964,97 @@ async def editor_delete_draft(
     return {"deleted": True, "draft_id": draft_id}
 
 
+@app.post("/api/v1/documents/drafts/{draft_id}/chat")
+@limiter.limit("30/hour")
+async def editor_chat(
+    draft_id: int, body: dict, request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """
+    The editor's Writing Assistant chat. The signed-in user asks for
+    writing help on their draft; the assistant answers with the draft's
+    full text as context, referencing the actual content.
+
+    Body: {message, history: [{role, content}], selection?}. A selection
+    (a passage the user is asking about) is quoted into the prompt. The
+    rate limit — 30/hour — keeps the assistant a help, not a crutch.
+
+    404 if the draft does not exist or is not owned by the caller.
+    Logged as a writing_assistant interaction so it appears in Team
+    Activity and AI cost tracking.
+    """
+    import asyncio
+
+    from tools.editor_drafts import get_draft
+    draft = await get_draft(draft_id)
+    # A draft the caller does not own is a 404 — not a 403 — so the
+    # endpoint never confirms another user's draft exists.
+    if draft is None or draft.get("owner_email") != session.get("email"):
+        raise HTTPException(status_code=404, detail="Draft not found.")
+
+    message = str(body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="'message' is required.")
+    if len(message) > 2000:
+        raise HTTPException(status_code=422,
+                            detail="Message exceeds the 2000-character limit.")
+    selection = body.get("selection")
+    history = body.get("history") or []
+
+    if ENVIRONMENT == "test":
+        return {"response": "Writing assistant is mocked in the test "
+                            "environment."}
+
+    content_text = (draft.get("content_text") or "")[:8000]
+    system_prompt = (
+        f"You are a writing assistant helping {draft['owner_email']} "
+        f"improve their {draft['document_type']} document.\n\n"
+        f"The full document is:\n---\n{content_text}\n---\n\n"
+        "Help the user improve their writing. Be specific and "
+        "constructive. Reference the actual content of their document in "
+        "your responses. Do not rewrite large sections unless explicitly "
+        "asked. Keep responses concise — this is a chat interface, not a "
+        "document."
+    )
+
+    # The last six exchanges, flattened into the prompt as context
+    # (call_claude is single-turn).
+    convo_lines: list[str] = []
+    for turn in history[-6:]:
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        text = str(turn.get("content") or "").strip()
+        if text:
+            convo_lines.append(f"{role}: {text}")
+    user_message = ""
+    if convo_lines:
+        user_message += ("Earlier in this conversation:\n"
+                         + "\n".join(convo_lines) + "\n\n")
+    if selection:
+        user_message += (f"Regarding this passage:\n> "
+                         f"{str(selection)[:1000]}\n\n")
+    user_message += message
+
+    from agents.usage import start_usage_capture
+    start_usage_capture()
+    try:
+        from agents.base import SONNET_MODEL, call_claude
+        reply = await asyncio.to_thread(
+            call_claude, SONNET_MODEL, system_prompt, user_message, 600)
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("editor_chat_failed", ref=ref, error=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Writing assistant unavailable (ref: {ref})")
+
+    _log_interaction_bg(
+        request, session, "writing_assistant",
+        question_text=message[:500],
+        response_summary=reply[:500],
+        metadata={"draft_id": draft_id})
+    return {"response": reply}
+
+
 # ── Regime ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/regime/current")

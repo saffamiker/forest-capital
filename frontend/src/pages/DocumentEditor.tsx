@@ -83,6 +83,10 @@ export default function DocumentEditor() {
   const [rightOpen, setRightOpen] = useState(true)
   const [previewOpen, setPreviewOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
+  // A quoted passage pushed into the Writing Assistant by the "Ask AI"
+  // selection action; the nonce re-triggers the panel's prefill effect.
+  const [assistantPrefill, setAssistantPrefill] =
+    useState<{ text: string; nonce: number } | null>(null)
 
   const dirtyRef = useRef(false)
   // Initial marker total per section heading — the progress denominator.
@@ -208,6 +212,16 @@ export default function DocumentEditor() {
       setExporting(false)
     }
   }, [draft, id, save])
+
+  // "Ask AI" on an editor selection — opens the assistant panel and
+  // pre-fills the chat input with the quoted passage.
+  const handleAskAI = (text: string) => {
+    setRightOpen(true)
+    setAssistantPrefill({
+      text: `> ${text}\n\nHow can I improve this?`,
+      nonce: Date.now(),
+    })
+  }
 
   const jumpToSection = (heading: string) => {
     // Headings render as <h1>..<h3>; find the one whose text matches.
@@ -362,15 +376,16 @@ export default function DocumentEditor() {
           ) : (
             <RichTextEditor
               content={(contentJson as TipTapDoc | null)}
-              onChange={onRichChange} />
+              onChange={onRichChange}
+              onAskAI={handleAskAI} />
           )}
         </main>
 
         {rightOpen && (
           <aside className="w-[300px] shrink-0 border-l border-border
                             bg-navy-900">
-            <WritingAssistant draftId={id} contentText={contentText}
-              unresolvedMarkers={unresolved} />
+            <WritingAssistant draftId={id} unresolvedMarkers={unresolved}
+              prefill={assistantPrefill} />
           </aside>
         )}
       </div>

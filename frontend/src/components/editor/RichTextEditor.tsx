@@ -7,11 +7,12 @@
  * [[VERIFY]] marker, "Mark as Complete" for a [[BOB]] callout — both
  * delete the marker text from the document.
  */
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useEditor, EditorContent } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import {
   Bold, Italic, Heading1, Heading2, Heading3, List, ListOrdered, Quote,
+  Sparkles,
 } from 'lucide-react'
 
 import { markerExtension, MARKER_RE } from '../../lib/editorMarkers'
@@ -20,11 +21,18 @@ import type { TipTapDoc } from '../../types/editor'
 interface Props {
   content: TipTapDoc | null
   onChange: (json: TipTapDoc, text: string) => void
+  /** Called with the selected text when the user clicks the floating
+   *  "Ask AI" button over an editor selection. */
+  onAskAI?: (text: string) => void
 }
 
 const EMPTY_DOC: TipTapDoc = { type: 'doc', content: [{ type: 'paragraph' }] }
 
-export default function RichTextEditor({ content, onChange }: Props) {
+export default function RichTextEditor({ content, onChange, onAskAI }: Props) {
+  // The floating "Ask AI" button over a non-empty selection.
+  const [ask, setAsk] = useState<
+    { text: string; top: number; left: number } | null>(null)
+
   const editor = useEditor({
     extensions: [
       StarterKit,
@@ -47,6 +55,19 @@ export default function RichTextEditor({ content, onChange }: Props) {
     },
     onUpdate: ({ editor: ed }) => {
       onChange(ed.getJSON() as TipTapDoc, ed.getText())
+    },
+    onSelectionUpdate: ({ editor: ed }) => {
+      if (!onAskAI) return
+      const { from, to } = ed.state.selection
+      const text = from === to
+        ? '' : ed.state.doc.textBetween(from, to, ' ').trim()
+      if (!text) { setAsk(null); return }
+      try {
+        const c = ed.view.coordsAtPos(from)
+        setAsk({ text, top: c.top, left: c.left })
+      } catch {
+        setAsk(null)
+      }
     },
   })
 
@@ -136,6 +157,23 @@ export default function RichTextEditor({ content, onChange }: Props) {
       <div className="flex-1 overflow-y-auto px-6 py-5">
         <EditorContent editor={editor} />
       </div>
+
+      {/* Floating "Ask AI" button over a selection. */}
+      {ask && onAskAI && (
+        <button
+          type="button"
+          // preventDefault on mousedown keeps the editor selection alive
+          // through the click.
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => { onAskAI(ask.text); setAsk(null) }}
+          style={{ position: 'fixed', top: ask.top - 40, left: ask.left,
+                   zIndex: 60 }}
+          className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                     bg-electric text-white shadow-lg hover:bg-blue-500"
+        >
+          <Sparkles className="w-3 h-3" /> Ask AI
+        </button>
+      )}
     </div>
   )
 }

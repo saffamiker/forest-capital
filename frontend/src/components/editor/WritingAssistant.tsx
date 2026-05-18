@@ -6,7 +6,7 @@
  * markers remain. Below: an AI chat that answers writing questions with
  * the draft's text as context (the document-assistant endpoint).
  */
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import {
   GraduationCap, Loader2, Send, AlertTriangle, Sparkles,
@@ -16,8 +16,10 @@ import Markdown from '../Markdown'
 
 interface Props {
   draftId: number
-  contentText: string
   unresolvedMarkers: number
+  /** A passage to drop into the chat input — set by the editor's
+   *  "Ask AI" selection action. The nonce re-triggers on each request. */
+  prefill?: { text: string; nonce: number } | null
 }
 
 const SUGGESTED = [
@@ -33,7 +35,7 @@ interface ChatMessage {
 }
 
 export default function WritingAssistant({
-  draftId, contentText, unresolvedMarkers,
+  draftId, unresolvedMarkers, prefill,
 }: Props) {
   const [reviewPhase, setReviewPhase] =
     useState<'idle' | 'running' | 'done' | 'error'>('idle')
@@ -42,6 +44,15 @@ export default function WritingAssistant({
   const [input, setInput] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+
+  // The editor's "Ask AI" action pushes a quoted passage into the input.
+  useEffect(() => {
+    if (prefill?.text) {
+      setInput(prefill.text)
+      inputRef.current?.focus()
+    }
+  }, [prefill?.nonce])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const runReview = async () => {
     setReviewPhase('running')
@@ -90,17 +101,19 @@ export default function WritingAssistant({
   const send = async (text: string) => {
     const message = text.trim()
     if (!message || chatLoading) return
+    // The last six exchanges travel as history — enough context without
+    // token bloat.
+    const history = messages.slice(-6).map((m) => ({
+      role: m.role, content: m.text,
+    }))
     setMessages((m) => [...m, { role: 'user', text: message }])
     setInput('')
     setChatLoading(true)
     try {
-      const res = await axios.post(`/api/documents/${draftId}/assistant`, {
-        message,
-        context_content: contentText.slice(0, 6000),
-        context_type: 'section',
-      })
-      const reply = [res.data?.explanation, res.data?.suggestion]
-        .filter(Boolean).join('\n\n') || 'No response.'
+      const res = await axios.post(
+        `/api/v1/documents/drafts/${draftId}/chat`,
+        { message, history, selection: null })
+      const reply = res.data?.response || 'No response.'
       setMessages((m) => [...m, { role: 'assistant', text: reply }])
     } catch {
       setMessages((m) => [...m,
@@ -181,7 +194,8 @@ export default function WritingAssistant({
           )}
         </div>
         <div className="flex items-center gap-1">
-          <input value={input} onChange={(e) => setInput(e.target.value)}
+          <input ref={inputRef} value={input}
+            onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => { if (e.key === 'Enter') send(input) }}
             placeholder="Ask about your document, request improvements…"
             className="flex-1 bg-navy-800 border border-border rounded

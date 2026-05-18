@@ -282,7 +282,16 @@ deliverables lead.*
 - [ ] Type a sentence anywhere in the document body — verify the header
       shows "Saving…" then "Saved [time]" (auto-save runs every 30s).
 - [ ] In the Writing Assistant panel (right), type *"Is my methodology
-      section clear?"* — verify a response returns.
+      section clear?"* — verify a specific, relevant response returns
+      (it should reference your actual content, not be generic).
+- [ ] Select a sentence in the editor — verify the **✨ Ask AI** button
+      appears above the selection.
+- [ ] Click it — verify the Writing Assistant panel opens and the chat
+      input is pre-filled with the selected text quoted.
+- [ ] Send the pre-filled message — verify the response references the
+      specific passage you selected.
+- [ ] After the session, open Team Activity on the Reports page — verify
+      the writing-assistant exchange is recorded.
 - [ ] Click **[Run Academic Review]** in the Writing Assistant panel —
       verify the inline verdict appears below the button.
 - [ ] If unresolved markers remain, verify the warning appears:
@@ -377,6 +386,14 @@ presentation and visualisation lead.*
 - [ ] Click **[Export PPTX]** in the editor header — verify a `.pptx`
       file downloads, and open it to confirm your edited speaker notes
       are present on the slides.
+
+### Writing Assistant (Presentation)
+
+- [ ] In the editor, open the Writing Assistant panel (right) and type a
+      question about a slide — verify a specific, relevant response.
+- [ ] Select a word or phrase in a slide's content or speaker-notes
+      field, then use the Writing Assistant chat to ask about it —
+      verify the response is specific to the slide content.
 
 ### Export package
 

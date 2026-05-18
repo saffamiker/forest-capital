@@ -253,6 +253,93 @@ class TestInEditorExport:
         assert resp.status_code == 404
 
 
+class TestEditorChat:
+    CHAT = "/api/v1/documents/drafts/{}/chat"
+
+    def test_chat_requires_auth(self):
+        assert client.post(self.CHAT.format(1),
+                           json={"message": "hi"}).status_code == 401
+
+    def test_writing_assistant_is_a_logged_interaction_type(self):
+        from tools.activity_log import _INTERACTION_TYPES
+        assert "writing_assistant" in _INTERACTION_TYPES
+
+    def test_chat_unknown_draft_is_404(self):
+        resp = client.post(self.CHAT.format(999999999), headers=TEAM,
+                           json={"message": "hi"})
+        assert resp.status_code == 404
+
+    def test_chat_returns_a_response(self, clean_editor_drafts):
+        if not _db_ready():
+            pytest.skip("no live database")
+        did = client.post(DRAFTS, headers=TEAM, json={
+            "document_type": "midpoint_paper", "title": "Chat draft",
+            "content_text": "the document body"}).json()["id"]
+        resp = client.post(self.CHAT.format(did), headers=TEAM,
+                           json={"message": "Is my conclusion clear?",
+                                 "history": [], "selection": None})
+        assert resp.status_code == 200
+        assert isinstance(resp.json()["response"], str)
+
+    def test_chat_empty_message_is_422(self, clean_editor_drafts):
+        if not _db_ready():
+            pytest.skip("no live database")
+        did = client.post(DRAFTS, headers=TEAM, json={
+            "document_type": "midpoint_paper", "title": "Chat draft",
+            "content_text": "body"}).json()["id"]
+        resp = client.post(self.CHAT.format(did), headers=TEAM,
+                           json={"message": "   "})
+        assert resp.status_code == 422
+
+    def test_chat_on_a_draft_not_owned_is_404(self, clean_editor_drafts):
+        if not _db_ready():
+            pytest.skip("no live database")
+        # Created by Bob (TEAM) ...
+        did = client.post(DRAFTS, headers=TEAM, json={
+            "document_type": "midpoint_paper", "title": "Bob's draft",
+            "content_text": "body"}).json()["id"]
+        # ... and another team member cannot chat against it.
+        molly = {"X-API-Key": generate_session_token("murdockm@queens.edu")}
+        resp = client.post(self.CHAT.format(did), headers=molly,
+                           json={"message": "hi"})
+        assert resp.status_code == 404
+
+    def test_chat_prompt_carries_content_selection_and_history(
+            self, clean_editor_drafts, monkeypatch):
+        if not _db_ready():
+            pytest.skip("no live database")
+        did = client.post(DRAFTS, headers=TEAM, json={
+            "document_type": "midpoint_paper", "title": "Prompt draft",
+            "content_text": "DOC-BODY-MARKER unique document text"}).json()["id"]
+
+        captured: dict[str, str] = {}
+
+        def _fake_call_claude(model, system_prompt, user_message,
+                              max_tokens=600, tools=None):
+            captured["system"] = system_prompt
+            captured["user"] = user_message
+            return "fake assistant reply"
+
+        # Leave the test-env short-circuit so the real prompt is built.
+        monkeypatch.setattr("main.ENVIRONMENT", "production")
+        monkeypatch.setattr("agents.base.call_claude", _fake_call_claude)
+
+        resp = client.post(self.CHAT.format(did), headers=TEAM, json={
+            "message": "Tighten this",
+            "history": [{"role": "user", "content": "earlier question"},
+                        {"role": "assistant", "content": "earlier answer"}],
+            "selection": "the passage I selected"})
+        assert resp.status_code == 200
+        assert resp.json()["response"] == "fake assistant reply"
+        # The draft's content_text is in the system prompt.
+        assert "DOC-BODY-MARKER" in captured["system"]
+        # The selection is quoted into the user message.
+        assert "> the passage I selected" in captured["user"]
+        # The history is flattened in.
+        assert "earlier question" in captured["user"]
+        assert "Tighten this" in captured["user"]
+
+
 class TestAcademicReviewReadsDraft:
     def test_review_context_overlays_the_editor_draft(self, clean_editor_drafts):
         if not _db_ready():
