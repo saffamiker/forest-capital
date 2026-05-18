@@ -20,11 +20,13 @@ formula specs below describe that layer, and the regime difference is
 documented in formula_specifications so a cross-layer value gap is
 explained rather than flagged.
 
-PERSISTED-WEIGHTS LIMITATION: the backtester computes per-rebalance
-weight schedules but does not persist them — only monthly returns are
-cached. So raw_data.strategy_weights is empty and true_turnover cannot
-be independently recomputed. Layer 1's weight-constraint check degrades
-to a SKIP finding accordingly.
+WEIGHT SCHEDULES: the backtester persists each strategy's per-rebalance
+target weights on the result (weight_schedule), so raw_data.
+strategy_weights carries the full {dates, equity, ig, hy} columns and
+Layer 1's long-only / sum-to-1 weight-constraint check runs in full. A
+strategy cached before weight persistence shipped has no weight_schedule
+and contributes empty columns — Layer 1 then warns rather than failing
+until the cache is refreshed (POST /api/v1/cache/invalidate).
 """
 from __future__ import annotations
 
@@ -145,6 +147,23 @@ def _list_to_dict(rows: list[dict], key: str) -> dict[str, dict]:
     return out
 
 
+def _weight_columns(weight_schedule: list[dict]) -> dict[str, list]:
+    """
+    Converts a strategy's persisted weight_schedule — a list of
+    {date, weights:{equity,ig,hy}} — into the columnar shape the Layer 1
+    weight-constraint check consumes: {dates, equity, ig, hy}.
+    """
+    return {
+        "dates": [e.get("date") for e in weight_schedule],
+        "equity": [float((e.get("weights") or {}).get("equity", 0.0))
+                   for e in weight_schedule],
+        "ig": [float((e.get("weights") or {}).get("ig", 0.0))
+               for e in weight_schedule],
+        "hy": [float((e.get("weights") or {}).get("hy", 0.0))
+               for e in weight_schedule],
+    }
+
+
 async def assemble_audit_payload() -> dict[str, Any]:
     """
     Builds the full audit payload. Returns a dict with an `available`
@@ -204,10 +223,15 @@ async def assemble_audit_payload() -> dict[str, Any]:
                 name: [p[1] for p in (s.get("monthly_returns") or [])]
                 for name, s in strategies.items()
             },
-            # Per-rebalance weights are not persisted — see the module
-            # docstring. Empty by design; Layer 1's weight-constraint
-            # check skips accordingly.
-            "strategy_weights": {},
+            # Per-rebalance target weights, from each strategy's persisted
+            # weight_schedule — the columnar shape Layer 1's weight check
+            # consumes. A strategy cached before weight persistence shipped
+            # has no weight_schedule and contributes an empty column set;
+            # Layer 1 then warns rather than failing.
+            "strategy_weights": {
+                name: _weight_columns(s.get("weight_schedule") or [])
+                for name, s in strategies.items()
+            },
         }
 
         # ── platform_computed — the platform's current analytics output ──

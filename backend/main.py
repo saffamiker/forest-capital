@@ -1942,6 +1942,23 @@ async def audit_export_run(
     )
 
 
+@app.post("/api/v1/cache/invalidate")
+async def cache_invalidate(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Clears strategy_results_cache so the backtester recomputes from fresh
+    data on the next /api/backtest request — used after a data update or
+    to repopulate cached results that predate a new result-dict field
+    (e.g. the persisted weight_schedule). Sysadmin only.
+    """
+    from tools.cache import clear_strategy_cache
+    removed = await clear_strategy_cache()
+    log.info("strategy_cache_invalidated", rows_removed=removed,
+             by=session.get("email"))
+    return {"status": "cleared", "rows_removed": removed}
+
+
 # ── User management ───────────────────────────────────────────────────────────
 #
 # The sysadmin manages platform_users from inside the platform. Every

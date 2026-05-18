@@ -186,9 +186,11 @@ class TestLayer1:
 
     def test_catches_a_broken_weight_sum(self):
         payload = _clean_payload()
-        # A weight set that does not sum to 1.0.
+        # A persisted weight schedule (columnar) whose row does not
+        # sum to 1.0 — equity 0.5 + ig 0.3 + hy 0.1 = 0.9.
         payload["raw_data"]["strategy_weights"] = {
-            "S1": {"2022-01-31": {"equity": 0.5, "ig": 0.3, "hy": 0.1}},
+            "S1": {"dates": ["2022-01-31"], "equity": [0.5],
+                   "ig": [0.3], "hy": [0.1]},
         }
         result = layer_1_raw_data_audit(payload)
         weight = [f for f in result["findings"]

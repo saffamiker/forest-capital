@@ -374,6 +374,29 @@ async def set_strategy_cache(
         log.warning("strategy_cache_write_error", error=str(exc))
 
 
+async def clear_strategy_cache() -> int:
+    """
+    Deletes every strategy_results_cache row so the backtester recomputes
+    from fresh data on the next request — used after a data update or to
+    repopulate results that predate a new result-dict field (e.g. the
+    weight_schedule). Returns the number of rows removed; fail-open to 0.
+    """
+    if not _DB_AVAILABLE:
+        return 0
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            res = await session.execute(
+                text("DELETE FROM strategy_results_cache"))
+            await session.commit()
+            removed = res.rowcount or 0
+            log.info("strategy_cache_cleared", rows=removed)
+            return removed
+    except Exception as exc:
+        log.warning("strategy_cache_clear_error", error=str(exc))
+        return 0
+
+
 async def get_regime_cache() -> dict[str, Any] | None:
     """
     Returns cached regime signals if not expired, else None.

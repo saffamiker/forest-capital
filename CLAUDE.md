@@ -5529,12 +5529,18 @@ cross-layer checks are recorded as INFO findings that explain the
 difference rather than flagging it. The export report carries a
 COMPUTATION REGIMES section to the same end.
 
-PERSISTED-WEIGHTS LIMITATION: the backtester computes per-rebalance
-weight schedules but does not persist them — only monthly returns are
-cached. So raw_data.strategy_weights is empty, true_turnover cannot be
-independently recomputed, and Layer 1's weight-constraint check
-degrades to an honest SKIP (re-run the backtester with weight logging
-to audit turnover).
+WEIGHT SCHEDULE PERSISTENCE: the backtester persists each strategy's
+per-rebalance target weights as a `weight_schedule` list on its result
+dict (one {date, weights:{equity,ig,hy}} entry per rebalance), so the
+schedule survives into strategy_results_cache. audit_assembler builds
+raw_data.strategy_weights from it (columnar {name:{dates,equity,ig,hy}}),
+and Layer 1's weight-constraint check 5 now runs FULLY — sum-to-1,
+long-only and ≤1 verified at every rebalance, with a BENCHMARK
+100%-equity special case. A strategy cached BEFORE weight persistence
+shipped has an empty schedule; the check WARNs (not SKIPs, not FAILs)
+for it and the message points at POST /api/v1/cache/invalidate. That
+endpoint (manage_users-gated) clears strategy_results_cache so the next
+/api/backtest/compare recomputes and repopulates the weight schedule.
 
 ENDPOINTS (all manage_users-gated — sysadmin only):
   POST /api/v1/audit/run            — fire an audit (background; returns
