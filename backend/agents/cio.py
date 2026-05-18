@@ -16,7 +16,9 @@ synthesis task — this is the one call where model quality is paramount.
 """
 from __future__ import annotations
 
+import contextvars
 import json
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import structlog
@@ -70,10 +72,12 @@ class CIO:
     """
     Council orchestrator — briefs specialists, engages Gemini, synthesises.
 
-    The deliberation is intentionally sequential (not fully parallel) because
-    each step informs the next: specialist reports feed the draft consensus
-    which feeds Gemini's challenge which feeds the final synthesis. Running
-    all agents at once would prevent Gemini from seeing the council's position.
+    The deliberation PHASES are sequential because each informs the next:
+    specialist reports feed the draft consensus, which feeds the dissent
+    challenges, which feed the final synthesis. But the four specialists
+    within phase 1 are independent, so they run in parallel — sequentially
+    the four synchronous LLM calls take ~120s, long enough for Render to
+    502 the request.
     """
 
     def __init__(self) -> None:
@@ -107,11 +111,29 @@ class CIO:
         """
         log.info("council_deliberation_started", query_len=len(query))
 
-        # Step 1-5: Brief specialists
-        equity_report = self._equity.analyse(strategy_results)
-        fi_report = self._fi.analyse(strategy_results, history)
-        risk_report = self._risk.analyse(strategy_results)
-        quant_report = self._quant.analyse(strategy_results)
+        # Step 1-5: Brief the four specialists IN PARALLEL. Each .analyse()
+        # is an independent, synchronous, network-bound LLM call; run
+        # sequentially they take ~120s and Render 502s the council
+        # request. A thread pool runs them concurrently (~30s target).
+        # Each worker runs inside a copied context so the per-request
+        # harness-metrics ContextVar — a shared list seeded by the
+        # endpoint's start_harness_capture() — still captures every
+        # specialist's harness run (the copy shares the list by reference).
+        # .result() re-raises a worker exception exactly as the former
+        # sequential calls did, so error semantics are unchanged.
+        specialist_jobs = [
+            (self._equity.analyse, (strategy_results,)),
+            (self._fi.analyse, (strategy_results, history)),
+            (self._risk.analyse, (strategy_results,)),
+            (self._quant.analyse, (strategy_results,)),
+        ]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            futures = [
+                pool.submit(contextvars.copy_context().run, fn, *args)
+                for fn, args in specialist_jobs
+            ]
+            reports = [f.result() for f in futures]
+        equity_report, fi_report, risk_report, quant_report = reports
 
         log.info(
             "specialist_reports_collected",

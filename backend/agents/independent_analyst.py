@@ -8,7 +8,7 @@ blind spots that similarly-trained models might miss.
 Gemini's sole job: challenge the council consensus with specific,
 data-grounded objections. Not contrarianism for its own sake.
 
-Model: gemini-1.5-pro (google-generativeai SDK).
+Model: gemini-2.0-flash (google-genai SDK).
 UI accent: purple (#7c3aed) — always distinct from Claude agents.
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 
 import structlog
 
-from agents.base import GEMINI_MODEL
+from agents.base import GEMINI_MODEL, call_gemini
 
 log = structlog.get_logger(__name__)
 
@@ -75,9 +75,6 @@ class IndependentAnalyst:
             return self._mock_challenge(council_summary, strategy_results)
 
         try:
-            import google.generativeai as genai  # type: ignore[import-untyped]
-
-            genai.configure(api_key=api_key)
             # Inject any uploaded academic-context documents so the Gemini
             # dissenter judges the consensus against the same evaluation
             # criteria the Claude agents see. Fail-open.
@@ -87,10 +84,6 @@ class IndependentAnalyst:
                 system_instruction = inject_academic_context(_SYSTEM_PROMPT)
             except Exception as exc:  # noqa: BLE001
                 log.warning("academic_context_inject_failed", error=str(exc))
-            model = genai.GenerativeModel(
-                GEMINI_MODEL,
-                system_instruction=system_instruction,
-            )
 
             evidence = self._build_evidence(council_summary, strategy_results)
             prompt = (
@@ -102,8 +95,7 @@ class IndependentAnalyst:
                 f"EVIDENCE:\n{evidence}"
             )
 
-            response = model.generate_content(prompt)
-            challenge_text = response.text
+            challenge_text = call_gemini(GEMINI_MODEL, system_instruction, prompt)
 
             log.info("gemini_analyst_completed", response_len=len(challenge_text))
             return self._parse_challenge(challenge_text, strategy_results)

@@ -5547,6 +5547,43 @@ three layers; its export report is intended for inclusion in the
 Analytical Appendix as evidence of independent statistical verification.
 
 
+─────────────────────────────────────────────────────────────────────────────
+GEMINI SDK MIGRATION + COUNCIL PARALLELISATION (May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+GEMINI SDK: the deprecated google-generativeai package (genai.configure /
+genai.GenerativeModel) was replaced by the current google-genai package
+(genai.Client / client.models.generate_content). requirements.txt now
+pins google-genai>=1.0.0. All three Gemini call sites — the
+independent_analyst dissenter, the academic_review Gemini peer, and the
+document-editing assistant in main.py — route through one shared wrapper,
+agents/base.call_gemini(model, system_prompt, user_message), which
+mirrors call_claude's convention and imports the SDK lazily so the test
+environment (every Gemini path mocks before reaching it) never needs the
+package installed.
+
+MODEL STRING: GEMINI_MODEL moved gemini-1.5-pro → gemini-2.0-flash
+(gemini-1.5-pro retired; 2.0-flash is the current GA model). The
+constant lives in agents/base.py alongside SONNET_MODEL /
+OPUS_MODEL / HAIKU_MODEL — current strings: claude-sonnet-4-6,
+claude-opus-4-7, claude-haiku-4-5-20251001, gemini-2.0-flash.
+
+COUNCIL PARALLELISATION: cio.deliberate()'s phase 1 — the four Claude
+specialist analysts (equity, fixed-income, risk, quant) — previously ran
+sequentially (~120s of synchronous LLM calls, long enough for Render to
+502 the council request). They are independent, so they now run in
+parallel via a concurrent.futures.ThreadPoolExecutor (max_workers=4,
+~30s target). Each worker runs inside a contextvars.copy_context() so
+the per-request harness-metrics ContextVar — a shared list seeded by the
+endpoint's start_harness_capture() — still captures every specialist's
+harness run (the copy shares the list by reference). future.result()
+re-raises a worker exception exactly as the former sequential calls did,
+so error semantics are unchanged. The deliberation PHASES remain
+sequential (specialists → draft consensus → Gemini + Grok dissent →
+CIO synthesis); only phase 1 was parallelised — the CIO synthesis step
+is untouched.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.

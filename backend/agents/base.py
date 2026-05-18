@@ -46,7 +46,10 @@ SCOPE_ENFORCEMENT = (
 SONNET_MODEL = "claude-sonnet-4-6"
 OPUS_MODEL = "claude-opus-4-7"
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
-GEMINI_MODEL = "gemini-1.5-pro"
+# gemini-1.5-pro was retired; gemini-2.0-flash is the current GA model.
+# The Gemini SDK was also migrated — google-generativeai (deprecated) →
+# google-genai. See call_gemini below.
+GEMINI_MODEL = "gemini-2.0-flash"
 
 # Token budget per call — protects credits from runaway prompts.
 MAX_INPUT_TOKENS = 2048
@@ -111,6 +114,32 @@ def _with_academic_context(system_prompt: str) -> str:
         # cache is visible rather than silently dropping agent context.
         log.warning("academic_context_inject_failed", error=str(exc))
         return system_prompt
+
+
+def call_gemini(model: str, system_prompt: str, user_message: str) -> str:
+    """
+    Thin wrapper around the google-genai SDK — the single Gemini call
+    convention for the codebase.
+
+    google-genai is the current Google GenAI package; the older
+    google-generativeai package (genai.configure / genai.GenerativeModel)
+    was deprecated. This wrapper isolates the SDK so the Gemini dissenter
+    (independent_analyst), the academic-review Gemini peer and the
+    document-editing assistant all construct the client one way.
+
+    The SDK is imported lazily so the test environment — which mocks every
+    Gemini path before reaching here — never needs the package installed.
+    """
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY", ""))
+    response = client.models.generate_content(
+        model=model,
+        contents=user_message,
+        config=types.GenerateContentConfig(system_instruction=system_prompt),
+    )
+    return response.text or ""
 
 
 def build_agent_response(

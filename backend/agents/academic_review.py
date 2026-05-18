@@ -396,14 +396,13 @@ def _mock_peer_review(meta: dict[str, str]) -> str:
 
 
 def _call_gemini_peer(system_prompt: str, user_message: str) -> str:
-    """Replicates agents/independent_analyst.py's Gemini call pattern."""
+    """Replicates agents/independent_analyst.py's Gemini call pattern —
+    the shared call_gemini wrapper over the google-genai SDK."""
     api_key = os.getenv("GOOGLE_API_KEY", "")
     if _is_test_env() or not api_key:
         return _mock_peer_review(_PEER_AGENTS["independent_analyst"])
-    import google.generativeai as genai  # type: ignore[import-untyped]
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(GEMINI_MODEL, system_instruction=system_prompt)
-    return model.generate_content(user_message).text
+    from agents.base import call_gemini
+    return call_gemini(GEMINI_MODEL, system_prompt, user_message)
 
 
 def _call_grok_peer(system_prompt: str, user_message: str) -> str:

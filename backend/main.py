@@ -4949,18 +4949,12 @@ async def document_assistant(
     try:
         from agents.contrarian_analyst import XAI_TIMEOUT_SECONDS  # noqa: F401
         import os as _os
-        import google.generativeai as genai  # type: ignore[import-untyped]
+        from agents.base import call_gemini
 
         api_key = _os.getenv("GOOGLE_API_KEY", "")
         if not api_key:
             log.info("document_assistant_mock_no_key")
             return _mock_assistant_response(user_message, context_content)
-
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            GEMINI_MODEL,
-            system_instruction=_GEMINI_ASSISTANT_SYSTEM_PROMPT,
-        )
 
         prompt = (
             f"Editing context: {context_type}\n"
@@ -4974,8 +4968,9 @@ async def document_assistant(
             f"  - Output ONLY the rewritten content, no preamble"
         )
 
-        response = model.generate_content(prompt)
-        suggestion = response.text.strip()
+        suggestion = call_gemini(
+            GEMINI_MODEL, _GEMINI_ASSISTANT_SYSTEM_PROMPT, prompt,
+        ).strip()
 
         return {
             "suggestion":   suggestion,
