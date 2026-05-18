@@ -5,7 +5,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer
 } from 'recharts'
-import { AlertTriangle, RefreshCw } from 'lucide-react'
+import { AlertTriangle, RefreshCw, X } from 'lucide-react'
 import RegimeIndicator from './RegimeIndicator'
 import EfficientFrontier from './EfficientFrontier'
 import StrategyCard from './StrategyCard'
@@ -56,20 +56,36 @@ interface StrategyTableColumn {
   label: string
   /** Key into explainerTooltips.ts — drives the column-header InfoIcon. */
   infoKey: string | null
+  /** Hidden below lg unless the "More columns" toggle is on. The '#'
+   *  rank column stays hidden on mobile even when expanded. */
+  mobileHidden: boolean
 }
 
 const STRATEGY_TABLE_COLUMNS: StrategyTableColumn[] = [
-  { label: '#',                infoKey: null },
-  { label: 'Strategy',         infoKey: null },
-  { label: 'CAGR',             infoKey: 'cagr' },
-  { label: 'Sharpe [95% CI]',  infoKey: 'sharpe_ci' },
-  { label: 'Max DD',           infoKey: 'max_drawdown' },
-  { label: 'DSR',              infoKey: 'dsr' },
-  { label: 'p (FDR)',          infoKey: 'p_fdr' },
-  { label: 'CV Score',         infoKey: 'cv_score' },
-  { label: 'Turnover (ann.)',  infoKey: 'turnover' },
-  { label: 'Tier 1',           infoKey: 'tier' },
+  { label: '#',                infoKey: null,           mobileHidden: true },
+  { label: 'Strategy',         infoKey: null,           mobileHidden: false },
+  { label: 'CAGR',             infoKey: 'cagr',         mobileHidden: false },
+  { label: 'Sharpe [95% CI]',  infoKey: 'sharpe_ci',    mobileHidden: false },
+  { label: 'Max DD',           infoKey: 'max_drawdown', mobileHidden: true },
+  { label: 'DSR',              infoKey: 'dsr',          mobileHidden: true },
+  { label: 'p (FDR)',          infoKey: 'p_fdr',        mobileHidden: true },
+  { label: 'CV Score',         infoKey: 'cv_score',     mobileHidden: true },
+  { label: 'Turnover (ann.)',  infoKey: 'turnover',     mobileHidden: true },
+  { label: 'Tier 1',           infoKey: 'tier',         mobileHidden: false },
 ]
+
+// Below lg the table shows a reduced column set (Strategy, CAGR, Sharpe,
+// Tier 1) so it fits a phone without horizontal scrolling; "More columns"
+// reveals the rest. The '#' rank column stays hidden on mobile regardless
+// — row order conveys rank. lg+ always shows every column.
+function colVis(col: StrategyTableColumn, showAll: boolean): string {
+  const stayHidden = col.mobileHidden && (col.label === '#' || !showAll)
+  return stayHidden ? 'hidden lg:table-cell' : ''
+}
+
+// The Strategy column is frozen (sticky-left) so it stays visible while
+// the metric columns scroll horizontally on a narrow screen.
+const STICKY_NAME_CELL = 'sticky left-0 bg-navy-800 z-10'
 
 // Render a "YYYY–YYYY" label from ISO dates. Falls back to a long em-dash when
 // the API hasn't returned a range yet (initial render before the store loads).
@@ -113,11 +129,15 @@ interface StrategyTableRowProps {
   rank: number
   selected: boolean
   onSelect: (name: string) => void
+  /** Drives the mobile column visibility — matches the table header. */
+  showAll: boolean
 }
 
-function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps) {
+function StrategyTableRow({ s, rank, selected, onSelect, showAll }: StrategyTableRowProps) {
   const isSignificant = s.is_significant
   const pFmt = (p: number | undefined) => p == null ? '—' : p >= 0.01 ? p.toFixed(3) : p.toFixed(4)
+  // Per-column mobile visibility — indexes line up with STRATEGY_TABLE_COLUMNS.
+  const c = (i: number) => colVis(STRATEGY_TABLE_COLUMNS[i], showAll)
   // Strategy-rules metadata behind the ⓘ icon on the strategy name.
   const meta = STRATEGY_METADATA[s.strategy_name]
   return (
@@ -127,8 +147,8 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
       }`}
       onClick={() => onSelect(s.strategy_name)}
     >
-      <td className="px-3 py-2 font-mono text-muted text-xs">{rank}</td>
-      <td className="px-3 py-2">
+      <td className={`px-3 py-2 font-mono text-muted text-xs ${c(0)}`}>{rank}</td>
+      <td className={`px-3 py-2 ${STICKY_NAME_CELL} ${c(1)}`}>
         <div className="flex items-center gap-2">
           <span className="inline-flex items-center">
             <span className="text-white text-xs font-medium">{s.strategy_name.replace(/_/g, ' ')}</span>
@@ -154,8 +174,8 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
           {isSignificant && <span className="badge-pass">SIG</span>}
         </div>
       </td>
-      <td className="px-3 py-2 font-mono text-white text-xs">{s.cagr != null ? (s.cagr * 100).toFixed(1) : '—'}%</td>
-      <td className="px-3 py-2 font-mono text-white text-xs">
+      <td className={`px-3 py-2 font-mono text-white text-xs ${c(2)}`}>{s.cagr != null ? (s.cagr * 100).toFixed(1) : '—'}%</td>
+      <td className={`px-3 py-2 font-mono text-white text-xs ${c(3)}`}>
         {s.sharpe_ratio != null ? s.sharpe_ratio.toFixed(2) : '—'}
         <span className="text-muted">
           {s.sharpe_ci_95 != null && s.sharpe_ci_95[0] != null && s.sharpe_ci_95[1] != null
@@ -163,29 +183,29 @@ function StrategyTableRow({ s, rank, selected, onSelect }: StrategyTableRowProps
             : ' [—]'}
         </span>
       </td>
-      <td className="px-3 py-2 font-mono text-danger text-xs">{s.max_drawdown != null ? (s.max_drawdown * 100).toFixed(1) : '—'}%</td>
-      <td className="px-3 py-2 font-mono text-xs">
+      <td className={`px-3 py-2 font-mono text-danger text-xs ${c(4)}`}>{s.max_drawdown != null ? (s.max_drawdown * 100).toFixed(1) : '—'}%</td>
+      <td className={`px-3 py-2 font-mono text-xs ${c(5)}`}>
         <span className={(s.dsr_p_value ?? 1) <= 0.005 ? 'text-success' : 'text-muted'}>
           {s.deflated_sharpe_ratio != null ? s.deflated_sharpe_ratio.toFixed(2) : '—'}
         </span>
       </td>
-      <td className="px-3 py-2 font-mono text-xs">
+      <td className={`px-3 py-2 font-mono text-xs ${c(6)}`}>
         <span className={(s.p_value_corrected ?? 1) <= 0.005 ? 'text-success' : 'text-muted'}>
           {pFmt(s.p_value_corrected)}
         </span>
       </td>
-      <td className="px-3 py-2 font-mono text-xs">
+      <td className={`px-3 py-2 font-mono text-xs ${c(7)}`}>
         <span className={(s.cv_stability_score ?? 0) >= 0.60 ? 'text-success' : 'text-warning'}>
           {s.cv_stability_score != null ? s.cv_stability_score.toFixed(2) : '—'}
         </span>
       </td>
       <td
-        className="px-3 py-2 font-mono text-white text-xs"
+        className={`px-3 py-2 font-mono text-white text-xs ${c(8)}`}
         title="Average annual portfolio turnover — sum of absolute weight changes at each quarterly rebalance, annualised."
       >
         {s.true_turnover != null ? `${(s.true_turnover * 100).toFixed(0)}%` : '—'}
       </td>
-      <td className="px-3 py-2">
+      <td className={`px-3 py-2 ${c(9)}`}>
         {isSignificant ? (
           <span className="badge-pass">PASS</span>
         ) : (s.tier1_gates_passed ?? 0) >= 3 ? (
@@ -213,6 +233,8 @@ export default function Dashboard() {
     { last_updated: string | null; staleness: Staleness } | null
   >(null)
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
+  // Mobile only — reveals the columns hidden in the reduced phone view.
+  const [showAllCols, setShowAllCols] = useState(false)
   const cumulativeChartRef = useRef<HTMLDivElement>(null)
   const [visibleStrategies, setVisibleStrategies] = useState<Set<string>>(
     new Set([...SIGNIFICANT_STRATEGIES, 'BENCHMARK'])
@@ -526,6 +548,20 @@ export default function Dashboard() {
               />
             </div>
           </div>
+          {/* Mobile-only control row — the table shows a reduced column
+              set on a phone; this toggles the rest and hints at the
+              horizontal scroll. Hidden from lg up, where all columns fit. */}
+          <div className="lg:hidden flex items-center justify-between gap-2
+                          px-4 py-2 border-b border-border">
+            <span className="text-2xs text-muted">← scroll table sideways →</span>
+            <button
+              type="button"
+              onClick={() => setShowAllCols((v) => !v)}
+              className="text-2xs text-electric hover:underline min-h-[44px] px-1"
+            >
+              {showAllCols ? 'Fewer columns' : 'More columns'}
+            </button>
+          </div>
           <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: 'calc(100vh - 380px)' }}>
             <table className="w-full text-left">
               <thead className="sticky top-0 z-10 bg-navy-800">
@@ -541,7 +577,9 @@ export default function Dashboard() {
                   {STRATEGY_TABLE_COLUMNS.map((col) => (
                     <th
                       key={col.label}
-                      className="px-3 py-2 text-2xs text-muted uppercase tracking-wide font-medium whitespace-nowrap"
+                      className={`px-3 py-2 text-2xs text-muted uppercase tracking-wide
+                        font-medium whitespace-nowrap ${colVis(col, showAllCols)} ${
+                        col.label === 'Strategy' ? 'sticky left-0 z-20 bg-navy-800' : ''}`}
                     >
                       <span className="inline-flex items-center">
                         {col.label}
@@ -561,6 +599,7 @@ export default function Dashboard() {
                     rank={i + 1}
                     selected={selectedStrategy === s.strategy_name}
                     onSelect={setSelectedStrategy}
+                    showAll={showAllCols}
                   />
                 ))}
               </tbody>
@@ -573,10 +612,29 @@ export default function Dashboard() {
             generic top-right "Ask the Council" link was a duplicate and
             has been removed. */}
         {selectedData && (
-          <div>
-            <h3 className="text-white font-semibold text-sm mb-2">
-              {selectedData.strategy_name.replace(/_/g, ' ')} — Detail
-            </h3>
+          // Inline panel on desktop; a full-screen overlay on mobile so the
+          // detail is not lost below the fold on a phone. `fixed lg:static`
+          // collapses the overlay back into normal page flow from lg up.
+          <div
+            className="fixed inset-0 z-50 overflow-y-auto bg-navy-900 p-4
+                       lg:static lg:z-auto lg:bg-transparent lg:p-0 lg:overflow-visible"
+          >
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-white font-semibold text-sm">
+                {selectedData.strategy_name.replace(/_/g, ' ')} — Detail
+              </h3>
+              {/* Close — mobile overlay only; on desktop the panel is
+                  inline and dismissed by selecting another row. */}
+              <button
+                type="button"
+                onClick={() => setSelectedStrategy(null)}
+                aria-label="Close strategy detail"
+                className="lg:hidden flex items-center justify-center w-11 h-11
+                           -mr-2 rounded text-muted hover:text-white hover:bg-navy-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
             <StrategyCard
               strategy={selectedData}
               onAskCouncil={(question) =>
