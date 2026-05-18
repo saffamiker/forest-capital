@@ -1140,10 +1140,29 @@ def _log_interaction_bg(
     on the running loop and returns immediately. The session_id and
     session_type travel from the frontend as request headers. Wrapped
     so a scheduling or DB failure never touches the primary response.
+
+    AI token cost: collect_usage() is read here, in the request context,
+    so any endpoint that called start_usage_capture() has its token
+    totals logged and its per-agent breakdown folded into metadata. An
+    endpoint that did not start a capture simply logs null token columns.
     """
     try:
         import asyncio
         from tools.activity_log import log_agent_interaction
+
+        in_tok = out_tok = model_used = cost = None
+        try:
+            from agents.usage import collect_usage
+            usage = collect_usage()
+            in_tok = usage.get("input_tokens")
+            out_tok = usage.get("output_tokens")
+            model_used = usage.get("model_used")
+            cost = usage.get("estimated_cost_usd")
+            if usage.get("per_agent"):
+                metadata = {**(metadata or {}),
+                            "per_agent_cost": usage["per_agent"]}
+        except Exception:  # noqa: BLE001 — cost telemetry is never fatal
+            pass
 
         task = asyncio.create_task(log_agent_interaction(
             user_email=session.get("email", ""),
@@ -1154,6 +1173,10 @@ def _log_interaction_bg(
             agents_involved=agents_involved,
             response_summary=response_summary,
             metadata=metadata,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            model_used=model_used,
+            estimated_cost_usd=cost,
         ))
         _activity_bg_tasks.add(task)
         task.add_done_callback(_activity_bg_tasks.discard)
@@ -1310,13 +1333,17 @@ async def council_query(
             from agents.harness import (
                 start_harness_capture, collect_harness_metrics,
             )
+            from agents.usage import start_usage_capture
 
             history = get_full_history()
             strategy_results = run_all_strategies(history)
 
             # Capture every specialist's harness run for the Team Activity
-            # metrics — the specialists run synchronously in this context.
+            # metrics, and every agent call's token usage for cost
+            # tracking — both seeded before the parallel specialist phase
+            # so the copied thread contexts share the accumulator lists.
             start_harness_capture()
+            start_usage_capture()
             cio = CIO()
             council_response = cio.deliberate(
                 query=body.query,
@@ -1422,13 +1449,16 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
         chunk_arbiter_text, ARBITER_MODEL,
     )
     from agents.harness import start_harness_capture, collect_harness_metrics
+    from agents.usage import start_usage_capture
 
     async def event_stream():
         try:
-            # Capture the peer + arbiter harness runs for Team Activity.
-            # The ContextVar list is shared into the asyncio.to_thread peer
-            # and arbiter tasks, so every run is recorded.
+            # Capture the peer + arbiter harness runs for Team Activity, and
+            # every agent call's token usage for cost tracking. The ContextVar
+            # lists are shared into the asyncio.to_thread peer and arbiter
+            # tasks, so every run is recorded.
             start_harness_capture()
+            start_usage_capture()
             ctx = await gather_review_context()
             context_block = ctx["context_block"]
             multi_user = ctx.get("multi_user_activity", False)

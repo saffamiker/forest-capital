@@ -92,6 +92,13 @@ def call_claude(
         system=_with_academic_context(system_prompt),
         messages=[{"role": "user", "content": user_message}],
     )
+    # Token-usage capture — a no-op unless an endpoint started a capture.
+    try:
+        from agents.usage import record_usage
+        record_usage(model, message.usage.input_tokens,
+                     message.usage.output_tokens)
+    except Exception:  # noqa: BLE001 — cost telemetry must never break a call
+        pass
     return message.content[0].text
 
 
@@ -140,6 +147,16 @@ def call_gemini(model: str, system_prompt: str, user_message: str) -> str:
         contents=user_message,
         config=types.GenerateContentConfig(system_instruction=system_prompt),
     )
+    # Token-usage capture — a no-op unless an endpoint started a capture.
+    try:
+        from agents.usage import record_usage
+        um = getattr(response, "usage_metadata", None)
+        if um is not None:
+            record_usage(model,
+                         getattr(um, "prompt_token_count", 0),
+                         getattr(um, "candidates_token_count", 0))
+    except Exception:  # noqa: BLE001 — cost telemetry must never break a call
+        pass
     return response.text or ""
 
 

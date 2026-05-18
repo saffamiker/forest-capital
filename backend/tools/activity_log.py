@@ -183,6 +183,10 @@ async def log_agent_interaction(
     agents_involved: list[str] | None = None,
     response_summary: str | None = None,
     metadata: dict | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    model_used: str | None = None,
+    estimated_cost_usd: float | None = None,
 ) -> bool:
     """
     Records one substantive AI interaction (a council run, an academic
@@ -209,11 +213,14 @@ async def log_agent_interaction(
                 text(
                     "INSERT INTO agent_interactions "
                     "(user_email, session_id, session_type, interaction_type, "
-                    " question_text, agents_involved, response_summary, metadata) "
+                    " question_text, agents_involved, response_summary, metadata, "
+                    " input_tokens, output_tokens, model_used, "
+                    " estimated_cost_usd) "
                     "VALUES (:user_email, :session_id, :session_type, "
                     " :interaction_type, :question_text, "
                     " CAST(:agents_involved AS JSONB), :response_summary, "
-                    " CAST(:metadata AS JSONB))"
+                    " CAST(:metadata AS JSONB), :input_tokens, :output_tokens, "
+                    " :model_used, :estimated_cost_usd)"
                 ),
                 {
                     "user_email": user_email,
@@ -225,6 +232,10 @@ async def log_agent_interaction(
                     if agents_involved is not None else None,
                     "response_summary": summary,
                     "metadata": _json_or_none(metadata),
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "model_used": model_used,
+                    "estimated_cost_usd": estimated_cost_usd,
                 },
             )
             await session.commit()
