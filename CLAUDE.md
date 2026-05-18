@@ -5587,6 +5587,69 @@ Analytical Appendix as evidence of independent statistical verification.
 
 
 ─────────────────────────────────────────────────────────────────────────────
+SMART AUDIT CACHING (migration 018, May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+An audit run independently recomputes every metric with claude-opus-4-7
+— the most expensive operation on the platform. Smart audit caching
+re-runs an audit ONLY when the data it verifies has actually changed; a
+cached, verified result is served instantly while the data is unchanged.
+
+THE DATA FINGERPRINT — audit_assembler.current_data_hash() is a cheap
+SHA256 fingerprint of the data the audit verifies: the row counts and
+newest dates of market_data_monthly, ff_factors_monthly and
+strategy_results_cache, read via get_data_status() (COUNT/MAX queries
+only — never a full payload assembly). It changes when rows are appended
+or the strategy cache is recomputed, not on a restart. Returns "" on any
+failure or when no relevant table is reported — an empty hash never
+matches, so the audit reads as stale rather than wrongly cached.
+audit_runs.data_hash (migration 018) stores the fingerprint of the data
+each completed run verified; _execute_audit computes and stores it.
+
+is_audit_current() compares TWO layers, returning a per-layer breakdown
+{is_current, statistical_current, qa_current, current_data_hash,
+last_hash, qa_strategy_hash, qa_last_hash}:
+  - statistical_current — current_data_hash() matches the data_hash on
+    the most recent COMPLETED audit_runs row.
+  - qa_current — the latest non-expired qa_results_cache verdict was
+    computed for the same strategy data as the latest
+    strategy_results_cache row (the two strategy_hash values match).
+is_current is True only when BOTH are current. GET /api/v1/audit/runs/
+latest carries the breakdown; the QA tab shows a green "Verified … ·
+Data unchanged · No re-run needed" banner when both are current, and a
+per-layer "Statistical audit: ✓ current / Methodology audit: ⚠️ stale"
+breakdown when only one has drifted.
+
+AUTO-TRIGGER — run_full_audit(reason) re-runs the statistical audit then
+the QA methodology audit, in sequence (never parallel — they would
+contend for the concurrency lock). It is IDEMPOTENT: a no-op when
+is_audit_current() reports the cache still holds, so it is safe to fire
+after any data event. trigger_audit_async(reason) spawns it in the
+background — loop-or-thread adaptive (a task on an event loop, a daemon
+thread off one). Fail-open throughout. Two hooks fire it:
+  - data ingestion — after a successful incremental data append in
+    get_full_history (reason "data_ingestion").
+  - POST /api/v1/cache/invalidate — after the strategy cache is cleared
+    (reason "cache_invalidation").
+The reason is logged (auto_audit_triggered / auto_audit_skipped_current)
+and stored as the audit_runs.triggered_by value, so the audit history
+distinguishes an auto-run from a manual one.
+
+RUN LIVE DEMO — when is_current is True the QA tab also shows a
+confirmation-gated "Run Live Demo" button. It forces a fresh audit
+regardless of cache currency — for showing the audit running live to
+Forest Capital — by POSTing /api/v1/audit/run with {"reason": "demo"}
+(accepted as an alias for triggered_by). The run is stored
+triggered_by="demo" and marked 🎯 in the audit history so a forced
+presentation run is never mistaken for a real data-driven audit.
+
+COST MODEL — the Opus audit model is charged only when the data
+genuinely changes (a data ingestion or cache invalidation) or when a
+demo run is explicitly requested. Navigating to the QA tab, polling, or
+re-mounting never spends the Opus budget — the cached verdict is served.
+
+
+─────────────────────────────────────────────────────────────────────────────
 GEMINI SDK MIGRATION + COUNCIL PARALLELISATION (May 17 2026)
 ─────────────────────────────────────────────────────────────────────────────
 
