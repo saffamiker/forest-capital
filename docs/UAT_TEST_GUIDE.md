@@ -120,6 +120,19 @@ role-specific section.
 - [ ] Presentation View shows three charts at screen-share scale.
 - [ ] CSV export works on Team Activity.
 
+### Submission Guides
+
+- [ ] On the Reports page, verify the **Submission Guides** section is
+      visible (below Generate Documents).
+- [ ] Expand **Guide 1 — Midpoint Paper** — verify the editor-based
+      workflow steps appear (generate → Open in Editor → resolve markers →
+      Academic Review → export).
+- [ ] Expand **Guide 2 — Final Presentation** — verify its workflow steps
+      appear (generate → Open in Editor → verify data points and write
+      speaker notes → Presentation Preview → export).
+- [ ] Verify each guide leads with the tracking note — work done on the
+      platform is the documented contribution record.
+
 ### Settings
 
 - [ ] All six sections render: **Organisation / Data and Study Period /
@@ -250,6 +263,37 @@ deliverables lead.*
   - [ ] An investment-audience tone.
   - [ ] A Limitations section is present.
 
+### Document Editor
+
+*Run after generating the midpoint paper above.*
+
+- [ ] On the midpoint-paper card, click **[Open in Editor]** (the primary
+      button after generation — not Download).
+- [ ] Verify the editor loads at `/editor/:draft_id` with a three-panel
+      layout: navigator (left), document (centre), Writing Assistant (right).
+- [ ] Verify the **AI DRAFT** banner and the amber **BOB — YOUR TASKS**
+      callout appear at the top.
+- [ ] Verify `[[VERIFY]]` markers render as amber-highlighted spans in the
+      document body.
+- [ ] Verify `[[BOB]]` callouts render as amber-highlighted spans.
+- [ ] Click a `[[BOB]]` callout and confirm the prompt — verify the marker
+      is removed and the left-panel section progress bar advances.
+- [ ] Click a `[[VERIFY]]` marker and confirm the prompt — verify the amber
+      highlight is removed.
+- [ ] Type a sentence anywhere in the document body — verify the header
+      shows "Saving…" then "Saved [time]" (auto-save runs every 30s).
+- [ ] In the Writing Assistant panel (right), type *"Is my methodology
+      section clear?"* — verify a response returns.
+- [ ] Click **[Run Academic Review]** in the Writing Assistant panel —
+      verify the inline verdict appears below the button.
+- [ ] If unresolved markers remain, verify the warning appears:
+      "You have [n] unresolved markers".
+- [ ] In the left panel under Versions, click **Save**, label it
+      "UAT test" — verify it appears in version history with a restore
+      control.
+- [ ] Return to Reports, and on the midpoint-paper card click **[Download]**
+      — verify a `.docx` file downloads with the current content.
+
 ### Settings — Academic Documents
 
 - [ ] Navigate to Settings → Academic Documents.
@@ -306,6 +350,34 @@ presentation and visualisation lead.*
   - [ ] All text is readable (not white-on-white or black-on-black).
   - [ ] No lorem ipsum or placeholder text.
 
+### Presentation Editor
+
+*Run after generating the presentation deck above.*
+
+- [ ] On the presentation-deck card, click **[Open in Editor]**.
+- [ ] Verify the centre panel renders **slide cards** — an editable title,
+      content and speaker-notes field per slide — not a rich-text editor.
+- [ ] Verify at least one slide shows amber **data-point markers**.
+- [ ] Click **Mark data points verified** on a slide — verify the marker
+      row clears to a verified state.
+- [ ] Click the speaker-notes field on any slide and type a sentence.
+- [ ] Click **[Generate Talking Points]** below the notes field — verify
+      4-6 bullet points return.
+- [ ] Click the insert (+) control on one bullet — verify it appends to
+      the speaker-notes field.
+- [ ] Verify the slide shows a **Complete** indicator once its notes are
+      written and its data points are verified.
+- [ ] Verify the left-panel progress indicator updates for that slide.
+- [ ] Click **[Presentation Preview]** in the header bar — verify a
+      full-screen overlay opens.
+- [ ] Verify the speaker notes show in a strip below each slide, labelled
+      "Your notes (not visible to audience)".
+- [ ] Navigate with the arrow keys — verify slides advance and the
+      counter ("N / 16") updates.
+- [ ] Press **Esc** — verify the overlay closes and returns to the editor.
+- [ ] Return to Reports, and on the deck card click **[Download]** —
+      verify a `.pptx` file downloads.
+
 ### Export package
 
 - [ ] Navigate to Reports and click **Export Academic Package**.
@@ -361,3 +433,10 @@ Send the completed sign-off and any failure notes to **ruurdsm@queens.edu**.
   document.
 - Generated presentation charts may differ slightly from the platform charts
   (matplotlib server-side rendering vs Recharts frontend rendering).
+- The document editor has no in-editor export button — the generated file
+  is downloaded from the **[Download]** action on the Reports → Generate
+  Documents card. The editor saves drafts continuously; the download
+  always reflects the current saved draft.
+- In the editor, a `[[VERIFY]]` or `[[BOB]]` marker is resolved by clicking
+  it and confirming the prompt (which deletes the marker text) — there is
+  no separate "Mark as Complete" button.

@@ -157,7 +157,7 @@ export default function DocumentGenerationPanel() {
   }
 
   return (
-    <section>
+    <section data-tour="generate-documents">
       <div className="flex items-baseline gap-3 mb-3">
         <h2 className="text-white font-semibold text-sm">Generate Documents</h2>
         <span className="text-2xs text-muted uppercase tracking-wide">
