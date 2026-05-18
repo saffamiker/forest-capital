@@ -6,28 +6,36 @@
  *      figure by a separate model. The full findings panel is project-team
  *      only; viewers see a read-only summary of the latest audit run.
  *
- * A "Run Full QA" button at the top triggers both at once (project team
- * only) and shows unified progress. The Statistical Audit was relocated
- * here from Settings — the QA tab is the single home for both audit types.
+ * A "Run Full QA" button triggers both at once (project team only) with
+ * unified progress. A "Presentation View" shows a clean QA certificate
+ * for screen-sharing during the final presentation. The Statistical Audit
+ * was relocated here from Settings — the QA tab is the single home for
+ * both audit types.
  */
 import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import {
   ShieldCheck, Loader2, CheckCircle, XCircle, AlertTriangle, PlayCircle,
+  Presentation,
 } from 'lucide-react'
 import QAAuditPanel from '../components/QAAuditPanel'
 import AuditPanel from '../components/AuditPanel'
 import TeamGate from '../components/TeamGate'
 import { useIsTeamMember } from '../hooks/usePermissions'
 import { useQAStore } from '../stores/qaStore'
+import type { QAAuditResult } from '../types/agents'
 
 interface LatestRun {
   status: string
   triggered_at: string | null
+  completed_at: string | null
   total_checks: number
   passed: number
   failed: number
   warnings: number
+  layer_1_status: string | null
+  layer_2_status: string | null
+  layer_3_status: string | null
 }
 
 type Verdict = 'PASS' | 'WARN' | 'FAIL'
@@ -48,6 +56,12 @@ const VERDICT_CLS: Record<Verdict, string> = {
   PASS: 'text-success',
   WARN: 'text-warning',
   FAIL: 'text-danger',
+}
+
+function worstVerdict(vs: Verdict[]): Verdict {
+  if (vs.includes('FAIL')) return 'FAIL'
+  if (vs.includes('WARN')) return 'WARN'
+  return 'PASS'
 }
 
 // ── Read-only audit summary for non-team viewers ──────────────────────────────
@@ -120,11 +134,159 @@ function PhaseRow({ label, phase, detail }: {
   )
 }
 
+// ── Presentation View — the QA certificate ────────────────────────────────────
+
+function layerIcon(status: string | null): string {
+  if (status === 'pass') return '✅'
+  if (status === 'fail') return '❌'
+  if (status === 'warning') return '⚠️'
+  if (status === 'skip') return '—'
+  return '—'
+}
+
+function QACertificate({ onExit }: { onExit: () => void }) {
+  const qaResult = useQAStore((s) => s.result)
+  const [run, setRun] = useState<LatestRun | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    axios.get<{ run: LatestRun | null }>('/api/v1/audit/runs/latest')
+      .then((res) => { if (!cancelled) setRun(res.data.run) })
+      .catch(() => { if (!cancelled) setRun(null) })
+      .finally(() => { if (!cancelled) setLoading(false) })
+    return () => { cancelled = true }
+  }, [])
+
+  // Overall verdict across both audit types.
+  const verdicts: Verdict[] = []
+  if (qaResult) verdicts.push(qaResult.verdict)
+  if (run) verdicts.push(runVerdict(run))
+  const overall: Verdict = verdicts.length ? worstVerdict(verdicts) : 'WARN'
+  const OverallIcon = overall === 'FAIL' ? XCircle
+    : overall === 'WARN' ? AlertTriangle : CheckCircle
+
+  const stamp = run?.completed_at ?? run?.triggered_at ?? null
+  const stampText = stamp ? new Date(stamp).toLocaleString() : 'no full QA run recorded yet'
+
+  return (
+    <div className="p-6 md:p-10 max-w-2xl mx-auto">
+      <div className="flex justify-end mb-4">
+        <button
+          type="button"
+          onClick={onExit}
+          className="text-xs px-2.5 py-1.5 rounded border border-border
+                     text-muted hover:text-white transition-colors"
+        >
+          Exit Presentation View
+        </button>
+      </div>
+
+      <div className="text-center space-y-1 mb-8">
+        <div className="text-2xs uppercase tracking-[0.2em] text-electric">
+          Quality Assurance Certificate
+        </div>
+        <h1 className="text-xl font-semibold text-white">
+          Forest Capital Portfolio Intelligence System
+        </h1>
+        <p className="text-xs text-muted">
+          FNA 670 — McColl School of Business
+        </p>
+        <p className="text-2xs text-muted font-mono pt-1">
+          Last full QA run: {stampText}
+        </p>
+      </div>
+
+      {loading ? (
+        <p className="text-center text-muted text-sm flex items-center justify-center gap-2">
+          <Loader2 className="w-4 h-4 animate-spin" /> Loading certificate…
+        </p>
+      ) : (
+        <div className="space-y-4">
+          {/* Methodology Review box */}
+          <div className="rounded-lg border border-border bg-navy-800 p-5">
+            <div className="text-2xs uppercase tracking-wide text-muted mb-2">
+              Methodology Review
+            </div>
+            {qaResult ? (
+              <div className="flex items-center gap-3">
+                <CheckCircle className={`w-6 h-6 ${VERDICT_CLS[qaResult.verdict]}`} />
+                <div>
+                  <div className="text-lg font-mono text-white">
+                    {qaResult.checks_passed}/{qaResult.checks_total} checks passed
+                  </div>
+                  <div className="text-2xs text-muted">
+                    {qaResult.checks_failed} failures · {qaResult.checks_warned} warnings
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-muted italic">
+                The methodology checklist has not been run yet.
+              </p>
+            )}
+          </div>
+
+          {/* Statistical Audit box */}
+          <div className="rounded-lg border border-border bg-navy-800 p-5">
+            <div className="text-2xs uppercase tracking-wide text-muted mb-2">
+              Statistical Audit
+            </div>
+            {run ? (
+              <div className="space-y-1.5">
+                <div className="text-sm text-white flex justify-between">
+                  <span>Layer 1: Raw data</span><span>{layerIcon(run.layer_1_status)}</span>
+                </div>
+                <div className="text-sm text-white flex justify-between">
+                  <span>Layer 2: Recomputation</span><span>{layerIcon(run.layer_2_status)}</span>
+                </div>
+                <div className="text-sm text-white flex justify-between">
+                  <span>Layer 3: Consistency</span><span>{layerIcon(run.layer_3_status)}</span>
+                </div>
+                <div className="text-2xs text-muted pt-1.5 border-t border-border/50 mt-1.5">
+                  {run.total_checks} checks · {run.passed} passed ·
+                  {' '}Independent model: Opus
+                </div>
+              </div>
+            ) : (
+              <p className="text-xs text-muted italic">
+                No statistical audit has been run yet.
+              </p>
+            )}
+          </div>
+
+          {/* Overall box */}
+          <div className={`rounded-lg border p-5 ${
+            overall === 'FAIL' ? 'border-danger/30 bg-danger/5'
+              : overall === 'WARN' ? 'border-warning/30 bg-warning/5'
+                : 'border-success/30 bg-success/5'}`}>
+            <div className="flex items-center gap-3">
+              <OverallIcon className={`w-7 h-7 ${VERDICT_CLS[overall]}`} />
+              <div>
+                <div className={`text-lg font-bold ${VERDICT_CLS[overall]}`}>
+                  OVERALL: {overall}
+                </div>
+                <div className="text-xs text-muted">
+                  {overall === 'PASS'
+                    ? 'All analytical results have been independently verified.'
+                    : overall === 'WARN'
+                      ? 'Results verified — review the disclosed warnings.'
+                      : 'One or more checks failed — review before presenting.'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Hub ───────────────────────────────────────────────────────────────────────
 
 export default function QAHub() {
   const isTeam = useIsTeamMember()
-  const qaResult = useQAStore((s) => s.result)
+  const qaResult: QAAuditResult | null = useQAStore((s) => s.result)
   const qaReload = useQAStore((s) => s.reload)
 
   const [methodPhase, setMethodPhase] = useState<Phase>('idle')
@@ -133,6 +295,7 @@ export default function QAHub() {
   // Bumped when a full run completes — remounts AuditPanel so it re-fetches.
   const [auditRefreshKey, setAuditRefreshKey] = useState(0)
   const [showProgress, setShowProgress] = useState(false)
+  const [presentMode, setPresentMode] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => () => {
@@ -186,6 +349,10 @@ export default function QAHub() {
       .catch(() => setAuditPhase('error'))
   }
 
+  if (presentMode) {
+    return <QACertificate onExit={() => setPresentMode(false)} />
+  }
+
   // Per-section progress detail.
   const methodDetail = methodPhase === 'running' ? 'Running…'
     : methodPhase === 'error' ? 'Could not complete'
@@ -209,8 +376,7 @@ export default function QAHub() {
     else if (qaResult) verdicts.push(qaResult.verdict)
     if (auditPhase === 'error') verdicts.push('FAIL')
     else if (auditRun) verdicts.push(runVerdict(auditRun))
-    overall = verdicts.includes('FAIL') ? 'FAIL'
-      : verdicts.includes('WARN') ? 'WARN' : 'PASS'
+    overall = verdicts.length ? worstVerdict(verdicts) : 'WARN'
   }
   const OverallIcon = overall === 'FAIL' ? XCircle
     : overall === 'WARN' ? AlertTriangle : CheckCircle
@@ -225,20 +391,33 @@ export default function QAHub() {
             ways every analytical result on this platform is verified.
           </p>
         </div>
-        <TeamGate permission="team_member">
-          <button
-            type="button"
-            onClick={runFullQA}
-            disabled={fullRunActive}
-            className="flex items-center gap-1.5 px-3 py-2 rounded text-sm font-medium
-                       bg-electric/10 border border-electric/30 text-electric
-                       hover:bg-electric/20 transition-colors disabled:opacity-50"
-          >
-            {fullRunActive
-              ? <><Loader2 className="w-4 h-4 animate-spin" /> Running…</>
-              : <><PlayCircle className="w-4 h-4" /> Run Full QA</>}
-          </button>
-        </TeamGate>
+        <div className="flex items-center gap-2">
+          <TeamGate permission="team_member">
+            <button
+              type="button"
+              onClick={() => setPresentMode(true)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded text-sm font-medium
+                         border border-warning/40 bg-warning/10 text-warning
+                         hover:bg-warning/20 transition-colors"
+            >
+              <Presentation className="w-4 h-4" /> Presentation View
+            </button>
+          </TeamGate>
+          <TeamGate permission="team_member">
+            <button
+              type="button"
+              onClick={runFullQA}
+              disabled={fullRunActive}
+              className="flex items-center gap-1.5 px-3 py-2 rounded text-sm font-medium
+                         bg-electric/10 border border-electric/30 text-electric
+                         hover:bg-electric/20 transition-colors disabled:opacity-50"
+            >
+              {fullRunActive
+                ? <><Loader2 className="w-4 h-4 animate-spin" /> Running…</>
+                : <><PlayCircle className="w-4 h-4" /> Run Full QA</>}
+            </button>
+          </TeamGate>
+        </div>
       </div>
 
       {/* Unified-run progress — shown once a full run has been triggered. */}
