@@ -78,6 +78,21 @@ _MIDPOINT_SECTIONS = [
 ]
 
 
+# Section order for the executive brief — (heading, narratives key).
+# The brief carries no [[BOB]] callouts: it is a senior-investment-
+# audience document, not one with author-input gaps.
+_EXEC_BRIEF_SECTIONS = [
+    ("Executive Summary", "exec_summary"),
+    ("Methodology Overview", "methodology"),
+    ("Finding 1 — The 2022 Correlation Break", "finding_1"),
+    ("Finding 2 — Static Allocation Results", "finding_2"),
+    ("Finding 3 — Dynamic Allocation Results", "finding_3"),
+    ("Finding 4 — Factor Analysis", "finding_4"),
+    ("Limitations and Risks", "limitations"),
+    ("Final Recommendations", "recommendations"),
+]
+
+
 # The 16 presentation-deck slides — (title, narratives key or None).
 # Mirrors tools/academic_deck.build_presentation_deck's slide order so a
 # deck draft opened in the editor matches the generated .pptx.
@@ -153,6 +168,28 @@ def midpoint_to_editor(
     for heading, key, callout in _MIDPOINT_SECTIONS:
         nodes, lines = _section_blocks(
             heading, narratives.get(key, ""), callout)
+        doc_content.extend(nodes)
+        text_lines.extend(lines)
+    content_json = {"type": "doc", "content": doc_content}
+    content_text = "\n".join(text_lines).strip()
+    return content_json, content_text
+
+
+def executive_brief_to_editor(
+    narratives: dict[str, str],
+) -> tuple[dict[str, Any], str]:
+    """
+    Builds the editor content for a generated executive brief.
+
+    Returns (content_json, content_text): a TipTap doc and its plain-text
+    projection — the same pattern as midpoint_to_editor. The eight
+    sections become H1 headings with the generated prose as paragraphs;
+    the brief carries no [[BOB]] callouts.
+    """
+    doc_content: list[dict] = []
+    text_lines: list[str] = []
+    for heading, key in _EXEC_BRIEF_SECTIONS:
+        nodes, lines = _section_blocks(heading, narratives.get(key, ""), None)
         doc_content.extend(nodes)
         text_lines.extend(lines)
     content_json = {"type": "doc", "content": doc_content}

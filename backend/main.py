@@ -4010,17 +4010,39 @@ async def export_executive_brief(
         docx_bytes = await asyncio.to_thread(
             build_executive_brief, data, narratives)
 
+        # Load the generated content into an editor draft so the frontend
+        # can open it directly in the editor — the same pattern as the
+        # midpoint paper and the deck. The draft_id rides back in the
+        # X-Draft-Id response header; a draft-storage failure never fails
+        # the download.
+        draft_id: int | None = None
+        try:
+            from tools.editor_content import executive_brief_to_editor
+            from tools.editor_drafts import create_draft
+            content_json, content_text = executive_brief_to_editor(narratives)
+            draft = await create_draft(
+                "executive_brief", session["email"],
+                f"Executive Brief — {date.today().isoformat()}",
+                content_json, content_text, created_from="generated")
+            if draft is not None:
+                draft_id = draft["id"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("executive_brief_draft_create_failed", error=str(exc))
+
         _log_interaction_bg(
             request, session, "export", agents_involved=["academic_writer"],
             response_summary="Executive brief generated",
             metadata={"deliverable": "executive_brief",
-                      "data_available": data["available"]})
+                      "data_available": data["available"],
+                      "draft_id": draft_id})
 
         filename = f"forest-capital-executive-brief-{date.today().isoformat()}.docx"
-        return Response(
-            content=docx_bytes, media_type=_DOCX_MEDIA,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        if draft_id is not None:
+            headers["X-Draft-Id"] = str(draft_id)
+            headers["Access-Control-Expose-Headers"] = "X-Draft-Id"
+        return Response(content=docx_bytes, media_type=_DOCX_MEDIA,
+                        headers=headers)
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
         log.error("executive_brief_export_error", ref=ref, error=str(exc))

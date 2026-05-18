@@ -10,11 +10,11 @@
  *   Executive Brief            → POST /api/v1/export/executive-brief
  *   Final Presentation Deck    → POST /api/v1/export/presentation-deck
  *
- * The midpoint paper and the deck also load the generated content into
- * an editor draft (the endpoint returns the new draft id in the
- * X-Draft-Id header); the card then offers Open in Editor as the
- * primary CTA, with Download as a secondary action. The downloaded
- * files are FIRST DRAFTS — every one carries the AI DRAFT banner.
+ * All three documents also load the generated content into an editor
+ * draft (the endpoint returns the new draft id in the X-Draft-Id
+ * header); the card then offers Open in Editor as the primary CTA,
+ * with Download as a secondary action. The downloaded files are FIRST
+ * DRAFTS — every one carries the AI DRAFT banner.
  */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
@@ -122,9 +122,9 @@ export default function DocumentGenerationPanel() {
           ?? 'application/octet-stream'),
       })
 
-      // A document that did not produce an editor draft (the brief)
-      // downloads immediately, as before. One that did keeps the file
-      // in memory and offers Open in Editor as the primary action.
+      // A document with no editor draft (draft storage unavailable)
+      // downloads immediately. One with a draft keeps the file in
+      // memory and offers Open in Editor as the primary action.
       if (draftId === null || Number.isNaN(draftId)) {
         triggerDownload(blob, filename)
       } else {
