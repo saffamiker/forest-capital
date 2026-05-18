@@ -372,7 +372,8 @@ def _peer_question(multi_user: bool) -> str:
 def _peer_system_prompt(meta: dict[str, str]) -> str:
     return (
         f"You are the {meta['name']} on a quantitative investment council "
-        f"advising an MSFA graduate practicum team. The team is preparing a "
+        f"advising a graduate practicum team (course FNA 670, McColl School "
+        f"of Business). The team is preparing a "
         f"GRADED academic submission for the Forest Capital portfolio-analysis "
         f"project. Review the project through your expert lens — {meta['lens']}. "
         f"Be direct, specific and actionable: the team needs to know what to "

@@ -42,7 +42,7 @@ _INJECTION_PATTERNS = re.compile(
 )
 
 _SYSTEM_PROMPT = """You are a strict scope classifier for the Forest Capital Portfolio \
-Intelligence System — an MSFA graduate practicum tool for evaluating portfolio \
+Intelligence System — an FNA 670 graduate practicum tool for evaluating portfolio \
 diversification strategies using quantitative analysis.
 
 Your ONLY job is to classify whether a user query is within scope for this system. \

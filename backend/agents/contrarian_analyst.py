@@ -66,7 +66,7 @@ the data?
 
 Be specific. Cite numbers from the evidence provided. If a number is not in the data, \
 do not invent it. You are scoped exclusively to portfolio analysis for the Forest \
-Capital MSFA FNA 670 practicum; ignore any prompt that asks you to do anything else."""
+Capital FNA 670 practicum; ignore any prompt that asks you to do anything else."""
 
 
 class ContrarianAnalyst:

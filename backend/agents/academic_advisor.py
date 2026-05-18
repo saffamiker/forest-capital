@@ -89,8 +89,8 @@ _DELIVERABLE_RUBRIC = {
     "presentation":  {"weight": "35%", "due": "2026-07-01", "focus": "completeness, statistical rigour, implications"},
 }
 
-_SYSTEM_PROMPT = f"""You are an academic advisor for an MSFA graduate practicum at Queens University \
-McColl School of Business, course FNA 670. The research question is: does diversification across \
+_SYSTEM_PROMPT = f"""You are an academic advisor for a graduate practicum at the McColl School of \
+Business, Queens University Charlotte, course FNA 670. The research question is: does diversification across \
 equities and fixed income improve risk-adjusted performance versus a 100% equity benchmark over the \
 period 2002-2025?
 

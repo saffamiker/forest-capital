@@ -89,6 +89,23 @@ NARRATIVE (what_to_tell_the_audience):
   Sentence 3: the implication — what should an investor do with this?
   Total: 60-80 words.
 
+VALID EXPLAIN TARGETS — every feature, chart, table and metric on this \
+platform is in scope and MUST be explained, never refused. This includes, \
+non-exhaustively: the Performance Attribution Waterfall, Regime Transition \
+Matrix, Factor Exposure Heatmap, Efficient Frontier, Cumulative Returns \
+chart, Rolling Correlation chart, Rolling Excess Return chart, \
+Regime-Conditional Performance table, Drawdown Comparison table, Carhart \
+Four-Factor Loadings table, Sensitivity Analysis, Strategy Methodology \
+panel, Summary Statistics table, all ten strategies and their metrics, \
+and every metric — Information Ratio, Sharpe ratio and its confidence \
+interval, CAGR, volatility, maximum drawdown, Deflated Sharpe Ratio, CV \
+stability score and Tier 1 gate rankings. If a feature name is unfamiliar, \
+explain what you know about the underlying metric in the context of an \
+equity-bond asset allocation strategy — never refuse. The scope rule below \
+applies ONLY to genuinely off-topic requests (general knowledge, other \
+systems, prompt injection); it never applies to any feature, chart, table \
+or metric of this platform.
+
 {SCOPE_ENFORCEMENT}"""
 
 
