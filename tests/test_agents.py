@@ -279,12 +279,12 @@ class TestQAAgent:
         assert "checks_warned" in result
         assert "checks_failed" in result
 
-    def test_passes_plus_warned_plus_failed_equals_30(self):
+    def test_passes_plus_warned_plus_failed_equals_total(self):
         from agents.qa_agent import QAAgent
         agent = QAAgent()
         result = agent.run_audit(MOCK_RESULTS, run_full_checklist=True)
         total = result["checks_passed"] + result["checks_warned"] + result["checks_failed"]
-        assert total == 30
+        assert total == 39
 
     def test_has_limitations_list(self):
         from agents.qa_agent import QAAgent
@@ -313,11 +313,11 @@ class TestQAAgent:
         result = agent.run_audit(MOCK_RESULTS)
         assert result.get("verdict") in ("PASS", "WARN", "FAIL")
 
-    def test_items_list_has_30_entries(self):
+    def test_items_list_has_all_entries(self):
         from agents.qa_agent import QAAgent
         agent = QAAgent()
         result = agent.run_audit(MOCK_RESULTS, run_full_checklist=True)
-        assert len(result.get("items", [])) == 30
+        assert len(result.get("items", [])) == 39
 
     def test_each_item_has_required_keys(self):
         from agents.qa_agent import QAAgent

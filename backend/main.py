@@ -1,6 +1,6 @@
 """
 Forest Capital Portfolio Intelligence System — FastAPI backend.
-Sprint 4: all 8 agents live, council deliberation wired, QA 30-point checklist,
+Sprint 4: all 8 agents live, council deliberation wired, QA methodology checklist,
           WebSocket streaming, scope guard enforced, council_sessions logging.
 """
 from __future__ import annotations
@@ -2496,7 +2496,7 @@ async def advisor_citations(
 @limiter.limit("10/minute")
 async def qa_audit(request: Request, session: dict = Depends(require_auth)):
     """
-    Runs the full 30-point QA audit against real strategy results.
+    Runs the full QA methodology audit against real strategy results.
 
     QA Agent uses Opus for the narrative; deterministic checks run from
     the strategy results dict to guarantee pass/fail verdicts are never

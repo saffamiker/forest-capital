@@ -109,8 +109,8 @@ export default function QAAuditPanel() {
   // and never triggers a second 10-second audit run.
   const { result: audit, loading, load, reload } = useQAStore()
   // Per-audit Commentary narrative. Loaded once per audit-items array —
-  // the Explainer Agent generates fresh what/why/failure/how text for the
-  // 30 checks based on their actual pass/warn/fail state in this run.
+  // the Explainer Agent generates fresh what/why/failure/how text for
+  // the checks based on their actual pass/warn/fail state in this run.
   const qaExplanations = useGlossaryStore((s) => s.qa)
   const loadQA = useGlossaryStore((s) => s.loadQA)
   const [openChecks, setOpenChecks] = useState<Set<string>>(new Set())
@@ -140,7 +140,7 @@ export default function QAAuditPanel() {
   if (loading && !audit) return (
     <div className="p-6 flex items-center gap-2 text-muted text-sm">
       <RefreshCw className="w-4 h-4 animate-spin" />
-      Running 30-point audit…
+      Running methodology audit…
     </div>
   )
 
@@ -165,7 +165,7 @@ export default function QAAuditPanel() {
               <VerdictBadge verdict={audit.verdict} />
             </div>
             <p className="text-muted text-sm mt-0.5">
-              30-point methodology checklist · Sprint {audit.sprint ?? '4'} results
+              {audit.checks_total}-point methodology checklist · Sprint {audit.sprint ?? '4'} results
             </p>
           </div>
           <div className="text-right shrink-0">

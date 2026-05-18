@@ -61,10 +61,10 @@ from agents._xai_config import build_headers, resolve_xai_config  # noqa: E402
 
 # Haiku fallback default when the Explainer can't reach xAI. Bumped from
 # 800 → 2000 after production traces showed truncated JSON responses
-# (max_tokens hit mid-string, breaking json.loads downstream). 2000 is
-# safe for all five Explainer methods — the longest legitimate response
-# is the 30-item QA explanation, which sits at ~1400 tokens.
-HAIKU_FALLBACK_MAX_TOKENS = 2000
+# (max_tokens hit mid-string, breaking json.loads downstream), then to
+# 2600 when the QA checklist grew to 39 items — the longest legitimate
+# response is the per-item QA explanation, now ~1900 tokens.
+HAIKU_FALLBACK_MAX_TOKENS = 2600
 
 log = structlog.get_logger(__name__)
 
@@ -597,11 +597,11 @@ class ExplainerAgent:
         )
 
         try:
-            # QA explanations cover up to 30 checklist items at once; bump
+            # QA explanations cover all 39 checklist items at once; bump
             # the per-call max_tokens above the 800 default so the JSON
             # response doesn't get truncated mid-string. Production traces
             # showed this exact failure when the Haiku fallback fired.
-            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=2000)
+            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=2600)
             return _safe_json_parse(response, fallback={})
         except Exception as exc:
             log.error("explainer_qa_error", error=str(exc))

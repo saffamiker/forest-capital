@@ -133,14 +133,14 @@ class TestQAAuditStructure:
         result = qa.run_audit(FULL_MOCK_RESULTS, run_full_checklist=True)
         assert isinstance(result, dict)
 
-    def test_30_checklist_items_always_present(self, qa):
+    def test_all_checklist_items_always_present(self, qa):
         result = qa.run_audit(FULL_MOCK_RESULTS, run_full_checklist=True)
-        assert len(result["items"]) == 30
+        assert len(result["items"]) == 39
 
     def test_item_statuses_sum_correctly(self, qa):
         result = qa.run_audit(FULL_MOCK_RESULTS, run_full_checklist=True)
         total = result["checks_passed"] + result["checks_warned"] + result["checks_failed"]
-        assert total == 30
+        assert total == 39
 
     def test_verdict_is_fail_if_any_fail(self, qa):
         # Inject a strategy with clearly problematic data
@@ -203,7 +203,7 @@ class TestQALimitationsGeneration:
 
 
 class TestQAChecklist:
-    """Verify the 30-item checklist covers all required categories."""
+    """Verify the checklist covers all required categories."""
 
     REQUIRED_CATEGORIES = {
         "DATA_INTEGRITY",
@@ -221,9 +221,9 @@ class TestQAChecklist:
         for cat in self.REQUIRED_CATEGORIES:
             assert cat in categories, f"Missing category: {cat}"
 
-    def test_checklist_has_exactly_30_items(self, qa):
+    def test_checklist_has_exactly_39_items(self, qa):
         from agents.qa_agent import _CHECKLIST_ITEMS
-        assert len(_CHECKLIST_ITEMS) == 30
+        assert len(_CHECKLIST_ITEMS) == 39
 
     def test_all_checklist_items_have_required_keys(self, qa):
         from agents.qa_agent import _CHECKLIST_ITEMS

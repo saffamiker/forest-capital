@@ -3,7 +3,7 @@
  *
  * Persists the last QA audit result for the session so the QA tab
  * shows the previous audit when re-visited without re-running the
- * 30-point checklist (which calls the QA agent and takes ~10s).
+ * methodology checklist (which calls the QA agent and takes ~10s).
  *
  * Also tracks the QA status gate for Present mode:
  *   'unknown'  — audit not yet run this session

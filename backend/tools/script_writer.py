@@ -333,7 +333,7 @@ def build_qa_prep_docx(
         ("How do you prevent hallucinated numbers in agent outputs?",
          "Every agent system prompt forbids citing numbers not present in the "
          "input. Tool outputs are the only allowed source. The QA Agent "
-         "audits for hallucination as part of the 30-point checklist.",
+         "audits for hallucination as part of the methodology checklist.",
          None, "MEDIUM", "Michael"),
         ("What did the AI council get wrong, and how did you catch it?",
          "Be specific about a real example: the initial CPCV implementation "

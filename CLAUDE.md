@@ -5584,6 +5584,45 @@ CIO synthesis); only phase 1 was parallelised — the CIO synthesis step
 is untouched.
 
 
+─────────────────────────────────────────────────────────────────────────────
+QA CHECKLIST EXPANSION — 30 → 39 CHECKS (May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The QA agent checklist (agents/qa_agent.py `_CHECKLIST_ITEMS`) grew from
+30 to 39 items so every built platform feature has QA coverage and no
+check tests an unbuilt feature. A read-only Phase 1 inventory confirmed
+the original 30 are all valid — in particular P03 (transaction costs),
+S06 (Newey-West), S07 (block bootstrap), C01 (walk-forward), C02 (CPCV),
+C03 (Monte Carlo permutation) and O01 (SPA) are all genuinely
+implemented and were KEPT.
+
+Three checks were reworded (not removed) to match the implementation:
+  - D07 — "annualisation matched to series frequency" (sqrt(12) for the
+    monthly metrics, sqrt(252) only for daily-series computations) —
+    the platform was never buggy; the old "sqrt(252) throughout"
+    wording was the inaccuracy.
+  - P04 — "no look-ahead in rebalancing" (signal at t uses data through
+    t-1) — the old "next-day open" wording does not map to a monthly
+    backtester.
+  - P05 — "no in-sample test leakage" (walk-forward windows train only
+    on prior data) — there is no fixed 2022-24 hold-out window.
+
+Nine checks were ADDED — six ANALYTICS (AN01-AN06: Carhart regression,
+portfolio turnover, sensitivity analysis, regime-analysis consistency,
+information ratio, cumulative-returns integrity) and three INTEGRATION
+(IN01-IN03: statistical-audit clean, Academic Review complete, document
+generation clean). AN02 (turnover non-negative) and AN05 (information
+ratios finite, benchmark IR null/zero) run deterministically from the
+strategy results; the rest are LLM-assessed. The QA agent system prompt
+gained a PLATFORM IMPLEMENTATION CONTEXT block listing what the platform
+actually does (data pipeline, statistical methods, CV methods,
+sensitivity range, 2022 disclosure, audit/review subsystems) so the
+auditor never WARNs on a built feature as if missing.
+
+The checklist size is no longer hardcoded in the UI — the QA panel
+reads `checks_total` from the report.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
