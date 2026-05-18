@@ -321,11 +321,28 @@ async def _gather_analytics_snapshot() -> dict[str, Any]:
     return snapshot
 
 
-async def gather_review_context() -> dict[str, Any]:
+# An editor document_type → the review document_type it stands in for.
+# When the reviewer has a current editor draft of one of these, its live
+# content is reviewed in preference to any uploaded file of that kind.
+_EDITOR_TO_REVIEW_TYPE = {
+    "midpoint_paper": "midpoint_draft",
+    "presentation_deck": "presentation_slides",
+    "executive_brief": "other",
+}
+
+
+async def gather_review_context(
+    reviewer_email: str | None = None,
+) -> dict[str, Any]:
     """
     Assembles the full review context: the analytics snapshot, the
     documents grouped by type, and the formatted context block that gets
     injected into every agent prompt.
+
+    reviewer_email — when given, the reviewer's current editor drafts
+    (tools/editor_drafts) take precedence over an uploaded academic
+    document of the same kind, so Academic Review evaluates the live
+    working draft rather than a stale uploaded file.
     """
     analytics = await _gather_analytics_snapshot()
     docs: list[dict] = []
@@ -335,6 +352,24 @@ async def gather_review_context() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_review_documents_read_failed", error=str(exc))
     docs_by_type = group_documents_by_type(docs)
+
+    # Overlay the reviewer's editor drafts — a current draft replaces the
+    # uploaded file of the corresponding type.
+    if reviewer_email:
+        try:
+            from tools.editor_drafts import get_current_draft
+            for ed_type, rv_type in _EDITOR_TO_REVIEW_TYPE.items():
+                draft = await get_current_draft(reviewer_email, ed_type)
+                if draft and (draft.get("content_text") or "").strip():
+                    docs_by_type[rv_type] = [{
+                        "document_type": rv_type,
+                        "name": (f"{draft['title']} "
+                                 f"(editor draft, v{draft['version']})"),
+                        "content_text": draft["content_text"],
+                    }]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("academic_review_editor_overlay_failed",
+                        error=str(exc))
 
     # Team-activity summary — analytical sessions only; testing-session
     # activity is never injected into agent context.

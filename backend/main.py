@@ -1582,7 +1582,8 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             # tasks, so every run is recorded.
             start_harness_capture()
             start_usage_capture()
-            ctx = await gather_review_context()
+            ctx = await gather_review_context(
+                reviewer_email=session.get("email"))
             context_block = ctx["context_block"]
             multi_user = ctx.get("multi_user_activity", False)
 
