@@ -398,7 +398,11 @@ async def run_full_audit(reason: str = "scheduled") -> None:
         from tools.audit_assembler import is_audit_current
         currency = await is_audit_current()
         if currency.get("is_current"):
-            log.info("auto_audit_skipped_current", reason=reason)
+            # The data the last completed audit verified is unchanged —
+            # skip, so a redeploy or a no-op data event never spends an
+            # Opus audit. The skip is logged for Render-log visibility.
+            log.info("audit_trigger_skipped", reason="audit_current",
+                     triggered_from=reason)
             return
     except Exception as exc:  # noqa: BLE001
         log.warning("auto_audit_currency_check_failed", reason=reason,

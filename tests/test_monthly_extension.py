@@ -151,6 +151,22 @@ class TestExtendMarketData:
                     "monthly_skipped", "status"):
             assert key in out
 
+    def test_no_data_change_logs_audit_trigger_skipped(self, monkeypatch):
+        # A startup run that adds no new month must NOT trigger an audit,
+        # and must log audit_trigger_skipped so a redeploy is visible in
+        # the Render logs as firing no Opus call.
+        import database
+        from structlog.testing import capture_logs
+        monkeypatch.setattr(database, "DATABASE_URL", None, raising=False)
+        with capture_logs() as logs:
+            out = df.extend_market_data(audit_reason="startup")
+        assert out["monthly_rows_added"] == 0
+        skipped = [e for e in logs
+                   if e.get("event") == "audit_trigger_skipped"]
+        assert skipped, "expected an audit_trigger_skipped log event"
+        assert skipped[0]["reason"] == "no_data_change"
+        assert skipped[0]["triggered_from"] == "startup"
+
 
 # ── POST /api/v1/admin/refresh-monthly-data ───────────────────────────────────
 

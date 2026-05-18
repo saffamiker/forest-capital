@@ -78,12 +78,15 @@ async def lifespan(app: FastAPI):
         # Auto-extend the monthly data pipeline beyond the Excel file —
         # fetch any complete calendar months that have closed since the
         # last run. A daemon thread so startup never blocks on yfinance;
-        # fail-open inside extend_market_data.
+        # fail-open inside extend_market_data. audit_reason="startup" so
+        # a redeploy with no data change logs audit_trigger_skipped and
+        # fires no Opus audit; only a genuine new month triggers one.
         try:
             import threading
             from tools.data_fetcher import extend_market_data
-            threading.Thread(target=extend_market_data, daemon=True,
-                             name="monthly-data-extend").start()
+            threading.Thread(
+                target=lambda: extend_market_data(audit_reason="startup"),
+                daemon=True, name="monthly-data-extend").start()
         except Exception as exc:  # noqa: BLE001
             log.warning("monthly_extend_startup_failed", error=str(exc))
     yield

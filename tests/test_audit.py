@@ -414,6 +414,23 @@ class TestSmartAuditCaching:
         asyncio.run(audit_engine.run_full_audit("data_ingestion"))
         assert created == []   # idempotent — no run created on current data
 
+    def test_skipped_trigger_logs_audit_trigger_skipped(self, monkeypatch):
+        # When the audit is already current, the bypass is logged as an
+        # audit_trigger_skipped event so a redeploy that fires no Opus
+        # call is visible in the Render logs.
+        from structlog.testing import capture_logs
+
+        async def _current() -> dict:
+            return {"is_current": True}
+        monkeypatch.setattr(audit_assembler, "is_audit_current", _current)
+        with capture_logs() as logs:
+            asyncio.run(audit_engine.run_full_audit("startup"))
+        skipped = [e for e in logs
+                   if e.get("event") == "audit_trigger_skipped"]
+        assert skipped, "expected an audit_trigger_skipped log event"
+        assert skipped[0]["reason"] == "audit_current"
+        assert skipped[0]["triggered_from"] == "startup"
+
     def test_run_full_audit_proceeds_when_stale(self, monkeypatch):
         async def _stale() -> dict:
             return {"is_current": False}
