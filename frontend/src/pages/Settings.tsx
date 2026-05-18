@@ -25,6 +25,7 @@ import type { BrandMode } from '../context/BrandContext'
 import { useSession } from '../context/SessionContext'
 import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 import UserManagementPanel from '../components/UserManagementPanel'
+import AuditPanel from '../components/AuditPanel'
 import { TestResultsSection, TestAdminSections } from '../components/TestRunnerSettings'
 import TeamGate from '../components/TeamGate'
 import { useIsTeamMember, useIsSysadmin } from '../hooks/usePermissions'
@@ -506,6 +507,17 @@ export default function Settings() {
           description="Manage who can access the platform and their permission level."
         >
           <UserManagementPanel />
+        </SettingsSection>
+      )}
+
+      {/* Statistical Audit — sysadmin-only, below Users. */}
+      {isSysadmin && (
+        <SettingsSection
+          id="audit"
+          title="Statistical Audit"
+          description="Independent re-verification of every analytical calculation by a separate AI model."
+        >
+          <AuditPanel />
         </SettingsSection>
       )}
 

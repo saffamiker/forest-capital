@@ -9,6 +9,8 @@
  *   ✅ Failure resolved      — a failure you reported was resolved; re-test.
  *   💬 Feedback responded    — your feedback was reviewed.
  *   🔍 Triage report ready   — a new triage report (sysadmin only).
+ *   ⚠️ Audit found issues    — a statistical audit flagged discrepancies
+ *                              (sysadmin only).
  *
  * Notifications are derived server-side (no notifications table) — see
  * GET /api/v1/testing/notifications and /unseen. They are dismissible
@@ -18,7 +20,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { FlaskConical, CheckCircle, MessageSquare, Search, X } from 'lucide-react'
+import {
+  FlaskConical, CheckCircle, MessageSquare, Search, ShieldAlert, X,
+} from 'lucide-react'
 import { TEST_SCRIPTS, scriptForEmail, getTestScript } from '../constants/testScripts'
 import { startTestRun } from '../lib/testRunnerBus'
 import { useSession } from '../context/SessionContext'
@@ -47,10 +51,19 @@ interface TriageLatestResponse {
     metadata: { immediate_count?: number }
   } | null
 }
+interface AuditLatestResponse {
+  run: {
+    id: number
+    triggered_at: string | null
+    status: string
+    failed: number
+  } | null
+}
 
 interface Notice {
   key: string
-  kind: 'new_tests' | 'failure_resolved' | 'feedback_responded' | 'triage_ready'
+  kind: 'new_tests' | 'failure_resolved' | 'feedback_responded'
+    | 'triage_ready' | 'audit_failed'
   title: string
   body: string
   actionLabel: string
@@ -168,6 +181,32 @@ export default function TestNotifications() {
           }
         } catch { /* non-sysadmin (403) or no report — no triage notice */ }
 
+        // ── Audit found discrepancies — sysadmin only ──────────────────
+        // Its own request, like the triage notice — a 403 for a
+        // non-sysadmin must not abort the notices already built.
+        try {
+          const audit = await axios.get<AuditLatestResponse>(
+            '/api/v1/audit/runs/latest')
+          const run = audit.data.run
+          if (run && run.status !== 'running' && run.failed > 0
+              && run.triggered_at) {
+            const ageH = (Date.now() - new Date(run.triggered_at).getTime())
+              / 3600000
+            if (ageH < 24) {
+              built.push({
+                key: `audit:${run.id}`,
+                kind: 'audit_failed',
+                title: '⚠️ Statistical audit found discrepancies',
+                body: `The latest audit flagged ${run.failed} `
+                  + `discrepanc${run.failed === 1 ? 'y' : 'ies'} requiring `
+                  + 'attention. Review the audit findings before presenting.',
+                actionLabel: 'View Audit Report',
+                onAction: () => navigate('/settings#audit'),
+              })
+            }
+          }
+        } catch { /* non-sysadmin (403) or no run — no audit notice */ }
+
         const dismissed = new Set(readDismissed())
         setNotices(built.filter((n) => !dismissed.has(n.key)))
       } catch {
@@ -194,9 +233,11 @@ export default function TestNotifications() {
 
   const Icon = current.kind === 'new_tests' ? FlaskConical
     : current.kind === 'failure_resolved' ? CheckCircle
-      : current.kind === 'triage_ready' ? Search : MessageSquare
+      : current.kind === 'triage_ready' ? Search
+        : current.kind === 'audit_failed' ? ShieldAlert : MessageSquare
   const accent = current.kind === 'failure_resolved'
-    ? 'text-success' : 'text-electric'
+    ? 'text-success'
+    : current.kind === 'audit_failed' ? 'text-warning' : 'text-electric'
 
   return (
     <div className="fixed inset-0 z-[82] flex items-center justify-center
