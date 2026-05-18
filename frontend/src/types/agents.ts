@@ -40,4 +40,8 @@ export interface QAAuditResult {
   limitations?: string[]
   data_caveats?: string[]
   model_assumptions?: string[]
+  // The full LLM analysis text. LLM-assessed checks carry a placeholder
+  // evidence line pointing here — the panel renders this under each such
+  // warning/fail item so the reasoning is visible, not just referenced.
+  raw_analysis?: string
 }

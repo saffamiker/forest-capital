@@ -33,11 +33,17 @@ interface CheckRowProps {
   // Agent. Optional — when undefined (audit hasn't been explained yet, or
   // the Explainer call failed), the row falls back to evidence/fix only.
   explanation?: QAItemExplanation
+  // The audit's full LLM analysis text. An LLM-assessed check carries a
+  // placeholder evidence line; this is the actual reasoning it points to.
+  rawAnalysis?: string
 }
 
-function CheckRow({ check, open, onToggle, explanation }: CheckRowProps) {
+function CheckRow({ check, open, onToggle, explanation, rawAnalysis }: CheckRowProps) {
   const cfg = VERDICT_CONFIG[check.status]
   const { Icon } = cfg
+  // LLM-assessed items store a placeholder evidence line that points at
+  // the report-level raw_analysis — show the real analysis text instead.
+  const isPlaceholderEvidence = check.evidence.includes('raw_analysis')
   return (
     <div className={`border rounded-lg overflow-hidden mb-1.5 ${cfg.border}`}>
       <button
@@ -56,7 +62,18 @@ function CheckRow({ check, open, onToggle, explanation }: CheckRowProps) {
       </button>
       {open && (
         <div className="px-3 py-2 border-t border-border/50 bg-navy-900 space-y-2">
-          <p className="text-slate-300 text-xs">{check.evidence}</p>
+          {isPlaceholderEvidence && rawAnalysis ? (
+            <div>
+              <div className="text-2xs uppercase tracking-wide text-muted mb-0.5">
+                QA analysis
+              </div>
+              <p className="text-slate-300 text-xs whitespace-pre-wrap leading-relaxed">
+                {rawAnalysis}
+              </p>
+            </div>
+          ) : (
+            <p className="text-slate-300 text-xs">{check.evidence}</p>
+          )}
           {check.fix && (
             <p className="text-warning text-xs"><strong>Fix:</strong> {check.fix}</p>
           )}
@@ -213,6 +230,7 @@ export default function QAAuditPanel() {
             open={openChecks.has(check.check_id)}
             onToggle={() => toggleCheck(check.check_id)}
             explanation={qaExplanations[check.check_id]}
+            {...(audit.raw_analysis ? { rawAnalysis: audit.raw_analysis } : {})}
           />
         ))}
       </div>
