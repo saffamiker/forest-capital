@@ -5281,6 +5281,67 @@ team_member users from platform_users instead. Left as-is for now; the
 config list and the seeded table agree, so there is no behavioural gap.
 
 
+─────────────────────────────────────────────────────────────────────────────
+MOBILE RESPONSIVE IMPLEMENTATION (May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The frontend is responsive from 320px width upward. Frontend-only — no
+backend change. Desktop (lg+) is unchanged: every mobile adaptation is
+additive, gated behind a breakpoint, and resets to the original layout
+from lg up.
+
+BREAKPOINTS — Tailwind defaults, three tiers:
+  Mobile   < 640px   — the unprefixed default
+  Tablet   640–1023  — sm:
+  Desktop  1024px+   — lg:
+A few one-off needs use arbitrary queries — min-[380px]:, min-[400px]:
+(nav-bar element thresholds) and max-sm:landscape: (the TestRunner
+height cap in mobile landscape).
+
+NAV DRAWER PATTERN: below lg the horizontal nav is replaced by a ☰
+hamburger that opens a left slide-in drawer (MobileNavDrawer in
+layouts/MainLayout.tsx) — a dark overlay (click to close), Escape to
+close, the nav items grouped (Analysis / AI and Review / Output), the
+mode switcher and the account controls. The hamburger sits at z-[62]
+above the drawer (z-[61]) so it stays clickable and animates ☰ → ✕.
+The three-mode selector is extracted into a shared ModeSelector
+component used both horizontally (desktop bar) and vertically (drawer).
+
+BOTTOM SHEET PATTERN: ExplainerPanel and DataExplainPanel are
+right-side drawers on desktop and slide-up bottom sheets on mobile
+(inset-x-0 bottom-0, ≈60vh, scrollable, a drag-handle ✕). The
+TestRunner control panel and the What's New / Academic Export modals
+likewise go full-width / full-screen on mobile and revert from sm: up.
+Entrance keyframes (fc-slide-in-left, fc-slide-up, fc-fade-in) live in
+index.css.
+
+STICKY COLUMN PATTERN: every wide data table is wrapped in
+overflow-x-auto and freezes its first column (the row label —
+Strategy / Asset / Name) with `sticky left-0 z-… bg-navy-{800|900}`,
+so the identity column stays visible while the metric columns scroll.
+Applied to the Dashboard strategy table (which also drops to a reduced
+column set below lg with a "More columns" toggle), the four Analytics
+tables, the UserManagementPanel table, and the four matrix tables on
+Statistical Evidence / Regime Analysis.
+
+SAFE AREAS: fixed bottom elements and the page content area pad against
+env(safe-area-inset-bottom) so nothing sits under a phone's home-bar /
+gesture area. Charts are already fluid via recharts ResponsiveContainer
+(or w-full SVGs).
+
+TOUCH TARGETS: interactive elements are a 44px minimum on mobile —
+applied as `min-h-[44px] min-w-[44px]` (often with `sm:min-h-0` to
+restore the compact desktop size). A global index.css rule gives every
+button / link / role=button a subtle active:scale(0.97) press-in; a
+global prefers-reduced-motion:reduce rule collapses every animation.
+
+TESTS: __tests__/mobile-responsive.test.tsx (12 tests) covers the nav
+drawer behaviour and the responsive-class wiring; jsdom cannot evaluate
+@media, so breakpoint behaviour is asserted via the utility classes.
+docs/mobile_checklist.md is the manual visual-verification checklist
+(iPhone SE / 14 / iPad / desktop, portrait and landscape).
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -5325,6 +5386,10 @@ was written, so the GitHub board was not updated programmatically).
      permission model (roles are presets over a permissions array),
      three-tier resolution (JWT → DB → config fallback), the sysadmin
      Settings → Users management UI, last-sysadmin guards (migration 015)
+  ✅ Mobile responsive — the whole frontend works from 320px up:
+     hamburger nav drawer, bottom-sheet panels, sticky-column tables,
+     safe-area insets, 44px touch targets (12 commits, frontend-only;
+     desktop unchanged)
   ✅ Changelog + What's New modal + CI/CD pipeline (ci.yml, changelog
      gate, migrations 011-012)
   ✅ Site tour — 15-step react-joyride walkthrough, academic-rationale
