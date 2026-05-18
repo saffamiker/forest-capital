@@ -123,10 +123,13 @@ class TestCreateUserValidation:
                             headers=SYSADMIN_HEADERS)
         assert resp.status_code == 422
 
-    def test_valid_request_clears_validation(self):
+    def test_valid_request_clears_validation(self, clean_platform_users):
         # Valid email + role → reaches create_user. Any status that is
         # not a validation rejection (422) or a duplicate (409) proves
         # validation was passed — 503 with no database, 201 with one.
+        # The clean_platform_users fixture (conftest) removes the row
+        # this test inserts when a database is present, so a re-run
+        # never collides on the duplicate email.
         resp = client.post(USERS,
                             json={"email": "new@queens.edu", "role": "viewer"},
                             headers=SYSADMIN_HEADERS)
