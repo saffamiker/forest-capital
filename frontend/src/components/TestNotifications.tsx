@@ -8,6 +8,7 @@
  *   🧪 New tests available  — un-attested test steps exist.
  *   ✅ Failure resolved      — a failure you reported was resolved; re-test.
  *   💬 Feedback responded    — your feedback was reviewed.
+ *   🔍 Triage report ready   — a new triage report (sysadmin only).
  *
  * Notifications are derived server-side (no notifications table) — see
  * GET /api/v1/testing/notifications and /unseen. They are dismissible
@@ -17,7 +18,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { FlaskConical, CheckCircle, MessageSquare, X } from 'lucide-react'
+import { FlaskConical, CheckCircle, MessageSquare, Search, X } from 'lucide-react'
 import { TEST_SCRIPTS, scriptForEmail, getTestScript } from '../constants/testScripts'
 import { startTestRun } from '../lib/testRunnerBus'
 import { useSession } from '../context/SessionContext'
@@ -36,10 +37,20 @@ interface NotificationsResponse {
     id: number; title: string; status: string; resolution_note: string | null
   }>
 }
+interface TriageLatestResponse {
+  report: {
+    id: number
+    triggered_at: string | null
+    items_assessed: number
+    github_issues_created: number
+    status: string
+    metadata: { immediate_count?: number }
+  } | null
+}
 
 interface Notice {
   key: string
-  kind: 'new_tests' | 'failure_resolved' | 'feedback_responded'
+  kind: 'new_tests' | 'failure_resolved' | 'feedback_responded' | 'triage_ready'
   title: string
   body: string
   actionLabel: string
@@ -129,6 +140,34 @@ export default function TestNotifications() {
           })
         }
 
+        // ── Triage report ready — sysadmin only ────────────────────────
+        // Its own request: /triage/latest is sysadmin-gated, so a 403 for
+        // a non-sysadmin must not abort the other notifications above.
+        try {
+          const triage = await axios.get<TriageLatestResponse>(
+            '/api/v1/testing/triage/latest')
+          const rep = triage.data.report
+          if (rep && rep.status !== 'running' && rep.triggered_at) {
+            const ageH = (Date.now() - new Date(rep.triggered_at).getTime())
+              / 3600000
+            if (ageH < 24) {
+              built.push({
+                key: `triage:${rep.id}`,
+                kind: 'triage_ready',
+                title: '🔍 Triage report ready',
+                body: `${rep.items_assessed} item`
+                  + `${rep.items_assessed === 1 ? '' : 's'} assessed · `
+                  + `${rep.metadata.immediate_count ?? 0} immediate action`
+                  + `${(rep.metadata.immediate_count ?? 0) === 1 ? '' : 's'} · `
+                  + `${rep.github_issues_created} GitHub issue`
+                  + `${rep.github_issues_created === 1 ? '' : 's'} created.`,
+                actionLabel: 'View Report',
+                onAction: () => navigate('/settings#test-administration'),
+              })
+            }
+          }
+        } catch { /* non-sysadmin (403) or no report — no triage notice */ }
+
         const dismissed = new Set(readDismissed())
         setNotices(built.filter((n) => !dismissed.has(n.key)))
       } catch {
@@ -154,7 +193,8 @@ export default function TestNotifications() {
   }
 
   const Icon = current.kind === 'new_tests' ? FlaskConical
-    : current.kind === 'failure_resolved' ? CheckCircle : MessageSquare
+    : current.kind === 'failure_resolved' ? CheckCircle
+      : current.kind === 'triage_ready' ? Search : MessageSquare
   const accent = current.kind === 'failure_resolved'
     ? 'text-success' : 'text-electric'
 
