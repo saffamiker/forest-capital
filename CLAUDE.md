@@ -6138,9 +6138,8 @@ Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
 
 This is the board OF RECORD in the repo. A mirror GitHub Projects board
-is maintained separately — creating/updating it requires `gh auth login`
-with the `project` scope (the CLI was unauthenticated when this section
-was written, so the GitHub board was not updated programmatically).
+is maintained separately. The `gh` CLI is authenticated with the
+`project` scope, so the GitHub board is kept in sync programmatically.
 
 ─── DONE ──────────────────────────────────────────────────────────────
   Sprints 1–6 in full (see the Sprint history table at the top), plus
@@ -6201,10 +6200,29 @@ was written, so the GitHub board was not updated programmatically).
   ✅ Block A/B fixes — strategy-name InfoIcons, Data Explain feature
      (explain vs explain-data), council hand-off pre-population
   ✅ UAT test guide — docs/UAT_TEST_GUIDE.md, four sections
+  ✅ In-platform document editor stream:
+     ✅ Migration 021 — editor_drafts / editor_draft_versions tables
+     ✅ 3-panel /editor/:draftId page — TipTap rich text for a
+        paper/brief, slide-card editor for a deck, 30s auto-save
+     ✅ Writing Assistant chat endpoint
+     ✅ In-editor export — DOCX / PPTX
+     ✅ Submission Guide panel — Reports header button, role-aware,
+        deadline countdown
+     ✅ Generate → Editor flow (export endpoints return the new draft id)
+     ✅ Academic Review reads current editor draft content
+     ✅ [[BOB]] block panel + [[VERIFY]] popup UX (commit 599296c)
+     ✅ UAT guide + site tour updated for the editor (commit 64704b6)
+  ◐ alembic upgrade head on Render — in-flight: migrations through 021
+     are ready; `alembic upgrade head` runs on Render post-merge,
+     pending the develop → main deploy
+  ✅ S3 (or equivalent) for screenshot storage — Render persistent
+     disk at /data/test_screenshots; screenshots survive redeploys
   ✅ CLAUDE.md + README brought current
 
 ─── IN PROGRESS ───────────────────────────────────────────────────────
-  (nothing currently in progress)
+  □ develop → main PR — opening now. Moving to a develop → main
+    pull-request flow with the CI jobs (ci.yml) as required status
+    checks, so nothing reaches main without a green pipeline.
 
 ─── BACKLOG ────────────────────────────────────────────────────────────
 
@@ -6219,12 +6237,6 @@ was written, so the GitHub board was not updated programmatically).
   □ Bob — UAT Section 3 test pass
   □ Molly — UAT Section 4 test pass + presentation review pass
   □ All — UAT Section 1 test pass
-  □ alembic upgrade head on Render for migrations 014 and 015
-
-  POST-DEADLINE:
-  □ Move to develop → main PR flow with required status checks
-  □ S3 (or equivalent) for screenshot storage — currently local disk,
-    ephemeral on Render
 
 ─── JUNE 3 MILESTONE ───────────────────────────────────────────────────
   Items that must land for the midpoint check-in:
