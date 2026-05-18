@@ -5712,6 +5712,21 @@ Every result still also carries the legacy rebalance-count proxy
 avg_monthly_turnover (the statistical-audit layer references that
 field); only true_turnover is shown on the Dashboard, with no fallback.
 
+ONE-WAY CONVENTION: the sum(|Δw|)/2 figure is ONE-WAY annualised
+turnover — the proportion of the portfolio traded in one direction per
+year, the standard institutional convention. Two-way round-trip
+turnover is approximately double the reported figure. Wherever turnover
+is communicated — the Dashboard InfoIcon tooltip, the midpoint paper
+methodology section, the Academic Review arbiter evaluator — this
+convention is stated explicitly so a reader is never left guessing.
+
+BLACK-LITTERMAN FINDING: real-data turnover (2002-2025) runs ~4-5% for
+the fixed-weight statics, 18-56% for most dynamic strategies — and 4.7%
+for BLACK_LITTERMAN. Despite its dynamic classification, Black-Litterman
+exhibits static-like turnover because its quarterly views shift weights
+only modestly from the equilibrium prior. This is a genuine analytical
+finding, not a data issue, and is disclosed as such.
+
 
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that

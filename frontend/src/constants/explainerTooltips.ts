@@ -126,8 +126,13 @@ export const EXPLAINER_TOOLTIPS: Record<string, string> = {
     + 'single metric.',
   turnover:
     'Average annual portfolio turnover — the proportion of the portfolio '
-    + 'replaced per year. Higher turnover implies higher transaction costs '
-    + 'in practice.',
+    + 'traded in one direction per year (one-way convention, standard '
+    + 'institutional practice). Two-way round-trip turnover is '
+    + 'approximately double this figure. Dynamic strategies show higher '
+    + 'turnover reflecting signal-driven reallocation. Note: '
+    + 'Black-Litterman reports static-like turnover (4.7%) because its '
+    + 'quarterly views shift weights only modestly despite being '
+    + 'classified as dynamic.',
   tier:
     'Strategy ranking tier based on the composite score. Tier 1 is the '
     + 'highest performing — used to group strategies for presentation.',

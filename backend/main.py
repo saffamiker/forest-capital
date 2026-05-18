@@ -3088,7 +3088,18 @@ async def export_midpoint_paper(
                  "portfolio constraints (long-only, fully invested, no cash, "
                  "quarterly rebalancing), the ten strategies grouped as "
                  "static versus dynamic, and the Carhart four-factor "
-                 "attribution model."),
+                 "attribution model. When discussing portfolio turnover, "
+                 "always clarify: turnover is reported as one-way annualised "
+                 "turnover (the standard institutional convention) and "
+                 "two-way round-trip turnover is approximately double the "
+                 "reported figures; true turnover is computed from the "
+                 "drift-inclusive weight schedule at each quarterly "
+                 "rebalance, capturing both signal-driven reallocation and "
+                 "drift-correction trading back to target. Note that "
+                 "Black-Litterman, despite its dynamic classification, "
+                 "exhibits static-like turnover (4.7%) reflecting the "
+                 "framework's modest weight adjustments from its equilibrium "
+                 "prior — a genuine analytical finding, not a data issue."),
              "context": {"study_period": period,
                          "strategy_metadata": data.get("strategy_metadata"),
                          "risk_free_rate": data["risk_free_rate"]}},
