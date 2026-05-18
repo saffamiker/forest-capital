@@ -1179,10 +1179,12 @@ def _deliberate_to_frontend(query: str, council_response: dict[str, Any]) -> dic
             # will catch it.
             continue
 
-        # Per-agent content selection:
+        # Per-agent content selection — every agent shows its FULL
+        # narrative, not a one-line summary:
         #   CIO         → final synthesis (the recommendation narrative)
         #   Gemini/Grok → full challenge text (the dissenting narrative)
-        #   Specialists → summary (1-2 sentences purpose-built for display)
+        #   Specialists → raw_analysis (the complete specialist analysis;
+        #                 summary is only the one-line fallback)
         tech = report.get("technical_findings", {}) or {}
         if key == "cio":
             content = tech.get("final_synthesis_text") or report.get("summary", "")
@@ -1191,7 +1193,7 @@ def _deliberate_to_frontend(query: str, council_response: dict[str, Any]) -> dic
         elif key == "contrarian_analyst":
             content = tech.get("full_challenge") or report.get("summary", "")
         else:
-            content = report.get("summary", "")
+            content = tech.get("raw_analysis") or report.get("summary", "")
 
         # NEVER drop an agent whose report exists. An empty content field
         # used to be silently filtered, which produced an empty Debate tab

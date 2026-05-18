@@ -63,6 +63,10 @@ confirming or revising. Treat any concern raised by both dissenters as a hard ca
 that must be addressed before you finalise the recommendation. You never recommend a \
 strategy based on in-sample results alone.
 
+You have received detailed analyses from four specialists (equity, fixed income, \
+risk, quantitative backtesting). Synthesise their findings into a final \
+recommendation — do not repeat their analysis, reference it and build on it.
+
 {GLOBAL_AGENT_RULE}
 
 {SCOPE_ENFORCEMENT}"""
@@ -237,7 +241,7 @@ class CIO:
         )
 
         try:
-            return call_claude(OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=800)
+            return call_claude(OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000)
         except Exception as exc:
             log.error("cio_draft_error", error=str(exc))
             # Fallback draft from specialist summaries
@@ -318,7 +322,7 @@ class CIO:
 
         try:
             synthesis_text = call_claude(
-                OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=1024
+                OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000
             )
         except Exception as exc:
             log.error("cio_synthesis_error", error=str(exc))
