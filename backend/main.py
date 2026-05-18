@@ -841,6 +841,129 @@ async def delete_academic_doc(doc_id: str, session: dict = Depends(require_team_
     return {"deleted": True, "id": doc_id}
 
 
+# ── Document editor — editor_drafts / editor_draft_versions ────────────────────
+#
+# The in-platform editor for Bob's midpoint paper and Molly's presentation
+# deck (migration 021). All endpoints require team_member; the auto-save
+# PATCH is silent (no version), POST .../versions saves a named checkpoint.
+
+@app.get("/api/v1/documents/drafts")
+async def editor_list_drafts(session: dict = Depends(require_team_member)):
+    """Every non-deleted draft owned by the current user."""
+    from tools.editor_drafts import list_drafts
+    return {"drafts": await list_drafts(session["email"])}
+
+
+@app.get("/api/v1/documents/drafts/{draft_id}")
+async def editor_get_draft(
+    draft_id: int, session: dict = Depends(require_team_member),
+):
+    """A single draft with its current working content."""
+    from tools.editor_drafts import get_draft
+    draft = await get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    return draft
+
+
+@app.post("/api/v1/documents/drafts", status_code=201)
+async def editor_create_draft(
+    body: dict, session: dict = Depends(require_team_member),
+):
+    """
+    Creates a draft and makes it the current one for this owner +
+    document_type. Body: {document_type, title, content_json,
+    content_text, created_from?}.
+    """
+    from tools.editor_drafts import DOCUMENT_TYPES, create_draft
+    document_type = str(body.get("document_type") or "")
+    if document_type not in DOCUMENT_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"document_type must be one of {DOCUMENT_TYPES}.")
+    title = str(body.get("title") or "Untitled draft")[:300]
+    created_from = str(body.get("created_from") or "manual")
+    draft = await create_draft(
+        document_type, session["email"], title,
+        body.get("content_json"), body.get("content_text"),
+        created_from=created_from)
+    if draft is None:
+        raise HTTPException(status_code=503,
+                            detail="Draft storage is unavailable.")
+    return draft
+
+
+@app.patch("/api/v1/documents/drafts/{draft_id}")
+async def editor_update_draft(
+    draft_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Auto-save — overwrites the working content. Silent: does NOT create
+    a version. Body: {content_json, content_text, word_count?}.
+    """
+    from tools.editor_drafts import update_draft
+    wc = body.get("word_count")
+    ok = await update_draft(
+        draft_id, body.get("content_json"), body.get("content_text"),
+        word_count_override=int(wc) if isinstance(wc, (int, float)) else None)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    return {"saved": True, "draft_id": draft_id}
+
+
+@app.post("/api/v1/documents/drafts/{draft_id}/versions", status_code=201)
+async def editor_save_version(
+    draft_id: int, body: dict | None = None,
+    session: dict = Depends(require_team_member),
+):
+    """Saves a named version checkpoint. Body: {version_label}."""
+    from tools.editor_drafts import save_version
+    label = None
+    if body and body.get("version_label"):
+        label = str(body["version_label"])[:200]
+    version = await save_version(draft_id, label, session["email"])
+    if version is None:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    return version
+
+
+@app.get("/api/v1/documents/drafts/{draft_id}/versions")
+async def editor_list_versions(
+    draft_id: int, session: dict = Depends(require_team_member),
+):
+    """Every saved version of a draft, newest first."""
+    from tools.editor_drafts import list_versions
+    return {"versions": await list_versions(draft_id)}
+
+
+@app.post("/api/v1/documents/drafts/{draft_id}/restore/{version_id}")
+async def editor_restore_version(
+    draft_id: int, version_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Restores a saved version as the draft's current content."""
+    from tools.editor_drafts import restore_version
+    draft = await restore_version(draft_id, version_id)
+    if draft is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Draft or version not found.")
+    return draft
+
+
+@app.delete("/api/v1/documents/drafts/{draft_id}")
+async def editor_delete_draft(
+    draft_id: int, session: dict = Depends(require_team_member),
+):
+    """Soft-deletes a draft."""
+    from tools.editor_drafts import soft_delete_draft
+    ok = await soft_delete_draft(draft_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    return {"deleted": True, "draft_id": draft_id}
+
+
 # ── Regime ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/regime/current")
@@ -3593,17 +3716,38 @@ async def export_midpoint_paper(
         narratives = await _generate_narratives(_apply_draft_caveats(specs))
         docx_bytes = await asyncio.to_thread(build_midpoint_paper, data, narratives)
 
+        # Load the generated content into an editor draft so the frontend
+        # can open it directly in the editor. The draft_id rides back in
+        # the X-Draft-Id response header (the body is the binary .docx).
+        # A draft-storage failure never fails the download.
+        draft_id: int | None = None
+        try:
+            from tools.editor_content import midpoint_to_editor
+            from tools.editor_drafts import create_draft
+            content_json, content_text = midpoint_to_editor(narratives)
+            draft = await create_draft(
+                "midpoint_paper", session["email"],
+                f"Midpoint Paper — {date.today().isoformat()}",
+                content_json, content_text, created_from="generated")
+            if draft is not None:
+                draft_id = draft["id"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("midpoint_draft_create_failed", error=str(exc))
+
         _log_interaction_bg(
             request, session, "export", agents_involved=["academic_writer"],
             response_summary="Midpoint paper generated",
             metadata={"deliverable": "midpoint_paper",
-                      "data_available": data["available"]})
+                      "data_available": data["available"],
+                      "draft_id": draft_id})
 
         filename = f"forest-capital-midpoint-paper-{date.today().isoformat()}.docx"
-        return Response(
-            content=docx_bytes, media_type=_DOCX_MEDIA,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        if draft_id is not None:
+            headers["X-Draft-Id"] = str(draft_id)
+            headers["Access-Control-Expose-Headers"] = "X-Draft-Id"
+        return Response(content=docx_bytes, media_type=_DOCX_MEDIA,
+                        headers=headers)
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
         log.error("midpoint_paper_export_error", ref=ref, error=str(exc))
