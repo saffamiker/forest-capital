@@ -58,10 +58,12 @@ export default function RegimeTransitionMatrix({ matrix }: Props) {
         </p>
       </div>
 
+      <div className="overflow-x-auto">
       <table className="w-full text-xs">
         <thead>
           <tr>
-            <th className="text-left py-2 pr-3 text-muted text-2xs uppercase tracking-wide">
+            <th className="text-left py-2 pr-3 text-muted text-2xs uppercase tracking-wide
+                            sticky left-0 z-10 bg-navy-800">
               From ↓ / To →
             </th>
             {REGIMES.map((to) => (
@@ -79,7 +81,7 @@ export default function RegimeTransitionMatrix({ matrix }: Props) {
         <tbody>
           {REGIMES.map((from) => (
             <tr key={from} className="border-t border-border/50">
-              <td className="py-2 pr-3">
+              <td className="py-2 pr-3 sticky left-0 z-[5] bg-navy-800">
                 <span
                   className="inline-block px-2 py-0.5 rounded text-2xs"
                   style={{ background: `${REGIME_COLORS[from]}30`, color: REGIME_COLORS[from] }}
@@ -109,6 +111,7 @@ export default function RegimeTransitionMatrix({ matrix }: Props) {
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   )
 }

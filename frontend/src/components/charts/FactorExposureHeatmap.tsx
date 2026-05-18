@@ -75,7 +75,7 @@ export default function FactorExposureHeatmap({ factorLoadings }: Props) {
         <table className="w-full text-xs">
           <thead>
             <tr className="text-muted text-2xs uppercase tracking-wide">
-              <th className="text-left py-2 pr-3">Strategy</th>
+              <th className="text-left py-2 pr-3 sticky left-0 z-10 bg-navy-800">Strategy</th>
               {FACTOR_KEYS.map((k) => (
                 <th key={k} className="px-2 py-2 text-center">{FACTOR_LABELS[k]}</th>
               ))}
@@ -86,7 +86,7 @@ export default function FactorExposureHeatmap({ factorLoadings }: Props) {
           <tbody>
             {entries.map(([name, loadings]) => (
               <tr key={name} className="border-t border-border/50">
-                <td className="py-1.5 pr-3">
+                <td className="py-1.5 pr-3 sticky left-0 z-[5] bg-navy-800">
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="text-white font-mono">{prettyName(name)}</span>
                     <StrategyTypeBadge strategy={name} />

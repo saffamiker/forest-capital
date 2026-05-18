@@ -104,7 +104,7 @@ export default function SignificanceJourneyMatrix({ strategies }: Props) {
         <table className="w-full text-2xs">
           <thead>
             <tr className="text-muted uppercase tracking-wide">
-              <th className="text-left py-1.5 pr-3">Strategy</th>
+              <th className="text-left py-1.5 pr-3 sticky left-0 z-10 bg-navy-800">Strategy</th>
               {GATES.map((g) => (
                 <th key={g.label} className="px-1.5 py-1.5 text-center w-20">
                   <ExplainableText term={g.term}>{g.label}</ExplainableText>
@@ -116,7 +116,7 @@ export default function SignificanceJourneyMatrix({ strategies }: Props) {
           <tbody>
             {sorted.map((s) => (
               <tr key={s.strategy_name} className="border-t border-border/40">
-                <td className="py-1 pr-3 align-middle">
+                <td className="py-1 pr-3 align-middle sticky left-0 z-[5] bg-navy-800">
                   <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="text-white font-mono text-xs">{prettyName(s.strategy_name)}</span>
                     <StrategyTypeBadge strategy={s.strategy_name} />
