@@ -33,6 +33,14 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* Momentum scrolling on iOS for every scroll container. */
+  body,
+  .overflow-y-auto,
+  .overflow-x-auto,
+  .overflow-auto {
+    -webkit-overflow-scrolling: touch;
+  }
+
   /* Thin scrollbar */
   ::-webkit-scrollbar {
     width: 6px;
@@ -64,6 +72,28 @@
 @keyframes fc-slide-up {
   from { transform: translateY(100%); }
   to { transform: translateY(0); }
+}
+
+/* Touch feedback — a subtle press-in on every interactive element so a
+   tap is visibly acknowledged. Suppressed under reduced-motion. */
+@media (prefers-reduced-motion: no-preference) {
+  button:active,
+  a:active,
+  [role='button']:active {
+    transform: scale(0.97);
+  }
+}
+
+/* Honour the OS reduced-motion setting — collapse every animation and
+   transition (drawer slide-in, bottom-sheet slide-up, etc.). */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
 }
 
 @layer components {

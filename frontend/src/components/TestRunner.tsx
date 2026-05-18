@@ -441,6 +441,7 @@ export default function TestRunner() {
         style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
         className="fixed z-[90] border-2 border-warning bg-navy-800 shadow-2xl
                    overflow-y-auto inset-x-0 bottom-0 max-h-[50vh] rounded-t-lg
+                   max-sm:landscape:max-h-[40vh]
                    sm:inset-x-auto sm:bottom-4 sm:right-4 sm:w-[360px]
                    sm:max-w-[92vw] sm:max-h-none sm:rounded-lg sm:pb-0"
       >

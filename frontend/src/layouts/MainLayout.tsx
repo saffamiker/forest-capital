@@ -471,8 +471,11 @@ export default function MainLayout() {
       {/* Mobile / tablet navigation drawer. */}
       <MobileNavDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
 
-      {/* Page content — scrolls independently; nav never moves */}
-      <main className="flex-1 overflow-y-auto overflow-x-hidden">
+      {/* Page content — scrolls independently; nav never moves. The
+          safe-area bottom padding keeps content clear of a phone's
+          home-bar / gesture area. */}
+      <main className="flex-1 overflow-y-auto overflow-x-hidden
+                        pb-[env(safe-area-inset-bottom)]">
         <Outlet />
       </main>
 

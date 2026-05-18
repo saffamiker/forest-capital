@@ -126,8 +126,10 @@ export default function WhatsNewModal() {
           ))}
         </div>
 
-        {/* Footer */}
-        <div className="flex items-center justify-between gap-3 px-5 py-3
+        {/* Footer — extra bottom padding on a full-screen mobile modal so
+            the "Got it" button clears the phone home-bar safe area. */}
+        <div className="flex items-center justify-between gap-3 px-5 pt-3
+                        pb-[max(0.75rem,env(safe-area-inset-bottom))]
                         border-t border-border shrink-0">
           {hasTourUpdate ? (
             <button
