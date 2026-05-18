@@ -5913,6 +5913,61 @@ only modestly from the equilibrium prior. This is a genuine analytical
 finding, not a data issue, and is disclosed as such.
 
 
+─────────────────────────────────────────────────────────────────────────────
+AI TOKEN COST TRACKING (migration 020, May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+Every AI interaction logged to agent_interactions now carries its token
+usage and an estimated USD cost, so the team can see what the platform's
+AI spend is and where it goes — without an external billing dashboard.
+
+PRICING — config.py: TOKEN_COSTS_USD maps each model to per-token input
+and output rates (claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5,
+gemini-2.0-flash, grok). calculate_cost(model, input_tokens,
+output_tokens) returns the estimated USD cost, or None for an unknown
+model or non-numeric counts — the caller stores null rather than a wrong
+figure. The model string is matched leniently (prefix / substring) so a
+dated provider string like claude-haiku-4-5-20251001 still resolves.
+
+CAPTURE — agents/usage.py is a per-request ContextVar accumulator, the
+same pattern as the harness-metrics capture. record_usage(model, in, out)
+reports one AI call's tokens; it is a silent no-op unless an endpoint
+called start_usage_capture(), so the call wrappers (call_claude,
+call_gemini, the two Grok helpers) invoke it unconditionally. The capture
+list is seeded BEFORE the parallel specialist threads spawn, so the
+contextvars.copy_context() each thread runs under shares it by reference.
+set_current_agent(label) tags a context so collect_usage() can return a
+per-agent breakdown; cio.deliberate() tags each specialist thread
+(equity/fixed-income/risk/quant) and the request-context steps
+(cio/independent_analyst/contrarian_analyst). collect_usage() aggregates
+the totals, the model_used (a single model or "multiple") and the
+per_agent breakdown. Everything is fail-open — telemetry never breaks an
+agent call.
+
+STORAGE — migration 020 adds input_tokens, output_tokens, model_used and
+estimated_cost_usd to agent_interactions. _log_interaction_bg in main.py
+calls collect_usage() in the request context, writes the four columns
+via log_agent_interaction and folds the per_agent breakdown into
+metadata.per_agent_cost. The council and academic-review endpoints start
+a capture alongside the harness capture. Rows predating the migration
+carry NULL costs and read as zero — every figure is "spend since cost
+tracking shipped", not lifetime spend.
+
+SURFACES:
+  - GET /api/v1/activity/cost-summary — grand total plus per-member and
+    per-interaction-type breakdowns (get_cost_summary in activity_log.py).
+    The Team Activity view renders it as a CostPanel below the engagement
+    summary; hidden in Presentation View.
+  - The Team Activity council timeline row shows the per-query cost
+    inline, expanding on click into the per-agent cost list.
+  - Settings → Users carries an "AI cost" column — list_all_users sums
+    estimated_cost_usd per user_email as ai_cost_usd, so a sysadmin sees
+    what each account (viewers included) has cost.
+
+Migration 020 is changelog version 39. Operator step: alembic upgrade
+head on Render.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.

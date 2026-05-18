@@ -423,7 +423,7 @@ export default function UserManagementPanel() {
                     </td>
                     <td className="py-2 px-2 font-mono text-success"
                         title="Estimated AI token spend across this user's interactions">
-                      ${u.ai_cost_usd.toFixed(4)}
+                      ${(u.ai_cost_usd ?? 0).toFixed(4)}
                     </td>
                     <td className="py-2 px-2"
                         title="Lifetime council query allocation">
