@@ -2044,7 +2044,17 @@ async def admin_create_user(
     if created is None:
         raise HTTPException(status_code=503,
                             detail="Could not create the user — database unavailable.")
-    return created
+    # Welcome email — sent only after the user is successfully created.
+    # Fail-open: send_welcome_email never raises, so a delivery failure
+    # cannot undo or block the creation. welcome_email_sent tells the
+    # frontend which confirmation message to show.
+    from auth import send_welcome_email
+    welcome_email_sent = await send_welcome_email(
+        email=email,
+        display_name=created.get("display_name"),
+        notes=created.get("notes"),
+    )
+    return {**created, "welcome_email_sent": welcome_email_sent}
 
 
 @app.patch("/api/v1/admin/users/{user_id}")

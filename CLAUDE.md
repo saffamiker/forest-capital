@@ -5279,6 +5279,21 @@ USER-MANAGEMENT ENDPOINTS (all manage_users-gated):
   leave the platform with no active manage_users holder
   (count_active_sysadmins <= 1) — 400 "Cannot remove the last sysadmin."
 
+WELCOME EMAIL: POST /api/v1/admin/users sends a welcome email to the new
+user immediately after a successful create. auth.build_welcome_email()
+builds the (subject, plain-text body) — a pure, unit-testable function
+naming the platform, Group 1, how magic-link login works, the user's
+registered email, and what each screen offers; a notes line ("You have
+been added as: …") is added only when Michael recorded notes.
+auth.send_welcome_email() delivers it through the same SendGrid path and
+sender as the magic link (printed to the terminal in dev/test). It is
+FAIL-OPEN — returns True on send / False on any failure, never raises —
+so a delivery problem cannot block or undo the user creation; the
+endpoint's response carries welcome_email_sent and the Settings → Users
+panel shows "User added and welcome email sent to …" or "… could not be
+sent — check email configuration." The platform URL quoted in the email
+is config.PLATFORM_URL (env var, defaults to FRONTEND_URL).
+
 AUTH ENDPOINTS: the magic-link request gates on
 tools.platform_users.is_login_allowed (an active platform_users row is
 required when the table is reachable, so a deactivated user is correctly

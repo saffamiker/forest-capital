@@ -125,6 +125,10 @@ FRED_SERIES = {
 # ── AUTH & ENVIRONMENT ────────────────────────────────────────────────────────
 ENVIRONMENT              = os.getenv("ENVIRONMENT", "development")
 FRONTEND_URL             = os.getenv("FRONTEND_URL", "http://localhost:5173")
+# The public URL a user visits to log in — quoted in the welcome email
+# sent on user creation. Defaults to FRONTEND_URL (the Vercel deployment);
+# set PLATFORM_URL on Render only if the two ever diverge.
+PLATFORM_URL             = os.getenv("PLATFORM_URL", FRONTEND_URL)
 SECRET_KEY               = os.getenv("SECRET_KEY", "dev-secret-key-change-in-production")
 MASTER_API_KEY           = os.getenv("MASTER_API_KEY", "michael_dev_key_here")
 
