@@ -22,11 +22,13 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FlaskConical, CheckCircle, MessageSquare, Search, ShieldAlert, X,
+  CalendarClock,
 } from 'lucide-react'
 import { TEST_SCRIPTS, scriptForEmail, getTestScript } from '../constants/testScripts'
 import { startTestRun } from '../lib/testRunnerBus'
 import { useSession } from '../context/SessionContext'
 import { useAuth } from '../App'
+import { SUBMISSION_DEADLINES, deadlineCountdown } from './SubmissionGuides'
 
 const DISMISS_KEY = 'fc_test_notif_dismissed'
 
@@ -63,11 +65,14 @@ interface AuditLatestResponse {
 interface Notice {
   key: string
   kind: 'new_tests' | 'failure_resolved' | 'feedback_responded'
-    | 'triage_ready' | 'audit_failed'
+    | 'triage_ready' | 'audit_failed' | 'deadline'
   title: string
   body: string
   actionLabel: string
   onAction: () => void
+  /** Overrides the kind-based accent — used by the deadline notice to
+   *  match the guide panel's amber/red urgency colours. */
+  accentClass?: string
 }
 
 function readDismissed(): string[] {
@@ -207,6 +212,26 @@ export default function TestNotifications() {
           }
         } catch { /* non-sysadmin (403) or no run — no audit notice */ }
 
+        // ── Deliverable deadline countdown — Bob / Molly only ──────────
+        const myDeadline = SUBMISSION_DEADLINES.find(
+          (d) => d.ownerEmail === email)
+        if (myDeadline) {
+          const cd = deadlineCountdown(myDeadline.deadline, myDeadline.noun)
+          if (cd.tone !== 'passed') {
+            built.push({
+              key: `deadline:${myDeadline.deadline}`,
+              kind: 'deadline',
+              title: '📋 Deliverable deadline',
+              body: `${cd.label}. Open the Submission Guide on the Reports `
+                + 'screen for the step-by-step workflow.',
+              actionLabel: 'Open Reports',
+              onAction: () => navigate('/reports'),
+              accentClass: cd.tone === 'red' ? 'text-danger'
+                : cd.tone === 'amber' ? 'text-warning' : 'text-electric',
+            })
+          }
+        }
+
         const dismissed = new Set(readDismissed())
         setNotices(built.filter((n) => !dismissed.has(n.key)))
       } catch {
@@ -234,10 +259,11 @@ export default function TestNotifications() {
   const Icon = current.kind === 'new_tests' ? FlaskConical
     : current.kind === 'failure_resolved' ? CheckCircle
       : current.kind === 'triage_ready' ? Search
-        : current.kind === 'audit_failed' ? ShieldAlert : MessageSquare
-  const accent = current.kind === 'failure_resolved'
-    ? 'text-success'
-    : current.kind === 'audit_failed' ? 'text-warning' : 'text-electric'
+        : current.kind === 'audit_failed' ? ShieldAlert
+          : current.kind === 'deadline' ? CalendarClock : MessageSquare
+  const accent = current.accentClass
+    ?? (current.kind === 'failure_resolved' ? 'text-success'
+      : current.kind === 'audit_failed' ? 'text-warning' : 'text-electric')
 
   return (
     <div className="fixed inset-0 z-[82] flex items-center justify-center

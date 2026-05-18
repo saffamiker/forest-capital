@@ -29,7 +29,7 @@ import AdvisorPanel from '../components/AdvisorPanel'
 import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
-import SubmissionGuides from '../components/SubmissionGuides'
+import SubmissionGuidePanel from '../components/SubmissionGuides'
 import TeamGate from '../components/TeamGate'
 import type { DeliverableType } from '../types/advisor'
 import type { SectionDocType } from '../types/documents'
@@ -278,6 +278,7 @@ export default function Reports() {
   // default midpoint deliverable that the floating button would pick.
   const [advisorDeliverable, setAdvisorDeliverable] = useState<DeliverableType | null>(null)
   const [exporting, setExporting] = useState(false)
+  const [guideOpen, setGuideOpen] = useState(false)
 
   useEffect(() => {
     let cancelled = false
@@ -371,23 +372,37 @@ export default function Reports() {
             edit before submitting.
           </p>
         </div>
-        {/* Academic Export Package — light-mode charts + CSV tables zipped
-            for paper submission. A team action. */}
-        <TeamGate permission="export_package"
-          tooltip="Exporting the academic package is available to the project team">
+        <div className="flex items-center gap-2 shrink-0">
+          {/* Submission Guide — opens the role-relevant deliverable guide
+              with its deadline countdown. */}
           <button
             type="button"
-            onClick={() => setExporting(true)}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold
-                       bg-electric text-white hover:bg-blue-500 transition-colors shrink-0"
+            onClick={() => setGuideOpen(true)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm
+                       font-semibold border border-electric/40 text-electric
+                       hover:bg-electric/10 transition-colors"
           >
-            <FileArchive className="w-4 h-4" />
-            Export Academic Package
+            📋 Submission Guide
           </button>
-        </TeamGate>
+          {/* Academic Export Package — light-mode charts + CSV tables zipped
+              for paper submission. A team action. */}
+          <TeamGate permission="export_package"
+            tooltip="Exporting the academic package is available to the project team">
+            <button
+              type="button"
+              onClick={() => setExporting(true)}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold
+                         bg-electric text-white hover:bg-blue-500 transition-colors shrink-0"
+            >
+              <FileArchive className="w-4 h-4" />
+              Export Academic Package
+            </button>
+          </TeamGate>
+        </div>
       </div>
 
       {exporting && <AcademicExportModal onClose={() => setExporting(false)} />}
+      {guideOpen && <SubmissionGuidePanel onClose={() => setGuideOpen(false)} />}
 
       {error && (
         <div className="flex items-start gap-2 px-3 py-2 rounded border border-danger/30 bg-danger/5 text-danger text-xs">
@@ -404,10 +419,6 @@ export default function Reports() {
           three graded deliverables, assembled server-side from real
           platform data. Sits above Team Activity per the spec. */}
       <DocumentGenerationPanel />
-
-      {/* Submission Guides — the editor-based workflow for the midpoint
-          paper (Bob) and the final presentation (Molly). */}
-      <SubmissionGuides />
 
       {/* Team Activity — the evidence behind the Roles & Division-of-Labor
           deliverable and the AI-use narrative, so it leads the page.

@@ -120,16 +120,15 @@ role-specific section.
 - [ ] Presentation View shows three charts at screen-share scale.
 - [ ] CSV export works on Team Activity.
 
-### Submission Guides
+### Submission Guide
 
-- [ ] On the Reports page, verify the **Submission Guides** section is
-      visible (below Generate Documents).
-- [ ] Expand **Guide 1 — Midpoint Paper** — verify the editor-based
-      workflow steps appear (generate → Open in Editor → resolve markers →
-      Academic Review → export).
-- [ ] Expand **Guide 2 — Final Presentation** — verify its workflow steps
-      appear (generate → Open in Editor → verify data points and write
-      speaker notes → Presentation Preview → export).
+- [ ] Verify the **📋 Submission Guide** button is visible in the Reports
+      page header.
+- [ ] Click it — verify the side panel opens with the guide(s) relevant
+      to your role: Bob sees Guide 1 (Midpoint Paper), Molly sees Guide 2
+      (Final Presentation), Michael sees both.
+- [ ] Verify a **deadline countdown** is visible at the top of each guide
+      (amber at 5 days or fewer, red at 2 days or fewer).
 - [ ] Verify each guide leads with the tracking note — work done on the
       platform is the documented contribution record.
 
