@@ -25,6 +25,7 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    WEB_SEARCH_TOOL,
     build_agent_response,
     call_claude,
 )
@@ -66,11 +67,32 @@ APA FORMATTING:
 - Statistics: italicise t, F, p, r, M, SD (written in prose, not code)
 
 ABSOLUTE PROHIBITIONS:
-- Never cite a source not in the provided references list
+- Never cite a source unless it is in the provided references list OR you \
+have verified it via the web_search tool (see EXTERNAL CITATIONS below)
 - Never report a statistic not in the provided input data
 - Never claim statistical significance beyond what is_significant shows
 - Never use first person
 - Never omit the 'AI DRAFT — REQUIRES HUMAN REVIEW' label
+
+EXTERNAL CITATIONS (web search):
+For each key finding in the paper, search for and include at least one \
+supporting academic citation. Required citation targets:
+
+1. 2022 equity-bond correlation regime break — search for recent \
+literature on bond-equity correlation breakdown post-2022.
+2. FDR correction in finance — cite Harvey, Liu and Zhu (2016), \
+"... and the Cross-Section of Expected Returns", or an equivalent.
+3. Regime-switching in asset allocation — search for literature on \
+Markov regime-switching portfolio construction.
+4. Mean-variance optimisation instability — search for literature on \
+corner solutions and high-yield concentration in the efficient frontier.
+5. Carhart four-factor model — cite Carhart (1997), "On Persistence in \
+Mutual Fund Performance".
+
+Include a References section at the end with all citations in APA \
+format. Do not fabricate citations — use the web_search tool to verify \
+every source before citing it; if search cannot confirm a source, omit \
+the citation rather than inventing one.
 
 TEAM ACTIVITY DATA:
 When a team activity summary is supplied in the input, you have access to
@@ -137,12 +159,15 @@ class AcademicWriter:
             "Write the Data & Methodology section in APA 7th edition format. "
             "Cover: data sources and hierarchy, portfolio construction, "
             "statistical framework (p-thresholds, FDR, DSR, CPCV, block bootstrap). "
-            "Cite only from the references_available list. ~400 words.\n\n"
+            "Cite from references_available, and use web_search to find and "
+            "verify external sources for the key findings (see EXTERNAL "
+            "CITATIONS in your instructions). ~400 words.\n\n"
             f"DATA:\n{context}"
         )
 
         try:
-            text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=800)
+            text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message,
+                               max_tokens=800, tools=[WEB_SEARCH_TOOL])
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_methodology_error", error=str(exc))
@@ -188,12 +213,15 @@ class AcademicWriter:
             "Write the Results and Analysis section in APA 7th edition format. "
             "Use APA Table format for strategy comparison. Report all statistics "
             "as: t(282) = x.xx, p = .xxx format. "
-            "Cite only from references_available. ~600 words.\n\n"
+            "Cite from references_available, and use web_search to find and "
+            "verify external sources for the key findings (see EXTERNAL "
+            "CITATIONS in your instructions). ~600 words.\n\n"
             f"DATA:\n{context}"
         )
 
         try:
-            text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=1024)
+            text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message,
+                               max_tokens=1024, tools=[WEB_SEARCH_TOOL])
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_results_error", error=str(exc))
@@ -228,12 +256,14 @@ class AcademicWriter:
         user_message = (
             "Write the Discussion and Limitations section in APA 7th edition format. "
             "Be honest about limitations — do not minimise them. "
-            "Connect methodology to findings. ~200 words.\n\n"
+            "Connect methodology to findings. Use web_search to cite external "
+            "literature where it supports a key point. ~200 words.\n\n"
             f"DATA:\n{context}"
         )
 
         try:
-            text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=512)
+            text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message,
+                               max_tokens=512, tools=[WEB_SEARCH_TOOL])
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_discussion_error", error=str(exc))

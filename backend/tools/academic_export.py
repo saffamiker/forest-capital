@@ -214,14 +214,18 @@ def harness_narrative(
 
     try:
         from agents.academic_writer import _SYSTEM_PROMPT
-        from agents.base import SONNET_MODEL, call_claude
+        from agents.base import SONNET_MODEL, WEB_SEARCH_TOOL, call_claude
         from agents.evaluator_prompts import academic_review_peer_evaluator_prompt
         from agents.harness import GeneratorEvaluatorHarness
 
         harness = GeneratorEvaluatorHarness()
         result = harness.run(
+            # Web search is enabled so the section can cite verified
+            # external literature for its key findings (see EXTERNAL
+            # CITATIONS in the academic writer's system prompt).
             generator_fn=lambda prompt: call_claude(
-                SONNET_MODEL, _SYSTEM_PROMPT, prompt, max_tokens=max_tokens),
+                SONNET_MODEL, _SYSTEM_PROMPT, prompt, max_tokens=max_tokens,
+                tools=[WEB_SEARCH_TOOL]),
             evaluator_prompt=academic_review_peer_evaluator_prompt("academic writer"),
             generator_prompt=user_message,
             context=ctx_str,
