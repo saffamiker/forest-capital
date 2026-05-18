@@ -363,6 +363,12 @@ def build_methodology_audit_pdf(audit: dict[str, Any]) -> bytes:
     """
     s = _styles()
     items = audit.get("items") or []
+    # Per-check filtering — split the QA analysis into per-check sections
+    # by check-id header, identical to the UI. Each check then shows ONLY
+    # its own section, never the whole raw_analysis blob.
+    from agents.qa_agent import _split_raw_analysis
+    raw_analysis = audit.get("raw_analysis") or ""
+    sections = _split_raw_analysis(raw_analysis)
     total = audit.get("checks_total") or len(items)
     passed = audit.get("checks_passed") or 0
     warned = audit.get("checks_warned") or 0
@@ -457,10 +463,26 @@ def build_methodology_audit_pdf(audit: dict[str, Any]) -> bytes:
             if it.get("description"):
                 story.append(Paragraph(_esc(it.get("description")),
                                        s["detail"]))
-            if it.get("evidence"):
-                story.append(Paragraph(_esc(it.get("evidence")), s["detail"]))
-            if it.get("fix"):
+            # Per-check detail — this check's own section of the QA
+            # analysis, matched by its check-id header. Never the whole
+            # raw_analysis blob, and never another check's section.
+            cid = it.get("check_id")
+            section = sections.get(cid)
+            evidence = it.get("evidence")
+            if section:
+                detail = section
+            elif evidence and evidence != raw_analysis:
+                # A deterministic check carries its own computed evidence.
+                detail = evidence
+            else:
+                detail = "No detailed analysis available for this check."
+            story.append(Paragraph(_esc(detail), s["detail"]))
+            # Skip the "See the <id> analysis section above" cross-
+            # reference — a template artifact, meaningless now that each
+            # check shows its own section inline.
+            fix = it.get("fix")
+            if fix and "analysis section above" not in fix:
                 story.append(Paragraph(
-                    f"<b>Fix:</b> {_esc(it.get('fix'))}", s["detail"]))
+                    f"<b>Fix:</b> {_esc(fix)}", s["detail"]))
 
     return _render(story, "Forest Capital — Methodology Audit Report")
