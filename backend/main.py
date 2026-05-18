@@ -91,14 +91,17 @@ app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # Uploads mount — serves UAT test-runner screenshots read-only.
-# NOTE: Render's filesystem is ephemeral; these image files do not
-# survive a redeploy. The attestation row in test_results is the durable
-# record — screenshots are supporting evidence only. The directory is
-# created on startup so the mount always resolves.
+# config.SCREENSHOT_DIR resolves to /data/test_screenshots on Render (a
+# persistent disk — screenshots survive redeployments) and to
+# backend/data/test_screenshots in local development. The directory is
+# created on startup so the mount always resolves; the mount is rooted
+# one level above it so the stored "test_screenshots/<uuid>" relative
+# paths resolve under /uploads.
 try:
     from fastapi.staticfiles import StaticFiles
-    _uploads_dir = os.path.join(os.path.dirname(__file__), "data", "uploads")
-    os.makedirs(_uploads_dir, exist_ok=True)
+    from config import SCREENSHOT_DIR
+    os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+    _uploads_dir = os.path.dirname(SCREENSHOT_DIR)
     app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
 except Exception as _exc:  # noqa: BLE001
     log.warning("uploads_mount_failed", error=str(_exc))

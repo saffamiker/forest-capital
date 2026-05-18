@@ -97,6 +97,18 @@ STRESS_SCENARIOS = {
 CACHE_DIR          = "data/cache"
 CACHE_EXPIRY_HOURS = 24
 
+# ── TEST-RUNNER SCREENSHOT STORAGE ────────────────────────────────────────────
+# UAT screenshots persist on a Render disk mounted at /data — surviving
+# redeployments. When /data is absent (local development) the path falls
+# back to backend/data/test_screenshots. The fallback is resolved from
+# this file's location, not the process CWD, so it is correct whatever
+# directory uvicorn was launched from.
+SCREENSHOT_DIR = (
+    "/data/test_screenshots"
+    if os.path.exists("/data")
+    else os.path.join(os.path.dirname(__file__), "data", "test_screenshots")
+)
+
 # ── MACRO DATA (FRED) ─────────────────────────────────────────────────────────
 # 60-second timeout guards against FRED gateway stalls that previously caused
 # 3-minute dashboard load times — regime cache (15-min TTL) absorbs most hits.

@@ -39,10 +39,13 @@ log = structlog.get_logger(__name__)
 ADMIN_EMAIL = "ruurdsm@queens.edu"
 
 # ── Screenshot storage ────────────────────────────────────────────────────────
-# Local disk under backend/data/uploads. Served read-only via the
-# /uploads StaticFiles mount in main.py. EPHEMERAL on Render — see the
-# module docstring.
-_UPLOAD_ROOT = Path(__file__).parent.parent / "data" / "uploads"
+# config.SCREENSHOT_DIR is /data/test_screenshots on Render (a persistent
+# disk — survives redeployments) and backend/data/test_screenshots in
+# local development. Served read-only via the /uploads StaticFiles mount
+# in main.py. The DB stores the relative path "test_screenshots/<uuid>"
+# so the /uploads mount (rooted one level above SCREENSHOT_DIR) resolves it.
+from config import SCREENSHOT_DIR
+
 _SCREENSHOT_SUBDIR = "test_screenshots"
 _ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".gif"}
 _MAX_SCREENSHOTS = 3
@@ -50,8 +53,9 @@ _MAX_SCREENSHOTS = 3
 
 def save_screenshots(files: list[tuple[str, bytes]]) -> list[str]:
     """
-    Writes up to three uploaded images to the local uploads directory and
-    returns their relative paths (e.g. "test_screenshots/<uuid>.png").
+    Writes up to three uploaded images to the persistent screenshot
+    directory and returns their relative paths (e.g.
+    "test_screenshots/<uuid>.png").
 
     files: (filename, bytes) pairs. Fail-open — if the directory cannot be
     written the result is simply stored without screenshots; a failure
@@ -59,15 +63,15 @@ def save_screenshots(files: list[tuple[str, bytes]]) -> list[str]:
     """
     saved: list[str] = []
     try:
-        dest = _UPLOAD_ROOT / _SCREENSHOT_SUBDIR
+        dest = Path(SCREENSHOT_DIR)
         dest.mkdir(parents=True, exist_ok=True)
         for filename, content in files[:_MAX_SCREENSHOTS]:
             ext = Path(filename or "").suffix.lower()
             if ext not in _ALLOWED_IMAGE_EXT or not content:
                 continue
-            rel = f"{_SCREENSHOT_SUBDIR}/{uuid.uuid4().hex}{ext}"
-            (_UPLOAD_ROOT / rel).write_bytes(content)
-            saved.append(rel)
+            fname = f"{uuid.uuid4().hex}{ext}"
+            (dest / fname).write_bytes(content)
+            saved.append(f"{_SCREENSHOT_SUBDIR}/{fname}")
     except Exception as exc:  # noqa: BLE001
         log.warning("test_screenshot_save_failed", error=str(exc))
     return saved

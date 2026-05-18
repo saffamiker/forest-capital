@@ -5083,13 +5083,17 @@ ruurdsm@ only): results (multipart upsert) + results (read) + unseen +
 summary + failures + failures/{id}/resolve + feedback + feedback (read)
 + feedback/{id}/resolve + quality-check + notifications.
 
-SCREENSHOTS: stored to the local backend/data/uploads directory, served
-read-only via the /uploads StaticFiles mount; the DB holds relative
-paths, never BLOBs. EPHEMERAL on Render — the filesystem resets on
-redeploy, so screenshot image files do NOT survive a redeploy. The
+SCREENSHOTS: stored at config.SCREENSHOT_DIR, served read-only via the
+/uploads StaticFiles mount (rooted one level above it so the stored
+"test_screenshots/<uuid>" relative paths resolve); the DB holds those
+relative paths, never BLOBs. SCREENSHOT_DIR is /data/test_screenshots
+on Render — a persistent disk mounted at /data (provision a 1 GB Render
+disk) — so screenshots SURVIVE redeployments; it falls back to
+backend/data/test_screenshots in local development (when /data does not
+exist). The directory is created on startup (os.makedirs exist_ok). The
 test_results attestation row (result, description, severity,
-timestamps) is the durable record; screenshots are supporting evidence
-only. If storage is unavailable the result is stored without
+timestamps) remains the durable record; screenshots are supporting
+evidence. If storage is unavailable the result is stored without
 screenshots — never blocked.
 
 SETTINGS: a "Test Results" section (every tester — per-script progress,
