@@ -37,10 +37,14 @@ export default function ProbabilisticSharpeChart({ strategies }: Props) {
   const xMax = Math.max(1.5, Math.ceil(Math.max(...allValues) * 10) / 10)
   const span = xMax - xMin || 1
 
-  const WIDTH = 720
+  // PAD_LEFT must clear the longest strategy name + type badge — the row
+  // labels are right-anchored at PAD_LEFT-8, so too small a pad clipped
+  // "MOMENTUM ROTATION" / "MAX SHARPE ROLLING" at the viewBox left edge.
+  // WIDTH grows with it so the plotting area (innerW) is unchanged.
+  const WIDTH = 780
   const ROW_H = 28
   const HEIGHT = usable.length * ROW_H + 40
-  const PAD_LEFT = 160
+  const PAD_LEFT = 220
   const PAD_RIGHT = 60
   const PAD_TOP = 12
   const innerW = WIDTH - PAD_LEFT - PAD_RIGHT
