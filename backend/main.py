@@ -1923,20 +1923,22 @@ async def audit_export_run(
     session: dict = Depends(require_permission("team_member")),
 ):
     """
-    The audit run as a downloadable plain-text report — suitable for the
-    Analytical Appendix as evidence of independent statistical
-    verification. Sysadmin only.
+    The audit run as a downloadable PDF — the Statistical Audit Report,
+    professionally formatted for inclusion in the Analytical Appendix as
+    evidence of independent statistical verification. Project team only.
     """
-    from tools.audit_engine import format_audit_report, get_audit_run
+    from datetime import date
+    from tools.audit_engine import get_audit_run
+    from tools.audit_pdf import build_statistical_audit_pdf
     run = await get_audit_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Audit run not found.")
-    report = format_audit_report(run)
+    pdf = build_statistical_audit_pdf(run)
+    filename = f"forest_capital_statistical_audit_{date.today().isoformat()}.pdf"
     return Response(
-        content=report,
-        media_type="text/plain",
-        headers={"Content-Disposition":
-                 f'attachment; filename="audit_report_{run_id}.txt"'},
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -2533,6 +2535,43 @@ async def qa_audit(request: Request, session: dict = Depends(require_auth)):
             log.error("qa_audit_error", error=str(exc))
 
     return MOCK_QA_AUDIT
+
+
+@app.get("/api/v1/qa/export")
+@limiter.limit("10/minute")
+async def qa_export(request: Request, session: dict = Depends(require_auth)):
+    """
+    The QA methodology audit as a downloadable PDF — the Methodology
+    Audit Report, formatted for inclusion in the Analytical Appendix.
+    Open to every authenticated user: the Methodology Review section of
+    the QA tab is not team-gated.
+
+    The audit is run fresh (the same path as POST /api/qa/audit) so the
+    PDF always reflects the current strategy results; the test
+    environment and a pipeline failure fall back to the mock audit so
+    the endpoint always returns a valid PDF.
+    """
+    from datetime import date
+    from tools.audit_pdf import build_methodology_audit_pdf
+    audit = MOCK_QA_AUDIT
+    if ENVIRONMENT != "test":
+        try:
+            from tools.data_fetcher import get_full_history
+            from tools.backtester import run_all_strategies
+            from agents.qa_agent import QAAgent
+            history = get_full_history()
+            strategy_results = run_all_strategies(history)
+            audit = QAAgent().run_audit(strategy_results, run_full_checklist=True)
+        except Exception as exc:
+            log.error("qa_export_error", error=str(exc))
+            audit = MOCK_QA_AUDIT
+    pdf = build_methodology_audit_pdf(audit)
+    filename = f"forest_capital_methodology_audit_{date.today().isoformat()}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/qa/ask")

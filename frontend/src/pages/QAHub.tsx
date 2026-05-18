@@ -16,7 +16,7 @@ import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import {
   ShieldCheck, Loader2, CheckCircle, XCircle, AlertTriangle, PlayCircle,
-  Presentation,
+  Presentation, Download,
 } from 'lucide-react'
 import QAAuditPanel from '../components/QAAuditPanel'
 import AuditPanel from '../components/AuditPanel'
@@ -296,6 +296,7 @@ export default function QAHub() {
   const [auditRefreshKey, setAuditRefreshKey] = useState(0)
   const [showProgress, setShowProgress] = useState(false)
   const [presentMode, setPresentMode] = useState(false)
+  const [reportError, setReportError] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => () => {
@@ -347,6 +348,22 @@ export default function QAHub() {
         }, AUDIT_POLL_MS)
       })
       .catch(() => setAuditPhase('error'))
+  }
+
+  // Download the Methodology Audit Report PDF (GET /api/v1/qa/export).
+  const downloadMethodologyReport = () => {
+    setReportError(null)
+    void axios.get('/api/v1/qa/export', { responseType: 'blob' })
+      .then((res) => {
+        const url = URL.createObjectURL(res.data as Blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `forest_capital_methodology_audit_${
+          new Date().toISOString().slice(0, 10)}.pdf`
+        a.click()
+        URL.revokeObjectURL(url)
+      })
+      .catch(() => setReportError('Could not download the methodology report.'))
   }
 
   if (presentMode) {
@@ -448,13 +465,27 @@ export default function QAHub() {
 
       {/* Section 1 — Methodology Review (every authenticated user). */}
       <section className="space-y-3">
-        <div>
-          <h2 className="text-base font-semibold text-white">Methodology Review</h2>
-          <p className="text-xs text-muted mt-0.5">
-            The QA agent's methodology checklist — backtesting assumptions,
-            statistical integrity, cross-validation and presentation rigour.
-          </p>
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-base font-semibold text-white">Methodology Review</h2>
+            <p className="text-xs text-muted mt-0.5">
+              The QA agent's methodology checklist — backtesting assumptions,
+              statistical integrity, cross-validation and presentation rigour.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={downloadMethodologyReport}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded text-xs
+                       border border-border text-slate-300 hover:bg-navy-700
+                       transition-colors shrink-0"
+          >
+            <Download className="w-3.5 h-3.5" /> Download Methodology Report
+          </button>
         </div>
+        {reportError && (
+          <p className="text-2xs text-danger">{reportError}</p>
+        )}
         <QAAuditPanel />
       </section>
 

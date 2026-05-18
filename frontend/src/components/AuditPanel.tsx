@@ -204,7 +204,9 @@ export default function AuditPanel() {
       const url = URL.createObjectURL(res.data as Blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `audit_report_${id}.txt`
+      // The endpoint returns the formatted Statistical Audit Report PDF.
+      a.download = `forest_capital_statistical_audit_${
+        new Date().toISOString().slice(0, 10)}.pdf`
       a.click()
       URL.revokeObjectURL(url)
     } catch {

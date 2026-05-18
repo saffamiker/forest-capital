@@ -5536,8 +5536,28 @@ ENDPOINTS (all manage_users-gated — sysadmin only):
   GET  /api/v1/audit/runs           — every run, newest first
   GET  /api/v1/audit/runs/latest    — the most recent run with findings
   GET  /api/v1/audit/runs/{id}      — one run, findings grouped by layer
-  GET  /api/v1/audit/runs/{id}/export — the plain-text audit report
+  GET  /api/v1/audit/runs/{id}/export — the Statistical Audit Report PDF
 A 'running' audit_runs row is the concurrency lock.
+
+AUDIT REPORT PDFs (May 18 2026): both audit exports are professionally
+formatted PDFs (tools/audit_pdf.py, reportlab) for the Analytical
+Appendix — white background, Forest Capital / McColl School of Business
+identity, page numbers, PASS/WARN/FAIL colour coding.
+  GET /api/v1/audit/runs/{id}/export → build_statistical_audit_pdf —
+    cover, executive summary (what the audit is, the three layers,
+    overall result, how to read PASS/WARN/FAIL, the independent
+    auditor), per-layer detailed findings, and a data-provenance page.
+    team_member-gated.
+  GET /api/v1/qa/export → build_methodology_audit_pdf — the QA agent's
+    methodology checklist as a PDF: cover, executive summary, and
+    findings grouped by category. Runs the audit fresh (the POST
+    /api/qa/audit path); require_auth (the Methodology Review is open to
+    every authenticated user). Filenames:
+    forest_capital_statistical_audit_<date>.pdf and
+    forest_capital_methodology_audit_<date>.pdf. The QA tab carries a
+    Download button on each section. (The /mnt/skills PDF skill is
+    absent in this environment; reportlab — already a pinned dependency
+    — is the engine, following the docx/pptx generator pattern.)
 
 FRONTEND: Settings → Statistical Audit (sysadmin only, below Users) —
 the latest run's status and per-layer progress, findings grouped as
