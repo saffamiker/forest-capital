@@ -111,6 +111,52 @@ def clean_platform_users():
     asyncio.run(_delete_added(before))
 
 
+@pytest.fixture
+def clean_editor_drafts():
+    """
+    Reusable teardown for tests that create editor_drafts rows (the
+    document editor). Snapshots the editor_drafts ids before the test
+    and hard-deletes any added during it — editor_draft_versions rows
+    cascade. Fail-open: with no database it is a no-op.
+    """
+    import asyncio
+
+    async def _ids() -> set[int]:
+        try:
+            from sqlalchemy import text
+
+            from database import AsyncSessionLocal
+            if AsyncSessionLocal is None:
+                return set()
+            async with AsyncSessionLocal() as s:
+                rows = await s.execute(text("SELECT id FROM editor_drafts"))
+                return {r[0] for r in rows.fetchall()}
+        except Exception:
+            return set()
+
+    async def _delete_added(before: set[int]) -> None:
+        try:
+            from sqlalchemy import text
+
+            from database import AsyncSessionLocal
+            if AsyncSessionLocal is None:
+                return
+            async with AsyncSessionLocal() as s:
+                rows = await s.execute(text("SELECT id FROM editor_drafts"))
+                added = [r[0] for r in rows.fetchall() if r[0] not in before]
+                for row_id in added:
+                    await s.execute(text(
+                        "DELETE FROM editor_drafts WHERE id = :i"),
+                        {"i": row_id})
+                await s.commit()
+        except Exception:
+            pass
+
+    before = asyncio.run(_ids())
+    yield
+    asyncio.run(_delete_added(before))
+
+
 @pytest.fixture(autouse=True)
 def _clear_inprocess_caches():
     """Resets every module-level in-process cache before AND after each test.
