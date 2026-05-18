@@ -15,9 +15,11 @@ from typing import Any
 import structlog
 
 from agents.base import (
+    CITATION_INSTRUCTION,
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    WEB_SEARCH_TOOL,
     build_agent_response,
     call_claude,
 )
@@ -61,7 +63,9 @@ and a clear position with its supporting reasoning.
 
 {GLOBAL_AGENT_RULE}
 
-{SCOPE_ENFORCEMENT}"""
+{SCOPE_ENFORCEMENT}
+
+{CITATION_INSTRUCTION}"""
 
 
 class EquityAnalyst:
@@ -110,7 +114,8 @@ class EquityAnalyst:
             harness = GeneratorEvaluatorHarness()
             result = harness.run(
                 generator_fn=lambda p: call_claude(
-                    SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500),
+                    SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500,
+                    tools=[WEB_SEARCH_TOOL]),
                 evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
                 generator_prompt=user_message,
                 context=str(context)[:4000],
