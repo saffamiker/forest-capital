@@ -1054,3 +1054,43 @@ Migration: 015 — operator runs `alembic upgrade head` on Render.
 
 Test counts (cumulative): 1157 backend pass, 21 skipped (HMM/Windows +
                            deployment), 220 frontend pass.
+
+
+## Automated feedback triage ✅ COMPLETE (2026-05-17)
+The platform triages its own UAT backlog — an AI QA lead turns the
+feedback / failure backlog into a structured triage report and opens
+GitHub issues for the urgent items.
+
+Backend:
+  migrations/016_create_triage_reports.py — triage_reports table +
+    changelog entry 35.
+  tools/triage_engine.py — run_triage() (the seven-step flow), the
+    triage_reports persistence, the GitHub issue creation, and the
+    threshold / concurrency helpers. Fail-open throughout.
+  tools/github_labels.py — ensure_triage_labels() (the ten triage
+    labels, idempotent, fail-open).
+  agents/evaluator_prompts.py — triage_evaluator_prompt.
+  main.py — POST/GET /api/v1/testing/triage and /triage/latest
+    (manage_users-gated); the threshold and test-pass automation hooks
+    on the result / feedback POST endpoints (fire-and-forget).
+
+  tests/test_triage.py — 20 tests: the sysadmin gate on the three triage
+    endpoints; run_triage early-return on an empty backlog and skip on a
+    concurrent run; the five-section report generation and the
+    high-severity immediate set; the threshold trigger at exactly 5
+    items, the test-pass trigger, and both blocked by a concurrent run;
+    the run_triage orchestration (item count, status, fail-open GitHub);
+    and GitHub issue / label creation failing open with no token.
+
+Frontend:
+  components/TestRunnerSettings.tsx — the Settings → Triage Reports
+    block (sysadmin only): the latest report, a Run-Triage button, and
+    a history accordion.
+  components/TestNotifications.tsx — the "🔍 Triage report ready"
+    login notification.
+  components/TestRunner.tsx — sends script_complete on the final step.
+
+Migration: 016 — operator runs `alembic upgrade head` on Render.
+
+Test counts (cumulative): 1177 backend pass, 21 skipped (HMM/Windows +
+                           deployment), 232 frontend pass.

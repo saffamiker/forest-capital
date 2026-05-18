@@ -5342,6 +5342,89 @@ docs/mobile_checklist.md is the manual visual-verification checklist
 (iPhone SE / 14 / iPad / desktop, portrait and landscape).
 
 
+─────────────────────────────────────────────────────────────────────────────
+AUTOMATED FEEDBACK TRIAGE (migration 016, May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The platform triages its own UAT backlog. When tester feedback and
+failure reports accumulate, a QA-lead agent produces a structured
+triage report and opens GitHub issues for the urgent items — no manual
+extraction.
+
+triage_reports TABLE (migration 016): id, triggered_by (threshold |
+test_pass | manual), triggered_at, items_assessed, report_text,
+github_issues_created, status (running | complete | partial | failed)
+and a nullable JSONB metadata column. Changelog entry 35.
+
+run_triage() — tools/triage_engine.py, the seven-step flow:
+  1. Gather the unaddressed backlog — test_feedback rows with status
+     'new' plus test_results failures with resolved_at NULL (reuses the
+     test_runner read layer). An empty backlog returns early — no report.
+  2. Build the agent context — every item structured into a text block.
+  3. Agent triage call — claude-sonnet-4-6 through the
+     GeneratorEvaluatorHarness with triage_evaluator_prompt. In the test
+     environment / with no API key a deterministic five-section report
+     is produced instead.
+  4. Parse the report — record which of the five required sections
+     (IMMEDIATE ACTIONS, QUICK WINS, PATTERNS AND THEMES, POST-DEADLINE
+     BACKLOG, SUMMARY) are present, into metadata.
+  5. GitHub issues — one issue per blocking / major item. Severity is
+     deterministic — the tester-assigned severity for a failure, the
+     AI-assigned ai_severity for feedback — so the issue set never
+     depends on parsing the agent's prose. Issue {number, url} pairs are
+     stored in triage_reports.metadata.github_issues (test_results /
+     test_feedback carry no issue column, so metadata is the store).
+  6. Store the report; move the assessed feedback from 'new' to
+     'triaged'. Failures carry no status column, so they are not flagged
+     — the threshold trigger time-scopes them instead.
+  7. The stored report IS the login-notification source — the frontend
+     surfaces it (see below). No separate notifications table, the same
+     pattern as the existing test notifications.
+
+CONCURRENCY: the first thing run_triage does after confirming a
+non-empty backlog is INSERT a triage_reports row with status 'running'
+— that row is both the report placeholder and the concurrency lock. A
+second run while one is 'running' is skipped.
+
+FAIL-OPEN THROUGHOUT: every database read fails open to a safe default;
+a step failure still finalises the report with status partial / failed;
+GitHub issue creation (and label setup) never aborts the run. Triage
+always runs in a fire-and-forget background task — it never blocks the
+result / feedback submission that triggered it.
+
+TWO AUTOMATION TRIGGERS (main._triage_trigger, fire-and-forget hooks on
+the result / feedback POST endpoints):
+  - Threshold — 5+ unaddressed items have accumulated since the last
+    triage run (count_unaddressed_items scoped by last_triage_at).
+  - Test pass — a tester completed a full script. The client holds the
+    testScripts.ts step inventory, so the TestRunner signals completion
+    with a `script_complete` form flag on the final step's result POST;
+    the backend hook fires on that flag.
+Michael can also trigger manually from Settings → Triage Reports.
+
+GITHUB LABELS: tools/github_labels.ensure_triage_labels() creates the
+ten triage labels (bug / enhancement / ux-issue / question; blocking /
+major / minor / trivial; quick-win / post-deadline) with sensible
+colours before the first issue is opened — idempotent, fail-open.
+
+ENDPOINTS (all manage_users-gated — sysadmin only):
+  POST /api/v1/testing/triage         — fire a manual run (background)
+  GET  /api/v1/testing/triage         — every report, newest first
+  GET  /api/v1/testing/triage/latest  — the most recent report
+
+FRONTEND: Settings → Test Administration → Triage Reports (sysadmin
+only) shows the latest report in full (summary line, GitHub issue
+links, the report rendered as markdown), a "Run Triage Now" button that
+polls /triage/latest every 5s while a run is in flight, and a
+collapsible history of previous reports. TestNotifications shows a
+"🔍 Triage report ready" login notification for a report under 24h old.
+
+EVALUATOR: triage_evaluator_prompt (agents/evaluator_prompts.py) scores
+the report on five criteria — all five sections present, immediate
+items referenced specifically, real patterns, effort estimates on every
+immediate / quick-win item, and an accurate SUMMARY.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -5390,6 +5473,10 @@ was written, so the GitHub board was not updated programmatically).
      hamburger nav drawer, bottom-sheet panels, sticky-column tables,
      safe-area insets, 44px touch targets (12 commits, frontend-only;
      desktop unchanged)
+  ✅ Automated feedback triage — the QA backlog is triaged by an AI QA
+     lead into immediate actions / quick wins / patterns, with GitHub
+     issues for the urgent items; threshold + test-pass + manual
+     triggers, sysadmin-only (migration 016)
   ✅ Changelog + What's New modal + CI/CD pipeline (ci.yml, changelog
      gate, migrations 011-012)
   ✅ Site tour — 15-step react-joyride walkthrough, academic-rationale
