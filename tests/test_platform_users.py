@@ -103,8 +103,9 @@ class TestManageUsersGate:
 
 class TestCreateUserValidation:
     """The create endpoint validates email and role before touching the
-    database. A request that clears validation reaches create_user,
-    which returns 503 with no database — confirming it passed."""
+    database. A request that clears validation reaches create_user —
+    503 with no database, 201 against a database (the migration-015
+    seed applied). Either way it is NOT a validation rejection."""
 
     def test_invalid_email_is_422(self):
         resp = client.post(USERS, json={"email": "not-an-email"},
@@ -123,12 +124,13 @@ class TestCreateUserValidation:
         assert resp.status_code == 422
 
     def test_valid_request_clears_validation(self):
-        # Valid email + role → reaches create_user → 503 (no database).
-        # Anything other than 422/409 proves validation was passed.
+        # Valid email + role → reaches create_user. Any status that is
+        # not a validation rejection (422) or a duplicate (409) proves
+        # validation was passed — 503 with no database, 201 with one.
         resp = client.post(USERS,
                             json={"email": "new@queens.edu", "role": "viewer"},
                             headers=SYSADMIN_HEADERS)
-        assert resp.status_code == 503
+        assert resp.status_code not in (422, 409)
 
 
 class TestPatchDeleteNotFound:
