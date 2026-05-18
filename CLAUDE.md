@@ -5623,6 +5623,57 @@ The checklist size is no longer hardcoded in the UI — the QA panel
 reads `checks_total` from the report.
 
 
+─────────────────────────────────────────────────────────────────────────────
+QA TAB — UNIFIED QUALITY HUB (May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The QA tab (/qa, pages/QAHub.tsx) is a two-section quality-assurance hub.
+The Statistical Audit was relocated here from Settings — Settings no
+longer has an audit section.
+
+  Section 1 — Methodology Review: the QA agent's 39-check methodology
+  checklist (QAAuditPanel). Visible to every authenticated user — no
+  permission change from the old QA tab.
+
+  Section 2 — Statistical Audit: the independent three-layer
+  recomputation (AuditPanel). The full findings panel is project-team
+  only (useIsTeamMember); a non-team viewer sees a read-only summary of
+  the latest run — verdict, date, check counts — and the line "Full
+  results available to project team members."
+
+RUN FULL QA: a button at the top of the tab (team_member, TeamGate-
+wrapped) triggers both audits at once — qaStore.reload() (POST
+/api/qa/audit) and POST /api/v1/audit/run — and shows unified progress,
+each row settling to a pass count, then an overall verdict (GREEN both
+pass, AMBER warnings only, RED any failure). The statistical-audit poll
+is capped (36 × 10s) and stops cleanly when no run row appears (e.g. no
+database); the audit panel remounts on completion to show the fresh run.
+
+PRESENTATION VIEW: a button (team_member) switches the tab to a clean
+Quality Assurance Certificate for screen-sharing — a header (Forest
+Capital Portfolio Intelligence System, FNA 670 — McColl School of
+Business), the last-full-QA timestamp, and three boxes: Methodology
+Review (checks passed / failures / warnings), Statistical Audit
+(per-layer Layer 1/2/3 status, check counts, independent model Opus)
+and Overall. Exit returns to the full QA view. Follows the Team
+Activity present-mode pattern.
+
+AUDIT ENDPOINT RE-GATING: the audit endpoints moved off sysadmin-only
+so the team can drive the audit from the QA tab —
+  POST /api/v1/audit/run              — team_member
+  GET  /api/v1/audit/runs             — team_member
+  GET  /api/v1/audit/runs/{id}        — team_member
+  GET  /api/v1/audit/runs/{id}/export — team_member
+  GET  /api/v1/audit/runs/latest      — any authenticated user (backs
+        the viewer read-only summary; the full panel is frontend-gated)
+
+PERMISSION SUMMARY:
+  Methodology Review               — every authenticated user
+  Statistical Audit full panel     — team_member+
+  Run Full QA / Presentation View  — team_member+
+  Non-team viewer                  — read-only audit summary only
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.

@@ -76,12 +76,11 @@ All data follows a strict hierarchy — Excel is authoritative; external fetches
 2. **Data and Study Period** — read-only data-table status from `GET /api/v1/admin/data-status`: per-table row count, date range, last-updated timestamp and a green/amber/red staleness pill (green = newest data within 15 days of today, amber 15–30, red > 30), plus a study-period summary line.
 3. **Analytics Configuration** — the risk-free rate from `GET /api/v1/analytics/config` (mean monthly FRED DTB3 ×12 — the same value the efficient frontier and analytics layer use), shown read-only.
 4. **Users** *(sysadmin only)* — the `UserManagementPanel`: add, edit and deactivate platform users and tune each one's permission checklist. See *Access Control* below.
-5. **Statistical Audit** *(sysadmin only)* — the `AuditPanel`: run a full or pre-submission audit, view the latest run's findings, and download the audit report. See *Statistical Audit* below.
-6. **Academic Documents** — the `AcademicDocumentsPanel` upload UI (moved here from the Reports view). Accepts **PDF and Markdown (.md)**; file type is decided by extension, authoritative over MIME type — PDFs go through pypdf, `.md` files are read directly as UTF-8. Uploaded documents are injected into every AI agent's system context. Deep-linkable via `/settings#academic-documents`.
-7. **Account** — signed-in email, the Testing Mode toggle and Start Test Pass control, the Retake Site Tour button, and Sign out.
-8. **Release History** — every changelog entry with its academic rationale, newest first; unseen entries carry a "New" badge.
-9. **Test Results** *(project team)* — the signed-in tester's guided-UAT attestations per script, with re-test and an attestation CSV export.
-10. **Test Administration** *(sysadmin only)* — the all-testers Failure Reports list, the AI-categorised Feedback Backlog, and the **Triage Reports** block (see *Automated Triage* below).
+5. **Academic Documents** — the `AcademicDocumentsPanel` upload UI (moved here from the Reports view). Accepts **PDF and Markdown (.md)**; file type is decided by extension, authoritative over MIME type — PDFs go through pypdf, `.md` files are read directly as UTF-8. Uploaded documents are injected into every AI agent's system context. Deep-linkable via `/settings#academic-documents`.
+6. **Account** — signed-in email, the Testing Mode toggle and Start Test Pass control, the Retake Site Tour button, and Sign out.
+7. **Release History** — every changelog entry with its academic rationale, newest first; unseen entries carry a "New" badge.
+8. **Test Results** *(project team)* — the signed-in tester's guided-UAT attestations per script, with re-test and an attestation CSV export.
+9. **Test Administration** *(sysadmin only)* — the all-testers Failure Reports list, the AI-categorised Feedback Backlog, and the **Triage Reports** block (see *Automated Triage* below).
 
 **Staleness pills — expected behaviour:** `market_data_monthly` and `ff_factors_monthly` show **red** pills by design. The dataset is intentionally locked at December 2025, so the newest data is several months behind "today". The pill reports recency-vs-today; a red pill here is the dataset's deliberate end date, not a pipeline failure.
 
@@ -221,6 +220,8 @@ GitHub issues are opened automatically for the urgent items, tagged with severit
 
 ## Statistical Audit
 
+The **QA tab** is a unified quality-assurance hub with two sections: **Methodology Review** — the QA agent's 39-check methodology checklist, visible to every authenticated user — and **Statistical Audit** (described below). A **Run Full QA** button at the top runs both at once with unified progress and an overall verdict; a **Presentation View** renders a clean QA certificate for screen-sharing. The Statistical Audit panel was relocated to the QA tab from Settings — the full panel is project-team only, and a non-team viewer sees a read-only summary of the latest run.
+
 Every analytical figure on the platform can be **independently re-verified**. The audit sends the raw data and the formula specifications to a *separate* model — **`claude-opus-4-7`**, independent of the `claude-sonnet-4-6` the platform computes with — which recomputes every metric from scratch and flags any discrepancy. It is the platform's strongest accuracy guarantee: every number shown to Forest Capital and faculty has been recomputed by a separate model, with full working shown.
 
 **Three layers run in sequence:**
@@ -233,7 +234,7 @@ Every step is fail-open: a failure still stores the run with whatever completed,
 
 **Two computation regimes.** The Analytics layer annualises monthly data with ×12; the Dashboard strategy table annualises daily data with ×252. CAGR is regime-independent and is cross-checked directly; Sharpe and max-drawdown differ between the layers *by construction*, so the audit documents the difference (in the report's *Computation Regimes* section) rather than flagging it.
 
-**How to run it:** Settings → **Statistical Audit** (sysadmin only) → **Run Full Audit**. Use **Run Pre-Submission Audit** before a deadline — it runs the same three layers and its **Download Audit Report** produces a formatted text report intended for inclusion in the **Analytical Appendix** as evidence of independent statistical verification. The sysadmin sees an "⚠️ Statistical audit found discrepancies" login notification when an audit completes with failures.
+**How to run it:** the **QA tab** → **Statistical Audit** section → **Run Full Audit** (project team). Use **Run Pre-Submission Audit** before a deadline — it runs the same three layers and its **Download Audit Report** produces a formatted text report intended for inclusion in the **Analytical Appendix** as evidence of independent statistical verification. Or use **Run Full QA** at the top of the QA tab to trigger the methodology checklist and the statistical audit together. A login notification flags an audit that completes with failures.
 
 **Known limitation:** the backtester does not persist per-rebalance weights, so the weight-constraint check and an independent turnover recomputation cannot run from stored data — that check skips honestly rather than passing unverified.
 
