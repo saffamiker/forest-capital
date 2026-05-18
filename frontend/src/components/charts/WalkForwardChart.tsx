@@ -108,7 +108,11 @@ export default function WalkForwardChart({ walkForward }: Props) {
 
       <div style={{ width: '100%', height: 280 }}>
         <ResponsiveContainer>
-          <LineChart data={data} margin={{ top: 8, right: 20, left: 0, bottom: 8 }}>
+          {/* top:28 — room for the "2022 Regime Break" reference-line
+              label (position:'top') so it is not clipped by the chart
+              edge. left:20 — room for the rotated "OOS Sharpe" axis
+              label so it does not overlap the y-axis tick values. */}
+          <LineChart data={data} margin={{ top: 28, right: 20, left: 20, bottom: 8 }}>
             <CartesianGrid stroke={GRID_STROKE} strokeDasharray="3 3" />
             <XAxis
               dataKey="window_end"
