@@ -9,6 +9,7 @@ import TeamGate from './TeamGate'
 import type { AgentMessage } from '../types/agents'
 import { useCouncilStore } from '../stores/councilStore'
 import { trackFeature } from '../lib/activityLogger'
+import { useAuth } from '../App'
 
 interface AgentStyleConfig {
   accent: string
@@ -135,7 +136,16 @@ export default function CouncilDebate() {
   // navigating Council → Dashboard → Council preserves the previous response
   // without a re-fetch. The query input is wired to the store's `query`
   // field so half-typed text also survives navigation.
-  const { query, result, loading, error, lastQuery, setQuery, runQuery, abort } = useCouncilStore()
+  const { query, result, loading, error, lastQuery, setQuery, runQuery, abort,
+          councilUsage } = useCouncilStore()
+  const { session } = useAuth()
+  // Viewer council allocation — the store's post-query usage if a query
+  // has run this session, otherwise the value from /api/auth/me. A null
+  // limit means the user is unlimited (team member / sysadmin).
+  const councilUsed = councilUsage?.used ?? session?.councilQueriesUsed ?? 0
+  const councilLimit = councilUsage?.limit ?? session?.councilQueriesLimit ?? null
+  const isLimited = councilLimit != null
+  const limitReached = isLimited && councilUsed >= councilLimit
   const [activeTab, setActiveTab] = useState<'debate' | 'heatmap'>('debate')
   // Active persona-modal target. Null = modal closed. Carries the
   // agent message so the THIS SESSION tab can render the agent's
@@ -207,7 +217,11 @@ export default function CouncilDebate() {
         ) : (
           <button
             type="submit"
-            disabled={!query.trim()}
+            disabled={!query.trim() || limitReached}
+            title={limitReached
+              ? 'Council query allocation used — contact Michael Ruurds '
+                + 'for additional access.'
+              : undefined}
             className="flex items-center justify-center gap-2 w-full sm:w-auto
                        px-4 py-2.5 bg-electric hover:bg-blue-500 disabled:opacity-40
                        disabled:cursor-not-allowed text-white text-sm font-medium
@@ -219,6 +233,27 @@ export default function CouncilDebate() {
         )}
       </form>
 
+      {/* Viewer council allocation — shown only for a limited (non-
+          unlimited) user; hidden entirely for team members and sysadmin. */}
+      {isLimited && (
+        <div className={`text-xs rounded-lg border px-3 py-2 ${
+          limitReached
+            ? 'border-warning/40 bg-warning/10 text-warning'
+            : 'border-border bg-navy-800 text-muted'}`}>
+          {limitReached ? (
+            <span>
+              You have used all {councilLimit} of your council queries.
+              {' '}Please contact{' '}
+              <a href="mailto:ruurdsm@queens.edu"
+                 className="text-electric hover:underline">Michael Ruurds</a>
+              {' '}to request additional access.
+            </span>
+          ) : (
+            <span>Council queries: {councilUsed} of {councilLimit} used.</span>
+          )}
+        </div>
+      )}
+
       {/* Academic Review — a secondary council action that evaluates the
           project's analytics, findings and deliverables against the
           uploaded project requirements. A team feature; the Ask Council
@@ -229,8 +264,10 @@ export default function CouncilDebate() {
 
       {/* Council failure — a failed query previously left a blank screen
           (the empty state is gated on `!result`, and an errored run sets
-          a truthy `result`). This surfaces the store error with a retry. */}
-      {result?.error && !loading && (
+          a truthy `result`). This surfaces the store error with a retry.
+          The council_limit_reached case is NOT an error — the viewer
+          allocation banner above already explains it — so it is excluded. */}
+      {result?.error && !loading && error !== 'council_limit_reached' && (
         <div className="card border border-danger/30 bg-danger/5 p-4">
           <div className="flex items-start gap-2.5">
             <AlertTriangle className="w-4 h-4 text-danger shrink-0 mt-0.5" />

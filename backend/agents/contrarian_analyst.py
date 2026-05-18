@@ -127,7 +127,7 @@ class ContrarianAnalyst:
                             {"role": "system", "content": _academic_ctx(_SYSTEM_PROMPT)},
                             {"role": "user", "content": user_prompt},
                         ],
-                        "max_tokens": 800,
+                        "max_tokens": 2000,
                         "temperature": 0.7,
                     },
                 )
@@ -136,6 +136,15 @@ class ContrarianAnalyst:
 
             # Both providers return the OpenAI shape: choices[0].message.content
             challenge_text = data["choices"][0]["message"]["content"]
+            # Token-usage capture — OpenAI-shape usage block. No-op unless
+            # an endpoint started a capture; never breaks the response.
+            try:
+                from agents.usage import record_usage
+                usage = data.get("usage") or {}
+                record_usage("grok", usage.get("prompt_tokens", 0),
+                             usage.get("completion_tokens", 0))
+            except Exception:  # noqa: BLE001
+                pass
             log.info(
                 "contrarian_analyst_completed",
                 response_len=len(challenge_text),

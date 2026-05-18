@@ -10,17 +10,18 @@
  *   Executive Brief            → POST /api/v1/export/executive-brief
  *   Final Presentation Deck    → POST /api/v1/export/presentation-deck
  *
- * Generation is a 30-90 second server call (the Academic Writer harness
- * plus, for the deck, server-side chart rendering). Each card shows a
- * progress state while it runs, an error with a retry on failure, and
- * the last-generated timestamp (persisted in localStorage so it survives
- * a reload). The downloaded files are FIRST DRAFTS for Bob to refine —
- * every one carries the AI DRAFT banner.
+ * The midpoint paper and the deck also load the generated content into
+ * an editor draft (the endpoint returns the new draft id in the
+ * X-Draft-Id header); the card then offers Open in Editor as the
+ * primary CTA, with Download as a secondary action. The downloaded
+ * files are FIRST DRAFTS — every one carries the AI DRAFT banner.
  */
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, Presentation, Download, Loader2, AlertCircle, CheckCircle,
+  PenLine,
 } from 'lucide-react'
 import TeamGate from './TeamGate'
 
@@ -38,7 +39,7 @@ const DOCS: DocSpec[] = [
     title: 'Midpoint Submission Paper',
     description:
       'Three-page academic paper formatted to midpoint requirements. '
-      + 'Double-spaced, 12pt, ready to submit.',
+      + 'Double-spaced, 12pt, ready to refine in the editor.',
     endpoint: '/api/v1/export/midpoint-paper',
     icon: FileText,
   },
@@ -55,14 +56,13 @@ const DOCS: DocSpec[] = [
     id: 'deck',
     title: 'Final Presentation Deck',
     description:
-      '16-slide deck with real data charts in light mode, ready for the '
-      + 'final presentation.',
+      '16-slide deck with real data charts in light mode, ready to '
+      + 'refine in the editor.',
     endpoint: '/api/v1/export/presentation-deck',
     icon: Presentation,
   },
 ]
 
-// localStorage key for the per-document last-generated timestamps.
 const LS_KEY = 'fc_doc_generated_at'
 
 function readGeneratedAt(): Record<string, string> {
@@ -74,15 +74,15 @@ function readGeneratedAt(): Record<string, string> {
   }
 }
 
-/** Triggers a browser download of a blob response, naming it from the
- *  Content-Disposition header when present. */
-function downloadBlob(res: { data: unknown; headers: Record<string, unknown> },
-                      fallback: string): void {
-  const dispo = String(res.headers['content-disposition'] ?? '')
-  const match = /filename="?([^";]+)"?/i.exec(dispo)
-  const filename = match?.[1] ?? fallback
-  const contentType = String(res.headers['content-type'] ?? 'application/octet-stream')
-  const blob = new Blob([res.data as BlobPart], { type: contentType })
+/** A completed generation — the file is held in memory until the user
+ *  downloads it or opens the draft in the editor. */
+interface GenResult {
+  blob: Blob
+  filename: string
+  draftId: number | null
+}
+
+function triggerDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
@@ -94,9 +94,12 @@ function downloadBlob(res: { data: unknown; headers: Record<string, unknown> },
 }
 
 export default function DocumentGenerationPanel() {
+  const navigate = useNavigate()
   const [busyId, setBusyId] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const [generatedAt, setGeneratedAt] = useState<Record<string, string>>(readGeneratedAt)
+  const [results, setResults] = useState<Record<string, GenResult>>({})
+  const [generatedAt, setGeneratedAt] =
+    useState<Record<string, string>>(readGeneratedAt)
 
   const handleGenerate = async (doc: DocSpec) => {
     setBusyId(doc.id)
@@ -107,32 +110,43 @@ export default function DocumentGenerationPanel() {
     })
     try {
       const res = await axios({
-        url: doc.endpoint,
-        method: 'POST',
-        responseType: 'blob',
+        url: doc.endpoint, method: 'POST', responseType: 'blob',
       })
-      downloadBlob(res, `forest-capital-${doc.id}`)
+      const dispo = String(res.headers['content-disposition'] ?? '')
+      const match = /filename="?([^";]+)"?/i.exec(dispo)
+      const filename = match?.[1] ?? `forest-capital-${doc.id}`
+      const draftHeader = res.headers['x-draft-id']
+      const draftId = draftHeader != null ? Number(draftHeader) : null
+      const blob = new Blob([res.data as BlobPart], {
+        type: String(res.headers['content-type']
+          ?? 'application/octet-stream'),
+      })
+
+      // A document that did not produce an editor draft (the brief)
+      // downloads immediately, as before. One that did keeps the file
+      // in memory and offers Open in Editor as the primary action.
+      if (draftId === null || Number.isNaN(draftId)) {
+        triggerDownload(blob, filename)
+      } else {
+        setResults((prev) => ({
+          ...prev, [doc.id]: { blob, filename, draftId },
+        }))
+      }
+
       const now = new Date().toISOString()
       setGeneratedAt((prev) => {
         const next = { ...prev, [doc.id]: now }
-        try {
-          localStorage.setItem(LS_KEY, JSON.stringify(next))
-        } catch {
-          /* localStorage unavailable — the timestamp is best-effort */
-        }
+        try { localStorage.setItem(LS_KEY, JSON.stringify(next)) } catch { /* best-effort */ }
         return next
       })
     } catch (err) {
-      // A blob-typed error response must be read as text before its
-      // JSON detail can be surfaced.
       let msg = 'Generation failed. Please try again.'
       if (axios.isAxiosError(err) && err.response?.data instanceof Blob) {
         try {
-          const parsed = JSON.parse(await err.response.data.text()) as { detail?: string }
+          const parsed = JSON.parse(await err.response.data.text()) as
+            { detail?: string }
           if (parsed.detail) msg = parsed.detail
-        } catch {
-          /* keep the generic message */
-        }
+        } catch { /* keep the generic message */ }
       } else if (axios.isAxiosError(err)) {
         msg = err.message
       }
@@ -143,7 +157,7 @@ export default function DocumentGenerationPanel() {
   }
 
   return (
-    <section>
+    <section data-tour="generate-documents">
       <div className="flex items-baseline gap-3 mb-3">
         <h2 className="text-white font-semibold text-sm">Generate Documents</h2>
         <span className="text-2xs text-muted uppercase tracking-wide">
@@ -157,13 +171,12 @@ export default function DocumentGenerationPanel() {
           const anyBusy = busyId !== null
           const error = errors[doc.id]
           const ts = generatedAt[doc.id]
+          const result = results[doc.id]
           return (
             <div key={doc.id} className="card p-4 flex flex-col gap-3">
               <div className="flex items-start gap-3">
-                <div
-                  className="w-9 h-9 rounded flex items-center justify-center shrink-0
-                             bg-electric/10 text-electric"
-                >
+                <div className="w-9 h-9 rounded flex items-center justify-center
+                                shrink-0 bg-electric/10 text-electric">
                   <Icon className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0">
@@ -176,47 +189,71 @@ export default function DocumentGenerationPanel() {
 
               <div className="text-2xs text-muted flex items-center gap-1">
                 {ts ? (
-                  <>
-                    <CheckCircle className="w-3 h-3 text-success" />
-                    Last generated: {new Date(ts).toLocaleString()}
-                  </>
-                ) : (
-                  <>Last generated: Never</>
-                )}
+                  <><CheckCircle className="w-3 h-3 text-success" />
+                    Last generated: {new Date(ts).toLocaleString()}</>
+                ) : <>Last generated: Never</>}
               </div>
 
-              <TeamGate block permission="generate_documents"
-                tooltip="Document generation is available to the project team">
-                <button
-                  type="button"
-                  disabled={anyBusy}
-                  onClick={() => void handleGenerate(doc)}
-                  className="w-full flex items-center justify-center gap-1.5 px-3 py-2
-                             rounded text-xs font-semibold transition-colors
-                             bg-electric text-white hover:bg-blue-500
-                             disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {busy ? (
-                    <><Loader2 className="w-3 h-3 animate-spin" /> Generating… 30–60 seconds</>
-                  ) : (
-                    <><Download className="w-3 h-3" /> {ts ? 'Regenerate' : 'Generate'}</>
-                  )}
-                </button>
-              </TeamGate>
+              {/* Post-generation: a draft-backed document offers Open in
+                  Editor (primary), Download (secondary), View on Reports
+                  (tertiary). */}
+              {result ? (
+                <div className="flex flex-col gap-1.5">
+                  <button type="button"
+                    onClick={() => navigate(`/editor/${result.draftId}`)}
+                    className="w-full flex items-center justify-center gap-1.5
+                               px-3 py-2 rounded text-xs font-semibold
+                               bg-electric text-white hover:bg-blue-500">
+                    <PenLine className="w-3 h-3" /> Open in Editor
+                  </button>
+                  <button type="button"
+                    onClick={() => triggerDownload(result.blob, result.filename)}
+                    className="w-full flex items-center justify-center gap-1.5
+                               px-3 py-1.5 rounded text-xs border border-electric/40
+                               text-electric hover:bg-electric/10">
+                    <Download className="w-3 h-3" /> Download
+                  </button>
+                  <button type="button"
+                    onClick={() => setResults((prev) => {
+                      const next = { ...prev }
+                      delete next[doc.id]
+                      return next
+                    })}
+                    className="text-2xs text-muted hover:text-white">
+                    View on Reports page
+                  </button>
+                </div>
+              ) : (
+                <TeamGate block permission="generate_documents"
+                  tooltip="Document generation is available to the project team">
+                  <button type="button" disabled={anyBusy}
+                    onClick={() => void handleGenerate(doc)}
+                    className="w-full flex items-center justify-center gap-1.5
+                               px-3 py-2 rounded text-xs font-semibold
+                               transition-colors bg-electric text-white
+                               hover:bg-blue-500 disabled:opacity-50
+                               disabled:cursor-not-allowed">
+                    {busy ? (
+                      <><Loader2 className="w-3 h-3 animate-spin" />
+                        Generating… 30–60 seconds</>
+                    ) : (
+                      <><Download className="w-3 h-3" />
+                        {ts ? 'Regenerate' : 'Generate'}</>
+                    )}
+                  </button>
+                </TeamGate>
+              )}
 
               {error && (
-                <div
-                  className="flex items-start gap-1.5 px-2 py-1.5 rounded text-2xs
-                             border border-danger/30 bg-danger/5 text-danger"
-                >
+                <div className="flex items-start gap-1.5 px-2 py-1.5 rounded
+                                text-2xs border border-danger/30 bg-danger/5
+                                text-danger">
                   <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
                   <span className="flex-1">
                     {error}{' '}
-                    <button
-                      type="button"
+                    <button type="button"
                       onClick={() => void handleGenerate(doc)}
-                      className="underline hover:no-underline font-semibold"
-                    >
+                      className="underline hover:no-underline font-semibold">
                       Retry
                     </button>
                   </span>

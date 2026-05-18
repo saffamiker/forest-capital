@@ -321,11 +321,28 @@ async def _gather_analytics_snapshot() -> dict[str, Any]:
     return snapshot
 
 
-async def gather_review_context() -> dict[str, Any]:
+# An editor document_type → the review document_type it stands in for.
+# When the reviewer has a current editor draft of one of these, its live
+# content is reviewed in preference to any uploaded file of that kind.
+_EDITOR_TO_REVIEW_TYPE = {
+    "midpoint_paper": "midpoint_draft",
+    "presentation_deck": "presentation_slides",
+    "executive_brief": "other",
+}
+
+
+async def gather_review_context(
+    reviewer_email: str | None = None,
+) -> dict[str, Any]:
     """
     Assembles the full review context: the analytics snapshot, the
     documents grouped by type, and the formatted context block that gets
     injected into every agent prompt.
+
+    reviewer_email — when given, the reviewer's current editor drafts
+    (tools/editor_drafts) take precedence over an uploaded academic
+    document of the same kind, so Academic Review evaluates the live
+    working draft rather than a stale uploaded file.
     """
     analytics = await _gather_analytics_snapshot()
     docs: list[dict] = []
@@ -335,6 +352,24 @@ async def gather_review_context() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_review_documents_read_failed", error=str(exc))
     docs_by_type = group_documents_by_type(docs)
+
+    # Overlay the reviewer's editor drafts — a current draft replaces the
+    # uploaded file of the corresponding type.
+    if reviewer_email:
+        try:
+            from tools.editor_drafts import get_current_draft
+            for ed_type, rv_type in _EDITOR_TO_REVIEW_TYPE.items():
+                draft = await get_current_draft(reviewer_email, ed_type)
+                if draft and (draft.get("content_text") or "").strip():
+                    docs_by_type[rv_type] = [{
+                        "document_type": rv_type,
+                        "name": (f"{draft['title']} "
+                                 f"(editor draft, v{draft['version']})"),
+                        "content_text": draft["content_text"],
+                    }]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("academic_review_editor_overlay_failed",
+                        error=str(exc))
 
     # Team-activity summary — analytical sessions only; testing-session
     # activity is never injected into agent context.
@@ -560,6 +595,43 @@ five sections, in this exact markdown format so the UI can parse it:
 ### 5. Overall Academic Readiness
 **Rating:** <Strong | Developing | Needs Work>
 <one paragraph>
+
+THE CENTRAL FINDING — the most important analytical finding in this
+project is the 2022 equity-bond correlation regime break. A submission
+that does not quantify it with actual pre/post values (approximately
+-0.05 and +0.61) and connect it to strategy performance differences is
+materially incomplete regardless of other qualities. The FDR correction
+result (zero strategies significant at q < 0.005) must be present and
+correctly interpreted; a submission that omits it or misrepresents it as
+a positive finding is a methodological disclosure failure. The
+independent three-layer statistical audit (zero critical failures
+across 59 checks) is a distinguishing feature of the project and should
+be cited as evidence of analytical rigour in the methodology section.
+When evaluating citations, check they are real and support the specific
+claim made — fabricated or misattributed citations are a serious concern
+to flag under Requirements and Rubric Alignment.
+
+UNRESOLVED MARKERS CHECK — if any document in the context still
+contains [[VERIFY]] or [[VERIFY CITATION]] markers, or unresolved
+[[BOB]] / [[MOLLY]] callouts, flag it prominently under section 2,
+Requirements and Rubric Alignment: state that the draft contains
+unresolved verification markers, that every marker must be resolved
+before submission, and that a document carrying unresolved markers is
+not ready to submit.
+
+EXTERNAL CITATIONS CHECK — within sections 1 and 2:
+Check whether the work contextualises its key findings with external
+academic citations. A submission with no citations is weaker than one
+that situates its findings within the existing literature. Specifically
+look for: a citation supporting the 2022 correlation regime break, a
+citation supporting the FDR methodology choice, a citation for the
+Carhart four-factor model, and a References section in APA format.
+- If citations are present and real (authors and titles that match
+  known literature), note this positively under section 1, Data
+  Sufficiency and Methodology.
+- If citations appear fabricated (authors or titles that do not match
+  any known work), flag it as a serious concern under section 2,
+  Requirements and Rubric Alignment.
 
 Every rating is exactly one of: Strong, Developing, Needs Work. Be direct
 and actionable — the team is preparing a graded submission, so generic

@@ -1645,17 +1645,19 @@ def _extend_monthly_market_data() -> dict:
     return result
 
 
-def extend_market_data() -> dict:
+def extend_market_data(audit_reason: str = "data_ingestion") -> dict:
     """
     Auto-extend the monthly data pipeline beyond the Excel file. Runs the
     monthly equity/IG/HY extension (Part 1); the Fama-French factors
     extend on their own via _load_ff_factors_with_cache(). Fired on
-    startup and by POST /api/v1/admin/refresh-monthly-data.
+    startup (audit_reason="startup") and by POST /api/v1/admin/
+    refresh-monthly-data.
 
     Fail-open: a failure is logged and reported in `status`, never raised.
-    After a successful extension the strategy cache has already been
-    cleared inside the persist transaction; the audit auto-trigger then
-    re-verifies the new data in the background.
+    The audit is triggered ONLY when new monthly rows were actually
+    appended — a redeploy or refresh that finds no new complete month
+    adds zero rows, triggers no audit, and logs an audit_trigger_skipped
+    line so Render logs confirm no unnecessary Opus call was made.
     """
     out: dict[str, Any] = {
         "monthly_rows_added": 0, "monthly_new_max": None,
@@ -1673,11 +1675,19 @@ def extend_market_data() -> dict:
         return out
 
     if out["monthly_rows_added"] > 0:
+        # New data landed — the audit must re-verify it. run_full_audit
+        # still re-checks is_audit_current() defensively before any
+        # Opus call.
         try:
             from tools.audit_engine import trigger_audit_async
-            trigger_audit_async("data_ingestion")
+            trigger_audit_async(audit_reason)
         except Exception as exc:  # noqa: BLE001
             log.warning("extend_audit_trigger_failed", error=str(exc))
+    else:
+        # No new month — no data change, so no audit is triggered. Logged
+        # for Render-log visibility that a redeploy fired no Opus call.
+        log.info("audit_trigger_skipped", reason="no_data_change",
+                 triggered_from=audit_reason)
     return out
 
 

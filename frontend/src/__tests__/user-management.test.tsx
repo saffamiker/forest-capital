@@ -142,6 +142,7 @@ const USER_FIXTURE = {
   last_login_at: '2026-05-16T12:00:00Z',
   notes: null,
   activity_count: 42,
+  ai_cost_usd: 0.0312,
 }
 
 describe('UserManagementPanel', () => {

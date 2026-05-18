@@ -26,6 +26,11 @@ interface PlatformUser {
   last_login_at: string | null
   notes: string | null
   activity_count: number
+  // Estimated AI token spend across this user's interactions (USD).
+  ai_cost_usd: number
+  // Lifetime council-query allocation. council_queries_limit null = unlimited.
+  council_queries_used: number
+  council_queries_limit: number | null
 }
 
 const ROLE_BADGE: Record<string, string> = {
@@ -68,6 +73,13 @@ function UserFormModal({ user, onClose, onSaved }: {
   const [perms, setPerms] = useState<string[]>(
     user?.permissions ?? ROLE_PRESETS.viewer)
   const [notes, setNotes] = useState(user?.notes ?? '')
+  // Council query allocation — Unlimited (limit null), the limit value,
+  // and a one-shot "reset usage to 0" applied on save.
+  const [councilUnlimited, setCouncilUnlimited] = useState(
+    user ? user.council_queries_limit == null : false)
+  const [councilLimit, setCouncilLimit] = useState(
+    String(user?.council_queries_limit ?? 5))
+  const [resetUsage, setResetUsage] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -88,10 +100,15 @@ function UserFormModal({ user, onClose, onSaved }: {
     setError(null)
     try {
       if (editing) {
-        await axios.patch(`/api/v1/admin/users/${user.id}`, {
+        const patch: Record<string, unknown> = {
           display_name: displayName, role: effectiveRole,
           permissions: perms, notes,
-        })
+        }
+        // Council allocation — null when Unlimited, else the parsed limit.
+        patch.council_queries_limit = councilUnlimited
+          ? null : Math.max(0, parseInt(councilLimit, 10) || 0)
+        if (resetUsage) patch.council_queries_used = 0
+        await axios.patch(`/api/v1/admin/users/${user.id}`, patch)
         onSaved()
       } else {
         const res = await axios.post<{ welcome_email_sent?: boolean }>(
@@ -190,6 +207,51 @@ function UserFormModal({ user, onClose, onSaved }: {
               placeholder="e.g. Forest Capital review access"
               className={inputCls} />
           </Field>
+
+          {/* Council query allocation — viewers have a finite lifetime
+              allowance; team members and sysadmins are unlimited. */}
+          {editing && (
+            <Field label="Council query allocation">
+              {effectiveRole === 'viewer' && !councilUnlimited ? (
+                <div className="space-y-2">
+                  <div className="text-2xs text-muted">
+                    {user.council_queries_used} of{' '}
+                    {user.council_queries_limit ?? '∞'} used so far
+                    {resetUsage && ' — will reset to 0 on save'}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-2xs text-muted">Query limit</span>
+                    <input type="number" min={0} value={councilLimit}
+                      onChange={(e) => setCouncilLimit(e.target.value)}
+                      className={inputCls + ' w-24'} />
+                  </div>
+                  <label className="flex items-center gap-2 text-xs text-slate-200">
+                    <input type="checkbox" checked={resetUsage}
+                      onChange={(e) => setResetUsage(e.target.checked)} />
+                    Reset usage count to 0
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-slate-200">
+                    <input type="checkbox" checked={councilUnlimited}
+                      onChange={(e) => setCouncilUnlimited(e.target.checked)} />
+                    Grant unlimited council access
+                  </label>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  <div className="text-xs text-electric">
+                    Unlimited council access — no query limit.
+                  </div>
+                  {effectiveRole === 'viewer' && (
+                    <label className="flex items-center gap-2 text-xs text-slate-200">
+                      <input type="checkbox" checked={councilUnlimited}
+                        onChange={(e) => setCouncilUnlimited(e.target.checked)} />
+                      Unlimited (uncheck to set a finite limit)
+                    </label>
+                  )}
+                </div>
+              )}
+            </Field>
+          )}
 
           <div className="rounded border border-border bg-navy-900 px-2.5 py-2
                           text-2xs text-muted leading-relaxed">
@@ -321,6 +383,8 @@ export default function UserManagementPanel() {
                 <th className="py-1.5 px-2">Status</th>
                 <th className="py-1.5 px-2">Last login</th>
                 <th className="py-1.5 px-2">Activity</th>
+                <th className="py-1.5 px-2">AI cost</th>
+                <th className="py-1.5 px-2">Council</th>
                 <th className="py-1.5 pl-2">Actions</th>
               </tr>
             </thead>
@@ -356,6 +420,22 @@ export default function UserManagementPanel() {
                     <td className="py-2 px-2 text-muted"
                         title="Total interactions and page views">
                       {u.activity_count}
+                    </td>
+                    <td className="py-2 px-2 font-mono text-success"
+                        title="Estimated AI token spend across this user's interactions">
+                      ${(u.ai_cost_usd ?? 0).toFixed(4)}
+                    </td>
+                    <td className="py-2 px-2"
+                        title="Lifetime council query allocation">
+                      {u.council_queries_limit == null ? (
+                        <span className="text-electric">Unlimited</span>
+                      ) : (
+                        <span className={
+                          u.council_queries_used >= u.council_queries_limit
+                            ? 'text-warning' : 'text-muted'}>
+                          {u.council_queries_used} / {u.council_queries_limit}
+                        </span>
+                      )}
                     </td>
                     <td className="py-2 pl-2">
                       <div className="flex items-center gap-2">

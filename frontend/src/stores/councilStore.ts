@@ -25,6 +25,9 @@ interface CouncilState {
   result: CouncilResult | null   // last response (survives navigation)
   loading: boolean
   error: string | null
+  // Viewer council allocation — {used, limit} for a limited user, null
+  // for an unlimited user (or until the first query/me-fetch resolves).
+  councilUsage: { used: number; limit: number } | null
 
   setQuery: (q: string) => void
   runQuery: (q: string) => Promise<void>
@@ -42,6 +45,7 @@ export const useCouncilStore = create<CouncilState>((set, get) => ({
   result: null,
   loading: false,
   error: null,
+  councilUsage: null,
 
   setQuery: (q) => set({ query: q }),
 
@@ -54,16 +58,35 @@ export const useCouncilStore = create<CouncilState>((set, get) => ({
       const res = await axios.post<CouncilResponse>(
         '/api/council/query', { query: trimmed }, { signal: _controller.signal },
       )
-      set({ result: res.data, loading: false })
+      // A limited viewer's response carries the post-query allocation.
+      const usage = res.data.council_queries_limit != null
+        ? { used: res.data.council_queries_used ?? 0,
+            limit: res.data.council_queries_limit }
+        : get().councilUsage
+      set({ result: res.data, loading: false, councilUsage: usage })
     } catch (err) {
       // A user-initiated cancel is not an error — clear loading, show nothing.
       if (axios.isCancel(err)) {
         set({ loading: false })
         return
       }
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.detail ?? err.message)
-        : 'Council query failed'
+      // A 429 council_limit_reached carries {limit, used} — surface it as
+      // the blocked state so the screen shows the contact-Michael message.
+      if (axios.isAxiosError(err) && err.response?.status === 429) {
+        const d = err.response.data?.detail
+        if (d && typeof d === 'object' && d.error === 'council_limit_reached') {
+          set({
+            loading: false,
+            error: 'council_limit_reached',
+            councilUsage: { used: Number(d.used), limit: Number(d.limit) },
+            result: { error: true, query: trimmed, messages: [], final_recommendation: '', consensus_reached: false },
+          })
+          return
+        }
+      }
+      const detail = axios.isAxiosError(err) ? err.response?.data?.detail : null
+      const msg = (typeof detail === 'string' && detail) ? detail
+        : (axios.isAxiosError(err) ? err.message : 'Council query failed')
       set({
         loading: false,
         error: String(msg),

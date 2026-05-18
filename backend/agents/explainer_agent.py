@@ -177,6 +177,15 @@ def _call_grok(
             )
         resp.raise_for_status()
         data = resp.json()
+    # Token-usage capture — OpenAI-shape usage block; no-op unless an
+    # endpoint started a capture.
+    try:
+        from agents.usage import record_usage
+        usage = data.get("usage") or {}
+        record_usage("grok", usage.get("prompt_tokens", 0),
+                     usage.get("completion_tokens", 0))
+    except Exception:  # noqa: BLE001
+        pass
     # Both providers return the OpenAI chat-completions shape:
     # choices[0].message.content
     return data["choices"][0]["message"]["content"]

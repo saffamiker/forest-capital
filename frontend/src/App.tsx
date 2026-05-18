@@ -15,6 +15,7 @@ import Reports from './pages/Reports'
 import Settings from './pages/Settings'
 import StoryboardEditor from './pages/StoryboardEditor'
 import SectionEditor from './pages/SectionEditor'
+import DocumentEditor from './pages/DocumentEditor'
 import { BrandProvider } from './context/BrandContext'
 import { UIProvider } from './context/UIContext'
 import { SessionProvider } from './context/SessionContext'
@@ -30,6 +31,9 @@ interface Session {
   role?: string
   displayName?: string | null
   permissions?: string[]
+  // Lifetime council-query allocation. councilQueriesLimit null = unlimited.
+  councilQueriesUsed?: number
+  councilQueriesLimit?: number | null
 }
 
 interface MeResponse {
@@ -37,6 +41,8 @@ interface MeResponse {
   role: string
   display_name: string | null
   permissions: string[]
+  council_queries_used: number
+  council_queries_limit: number | null
 }
 
 interface AuthContextType {
@@ -86,6 +92,8 @@ function AuthProvider({ children }: { children: ReactNode }) {
       role: data.role,
       displayName: data.display_name,
       permissions: data.permissions,
+      councilQueriesUsed: data.council_queries_used,
+      councilQueriesLimit: data.council_queries_limit,
     } : prev))
   }, [])
 
@@ -223,6 +231,7 @@ export default function App() {
                 <Route path="settings" element={<Settings />} />
                 <Route path="reports/storyboard" element={<StoryboardEditor />} />
                 <Route path="reports/document/:documentId" element={<SectionEditor />} />
+                <Route path="editor/:draftId" element={<DocumentEditor />} />
               </Route>
             </Routes>
           </UIProvider>

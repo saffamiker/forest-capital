@@ -1,0 +1,309 @@
+"""
+tools/editor_drafts.py
+
+Data-access layer for the in-platform document editor — the
+editor_drafts (mutable working copy) and editor_draft_versions
+(immutable named checkpoints) tables (migration 021).
+
+Every function fails open: a database error is logged and a safe
+default returned (None / [] / False), so an editor endpoint degrades
+gracefully rather than 500-ing. The endpoints in main.py wrap these.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import structlog
+
+log = structlog.get_logger(__name__)
+
+DOCUMENT_TYPES = ("midpoint_paper", "executive_brief", "presentation_deck")
+CREATED_FROM = ("generated", "uploaded", "manual")
+
+_DRAFT_COLS = (
+    "id, document_type, owner_email, title, content_json, content_text, "
+    "word_count, version, is_current, is_deleted, created_from, "
+    "created_at, updated_at"
+)
+_VERSION_COLS = (
+    "id, draft_id, version, content_json, content_text, word_count, "
+    "version_label, saved_at, saved_by"
+)
+
+
+def _session():
+    """The async session factory, or None when no database is configured."""
+    from database import AsyncSessionLocal
+    return AsyncSessionLocal
+
+
+def word_count(text: str | None) -> int:
+    """Whitespace-delimited word count of a plain-text projection."""
+    return len((text or "").split())
+
+
+def _draft_row(r: Any) -> dict[str, Any]:
+    return {
+        "id": r[0], "document_type": r[1], "owner_email": r[2],
+        "title": r[3], "content_json": r[4], "content_text": r[5],
+        "word_count": r[6], "version": r[7], "is_current": r[8],
+        "is_deleted": r[9], "created_from": r[10],
+        "created_at": r[11].isoformat() if r[11] else None,
+        "updated_at": r[12].isoformat() if r[12] else None,
+    }
+
+
+def _version_row(r: Any) -> dict[str, Any]:
+    return {
+        "id": r[0], "draft_id": r[1], "version": r[2],
+        "content_json": r[3], "content_text": r[4], "word_count": r[5],
+        "version_label": r[6],
+        "saved_at": r[7].isoformat() if r[7] else None,
+        "saved_by": r[8],
+    }
+
+
+async def list_drafts(owner_email: str) -> list[dict[str, Any]]:
+    """Every non-deleted draft owned by this user, newest update first."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return []
+        async with sf() as s:
+            rows = await s.execute(text(
+                f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                "WHERE owner_email = :e AND is_deleted = false "
+                "ORDER BY updated_at DESC"), {"e": owner_email})
+            return [_draft_row(r) for r in rows.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_list_drafts_failed", error=str(exc))
+        return []
+
+
+async def get_draft(draft_id: int) -> dict[str, Any] | None:
+    """One non-deleted draft by id, or None."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            row = await s.execute(text(
+                f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                "WHERE id = :i AND is_deleted = false"), {"i": draft_id})
+            found = row.fetchone()
+            return _draft_row(found) if found else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_get_draft_failed", error=str(exc))
+        return None
+
+
+async def get_current_draft(
+    owner_email: str, document_type: str,
+) -> dict[str, Any] | None:
+    """
+    The user's current draft for a document type — the one Academic
+    Review reads in preference to an uploaded file. None when the user
+    has no draft of that type.
+    """
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            row = await s.execute(text(
+                f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                "WHERE owner_email = :e AND document_type = :t "
+                "AND is_current = true AND is_deleted = false "
+                "ORDER BY updated_at DESC LIMIT 1"),
+                {"e": owner_email, "t": document_type})
+            found = row.fetchone()
+            return _draft_row(found) if found else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_get_current_draft_failed", error=str(exc))
+        return None
+
+
+async def create_draft(
+    document_type: str, owner_email: str, title: str,
+    content_json: Any, content_text: str | None,
+    created_from: str = "manual",
+) -> dict[str, Any] | None:
+    """
+    Creates a draft and makes it the current one for this owner +
+    document_type — every other draft of the same type is set
+    is_current = false, so there is exactly one current draft per type.
+    """
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        cj = json.dumps(content_json) if content_json is not None else None
+        async with sf() as s:
+            await s.execute(text(
+                "UPDATE editor_drafts SET is_current = false "
+                "WHERE owner_email = :e AND document_type = :t "
+                "AND is_current = true"),
+                {"e": owner_email, "t": document_type})
+            row = await s.execute(text(
+                "INSERT INTO editor_drafts (document_type, owner_email, "
+                "title, content_json, content_text, word_count, "
+                "created_from, is_current) VALUES (:t, :e, :ti, "
+                "CAST(:cj AS JSONB), :ct, :wc, :cf, true) "
+                f"RETURNING {_DRAFT_COLS}"),
+                {"t": document_type, "e": owner_email, "ti": title,
+                 "cj": cj, "ct": content_text,
+                 "wc": word_count(content_text), "cf": created_from})
+            found = row.fetchone()
+            await s.commit()
+            return _draft_row(found) if found else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_create_draft_failed", error=str(exc))
+        return None
+
+
+async def update_draft(
+    draft_id: int, content_json: Any, content_text: str | None,
+    word_count_override: int | None = None,
+) -> bool:
+    """
+    Auto-save — overwrites the working content and bumps updated_at.
+    Silent: it does NOT create a version. Returns True on a write.
+    """
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return False
+        cj = json.dumps(content_json) if content_json is not None else None
+        wc = (word_count_override if word_count_override is not None
+              else word_count(content_text))
+        async with sf() as s:
+            res = await s.execute(text(
+                "UPDATE editor_drafts SET content_json = CAST(:cj AS JSONB), "
+                "content_text = :ct, word_count = :wc, updated_at = now() "
+                "WHERE id = :i AND is_deleted = false"),
+                {"cj": cj, "ct": content_text, "wc": wc, "i": draft_id})
+            await s.commit()
+            return res.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_update_draft_failed", error=str(exc))
+        return False
+
+
+async def save_version(
+    draft_id: int, version_label: str | None, saved_by: str | None,
+) -> dict[str, Any] | None:
+    """
+    Saves a named checkpoint: snapshots the draft's current content into
+    editor_draft_versions at the draft's current version number, then
+    increments the draft's version. Returns the new version row.
+    """
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            d = await s.execute(text(
+                "SELECT version, content_json, content_text, word_count "
+                "FROM editor_drafts WHERE id = :i AND is_deleted = false"),
+                {"i": draft_id})
+            draft = d.fetchone()
+            if draft is None:
+                return None
+            cur_version = draft[0]
+            row = await s.execute(text(
+                "INSERT INTO editor_draft_versions (draft_id, version, "
+                "content_json, content_text, word_count, version_label, "
+                "saved_by) VALUES (:d, :v, CAST(:cj AS JSONB), :ct, :wc, "
+                f":vl, :sb) RETURNING {_VERSION_COLS}"),
+                {"d": draft_id, "v": cur_version,
+                 "cj": json.dumps(draft[1]) if draft[1] is not None else None,
+                 "ct": draft[2], "wc": draft[3],
+                 "vl": version_label, "sb": saved_by})
+            found = row.fetchone()
+            await s.execute(text(
+                "UPDATE editor_drafts SET version = version + 1, "
+                "updated_at = now() WHERE id = :i"), {"i": draft_id})
+            await s.commit()
+            return _version_row(found) if found else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_save_version_failed", error=str(exc))
+        return None
+
+
+async def list_versions(draft_id: int) -> list[dict[str, Any]]:
+    """Every saved version of a draft, newest first."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return []
+        async with sf() as s:
+            rows = await s.execute(text(
+                f"SELECT {_VERSION_COLS} FROM editor_draft_versions "
+                "WHERE draft_id = :d ORDER BY version DESC"),
+                {"d": draft_id})
+            return [_version_row(r) for r in rows.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_list_versions_failed", error=str(exc))
+        return []
+
+
+async def restore_version(
+    draft_id: int, version_id: int,
+) -> dict[str, Any] | None:
+    """
+    Restores a saved version's content as the draft's current content.
+    Returns the updated draft, or None if the version does not belong to
+    the draft.
+    """
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            v = await s.execute(text(
+                "SELECT content_json, content_text, word_count "
+                "FROM editor_draft_versions "
+                "WHERE id = :vi AND draft_id = :d"),
+                {"vi": version_id, "d": draft_id})
+            ver = v.fetchone()
+            if ver is None:
+                return None
+            await s.execute(text(
+                "UPDATE editor_drafts SET content_json = CAST(:cj AS JSONB), "
+                "content_text = :ct, word_count = :wc, updated_at = now() "
+                "WHERE id = :i AND is_deleted = false"),
+                {"cj": json.dumps(ver[0]) if ver[0] is not None else None,
+                 "ct": ver[1], "wc": ver[2], "i": draft_id})
+            await s.commit()
+        return await get_draft(draft_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_restore_version_failed", error=str(exc))
+        return None
+
+
+async def soft_delete_draft(draft_id: int) -> bool:
+    """Soft-deletes a draft — is_deleted = true, is_current = false."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return False
+        async with sf() as s:
+            res = await s.execute(text(
+                "UPDATE editor_drafts SET is_deleted = true, "
+                "is_current = false, updated_at = now() "
+                "WHERE id = :i AND is_deleted = false"), {"i": draft_id})
+            await s.commit()
+            return res.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_soft_delete_failed", error=str(exc))
+        return False

@@ -78,12 +78,15 @@ async def lifespan(app: FastAPI):
         # Auto-extend the monthly data pipeline beyond the Excel file —
         # fetch any complete calendar months that have closed since the
         # last run. A daemon thread so startup never blocks on yfinance;
-        # fail-open inside extend_market_data.
+        # fail-open inside extend_market_data. audit_reason="startup" so
+        # a redeploy with no data change logs audit_trigger_skipped and
+        # fires no Opus audit; only a genuine new month triggers one.
         try:
             import threading
             from tools.data_fetcher import extend_market_data
-            threading.Thread(target=extend_market_data, daemon=True,
-                             name="monthly-data-extend").start()
+            threading.Thread(
+                target=lambda: extend_market_data(audit_reason="startup"),
+                daemon=True, name="monthly-data-extend").start()
         except Exception as exc:  # noqa: BLE001
             log.warning("monthly_extend_startup_failed", error=str(exc))
     yield
@@ -236,13 +239,26 @@ async def logout(body: LogoutRequest):
 
 @app.get("/api/auth/me")
 async def get_me(session: dict = Depends(require_auth)):
-    """The signed-in user — email, role, display name, and the
-    authoritative permissions array the frontend gates the UI on."""
+    """The signed-in user — email, role, display name, the authoritative
+    permissions array the frontend gates the UI on, and the lifetime
+    council-query allocation (council_queries_limit None = unlimited)."""
+    council_used = 0
+    council_limit: int | None = None
+    try:
+        from tools.platform_users import get_active_user
+        u = await get_active_user(session["email"])
+        if u:
+            council_used = u.get("council_queries_used", 0)
+            council_limit = u.get("council_queries_limit")
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "email": session["email"],
         "role": session.get("role") or "viewer",
         "display_name": session.get("display_name"),
         "permissions": session.get("permissions") or [],
+        "council_queries_used": council_used,
+        "council_queries_limit": council_limit,
     }
 
 
@@ -825,6 +841,220 @@ async def delete_academic_doc(doc_id: str, session: dict = Depends(require_team_
     return {"deleted": True, "id": doc_id}
 
 
+# ── Document editor — editor_drafts / editor_draft_versions ────────────────────
+#
+# The in-platform editor for Bob's midpoint paper and Molly's presentation
+# deck (migration 021). All endpoints require team_member; the auto-save
+# PATCH is silent (no version), POST .../versions saves a named checkpoint.
+
+@app.get("/api/v1/documents/drafts")
+async def editor_list_drafts(session: dict = Depends(require_team_member)):
+    """Every non-deleted draft owned by the current user."""
+    from tools.editor_drafts import list_drafts
+    return {"drafts": await list_drafts(session["email"])}
+
+
+@app.get("/api/v1/documents/drafts/{draft_id}")
+async def editor_get_draft(
+    draft_id: int, session: dict = Depends(require_team_member),
+):
+    """A single draft with its current working content."""
+    from tools.editor_drafts import get_draft
+    draft = await get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    return draft
+
+
+@app.post("/api/v1/documents/drafts", status_code=201)
+async def editor_create_draft(
+    body: dict, session: dict = Depends(require_team_member),
+):
+    """
+    Creates a draft and makes it the current one for this owner +
+    document_type. Body: {document_type, title, content_json,
+    content_text, created_from?}.
+    """
+    from tools.editor_drafts import DOCUMENT_TYPES, create_draft
+    document_type = str(body.get("document_type") or "")
+    if document_type not in DOCUMENT_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"document_type must be one of {DOCUMENT_TYPES}.")
+    title = str(body.get("title") or "Untitled draft")[:300]
+    created_from = str(body.get("created_from") or "manual")
+    draft = await create_draft(
+        document_type, session["email"], title,
+        body.get("content_json"), body.get("content_text"),
+        created_from=created_from)
+    if draft is None:
+        raise HTTPException(status_code=503,
+                            detail="Draft storage is unavailable.")
+    return draft
+
+
+@app.patch("/api/v1/documents/drafts/{draft_id}")
+async def editor_update_draft(
+    draft_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Auto-save — overwrites the working content. Silent: does NOT create
+    a version. Body: {content_json, content_text, word_count?}.
+    """
+    from tools.editor_drafts import update_draft
+    wc = body.get("word_count")
+    ok = await update_draft(
+        draft_id, body.get("content_json"), body.get("content_text"),
+        word_count_override=int(wc) if isinstance(wc, (int, float)) else None)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    return {"saved": True, "draft_id": draft_id}
+
+
+@app.post("/api/v1/documents/drafts/{draft_id}/versions", status_code=201)
+async def editor_save_version(
+    draft_id: int, body: dict | None = None,
+    session: dict = Depends(require_team_member),
+):
+    """Saves a named version checkpoint. Body: {version_label}."""
+    from tools.editor_drafts import save_version
+    label = None
+    if body and body.get("version_label"):
+        label = str(body["version_label"])[:200]
+    version = await save_version(draft_id, label, session["email"])
+    if version is None:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    return version
+
+
+@app.get("/api/v1/documents/drafts/{draft_id}/versions")
+async def editor_list_versions(
+    draft_id: int, session: dict = Depends(require_team_member),
+):
+    """Every saved version of a draft, newest first."""
+    from tools.editor_drafts import list_versions
+    return {"versions": await list_versions(draft_id)}
+
+
+@app.post("/api/v1/documents/drafts/{draft_id}/restore/{version_id}")
+async def editor_restore_version(
+    draft_id: int, version_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Restores a saved version as the draft's current content."""
+    from tools.editor_drafts import restore_version
+    draft = await restore_version(draft_id, version_id)
+    if draft is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Draft or version not found.")
+    return draft
+
+
+@app.delete("/api/v1/documents/drafts/{draft_id}")
+async def editor_delete_draft(
+    draft_id: int, session: dict = Depends(require_team_member),
+):
+    """Soft-deletes a draft."""
+    from tools.editor_drafts import soft_delete_draft
+    ok = await soft_delete_draft(draft_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    return {"deleted": True, "draft_id": draft_id}
+
+
+@app.post("/api/v1/documents/drafts/{draft_id}/chat")
+@limiter.limit("30/hour")
+async def editor_chat(
+    draft_id: int, body: dict, request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """
+    The editor's Writing Assistant chat. The signed-in user asks for
+    writing help on their draft; the assistant answers with the draft's
+    full text as context, referencing the actual content.
+
+    Body: {message, history: [{role, content}], selection?}. A selection
+    (a passage the user is asking about) is quoted into the prompt. The
+    rate limit — 30/hour — keeps the assistant a help, not a crutch.
+
+    404 if the draft does not exist or is not owned by the caller.
+    Logged as a writing_assistant interaction so it appears in Team
+    Activity and AI cost tracking.
+    """
+    import asyncio
+
+    from tools.editor_drafts import get_draft
+    draft = await get_draft(draft_id)
+    # A draft the caller does not own is a 404 — not a 403 — so the
+    # endpoint never confirms another user's draft exists.
+    if draft is None or draft.get("owner_email") != session.get("email"):
+        raise HTTPException(status_code=404, detail="Draft not found.")
+
+    message = str(body.get("message") or "").strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="'message' is required.")
+    if len(message) > 2000:
+        raise HTTPException(status_code=422,
+                            detail="Message exceeds the 2000-character limit.")
+    selection = body.get("selection")
+    history = body.get("history") or []
+
+    if ENVIRONMENT == "test":
+        return {"response": "Writing assistant is mocked in the test "
+                            "environment."}
+
+    content_text = (draft.get("content_text") or "")[:8000]
+    system_prompt = (
+        f"You are a writing assistant helping {draft['owner_email']} "
+        f"improve their {draft['document_type']} document.\n\n"
+        f"The full document is:\n---\n{content_text}\n---\n\n"
+        "Help the user improve their writing. Be specific and "
+        "constructive. Reference the actual content of their document in "
+        "your responses. Do not rewrite large sections unless explicitly "
+        "asked. Keep responses concise — this is a chat interface, not a "
+        "document."
+    )
+
+    # The last six exchanges, flattened into the prompt as context
+    # (call_claude is single-turn).
+    convo_lines: list[str] = []
+    for turn in history[-6:]:
+        role = "User" if turn.get("role") == "user" else "Assistant"
+        text = str(turn.get("content") or "").strip()
+        if text:
+            convo_lines.append(f"{role}: {text}")
+    user_message = ""
+    if convo_lines:
+        user_message += ("Earlier in this conversation:\n"
+                         + "\n".join(convo_lines) + "\n\n")
+    if selection:
+        user_message += (f"Regarding this passage:\n> "
+                         f"{str(selection)[:1000]}\n\n")
+    user_message += message
+
+    from agents.usage import start_usage_capture
+    start_usage_capture()
+    try:
+        from agents.base import SONNET_MODEL, call_claude
+        reply = await asyncio.to_thread(
+            call_claude, SONNET_MODEL, system_prompt, user_message, 600)
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("editor_chat_failed", ref=ref, error=str(exc))
+        raise HTTPException(
+            status_code=502,
+            detail=f"Writing assistant unavailable (ref: {ref})")
+
+    _log_interaction_bg(
+        request, session, "writing_assistant",
+        question_text=message[:500],
+        response_summary=reply[:500],
+        metadata={"draft_id": draft_id})
+    return {"response": reply}
+
+
 # ── Regime ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/regime/current")
@@ -1124,10 +1354,29 @@ def _log_interaction_bg(
     on the running loop and returns immediately. The session_id and
     session_type travel from the frontend as request headers. Wrapped
     so a scheduling or DB failure never touches the primary response.
+
+    AI token cost: collect_usage() is read here, in the request context,
+    so any endpoint that called start_usage_capture() has its token
+    totals logged and its per-agent breakdown folded into metadata. An
+    endpoint that did not start a capture simply logs null token columns.
     """
     try:
         import asyncio
         from tools.activity_log import log_agent_interaction
+
+        in_tok = out_tok = model_used = cost = None
+        try:
+            from agents.usage import collect_usage
+            usage = collect_usage()
+            in_tok = usage.get("input_tokens")
+            out_tok = usage.get("output_tokens")
+            model_used = usage.get("model_used")
+            cost = usage.get("estimated_cost_usd")
+            if usage.get("per_agent"):
+                metadata = {**(metadata or {}),
+                            "per_agent_cost": usage["per_agent"]}
+        except Exception:  # noqa: BLE001 — cost telemetry is never fatal
+            pass
 
         task = asyncio.create_task(log_agent_interaction(
             user_email=session.get("email", ""),
@@ -1138,6 +1387,10 @@ def _log_interaction_bg(
             agents_involved=agents_involved,
             response_summary=response_summary,
             metadata=metadata,
+            input_tokens=in_tok,
+            output_tokens=out_tok,
+            model_used=model_used,
+            estimated_cost_usd=cost,
         ))
         _activity_bg_tasks.add(task)
         task.add_done_callback(_activity_bg_tasks.discard)
@@ -1179,10 +1432,12 @@ def _deliberate_to_frontend(query: str, council_response: dict[str, Any]) -> dic
             # will catch it.
             continue
 
-        # Per-agent content selection:
+        # Per-agent content selection — every agent shows its FULL
+        # narrative, not a one-line summary:
         #   CIO         → final synthesis (the recommendation narrative)
         #   Gemini/Grok → full challenge text (the dissenting narrative)
-        #   Specialists → summary (1-2 sentences purpose-built for display)
+        #   Specialists → raw_analysis (the complete specialist analysis;
+        #                 summary is only the one-line fallback)
         tech = report.get("technical_findings", {}) or {}
         if key == "cio":
             content = tech.get("final_synthesis_text") or report.get("summary", "")
@@ -1191,7 +1446,7 @@ def _deliberate_to_frontend(query: str, council_response: dict[str, Any]) -> dic
         elif key == "contrarian_analyst":
             content = tech.get("full_challenge") or report.get("summary", "")
         else:
-            content = report.get("summary", "")
+            content = tech.get("raw_analysis") or report.get("summary", "")
 
         # NEVER drop an agent whose report exists. An empty content field
         # used to be silently filtered, which produced an empty Debate tab
@@ -1236,6 +1491,30 @@ async def council_query(
     if len(body.query) > 500:
         raise HTTPException(status_code=422, detail="Query exceeds 500 character limit.")
 
+    # Viewer council query allocation — a user with a council_queries_limit
+    # set is blocked once their lifetime allowance is spent. Team members
+    # and sysadmins have a NULL limit and are never blocked. Checked before
+    # the scope guard so a blocked viewer never spends a classifier call.
+    council_quota: dict[str, Any] | None = None
+    from tools.platform_users import (
+        get_council_allocation, increment_council_queries,
+    )
+    allocation = await get_council_allocation(session["email"])
+    if allocation and allocation.get("council_queries_limit") is not None:
+        used = int(allocation.get("council_queries_used", 0) or 0)
+        limit = int(allocation["council_queries_limit"])
+        if used >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "council_limit_reached",
+                    "limit": limit,
+                    "used": used,
+                },
+            )
+        # The query is counted against the allowance before processing.
+        council_quota = await increment_council_queries(session["email"])
+
     # Scope guard — must pass before any agent is invoked
     if ENVIRONMENT != "test":
         try:
@@ -1268,13 +1547,17 @@ async def council_query(
             from agents.harness import (
                 start_harness_capture, collect_harness_metrics,
             )
+            from agents.usage import start_usage_capture
 
             history = get_full_history()
             strategy_results = run_all_strategies(history)
 
             # Capture every specialist's harness run for the Team Activity
-            # metrics — the specialists run synchronously in this context.
+            # metrics, and every agent call's token usage for cost
+            # tracking — both seeded before the parallel specialist phase
+            # so the copied thread contexts share the accumulator lists.
             start_harness_capture()
+            start_usage_capture()
             cio = CIO()
             council_response = cio.deliberate(
                 query=body.query,
@@ -1305,7 +1588,13 @@ async def council_query(
                 metadata=({"harness": harness_meta} if harness_meta else None),
             )
 
-            return _deliberate_to_frontend(body.query, council_response)
+            result = _deliberate_to_frontend(body.query, council_response)
+            if council_quota:
+                result["council_queries_used"] = (
+                    council_quota["council_queries_used"])
+                result["council_queries_limit"] = (
+                    council_quota["council_queries_limit"])
+            return result
 
         except Exception as exc:
             log.error("council_query_error", error=str(exc))
@@ -1318,6 +1607,9 @@ async def council_query(
     response = dict(MOCK_COUNCIL_RESPONSE)
     response["query"] = body.query
     response["mode"] = "fallback"
+    if council_quota:
+        response["council_queries_used"] = council_quota["council_queries_used"]
+        response["council_queries_limit"] = council_quota["council_queries_limit"]
     return response
 
 
@@ -1371,14 +1663,18 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
         chunk_arbiter_text, ARBITER_MODEL,
     )
     from agents.harness import start_harness_capture, collect_harness_metrics
+    from agents.usage import start_usage_capture
 
     async def event_stream():
         try:
-            # Capture the peer + arbiter harness runs for Team Activity.
-            # The ContextVar list is shared into the asyncio.to_thread peer
-            # and arbiter tasks, so every run is recorded.
+            # Capture the peer + arbiter harness runs for Team Activity, and
+            # every agent call's token usage for cost tracking. The ContextVar
+            # lists are shared into the asyncio.to_thread peer and arbiter
+            # tasks, so every run is recorded.
             start_harness_capture()
-            ctx = await gather_review_context()
+            start_usage_capture()
+            ctx = await gather_review_context(
+                reviewer_email=session.get("email"))
             context_block = ctx["context_block"]
             multi_user = ctx.get("multi_user_activity", False)
 
@@ -1890,6 +2186,14 @@ async def audit_run(
     Project team only — the Statistical Audit lives in the QA tab.
     """
     from tools.audit_engine import start_audit
+    from tools.qa_guard import QA_BUSY_MESSAGE, qa_run_in_progress
+
+    # Global QA-run guard — rejects if a methodology audit or another
+    # statistical audit is already in progress. start_audit keeps its own
+    # is_audit_running() check as the race backstop.
+    if await qa_run_in_progress() is not None:
+        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
+
     body = body or {}
     triggered_by = str(body.get("triggered_by") or body.get("reason")
                        or "manual")
@@ -2088,6 +2392,7 @@ async def admin_create_user(
         email=email,
         display_name=created.get("display_name"),
         notes=created.get("notes"),
+        council_limit=created.get("council_queries_limit"),
     )
     return {**created, "welcome_email_sent": welcome_email_sent}
 
@@ -2099,8 +2404,9 @@ async def admin_update_user(
 ):
     """
     Updates a user's display_name / role / permissions / is_active /
-    notes. email is immutable. The last active sysadmin cannot be
-    demoted or deactivated. Sysadmin only.
+    notes / council_queries_limit / council_queries_used. email is
+    immutable. The last active sysadmin cannot be demoted or
+    deactivated. Sysadmin only.
     """
     from tools.platform_users import (
         count_active_sysadmins, get_user_by_id, update_user,
@@ -2127,6 +2433,27 @@ async def admin_update_user(
             body["permissions"], fields.get("role", user["role"]))
     if "is_active" in body:
         fields["is_active"] = bool(body["is_active"])
+    # Council query allocation — Adjust Limit (int), Unlimited (null),
+    # Reset Usage (used = 0). bool is rejected: it is an int subclass.
+    if "council_queries_limit" in body:
+        cql = body["council_queries_limit"]
+        if cql is None:
+            fields["council_queries_limit"] = None
+        elif isinstance(cql, int) and not isinstance(cql, bool) and cql >= 0:
+            fields["council_queries_limit"] = cql
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="council_queries_limit must be a non-negative "
+                       "integer or null.")
+    if "council_queries_used" in body:
+        cqu = body["council_queries_used"]
+        if isinstance(cqu, int) and not isinstance(cqu, bool) and cqu >= 0:
+            fields["council_queries_used"] = cqu
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="council_queries_used must be a non-negative integer.")
 
     # Last-sysadmin guard — refuse a change that would leave no active
     # administrator. A "sysadmin" is any active user holding manage_users.
@@ -2343,6 +2670,23 @@ async def activity_summary(
     from tools.activity_log import get_activity_summary
 
     return await get_activity_summary(analytical_only=not include_testing)
+
+
+@app.get("/api/v1/activity/cost-summary")
+async def activity_cost_summary(
+    request: Request,
+    include_testing: bool = Query(False),
+    session: dict = Depends(require_auth),
+):
+    """
+    AI token spend — grand total plus per-member and per-interaction-type
+    breakdowns, drawn from the agent_interactions cost columns. Drives the
+    Team Activity cost panel. Analytical sessions only unless
+    include_testing is set.
+    """
+    from tools.activity_log import get_cost_summary
+
+    return await get_cost_summary(analytical_only=not include_testing)
 
 
 # ── Changelog ─────────────────────────────────────────────────────────────────
@@ -2598,30 +2942,44 @@ async def qa_audit(request: Request, session: dict = Depends(require_auth)):
     QA Agent uses Opus for the narrative; deterministic checks run from
     the strategy results dict to guarantee pass/fail verdicts are never
     hallucinated. Falls back to mock audit if pipeline is unavailable.
+
+    Global QA-run guard: rejected with 409 if a statistical audit or
+    another methodology run is already in progress (tools/qa_guard.py).
     """
-    if ENVIRONMENT != "test":
-        try:
-            from tools.data_fetcher import get_full_history
-            from tools.backtester import run_all_strategies
-            from agents.qa_agent import QAAgent
+    from tools.qa_guard import (
+        QA_BUSY_MESSAGE, begin_methodology, end_methodology,
+        qa_run_in_progress,
+    )
+    if await qa_run_in_progress() is not None:
+        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
 
-            history = get_full_history()
-            strategy_results = run_all_strategies(history)
+    begin_methodology()
+    try:
+        if ENVIRONMENT != "test":
+            try:
+                from tools.data_fetcher import get_full_history
+                from tools.backtester import run_all_strategies
+                from agents.qa_agent import QAAgent
 
-            qa = QAAgent()
-            audit = qa.run_audit(strategy_results, run_full_checklist=True)
-            # Team Activity — record the audit run (non-blocking).
-            _log_interaction_bg(
-                request, session, "qa",
-                response_summary=str(audit.get("summary", "")),
-                metadata={"verdict": audit.get("verdict")},
-            )
-            return audit
+                history = get_full_history()
+                strategy_results = run_all_strategies(history)
 
-        except Exception as exc:
-            log.error("qa_audit_error", error=str(exc))
+                qa = QAAgent()
+                audit = qa.run_audit(strategy_results, run_full_checklist=True)
+                # Team Activity — record the audit run (non-blocking).
+                _log_interaction_bg(
+                    request, session, "qa",
+                    response_summary=str(audit.get("summary", "")),
+                    metadata={"verdict": audit.get("verdict")},
+                )
+                return audit
 
-    return MOCK_QA_AUDIT
+            except Exception as exc:
+                log.error("qa_audit_error", error=str(exc))
+
+        return MOCK_QA_AUDIT
+    finally:
+        end_methodology()
 
 
 @app.get("/api/v1/qa/export")
@@ -2818,10 +3176,21 @@ async def qa_run(request: Request, session: dict = Depends(require_auth)):
 
     Auto-escalation to Tier 3 happens inside the background worker if
     Tier 2 returns FAIL (see schedule_tier2_background).
+
+    Global QA-run guard: rejected with 409 if a statistical audit or
+    another methodology run is already in progress (tools/qa_guard.py).
     """
+    from tools.qa_guard import (
+        QA_BUSY_MESSAGE, begin_methodology, end_methodology,
+        qa_run_in_progress,
+    )
+    if await qa_run_in_progress() is not None:
+        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
+
     if ENVIRONMENT == "test":
         return {"verdict": "PASS", "tier": 1, "tier2_scheduled": False}
 
+    begin_methodology()
     try:
         from tools.qa_tiered import run_tier1_checks, schedule_tier2_background
         from tools.cache import set_qa_cache
@@ -2869,6 +3238,8 @@ async def qa_run(request: Request, session: dict = Depends(require_auth)):
         ref = uuid.uuid4().hex[:8]
         log.error("qa_run_error", ref=ref, error=str(exc))
         raise HTTPException(status_code=500, detail=f"QA run failed (ref: {ref})")
+    finally:
+        end_methodology()
 
 
 @app.post("/api/v1/qa/full-review")
@@ -2881,10 +3252,21 @@ async def qa_full_review(request: Request, session: dict = Depends(require_auth)
 
     Master-key path: anyone with a valid session can trigger Tier 3,
     but the rate limit caps abuse at 5/minute.
+
+    Global QA-run guard: rejected with 409 if a statistical audit or
+    another methodology run is already in progress (tools/qa_guard.py).
     """
+    from tools.qa_guard import (
+        QA_BUSY_MESSAGE, begin_methodology, end_methodology,
+        qa_run_in_progress,
+    )
+    if await qa_run_in_progress() is not None:
+        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
+
     if ENVIRONMENT == "test":
         return {"verdict": "PASS", "tier": 3}
 
+    begin_methodology()
     try:
         from tools.qa_tiered import run_tier3_review
         from tools.cache import set_qa_cache
@@ -2908,6 +3290,8 @@ async def qa_full_review(request: Request, session: dict = Depends(require_auth)
         ref = uuid.uuid4().hex[:8]
         log.error("qa_full_review_error", ref=ref, error=str(exc))
         raise HTTPException(status_code=500, detail=f"Full review failed (ref: {ref})")
+    finally:
+        end_methodology()
 
 
 # ── Report ────────────────────────────────────────────────────────────────────
@@ -3138,6 +3522,119 @@ _DOCX_MEDIA = ("application/vnd.openxmlformats-officedocument."
 _PPTX_MEDIA = ("application/vnd.openxmlformats-officedocument."
                "presentationml.presentation")
 
+# Key analytical findings that MUST appear in the midpoint paper. These
+# are appended to the section task prompts (never overwrite the existing
+# instruction — the task string is one logical document). The findings
+# are split by the section they belong in; the Academic Review arbiter
+# scores the same set (agents/academic_review.py).
+_MIDPOINT_S1_KEY_FINDINGS = (
+    "\n\nKEY FINDINGS — Section 1 must state each of these disclosures "
+    "explicitly:\n"
+    "(a) The 2022 equity-IG correlation regime break — the equity-IG "
+    "correlation shifted from approximately -0.05 (pre-2022) to +0.61 "
+    "(post-2022), a structural break in the diversification assumption "
+    "underlying traditional fixed-income allocation. Introduce it here as "
+    "the central finding of the project; it is developed in the Results "
+    "section.\n"
+    "(b) Shorter return histories — five strategies start later than the "
+    "2002-07 study period because of initialisation lookback windows: "
+    "MIN_VARIANCE, BLACK_LITTERMAN and MAX_SHARPE_ROLLING begin "
+    "approximately 2005-07 (36-month window), MOMENTUM_ROTATION "
+    "approximately 2003-07 (12-month window), and REGIME_SWITCHING "
+    "approximately 2002-10 (3-month window). Their comparative metrics "
+    "cover their actual data period, not the full 2002-2026 study "
+    "period.\n"
+    "(c) Independent statistical audit — every metric in the project was "
+    "independently recomputed from raw data by a separate AI model "
+    "(Claude Opus) with no access to the platform's intermediate "
+    "calculations; the audit found zero critical failures across 59 "
+    "checks, and the full audit report is included as an analytical "
+    "appendix. Cite this as evidence of analytical rigour.\n"
+    "(d) Data provenance — investment-grade bond data uses an LQD-to-BND "
+    "splice (LQD pre-2007, BND 2007 onward); high-yield data uses the "
+    "BAMLHYH0A0HYM2TRIV total-return index through December 2025, "
+    "extended via the HYG ETF proxy (approximately 0.04% per month "
+    "tracking error — a documented source change) from January 2026; the "
+    "risk-free rate uses the FRED DTB3 monthly series throughout; the "
+    "monthly series auto-extends from the historical baseline using live "
+    "market-data feeds.\n\n"
+    "METHODOLOGY HIGHLIGHTS — name each of these explicitly: the Carhart "
+    "four-factor model (four factors, MOM included — not a generic "
+    "three-factor model); the time-varying DTB3 risk-free rate (not a "
+    "fixed 4.5%); the Probabilistic Sharpe Ratio with 95% confidence "
+    "intervals; the Deflated Sharpe Ratio (correcting for ten trials "
+    "across ten strategies); the Benjamini-Hochberg FDR correction at "
+    "q < 0.005; and true one-way portfolio turnover from the "
+    "drift-inclusive weight schedule."
+)
+# Verification caveats appended to the document-section task prompts.
+# CAVEAT 2 — every external citation is preceded by a [[VERIFY CITATION]]
+# marker; CAVEAT 3 — every uncertain numeric value is wrapped in a
+# [[VERIFY]] marker. The academic_docx renderer shows both bold and
+# highlighted; the Academic Review arbiter flags any that survive into a
+# submitted draft. Applied via _apply_draft_caveats so a task that
+# already carries one form is not given a second, conflicting copy.
+_CAVEAT_CITATION = (
+    "\n\nCITATION VERIFICATION — immediately before every external "
+    "citation you include, insert an inline marker of the form "
+    "[[VERIFY CITATION: check that Author (Year) exists and supports "
+    "this specific claim before submitting]], so no unverified citation "
+    "is missed."
+)
+_CAVEAT_STATS = (
+    "\n\nSTATISTIC VERIFICATION — if you are uncertain about any "
+    "specific numeric value, do NOT insert it silently; wrap it in an "
+    "inline marker of the form [[VERIFY: <the value and what it is>]] "
+    "(for example [[VERIFY: Sharpe ratio for Regime Switching = 0.63]]) "
+    "so a team member confirms it against the Analytics page before "
+    "submission."
+)
+
+
+def _apply_draft_caveats(specs: list[dict]) -> list[dict]:
+    """
+    Appends the citation- and statistic-verification caveats to each
+    section task prompt. Idempotent per form — a task that already
+    carries the [[VERIFY CITATION]] or [[VERIFY:]] instruction is not
+    given a second, conflicting copy (the midpoint methodology and
+    results tasks already carry the statistic marker).
+    """
+    for spec in specs:
+        task = spec.get("task", "")
+        if "[[VERIFY CITATION" not in task:
+            task += _CAVEAT_CITATION
+        if "[[VERIFY:" not in task:
+            task += _CAVEAT_STATS
+        spec["task"] = task
+    return specs
+
+
+_MIDPOINT_S2_KEY_FINDINGS = (
+    "\n\nKEY FINDINGS — present these in this order, the correlation "
+    "break FIRST:\n"
+    "(1) The 2022 correlation regime break is the central finding and "
+    "MUST be the first result discussed: the equity-IG correlation "
+    "shifted from approximately -0.05 (pre-2022) to +0.61 (post-2022) — "
+    "quote the pre/post values from the provided correlation_pre_post "
+    "data — and connect it to the divergence in strategy performance.\n"
+    "(2) Regime Switching is the only strategy that demonstrably adapts "
+    "to the post-2022 correlation environment; cite its post-2022 Sharpe "
+    "(approximately 0.2483) against the benchmark's post-2022 Sharpe, "
+    "using the actual values in the regime_conditional data.\n"
+    "(3) The FDR result — after Benjamini-Hochberg FDR correction across "
+    "all ten strategies (q < 0.005) no strategy achieves significance at "
+    "the corrected level; raw p-values range from 0.008 to 1.000. Frame "
+    "this as methodological honesty — preliminary evidence of "
+    "economically meaningful performance, NOT a failure and NOT a "
+    "positive significance claim.\n"
+    "(4) The efficient-frontier tangency portfolio concentrates "
+    "approximately 95.6% in high-yield bonds, reflecting HY's realised "
+    "risk-adjusted performance over the sample period. Disclose this "
+    "explicitly as a concentration risk that is sensitive to the "
+    "realised HY Sharpe and is not a strategic allocation recommendation "
+    "without out-of-sample validation."
+)
+
 
 async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
     """
@@ -3172,10 +3669,43 @@ async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
     return out
 
 
+async def _editor_export(editor_draft_id: int) -> Response:
+    """
+    Builds a .docx (paper/brief) or .pptx (deck) from an editor draft's
+    current content — the in-editor Export path. Renders the editor
+    content directly rather than regenerating the document, so the
+    export is exactly what the author has in the editor.
+    """
+    import asyncio
+    from datetime import date
+
+    from tools.editor_drafts import get_draft
+
+    draft = await get_draft(editor_draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+
+    if draft["document_type"] == "presentation_deck":
+        from tools.academic_deck import build_editor_pptx
+        content = await asyncio.to_thread(build_editor_pptx, draft)
+        media, ext = _PPTX_MEDIA, "pptx"
+    else:
+        from tools.academic_docx import build_editor_docx
+        content = await asyncio.to_thread(build_editor_docx, draft)
+        media, ext = _DOCX_MEDIA, "docx"
+
+    slug = draft["document_type"].replace("_", "-")
+    filename = f"forest-capital-{slug}-{date.today().isoformat()}.{ext}"
+    return Response(
+        content=content, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 @app.post("/api/v1/export/midpoint-paper")
 @limiter.limit("6/minute")
 async def export_midpoint_paper(
     request: Request,
+    body: dict | None = None,
     session: dict = Depends(require_permission("generate_documents")),
 ):
     """
@@ -3188,18 +3718,39 @@ async def export_midpoint_paper(
     12 pt Times New Roman, 1-inch margins, page numbers. The four narrative
     sections are written by the Academic Writer agent through the harness;
     the call can take 30-60 seconds.
+
+    When the body carries an editor_draft_id, the .docx is built directly
+    from that editor draft's current content (the in-editor Export path)
+    instead of regenerating from scratch.
     """
     import asyncio
     from datetime import date
 
     from tools.academic_docx import build_midpoint_paper
-    from tools.academic_export import DATA_PENDING, gather_document_data
+    from tools.academic_export import (
+        DATA_PENDING, gather_document_data, gather_roles_activity,
+    )
+
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
 
     try:
         data = await gather_document_data()
         period = data["study_period"]
         has_results = bool(data["summary_statistics"] or data["regime_conditional"])
         has_review = bool(data["last_review_text"])
+
+        # Section 3 (Roles) is pre-seeded from real per-member platform
+        # activity — commits, council runs, reviews, uploads, UAT — so Bob
+        # personalises a factual draft rather than writing from scratch.
+        roles_activity = await gather_roles_activity(data["team_summary"])
+        has_roles = any(
+            v.get("commits") or v.get("council_sessions_run")
+            or v.get("academic_review_sessions") or v.get("documents_uploaded")
+            or v.get("uat_sections_attested")
+            for v in roles_activity.values()
+        )
 
         specs = [
             {"key": "methodology", "available": True,
@@ -3229,7 +3780,8 @@ async def export_midpoint_paper(
                  "NOT insert it silently — wrap it in an inline verification "
                  "marker of the form [[VERIFY: <claim>]] (for example "
                  "[[VERIFY: Sharpe ratio for Regime Switching = 0.63]]) so a "
-                 "team member checks it before submission."),
+                 "team member checks it before submission."
+                 + _MIDPOINT_S1_KEY_FINDINGS),
              "context": {"study_period": period,
                          "strategy_metadata": data.get("strategy_metadata"),
                          "risk_free_rate": data["risk_free_rate"]}},
@@ -3249,16 +3801,36 @@ async def export_midpoint_paper(
                  "numeric value, do NOT insert it silently — wrap it in an "
                  "inline verification marker of the form [[VERIFY: <claim>]] "
                  "(for example [[VERIFY: Sharpe ratio for Regime Switching = "
-                 "0.63]]) so a team member checks it before submission."),
+                 "0.63]]) so a team member checks it before submission."
+                 + _MIDPOINT_S2_KEY_FINDINGS),
              "context": {"summary_statistics": data["summary_statistics"],
                          "regime_conditional": data["regime_conditional"],
                          "correlation_pre_post": {
                              "pre_2022": data["rolling_correlation"].get("pre_2022"),
                              "post_2022": data["rolling_correlation"].get("post_2022")}}},
-            # Section 3 (Roles and Division of Labor) is NOT AI-generated —
-            # build_midpoint_paper renders a human-input callout for Bob,
-            # who is the only one who can describe the division of labour
-            # authentically. No spec entry for it.
+            # Section 3 (Roles and Division of Labor) is pre-seeded from
+            # real Team Activity counts. The AI draft is factual, not
+            # authoritative — build_midpoint_paper renders a "BOB —
+            # PERSONALISE" callout beneath it directing him to rewrite it
+            # in his own voice and add what the platform data cannot show.
+            {"key": "roles", "available": has_roles,
+             "pending": (f"{DATA_PENDING} — no platform activity on record "
+                         "yet. Run council sessions, reviews and UAT, then "
+                         "regenerate; meanwhile describe the roles directly."),
+             "agent_id": "midpoint_roles",
+             "task": (
+                 "Write the Roles and Division of Labor section — about 150 "
+                 "words, APA style, past tense, third person. Use ONLY the "
+                 "team_activity_summary data provided. State each team "
+                 "member's role and attribute their documented platform "
+                 "activity — commits, council sessions run, academic review "
+                 "sessions, documents uploaded, UAT sections attested. Do "
+                 "NOT invent contributions the data does not show; if a "
+                 "count is zero, omit it rather than guessing. This is a "
+                 "factual pre-seed for the team to personalise — write it "
+                 "plainly and let each member's actual activity counts "
+                 "carry the section."),
+             "context": {"team_activity_summary": roles_activity}},
             {"key": "next_steps", "available": has_review,
              "pending": (f"{DATA_PENDING} — no Academic Review verdict on "
                          "record. Run an Academic Review on the Council "
@@ -3274,20 +3846,41 @@ async def export_midpoint_paper(
              "context": {"academic_review_verdict":
                          (data["last_review_text"] or "")[:4000]}},
         ]
-        narratives = await _generate_narratives(specs)
+        narratives = await _generate_narratives(_apply_draft_caveats(specs))
         docx_bytes = await asyncio.to_thread(build_midpoint_paper, data, narratives)
+
+        # Load the generated content into an editor draft so the frontend
+        # can open it directly in the editor. The draft_id rides back in
+        # the X-Draft-Id response header (the body is the binary .docx).
+        # A draft-storage failure never fails the download.
+        draft_id: int | None = None
+        try:
+            from tools.editor_content import midpoint_to_editor
+            from tools.editor_drafts import create_draft
+            content_json, content_text = midpoint_to_editor(narratives)
+            draft = await create_draft(
+                "midpoint_paper", session["email"],
+                f"Midpoint Paper — {date.today().isoformat()}",
+                content_json, content_text, created_from="generated")
+            if draft is not None:
+                draft_id = draft["id"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("midpoint_draft_create_failed", error=str(exc))
 
         _log_interaction_bg(
             request, session, "export", agents_involved=["academic_writer"],
             response_summary="Midpoint paper generated",
             metadata={"deliverable": "midpoint_paper",
-                      "data_available": data["available"]})
+                      "data_available": data["available"],
+                      "draft_id": draft_id})
 
         filename = f"forest-capital-midpoint-paper-{date.today().isoformat()}.docx"
-        return Response(
-            content=docx_bytes, media_type=_DOCX_MEDIA,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        if draft_id is not None:
+            headers["X-Draft-Id"] = str(draft_id)
+            headers["Access-Control-Expose-Headers"] = "X-Draft-Id"
+        return Response(content=docx_bytes, media_type=_DOCX_MEDIA,
+                        headers=headers)
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
         log.error("midpoint_paper_export_error", ref=ref, error=str(exc))
@@ -3300,6 +3893,7 @@ async def export_midpoint_paper(
 @limiter.limit("6/minute")
 async def export_executive_brief(
     request: Request,
+    body: dict | None = None,
     session: dict = Depends(require_permission("generate_documents")),
 ):
     """
@@ -3312,12 +3906,19 @@ async def export_executive_brief(
     and Final Recommendations. Senior-investment-audience tone. The eight
     narrative sections run through the Academic Writer harness and the
     call can take 45-90 seconds.
+
+    When the body carries an editor_draft_id, the .docx is built from
+    that editor draft's current content (the in-editor Export path).
     """
     import asyncio
     from datetime import date
 
     from tools.academic_docx import build_executive_brief
     from tools.academic_export import DATA_PENDING, gather_document_data
+
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
 
     try:
         data = await gather_document_data()
@@ -3405,7 +4006,7 @@ async def export_executive_brief(
              "context": {"regime_conditional": data["regime_conditional"],
                          "summary_statistics": data["summary_statistics"]}},
         ]
-        narratives = await _generate_narratives(specs)
+        narratives = await _generate_narratives(_apply_draft_caveats(specs))
         docx_bytes = await asyncio.to_thread(
             build_executive_brief, data, narratives)
 
@@ -3432,6 +4033,7 @@ async def export_executive_brief(
 @limiter.limit("4/minute")
 async def export_presentation_deck(
     request: Request,
+    body: dict | None = None,
     session: dict = Depends(require_permission("generate_documents")),
 ):
     """
@@ -3445,12 +4047,21 @@ async def export_presentation_deck(
     AI-leverage prose run through the Academic Writer harness. The call
     can take 45-90 seconds; the first run also warms the sensitivity
     memo.
+
+    When the body carries an editor_draft_id, the .pptx is built from
+    that editor draft's current slides — including the presenter's
+    speaker notes — instead of regenerating the template (the in-editor
+    Export path).
     """
     import asyncio
     from datetime import date
 
     from tools.academic_deck import build_presentation_deck, render_deck_charts
     from tools.academic_export import DATA_PENDING, gather_document_data
+
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
 
     try:
         data = await gather_document_data()
@@ -3515,18 +4126,38 @@ async def export_presentation_deck(
         pptx_bytes = await asyncio.to_thread(
             build_presentation_deck, data, narratives, charts)
 
+        # Load the generated deck into a presentation_deck editor draft so
+        # Molly can open it directly in the slide editor; the draft_id
+        # rides back in the X-Draft-Id header. Never fails the download.
+        draft_id: int | None = None
+        try:
+            from tools.editor_content import deck_to_editor
+            from tools.editor_drafts import create_draft
+            content_json, content_text = deck_to_editor(narratives)
+            draft = await create_draft(
+                "presentation_deck", session["email"],
+                f"Presentation Deck — {date.today().isoformat()}",
+                content_json, content_text, created_from="generated")
+            if draft is not None:
+                draft_id = draft["id"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deck_draft_create_failed", error=str(exc))
+
         _log_interaction_bg(
             request, session, "export", agents_involved=["academic_writer"],
             response_summary="Presentation deck generated",
             metadata={"deliverable": "presentation_deck",
                       "data_available": data["available"],
-                      "charts_rendered": sum(1 for v in charts.values() if v)})
+                      "charts_rendered": sum(1 for v in charts.values() if v),
+                      "draft_id": draft_id})
 
         filename = f"forest-capital-presentation-deck-{date.today().isoformat()}.pptx"
-        return Response(
-            content=pptx_bytes, media_type=_PPTX_MEDIA,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        if draft_id is not None:
+            headers["X-Draft-Id"] = str(draft_id)
+            headers["Access-Control-Expose-Headers"] = "X-Draft-Id"
+        return Response(content=pptx_bytes, media_type=_PPTX_MEDIA,
+                        headers=headers)
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
         log.error("presentation_deck_export_error", ref=ref, error=str(exc))

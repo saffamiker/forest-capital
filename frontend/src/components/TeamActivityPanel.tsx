@@ -15,10 +15,11 @@ import axios from 'axios'
 import {
   GitCommit, Users, GraduationCap, ShieldCheck, FileText, Eye,
   Loader2, AlertCircle, RefreshCw, ClipboardCheck, Bug, CheckCircle2,
-  Lightbulb,
+  Lightbulb, DollarSign,
 } from 'lucide-react'
 import type {
-  ActivityEvent, ActivityKind, ActivitySummary, TeamActivityResponse,
+  ActivityEvent, ActivityKind, ActivitySummary, CostSummary,
+  TeamActivityResponse,
 } from '../types/activity'
 import TableExportButton from './TableExportButton'
 import TeamActivityCharts from './TeamActivityCharts'
@@ -79,6 +80,115 @@ function fmtDuration(seconds: number | null | undefined): string {
   if (seconds == null) return ''
   if (seconds < 60) return `${seconds}s`
   return `${Math.round(seconds / 60)}m`
+}
+
+// AI spend is fractions of a cent per call — four decimal places keeps a
+// single council run legible rather than rounding it to $0.00.
+function fmtCost(usd: number | null | undefined): string {
+  if (usd == null) return '$0.0000'
+  return `$${usd.toFixed(4)}`
+}
+
+function fmtTokens(n: number | null | undefined): string {
+  if (!n) return '0'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
+  return String(n)
+}
+
+// agent_interactions.interaction_type → a readable label for the
+// cost-by-type breakdown.
+const TYPE_LABELS: Record<string, string> = {
+  council: 'Council',
+  academic_review: 'Academic Review',
+  qa: 'QA Audit',
+  document_upload: 'Document Upload',
+  explain: 'Metric Explainer',
+  explain_data: 'Data Explainer',
+  export: 'Export',
+  test_quality_eval: 'Test Quality Check',
+}
+const typeLabel = (t: string): string => TYPE_LABELS[t] ?? t
+
+// ── Cost panel ────────────────────────────────────────────────────────────────
+
+function CostPanel({ cost }: { cost: CostSummary }) {
+  return (
+    <div className="card p-4">
+      <div className="flex items-center gap-2 mb-3">
+        <DollarSign className="w-3.5 h-3.5 text-success" />
+        <span className="text-2xs text-muted uppercase tracking-wide">
+          AI token spend{cost.analytical_sessions_only
+            ? ' · analytical sessions' : ' · all sessions'}
+        </span>
+      </div>
+
+      {/* Grand total */}
+      <div className="grid grid-cols-3 gap-3 mb-3">
+        <div>
+          <div className="font-mono text-success text-2xl leading-none">
+            {fmtCost(cost.total_cost_usd)}
+          </div>
+          <div className="text-2xs text-muted mt-1">estimated spend</div>
+        </div>
+        <div>
+          <div className="font-mono text-white text-2xl leading-none">
+            {fmtTokens(cost.total_input_tokens)}
+          </div>
+          <div className="text-2xs text-muted mt-1">input tokens</div>
+        </div>
+        <div>
+          <div className="font-mono text-white text-2xl leading-none">
+            {fmtTokens(cost.total_output_tokens)}
+          </div>
+          <div className="text-2xs text-muted mt-1">output tokens</div>
+        </div>
+      </div>
+
+      {cost.total_interactions === 0 ? (
+        <p className="text-xs text-muted italic">
+          No AI spend recorded yet — cost tracking began with the
+          token-logging release; earlier interactions carry no cost.
+        </p>
+      ) : (
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {/* By interaction type */}
+          <div>
+            <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
+              By interaction
+            </div>
+            <div className="space-y-1">
+              {cost.by_type.map((r) => (
+                <div key={r.interaction_type}
+                     className="flex items-center justify-between text-xs">
+                  <span className="text-slate-300">
+                    {typeLabel(r.interaction_type ?? '')}
+                    <span className="text-2xs text-muted"> · {r.interactions}</span>
+                  </span>
+                  <span className="font-mono text-success">{fmtCost(r.cost_usd)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* By member */}
+          <div>
+            <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
+              By team member
+            </div>
+            <div className="space-y-1">
+              {cost.by_member.map((r) => (
+                <div key={r.user}
+                     className="flex items-center justify-between text-xs">
+                  <span className="text-slate-300 truncate">{r.user_name}</span>
+                  <span className="font-mono text-success">{fmtCost(r.cost_usd)}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
 }
 
 // ── Summary panel ─────────────────────────────────────────────────────────────
@@ -278,6 +388,62 @@ function FilterBar({
   )
 }
 
+// ── Per-query council cost ────────────────────────────────────────────────────
+
+interface AgentCost {
+  input_tokens?: number
+  output_tokens?: number
+  estimated_cost_usd?: number
+  calls?: number
+}
+
+function CouncilCost({ ev }: { ev: ActivityEvent }) {
+  const [open, setOpen] = useState(false)
+  const cost = ev.estimated_cost_usd
+  // A council row predating the token-logging release has no cost — emit
+  // nothing rather than a misleading $0.0000.
+  if (cost == null) return null
+
+  const perAgent = (ev.metadata?.per_agent_cost as
+    Record<string, AgentCost> | undefined) ?? {}
+  const rows = Object.entries(perAgent)
+    .sort(([, a], [, b]) =>
+      (b.estimated_cost_usd ?? 0) - (a.estimated_cost_usd ?? 0))
+
+  return (
+    <div className="mt-1">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        disabled={rows.length === 0}
+        className="text-2xs text-success font-mono hover:underline
+                   disabled:no-underline disabled:cursor-default"
+      >
+        {fmtCost(cost)}
+        <span className="text-muted">
+          {' '}· {fmtTokens(ev.input_tokens)} in / {fmtTokens(ev.output_tokens)} out
+        </span>
+        {rows.length > 0 && (
+          <span className="text-muted"> · {open ? 'hide' : 'per agent'}</span>
+        )}
+      </button>
+      {open && rows.length > 0 && (
+        <div className="mt-1 pl-2 border-l border-border/60 space-y-0.5">
+          {rows.map(([label, a]) => (
+            <div key={label}
+                 className="flex items-center justify-between text-2xs gap-3">
+              <span className="text-slate-300">{agentLabel(label)}</span>
+              <span className="font-mono text-muted">
+                {fmtCost(a.estimated_cost_usd)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Timeline row ──────────────────────────────────────────────────────────────
 
 function TimelineRow({ ev }: { ev: ActivityEvent }) {
@@ -345,6 +511,7 @@ function RowBody({ ev }: { ev: ActivityEvent }) {
             {ev.agents_involved.map(agentLabel).join(' · ')}
           </div>
         )}
+        <CouncilCost ev={ev} />
       </div>
     )
   }
@@ -445,6 +612,7 @@ function RowBody({ ev }: { ev: ActivityEvent }) {
 
 export default function TeamActivityPanel() {
   const [summary, setSummary] = useState<ActivitySummary | null>(null)
+  const [cost, setCost] = useState<CostSummary | null>(null)
   const [events, setEvents] = useState<ActivityEvent[]>([])
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -478,6 +646,11 @@ export default function TeamActivityPanel() {
     })
       .then((res) => setSummary(res.data))
       .catch(() => setSummary(null))
+    axios.get<CostSummary>('/api/v1/activity/cost-summary', {
+      params: { include_testing: filters.includeTesting },
+    })
+      .then((res) => setCost(res.data))
+      .catch(() => setCost(null))
   }, [filters.includeTesting])
 
   const loadTimeline = useCallback((reset: boolean) => {
@@ -583,9 +756,10 @@ export default function TeamActivityPanel() {
         </div>
       ) : (
         <div className="space-y-3">
-          {/* Summary panel — hidden in Presentation View, which shows
-              only the three charts full-width. */}
+          {/* Summary + cost panels — hidden in Presentation View, which
+              shows only the three charts full-width. */}
           {summary && !presentMode && <SummaryPanel summary={summary} />}
+          {cost && !presentMode && <CostPanel cost={cost} />}
 
           {/* Visualisation dashboard. */}
           <TeamActivityCharts

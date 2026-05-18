@@ -16,9 +16,11 @@ from typing import Any
 import structlog
 
 from agents.base import (
+    CITATION_INSTRUCTION,
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    WEB_SEARCH_TOOL,
     build_agent_response,
     call_claude,
 )
@@ -54,9 +56,18 @@ LAYMAN_EXPLANATION (four paragraphs):
 
 These must reflect your actual findings. Honest about uncertainty.
 
+DEPTH REQUIREMENT — produce a detailed, thorough analysis of 300-500 words. Do not \
+summarise and do not defer with "see above" or "see the CIO for synthesis": the CIO \
+synthesises the council — your job is to provide complete domain expertise, not a \
+brief verdict. Your analysis must contain domain-specific analysis of the question \
+asked, quantitative references to the actual strategy metrics in the data provided, \
+and a clear position with its supporting reasoning.
+
 {GLOBAL_AGENT_RULE}
 
-{SCOPE_ENFORCEMENT}"""
+{SCOPE_ENFORCEMENT}
+
+{CITATION_INSTRUCTION}"""
 
 
 class FixedIncomeAnalyst:
@@ -105,7 +116,9 @@ class FixedIncomeAnalyst:
             # equity_analyst for the rationale.
             harness = GeneratorEvaluatorHarness()
             result = harness.run(
-                generator_fn=lambda p: call_claude(SONNET_MODEL, _SYSTEM_PROMPT, p),
+                generator_fn=lambda p: call_claude(
+                    SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500,
+                    tools=[WEB_SEARCH_TOOL]),
                 evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
                 generator_prompt=user_message,
                 context=str(context)[:4000],

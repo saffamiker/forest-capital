@@ -120,6 +120,18 @@ role-specific section.
 - [ ] Presentation View shows three charts at screen-share scale.
 - [ ] CSV export works on Team Activity.
 
+### Submission Guide
+
+- [ ] Verify the **📋 Submission Guide** button is visible in the Reports
+      page header.
+- [ ] Click it — verify the side panel opens with the guide(s) relevant
+      to your role: Bob sees Guide 1 (Midpoint Paper), Molly sees Guide 2
+      (Final Presentation), Michael sees both.
+- [ ] Verify a **deadline countdown** is visible at the top of each guide
+      (amber at 5 days or fewer, red at 2 days or fewer).
+- [ ] Verify each guide leads with the tracking note — work done on the
+      platform is the documented contribution record.
+
 ### Settings
 
 - [ ] All six sections render: **Organisation / Data and Study Period /
@@ -250,6 +262,51 @@ deliverables lead.*
   - [ ] An investment-audience tone.
   - [ ] A Limitations section is present.
 
+### Document Editor
+
+*Run after generating the midpoint paper above.*
+
+- [ ] On the midpoint-paper card, click **[Open in Editor]** (the primary
+      button after generation — not Download).
+- [ ] Verify the editor loads at `/editor/:draft_id` with a three-panel
+      layout: navigator (left), document (centre), Writing Assistant (right).
+- [ ] Verify the **AI DRAFT** banner and the amber **BOB — YOUR TASKS**
+      callout appear at the top.
+- [ ] Verify `[[VERIFY]]` markers render as amber-highlighted spans in the
+      document body.
+- [ ] Verify `[[BOB]]` callouts render as full-width amber block panels
+      with a [Mark as Complete] button.
+- [ ] Click [Mark as Complete] on a `[[BOB]]` panel — verify the panel
+      collapses and the section progress bar in the left panel updates.
+- [ ] Click a `[[VERIFY]]` marker — verify a popup opens with the message
+      "Verify this value against the Analytics page before removing this
+      marker." and two buttons: [Mark as Verified] and [Cancel]. Click
+      [Mark as Verified] — verify the amber highlight and marker text are
+      removed. Click a second `[[VERIFY]]` marker and click [Cancel] —
+      verify the popup closes and the marker remains intact.
+- [ ] Type a sentence anywhere in the document body — verify the header
+      shows "Saving…" then "Saved [time]" (auto-save runs every 30s).
+- [ ] In the Writing Assistant panel (right), type *"Is my methodology
+      section clear?"* — verify a specific, relevant response returns
+      (it should reference your actual content, not be generic).
+- [ ] Select a sentence in the editor — verify the **✨ Ask AI** button
+      appears above the selection.
+- [ ] Click it — verify the Writing Assistant panel opens and the chat
+      input is pre-filled with the selected text quoted.
+- [ ] Send the pre-filled message — verify the response references the
+      specific passage you selected.
+- [ ] After the session, open Team Activity on the Reports page — verify
+      the writing-assistant exchange is recorded.
+- [ ] Click **[Run Academic Review]** in the Writing Assistant panel —
+      verify the inline verdict appears below the button.
+- [ ] If unresolved markers remain, verify the warning appears:
+      "You have [n] unresolved markers".
+- [ ] In the left panel under Versions, click **Save**, label it
+      "UAT test" — verify it appears in version history with a restore
+      control.
+- [ ] Click **[Export DOCX]** in the editor header — verify a `.docx`
+      file downloads containing the current editor content.
+
 ### Settings — Academic Documents
 
 - [ ] Navigate to Settings → Academic Documents.
@@ -306,6 +363,43 @@ presentation and visualisation lead.*
   - [ ] All text is readable (not white-on-white or black-on-black).
   - [ ] No lorem ipsum or placeholder text.
 
+### Presentation Editor
+
+*Run after generating the presentation deck above.*
+
+- [ ] On the presentation-deck card, click **[Open in Editor]**.
+- [ ] Verify the centre panel renders **slide cards** — an editable title,
+      content and speaker-notes field per slide — not a rich-text editor.
+- [ ] Verify at least one slide shows amber **data-point markers**.
+- [ ] Click **Mark data points verified** on a slide — verify the marker
+      row clears to a verified state.
+- [ ] Click the speaker-notes field on any slide and type a sentence.
+- [ ] Click **[Generate Talking Points]** below the notes field — verify
+      4-6 bullet points return.
+- [ ] Click the insert (+) control on one bullet — verify it appends to
+      the speaker-notes field.
+- [ ] Verify the slide shows a **Complete** indicator once its notes are
+      written and its data points are verified.
+- [ ] Verify the left-panel progress indicator updates for that slide.
+- [ ] Click **[Presentation Preview]** in the header bar — verify a
+      full-screen overlay opens.
+- [ ] Verify the speaker notes show in a strip below each slide, labelled
+      "Your notes (not visible to audience)".
+- [ ] Navigate with the arrow keys — verify slides advance and the
+      counter ("N / 16") updates.
+- [ ] Press **Esc** — verify the overlay closes and returns to the editor.
+- [ ] Click **[Export PPTX]** in the editor header — verify a `.pptx`
+      file downloads, and open it to confirm your edited speaker notes
+      are present on the slides.
+
+### Writing Assistant (Presentation)
+
+- [ ] In the editor, open the Writing Assistant panel (right) and type a
+      question about a slide — verify a specific, relevant response.
+- [ ] Select a word or phrase in a slide's content or speaker-notes
+      field, then use the Writing Assistant chat to ask about it —
+      verify the response is specific to the slide content.
+
 ### Export package
 
 - [ ] Navigate to Reports and click **Export Academic Package**.
@@ -361,3 +455,11 @@ Send the completed sign-off and any failure notes to **ruurdsm@queens.edu**.
   document.
 - Generated presentation charts may differ slightly from the platform charts
   (matplotlib server-side rendering vs Recharts frontend rendering).
+- The in-editor **Export DOCX / Export PPTX** button renders the file
+  directly from the current editor content — a faithful export of what
+  the author has edited. It does not re-embed the regenerated data
+  tables; the table-rich version is the one produced by Reports →
+  Generate Documents.
+- `[[BOB]]` callouts render as block panels resolved via [Mark as
+  Complete]. `[[VERIFY]]` markers resolve via a popup with
+  [Mark as Verified] / [Cancel].

@@ -169,6 +169,56 @@ class TestQAAuditStructure:
         assert result["verdict"] in ("WARN", "FAIL")
 
 
+class TestQAPerCheckFiltering:
+    """_parse_audit_response splits the QA analysis per check id — each
+    item carries only its own section, and a check with no section gets
+    an honest fallback message, never the whole analysis blob."""
+
+    def test_check_with_a_section_shows_only_that_section(self, qa):
+        response = (
+            "**P03 — Transaction costs**\n"
+            "Costs are applied bidirectionally.\nVerdict: PASS\n\n"
+            "**S06 — Autocorrelation**\n"
+            "Ljung-Box runs; Newey-West applied.\nVerdict: PASS\n"
+        )
+        result = qa._parse_audit_response(response, FULL_MOCK_RESULTS, {})
+        p03 = next(i for i in result["items"] if i["check_id"] == "P03")
+        assert "bidirectionally" in p03["evidence"]
+        # Never another check's analysis.
+        assert "Autocorrelation" not in p03["evidence"]
+
+    def test_missing_section_falls_back_to_an_honest_message(self, qa):
+        # Only P03 has a section — every other check must get the
+        # fallback message, never the whole blob.
+        response = (
+            "**P03 — Transaction costs**\n"
+            "Costs are applied bidirectionally.\nVerdict: PASS\n"
+        )
+        result = qa._parse_audit_response(response, FULL_MOCK_RESULTS, {})
+        missing = [i for i in result["items"] if i["check_id"] != "P03"]
+        assert missing
+        for item in missing:
+            assert item["evidence"] == (
+                "No detailed analysis available for this check.")
+
+    def test_no_item_ever_shows_the_whole_blob(self, qa):
+        response = (
+            "**P03 — Transaction costs**\nCosts applied.\nVerdict: PASS\n"
+        )
+        result = qa._parse_audit_response(response, FULL_MOCK_RESULTS, {})
+        for item in result["items"]:
+            assert item["evidence"] != response
+
+    def test_no_fix_carries_the_cross_reference_artifact(self, qa):
+        response = (
+            "**P03 — Transaction costs**\nCosts applied.\nVerdict: WARN\n"
+        )
+        result = qa._parse_audit_response(response, FULL_MOCK_RESULTS, {})
+        for item in result["items"]:
+            fix = item.get("fix")
+            assert not (fix and "analysis section above" in fix)
+
+
 class TestQALimitationsGeneration:
     def test_limitations_list_nonempty(self, qa):
         result = qa.run_audit(FULL_MOCK_RESULTS)

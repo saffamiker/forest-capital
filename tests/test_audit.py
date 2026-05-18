@@ -77,23 +77,46 @@ def _clean_payload() -> dict:
     }
 
 
+# Shared stubs for the /api/v1/audit/run contract tests. The global
+# QA-run guard reads is_audit_running before start_audit; stubbing both
+# keeps a contract test from 409-ing on a stale row and from inserting a
+# real 'running' audit_runs row that would leak into later tests.
+async def _no_run_running() -> None:
+    return None
+
+
+async def _fake_start_audit(triggered_by: str, email: str) -> dict:
+    return {"status": "started", "audit_id": 1}
+
+
 # ── Endpoint gating ───────────────────────────────────────────────────────────
 
 class TestAuditEndpointGating:
     def test_run_rejects_a_viewer(self):
         assert client.post("/api/v1/audit/run", headers=VIEWER).status_code == 403
 
-    def test_run_admits_a_team_member(self):
+    def test_run_admits_a_team_member(self, monkeypatch):
         # The Statistical Audit moved to the QA tab — running it requires
-        # team_member, not sysadmin. No database in the test env, so
-        # start_audit returns a status field with a 200.
+        # team_member, not sysadmin. start_audit is stubbed so this stays
+        # a pure auth/contract test: it does not insert a real 'running'
+        # audit_runs row (which would leak and 409 later QA-run tests via
+        # the global guard), and is_audit_running is stubbed clear so the
+        # guard itself does not 409 on a pre-existing row.
+        monkeypatch.setattr("tools.audit_engine.is_audit_running",
+                            _no_run_running)
+        monkeypatch.setattr("tools.audit_engine.start_audit",
+                            _fake_start_audit)
         resp = client.post("/api/v1/audit/run", headers=TEAM)
         assert resp.status_code == 200
         assert "status" in resp.json()
 
-    def test_run_admits_the_sysadmin(self):
-        # No database in the test env → start_audit returns failed/
-        # no_database; the contract is a 200 with a status field.
+    def test_run_admits_the_sysadmin(self, monkeypatch):
+        # As above — guard and start_audit both stubbed so this stays an
+        # auth/contract test that leaves no audit_runs row behind.
+        monkeypatch.setattr("tools.audit_engine.is_audit_running",
+                            _no_run_running)
+        monkeypatch.setattr("tools.audit_engine.start_audit",
+                            _fake_start_audit)
         resp = client.post("/api/v1/audit/run", headers=SYSADMIN)
         assert resp.status_code == 200
         assert "status" in resp.json()
@@ -414,6 +437,23 @@ class TestSmartAuditCaching:
         asyncio.run(audit_engine.run_full_audit("data_ingestion"))
         assert created == []   # idempotent — no run created on current data
 
+    def test_skipped_trigger_logs_audit_trigger_skipped(self, monkeypatch):
+        # When the audit is already current, the bypass is logged as an
+        # audit_trigger_skipped event so a redeploy that fires no Opus
+        # call is visible in the Render logs.
+        from structlog.testing import capture_logs
+
+        async def _current() -> dict:
+            return {"is_current": True}
+        monkeypatch.setattr(audit_assembler, "is_audit_current", _current)
+        with capture_logs() as logs:
+            asyncio.run(audit_engine.run_full_audit("startup"))
+        skipped = [e for e in logs
+                   if e.get("event") == "audit_trigger_skipped"]
+        assert skipped, "expected an audit_trigger_skipped log event"
+        assert skipped[0]["reason"] == "audit_current"
+        assert skipped[0]["triggered_from"] == "startup"
+
     def test_run_full_audit_proceeds_when_stale(self, monkeypatch):
         async def _stale() -> dict:
             return {"is_current": False}
@@ -464,6 +504,13 @@ class TestSmartAuditCaching:
         async def _fake_start(triggered_by: str, email: str) -> dict:
             captured["triggered_by"] = triggered_by
             return {"status": "started", "audit_id": 1}
+
+        # The QA-run guard runs before start_audit and reads audit_runs
+        # directly — stub it clear so a stale 'running' row never 409s
+        # this contract test.
+        async def _none():
+            return None
+        monkeypatch.setattr("tools.audit_engine.is_audit_running", _none)
         monkeypatch.setattr("tools.audit_engine.start_audit", _fake_start)
         resp = client.post("/api/v1/audit/run", headers=TEAM,
                            json={"reason": "demo"})

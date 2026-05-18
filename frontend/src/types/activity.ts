@@ -30,6 +30,11 @@ export interface ActivityEvent {
   agents_involved?: string[] | null
   response_summary?: string | null
   metadata?: Record<string, unknown> | null
+  // token cost — populated from the migration-020 release onward
+  input_tokens?: number | null
+  output_tokens?: number | null
+  model_used?: string | null
+  estimated_cost_usd?: number | null
   // page view
   page?: string
   duration_seconds?: number | null
@@ -74,4 +79,26 @@ export interface ActivitySummary {
   total_interactions: number
   analytical_sessions_only: boolean
   test_coverage?: { steps_attested: number; testers: number }
+}
+
+/** One row of the AI cost summary — a member or an interaction type. */
+export interface CostRow {
+  user?: string
+  user_name?: string
+  interaction_type?: string
+  cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  interactions: number
+}
+
+/** GET /api/v1/activity/cost-summary — AI token spend. */
+export interface CostSummary {
+  total_cost_usd: number
+  total_input_tokens: number
+  total_output_tokens: number
+  total_interactions: number
+  by_member: CostRow[]
+  by_type: CostRow[]
+  analytical_sessions_only: boolean
 }

@@ -39,6 +39,28 @@ from agents.risk_manager import RiskManager
 
 log = structlog.get_logger(__name__)
 
+
+def _run_tagged(label: str, fn: Any, args: tuple) -> Any:
+    """
+    Runs a specialist call inside a copied context, first tagging that
+    context with the agent label so every record_usage() the call emits
+    is attributed to the right specialist in the per-agent cost
+    breakdown. Tagging must happen INSIDE the copied context — set in the
+    parent it would leak across all four threads.
+    """
+    _tag_agent(label)
+    return fn(*args)
+
+
+def _tag_agent(label: str) -> None:
+    """Tag the current context for the per-agent cost breakdown. Fail-open
+    — a tagging failure must never break a council call."""
+    try:
+        from agents.usage import set_current_agent
+        set_current_agent(label)
+    except Exception:  # noqa: BLE001 — cost telemetry is never fatal
+        pass
+
 _SYSTEM_PROMPT = f"""You are the Chief Investment Officer of a quantitative investment council \
 advising Forest Capital. You manage a team of specialist analysts and TWO independent \
 dissenting analysts: Gemini (which surfaces blind spots and alternative interpretations) \
@@ -62,6 +84,10 @@ When Gemini and Grok challenge the consensus, you engage seriously with both bef
 confirming or revising. Treat any concern raised by both dissenters as a hard caveat \
 that must be addressed before you finalise the recommendation. You never recommend a \
 strategy based on in-sample results alone.
+
+You have received detailed analyses from four specialists (equity, fixed income, \
+risk, quantitative backtesting). Synthesise their findings into a final \
+recommendation — do not repeat their analysis, reference it and build on it.
 
 {GLOBAL_AGENT_RULE}
 
@@ -122,15 +148,17 @@ class CIO:
         # .result() re-raises a worker exception exactly as the former
         # sequential calls did, so error semantics are unchanged.
         specialist_jobs = [
-            (self._equity.analyse, (strategy_results,)),
-            (self._fi.analyse, (strategy_results, history)),
-            (self._risk.analyse, (strategy_results,)),
-            (self._quant.analyse, (strategy_results,)),
+            ("equity_analyst", self._equity.analyse, (strategy_results,)),
+            ("fixed_income_analyst", self._fi.analyse,
+             (strategy_results, history)),
+            ("risk_manager", self._risk.analyse, (strategy_results,)),
+            ("quant_backtester", self._quant.analyse, (strategy_results,)),
         ]
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = [
-                pool.submit(contextvars.copy_context().run, fn, *args)
-                for fn, args in specialist_jobs
+                pool.submit(contextvars.copy_context().run,
+                            _run_tagged, label, fn, args)
+                for label, fn, args in specialist_jobs
             ]
             reports = [f.result() for f in futures]
         equity_report, fi_report, risk_report, quant_report = reports
@@ -143,6 +171,11 @@ class CIO:
             quant_ok=bool(quant_report),
         )
 
+        # The draft/dissent/synthesis steps run in the request context
+        # (not the copied specialist threads), so each tags that context
+        # for the per-agent cost breakdown before its LLM call.
+        _tag_agent("cio")
+
         # Step 6: Compile draft consensus — CIO summarises specialist views
         draft_consensus = self._compile_draft_consensus(
             query, equity_report, fi_report, risk_report, quant_report, strategy_results
@@ -151,12 +184,15 @@ class CIO:
         # Step 7-8: dissent — Gemini (blind spots) + Grok (stress test).
         # Both run before synthesis so the CIO sees both critiques together
         # and can flag concerns raised by both as hard caveats.
+        _tag_agent("independent_analyst")
         gemini_report = self._gemini.challenge(draft_consensus, strategy_results)
         log.info("gemini_challenge_received")
+        _tag_agent("contrarian_analyst")
         grok_report = self._grok.challenge(draft_consensus, strategy_results)
         log.info("grok_challenge_received")
 
         # Step 9: Synthesise final recommendation — CIO engages with both dissenters
+        _tag_agent("cio")
         cio_synthesis = self._synthesise(
             query,
             draft_consensus,
@@ -237,7 +273,7 @@ class CIO:
         )
 
         try:
-            return call_claude(OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=800)
+            return call_claude(OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000)
         except Exception as exc:
             log.error("cio_draft_error", error=str(exc))
             # Fallback draft from specialist summaries
@@ -318,7 +354,7 @@ class CIO:
 
         try:
             synthesis_text = call_claude(
-                OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=1024
+                OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000
             )
         except Exception as exc:
             log.error("cio_synthesis_error", error=str(exc))

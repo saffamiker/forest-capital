@@ -235,6 +235,23 @@ export const TOUR_STEPS: TourStep[] = [
       + 'This is the visual you show faculty during the AI use narrative.',
   },
   {
+    id: 'document-editor',
+    target: '[data-tour="generate-documents"]',
+    placement: 'top',
+    route: '/reports',
+    title: 'Your draft, ready to refine',
+    body: [
+      'Everything you generate opens directly in the in-platform editor. '
+      + 'Work through your draft here — every edit, every resolved marker, '
+      + 'every version save is tracked and part of your submission record. '
+      + 'Nothing you do is lost, and nothing is untracked.',
+      'The AI wrote the first draft. The grader reads what you do next.',
+    ],
+    relevantFor:
+      'Bob and Molly — the midpoint paper and the presentation deck both '
+      + 'open in the editor; refine them here, not in Word.',
+  },
+  {
     target: '#academic-documents',
     placement: 'top',
     route: '/settings',

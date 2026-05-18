@@ -5913,14 +5913,233 @@ only modestly from the equilibrium prior. This is a genuine analytical
 finding, not a data issue, and is disclosed as such.
 
 
+─────────────────────────────────────────────────────────────────────────────
+AI TOKEN COST TRACKING (migration 020, May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+Every AI interaction logged to agent_interactions now carries its token
+usage and an estimated USD cost, so the team can see what the platform's
+AI spend is and where it goes — without an external billing dashboard.
+
+PRICING — config.py: TOKEN_COSTS_USD maps each model to per-token input
+and output rates (claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5,
+gemini-2.0-flash, grok). calculate_cost(model, input_tokens,
+output_tokens) returns the estimated USD cost, or None for an unknown
+model or non-numeric counts — the caller stores null rather than a wrong
+figure. The model string is matched leniently (prefix / substring) so a
+dated provider string like claude-haiku-4-5-20251001 still resolves.
+
+CAPTURE — agents/usage.py is a per-request ContextVar accumulator, the
+same pattern as the harness-metrics capture. record_usage(model, in, out)
+reports one AI call's tokens; it is a silent no-op unless an endpoint
+called start_usage_capture(), so the call wrappers (call_claude,
+call_gemini, the two Grok helpers) invoke it unconditionally. The capture
+list is seeded BEFORE the parallel specialist threads spawn, so the
+contextvars.copy_context() each thread runs under shares it by reference.
+set_current_agent(label) tags a context so collect_usage() can return a
+per-agent breakdown; cio.deliberate() tags each specialist thread
+(equity/fixed-income/risk/quant) and the request-context steps
+(cio/independent_analyst/contrarian_analyst). collect_usage() aggregates
+the totals, the model_used (a single model or "multiple") and the
+per_agent breakdown. Everything is fail-open — telemetry never breaks an
+agent call.
+
+STORAGE — migration 020 adds input_tokens, output_tokens, model_used and
+estimated_cost_usd to agent_interactions. _log_interaction_bg in main.py
+calls collect_usage() in the request context, writes the four columns
+via log_agent_interaction and folds the per_agent breakdown into
+metadata.per_agent_cost. The council and academic-review endpoints start
+a capture alongside the harness capture. Rows predating the migration
+carry NULL costs and read as zero — every figure is "spend since cost
+tracking shipped", not lifetime spend.
+
+SURFACES:
+  - GET /api/v1/activity/cost-summary — grand total plus per-member and
+    per-interaction-type breakdowns (get_cost_summary in activity_log.py).
+    The Team Activity view renders it as a CostPanel below the engagement
+    summary; hidden in Presentation View.
+  - The Team Activity council timeline row shows the per-query cost
+    inline, expanding on click into the per-agent cost list.
+  - Settings → Users carries an "AI cost" column — list_all_users sums
+    estimated_cost_usd per user_email as ai_cost_usd, so a sysadmin sees
+    what each account (viewers included) has cost.
+
+Migration 020 is changelog version 39. Operator step: alembic upgrade
+head on Render.
+
+
+─────────────────────────────────────────────────────────────────────────────
+KEY FINDINGS — REQUIRED IN ALL ACADEMIC DELIVERABLES (May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The midpoint paper, executive brief and presentation deck must all
+present the project's eight key analytical findings. The midpoint paper
+generation prompt (main.py, the /api/v1/export/midpoint-paper section
+task specs — constants _MIDPOINT_S1_KEY_FINDINGS / _MIDPOINT_S2_KEY_
+FINDINGS) instructs the Academic Writer to feature them; the Academic
+Review arbiter (agents/academic_review.py _ARBITER_INSTRUCTIONS and the
+academic_review_arbiter_evaluator_prompt in agents/evaluator_prompts.py)
+scores their presence.
+
+Section 1 (Data and Methodology) findings:
+  - Finding 1 — the 2022 equity-IG correlation regime break (approx
+    -0.05 → +0.61), the project's central finding (also in Section 2).
+  - Finding 5 — turnover reported one-way (two-way ≈ double);
+    Black-Litterman's static-like 4.7% turnover.
+  - Finding 6 — five shorter-series strategies disclosed with their
+    lookback-window start dates.
+  - Finding 7 — the independent statistical audit (zero critical
+    failures across 59 checks).
+  - Finding 8 — data provenance (LQD/BND splice, HYG source change,
+    DTB3 risk-free, monthly auto-extension).
+  Methodology highlights: Carhart four-factor, time-varying DTB3,
+  Probabilistic Sharpe Ratio with 95% CIs, Deflated Sharpe Ratio,
+  Benjamini-Hochberg FDR at q < 0.005, true one-way turnover.
+
+Section 2 (Preliminary Results) findings, in order:
+  - Finding 1 FIRST — the 2022 correlation break, quantified, connected
+    to strategy-performance divergence.
+  - Finding 2 — Regime Switching post-2022 leadership (Sharpe ≈ 0.2483
+    vs the benchmark's post-2022 Sharpe).
+  - Finding 3 — the FDR result (no strategy significant at q < 0.005;
+    raw p 0.008-1.000), framed as methodological honesty, NOT a failure.
+  - Finding 4 — the efficient-frontier tangency portfolio ≈ 95.6% HY,
+    disclosed as a concentration risk with a sensitivity caveat.
+
+The Academic Review arbiter treats a submission that fails to quantify
+the 2022 break, or omits/misrepresents the FDR result, as materially
+incomplete.
+
+SECTION 3 ACTIVITY PRE-SEED: the midpoint paper's Roles and Division of
+Labor section is no longer a blank human-input callout — it is
+pre-seeded with a factual AI draft built from real platform activity.
+tools/academic_export.gather_roles_activity(team_summary) assembles a
+per-member team_activity_summary (keyed michael_ruurds / bob_thao /
+molly_murdock) from the get_activity_summary bundle plus two light reads
+— UAT sections attested (distinct test_results.script_id per user) and
+the completed-audit count (attributed to Michael, the sysadmin who runs
+audits). The /api/v1/export/midpoint-paper endpoint passes it as the
+"midpoint_roles" section context; the Academic Writer drafts a plain,
+count-attributed paragraph (it is told to omit a zero count, never
+invent a contribution). build_midpoint_paper renders the draft followed
+by a "BOB — PERSONALISE THIS SECTION" callout — the draft is a factual
+scaffold, not the final text. study_period also now carries
+ff_factors_end (the last Carhart-factor month) so Section 1's
+study-period description reflects the live database state.
+
+VERIFICATION CAVEATS: every AI-generated draft (midpoint paper,
+executive brief, presentation deck) carries verification guard rails so
+a draft is never mistaken for a submittable document.
+  - CAVEAT 1 — a boxed "AI DRAFT — REVIEW REQUIRED" warning below the
+    banner (CITATIONS / STATISTICS / YOUR VOICE / HALLUCINATIONS); in
+    the deck it is the title slide's speaker notes
+    (academic_docx._add_review_warning_box, academic_deck._DECK_TITLE_
+    NOTE).
+  - CAVEAT 2 — every external citation is preceded by a
+    [[VERIFY CITATION: …]] marker (main._CAVEAT_CITATION).
+  - CAVEAT 3 — every uncertain numeric value is wrapped in a
+    [[VERIFY: …]] marker (main._CAVEAT_STATS). Both caveats are appended
+    to the section task prompts by main._apply_draft_caveats, which is
+    idempotent per form — a task already carrying one marker is not
+    given a conflicting second copy. academic_docx._VERIFY_RE renders
+    both marker forms bold + yellow-highlighted.
+  - CAVEAT 4 — section/slide-specific human-input callouts: the midpoint
+    Roles callout ("BOB — PERSONALISE THIS SECTION", below its pre-seed)
+    and Next Steps callout ("BOB — REVIEW AND REFINE"); every deck slide
+    carries a [MOLLY — VERIFY BEFORE PRESENTING] speaker note.
+  - CAVEAT 5 — a Submission Checklist at the end of each .docx
+    (academic_docx._add_submission_checklist) and in the deck title
+    note: citations verified, statistics confirmed, all [[VERIFY]]
+    markers and [[BOB]]/[[MOLLY]] callouts resolved and removed, draft
+    rewritten in the author's voice, AI DRAFT banner removed, Academic
+    Review run.
+The Academic Review arbiter flags any document still carrying [[VERIFY]]
+markers or unresolved [[BOB]]/[[MOLLY]] callouts under Requirements and
+Rubric Alignment — a document with unresolved markers is not ready to
+submit. The final submitted file should carry none of these aids.
+
+
+─────────────────────────────────────────────────────────────────────────────
+IN-PLATFORM DOCUMENT EDITOR (migration 021, May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+A generated midpoint paper or presentation deck opens in an in-platform
+editor — Bob refines the paper, Molly the deck, without leaving the
+platform, so every edit is part of the documented contribution record.
+
+DATA MODEL — migration 021 adds two tables. They are namespaced
+editor_drafts / editor_draft_versions because migration 004 already
+created document_drafts / document_versions for the Sprint 6 storyboard
+editor (a different domain); the two sets coexist.
+  - editor_drafts — the mutable working copy: document_type
+    (midpoint_paper | executive_brief | presentation_deck), owner_email,
+    title, content_json (JSONB), content_text, word_count, version,
+    is_current, is_deleted, created_from (generated | uploaded |
+    manual). content_json is a TipTap document for a paper/brief and a
+    {slides:[...]} structure for a deck; content_text is the plain
+    projection the AI and Academic Review read.
+  - editor_draft_versions — an immutable named checkpoint (the restore
+    target): draft_id, version, content_json, content_text, word_count,
+    version_label, saved_at, saved_by.
+
+ENDPOINTS (all team_member-gated) — tools/editor_drafts.py is the
+fail-open data layer:
+  GET    /api/v1/documents/drafts                  — the user's drafts
+  GET    /api/v1/documents/drafts/{id}
+  POST   /api/v1/documents/drafts                  — create; sets
+         is_current, unsets other drafts of the same type
+  PATCH  /api/v1/documents/drafts/{id}             — silent auto-save,
+         no version row
+  POST   /api/v1/documents/drafts/{id}/versions    — named checkpoint
+  GET    /api/v1/documents/drafts/{id}/versions
+  POST   /api/v1/documents/drafts/{id}/restore/{version_id}
+  DELETE /api/v1/documents/drafts/{id}             — soft delete
+
+GENERATE → EDITOR — POST /api/v1/export/midpoint-paper and
+.../presentation-deck load the generated content into an editor draft
+(tools/editor_content.midpoint_to_editor / deck_to_editor) and return
+the new draft id in the X-Draft-Id response header. The Reports-screen
+Generate Documents card then offers Open in Editor as the primary CTA
+(Download secondary). The executive brief has no editor draft.
+
+EDITOR PAGE — /editor/:draftId (pages/DocumentEditor.tsx), three panels:
+  - LEFT EditorNavigator — document info, a section navigator with a
+    per-section progress bar (driven by remaining [[BOB]]/[[VERIFY]]
+    markers), and version history (Save Version / Restore).
+  - CENTRE — RichTextEditor (TipTap rich text) for a paper/brief, or
+    SlideEditor (editable slide cards) for a deck. lib/editorMarkers.ts
+    is a ProseMirror decoration plugin that renders [[VERIFY]] /
+    [[BOB]] markers as amber spans; clicking one offers to resolve it
+    and deletes the marker text.
+  - RIGHT WritingAssistant — Run Academic Review (streams the council
+    verdict, with an unresolved-marker warning) and an AI writing chat
+    (the document-assistant endpoint, the draft text as context).
+The draft auto-saves every 30 seconds (silent PATCH); a permanent
+AI DRAFT banner and a dismissible BOB/MOLLY "YOUR TASKS" callout top the
+page.
+
+ACADEMIC REVIEW — agents/academic_review.gather_review_context takes the
+reviewer's email and overlays their current editor drafts onto the
+documents-by-type map: a current draft's content_text is reviewed in
+preference to an uploaded academic-document file of the corresponding
+kind, falling back to the uploaded file when no draft exists.
+
+SUBMISSION GUIDES — the Reports screen carries Guide 1 (Bob, midpoint
+paper) and Guide 2 (Molly, final presentation), each walking the
+editor-based workflow and leading with the tracking note: work done on
+the platform is the documented contribution record.
+
+Migration 021 is changelog version 40. TipTap v2 (the React-18 line) is
+a frontend dependency. Operator step: alembic upgrade head on Render.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
 
 This is the board OF RECORD in the repo. A mirror GitHub Projects board
-is maintained separately — creating/updating it requires `gh auth login`
-with the `project` scope (the CLI was unauthenticated when this section
-was written, so the GitHub board was not updated programmatically).
+is maintained separately. The `gh` CLI is authenticated with the
+`project` scope, so the GitHub board is kept in sync programmatically.
 
 ─── DONE ──────────────────────────────────────────────────────────────
   Sprints 1–6 in full (see the Sprint history table at the top), plus
@@ -5981,10 +6200,31 @@ was written, so the GitHub board was not updated programmatically).
   ✅ Block A/B fixes — strategy-name InfoIcons, Data Explain feature
      (explain vs explain-data), council hand-off pre-population
   ✅ UAT test guide — docs/UAT_TEST_GUIDE.md, four sections
+  ✅ In-platform document editor stream:
+     ✅ Migration 021 — editor_drafts / editor_draft_versions tables
+     ✅ 3-panel /editor/:draftId page — TipTap rich text for a
+        paper/brief, slide-card editor for a deck, 30s auto-save
+     ✅ Writing Assistant chat endpoint
+     ✅ In-editor export — DOCX / PPTX
+     ✅ Submission Guide panel — Reports header button, role-aware,
+        deadline countdown
+     ✅ Generate → Editor flow (export endpoints return the new draft id)
+     ✅ Academic Review reads current editor draft content
+     ✅ [[BOB]] block panel + [[VERIFY]] popup UX (commit 599296c)
+     ✅ UAT guide + site tour updated for the editor (commit 64704b6)
+     ✅ UAT guide [[BOB]]/[[VERIFY]] UX fix (commit 62461b8)
+  ◐ alembic upgrade head on Render — in-flight: migrations through 021
+     are ready locally; migrations 019, 020 and 021 are NOT yet on
+     production. `alembic upgrade head` runs on Render post-merge,
+     pending the develop → main deploy
+  ✅ S3 (or equivalent) for screenshot storage — Render persistent
+     disk at /data/test_screenshots; screenshots survive redeploys
   ✅ CLAUDE.md + README brought current
 
 ─── IN PROGRESS ───────────────────────────────────────────────────────
-  (nothing currently in progress)
+  □ develop → main PR — opening now. Moving to a develop → main
+    pull-request flow with the CI jobs (ci.yml) as required status
+    checks, so nothing reaches main without a green pipeline.
 
 ─── BACKLOG ────────────────────────────────────────────────────────────
 
@@ -5999,12 +6239,6 @@ was written, so the GitHub board was not updated programmatically).
   □ Bob — UAT Section 3 test pass
   □ Molly — UAT Section 4 test pass + presentation review pass
   □ All — UAT Section 1 test pass
-  □ alembic upgrade head on Render for migrations 014 and 015
-
-  POST-DEADLINE:
-  □ Move to develop → main PR flow with required status checks
-  □ S3 (or equivalent) for screenshot storage — currently local disk,
-    ephemeral on Render
 
 ─── JUNE 3 MILESTONE ───────────────────────────────────────────────────
   Items that must land for the midpoint check-in:
