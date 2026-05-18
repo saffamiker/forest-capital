@@ -1870,13 +1870,19 @@ async def audit_run(
     """
     Triggers a full three-layer statistical audit in the background and
     returns immediately with the audit_id. A concurrent run is refused
-    with already_running. `triggered_by` may be "manual" (default) or
-    "pre_submission" — the latter marks an Analytical-Appendix audit.
+    with already_running.
+
+    `triggered_by` may be "manual" (default), "pre_submission" (an
+    Analytical-Appendix audit) or "demo" (a forced run for the live
+    presentation). The smart-audit-caching "Run Live Demo" button sends
+    {"reason": "demo"} — accepted here as an alias for triggered_by.
     Project team only — the Statistical Audit lives in the QA tab.
     """
     from tools.audit_engine import start_audit
-    triggered_by = str((body or {}).get("triggered_by") or "manual")
-    if triggered_by not in ("manual", "scheduled", "pre_submission"):
+    body = body or {}
+    triggered_by = str(body.get("triggered_by") or body.get("reason")
+                       or "manual")
+    if triggered_by not in ("manual", "scheduled", "pre_submission", "demo"):
         triggered_by = "manual"
     return await start_audit(triggered_by, session.get("email", ""))
 

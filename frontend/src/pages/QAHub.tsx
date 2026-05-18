@@ -26,7 +26,9 @@ import { useQAStore } from '../stores/qaStore'
 import type { QAAuditResult } from '../types/agents'
 
 interface LatestRun {
+  id?: number
   status: string
+  triggered_by?: string
   triggered_at: string | null
   completed_at: string | null
   total_checks: number
@@ -38,8 +40,29 @@ interface LatestRun {
   layer_3_status: string | null
 }
 
+interface LatestRunResponse {
+  run: LatestRun | null
+  is_current?: boolean
+  current_data_hash?: string
+  last_hash?: string | null
+}
+
 type Verdict = 'PASS' | 'WARN' | 'FAIL'
 type Phase = 'idle' | 'running' | 'done' | 'error'
+
+// Smart audit caching — an audit re-runs only when the data it verifies
+// has changed. relTime renders the "✓ Verified 2h ago" line.
+function relTime(iso: string | null): string {
+  if (!iso) return 'never'
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return 'never'
+  const mins = Math.round((Date.now() - then) / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.round(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.round(hrs / 24)}d ago`
+}
 
 // Poll the statistical audit at the same 10s cadence AuditPanel uses,
 // capped so a never-completing run cannot poll forever.
@@ -297,15 +320,31 @@ export default function QAHub() {
   const [showProgress, setShowProgress] = useState(false)
   const [presentMode, setPresentMode] = useState(false)
   const [reportError, setReportError] = useState<string | null>(null)
+  // Smart audit caching — is the last audit still current for this data?
+  const [isCurrent, setIsCurrent] = useState<boolean | null>(null)
+  const [currencyRunAt, setCurrencyRunAt] = useState<string | null>(null)
+  const [showDemoConfirm, setShowDemoConfirm] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   useEffect(() => () => {
     if (pollRef.current) clearInterval(pollRef.current)
   }, [])
 
+  // On mount, ask whether the cached audit still reflects the current
+  // data — drives the "verified, no re-run needed" state of the button.
+  const loadCurrency = () => {
+    void axios.get<LatestRunResponse>('/api/v1/audit/runs/latest')
+      .then((res) => {
+        setIsCurrent(res.data.is_current ?? false)
+        setCurrencyRunAt(res.data.run?.triggered_at ?? null)
+      })
+      .catch(() => { setIsCurrent(null) })
+  }
+  useEffect(() => { loadCurrency() }, [])
+
   const fullRunActive = methodPhase === 'running' || auditPhase === 'running'
 
-  const runFullQA = () => {
+  const runFullQA = (demo = false) => {
     if (fullRunActive) return
     setShowProgress(true)
     setMethodPhase('running')
@@ -319,7 +358,10 @@ export default function QAHub() {
       .catch(() => setMethodPhase('error'))
 
     // Statistical audit — fire, then poll the latest run until it settles.
-    void axios.post('/api/v1/audit/run', { triggered_by: 'manual' })
+    // A demo run forces a fresh audit regardless of cache currency and is
+    // tagged triggered_by="demo" so the audit history can mark it.
+    void axios.post('/api/v1/audit/run',
+      demo ? { reason: 'demo' } : { triggered_by: 'manual' })
       .then(() => {
         let polls = 0
         pollRef.current = setInterval(() => {
@@ -332,6 +374,7 @@ export default function QAHub() {
                 setAuditRun(run)
                 setAuditPhase('done')
                 setAuditRefreshKey((k) => k + 1)
+                loadCurrency()   // the fresh run is now the current one
               } else if (!run || polls >= AUDIT_POLL_MAX) {
                 // No run row (the audit could not start — e.g. no
                 // database) or the cap was hit — stop and report.
@@ -423,19 +466,102 @@ export default function QAHub() {
           <TeamGate permission="team_member">
             <button
               type="button"
-              onClick={runFullQA}
+              onClick={() => runFullQA(false)}
               disabled={fullRunActive}
-              className="flex items-center gap-1.5 px-3 py-2 rounded text-sm font-medium
-                         bg-electric/10 border border-electric/30 text-electric
-                         hover:bg-electric/20 transition-colors disabled:opacity-50"
+              className={`flex items-center gap-1.5 px-3 py-2 rounded text-sm
+                         font-medium transition-colors disabled:opacity-50 ${
+                isCurrent
+                  ? 'border border-border text-muted hover:bg-navy-700'
+                  : 'bg-electric/10 border border-electric/30 text-electric '
+                    + 'hover:bg-electric/20'}`}
             >
               {fullRunActive
                 ? <><Loader2 className="w-4 h-4 animate-spin" /> Running…</>
-                : <><PlayCircle className="w-4 h-4" /> Run Full QA</>}
+                : isCurrent
+                  ? <><PlayCircle className="w-4 h-4" /> Re-run Audit</>
+                  : <><PlayCircle className="w-4 h-4" /> Run Full QA</>}
             </button>
           </TeamGate>
         </div>
       </div>
+
+      {/* Smart audit caching — currency banner. */}
+      {isCurrent !== null && (
+        <div className={`rounded border p-3 flex items-center justify-between
+                         gap-3 flex-wrap ${
+          isCurrent
+            ? 'border-success/30 bg-success/5'
+            : 'border-warning/30 bg-warning/5'}`}>
+          {isCurrent ? (
+            <span className="text-xs text-success flex items-center gap-1.5">
+              <CheckCircle className="w-4 h-4 shrink-0" />
+              Verified {relTime(currencyRunAt)} · Data unchanged ·
+              {' '}No re-run needed
+            </span>
+          ) : (
+            <span className="text-xs text-warning flex items-center gap-1.5">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              Data has changed since the last audit — run a full QA to
+              re-verify.
+            </span>
+          )}
+          {isCurrent && (
+            <TeamGate permission="team_member">
+              <button
+                type="button"
+                onClick={() => setShowDemoConfirm(true)}
+                disabled={fullRunActive}
+                className="flex items-center gap-1.5 px-2.5 py-1.5 rounded
+                           text-xs font-medium border border-warning/40
+                           bg-warning/10 text-warning hover:bg-warning/20
+                           transition-colors disabled:opacity-50"
+              >
+                <PlayCircle className="w-3.5 h-3.5" /> Run Live Demo
+              </button>
+            </TeamGate>
+          )}
+        </div>
+      )}
+
+      {/* Demo-run confirmation. */}
+      {showDemoConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center
+                        bg-black/60 p-4"
+             onClick={() => setShowDemoConfirm(false)}>
+          <div className="card p-5 max-w-md w-full space-y-3"
+               onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-white">
+              Run a live demo audit?
+            </h3>
+            <p className="text-xs text-muted leading-relaxed">
+              This forces a fresh three-layer statistical audit even though
+              the data has not changed — the independent Opus model
+              recomputes every metric from scratch. Use it to show the
+              audit running live during a presentation. It costs an Opus
+              run and takes a few minutes.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDemoConfirm(false)}
+                className="px-3 py-1.5 rounded text-xs border border-border
+                           text-muted hover:text-white transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => { setShowDemoConfirm(false); runFullQA(true) }}
+                className="px-3 py-1.5 rounded text-xs font-medium
+                           bg-warning/10 border border-warning/40 text-warning
+                           hover:bg-warning/20 transition-colors"
+              >
+                Run Live Demo
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Unified-run progress — shown once a full run has been triggered. */}
       {showProgress && (
