@@ -100,9 +100,14 @@ class TestAuditEndpointGating:
         assert client.get("/api/v1/audit/runs", headers=VIEWER).status_code == 403
 
     def test_list_runs_admits_the_sysadmin(self):
+        # The runs list is [] with no database and may carry rows when a
+        # database is present (a prior manual trigger) — assert the
+        # contract (200 + a `runs` list), not an environment-dependent
+        # count.
         resp = client.get("/api/v1/audit/runs", headers=SYSADMIN)
         assert resp.status_code == 200
-        assert resp.json() == {"runs": []}
+        body = resp.json()
+        assert "runs" in body and isinstance(body["runs"], list)
 
     def test_latest_run_is_sysadmin_gated(self):
         assert client.get("/api/v1/audit/runs/latest",
