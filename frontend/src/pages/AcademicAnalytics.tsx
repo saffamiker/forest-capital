@@ -210,13 +210,14 @@ function SectionCard({
       }
       {...(tourId ? { 'data-tour': tourId } : {})}
     >
-      <div className="flex items-start justify-between mb-3">
-        <div>
+      <div className="flex items-start justify-between mb-3 gap-2">
+        <div className="min-w-0">
           <h2
-            className={`text-base font-semibold flex items-center ${light ? '' : 'text-white'}`}
+            className={`text-base font-semibold flex items-center min-w-0 ${light ? '' : 'text-white'}`}
             {...(light ? { style: { color: theme.textPrimary } } : {})}
           >
-            {title}
+            {/* truncate, never wrap, on a narrow header row */}
+            <span className="truncate">{title}</span>
             {infoKey && (
               <InfoIcon tooltipKey={infoKey} metricLabel={title} size="md" />
             )}
@@ -245,15 +246,19 @@ function SectionCard({
   )
 }
 
-const TH = ({ children, right = false, infoKey, infoLabel }: {
+const TH = ({ children, right = false, infoKey, infoLabel, sticky = false }: {
   children: React.ReactNode
   right?: boolean
   /** When set, an InfoIcon is placed after the header label. */
   infoKey?: string
   infoLabel?: string
+  /** Freezes the column (sticky-left) so it stays visible while the
+   *  table scrolls horizontally on a narrow screen. */
+  sticky?: boolean
 }) => (
   <th className={`px-3 py-2 text-xs font-medium uppercase tracking-wider text-muted
-                  ${right ? 'text-right' : 'text-left'}`}>
+                  whitespace-nowrap ${right ? 'text-right' : 'text-left'}
+                  ${sticky ? 'sticky left-0 z-10 bg-navy-800' : ''}`}>
     <span className={`inline-flex items-center ${right ? 'flex-row-reverse' : ''}`}>
       {children}
       {infoKey && (
@@ -262,10 +267,12 @@ const TH = ({ children, right = false, infoKey, infoLabel }: {
     </span>
   </th>
 )
-const TD = ({ children, right = false, mono = false }:
-  { children: React.ReactNode; right?: boolean; mono?: boolean }) => (
-  <td className={`px-3 py-2 text-sm text-white ${right ? 'text-right' : 'text-left'}
-                  ${mono ? 'font-mono' : ''}`}>
+const TD = ({ children, right = false, mono = false, sticky = false }:
+  { children: React.ReactNode; right?: boolean; mono?: boolean; sticky?: boolean }) => (
+  <td className={`px-3 py-2 text-sm text-white whitespace-nowrap
+                  ${right ? 'text-right' : 'text-left'}
+                  ${mono ? 'font-mono' : ''}
+                  ${sticky ? 'sticky left-0 z-[5] bg-navy-800' : ''}`}>
     {children}
   </td>
 )
@@ -286,9 +293,10 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
       subtitle="Full study period — equity, investment-grade bonds, high-yield bonds, and the benchmark. Excess return is annualised CAGR minus the benchmark CAGR; information ratio is excess return over tracking error."
       exportButton={<TableExportButton tableId="summary_statistics" headers={headers} rows={exportRows} />}
     >
+      <div className="overflow-x-auto">
       <table className="w-full">
         <thead><tr className="border-b border-border">
-          <TH>Asset</TH>
+          <TH sticky>Asset</TH>
           <TH right infoKey="cagr" infoLabel="CAGR">CAGR</TH>
           <TH right infoKey="excess_return" infoLabel="Excess Return">Excess Return (ann.)</TH>
           <TH right infoKey="volatility" infoLabel="Annualised Volatility">Ann. Volatility</TH>
@@ -300,7 +308,7 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
         <tbody>
           {rows.map((r) => (
             <tr key={r.asset} className="border-b border-border/50 hover:bg-navy-800/40 transition-colors">
-              <TD>{r.asset}</TD>
+              <TD sticky>{r.asset}</TD>
               <TD right mono>{pct(r.cagr)}</TD>
               <TD right mono><SignedPct x={r.excess_return} /></TD>
               <TD right mono>{pct(r.ann_volatility)}</TD>
@@ -312,6 +320,7 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
           ))}
         </tbody>
       </table>
+      </div>
     </SectionCard>
   )
 }
@@ -475,15 +484,16 @@ function RegimeConditionalTable({ rows }: { rows: RegimeRow[] }) {
             + `${pct(r.post_2022_cagr)}`).join('; ') }}
       exportButton={<TableExportButton tableId="regime_conditional" headers={headers} rows={exportRows} />}
     >
+      <div className="overflow-x-auto">
       <table className="w-full">
         <thead><tr className="border-b border-border">
-          <TH>Strategy</TH><TH right>Pre-2022 Sharpe</TH><TH right>Post-2022 Sharpe</TH>
+          <TH sticky>Strategy</TH><TH right>Pre-2022 Sharpe</TH><TH right>Post-2022 Sharpe</TH>
           <TH right>Pre-2022 CAGR</TH><TH right>Post-2022 CAGR</TH>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
             <tr key={r.strategy} className="border-b border-border/50 hover:bg-navy-800/40 transition-colors">
-              <TD>{r.strategy}</TD>
+              <TD sticky>{r.strategy}</TD>
               <TD right mono>{num(r.pre_2022_sharpe)}</TD>
               <TD right mono>{num(r.post_2022_sharpe)}</TD>
               <TD right mono>{pct(r.pre_2022_cagr)}</TD>
@@ -492,6 +502,7 @@ function RegimeConditionalTable({ rows }: { rows: RegimeRow[] }) {
           ))}
         </tbody>
       </table>
+      </div>
     </SectionCard>
   )
 }
@@ -517,14 +528,15 @@ function DrawdownComparisonTable({ rows }: { rows: DrawdownRow[] }) {
                 ? 'not recovered' : `${r.recovery_months} months`}`).join('; ') }}
       exportButton={<TableExportButton tableId="drawdown_comparison" headers={headers} rows={exportRows} />}
     >
+      <div className="overflow-x-auto">
       <table className="w-full">
         <thead><tr className="border-b border-border">
-          <TH>Strategy</TH><TH right>Max Drawdown</TH><TH right>Recovery (months)</TH>
+          <TH sticky>Strategy</TH><TH right>Max Drawdown</TH><TH right>Recovery (months)</TH>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
             <tr key={r.strategy} className="border-b border-border/50 hover:bg-navy-800/40 transition-colors">
-              <TD>{r.strategy}</TD>
+              <TD sticky>{r.strategy}</TD>
               <TD right mono>{pct(r.max_drawdown)}</TD>
               <TD right mono>
                 {r.recovery_months == null
@@ -535,6 +547,7 @@ function DrawdownComparisonTable({ rows }: { rows: DrawdownRow[] }) {
           ))}
         </tbody>
       </table>
+      </div>
     </SectionCard>
   )
 }
@@ -579,9 +592,10 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
             + `R² ${num(r.r_squared)}`).join('; ') }}
       exportButton={<TableExportButton tableId="factor_loadings" headers={headers} rows={exportRows} />}
     >
+      <div className="overflow-x-auto">
       <table className="w-full">
         <thead><tr className="border-b border-border">
-          <TH>Strategy</TH>
+          <TH sticky>Strategy</TH>
           <TH right infoKey="ff_alpha" infoLabel="Carhart Alpha">Alpha (annualized)</TH>
           <TH right infoKey="ff_mkt_rf" infoLabel="Market Beta (MKT-RF)">MKT-RF</TH>
           <TH right infoKey="ff_smb" infoLabel="SMB Factor Loading">SMB</TH>
@@ -592,7 +606,7 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
         <tbody>
           {rows.map((r) => (
             <tr key={r.strategy} className="border-b border-border/50 hover:bg-navy-800/40 transition-colors">
-              <TD>{r.strategy}</TD>
+              <TD sticky>{r.strategy}</TD>
               <TD right mono>
                 <span className={r.alpha_significant ? 'text-electric font-semibold' : ''}>
                   {pct(r.alpha_annualized)}{r.alpha_significant ? ' *' : ''}
@@ -611,6 +625,7 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
           ))}
         </tbody>
       </table>
+      </div>
     </SectionCard>
   )
 }
@@ -842,7 +857,7 @@ function StrategyMethodologyPanel({ rows }: { rows: StrategyMeta[] }) {
               <button
                 type="button"
                 onClick={() => setOpenId(open ? null : s.id)}
-                className="w-full flex items-center gap-2 px-3 py-2 hover:bg-navy-700 transition-colors"
+                className="w-full flex items-center gap-2 px-3 py-2 min-h-[44px] hover:bg-navy-700 transition-colors"
               >
                 {open
                   ? <ChevronDown className="w-4 h-4 text-muted shrink-0" />
