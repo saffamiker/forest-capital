@@ -561,6 +561,20 @@ five sections, in this exact markdown format so the UI can parse it:
 **Rating:** <Strong | Developing | Needs Work>
 <one paragraph>
 
+EXTERNAL CITATIONS CHECK — within sections 1 and 2:
+Check whether the work contextualises its key findings with external
+academic citations. A submission with no citations is weaker than one
+that situates its findings within the existing literature. Specifically
+look for: a citation supporting the 2022 correlation regime break, a
+citation supporting the FDR methodology choice, a citation for the
+Carhart four-factor model, and a References section in APA format.
+- If citations are present and real (authors and titles that match
+  known literature), note this positively under section 1, Data
+  Sufficiency and Methodology.
+- If citations appear fabricated (authors or titles that do not match
+  any known work), flag it as a serious concern under section 2,
+  Requirements and Rubric Alignment.
+
 Every rating is exactly one of: Strong, Developing, Needs Work. Be direct
 and actionable — the team is preparing a graded submission, so generic
 encouragement is not useful."""
