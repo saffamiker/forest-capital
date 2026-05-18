@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 import structlog
@@ -189,6 +190,68 @@ _CHECKLIST_ITEMS: list[dict[str, str]] = [
 
 assert len(_CHECKLIST_ITEMS) == 39, f"QA checklist must have exactly 39 items, got {len(_CHECKLIST_ITEMS)}"
 
+# ── raw_analysis parsing ──────────────────────────────────────────────────────
+# The QA LLM delimits each check in its analysis text with a markdown-bold
+# header like "**D01 —". These helpers split that text into per-check
+# sections and read each check's verdict FROM its own section — the text
+# is the authoritative source, so the badge agrees with the reasoning.
+
+_CHECK_IDS: set[str] = {item["check_id"] for item in _CHECKLIST_ITEMS}
+_CHECK_HEADER_RE = re.compile(r"\*\*\s*([A-Z]{1,3}\d{2})\b")
+_VERDICT_TOKEN_RE = re.compile(r"\b(PASS|WARNING|WARN|FAIL)\b")
+_VERDICT_MARKER_RE = re.compile(
+    r"(?:status|verdict)\s*[:=\-—]+\s*\**\s*(PASS|WARNING|WARN|FAIL)",
+    re.IGNORECASE,
+)
+
+
+def _split_raw_analysis(raw: str) -> dict[str, str]:
+    """Splits the QA LLM analysis into per-check sections keyed by check_id.
+
+    Each section runs from its '**D01 —'-style header to the next header.
+    A check_id absent from the text simply has no entry — the caller then
+    falls back to the full text for that check."""
+    if not raw:
+        return {}
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in raw.splitlines(keepends=True):
+        m = _CHECK_HEADER_RE.match(line.lstrip())
+        if m and m.group(1) in _CHECK_IDS:
+            current = m.group(1)
+            sections.setdefault(current, [])
+        if current is not None:
+            sections[current].append(line)
+    return {cid: "".join(ls).strip() for cid, ls in sections.items()}
+
+
+def _verdict_from_section(section: str) -> str | None:
+    """Reads the PASS/WARN/FAIL verdict from a check's analysis section.
+
+    The QA prompt instructs the agent to end each section with an
+    explicit 'Verdict: PASS|WARN|FAIL' line, so the marker regex is the
+    reliable path. Falls back to a verdict token on the header line, then
+    to the LAST verdict token in the section — a section's conclusion
+    comes last, so last-token tracks the written verdict ("...would FAIL
+    if uncorrected; PASS overall" reads as PASS, not FAIL)."""
+    if not section:
+        return None
+    norm = {"WARNING": "WARN"}
+    marker = _VERDICT_MARKER_RE.search(section)
+    if marker:
+        v = marker.group(1).upper()
+        return norm.get(v, v)
+    first_line = section.splitlines()[0] if section.splitlines() else ""
+    head = _VERDICT_TOKEN_RE.search(first_line.upper())
+    if head:
+        v = head.group(1)
+        return norm.get(v, v)
+    tokens = _VERDICT_TOKEN_RE.findall(section.upper())
+    if tokens:
+        v = tokens[-1]
+        return norm.get(v, v)
+    return None
+
 
 class QAAgent:
     """
@@ -237,10 +300,19 @@ class QAAgent:
 
         context = self._build_audit_context(strategy_results, deterministic_results)
         user_message = (
-            "Audit these strategy results against the methodology checklist. "
-            "For each item, provide: status (PASS/WARN/FAIL), evidence from the data, "
-            "and for FAIL/WARN items: the specific fix required. "
-            "Be rigorous — a professional quant will review this audit.\n\n"
+            "Audit these strategy results against the methodology "
+            "checklist.\n\n"
+            "Write your analysis as one section per check. Begin each "
+            "section with a bold markdown header on its own line, exactly "
+            "of the form '**<CHECK_ID> — <check name>**' (for example "
+            "'**D01 — Total returns verified**'). In the section give the "
+            "evidence from the data, and END the section with a line "
+            "exactly of the form 'Verdict: PASS' or 'Verdict: WARN' or "
+            "'Verdict: FAIL'. For a WARN or FAIL section also state the "
+            "specific fix required. The Verdict line is authoritative — it "
+            "drives the result badge, so it MUST match the conclusion you "
+            "wrote in that section. Be rigorous — a professional quant "
+            "will review this audit.\n\n"
             f"STRATEGY RESULTS SUMMARY:\n{context}\n\n"
             f"CHECKLIST:\n{json.dumps(_CHECKLIST_ITEMS, indent=2)}"
         )
@@ -484,15 +556,20 @@ class QAAgent:
         Deterministic check results override the LLM's assessment for the items
         where we can compute ground truth — this prevents hallucinated PASS verdicts.
         """
+        # Per-check sections of the LLM analysis — the authoritative source
+        # for both the verdict badge and the evidence shown on each tile.
+        sections = _split_raw_analysis(response_text)
+
         item_results = []
         for item in _CHECKLIST_ITEMS:
             key = item["key"]
+            cid = item["check_id"]
             det = deterministic_results.get(key)
 
             if det:
                 # Deterministic result takes priority over LLM assessment
                 item_results.append({
-                    "check_id": item["check_id"],
+                    "check_id": cid,
                     "category": item["category"],
                     "check": item["check"],
                     "description": item["description"],
@@ -502,15 +579,29 @@ class QAAgent:
                     else f"Review {key} in strategy results.",
                 })
             else:
-                # LLM-assessed item — default to WARN in test mode (no LLM)
+                # LLM-assessed item. The verdict is parsed FROM this
+                # check's own raw_analysis section so the badge agrees
+                # with the text; the evidence is that section alone, not
+                # the whole analysis blob. A check id absent from the
+                # text falls back to the full text and a conservative
+                # WARN.
+                section = sections.get(cid)
+                if section:
+                    status = _verdict_from_section(section) or "WARN"
+                    evidence = section
+                else:
+                    status = "WARN"
+                    evidence = (response_text
+                                or "LLM-based assessment unavailable.")
                 item_results.append({
-                    "check_id": item["check_id"],
+                    "check_id": cid,
                     "category": item["category"],
                     "check": item["check"],
                     "description": item["description"],
-                    "status": "WARN",
-                    "evidence": "LLM-based assessment — see raw_analysis for details.",
-                    "fix": None,
+                    "status": status,
+                    "evidence": evidence,
+                    "fix": None if status == "PASS"
+                    else f"See the {cid} analysis section above.",
                 })
 
         n_pass = sum(1 for i in item_results if i["status"] == "PASS")
