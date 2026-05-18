@@ -11,13 +11,14 @@ import { useParams, useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   ArrowLeft, Loader2, PanelLeftClose, PanelLeftOpen,
-  PanelRightClose, PanelRightOpen,
+  PanelRightClose, PanelRightOpen, MonitorPlay,
 } from 'lucide-react'
 
 import RichTextEditor from '../components/editor/RichTextEditor'
 import SlideEditor, { slideComplete } from '../components/editor/SlideEditor'
 import EditorNavigator from '../components/editor/EditorNavigator'
 import EditorTasksCallout from '../components/editor/EditorTasksCallout'
+import PresentationPreview from '../components/editor/PresentationPreview'
 import type { NavSection } from '../components/editor/EditorNavigator'
 import WritingAssistant from '../components/editor/WritingAssistant'
 import { countMarkers } from '../lib/editorMarkers'
@@ -72,6 +73,7 @@ export default function DocumentEditor() {
   const [lastSaved, setLastSaved] = useState<string>('not yet')
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
+  const [previewOpen, setPreviewOpen] = useState(false)
 
   const dirtyRef = useRef(false)
   // Initial marker total per section heading — the progress denominator.
@@ -258,6 +260,14 @@ export default function DocumentEditor() {
               : saveState === 'error' ? 'Save failed'
               : saveState === 'saved' ? `Saved ${lastSaved}` : 'Unsaved changes'}
           </span>
+          {isDeck && (
+            <button type="button" onClick={() => setPreviewOpen(true)}
+              className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                         border border-electric/40 text-electric
+                         hover:bg-electric/10">
+              <MonitorPlay className="w-3.5 h-3.5" /> Presentation Preview
+            </button>
+          )}
           <button type="button" onClick={() => setLeftOpen((v) => !v)}
             aria-label="Toggle navigator"
             className="text-muted hover:text-white">
@@ -317,6 +327,13 @@ export default function DocumentEditor() {
           </aside>
         )}
       </div>
+
+      {/* Presentation Preview — a full-screen rehearsal view for a deck. */}
+      {previewOpen && isDeck && (
+        <PresentationPreview
+          slides={(contentJson as DeckContent | null)?.slides ?? []}
+          onClose={() => setPreviewOpen(false)} />
+      )}
     </div>
   )
 }

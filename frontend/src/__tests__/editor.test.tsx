@@ -3,6 +3,7 @@ import { render, screen, fireEvent } from '@testing-library/react'
 
 import { findMarkers, countMarkers } from '../lib/editorMarkers'
 import SlideEditor, { slideComplete } from '../components/editor/SlideEditor'
+import PresentationPreview from '../components/editor/PresentationPreview'
 import type { DeckContent, DeckSlide } from '../types/editor'
 
 // ── [[VERIFY]] / [[BOB]] marker detection ─────────────────────────────────────
@@ -94,5 +95,58 @@ describe('SlideEditor', () => {
     fireEvent.click(screen.getByText('Mark data points verified'))
     const next = onChange.mock.calls[0][0] as DeckContent
     expect(next.slides[0].verified).toBe(true)
+  })
+})
+
+// ── PresentationPreview — the full-screen rehearsal overlay ───────────────────
+
+describe('PresentationPreview', () => {
+  const slides: DeckSlide[] = [
+    { id: 1, title: 'Opening', content: 'Intro body', data_points: [],
+      speaker_notes: 'Say hello and set up the question', verified: false,
+      notes_written: true },
+    { id: 2, title: 'Findings', content: 'Findings body', data_points: [],
+      speaker_notes: 'Walk through the 2022 break', verified: false,
+      notes_written: true },
+    { id: 3, title: 'Close', content: 'Closing body', data_points: [],
+      speaker_notes: '', verified: false, notes_written: false },
+  ]
+
+  it('opens a full-screen overlay showing the first slide', () => {
+    render(<PresentationPreview slides={slides} onClose={() => {}} />)
+    expect(screen.getByTestId('presentation-preview')).toBeInTheDocument()
+    expect(screen.getByText('Opening')).toBeInTheDocument()
+    expect(screen.getByText('1 / 3')).toBeInTheDocument()
+  })
+
+  it('navigates slides with the arrow keys', () => {
+    render(<PresentationPreview slides={slides} onClose={() => {}} />)
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(screen.getByText('2 / 3')).toBeInTheDocument()
+    expect(screen.getByText('Findings')).toBeInTheDocument()
+    fireEvent.keyDown(window, { key: 'ArrowLeft' })
+    expect(screen.getByText('1 / 3')).toBeInTheDocument()
+  })
+
+  it('shows the presenter speaker notes in a strip', () => {
+    render(<PresentationPreview slides={slides} onClose={() => {}} />)
+    expect(screen.getByText('Your notes (not visible to audience)'))
+      .toBeInTheDocument()
+    expect(screen.getByText('Say hello and set up the question'))
+      .toBeInTheDocument()
+  })
+
+  it('closes on Escape', () => {
+    const onClose = vi.fn()
+    render(<PresentationPreview slides={slides} onClose={onClose} />)
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('closes when the Exit button is clicked', () => {
+    const onClose = vi.fn()
+    render(<PresentationPreview slides={slides} onClose={onClose} />)
+    fireEvent.click(screen.getByLabelText('Exit preview'))
+    expect(onClose).toHaveBeenCalled()
   })
 })
