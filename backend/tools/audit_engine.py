@@ -353,6 +353,7 @@ async def _run_qa_methodology() -> None:
     from tools.cache import (
         _compute_data_hash, get_strategy_cache, set_qa_cache,
     )
+    from tools.qa_guard import begin_methodology, end_methodology
     from tools.qa_tiered import run_tier1_checks, schedule_tier2_background
 
     def _history_and_hash() -> tuple[Any, str]:
@@ -364,21 +365,30 @@ async def _run_qa_methodology() -> None:
                 if monthly is not None and n > 0 else "unknown")
         return history, _compute_data_hash(n, last, n_strategies=10)
 
-    history, strategy_hash = await _asyncio.to_thread(_history_and_hash)
-    cached = await get_strategy_cache(strategy_hash)
-    if cached:
-        results_dict = cached
-    else:
-        from tools.backtester import run_all_strategies
-        results_dict = await _asyncio.to_thread(run_all_strategies, history)
+    # The methodology flag makes this auto-triggered run visible to the
+    # global QA-run guard, so a user QA run is correctly rejected while
+    # it is in flight. Cleared in finally — Tier 2 continues in the
+    # background, which is not a guarded "run".
+    begin_methodology()
+    try:
+        history, strategy_hash = await _asyncio.to_thread(_history_and_hash)
+        cached = await get_strategy_cache(strategy_hash)
+        if cached:
+            results_dict = cached
+        else:
+            from tools.backtester import run_all_strategies
+            results_dict = await _asyncio.to_thread(
+                run_all_strategies, history)
 
-    t1 = await _asyncio.to_thread(run_tier1_checks, results_dict)
-    await set_qa_cache(strategy_hash, t1, tier=1)
+        t1 = await _asyncio.to_thread(run_tier1_checks, results_dict)
+        await set_qa_cache(strategy_hash, t1, tier=1)
 
-    # Tier 2 — fire and forget; off_loop write engine, see qa_run.
-    def _writer(h: str, v: dict, tier: int) -> None:
-        _asyncio.run(set_qa_cache(h, v, tier=tier, off_loop=True))
-    schedule_tier2_background(results_dict, strategy_hash, _writer)
+        # Tier 2 — fire and forget; off_loop write engine, see qa_run.
+        def _writer(h: str, v: dict, tier: int) -> None:
+            _asyncio.run(set_qa_cache(h, v, tier=tier, off_loop=True))
+        schedule_tier2_background(results_dict, strategy_hash, _writer)
+    finally:
+        end_methodology()
 
 
 async def run_full_audit(reason: str = "scheduled") -> None:

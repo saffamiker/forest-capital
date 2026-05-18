@@ -1971,6 +1971,14 @@ async def audit_run(
     Project team only — the Statistical Audit lives in the QA tab.
     """
     from tools.audit_engine import start_audit
+    from tools.qa_guard import QA_BUSY_MESSAGE, qa_run_in_progress
+
+    # Global QA-run guard — rejects if a methodology audit or another
+    # statistical audit is already in progress. start_audit keeps its own
+    # is_audit_running() check as the race backstop.
+    if await qa_run_in_progress() is not None:
+        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
+
     body = body or {}
     triggered_by = str(body.get("triggered_by") or body.get("reason")
                        or "manual")
@@ -2719,30 +2727,44 @@ async def qa_audit(request: Request, session: dict = Depends(require_auth)):
     QA Agent uses Opus for the narrative; deterministic checks run from
     the strategy results dict to guarantee pass/fail verdicts are never
     hallucinated. Falls back to mock audit if pipeline is unavailable.
+
+    Global QA-run guard: rejected with 409 if a statistical audit or
+    another methodology run is already in progress (tools/qa_guard.py).
     """
-    if ENVIRONMENT != "test":
-        try:
-            from tools.data_fetcher import get_full_history
-            from tools.backtester import run_all_strategies
-            from agents.qa_agent import QAAgent
+    from tools.qa_guard import (
+        QA_BUSY_MESSAGE, begin_methodology, end_methodology,
+        qa_run_in_progress,
+    )
+    if await qa_run_in_progress() is not None:
+        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
 
-            history = get_full_history()
-            strategy_results = run_all_strategies(history)
+    begin_methodology()
+    try:
+        if ENVIRONMENT != "test":
+            try:
+                from tools.data_fetcher import get_full_history
+                from tools.backtester import run_all_strategies
+                from agents.qa_agent import QAAgent
 
-            qa = QAAgent()
-            audit = qa.run_audit(strategy_results, run_full_checklist=True)
-            # Team Activity — record the audit run (non-blocking).
-            _log_interaction_bg(
-                request, session, "qa",
-                response_summary=str(audit.get("summary", "")),
-                metadata={"verdict": audit.get("verdict")},
-            )
-            return audit
+                history = get_full_history()
+                strategy_results = run_all_strategies(history)
 
-        except Exception as exc:
-            log.error("qa_audit_error", error=str(exc))
+                qa = QAAgent()
+                audit = qa.run_audit(strategy_results, run_full_checklist=True)
+                # Team Activity — record the audit run (non-blocking).
+                _log_interaction_bg(
+                    request, session, "qa",
+                    response_summary=str(audit.get("summary", "")),
+                    metadata={"verdict": audit.get("verdict")},
+                )
+                return audit
 
-    return MOCK_QA_AUDIT
+            except Exception as exc:
+                log.error("qa_audit_error", error=str(exc))
+
+        return MOCK_QA_AUDIT
+    finally:
+        end_methodology()
 
 
 @app.get("/api/v1/qa/export")
@@ -2939,10 +2961,21 @@ async def qa_run(request: Request, session: dict = Depends(require_auth)):
 
     Auto-escalation to Tier 3 happens inside the background worker if
     Tier 2 returns FAIL (see schedule_tier2_background).
+
+    Global QA-run guard: rejected with 409 if a statistical audit or
+    another methodology run is already in progress (tools/qa_guard.py).
     """
+    from tools.qa_guard import (
+        QA_BUSY_MESSAGE, begin_methodology, end_methodology,
+        qa_run_in_progress,
+    )
+    if await qa_run_in_progress() is not None:
+        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
+
     if ENVIRONMENT == "test":
         return {"verdict": "PASS", "tier": 1, "tier2_scheduled": False}
 
+    begin_methodology()
     try:
         from tools.qa_tiered import run_tier1_checks, schedule_tier2_background
         from tools.cache import set_qa_cache
@@ -2990,6 +3023,8 @@ async def qa_run(request: Request, session: dict = Depends(require_auth)):
         ref = uuid.uuid4().hex[:8]
         log.error("qa_run_error", ref=ref, error=str(exc))
         raise HTTPException(status_code=500, detail=f"QA run failed (ref: {ref})")
+    finally:
+        end_methodology()
 
 
 @app.post("/api/v1/qa/full-review")
@@ -3002,10 +3037,21 @@ async def qa_full_review(request: Request, session: dict = Depends(require_auth)
 
     Master-key path: anyone with a valid session can trigger Tier 3,
     but the rate limit caps abuse at 5/minute.
+
+    Global QA-run guard: rejected with 409 if a statistical audit or
+    another methodology run is already in progress (tools/qa_guard.py).
     """
+    from tools.qa_guard import (
+        QA_BUSY_MESSAGE, begin_methodology, end_methodology,
+        qa_run_in_progress,
+    )
+    if await qa_run_in_progress() is not None:
+        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
+
     if ENVIRONMENT == "test":
         return {"verdict": "PASS", "tier": 3}
 
+    begin_methodology()
     try:
         from tools.qa_tiered import run_tier3_review
         from tools.cache import set_qa_cache
@@ -3029,6 +3075,8 @@ async def qa_full_review(request: Request, session: dict = Depends(require_auth)
         ref = uuid.uuid4().hex[:8]
         log.error("qa_full_review_error", ref=ref, error=str(exc))
         raise HTTPException(status_code=500, detail=f"Full review failed (ref: {ref})")
+    finally:
+        end_methodology()
 
 
 # ── Report ────────────────────────────────────────────────────────────────────

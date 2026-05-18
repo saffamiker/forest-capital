@@ -44,6 +44,15 @@ def _reset_all_inprocess_caches() -> None:
         _hmm_cache_clear()
     except Exception:
         pass
+    try:
+        # The global QA-run guard's methodology flag is process-global —
+        # clear it so a test that set it (or an endpoint that errored
+        # before its finally ran) never leaves the guard stuck for the
+        # next test.
+        from tools.qa_guard import end_methodology
+        end_methodology()
+    except Exception:
+        pass
 
 
 @pytest.fixture(autouse=True)
