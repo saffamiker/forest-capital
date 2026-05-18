@@ -576,6 +576,14 @@ When evaluating citations, check they are real and support the specific
 claim made — fabricated or misattributed citations are a serious concern
 to flag under Requirements and Rubric Alignment.
 
+UNRESOLVED MARKERS CHECK — if any document in the context still
+contains [[VERIFY]] or [[VERIFY CITATION]] markers, or unresolved
+[[BOB]] / [[MOLLY]] callouts, flag it prominently under section 2,
+Requirements and Rubric Alignment: state that the draft contains
+unresolved verification markers, that every marker must be resolved
+before submission, and that a document carrying unresolved markers is
+not ready to submit.
+
 EXTERNAL CITATIONS CHECK — within sections 1 and 2:
 Check whether the work contextualises its key findings with external
 academic citations. A submission with no citations is weaker than one

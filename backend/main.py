@@ -3304,6 +3304,48 @@ _MIDPOINT_S1_KEY_FINDINGS = (
     "q < 0.005; and true one-way portfolio turnover from the "
     "drift-inclusive weight schedule."
 )
+# Verification caveats appended to the document-section task prompts.
+# CAVEAT 2 — every external citation is preceded by a [[VERIFY CITATION]]
+# marker; CAVEAT 3 — every uncertain numeric value is wrapped in a
+# [[VERIFY]] marker. The academic_docx renderer shows both bold and
+# highlighted; the Academic Review arbiter flags any that survive into a
+# submitted draft. Applied via _apply_draft_caveats so a task that
+# already carries one form is not given a second, conflicting copy.
+_CAVEAT_CITATION = (
+    "\n\nCITATION VERIFICATION — immediately before every external "
+    "citation you include, insert an inline marker of the form "
+    "[[VERIFY CITATION: check that Author (Year) exists and supports "
+    "this specific claim before submitting]], so no unverified citation "
+    "is missed."
+)
+_CAVEAT_STATS = (
+    "\n\nSTATISTIC VERIFICATION — if you are uncertain about any "
+    "specific numeric value, do NOT insert it silently; wrap it in an "
+    "inline marker of the form [[VERIFY: <the value and what it is>]] "
+    "(for example [[VERIFY: Sharpe ratio for Regime Switching = 0.63]]) "
+    "so a team member confirms it against the Analytics page before "
+    "submission."
+)
+
+
+def _apply_draft_caveats(specs: list[dict]) -> list[dict]:
+    """
+    Appends the citation- and statistic-verification caveats to each
+    section task prompt. Idempotent per form — a task that already
+    carries the [[VERIFY CITATION]] or [[VERIFY:]] instruction is not
+    given a second, conflicting copy (the midpoint methodology and
+    results tasks already carry the statistic marker).
+    """
+    for spec in specs:
+        task = spec.get("task", "")
+        if "[[VERIFY CITATION" not in task:
+            task += _CAVEAT_CITATION
+        if "[[VERIFY:" not in task:
+            task += _CAVEAT_STATS
+        spec["task"] = task
+    return specs
+
+
 _MIDPOINT_S2_KEY_FINDINGS = (
     "\n\nKEY FINDINGS — present these in this order, the correlation "
     "break FIRST:\n"
@@ -3500,7 +3542,7 @@ async def export_midpoint_paper(
              "context": {"academic_review_verdict":
                          (data["last_review_text"] or "")[:4000]}},
         ]
-        narratives = await _generate_narratives(specs)
+        narratives = await _generate_narratives(_apply_draft_caveats(specs))
         docx_bytes = await asyncio.to_thread(build_midpoint_paper, data, narratives)
 
         _log_interaction_bg(
@@ -3631,7 +3673,7 @@ async def export_executive_brief(
              "context": {"regime_conditional": data["regime_conditional"],
                          "summary_statistics": data["summary_statistics"]}},
         ]
-        narratives = await _generate_narratives(specs)
+        narratives = await _generate_narratives(_apply_draft_caveats(specs))
         docx_bytes = await asyncio.to_thread(
             build_executive_brief, data, narratives)
 

@@ -6027,6 +6027,37 @@ scaffold, not the final text. study_period also now carries
 ff_factors_end (the last Carhart-factor month) so Section 1's
 study-period description reflects the live database state.
 
+VERIFICATION CAVEATS: every AI-generated draft (midpoint paper,
+executive brief, presentation deck) carries verification guard rails so
+a draft is never mistaken for a submittable document.
+  - CAVEAT 1 — a boxed "AI DRAFT — REVIEW REQUIRED" warning below the
+    banner (CITATIONS / STATISTICS / YOUR VOICE / HALLUCINATIONS); in
+    the deck it is the title slide's speaker notes
+    (academic_docx._add_review_warning_box, academic_deck._DECK_TITLE_
+    NOTE).
+  - CAVEAT 2 — every external citation is preceded by a
+    [[VERIFY CITATION: …]] marker (main._CAVEAT_CITATION).
+  - CAVEAT 3 — every uncertain numeric value is wrapped in a
+    [[VERIFY: …]] marker (main._CAVEAT_STATS). Both caveats are appended
+    to the section task prompts by main._apply_draft_caveats, which is
+    idempotent per form — a task already carrying one marker is not
+    given a conflicting second copy. academic_docx._VERIFY_RE renders
+    both marker forms bold + yellow-highlighted.
+  - CAVEAT 4 — section/slide-specific human-input callouts: the midpoint
+    Roles callout ("BOB — PERSONALISE THIS SECTION", below its pre-seed)
+    and Next Steps callout ("BOB — REVIEW AND REFINE"); every deck slide
+    carries a [MOLLY — VERIFY BEFORE PRESENTING] speaker note.
+  - CAVEAT 5 — a Submission Checklist at the end of each .docx
+    (academic_docx._add_submission_checklist) and in the deck title
+    note: citations verified, statistics confirmed, all [[VERIFY]]
+    markers and [[BOB]]/[[MOLLY]] callouts resolved and removed, draft
+    rewritten in the author's voice, AI DRAFT banner removed, Academic
+    Review run.
+The Academic Review arbiter flags any document still carrying [[VERIFY]]
+markers or unresolved [[BOB]]/[[MOLLY]] callouts under Requirements and
+Rubric Alignment — a document with unresolved markers is not ready to
+submit. The final submitted file should carry none of these aids.
+
 
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
