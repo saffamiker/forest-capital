@@ -83,8 +83,13 @@ class TestAuditEndpointGating:
     def test_run_rejects_a_viewer(self):
         assert client.post("/api/v1/audit/run", headers=VIEWER).status_code == 403
 
-    def test_run_rejects_a_team_member(self):
-        assert client.post("/api/v1/audit/run", headers=TEAM).status_code == 403
+    def test_run_admits_a_team_member(self):
+        # The Statistical Audit moved to the QA tab — running it requires
+        # team_member, not sysadmin. No database in the test env, so
+        # start_audit returns a status field with a 200.
+        resp = client.post("/api/v1/audit/run", headers=TEAM)
+        assert resp.status_code == 200
+        assert "status" in resp.json()
 
     def test_run_admits_the_sysadmin(self):
         # No database in the test env → start_audit returns failed/
@@ -109,12 +114,15 @@ class TestAuditEndpointGating:
         body = resp.json()
         assert "runs" in body and isinstance(body["runs"], list)
 
-    def test_latest_run_is_sysadmin_gated(self):
-        assert client.get("/api/v1/audit/runs/latest",
-                          headers=VIEWER).status_code == 403
-        resp = client.get("/api/v1/audit/runs/latest", headers=SYSADMIN)
-        assert resp.status_code == 200
-        assert "run" in resp.json()
+    def test_latest_run_open_to_all_authenticated(self):
+        # /runs/latest is open to every authenticated user — viewers see
+        # the read-only audit summary in the QA tab. The full findings
+        # panel is team-gated in the frontend, not at this endpoint.
+        for headers in (VIEWER, TEAM, SYSADMIN):
+            resp = client.get("/api/v1/audit/runs/latest", headers=headers)
+            assert resp.status_code == 200
+            assert "run" in resp.json()
+        assert client.get("/api/v1/audit/runs/latest").status_code == 401
 
     def test_unknown_run_is_404(self):
         assert client.get("/api/v1/audit/runs/999999",

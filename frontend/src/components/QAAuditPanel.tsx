@@ -154,7 +154,9 @@ export default function QAAuditPanel() {
   const { Icon: OverallIcon } = overallCfg
 
   return (
-    <div className="p-4 md:p-6 max-w-4xl mx-auto space-y-5">
+    // No page chrome here — QAHub owns the page container so this panel
+    // embeds cleanly as the hub's Methodology Review section.
+    <div className="space-y-5">
       {/* Summary card */}
       <div className={`card p-5 border ${overallCfg.border} ${overallCfg.bg}`}>
         <div className="flex items-center gap-4">

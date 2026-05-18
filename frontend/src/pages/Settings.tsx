@@ -25,7 +25,6 @@ import type { BrandMode } from '../context/BrandContext'
 import { useSession } from '../context/SessionContext'
 import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 import UserManagementPanel from '../components/UserManagementPanel'
-import AuditPanel from '../components/AuditPanel'
 import { TestResultsSection, TestAdminSections } from '../components/TestRunnerSettings'
 import TeamGate from '../components/TeamGate'
 import { useIsTeamMember, useIsSysadmin } from '../hooks/usePermissions'
@@ -510,16 +509,8 @@ export default function Settings() {
         </SettingsSection>
       )}
 
-      {/* Statistical Audit — sysadmin-only, below Users. */}
-      {isSysadmin && (
-        <SettingsSection
-          id="audit"
-          title="Statistical Audit"
-          description="Independent re-verification of every analytical calculation by a separate AI model."
-        >
-          <AuditPanel />
-        </SettingsSection>
-      )}
+      {/* The Statistical Audit moved to the QA tab (a two-section quality
+          hub alongside the methodology review) — it is no longer here. */}
 
       <SettingsSection
         id="academic-documents"

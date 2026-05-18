@@ -1862,14 +1862,14 @@ async def testing_get_latest_triage_report(
 @app.post("/api/v1/audit/run")
 async def audit_run(
     body: dict | None = None,
-    session: dict = Depends(require_permission("manage_users")),
+    session: dict = Depends(require_permission("team_member")),
 ):
     """
     Triggers a full three-layer statistical audit in the background and
     returns immediately with the audit_id. A concurrent run is refused
     with already_running. `triggered_by` may be "manual" (default) or
     "pre_submission" — the latter marks an Analytical-Appendix audit.
-    Sysadmin only.
+    Project team only — the Statistical Audit lives in the QA tab.
     """
     from tools.audit_engine import start_audit
     triggered_by = str((body or {}).get("triggered_by") or "manual")
@@ -1880,18 +1880,23 @@ async def audit_run(
 
 @app.get("/api/v1/audit/runs")
 async def audit_get_runs(
-    session: dict = Depends(require_permission("manage_users")),
+    session: dict = Depends(require_permission("team_member")),
 ):
-    """Every audit run with summary stats, newest first. Sysadmin only."""
+    """Every audit run with summary stats, newest first. Project team only."""
     from tools.audit_engine import get_audit_runs
     return {"runs": await get_audit_runs()}
 
 
 @app.get("/api/v1/audit/runs/latest")
 async def audit_get_latest_run(
-    session: dict = Depends(require_permission("manage_users")),
+    session: dict = Depends(require_auth),
 ):
-    """The most recent audit run with its findings, or null. Sysadmin only."""
+    """
+    The most recent audit run with its findings, or null. Open to every
+    authenticated user — viewers see the read-only audit summary in the
+    QA tab; the full findings panel is gated to the project team in the
+    frontend.
+    """
     from tools.audit_engine import get_latest_audit_run
     return {"run": await get_latest_audit_run()}
 
@@ -1899,9 +1904,9 @@ async def audit_get_latest_run(
 @app.get("/api/v1/audit/runs/{run_id}")
 async def audit_get_run(
     run_id: int,
-    session: dict = Depends(require_permission("manage_users")),
+    session: dict = Depends(require_permission("team_member")),
 ):
-    """One audit run with all findings grouped by layer. Sysadmin only."""
+    """One audit run with all findings grouped by layer. Project team only."""
     from tools.audit_engine import get_audit_run
     run = await get_audit_run(run_id)
     if run is None:
@@ -1912,7 +1917,7 @@ async def audit_get_run(
 @app.get("/api/v1/audit/runs/{run_id}/export")
 async def audit_export_run(
     run_id: int,
-    session: dict = Depends(require_permission("manage_users")),
+    session: dict = Depends(require_permission("team_member")),
 ):
     """
     The audit run as a downloadable plain-text report — suitable for the

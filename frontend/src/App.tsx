@@ -7,7 +7,7 @@ import AuthVerify from './pages/AuthVerify'
 import MainLayout from './layouts/MainLayout'
 import Dashboard from './components/Dashboard'
 import CouncilDebate from './components/CouncilDebate'
-import QAAuditPanel from './components/QAAuditPanel'
+import QAHub from './pages/QAHub'
 import StatisticalEvidence from './pages/StatisticalEvidence'
 import RegimeAnalysis from './pages/RegimeAnalysis'
 import AcademicAnalytics from './pages/AcademicAnalytics'
@@ -218,7 +218,7 @@ export default function App() {
                 <Route path="regime-analysis" element={<RegimeAnalysis />} />
                 <Route path="analytics" element={<AcademicAnalytics />} />
                 <Route path="council" element={<CouncilDebate />} />
-                <Route path="qa" element={<QAAuditPanel />} />
+                <Route path="qa" element={<QAHub />} />
                 <Route path="reports" element={<Reports />} />
                 <Route path="settings" element={<Settings />} />
                 <Route path="reports/storyboard" element={<StoryboardEditor />} />
