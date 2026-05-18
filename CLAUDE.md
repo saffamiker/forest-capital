@@ -5310,10 +5310,10 @@ ENDPOINTS: GET/POST/PATCH/DELETE /api/v1/admin/users.
 UI: Settings → Users (sysadmin only).
 Migration: 015 — operator runs `alembic upgrade head` on Render.
 
-FORWARD ITEM: agents/academic_review.py builds its team-member list from
-config.PROJECT_TEAM_EMAILS — it should eventually read the active
-team_member users from platform_users instead. Left as-is for now; the
-config list and the seeded table agree, so there is no behavioural gap.
+agents/academic_review.py resolves its team-member list from
+platform_users — _resolve_team_members() queries the active sysadmin
+and team_member rows, fail-open to config.PROJECT_TEAM_EMAILS if the
+table is unreachable.
 
 
 ─────────────────────────────────────────────────────────────────────────────

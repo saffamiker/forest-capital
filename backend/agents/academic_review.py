@@ -116,22 +116,32 @@ def group_documents_by_type(docs: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
-def format_team_activity_block(team_activity: dict[str, Any] | None) -> list[str]:
+def format_team_activity_block(
+    team_activity: dict[str, Any] | None,
+    team_members: list[tuple[str, str]] | None = None,
+) -> list[str]:
     """
     Renders the team-activity summary into context lines for the agent
     prompt. Analytical sessions ONLY — testing-session activity is never
     shown to agents. Every project-team member is listed, including any
     with no recorded activity, so the division-of-labour assessment is
     fair. Returns [] when no activity data is available.
+
+    team_members is the (email, display_name) list resolved from
+    platform_users by _resolve_team_members(); when None (e.g. a direct
+    call), it falls back to the config allowlist.
     """
     if not team_activity:
         return []
     from config import PROJECT_TEAM_EMAILS, TEAM_MEMBER_NAMES
 
+    if team_members is None:
+        team_members = [(e, TEAM_MEMBER_NAMES.get(e, e))
+                        for e in sorted(PROJECT_TEAM_EMAILS)]
+
     per_member = {m["user"]: m for m in team_activity.get("per_member", [])}
     lines: list[str] = ["", "TEAM ENGAGEMENT (analytical sessions only)"]
-    for email in sorted(PROJECT_TEAM_EMAILS):
-        name = TEAM_MEMBER_NAMES.get(email, email)
+    for email, name in team_members:
         m = per_member.get(email)
         if not m:
             lines.append(f"- {name}: no recorded platform activity")
@@ -181,9 +191,37 @@ def _team_activity_multi_user(team_activity: dict[str, Any] | None) -> bool:
     return len(active) > 1
 
 
+async def _resolve_team_members() -> list[tuple[str, str]]:
+    """
+    The project team — active sysadmin and team_member users from
+    platform_users — as (email, display_name) pairs, sorted by email.
+
+    Fail-open: if the platform_users table is unreachable or holds no
+    matching rows, fall back to the config allowlist so the Academic
+    Review still assembles its team-engagement block.
+    """
+    from config import PROJECT_TEAM_EMAILS, TEAM_MEMBER_NAMES
+    fallback = [(e, TEAM_MEMBER_NAMES.get(e, e))
+                for e in sorted(PROJECT_TEAM_EMAILS)]
+    try:
+        from tools.platform_users import list_all_users
+        users = await list_all_users()
+        members = sorted(
+            (u["email"], u.get("display_name") or u["email"])
+            for u in users
+            if u.get("is_active")
+            and u.get("role") in ("sysadmin", "team_member")
+        )
+        return members or fallback
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_review_team_resolve_failed", error=str(exc))
+        return fallback
+
+
 def build_review_context_block(
     analytics: dict[str, Any], docs_by_type: dict[str, list[dict]],
     team_activity: dict[str, Any] | None = None,
+    team_members: list[tuple[str, str]] | None = None,
 ) -> str:
     """
     Renders the analytics inventory, the grouped documents and the
@@ -231,7 +269,7 @@ def build_review_context_block(
             lines.append(f"\n[{label}: {d.get('name', 'document')}]\n{text}")
 
     # — Team engagement —
-    lines.extend(format_team_activity_block(team_activity))
+    lines.extend(format_team_activity_block(team_activity, team_members))
 
     return "\n".join(lines)
 
@@ -308,7 +346,10 @@ async def gather_review_context() -> dict[str, Any]:
         log.warning("academic_review_team_activity_failed", error=str(exc))
     multi_user = _team_activity_multi_user(team_activity)
 
-    block = build_review_context_block(analytics, docs_by_type, team_activity)
+    # Project team — resolved from platform_users (fail-open to config).
+    team_members = await _resolve_team_members()
+    block = build_review_context_block(
+        analytics, docs_by_type, team_activity, team_members)
     present = [t for t, v in docs_by_type.items() if v]
     missing = [t for t, v in docs_by_type.items() if not v]
     log.info(
