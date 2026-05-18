@@ -1917,6 +1917,8 @@ async def audit_get_latest_run(
     return {
         "run": run,
         "is_current": currency["is_current"],
+        "statistical_current": currency["statistical_current"],
+        "qa_current": currency["qa_current"],
         "current_data_hash": currency["current_data_hash"],
         "last_hash": currency["last_hash"],
     }

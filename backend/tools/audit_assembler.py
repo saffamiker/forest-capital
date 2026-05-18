@@ -188,23 +188,42 @@ async def current_data_hash() -> str:
 
 async def is_audit_current() -> dict[str, Any]:
     """
-    Whether the last completed statistical audit still reflects the
-    current data. Compares current_data_hash() to the data_hash stored on
-    the most recent COMPLETED audit_runs row.
+    Whether BOTH audits — the statistical audit and the QA methodology
+    audit — still reflect the current data. Smart audit caching serves a
+    cached result only when is_current is True.
 
-    Returns {is_current, current_data_hash, last_hash}. is_current is
-    False when there is no prior completed run, when either hash is empty
-    (fail-open), or when the two hashes differ.
+    Statistical currency: current_data_hash() matches the data_hash on
+    the most recent COMPLETED audit_runs row.
+    QA currency: the most recent non-expired qa_results_cache verdict was
+    computed for the same strategy data as the latest strategy_results_cache
+    row (the two strategy_hash values match).
+
+    Returns a per-layer breakdown so the QA tab can show which audit is
+    stale when only one has changed:
+      {is_current, statistical_current, qa_current,
+       current_data_hash, last_hash, qa_strategy_hash, qa_last_hash}
+    Every field is fail-open — an empty/None hash never matches, so an
+    audit reads as stale rather than wrongly served from cache.
     """
     from tools.audit_engine import get_last_completed_audit_hash
+    from tools.cache import get_latest_qa_hash, get_latest_strategy_hash
 
     current = await current_data_hash()
     last = await get_last_completed_audit_hash()
-    is_current = bool(current) and bool(last) and current == last
+    statistical_current = bool(current) and bool(last) and current == last
+
+    strat_hash = await get_latest_strategy_hash()
+    qa_hash = await get_latest_qa_hash()
+    qa_current = bool(strat_hash) and bool(qa_hash) and strat_hash == qa_hash
+
     return {
-        "is_current": is_current,
+        "is_current": statistical_current and qa_current,
+        "statistical_current": statistical_current,
+        "qa_current": qa_current,
         "current_data_hash": current,
         "last_hash": last,
+        "qa_strategy_hash": strat_hash,
+        "qa_last_hash": qa_hash,
     }
 
 

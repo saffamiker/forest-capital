@@ -397,6 +397,50 @@ async def clear_strategy_cache() -> int:
         return 0
 
 
+async def get_latest_strategy_hash() -> str | None:
+    """
+    The strategy_hash of the most recently computed strategy_results_cache
+    row. Smart audit caching compares it against the latest QA verdict's
+    hash to tell whether the methodology audit is still current. None when
+    no strategies have been computed (or on a database error — fail-open).
+    """
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(text(
+                "SELECT strategy_hash FROM strategy_results_cache "
+                "ORDER BY computed_at DESC LIMIT 1"))
+            r = row.fetchone()
+            return str(r[0]) if r and r[0] else None
+    except Exception as exc:
+        log.warning("latest_strategy_hash_read_error", error=str(exc))
+    return None
+
+
+async def get_latest_qa_hash() -> str | None:
+    """
+    The strategy_hash of the most recent NON-EXPIRED qa_results_cache row
+    — the data block the latest methodology audit verified. The QA audit
+    is "current" when this matches get_latest_strategy_hash(). None when
+    no fresh QA verdict exists (or on a database error — fail-open).
+    """
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(text(
+                "SELECT strategy_hash FROM qa_results_cache "
+                "WHERE expires_at > now() ORDER BY run_at DESC LIMIT 1"))
+            r = row.fetchone()
+            return str(r[0]) if r and r[0] else None
+    except Exception as exc:
+        log.warning("latest_qa_hash_read_error", error=str(exc))
+    return None
+
+
 async def get_regime_cache() -> dict[str, Any] | None:
     """
     Returns cached regime signals if not expired, else None.

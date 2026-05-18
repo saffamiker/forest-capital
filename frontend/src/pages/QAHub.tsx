@@ -43,6 +43,8 @@ interface LatestRun {
 interface LatestRunResponse {
   run: LatestRun | null
   is_current?: boolean
+  statistical_current?: boolean
+  qa_current?: boolean
   current_data_hash?: string
   last_hash?: string | null
 }
@@ -322,6 +324,8 @@ export default function QAHub() {
   const [reportError, setReportError] = useState<string | null>(null)
   // Smart audit caching — is the last audit still current for this data?
   const [isCurrent, setIsCurrent] = useState<boolean | null>(null)
+  const [statisticalCurrent, setStatisticalCurrent] = useState(false)
+  const [qaCurrent, setQaCurrent] = useState(false)
   const [currencyRunAt, setCurrencyRunAt] = useState<string | null>(null)
   const [showDemoConfirm, setShowDemoConfirm] = useState(false)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -336,6 +340,8 @@ export default function QAHub() {
     void axios.get<LatestRunResponse>('/api/v1/audit/runs/latest')
       .then((res) => {
         setIsCurrent(res.data.is_current ?? false)
+        setStatisticalCurrent(res.data.statistical_current ?? false)
+        setQaCurrent(res.data.qa_current ?? false)
         setCurrencyRunAt(res.data.run?.triggered_at ?? null)
       })
       .catch(() => { setIsCurrent(null) })
@@ -499,11 +505,25 @@ export default function QAHub() {
               {' '}No re-run needed
             </span>
           ) : (
-            <span className="text-xs text-warning flex items-center gap-1.5">
-              <AlertTriangle className="w-4 h-4 shrink-0" />
-              Data has changed since the last audit — run a full QA to
-              re-verify.
-            </span>
+            <div className="text-xs text-warning space-y-0.5">
+              <div className="flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                Data has changed since the last audit — run a full QA to
+                re-verify.
+              </div>
+              <div className="pl-6 font-mono text-2xs">
+                Statistical audit:{' '}
+                <span className={statisticalCurrent ? 'text-success' : 'text-warning'}>
+                  {statisticalCurrent ? '✓ current' : '⚠️ stale'}
+                </span>
+              </div>
+              <div className="pl-6 font-mono text-2xs">
+                Methodology audit:{' '}
+                <span className={qaCurrent ? 'text-success' : 'text-warning'}>
+                  {qaCurrent ? '✓ current' : '⚠️ stale'}
+                </span>
+              </div>
+            </div>
           )}
           {isCurrent && (
             <TeamGate permission="team_member">
