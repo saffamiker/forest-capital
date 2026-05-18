@@ -239,13 +239,26 @@ async def logout(body: LogoutRequest):
 
 @app.get("/api/auth/me")
 async def get_me(session: dict = Depends(require_auth)):
-    """The signed-in user — email, role, display name, and the
-    authoritative permissions array the frontend gates the UI on."""
+    """The signed-in user — email, role, display name, the authoritative
+    permissions array the frontend gates the UI on, and the lifetime
+    council-query allocation (council_queries_limit None = unlimited)."""
+    council_used = 0
+    council_limit: int | None = None
+    try:
+        from tools.platform_users import get_active_user
+        u = await get_active_user(session["email"])
+        if u:
+            council_used = u.get("council_queries_used", 0)
+            council_limit = u.get("council_queries_limit")
+    except Exception:  # noqa: BLE001
+        pass
     return {
         "email": session["email"],
         "role": session.get("role") or "viewer",
         "display_name": session.get("display_name"),
         "permissions": session.get("permissions") or [],
+        "council_queries_used": council_used,
+        "council_queries_limit": council_limit,
     }
 
 
@@ -1241,6 +1254,30 @@ async def council_query(
     if len(body.query) > 500:
         raise HTTPException(status_code=422, detail="Query exceeds 500 character limit.")
 
+    # Viewer council query allocation — a user with a council_queries_limit
+    # set is blocked once their lifetime allowance is spent. Team members
+    # and sysadmins have a NULL limit and are never blocked. Checked before
+    # the scope guard so a blocked viewer never spends a classifier call.
+    council_quota: dict[str, Any] | None = None
+    from tools.platform_users import (
+        get_council_allocation, increment_council_queries,
+    )
+    allocation = await get_council_allocation(session["email"])
+    if allocation and allocation.get("council_queries_limit") is not None:
+        used = int(allocation.get("council_queries_used", 0) or 0)
+        limit = int(allocation["council_queries_limit"])
+        if used >= limit:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "council_limit_reached",
+                    "limit": limit,
+                    "used": used,
+                },
+            )
+        # The query is counted against the allowance before processing.
+        council_quota = await increment_council_queries(session["email"])
+
     # Scope guard — must pass before any agent is invoked
     if ENVIRONMENT != "test":
         try:
@@ -1310,7 +1347,13 @@ async def council_query(
                 metadata=({"harness": harness_meta} if harness_meta else None),
             )
 
-            return _deliberate_to_frontend(body.query, council_response)
+            result = _deliberate_to_frontend(body.query, council_response)
+            if council_quota:
+                result["council_queries_used"] = (
+                    council_quota["council_queries_used"])
+                result["council_queries_limit"] = (
+                    council_quota["council_queries_limit"])
+            return result
 
         except Exception as exc:
             log.error("council_query_error", error=str(exc))
@@ -1323,6 +1366,9 @@ async def council_query(
     response = dict(MOCK_COUNCIL_RESPONSE)
     response["query"] = body.query
     response["mode"] = "fallback"
+    if council_quota:
+        response["council_queries_used"] = council_quota["council_queries_used"]
+        response["council_queries_limit"] = council_quota["council_queries_limit"]
     return response
 
 
@@ -2093,6 +2139,7 @@ async def admin_create_user(
         email=email,
         display_name=created.get("display_name"),
         notes=created.get("notes"),
+        council_limit=created.get("council_queries_limit"),
     )
     return {**created, "welcome_email_sent": welcome_email_sent}
 
@@ -2104,8 +2151,9 @@ async def admin_update_user(
 ):
     """
     Updates a user's display_name / role / permissions / is_active /
-    notes. email is immutable. The last active sysadmin cannot be
-    demoted or deactivated. Sysadmin only.
+    notes / council_queries_limit / council_queries_used. email is
+    immutable. The last active sysadmin cannot be demoted or
+    deactivated. Sysadmin only.
     """
     from tools.platform_users import (
         count_active_sysadmins, get_user_by_id, update_user,
@@ -2132,6 +2180,27 @@ async def admin_update_user(
             body["permissions"], fields.get("role", user["role"]))
     if "is_active" in body:
         fields["is_active"] = bool(body["is_active"])
+    # Council query allocation — Adjust Limit (int), Unlimited (null),
+    # Reset Usage (used = 0). bool is rejected: it is an int subclass.
+    if "council_queries_limit" in body:
+        cql = body["council_queries_limit"]
+        if cql is None:
+            fields["council_queries_limit"] = None
+        elif isinstance(cql, int) and not isinstance(cql, bool) and cql >= 0:
+            fields["council_queries_limit"] = cql
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="council_queries_limit must be a non-negative "
+                       "integer or null.")
+    if "council_queries_used" in body:
+        cqu = body["council_queries_used"]
+        if isinstance(cqu, int) and not isinstance(cqu, bool) and cqu >= 0:
+            fields["council_queries_used"] = cqu
+        else:
+            raise HTTPException(
+                status_code=422,
+                detail="council_queries_used must be a non-negative integer.")
 
     # Last-sysadmin guard — refuse a change that would leave no active
     # administrator. A "sysadmin" is any active user holding manage_users.

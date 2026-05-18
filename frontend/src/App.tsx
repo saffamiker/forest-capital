@@ -30,6 +30,9 @@ interface Session {
   role?: string
   displayName?: string | null
   permissions?: string[]
+  // Lifetime council-query allocation. councilQueriesLimit null = unlimited.
+  councilQueriesUsed?: number
+  councilQueriesLimit?: number | null
 }
 
 interface MeResponse {
@@ -37,6 +40,8 @@ interface MeResponse {
   role: string
   display_name: string | null
   permissions: string[]
+  council_queries_used: number
+  council_queries_limit: number | null
 }
 
 interface AuthContextType {
@@ -86,6 +91,8 @@ function AuthProvider({ children }: { children: ReactNode }) {
       role: data.role,
       displayName: data.display_name,
       permissions: data.permissions,
+      councilQueriesUsed: data.council_queries_used,
+      councilQueriesLimit: data.council_queries_limit,
     } : prev))
   }, [])
 

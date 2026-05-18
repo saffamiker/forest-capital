@@ -24,7 +24,8 @@ log = structlog.get_logger(__name__)
 
 _USER_COLS = (
     "id, email, display_name, role, permissions, is_active, "
-    "created_at, created_by, last_login_at, notes"
+    "created_at, created_by, last_login_at, notes, "
+    "council_queries_used, council_queries_limit"
 )
 
 
@@ -35,6 +36,10 @@ def _row_to_dict(r: Any) -> dict[str, Any]:
         "permissions": list(r[4]) if r[4] else [], "is_active": r[5],
         "created_at": _iso(r[6]), "created_by": r[7],
         "last_login_at": _iso(r[8]), "notes": r[9],
+        # Lifetime council-query allocation. council_queries_limit is None
+        # for unlimited users (team members, sysadmins).
+        "council_queries_used": r[10] if r[10] is not None else 0,
+        "council_queries_limit": r[11],
     }
 
 
@@ -90,6 +95,40 @@ async def get_active_user(email: str) -> dict[str, Any] | None:
             return _row_to_dict(found) if found else None
     except Exception as exc:  # noqa: BLE001
         log.warning("platform_users_get_active_failed", error=str(exc))
+        return None
+
+
+async def get_council_allocation(email: str) -> dict[str, Any] | None:
+    """
+    A user's council query allocation — {council_queries_used,
+    council_queries_limit} — or None when the user is absent or the
+    database is unavailable. A narrow read kept separate from
+    get_active_user so the council endpoint can look up the allocation
+    without going through (or being confused with) auth resolution.
+    None means "no allowance on record" → the caller treats the user as
+    unlimited (fail-open).
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(text(
+                "SELECT council_queries_used, council_queries_limit "
+                "FROM platform_users "
+                "WHERE lower(email) = lower(:e) AND is_active = true"
+            ), {"e": email})
+            r = row.fetchone()
+            if r is None:
+                return None
+            return {
+                "council_queries_used": r[0] if r[0] is not None else 0,
+                "council_queries_limit": r[1],
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("platform_users_council_allocation_failed", error=str(exc))
         return None
 
 
@@ -232,7 +271,11 @@ async def create_user(
     *, email: str, display_name: str | None, role: str,
     permissions: list[str], notes: str | None, created_by: str,
 ) -> dict[str, Any] | None:
-    """Inserts a new platform_users row. Returns the stored row or None."""
+    """Inserts a new platform_users row. Returns the stored row or None.
+
+    Council allocation by role: viewers get a finite lifetime allowance
+    (5 queries); team members and sysadmins are unlimited (NULL)."""
+    council_limit = None if role in ("team_member", "sysadmin") else 5
     try:
         from sqlalchemy import text
 
@@ -242,11 +285,13 @@ async def create_user(
         async with AsyncSessionLocal() as session:
             row = await session.execute(text(
                 "INSERT INTO platform_users "
-                "(email, display_name, role, permissions, notes, created_by) "
-                "VALUES (:email, :dn, :role, :perms, :notes, :cb) "
+                "(email, display_name, role, permissions, notes, created_by, "
+                " council_queries_limit) "
+                "VALUES (:email, :dn, :role, :perms, :notes, :cb, :cql) "
                 f"RETURNING {_USER_COLS}"
             ), {"email": email, "dn": display_name, "role": role,
-                "perms": permissions, "notes": notes, "cb": created_by})
+                "perms": permissions, "notes": notes, "cb": created_by,
+                "cql": council_limit})
             stored = row.fetchone()
             await session.commit()
             return _row_to_dict(stored) if stored else None
@@ -258,10 +303,11 @@ async def create_user(
 async def update_user(user_id: int, fields: dict[str, Any]) -> dict[str, Any] | None:
     """
     Updates the supplied fields (display_name, role, permissions,
-    is_active, notes) of one user. email is immutable and ignored.
-    Returns the updated row, or None.
+    is_active, notes, council_queries_used, council_queries_limit) of one
+    user. email is immutable and ignored. Returns the updated row, or None.
     """
-    allowed = ("display_name", "role", "permissions", "is_active", "notes")
+    allowed = ("display_name", "role", "permissions", "is_active", "notes",
+               "council_queries_used", "council_queries_limit")
     sets = {k: v for k, v in fields.items() if k in allowed}
     if not sets:
         return await get_user_by_id(user_id)
@@ -303,3 +349,34 @@ async def record_login(email: str) -> None:
             await session.commit()
     except Exception as exc:  # noqa: BLE001
         log.warning("platform_users_record_login_failed", error=str(exc))
+
+
+async def increment_council_queries(email: str) -> dict[str, Any] | None:
+    """
+    Increments a user's lifetime council_queries_used by one and returns
+    {council_queries_used, council_queries_limit} with the new values.
+    Called once per council query by a limited (non-unlimited) user.
+    Fail-open: returns None on any database error.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(text(
+                "UPDATE platform_users "
+                "SET council_queries_used = council_queries_used + 1 "
+                "WHERE lower(email) = lower(:e) "
+                "RETURNING council_queries_used, council_queries_limit"
+            ), {"e": email})
+            stored = row.fetchone()
+            await session.commit()
+            if stored is None:
+                return None
+            return {"council_queries_used": stored[0],
+                    "council_queries_limit": stored[1]}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("platform_users_increment_council_failed", error=str(exc))
+        return None

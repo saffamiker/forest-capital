@@ -14,6 +14,10 @@ export interface CouncilResponse {
   /** "live" = a real council run; "fallback" = demo/mock data returned
    *  because the pipeline failed or the request ran in the test env. */
   mode?: 'live' | 'fallback'
+  /** Viewer council allocation after this query — present only for a
+   *  limited (non-unlimited) user. */
+  council_queries_used?: number
+  council_queries_limit?: number | null
 }
 
 export type Verdict = 'PASS' | 'WARN' | 'FAIL'

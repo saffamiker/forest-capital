@@ -309,7 +309,8 @@ class TestWelcomeEmail:
         import auth
         sent_to: list[str] = []
 
-        async def _send(email, display_name=None, notes=None):
+        async def _send(email, display_name=None, notes=None,
+                        council_limit=None):
             sent_to.append(email)
             return True
         monkeypatch.setattr(auth, "send_welcome_email", _send)
@@ -327,7 +328,8 @@ class TestWelcomeEmail:
         import auth
         sent: list[str] = []
 
-        async def _send(email, display_name=None, notes=None):
+        async def _send(email, display_name=None, notes=None,
+                        council_limit=None):
             sent.append(email)
             return True
         monkeypatch.setattr(auth, "send_welcome_email", _send)
@@ -345,7 +347,8 @@ class TestWelcomeEmail:
         })
         import auth
 
-        async def _send(email, display_name=None, notes=None):
+        async def _send(email, display_name=None, notes=None,
+                        council_limit=None):
             return False   # delivery failed — fail-open
         monkeypatch.setattr(auth, "send_welcome_email", _send)
         resp = client.post(USERS,
@@ -370,3 +373,146 @@ class TestWelcomeEmail:
         _subject, body = build_welcome_email(
             "guest@queens.edu", "Guest", "FNA 670 guest reviewer")
         assert "You have been added as: FNA 670 guest reviewer" in body
+
+
+class TestCouncilAllocation:
+    """Viewer council query allocation — the welcome-email line, the
+    council endpoint gate, and the Settings override controls."""
+
+    # ── Welcome email (CHANGE 4) ──────────────────────────────────────────────
+
+    def test_welcome_email_states_the_council_allocation(self):
+        from auth import build_welcome_email
+        _subject, body = build_welcome_email(
+            "guest@queens.edu", "Guest", None, council_limit=5)
+        assert "provisioned with 5 council queries" in body
+
+    def test_welcome_email_omits_allocation_for_unlimited(self):
+        from auth import build_welcome_email
+        _subject, body = build_welcome_email(
+            "tm@queens.edu", "TM", None, council_limit=None)
+        assert "provisioned with" not in body
+
+    # ── increment_council_queries — fail-open ────────────────────────────────
+
+    def test_increment_council_queries_no_db_returns_none(self, monkeypatch):
+        import asyncio
+        import database
+        import tools.platform_users as pu
+        monkeypatch.setattr(database, "AsyncSessionLocal", None, raising=False)
+        assert asyncio.run(pu.increment_council_queries("x@y.edu")) is None
+
+    # ── Council endpoint gate ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _patch_user(monkeypatch, *, used, limit):
+        """Stub the council endpoint's allocation lookup. get_council_
+        allocation is monkeypatched (not get_active_user) so auth
+        resolution is untouched."""
+        import tools.platform_users as pu
+
+        async def _get(_email):
+            return {"council_queries_used": used,
+                    "council_queries_limit": limit}
+
+        async def _inc(_email):
+            return {"council_queries_used": used + 1,
+                    "council_queries_limit": limit}
+        monkeypatch.setattr(pu, "get_council_allocation", _get)
+        monkeypatch.setattr(pu, "increment_council_queries", _inc)
+
+    def test_viewer_blocked_when_at_limit(self, monkeypatch):
+        self._patch_user(monkeypatch, used=5, limit=5)
+        resp = client.post("/api/council/query", json={"query": "test query"},
+                            headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 429
+        assert resp.json()["detail"]["error"] == "council_limit_reached"
+
+    def test_viewer_allowed_when_under_limit(self, monkeypatch):
+        # Query 5 of 5 (used=4) is still allowed.
+        self._patch_user(monkeypatch, used=4, limit=5)
+        resp = client.post("/api/council/query", json={"query": "test query"},
+                            headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+
+    def test_unlimited_user_is_never_blocked(self, monkeypatch):
+        # A NULL limit is unlimited even with a high used count.
+        self._patch_user(monkeypatch, used=999, limit=None)
+        resp = client.post("/api/council/query", json={"query": "test query"},
+                            headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+
+    def test_increment_called_once_on_an_allowed_query(self, monkeypatch):
+        import tools.platform_users as pu
+
+        async def _get(_email):
+            return {"council_queries_used": 1, "council_queries_limit": 5}
+        calls: list[str] = []
+
+        async def _inc(email):
+            calls.append(email)
+            return {"council_queries_used": 2, "council_queries_limit": 5}
+        monkeypatch.setattr(pu, "get_council_allocation", _get)
+        monkeypatch.setattr(pu, "increment_council_queries", _inc)
+        resp = client.post("/api/council/query", json={"query": "test query"},
+                            headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert len(calls) == 1   # counted exactly once
+
+    # ── Settings override — PATCH council fields ──────────────────────────────
+
+    @staticmethod
+    def _patch_update(monkeypatch):
+        """Stub get_user_by_id / count_active_sysadmins / update_user so the
+        PATCH endpoint reaches the council-field handling. Returns the list
+        the update_user fields dict is recorded into."""
+        import tools.platform_users as pu
+        recorded: list[dict] = []
+
+        async def _get_by_id(_uid):
+            return {"id": 1, "email": "v@queens.edu", "role": "viewer",
+                    "permissions": ["view_analytics", "ask_council"],
+                    "is_active": True}
+
+        async def _count():
+            return 5
+
+        async def _update(uid, fields):
+            recorded.append(fields)
+            return {"id": uid, **fields}
+        monkeypatch.setattr(pu, "get_user_by_id", _get_by_id)
+        monkeypatch.setattr(pu, "count_active_sysadmins", _count)
+        monkeypatch.setattr(pu, "update_user", _update)
+        return recorded
+
+    def test_reset_usage_patches_used_to_zero(self, monkeypatch):
+        recorded = self._patch_update(monkeypatch)
+        resp = client.patch("/api/v1/admin/users/1",
+                             json={"council_queries_used": 0},
+                             headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert recorded and recorded[0].get("council_queries_used") == 0
+
+    def test_adjust_limit_patches_the_new_value(self, monkeypatch):
+        recorded = self._patch_update(monkeypatch)
+        resp = client.patch("/api/v1/admin/users/1",
+                             json={"council_queries_limit": 12},
+                             headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert recorded and recorded[0].get("council_queries_limit") == 12
+
+    def test_unlimited_patches_limit_to_null(self, monkeypatch):
+        recorded = self._patch_update(monkeypatch)
+        resp = client.patch("/api/v1/admin/users/1",
+                             json={"council_queries_limit": None},
+                             headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert recorded and "council_queries_limit" in recorded[0]
+        assert recorded[0]["council_queries_limit"] is None
+
+    def test_negative_limit_is_rejected(self, monkeypatch):
+        self._patch_update(monkeypatch)
+        resp = client.patch("/api/v1/admin/users/1",
+                             json={"council_queries_limit": -3},
+                             headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 422

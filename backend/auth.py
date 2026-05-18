@@ -258,15 +258,27 @@ def build_welcome_email(
     email: str,
     display_name: str | None = None,
     notes: str | None = None,
+    council_limit: int | None = None,
 ) -> tuple[str, str]:
     """
     Builds the (subject, plain-text body) of the welcome email sent to a
     newly-created platform user. Pure — no I/O — so it is unit-testable.
     The greeting falls back to the email when no display name was given;
     a notes line is added only when Michael recorded notes on the user.
+    council_limit, when set (a viewer's finite allocation), adds a council
+    query-allowance line; None (an unlimited user) adds nothing.
     """
     greeting = display_name or email
     notes_line = (f"\nYou have been added as: {notes}\n" if notes else "")
+    # The raw email address stays plain text — mailto: links do not work
+    # in a plain-text email; the platform UI applies the anchor instead.
+    council_alloc = ""
+    if council_limit is not None:
+        council_alloc = (
+            f"\n  You have been provisioned with {council_limit} council "
+            f"queries. If you would like\n  additional access, please "
+            f"contact Michael Ruurds at ruurdsm@queens.edu."
+        )
     rule = "-" * 60
     body = f"""Dear {greeting},
 
@@ -309,7 +321,7 @@ Analytics
 
 AI Investment Council
   A council of seven AI agents deliberates on portfolio questions in
-  real time. Ask any question about the strategies, data, or methodology.
+  real time. Ask any question about the strategies, data, or methodology.{council_alloc}
 
 Statistical Evidence
   Walk-forward validation, combinatorial purged cross-validation (CPCV),
@@ -342,6 +354,7 @@ async def send_welcome_email(
     email: str,
     display_name: str | None = None,
     notes: str | None = None,
+    council_limit: int | None = None,
 ) -> bool:
     """
     Sends the welcome email to a newly-created platform user. Fail-open:
@@ -349,7 +362,8 @@ async def send_welcome_email(
     on any failure — never raises, so a delivery problem cannot block the
     user-creation response.
     """
-    subject, body = build_welcome_email(email, display_name, notes)
+    subject, body = build_welcome_email(
+        email, display_name, notes, council_limit)
 
     if ENVIRONMENT in ("development", "test"):
         border = "=" * 64
