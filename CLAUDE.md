@@ -6212,8 +6212,10 @@ is maintained separately. The `gh` CLI is authenticated with the
      ✅ Academic Review reads current editor draft content
      ✅ [[BOB]] block panel + [[VERIFY]] popup UX (commit 599296c)
      ✅ UAT guide + site tour updated for the editor (commit 64704b6)
+     ✅ UAT guide [[BOB]]/[[VERIFY]] UX fix (commit 62461b8)
   ◐ alembic upgrade head on Render — in-flight: migrations through 021
-     are ready; `alembic upgrade head` runs on Render post-merge,
+     are ready locally; migrations 019, 020 and 021 are NOT yet on
+     production. `alembic upgrade head` runs on Render post-merge,
      pending the develop → main deploy
   ✅ S3 (or equivalent) for screenshot storage — Render persistent
      disk at /data/test_screenshots; screenshots survive redeploys
