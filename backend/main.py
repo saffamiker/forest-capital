@@ -1533,6 +1533,52 @@ async def _read_screenshots(files: list[UploadFile]) -> list[str]:
     return save_screenshots(pairs) if pairs else []
 
 
+# ── Automated triage triggers ─────────────────────────────────────────────────
+#
+# The triage engine runs in the background, never blocking a result /
+# feedback submission. Two automatic triggers plus the manual endpoint:
+#   threshold  — 5+ unaddressed items have accumulated since the last run
+#   test_pass  — a tester has just completed a full test script
+# Both are fire-and-forget and fail-open — a triage failure never affects
+# the primary submission.
+
+_triage_bg_tasks: set = set()
+
+
+async def _triage_trigger(kind: str) -> None:
+    """Runs in the background. For the threshold trigger it first checks
+    the ≥5-unaddressed-since-last-run condition; the test_pass trigger
+    runs unconditionally. run_triage itself skips a concurrent run."""
+    try:
+        from tools.triage_engine import (
+            count_unaddressed_items, is_triage_running, last_triage_at,
+            run_triage,
+        )
+        if await is_triage_running():
+            return
+        if kind == "threshold":
+            since = await last_triage_at()
+            if await count_unaddressed_items(since=since) < 5:
+                return
+            await run_triage("threshold")
+        else:
+            await run_triage("test_pass")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_trigger_failed", kind=kind, error=str(exc))
+
+
+def _fire_triage(kind: str) -> None:
+    """Fire-and-forget scheduling of a triage trigger — a strong reference
+    is held so the task is not garbage-collected mid-run."""
+    try:
+        import asyncio
+        task = asyncio.create_task(_triage_trigger(kind))
+        _triage_bg_tasks.add(task)
+        task.add_done_callback(_triage_bg_tasks.discard)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_fire_failed", kind=kind, error=str(exc))
+
+
 @app.post("/api/v1/testing/results")
 @limiter.limit("120/minute")
 async def testing_record_result(
@@ -1548,6 +1594,7 @@ async def testing_record_result(
     browser_info: str = Form(default=""),
     override_reason: str = Form(default=""),
     low_quality: bool = Form(default=False),
+    script_complete: bool = Form(default=False),
     screenshots: list[UploadFile] = File(default=[]),
     session: dict = Depends(require_team_member),
 ):
@@ -1576,6 +1623,14 @@ async def testing_record_result(
     if stored is None:
         raise HTTPException(status_code=503,
                             detail="Could not record the result — database unavailable.")
+
+    # Automation hooks — both fire-and-forget, never block this response.
+    # Threshold: a new failure/feedback item may push the backlog past 5.
+    # Test pass: `script_complete` is set by the client (which holds the
+    # testScripts.ts step inventory) when the final step has been attested.
+    _fire_triage("threshold")
+    if script_complete:
+        _fire_triage("test_pass")
     return stored
 
 
@@ -1678,6 +1733,10 @@ async def testing_submit_feedback(
     if stored is None:
         raise HTTPException(status_code=503,
                             detail="Could not store the feedback — database unavailable.")
+
+    # Threshold trigger — a new feedback item may push the unaddressed
+    # backlog past 5. Fire-and-forget; never blocks this response.
+    _fire_triage("threshold")
     return stored
 
 
@@ -1762,6 +1821,40 @@ async def testing_quality_check(
                   "passed": verdict.get("passed")},
     )
     return verdict
+
+
+# ── Triage reports — sysadmin only ────────────────────────────────────────────
+
+@app.post("/api/v1/testing/triage")
+async def testing_run_triage(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Manually triggers a triage run in the background — does not block.
+    The report appears under Settings → Triage Reports when complete.
+    Sysadmin only (the manage_users permission).
+    """
+    _fire_triage("manual")
+    return {"status": "triage_started",
+            "message": "Triage report will be ready shortly."}
+
+
+@app.get("/api/v1/testing/triage")
+async def testing_get_triage_reports(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Every triage report, newest first. Sysadmin only."""
+    from tools.triage_engine import get_all_triage_reports
+    return {"reports": await get_all_triage_reports()}
+
+
+@app.get("/api/v1/testing/triage/latest")
+async def testing_get_latest_triage_report(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """The most recent triage report, or null. Sysadmin only."""
+    from tools.triage_engine import get_latest_triage_report
+    return {"report": await get_latest_triage_report()}
 
 
 # ── User management ───────────────────────────────────────────────────────────

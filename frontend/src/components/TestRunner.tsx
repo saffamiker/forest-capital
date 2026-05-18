@@ -210,6 +210,12 @@ export default function TestRunner() {
     form.append('step_id', step.id)
     form.append('result', result)
     form.append('browser_info', navigator.userAgent)
+    // Signal a completed test pass to the backend triage hook — the
+    // client holds the testScripts.ts step inventory, so it is the
+    // authoritative judge of "all steps attested".
+    if (stepIndex + 1 >= script.steps.length) {
+      form.append('script_complete', 'true')
+    }
     try {
       await axios.post('/api/v1/testing/results', form)
     } catch { /* fail-open — the UI must not stall on a logging error */ }
