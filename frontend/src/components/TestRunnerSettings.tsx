@@ -14,15 +14,16 @@
  * derived here by diffing the script step inventory against the stored
  * results — the backend deliberately does not know the scripts.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import {
   Check, X, SkipForward, Circle, RefreshCw, Download, AlertTriangle,
-  Loader2,
+  Loader2, ChevronDown, ChevronRight, ExternalLink, Search,
 } from 'lucide-react'
 import { TEST_SCRIPTS, getTestScript } from '../constants/testScripts'
 import { startTestRun } from '../lib/testRunnerBus'
 import { csvBlob } from '../lib/csv'
+import Markdown from './Markdown'
 
 type StepResult = 'pass' | 'fail' | 'skip'
 
@@ -478,6 +479,250 @@ function FeedbackBacklogBlock() {
   )
 }
 
+// ── Triage Reports ────────────────────────────────────────────────────────────
+
+interface TriageIssue {
+  item_type: string
+  item_id: number
+  number: number
+  url: string
+}
+
+interface TriageReport {
+  id: number
+  triggered_by: string
+  triggered_at: string | null
+  items_assessed: number
+  report_text: string
+  github_issues_created: number
+  status: string
+  metadata: {
+    immediate_count?: number
+    github_issues?: TriageIssue[]
+    sections?: Record<string, boolean>
+  }
+}
+
+function relTime(iso: string | null): string {
+  if (!iso) return 'never'
+  const then = new Date(iso).getTime()
+  if (Number.isNaN(then)) return 'never'
+  const mins = Math.round((Date.now() - then) / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hrs = Math.round(mins / 60)
+  if (hrs < 24) return `${hrs}h ago`
+  return `${Math.round(hrs / 24)}d ago`
+}
+
+// Best-effort count of the bullet items under a "## SECTION" heading —
+// the engine stores deterministic immediate / issue counts, but quick
+// wins live only in the agent prose.
+function countSection(reportText: string, heading: string): number {
+  const start = reportText.indexOf(heading)
+  if (start === -1) return 0
+  const rest = reportText.slice(start + heading.length)
+  const next = rest.indexOf('\n## ')
+  const body = next === -1 ? rest : rest.slice(0, next)
+  return body.split('\n').filter((l) => /^\s*[-*]\s+\S/.test(l)).length
+}
+
+function TriageSummaryLine({ r }: { r: TriageReport }) {
+  const immediate = r.metadata.immediate_count ?? 0
+  const quickWins = countSection(r.report_text, '## QUICK WINS')
+  return (
+    <div className="text-2xs text-muted">
+      {r.items_assessed} item{r.items_assessed === 1 ? '' : 's'} assessed
+      {' · '}{immediate} immediate
+      {' · '}{quickWins} quick win{quickWins === 1 ? '' : 's'}
+      {' · '}{r.github_issues_created} GitHub issue
+      {r.github_issues_created === 1 ? '' : 's'}
+    </div>
+  )
+}
+
+function TriageIssueLinks({ issues }: { issues: TriageIssue[] }) {
+  if (issues.length === 0) return null
+  return (
+    <div className="mt-2 flex flex-wrap gap-1.5">
+      {issues.map((iss) => (
+        <a
+          key={`${iss.item_type}-${iss.item_id}`}
+          href={iss.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="inline-flex items-center gap-1 text-2xs px-1.5 py-0.5
+                     rounded border border-electric/30 bg-electric/10
+                     text-electric hover:bg-electric/20 transition-colors"
+        >
+          <ExternalLink className="w-2.5 h-2.5" />
+          #{iss.number}
+        </a>
+      ))}
+    </div>
+  )
+}
+
+function TriageReportsBlock() {
+  const [reports, setReports] = useState<TriageReport[]>([])
+  const [loading, setLoading] = useState(true)
+  const [running, setRunning] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [historyOpen, setHistoryOpen] = useState(false)
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await axios.get<{ reports: TriageReport[] }>(
+        '/api/v1/testing/triage')
+      setReports(res.data.reports ?? [])
+      setError(null)
+    } catch {
+      setError('Could not load triage reports.')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { void load() }, [load])
+
+  // While a run is in flight, poll the latest report every 5s until its
+  // status leaves 'running'.
+  useEffect(() => {
+    if (!running) return
+    pollRef.current = setInterval(() => {
+      void axios.get<{ report: TriageReport | null }>(
+        '/api/v1/testing/triage/latest')
+        .then((res) => {
+          const latest = res.data.report
+          if (latest && latest.status !== 'running') {
+            setRunning(false)
+            void load()
+          }
+        })
+        .catch(() => { /* keep polling — a transient error is not fatal */ })
+    }, 5000)
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    }
+  }, [running, load])
+
+  const runTriage = async () => {
+    setError(null)
+    try {
+      await axios.post('/api/v1/testing/triage')
+      setRunning(true)
+    } catch {
+      setError('Could not start a triage run.')
+    }
+  }
+
+  const latest = reports[0] ?? null
+  const previous = reports.slice(1)
+
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <p className="text-2xs text-muted">
+          Automated triage of the feedback and failure backlog — runs on a
+          5-item threshold, on a completed test pass, or on demand.
+        </p>
+        <button
+          type="button"
+          onClick={() => void runTriage()}
+          disabled={running}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs
+                     font-medium bg-electric/10 border border-electric/30
+                     text-electric hover:bg-electric/20 transition-colors
+                     disabled:opacity-50 shrink-0"
+        >
+          {running
+            ? <><Loader2 className="w-3 h-3 animate-spin" /> Triage running…</>
+            : <><Search className="w-3 h-3" /> Run Triage Now</>}
+        </button>
+      </div>
+
+      {error && (
+        <div className="text-2xs text-danger mb-2">{error}</div>
+      )}
+
+      {loading ? (
+        <p className="text-xs text-muted flex items-center gap-1.5">
+          <Loader2 className="w-3 h-3 animate-spin" /> Loading triage reports…
+        </p>
+      ) : latest === null ? (
+        <p className="text-xs text-muted italic">
+          No triage run yet — it runs automatically as the backlog grows, or
+          start one now.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {/* Latest report — shown in full. */}
+          <div className="rounded border border-border bg-navy-800 p-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <span className="text-xs text-white font-medium">
+                Last triage {relTime(latest.triggered_at)}
+              </span>
+              <span className="text-2xs text-muted">
+                triggered by {latest.triggered_by} · {latest.status}
+              </span>
+            </div>
+            <TriageSummaryLine r={latest} />
+            <TriageIssueLinks issues={latest.metadata.github_issues ?? []} />
+            {latest.report_text && (
+              <div className="mt-2 pt-2 border-t border-border/50">
+                <Markdown content={latest.report_text} />
+              </div>
+            )}
+          </div>
+
+          {/* Previous reports — collapsible history. */}
+          {previous.length > 0 && (
+            <div className="rounded border border-border overflow-hidden">
+              <button
+                type="button"
+                onClick={() => setHistoryOpen((o) => !o)}
+                className="w-full flex items-center gap-2 px-3 py-2 min-h-[44px]
+                           text-xs text-white hover:bg-navy-700 transition-colors"
+              >
+                {historyOpen
+                  ? <ChevronDown className="w-3.5 h-3.5 text-muted" />
+                  : <ChevronRight className="w-3.5 h-3.5 text-muted" />}
+                Previous reports ({previous.length})
+              </button>
+              {historyOpen && (
+                <div className="border-t border-border divide-y divide-border">
+                  {previous.map((r) => (
+                    <div key={r.id} className="px-3 py-2.5">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <span className="text-2xs text-white">
+                          {relTime(r.triggered_at)} · {r.triggered_by} · {r.status}
+                        </span>
+                      </div>
+                      <TriageSummaryLine r={r} />
+                      <TriageIssueLinks issues={r.metadata.github_issues ?? []} />
+                      {r.report_text && (
+                        <details className="mt-1.5">
+                          <summary className="text-2xs text-electric cursor-pointer">
+                            View report
+                          </summary>
+                          <div className="mt-1.5">
+                            <Markdown content={r.report_text} />
+                          </div>
+                        </details>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Exported sections ─────────────────────────────────────────────────────────
 
 export function TestResultsSection() {
@@ -503,6 +748,17 @@ export function TestAdminSections() {
           Tester feedback with AI categorisation — step-linked and free-form.
         </p>
         <FeedbackBacklogBlock />
+      </div>
+      <div>
+        <h3 className="text-sm font-semibold text-white flex items-center gap-1.5">
+          <Search className="w-3.5 h-3.5 text-electric" />
+          Triage Reports
+        </h3>
+        <p className="text-2xs text-muted mt-0.5 mb-2">
+          AI triage of the backlog into immediate actions, quick wins and
+          patterns — with GitHub issues for the urgent items.
+        </p>
+        <TriageReportsBlock />
       </div>
     </div>
   )
