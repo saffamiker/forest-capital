@@ -20,15 +20,20 @@ spacing produces the ~3-page midpoint and ~5-page brief naturally.
 """
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, timezone
 from io import BytesIO
 from typing import Any
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_COLOR_INDEX, WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
+
+# Inline [[VERIFY: …]] markers — the Academic Writer is instructed to wrap
+# any uncertain numeric value in one rather than insert it silently.
+_VERIFY_RE = re.compile(r"(\[\[VERIFY:.*?\]\])")
 
 from tools.academic_export import (
     table_drawdown, table_factor_loadings, table_regime_conditional,
@@ -134,11 +139,94 @@ def _add_heading(doc: Document, text: str, *, size: int = 13) -> None:
 
 
 def _add_body(doc: Document, text: str) -> None:
-    """Renders blank-line-separated prose — one Word paragraph per block."""
+    """
+    Renders blank-line-separated prose — one Word paragraph per block.
+    Any [[VERIFY: …]] marker the Academic Writer emitted for an uncertain
+    value is rendered bold with a yellow highlight, so it is unmissable
+    to whoever refines the draft rather than a silently-trusted figure.
+    """
     for block in (text or "").strip().split("\n\n"):
         block = block.strip()
-        if block:
-            doc.add_paragraph(block)
+        if not block:
+            continue
+        para = doc.add_paragraph()
+        for part in _VERIFY_RE.split(block):
+            if not part:
+                continue
+            run = para.add_run(part)
+            run.font.name = _BODY_FONT
+            run.font.size = Pt(12)
+            if _VERIFY_RE.fullmatch(part):
+                run.bold = True
+                run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+
+
+def _shade_cell(cell, hex_color: str) -> None:
+    """Sets a table cell's background fill via OOXML w:shd."""
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), hex_color.lstrip("#"))
+    cell._tc.get_or_add_tcPr().append(shd)
+
+
+def _add_callout(doc: Document, title: str, body_lines: list[str]) -> None:
+    """
+    A boxed, amber-shaded callout — a single-cell bordered table — for
+    the human-input prompts a team member must act on. Bold throughout
+    so it survives scanning and is the first thing the reader sees.
+    """
+    table = doc.add_table(rows=1, cols=1)
+    table.style = "Table Grid"          # a visible 1 pt border on all sides
+    cell = table.rows[0].cells[0]
+    _shade_cell(cell, "#fef3c7")        # light amber
+
+    title_para = cell.paragraphs[0]
+    title_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    title_para.paragraph_format.space_after = Pt(4)
+    t = title_para.add_run(f"✏️  {title}")
+    t.bold = True
+    t.font.name = _BODY_FONT
+    t.font.size = Pt(11)
+    _set_run_color(t, "#92400e")        # dark amber
+
+    for line in body_lines:
+        para = cell.add_paragraph()
+        para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+        para.paragraph_format.space_after = Pt(2)
+        run = para.add_run(line)
+        run.bold = True
+        run.font.name = _BODY_FONT
+        run.font.size = Pt(10)
+        _set_run_color(run, "#1f2937")
+    # Breathing room below the box.
+    doc.add_paragraph().paragraph_format.space_after = Pt(2)
+
+
+# Human-input callouts for the midpoint paper — Bob must act on these
+# before the document is submitted; the AI cannot write them authentically.
+_ROLES_CALLOUT_TITLE = "BOB — THIS SECTION NEEDS YOUR DIRECT INPUT"
+_ROLES_CALLOUT_LINES = [
+    "Describe specifically:",
+    "•  What YOU personally did (written deliverables, literature review, "
+    "data interpretation, editing)",
+    "•  What Michael did (platform engineering, data infrastructure, "
+    "statistical implementation)",
+    "•  What Molly did (presentation design, visual storytelling, UAT "
+    "testing)",
+    "",
+    "The AI cannot write this authentically. Faculty will scrutinise this "
+    "section. Your own words only.",
+]
+_NEXT_STEPS_CALLOUT_TITLE = "BOB — REVIEW AND REFINE"
+_NEXT_STEPS_CALLOUT_LINES = [
+    "The draft below lists known analytical limitations and planned "
+    "enhancements. Edit it to reflect YOUR analytical priorities — not "
+    "just the engineering roadmap.",
+    "",
+    "Ask yourself: what would YOU investigate next given the findings? "
+    "That is what belongs here.",
+]
 
 
 def _add_table(doc: Document, caption: str, headers: list[str],
@@ -243,10 +331,15 @@ def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> by
     _add_table(doc, "Table 2. Regime-Conditional Performance "
                      "(Pre- vs Post-2022)", h, r)
 
+    # Section 3 is a human-input callout, not AI prose — only Bob can
+    # describe the division of labour authentically.
     _add_heading(doc, "3. Roles and Division of Labor")
-    _add_body(doc, narratives.get("roles", "[DATA PENDING]"))
+    _add_callout(doc, _ROLES_CALLOUT_TITLE, _ROLES_CALLOUT_LINES)
 
+    # Section 4 keeps the AI draft, but a callout above it directs Bob to
+    # refine it into his own analytical priorities.
     _add_heading(doc, "4. Next Steps and Open Questions")
+    _add_callout(doc, _NEXT_STEPS_CALLOUT_TITLE, _NEXT_STEPS_CALLOUT_LINES)
     _add_body(doc, narratives.get("next_steps", "[DATA PENDING]"))
 
     period_note = doc.add_paragraph()

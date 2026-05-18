@@ -4988,8 +4988,16 @@ which is also how the contract tests exercise the degradation path.
   banner repeated in the header of every page. The midpoint paper has
   the brief's four sections (Data & Methodology, Preliminary Results
   with the summary-statistics and regime-conditional tables embedded,
-  Roles & Division of Labor from real Team Activity counts, Next Steps
-  from the last Academic Review verdict). The executive brief has a
+  Roles & Division of Labor, Next Steps from the last Academic Review
+  verdict). HUMAN-INPUT CALLOUTS: Section 3 (Roles) is NOT AI-generated
+  — _add_callout renders a boxed amber "BOB — THIS SECTION NEEDS YOUR
+  DIRECT INPUT" prompt, since only Bob can describe the division of
+  labour authentically; Section 4 keeps the AI draft but a "BOB —
+  REVIEW AND REFINE" callout sits above it. In Sections 1-2 the
+  Academic Writer is instructed to wrap any uncertain numeric value in
+  an inline [[VERIFY: …]] marker rather than insert it silently;
+  _add_body renders those markers bold with a yellow highlight. The
+  executive brief has a
   title page then Executive Summary, Methodology, four Key Findings
   (regime-conditional / summary-statistics / drawdown / factor-loadings
   tables embedded) plus Limitations and Final Recommendations.

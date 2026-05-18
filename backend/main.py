@@ -3112,7 +3112,6 @@ async def export_midpoint_paper(
         data = await gather_document_data()
         period = data["study_period"]
         has_results = bool(data["summary_statistics"] or data["regime_conditional"])
-        has_team = bool((data["team_summary"] or {}).get("per_member"))
         has_review = bool(data["last_review_text"])
 
         specs = [
@@ -3138,7 +3137,12 @@ async def export_midpoint_paper(
                  "Black-Litterman, despite its dynamic classification, "
                  "exhibits static-like turnover (4.7%) reflecting the "
                  "framework's modest weight adjustments from its equilibrium "
-                 "prior — a genuine analytical finding, not a data issue."),
+                 "prior — a genuine analytical finding, not a data issue. "
+                 "If you are uncertain about any specific numeric value, do "
+                 "NOT insert it silently — wrap it in an inline verification "
+                 "marker of the form [[VERIFY: <claim>]] (for example "
+                 "[[VERIFY: Sharpe ratio for Regime Switching = 0.63]]) so a "
+                 "team member checks it before submission."),
              "context": {"study_period": period,
                          "strategy_metadata": data.get("strategy_metadata"),
                          "risk_free_rate": data["risk_free_rate"]}},
@@ -3154,26 +3158,20 @@ async def export_midpoint_paper(
                  "discuss the 2022 equity-bond correlation break and what the "
                  "pre- versus post-2022 Sharpe ratios reveal. Reference "
                  "Table 1 (summary statistics) and Table 2 (regime-conditional "
-                 "performance)."),
+                 "performance). If you are uncertain about any specific "
+                 "numeric value, do NOT insert it silently — wrap it in an "
+                 "inline verification marker of the form [[VERIFY: <claim>]] "
+                 "(for example [[VERIFY: Sharpe ratio for Regime Switching = "
+                 "0.63]]) so a team member checks it before submission."),
              "context": {"summary_statistics": data["summary_statistics"],
                          "regime_conditional": data["regime_conditional"],
                          "correlation_pre_post": {
                              "pre_2022": data["rolling_correlation"].get("pre_2022"),
                              "post_2022": data["rolling_correlation"].get("post_2022")}}},
-            {"key": "roles", "available": has_team,
-             "pending": (f"{DATA_PENDING} — Team Activity data unavailable. "
-                         "State roles manually: Michael Ruurds (engineering "
-                         "lead), Bob Thao (written deliverables lead), Molly "
-                         "Murdock (presentation lead)."),
-             "agent_id": "midpoint_roles",
-             "task": (
-                 "Write the Roles and Division of Labor section — about 150 "
-                 "words. The team: Michael Ruurds (engineering lead), Bob "
-                 "Thao (written deliverables lead), Molly Murdock "
-                 "(presentation lead). Ground the coordination narrative in "
-                 "the supplied platform-activity counts — commits, council "
-                 "sessions, academic reviews — rather than generic claims."),
-             "context": {"team_summary": data["team_summary"]}},
+            # Section 3 (Roles and Division of Labor) is NOT AI-generated —
+            # build_midpoint_paper renders a human-input callout for Bob,
+            # who is the only one who can describe the division of labour
+            # authentically. No spec entry for it.
             {"key": "next_steps", "available": has_review,
              "pending": (f"{DATA_PENDING} — no Academic Review verdict on "
                          "record. Run an Academic Review on the Council "
