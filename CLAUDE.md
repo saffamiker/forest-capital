@@ -6059,6 +6059,80 @@ Rubric Alignment — a document with unresolved markers is not ready to
 submit. The final submitted file should carry none of these aids.
 
 
+─────────────────────────────────────────────────────────────────────────────
+IN-PLATFORM DOCUMENT EDITOR (migration 021, May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+A generated midpoint paper or presentation deck opens in an in-platform
+editor — Bob refines the paper, Molly the deck, without leaving the
+platform, so every edit is part of the documented contribution record.
+
+DATA MODEL — migration 021 adds two tables. They are namespaced
+editor_drafts / editor_draft_versions because migration 004 already
+created document_drafts / document_versions for the Sprint 6 storyboard
+editor (a different domain); the two sets coexist.
+  - editor_drafts — the mutable working copy: document_type
+    (midpoint_paper | executive_brief | presentation_deck), owner_email,
+    title, content_json (JSONB), content_text, word_count, version,
+    is_current, is_deleted, created_from (generated | uploaded |
+    manual). content_json is a TipTap document for a paper/brief and a
+    {slides:[...]} structure for a deck; content_text is the plain
+    projection the AI and Academic Review read.
+  - editor_draft_versions — an immutable named checkpoint (the restore
+    target): draft_id, version, content_json, content_text, word_count,
+    version_label, saved_at, saved_by.
+
+ENDPOINTS (all team_member-gated) — tools/editor_drafts.py is the
+fail-open data layer:
+  GET    /api/v1/documents/drafts                  — the user's drafts
+  GET    /api/v1/documents/drafts/{id}
+  POST   /api/v1/documents/drafts                  — create; sets
+         is_current, unsets other drafts of the same type
+  PATCH  /api/v1/documents/drafts/{id}             — silent auto-save,
+         no version row
+  POST   /api/v1/documents/drafts/{id}/versions    — named checkpoint
+  GET    /api/v1/documents/drafts/{id}/versions
+  POST   /api/v1/documents/drafts/{id}/restore/{version_id}
+  DELETE /api/v1/documents/drafts/{id}             — soft delete
+
+GENERATE → EDITOR — POST /api/v1/export/midpoint-paper and
+.../presentation-deck load the generated content into an editor draft
+(tools/editor_content.midpoint_to_editor / deck_to_editor) and return
+the new draft id in the X-Draft-Id response header. The Reports-screen
+Generate Documents card then offers Open in Editor as the primary CTA
+(Download secondary). The executive brief has no editor draft.
+
+EDITOR PAGE — /editor/:draftId (pages/DocumentEditor.tsx), three panels:
+  - LEFT EditorNavigator — document info, a section navigator with a
+    per-section progress bar (driven by remaining [[BOB]]/[[VERIFY]]
+    markers), and version history (Save Version / Restore).
+  - CENTRE — RichTextEditor (TipTap rich text) for a paper/brief, or
+    SlideEditor (editable slide cards) for a deck. lib/editorMarkers.ts
+    is a ProseMirror decoration plugin that renders [[VERIFY]] /
+    [[BOB]] markers as amber spans; clicking one offers to resolve it
+    and deletes the marker text.
+  - RIGHT WritingAssistant — Run Academic Review (streams the council
+    verdict, with an unresolved-marker warning) and an AI writing chat
+    (the document-assistant endpoint, the draft text as context).
+The draft auto-saves every 30 seconds (silent PATCH); a permanent
+AI DRAFT banner and a dismissible BOB/MOLLY "YOUR TASKS" callout top the
+page.
+
+ACADEMIC REVIEW — agents/academic_review.gather_review_context takes the
+reviewer's email and overlays their current editor drafts onto the
+documents-by-type map: a current draft's content_text is reviewed in
+preference to an uploaded academic-document file of the corresponding
+kind, falling back to the uploaded file when no draft exists.
+
+SUBMISSION GUIDES — the Reports screen carries Guide 1 (Bob, midpoint
+paper) and Guide 2 (Molly, final presentation), each walking the
+editor-based workflow and leading with the tracking note: work done on
+the platform is the documented contribution record.
+
+Migration 021 is changelog version 40. TipTap v2 (the React-18 line) is
+a frontend dependency. Operator step: alembic upgrade head on Render.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
