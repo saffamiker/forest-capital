@@ -388,6 +388,62 @@ function FilterBar({
   )
 }
 
+// ── Per-query council cost ────────────────────────────────────────────────────
+
+interface AgentCost {
+  input_tokens?: number
+  output_tokens?: number
+  estimated_cost_usd?: number
+  calls?: number
+}
+
+function CouncilCost({ ev }: { ev: ActivityEvent }) {
+  const [open, setOpen] = useState(false)
+  const cost = ev.estimated_cost_usd
+  // A council row predating the token-logging release has no cost — emit
+  // nothing rather than a misleading $0.0000.
+  if (cost == null) return null
+
+  const perAgent = (ev.metadata?.per_agent_cost as
+    Record<string, AgentCost> | undefined) ?? {}
+  const rows = Object.entries(perAgent)
+    .sort(([, a], [, b]) =>
+      (b.estimated_cost_usd ?? 0) - (a.estimated_cost_usd ?? 0))
+
+  return (
+    <div className="mt-1">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        disabled={rows.length === 0}
+        className="text-2xs text-success font-mono hover:underline
+                   disabled:no-underline disabled:cursor-default"
+      >
+        {fmtCost(cost)}
+        <span className="text-muted">
+          {' '}· {fmtTokens(ev.input_tokens)} in / {fmtTokens(ev.output_tokens)} out
+        </span>
+        {rows.length > 0 && (
+          <span className="text-muted"> · {open ? 'hide' : 'per agent'}</span>
+        )}
+      </button>
+      {open && rows.length > 0 && (
+        <div className="mt-1 pl-2 border-l border-border/60 space-y-0.5">
+          {rows.map(([label, a]) => (
+            <div key={label}
+                 className="flex items-center justify-between text-2xs gap-3">
+              <span className="text-slate-300">{agentLabel(label)}</span>
+              <span className="font-mono text-muted">
+                {fmtCost(a.estimated_cost_usd)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ── Timeline row ──────────────────────────────────────────────────────────────
 
 function TimelineRow({ ev }: { ev: ActivityEvent }) {
@@ -455,6 +511,7 @@ function RowBody({ ev }: { ev: ActivityEvent }) {
             {ev.agents_involved.map(agentLabel).join(' · ')}
           </div>
         )}
+        <CouncilCost ev={ev} />
       </div>
     )
   }

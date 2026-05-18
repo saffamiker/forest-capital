@@ -30,6 +30,11 @@ export interface ActivityEvent {
   agents_involved?: string[] | null
   response_summary?: string | null
   metadata?: Record<string, unknown> | null
+  // token cost — populated from the migration-020 release onward
+  input_tokens?: number | null
+  output_tokens?: number | null
+  model_used?: string | null
+  estimated_cost_usd?: number | null
   // page view
   page?: string
   duration_seconds?: number | null

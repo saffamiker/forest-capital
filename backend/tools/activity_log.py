@@ -451,7 +451,8 @@ async def _read_interactions(session, text, wanted, session_type,
     rows = await session.execute(
         text(
             "SELECT user_email, session_type, interaction_type, timestamp, "
-            " question_text, agents_involved, response_summary, metadata "
+            " question_text, agents_involved, response_summary, metadata, "
+            " input_tokens, output_tokens, model_used, estimated_cost_usd "
             "FROM agent_interactions WHERE " + " AND ".join(clauses)
             + " ORDER BY timestamp DESC LIMIT :n"
         ),
@@ -469,6 +470,13 @@ async def _read_interactions(session, text, wanted, session_type,
             "agents_involved": r[5],
             "response_summary": r[6],
             "metadata": r[7],
+            # Token cost — present from the migration-020 release onward;
+            # older rows return null and the timeline simply omits the line.
+            "input_tokens": r[8],
+            "output_tokens": r[9],
+            "model_used": r[10],
+            "estimated_cost_usd": (
+                float(r[11]) if r[11] is not None else None),
         })
     return out
 
