@@ -24,6 +24,21 @@ log = structlog.get_logger(__name__)
 _RETURN_BOUND = 0.50          # |monthly return| above this is a data error
 _WEIGHT_TOLERANCE = 0.001     # |sum(weights) - 1| allowed
 
+# The reasoning attached to a "Return series length" warning — a shorter
+# strategy series is expected by construction, not a data gap. Carried on
+# the finding so it surfaces identically in the audit export report and
+# the Settings → Statistical Audit findings detail.
+_RETURN_SERIES_NOTE = (
+    "EXPECTED BEHAVIOUR: Dynamic strategies have shorter return series "
+    "than the full asset history because they consume an initialisation "
+    "lookback window. MIN_VARIANCE, BLACK_LITTERMAN, and "
+    "MAX_SHARPE_ROLLING require 36 months (start ~2005-07), "
+    "MOMENTUM_ROTATION 12 months (start ~2003-07), and REGIME_SWITCHING "
+    "3 months (start ~2002-10). This is correct by construction. "
+    "Comparative metrics for these strategies cover their actual start "
+    "date to 2025-12-31, not the full 2002-07-31 study period."
+)
+
 
 def _total_return(series: list[float]) -> float:
     """Cumulative total return of a monthly series — product of (1+r) - 1."""
@@ -202,9 +217,7 @@ def layer_1_raw_data_audit(payload: dict[str, Any]) -> dict[str, Any]:
         if short:
             f("Return series length", "series_length", "warning", "info",
               platform_value=f"asset months={n_assets}; shorter: {short}",
-              auditor_reasoning="Some strategy series are shorter than the "
-                                "asset series — expected, the dynamic "
-                                "strategies consume a lookback window.")
+              auditor_reasoning=_RETURN_SERIES_NOTE)
         else:
             f("Return series length", "series_length", "pass", "info",
               platform_value=f"all series = {n_assets} months",

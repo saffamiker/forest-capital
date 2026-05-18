@@ -7,13 +7,14 @@ model (claude-opus-4-7) — an entirely separate model from the
 claude-sonnet-4-6 the platform computes with. The auditor recomputes
 every metric from scratch and compares its value with the platform's.
 
-Five task groups, run in parallel (one Opus call each, plus one per
+Task groups run in parallel (one Opus call each, plus one per
 summary-statistics entry):
   A — summary statistics (CAGR, volatility, Sharpe, max drawdown,
       skewness, excess return, information ratio), per asset
   B — Carhart factor loadings, all strategies in one call
   C — the efficient-frontier max-Sharpe point
-  D — the pre/post-2022 regime split
+  D — the pre/post-2022 regime split, split across two calls of five
+      strategies each (one call for all ten truncates past parsing)
   E — the rolling pre/post-2022 correlation averages
 
 FAIL-OPEN: a task group whose response will not parse is recorded as a
@@ -193,39 +194,45 @@ def _frontier_prompt(payload: dict) -> str:
     )
 
 
-def _regime_prompt(payload: dict) -> str:
+def _regime_prompt(payload: dict, subset_names: list[str]) -> str:
+    """Builds a regime-split prompt for a SUBSET of strategies. The
+    regime split is audited in two calls of five strategies each — one
+    call for all ten overshoots the response token cap and the JSON is
+    truncated past parsing."""
     specs = payload["formula_specifications"]
+    all_returns = payload["raw_data"]["strategy_returns"]
+    all_regime = payload["platform_computed"]["regime_conditional"]
+    subset_returns = {k: v for k, v in all_returns.items()
+                      if k in subset_names}
+    subset_regime = {k: v for k, v in all_regime.items()
+                     if k in subset_names}
     return (
-        "Independently verify the pre/post-2022 regime split.\n\n"
-        f"Strategy monthly returns: {json.dumps(payload['raw_data']['strategy_returns'])}\n"
+        "Independently verify the pre/post-2022 regime split for these "
+        f"strategies: {', '.join(subset_names)}.\n\n"
+        f"Strategy monthly returns: {json.dumps(subset_returns)}\n"
         f"Dates: {payload['raw_data']['asset_returns'].get('dates')}\n"
         f"Monthly risk-free series: {payload['raw_data']['asset_returns'].get('rf')}\n\n"
-        f"Platform regime-conditional values: {json.dumps(payload['platform_computed']['regime_conditional'])}\n\n"
+        f"Platform regime-conditional values: {json.dumps(subset_regime)}\n\n"
         f"Split rule: {specs['regime_split']}\n"
         f"Sharpe formula: {specs['sharpe']}\nCAGR formula: {specs['cagr']}\n\n"
         "Compute pre- and post-2022 Sharpe and CAGR for each strategy and "
         "compare with the platform values.\n\n"
-        "Return ONLY a raw JSON object. No markdown, no code blocks, no "
-        "preamble, no explanation outside the JSON structure. Keep each "
-        "`reasoning` to ONE concise sentence so the whole JSON object fits "
-        "within the response limit — a truncated response cannot be "
-        "parsed and is wasted.\n\n"
-        "The exact structure to return:\n"
+        "Return ONLY a raw JSON object. No markdown. No code blocks. No "
+        "preamble. No explanation outside the JSON structure.\n\n"
+        "Be concise — one sentence of reasoning per strategy maximum.\n\n"
+        "A single check object looks exactly like this:\n"
         '{\n'
-        '  "strategy": "regime_split",\n'
-        '  "checks": [\n'
-        '    {\n'
-        '      "metric": "REGIME_SWITCHING.post_2022_sharpe",\n'
-        '      "platform_value": 0.63,\n'
-        '      "auditor_value": 0.63,\n'
-        '      "status": "pass",\n'
-        '      "discrepancy_pct": 0.0,\n'
-        '      "reasoning": "One concise sentence.",\n'
-        '      "flag": ""\n'
-        '    }\n'
-        '  ]\n'
-        '}\n'
-        "Include one check object per strategy for post_2022_sharpe; "
+        '  "metric": "REGIME_SWITCHING.post_2022_sharpe",\n'
+        '  "platform_value": 0.63,\n'
+        '  "auditor_value": 0.63,\n'
+        '  "status": "pass",\n'
+        '  "discrepancy_pct": 0.0,\n'
+        '  "reasoning": "One concise sentence.",\n'
+        '  "flag": ""\n'
+        '}\n\n'
+        "The full object to return:\n"
+        '{"strategy": "regime_split", "checks": [ <one check object per '
+        'strategy for post_2022_sharpe> ]}\n'
         "`status` is one of pass, warning, fail."
     )
 
@@ -301,7 +308,17 @@ async def layer_2_metric_audit(payload: dict[str, Any]) -> dict[str, Any]:
                  specs["factor_regression"]))
     jobs.append(("efficient frontier", _frontier_prompt(payload),
                  specs["efficient_frontier"]))
-    jobs.append(("regime split", _regime_prompt(payload),
+    # The regime split runs as two parallel calls of five strategies
+    # each — one call for all ten overshoots the token cap and the JSON
+    # truncates past parsing. _run_group flattens each job's findings,
+    # so the two calls' findings concatenate transparently.
+    regime_names = list(payload["raw_data"]["strategy_returns"].keys())
+    half = (len(regime_names) + 1) // 2
+    jobs.append(("regime split (A)",
+                 _regime_prompt(payload, regime_names[:half]),
+                 specs["regime_split"]))
+    jobs.append(("regime split (B)",
+                 _regime_prompt(payload, regime_names[half:]),
                  specs["regime_split"]))
     jobs.append(("rolling metrics", _rolling_prompt(payload),
                  specs["rolling_correlation"]))

@@ -384,19 +384,6 @@ def format_audit_report(run: dict[str, Any]) -> str:
                 lines.append(f"         discrepancy: {fnd['discrepancy']}")
             if fnd.get("auditor_reasoning"):
                 lines.append(f"         {fnd['auditor_reasoning']}")
-            # A shorter strategy series than the asset series is expected
-            # by construction — the dynamic strategies consume a lookback
-            # window. Spell that out so the warning is not misread.
-            if (fnd.get("check_name") == "Return series length"
-                    and fnd["status"] == "warning"):
-                lines.append(
-                    "         EXPECTED: Dynamic strategies have shorter "
-                    "return series than the asset data because they "
-                    "consume a lookback window during initialisation. "
-                    "MIN_VARIANCE, BLACK_LITTERMAN, and MAX_SHARPE_ROLLING "
-                    "require 36 months, MOMENTUM_ROTATION 12 months, and "
-                    "REGIME_SWITCHING 3 months. This is correct by "
-                    "construction and not a data gap.")
         lines.append("")
 
     # Discrepancies needing attention — every FAIL / WARNING.
