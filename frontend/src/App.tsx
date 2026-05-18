@@ -15,6 +15,7 @@ import Reports from './pages/Reports'
 import Settings from './pages/Settings'
 import StoryboardEditor from './pages/StoryboardEditor'
 import SectionEditor from './pages/SectionEditor'
+import DocumentEditor from './pages/DocumentEditor'
 import { BrandProvider } from './context/BrandContext'
 import { UIProvider } from './context/UIContext'
 import { SessionProvider } from './context/SessionContext'
@@ -230,6 +231,7 @@ export default function App() {
                 <Route path="settings" element={<Settings />} />
                 <Route path="reports/storyboard" element={<StoryboardEditor />} />
                 <Route path="reports/document/:documentId" element={<SectionEditor />} />
+                <Route path="editor/:draftId" element={<DocumentEditor />} />
               </Route>
             </Routes>
           </UIProvider>

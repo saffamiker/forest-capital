@@ -121,3 +121,32 @@
     @apply text-xs font-semibold tracking-widest uppercase text-muted;
   }
 }
+
+/* ── Document editor (TipTap) ────────────────────────────────────────── */
+.editor-prose {
+  @apply text-slate-200 text-sm leading-relaxed;
+}
+.editor-prose h1 { @apply text-white text-lg font-semibold mt-4 mb-2; }
+.editor-prose h2 { @apply text-white text-base font-semibold mt-3 mb-1.5; }
+.editor-prose h3 { @apply text-white text-sm font-semibold mt-3 mb-1; }
+.editor-prose p { @apply mb-2; }
+.editor-prose ul { @apply list-disc pl-5 mb-2; }
+.editor-prose ol { @apply list-decimal pl-5 mb-2; }
+.editor-prose blockquote {
+  @apply border-l-2 border-border pl-3 italic text-muted my-2;
+}
+.editor-prose:focus { outline: none; }
+
+/* [[VERIFY]] / [[BOB]] working-aid markers — amber, clickable. */
+.editor-marker {
+  @apply rounded px-0.5 cursor-pointer;
+}
+.editor-marker-verify {
+  background-color: rgba(245, 158, 11, 0.22);
+  color: #fcd34d;
+}
+.editor-marker-bob {
+  background-color: rgba(245, 158, 11, 0.30);
+  color: #fbbf24;
+  font-weight: 600;
+}
