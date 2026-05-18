@@ -693,3 +693,57 @@ def build_presentation_deck(
     buf = io.BytesIO()
     prs.save(buf)
     return buf.getvalue()
+
+
+# ── Editor-content export ─────────────────────────────────────────────────────
+
+def build_editor_pptx(draft: dict[str, Any]) -> bytes:
+    """
+    Renders a presentation_deck editor draft to a .pptx straight from its
+    {slides:[...]} content_json — one slide per editor slide, with the
+    title, content, data points, and the presenter's speaker notes
+    exactly as edited. Speaker notes from the editor are written into
+    each slide's notes, so the exported file carries them.
+
+    A faithful export of the editor content — it does not regenerate the
+    sixteen-slide template or render data charts.
+    """
+    from pptx import Presentation
+
+    prs = Presentation()
+    prs.slide_width = _SLIDE_W
+    prs.slide_height = _SLIDE_H
+
+    content = draft.get("content_json") or {}
+    slides = content.get("slides", []) if isinstance(content, dict) else []
+    total = len(slides)
+
+    for i, sl in enumerate(slides, start=1):
+        s = _blank(prs)
+        _bg(s, _WHITE)
+        _title_bar(s, str(sl.get("title") or f"Slide {i}"))
+        body = str(sl.get("content") or "")
+        if body.strip():
+            _textbox(s, Inches(0.7), Inches(1.3), Inches(12.0), Inches(3.2),
+                     body, size=18)
+        data_points = [str(d) for d in (sl.get("data_points") or []) if d]
+        if data_points:
+            _bullets(s, data_points, top=Inches(4.6), height=Inches(2.0),
+                     size=16)
+        # The presenter's speaker notes — carried into the exported file.
+        try:
+            s.notes_slide.notes_text_frame.text = str(
+                sl.get("speaker_notes") or "")
+        except Exception:  # noqa: BLE001 — a notes failure never fails export
+            pass
+        _footer(s, i, total)
+
+    if total == 0:
+        s = _blank(prs)
+        _bg(s, _WHITE)
+        _textbox(s, Inches(1.0), Inches(3.0), Inches(11.0), Inches(1.0),
+                 "This deck draft has no slides yet.", size=20)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return buf.getvalue()

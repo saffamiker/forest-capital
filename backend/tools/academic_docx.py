@@ -489,3 +489,69 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
     buf = BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+# ── Editor-content export ─────────────────────────────────────────────────────
+
+def _tiptap_text(node: Any) -> str:
+    """The concatenated plain text of a TipTap node and its descendants."""
+    if not isinstance(node, dict):
+        return ""
+    if node.get("text"):
+        return str(node["text"])
+    return "".join(_tiptap_text(c) for c in (node.get("content") or []))
+
+
+def build_editor_docx(draft: dict[str, Any]) -> bytes:
+    """
+    Renders an editor draft (a midpoint_paper or executive_brief) to a
+    .docx straight from its TipTap content_json — the document exactly as
+    the author has edited it in the in-platform editor.
+
+    Unlike build_midpoint_paper / build_executive_brief, this does not
+    regenerate narrative or embed data tables: it is a faithful export of
+    the current editor content. The AI DRAFT banner and submission
+    checklist are still applied; any [[VERIFY]] markers left in the text
+    are rendered highlighted by _add_body.
+    """
+    doc = _new_document()
+    _add_title_lines(doc, [
+        draft.get("title", "Document"),
+        "FNA 670 — Summer 2026",
+        "McColl School of Business",
+        date.today().strftime("%B %d, %Y"),
+    ])
+    _ai_draft_notice(doc)
+    _timestamp_line(doc)
+    _add_review_warning_box(doc)
+
+    content = draft.get("content_json") or {}
+    nodes = content.get("content", []) if isinstance(content, dict) else []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        ntype = node.get("type")
+        if ntype == "heading":
+            text = _tiptap_text(node).strip()
+            if text:
+                level = (node.get("attrs") or {}).get("level", 1)
+                _add_heading(doc, text, size=13 if level <= 1 else 12)
+        elif ntype == "paragraph":
+            text = _tiptap_text(node).strip()
+            if text:
+                _add_body(doc, text)
+        elif ntype in ("bulletList", "orderedList"):
+            for item in (node.get("content") or []):
+                text = _tiptap_text(item).strip()
+                if text:
+                    _add_body(doc, f"•  {text}")
+
+    # An empty draft still produces a structurally valid document.
+    if not nodes:
+        _add_body(doc, (draft.get("content_text")
+                        or "[DATA PENDING] — the draft is empty.").strip())
+
+    _add_submission_checklist(doc)
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()

@@ -203,6 +203,56 @@ class TestDraftOnGeneration:
         assert got.json()["created_from"] == "generated"
 
 
+class TestInEditorExport:
+    def test_export_docx_from_a_paper_draft(self, clean_editor_drafts):
+        if not _db_ready():
+            pytest.skip("no live database")
+        created = client.post(DRAFTS, headers=TEAM, json={
+            "document_type": "midpoint_paper", "title": "Export draft",
+            "content_json": {"type": "doc", "content": [
+                {"type": "heading", "attrs": {"level": 1},
+                 "content": [{"type": "text", "text": "1. Methodology"}]},
+                {"type": "paragraph",
+                 "content": [{"type": "text", "text": "Body paragraph."}]},
+            ]},
+            "content_text": "1. Methodology Body paragraph."})
+        did = created.json()["id"]
+        resp = client.post("/api/v1/export/midpoint-paper", headers=TEAM,
+                            json={"editor_draft_id": did})
+        assert resp.status_code == 200
+        # A valid .docx is a ZIP — the PK magic bytes.
+        assert resp.content[:2] == b"PK"
+        assert "wordprocessingml" in resp.headers.get("content-type", "")
+
+    def test_export_pptx_carries_editor_speaker_notes(self, clean_editor_drafts):
+        if not _db_ready():
+            pytest.skip("no live database")
+        import io
+        from pptx import Presentation
+
+        created = client.post(DRAFTS, headers=TEAM, json={
+            "document_type": "presentation_deck", "title": "Deck export",
+            "content_json": {"slides": [
+                {"id": 1, "title": "Opening", "content": "Body",
+                 "data_points": [], "speaker_notes": "UAT-NOTE rehearsal line",
+                 "verified": False, "notes_written": True}]},
+            "content_text": "Opening"})
+        did = created.json()["id"]
+        resp = client.post("/api/v1/export/presentation-deck", headers=TEAM,
+                            json={"editor_draft_id": did})
+        assert resp.status_code == 200
+        assert resp.content[:2] == b"PK"
+        prs = Presentation(io.BytesIO(resp.content))
+        # The presenter's speaker notes survive into the exported file.
+        notes = prs.slides[0].notes_slide.notes_text_frame.text
+        assert "UAT-NOTE rehearsal line" in notes
+
+    def test_export_unknown_draft_is_404(self):
+        resp = client.post("/api/v1/export/midpoint-paper", headers=TEAM,
+                            json={"editor_draft_id": 999999999})
+        assert resp.status_code == 404
+
+
 class TestAcademicReviewReadsDraft:
     def test_review_context_overlays_the_editor_draft(self, clean_editor_drafts):
         if not _db_ready():

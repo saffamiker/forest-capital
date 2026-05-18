@@ -3578,10 +3578,43 @@ async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
     return out
 
 
+async def _editor_export(editor_draft_id: int) -> Response:
+    """
+    Builds a .docx (paper/brief) or .pptx (deck) from an editor draft's
+    current content — the in-editor Export path. Renders the editor
+    content directly rather than regenerating the document, so the
+    export is exactly what the author has in the editor.
+    """
+    import asyncio
+    from datetime import date
+
+    from tools.editor_drafts import get_draft
+
+    draft = await get_draft(editor_draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+
+    if draft["document_type"] == "presentation_deck":
+        from tools.academic_deck import build_editor_pptx
+        content = await asyncio.to_thread(build_editor_pptx, draft)
+        media, ext = _PPTX_MEDIA, "pptx"
+    else:
+        from tools.academic_docx import build_editor_docx
+        content = await asyncio.to_thread(build_editor_docx, draft)
+        media, ext = _DOCX_MEDIA, "docx"
+
+    slug = draft["document_type"].replace("_", "-")
+    filename = f"forest-capital-{slug}-{date.today().isoformat()}.{ext}"
+    return Response(
+        content=content, media_type=media,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 @app.post("/api/v1/export/midpoint-paper")
 @limiter.limit("6/minute")
 async def export_midpoint_paper(
     request: Request,
+    body: dict | None = None,
     session: dict = Depends(require_permission("generate_documents")),
 ):
     """
@@ -3594,6 +3627,10 @@ async def export_midpoint_paper(
     12 pt Times New Roman, 1-inch margins, page numbers. The four narrative
     sections are written by the Academic Writer agent through the harness;
     the call can take 30-60 seconds.
+
+    When the body carries an editor_draft_id, the .docx is built directly
+    from that editor draft's current content (the in-editor Export path)
+    instead of regenerating from scratch.
     """
     import asyncio
     from datetime import date
@@ -3602,6 +3639,10 @@ async def export_midpoint_paper(
     from tools.academic_export import (
         DATA_PENDING, gather_document_data, gather_roles_activity,
     )
+
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
 
     try:
         data = await gather_document_data()
@@ -3761,6 +3802,7 @@ async def export_midpoint_paper(
 @limiter.limit("6/minute")
 async def export_executive_brief(
     request: Request,
+    body: dict | None = None,
     session: dict = Depends(require_permission("generate_documents")),
 ):
     """
@@ -3773,12 +3815,19 @@ async def export_executive_brief(
     and Final Recommendations. Senior-investment-audience tone. The eight
     narrative sections run through the Academic Writer harness and the
     call can take 45-90 seconds.
+
+    When the body carries an editor_draft_id, the .docx is built from
+    that editor draft's current content (the in-editor Export path).
     """
     import asyncio
     from datetime import date
 
     from tools.academic_docx import build_executive_brief
     from tools.academic_export import DATA_PENDING, gather_document_data
+
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
 
     try:
         data = await gather_document_data()
@@ -3893,6 +3942,7 @@ async def export_executive_brief(
 @limiter.limit("4/minute")
 async def export_presentation_deck(
     request: Request,
+    body: dict | None = None,
     session: dict = Depends(require_permission("generate_documents")),
 ):
     """
@@ -3906,12 +3956,21 @@ async def export_presentation_deck(
     AI-leverage prose run through the Academic Writer harness. The call
     can take 45-90 seconds; the first run also warms the sensitivity
     memo.
+
+    When the body carries an editor_draft_id, the .pptx is built from
+    that editor draft's current slides — including the presenter's
+    speaker notes — instead of regenerating the template (the in-editor
+    Export path).
     """
     import asyncio
     from datetime import date
 
     from tools.academic_deck import build_presentation_deck, render_deck_charts
     from tools.academic_export import DATA_PENDING, gather_document_data
+
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
 
     try:
         data = await gather_document_data()

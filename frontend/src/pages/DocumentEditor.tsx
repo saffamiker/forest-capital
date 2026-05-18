@@ -11,7 +11,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   ArrowLeft, Loader2, PanelLeftClose, PanelLeftOpen,
-  PanelRightClose, PanelRightOpen, MonitorPlay,
+  PanelRightClose, PanelRightOpen, MonitorPlay, Download,
 } from 'lucide-react'
 
 import RichTextEditor from '../components/editor/RichTextEditor'
@@ -31,6 +31,14 @@ const WORD_TARGETS: Record<string, number> = {
   midpoint_paper: 1500,
   executive_brief: 2000,
   presentation_deck: 0,
+}
+
+// The export endpoint for each document type — the in-editor Export
+// button POSTs {editor_draft_id} to it and downloads the result.
+const EXPORT_ENDPOINT: Record<string, string> = {
+  midpoint_paper: '/api/v1/export/midpoint-paper',
+  executive_brief: '/api/v1/export/executive-brief',
+  presentation_deck: '/api/v1/export/presentation-deck',
 }
 
 // Walks a TipTap doc into (heading, body-text) sections for the navigator.
@@ -74,6 +82,7 @@ export default function DocumentEditor() {
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
   const [previewOpen, setPreviewOpen] = useState(false)
+  const [exporting, setExporting] = useState(false)
 
   const dirtyRef = useRef(false)
   // Initial marker total per section heading — the progress denominator.
@@ -172,6 +181,34 @@ export default function DocumentEditor() {
     } catch { setError('Restore failed.') }
   }
 
+  // In-editor export — flushes pending edits, then POSTs the draft id to
+  // the matching export endpoint and downloads the rendered file.
+  const exportDocument = useCallback(async () => {
+    if (!draft) return
+    setExporting(true)
+    try {
+      await save()
+      const endpoint = EXPORT_ENDPOINT[draft.document_type]
+      const res = await axios.post(endpoint, { editor_draft_id: id },
+        { responseType: 'blob' })
+      const dispo = String(res.headers['content-disposition'] ?? '')
+      const match = /filename="?([^";]+)"?/i.exec(dispo)
+      const filename = match?.[1] ?? `forest-capital-${draft.document_type}`
+      const url = URL.createObjectURL(res.data as Blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch {
+      setError('Export failed — please try again.')
+    } finally {
+      setExporting(false)
+    }
+  }, [draft, id, save])
+
   const jumpToSection = (heading: string) => {
     // Headings render as <h1>..<h3>; find the one whose text matches.
     const nodes = document.querySelectorAll('.editor-prose h1, '
@@ -260,6 +297,16 @@ export default function DocumentEditor() {
               : saveState === 'error' ? 'Save failed'
               : saveState === 'saved' ? `Saved ${lastSaved}` : 'Unsaved changes'}
           </span>
+          <button type="button" onClick={() => void exportDocument()}
+            disabled={exporting}
+            className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                       border border-electric/40 text-electric
+                       hover:bg-electric/10 disabled:opacity-50">
+            {exporting
+              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Exporting…</>
+              : <><Download className="w-3.5 h-3.5" />
+                  {isDeck ? 'Export PPTX' : 'Export DOCX'}</>}
+          </button>
           {isDeck && (
             <button type="button" onClick={() => setPreviewOpen(true)}
               className="flex items-center gap-1 text-2xs px-2 py-1 rounded

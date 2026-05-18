@@ -290,8 +290,8 @@ deliverables lead.*
 - [ ] In the left panel under Versions, click **Save**, label it
       "UAT test" — verify it appears in version history with a restore
       control.
-- [ ] Return to Reports, and on the midpoint-paper card click **[Download]**
-      — verify a `.docx` file downloads with the current content.
+- [ ] Click **[Export DOCX]** in the editor header — verify a `.docx`
+      file downloads containing the current editor content.
 
 ### Settings — Academic Documents
 
@@ -374,8 +374,9 @@ presentation and visualisation lead.*
 - [ ] Navigate with the arrow keys — verify slides advance and the
       counter ("N / 16") updates.
 - [ ] Press **Esc** — verify the overlay closes and returns to the editor.
-- [ ] Return to Reports, and on the deck card click **[Download]** —
-      verify a `.pptx` file downloads.
+- [ ] Click **[Export PPTX]** in the editor header — verify a `.pptx`
+      file downloads, and open it to confirm your edited speaker notes
+      are present on the slides.
 
 ### Export package
 
@@ -432,10 +433,11 @@ Send the completed sign-off and any failure notes to **ruurdsm@queens.edu**.
   document.
 - Generated presentation charts may differ slightly from the platform charts
   (matplotlib server-side rendering vs Recharts frontend rendering).
-- The document editor has no in-editor export button — the generated file
-  is downloaded from the **[Download]** action on the Reports → Generate
-  Documents card. The editor saves drafts continuously; the download
-  always reflects the current saved draft.
+- The in-editor **Export DOCX / Export PPTX** button renders the file
+  directly from the current editor content — a faithful export of what
+  the author has edited. It does not re-embed the regenerated data
+  tables; the table-rich version is the one produced by Reports →
+  Generate Documents.
 - In the editor, a `[[VERIFY]]` or `[[BOB]]` marker is resolved by clicking
   it and confirming the prompt (which deletes the marker text) — there is
   no separate "Mark as Complete" button.
