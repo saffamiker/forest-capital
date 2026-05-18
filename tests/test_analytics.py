@@ -330,6 +330,20 @@ class TestExcessAndInformationRatio:
         bench = next(r for r in out if r["asset"] == "BENCHMARK")
         assert bench["information_ratio"] is None
 
+    def test_equity_information_ratio_is_null(self):
+        from tools.analytics import summary_statistics
+        # EQUITY *is* the benchmark (the benchmark is 100% equity). The
+        # EQUITY asset series and the BENCHMARK strategy series are
+        # economically identical but not bit-identical — a naive IR would
+        # divide that tiny noise into a spurious value. IR must be null.
+        out = summary_statistics(
+            {"EQUITY": _monthly_series([0.011, 0.009] * 12),
+             "BENCHMARK": _monthly_series([0.0109, 0.0091] * 12)},
+            None,
+        )
+        equity = next(r for r in out if r["asset"] == "EQUITY")
+        assert equity["information_ratio"] is None
+
     def test_excess_return_none_without_benchmark(self):
         from tools.analytics import summary_statistics
         out = summary_statistics({"A": _monthly_series([0.01] * 24)}, None)

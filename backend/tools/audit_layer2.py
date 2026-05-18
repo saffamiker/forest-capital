@@ -204,11 +204,29 @@ def _regime_prompt(payload: dict) -> str:
         f"Split rule: {specs['regime_split']}\n"
         f"Sharpe formula: {specs['sharpe']}\nCAGR formula: {specs['cagr']}\n\n"
         "Compute pre- and post-2022 Sharpe and CAGR for each strategy and "
-        "compare. Return ONLY JSON: "
-        '{"strategy": "regime_split", "checks": [{"metric": '
-        '"<strategy>.post_2022_sharpe", "platform_value": <num>, '
-        '"auditor_value": <num>, "status": "pass|warning|fail", '
-        '"discrepancy_pct": <num>, "reasoning": "...", "flag": "..."}]}'
+        "compare with the platform values.\n\n"
+        "Return ONLY a raw JSON object. No markdown, no code blocks, no "
+        "preamble, no explanation outside the JSON structure. Keep each "
+        "`reasoning` to ONE concise sentence so the whole JSON object fits "
+        "within the response limit — a truncated response cannot be "
+        "parsed and is wasted.\n\n"
+        "The exact structure to return:\n"
+        '{\n'
+        '  "strategy": "regime_split",\n'
+        '  "checks": [\n'
+        '    {\n'
+        '      "metric": "REGIME_SWITCHING.post_2022_sharpe",\n'
+        '      "platform_value": 0.63,\n'
+        '      "auditor_value": 0.63,\n'
+        '      "status": "pass",\n'
+        '      "discrepancy_pct": 0.0,\n'
+        '      "reasoning": "One concise sentence.",\n'
+        '      "flag": ""\n'
+        '    }\n'
+        '  ]\n'
+        '}\n'
+        "Include one check object per strategy for post_2022_sharpe; "
+        "`status` is one of pass, warning, fail."
     )
 
 

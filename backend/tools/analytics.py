@@ -120,10 +120,16 @@ def summary_statistics(
 
         # Information ratio = annualised mean monthly excess return over the
         # benchmark / annualised tracking error. Undefined (None) for the
-        # benchmark itself — zero tracking error — and when no benchmark
-        # series is supplied.
+        # benchmark itself AND for the EQUITY asset — the benchmark is 100%
+        # equity, so EQUITY *is* the benchmark: its excess return is a zero
+        # vector and the ratio is 0/0. The EQUITY asset series and the
+        # BENCHMARK strategy series are economically identical but not
+        # bit-identical (different source tables, rounding), so a naive
+        # computation divides tiny noise into a spurious IR — guard against
+        # it. Also None when no benchmark series is supplied.
         info_ratio: float | None = None
-        if bench_series is not None:
+        is_benchmark_equiv = name.strip().upper() in ("EQUITY", "BENCHMARK")
+        if bench_series is not None and not is_benchmark_equiv:
             excess_m = (r - bench_series.reindex(r.index)).dropna()
             te = float(excess_m.std(ddof=1)) if len(excess_m) > 1 else 0.0
             if te > 1e-12:
