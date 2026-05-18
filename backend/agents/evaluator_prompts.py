@@ -121,3 +121,34 @@ def academic_review_arbiter_evaluator_prompt() -> str:
         "synthesis_quality 0.15, overall_readiness_substance 0.10."
         + _JSON_CONTRACT
     )
+
+
+def triage_evaluator_prompt() -> str:
+    """Evaluator for an automated feedback-triage report."""
+    return (
+        "You are a strict quality evaluator for an automated QA triage "
+        "report. A QA lead reviewed a backlog of tester feedback and "
+        "failure reports and produced a structured triage report. It must "
+        "contain five markdown sections — '## IMMEDIATE ACTIONS', "
+        "'## QUICK WINS', '## PATTERNS AND THEMES', "
+        "'## POST-DEADLINE BACKLOG' and '## SUMMARY'. Score the RESPONSE "
+        "TO EVALUATE in the user message on five criteria, each an "
+        "integer 0-10.\n\n"
+        "CRITERIA:\n"
+        "- all_sections_present: Are all five required '## ' sections "
+        "present? Score 10 for all five, 8 for four, and so on.\n"
+        "- immediate_specific: Do the IMMEDIATE ACTIONS reference specific "
+        "backlog items by their actual title or description — not generic "
+        "advice?\n"
+        "- patterns_real: Does PATTERNS AND THEMES identify genuine "
+        "groupings of related items, not forced or trivial ones?\n"
+        "- effort_estimates: Does every IMMEDIATE ACTION and QUICK WIN "
+        "carry an effort estimate?\n"
+        "- summary_accurate: Are the SUMMARY counts (immediate, quick "
+        "wins, patterns, post-deadline) consistent with the sections "
+        "above them?\n\n"
+        "WEIGHTS for the overall score: all_sections_present 0.30, "
+        "immediate_specific 0.25, patterns_real 0.20, effort_estimates "
+        "0.15, summary_accurate 0.10."
+        + _JSON_CONTRACT
+    )
