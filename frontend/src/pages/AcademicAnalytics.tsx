@@ -22,6 +22,8 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 import TableExportButton from '../components/TableExportButton'
 import InfoIcon from '../components/InfoIcon'
 import DataExplainButton from '../components/DataExplainButton'
+import DataCurrencyBar from '../components/DataCurrencyBar'
+import { useDataStatus, tableOf } from '../hooks/useDataStatus'
 import type { ChartTheme } from '../lib/exportTheme'
 import { DARK_CHART_THEME } from '../lib/exportTheme'
 
@@ -583,7 +585,9 @@ function DrawdownComparisonTable({ rows }: { rows: DrawdownRow[] }) {
 
 // ── 5. Fama-French factor loadings table ──────────────────────────────────────
 
-function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
+function FactorLoadingsTable(
+  { rows, ffNote }: { rows: FactorRow[]; ffNote?: string | null },
+) {
   const headers = ['Strategy', 'Alpha (annualized)', 'MKT-RF', 'SMB', 'HML', 'MOM', 'R-squared']
   const exportRows = rows.map((r) => [
     r.strategy, pct(r.alpha_annualized), num(r.mkt_rf), num(r.smb), num(r.hml),
@@ -655,6 +659,9 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
         </tbody>
       </table>
       </div>
+      {ffNote && (
+        <p className="text-2xs text-muted mt-2 leading-relaxed">{ffNote}</p>
+      )}
     </SectionCard>
   )
 }
@@ -994,6 +1001,22 @@ export default function AcademicAnalytics() {
   const [data, setData] = useState<AnalyticsPayload | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const { status: dataStatus } = useDataStatus()
+
+  // The Fama-French factors can end earlier than the market data — the
+  // Carhart regression then covers a shorter window. Surface that as a
+  // second study-period line and a factor-loadings footnote.
+  const ffTable = tableOf(dataStatus, 'ff_factors_monthly')
+  const mktTable = tableOf(dataStatus, 'market_data_monthly')
+  const ffLagsMarket = !!(
+    ffTable && mktTable && ffTable.max_date && mktTable.max_date
+    && ffTable.max_date < mktTable.max_date
+  )
+  const ffNote = (ffLagsMarket && ffTable && mktTable)
+    ? `* Carhart four-factor regression covers ${ffTable.min_date} to `
+      + `${ffTable.max_date} (${ffTable.row_count} months). Market return `
+      + `data extends through ${mktTable.max_date}.`
+    : null
 
   useEffect(() => {
     let cancelled = false
@@ -1025,6 +1048,13 @@ export default function AcademicAnalytics() {
             windows — see footnotes.
           </p>
         )}
+        {ffLagsMarket && ffTable && (
+          <p className="text-xs text-muted mt-0.5 font-mono">
+            Factor model: {ffTable.min_date} → {ffTable.max_date}
+            {' '}({ffTable.row_count} months)
+          </p>
+        )}
+        <div className="mt-1"><DataCurrencyBar /></div>
       </div>
 
       {loading && <div className="card p-8 text-center text-muted text-sm">Loading…</div>}
@@ -1054,7 +1084,7 @@ export default function AcademicAnalytics() {
           {data.drawdown_comparison && data.drawdown_comparison.length > 0 &&
             <DrawdownComparisonTable rows={data.drawdown_comparison} />}
           {data.factor_loadings && data.factor_loadings.length > 0 &&
-            <FactorLoadingsTable rows={data.factor_loadings} />}
+            <FactorLoadingsTable rows={data.factor_loadings} ffNote={ffNote} />}
           <SensitivityAnalysis />
           {data.strategy_metadata && data.strategy_metadata.length > 0 &&
             <StrategyMethodologyPanel rows={data.strategy_metadata} />}

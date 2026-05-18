@@ -18,6 +18,7 @@ import ExplainableText from './ExplainableText'
 import InfoIcon from './InfoIcon'
 import ChartCommentStrip from './ChartCommentStrip'
 import LearnModeBanner from './LearnModeBanner'
+import DataCurrencyBar from './DataCurrencyBar'
 import ChartExportButton from './ChartExportButton'
 import TableExportButton from './TableExportButton'
 // Canonical strategy-colour map — one source of truth shared with every
@@ -391,6 +392,7 @@ export default function Dashboard() {
             Ten portfolio strategies ranked by risk-adjusted performance against
             the 100% equity benchmark.
           </p>
+          <div className="mt-1"><DataCurrencyBar /></div>
         </div>
 
         {/* Commentary-mode banner — renders only when mode === 'commentary'.

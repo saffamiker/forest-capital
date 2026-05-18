@@ -221,11 +221,30 @@ async def get_ff_factors() -> list[dict[str, Any]] | None:
     return None
 
 
+_MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+def _display_label(iso_date: str | None) -> str | None:
+    """A human month-year label for a table's max_date — the data
+    currency indicator shows '2026-04-30' as 'April 2026'."""
+    if not iso_date:
+        return None
+    try:
+        parts = str(iso_date).split("-")
+        return f"{_MONTH_NAMES[int(parts[1]) - 1]} {int(parts[0])}"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def get_data_status() -> dict[str, Any]:
     """
     Read-only status of the data tables feeding the analytics layer:
     row count, data date range, last-updated timestamp where the table
-    carries one, and a green/amber/red staleness pill.
+    carries one, a green/amber/red staleness pill, and a human
+    display_label of the newest data month ("April 2026").
 
     Staleness keys off the newest data date vs today:
       red   — newest data > 30 days behind
@@ -322,6 +341,11 @@ async def get_data_status() -> dict[str, Any]:
     except Exception as exc:
         log.warning("data_status_failed", error=str(exc))
         return empty
+
+    # A human "April 2026" label per table — the data currency indicator
+    # on each visualisation screen reads it instead of reformatting dates.
+    for t in tables:
+        t["display_label"] = _display_label(t.get("max_date"))
 
     # Study period — derived from market_data_monthly's range.
     study_period = None

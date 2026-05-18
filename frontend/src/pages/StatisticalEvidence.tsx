@@ -23,6 +23,7 @@ import MultipleComparisonTable from '../components/charts/MultipleComparisonTabl
 import WalkForwardChart from '../components/charts/WalkForwardChart'
 import ChartCommentStrip from '../components/ChartCommentStrip'
 import LearnModeBanner from '../components/LearnModeBanner'
+import DataCurrencyBar from '../components/DataCurrencyBar'
 
 // Teal accent — Statistical Evidence is the academic-rigour screen.
 const ACCENT = '#0d9488'
@@ -48,6 +49,7 @@ export default function StatisticalEvidence() {
           Tier 1 gates, CPCV distributions, FDR correction, and walk-forward
           out-of-sample performance across all 10 strategies.
         </p>
+        <div className="mt-1"><DataCurrencyBar /></div>
       </div>
 
       <LearnModeBanner />

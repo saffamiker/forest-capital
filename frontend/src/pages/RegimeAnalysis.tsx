@@ -21,6 +21,7 @@ import PerformanceAttributionWaterfall from '../components/charts/PerformanceAtt
 import RegimeTransitionMatrix from '../components/charts/RegimeTransitionMatrix'
 import ChartCommentStrip from '../components/ChartCommentStrip'
 import LearnModeBanner from '../components/LearnModeBanner'
+import DataCurrencyBar from '../components/DataCurrencyBar'
 
 // Purple accent — Regime Analysis is the regime/macro screen.
 const ACCENT = '#7c3aed'
@@ -46,6 +47,7 @@ export default function RegimeAnalysis() {
           Performance across bull, bear, and transition environments — and
           the 2022 equity-bond correlation breakdown that drove this project.
         </p>
+        <div className="mt-1"><DataCurrencyBar /></div>
       </div>
 
       <LearnModeBanner />
