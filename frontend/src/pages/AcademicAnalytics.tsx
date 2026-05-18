@@ -176,6 +176,28 @@ const monthLabel = (iso: string | null | undefined): string =>
 const periodLabel = (start: string | null, end: string | null): string =>
   start && end ? `${monthLabel(start)} to ${monthLabel(end)}` : '—'
 
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+]
+
+// The calendar months strictly after `afterIso`'s month, through
+// `throughIso`'s month — used to name the FF factor months Ken French
+// has not yet posted ("April 2026").
+function monthsBetween(afterIso: string, throughIso: string): string[] {
+  let [y, m] = afterIso.slice(0, 7).split('-').map(Number)   // m is 1-indexed
+  const [ty, tm] = throughIso.slice(0, 7).split('-').map(Number)
+  const out: string[] = []
+  m += 1
+  if (m > 12) { m = 1; y += 1 }
+  while (y < ty || (y === ty && m <= tm)) {
+    out.push(`${MONTH_NAMES[m - 1]} ${y}`)
+    m += 1
+    if (m > 12) { m = 1; y += 1 }
+  }
+  return out
+}
+
 // Percentage with green/red sign colouring — used for excess return.
 function SignedPct({ x }: { x: number | null | undefined }) {
   if (x == null) return <>—</>
@@ -1012,11 +1034,16 @@ export default function AcademicAnalytics() {
     ffTable && mktTable && ffTable.max_date && mktTable.max_date
     && ffTable.max_date < mktTable.max_date
   )
-  const ffNote = (ffLagsMarket && ffTable && mktTable)
-    ? `* Carhart four-factor regression covers ${ffTable.min_date} to `
-      + `${ffTable.max_date} (${ffTable.row_count} months). Market return `
-      + `data extends through ${mktTable.max_date}.`
-    : null
+  let ffNote: string | null = null
+  if (ffLagsMarket && ffTable?.min_date && ffTable.max_date
+      && mktTable?.max_date) {
+    const missing = monthsBetween(ffTable.max_date, mktTable.max_date)
+    const lag = missing.length
+    ffNote = '* Carhart four-factor regression covers '
+      + `${monthLabel(ffTable.min_date)} to ${monthLabel(ffTable.max_date)} `
+      + `(${lag} month${lag === 1 ? '' : 's'} behind market data — `
+      + `${missing.join(', ')} factors not yet posted by Ken French).`
+  }
 
   useEffect(() => {
     let cancelled = false

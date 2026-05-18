@@ -183,15 +183,16 @@ function DataStudyPeriodSection() {
           </div>
         ))}
       </div>
-      {/* Staleness legend — explains the pill colours and that a Stale
-          pill on the deliberately-locked dataset is expected. */}
+      {/* Staleness legend — pill colours and how the tables stay current. */}
       <p className="text-2xs text-muted leading-relaxed border-t border-border pt-2">
         <span className="text-success font-medium">Current</span> — updated within 15 days ·{' '}
         <span className="text-warning font-medium">Ageing</span> — 15 to 30 days ·{' '}
         <span className="text-danger font-medium">Stale</span> — over 30 days behind.
-        The study dataset deliberately ends in December 2025, so the market-data
-        and factor tables show <span className="text-danger font-medium">Stale</span> by
-        design — that reflects the dataset's fixed end date, not a pipeline failure.
+        {' '}market_data_monthly auto-extends monthly via yfinance (SPY/BND/HYG).
+        {' '}ff_factors_monthly auto-extends from the Ken French data library
+        (typically lags 1–2 months — a <span className="text-danger font-medium">Stale</span>{' '}
+        status for FF factors is expected while the current month has not yet
+        been posted).
       </p>
     </div>
   )
