@@ -261,13 +261,19 @@ def test_monthly_source_columns_populated(pipeline_ran):
     assert row["hy_src"] == row["total"], "hy_source missing on some rows"
 
 
-def test_monthly_equity_source_is_equity_monthly(pipeline_ran):
-    """All equity returns in market_data_monthly must cite equity_monthly (Excel)."""
+def test_monthly_equity_source_is_a_known_equity_series(pipeline_ran):
+    """
+    Every equity return in market_data_monthly must cite a known equity
+    series: 'equity_monthly' for the Excel-seeded history, or
+    'equity_monthly_yf' for the months auto-extended from yfinance beyond
+    the Excel period (see MONTHLY DATA AUTO-EXTENSION). No other value —
+    a stray source would mean the provenance tagging is broken.
+    """
     bad = _scalar(
         "SELECT COUNT(*) FROM market_data_monthly "
-        "WHERE equity_source != 'equity_monthly'"
+        "WHERE equity_source NOT IN ('equity_monthly', 'equity_monthly_yf')"
     )
-    assert bad == 0, f"{bad} rows have wrong equity_source in market_data_monthly"
+    assert bad == 0, f"{bad} rows have an unknown equity_source"
 
 
 # ── market_data_daily tests ───────────────────────────────────────────────────

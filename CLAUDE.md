@@ -4315,13 +4315,15 @@ Document types (academic_documents): the upload dropdown offers
 midpoint_requirements, final_presentation_requirements, midpoint_draft,
 presentation_slides, presentation_script, other.
 
-STALENESS PILLS — EXPECTED BEHAVIOUR: market_data_monthly and
-ff_factors_monthly will legitimately show RED staleness pills. The
-staleness rule measures the newest data date against today (red > 30
-days behind, amber 15-30, green within 15) — and the dataset is
-intentionally locked at December 2025, so the newest row is several
-months behind "today". This is correct behaviour, not a bug: the pill
-is reporting the dataset's deliberate end date, not a pipeline failure.
+STALENESS PILLS: the staleness rule measures the newest data date
+against today (red > 30 days behind, amber 15-30, green within 15). The
+monthly data pipeline auto-extends beyond the Excel file (see MONTHLY
+DATA AUTO-EXTENSION below), so once a calendar month has fully closed
+market_data_monthly and ff_factors_monthly catch up to it — a green or
+amber pill on a recently-closed month is the steady state, not a red
+one. A red pill therefore now means the auto-extension has not yet run
+or could not reach yfinance / Ken French — worth investigating rather
+than expected.
 
 
 ─────────────────────────────────────────────────────────────────────────────
@@ -5671,6 +5673,68 @@ COST MODEL — the Opus audit model is charged only when the data
 genuinely changes (a data ingestion or cache invalidation) or when a
 demo run is explicitly requested. Navigating to the QA tab, polling, or
 re-mounting never spends the Opus budget — the cached verdict is served.
+
+
+─────────────────────────────────────────────────────────────────────────────
+MONTHLY DATA AUTO-EXTENSION (May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The provided Excel file (FNA_670_Project_Sources.xlsx) is the historical
+SEED of the monthly series, NOT its ceiling. Its "S&P 500 Monthly
+Returns" sheet ends 2025-12, so the aligned market_data_monthly series
+historically ended there too. The pipeline now auto-extends past it.
+
+extend_market_data() (tools/data_fetcher.py) — once a calendar month has
+fully closed, fetches that month's TOTAL RETURN from yfinance and splices
+it on with the same daily→month-end compounding the LQD bridge uses
+((1+r1)…(1+rn)-1):
+  - equity → SPY     (yfinance, auto_adjust=True)
+  - IG     → BND     (yfinance — the same instrument as the Excel IG
+                      source, a direct continuation)
+  - HY     → HYG     (yfinance — see SOURCE CHANGE below)
+  - rf     → DTB3    (FRED, 3-month T-bill → monthly rate)
+Only COMPLETE calendar months are fetched — the current partial month is
+never included (_most_recent_complete_month()).
+
+SOURCE CHANGE — HY. The historical HY series is the BAMLHYH0A0HYM2TRIV
+total-return INDEX (from Excel). yfinance has no such index, so the
+forward extension uses the HYG ETF — a tradeable proxy that tracks the
+same high-yield market with a small expense-ratio drag (~0.49%/yr,
+~0.04%/month) and minor tracking error. This is a DELIBERATE, DOCUMENTED
+source change at the post-2025-12 splice, recorded in three places:
+  - every extension row carries hy_source = "hy_monthly_hyg_yf" in
+    market_data_monthly (the historical rows keep "hy_monthly_baml");
+  - data_series_registry.hy_monthly_hyg_yf.source_detail spells out the
+    proxy relationship and the tracking error;
+  - audit_assembler.DATA_SOURCE_NOTES carries it into every audit run's
+    metadata, so the independent auditor and the Analytical Appendix see
+    it. equity/IG/rf get their own registry entries too (equity_monthly_yf,
+    ig_monthly_bnd_yf, risk_free_dtb3_fred) — the registry rows are
+    upserted in the SAME transaction as, and before, the monthly insert,
+    so the source foreign keys always resolve.
+
+VALIDATION — before any row is stored: each monthly return must be within
+±50%, the months must be contiguous from the anchor, and dates must be
+month-ends. The longest VALID CONTIGUOUS run is stored; the walk stops at
+the first bad/missing month (a gap would corrupt the aligned series) and
+the skip reason is logged.
+
+TRIGGERS — extend_market_data runs (a) on application startup, in a
+daemon thread so startup never blocks on yfinance, and (b) on demand via
+POST /api/v1/admin/refresh-monthly-data (manage_users / sysadmin only).
+After a successful extension the persist transaction also clears
+strategy_results_cache, and the audit auto-trigger ("data_ingestion")
+re-verifies the new data — so a fetch needs no manual follow-up.
+
+FF FACTORS already auto-extend independently — _load_ff_factors_with_
+cache() does a DB-first incremental fetch from the Ken French data
+library (direct Dartmouth HTTP) on every load, writing only months newer
+than the DB max and failing open when the most recent months are not yet
+posted. No Excel dependency.
+
+Fail-open throughout: a yfinance/FRED outage, a DB error, or a failed
+month is logged and reported in the result `status`; the pipeline keeps
+whatever validated and never raises.
 
 
 ─────────────────────────────────────────────────────────────────────────────

@@ -241,11 +241,14 @@ def test_db_pre_cutover_rows_cite_lqd_bridge():
 
 def test_db_post_cutover_rows_cite_ig_monthly_bnd():
     """
-    In market_data_monthly, every row with date >= 2007-05-31 must have
-    ig_source = 'ig_monthly_bnd'.  Rows before the cutover are covered by
-    test (c); this test covers the BND-sourced period.
-    Together (c) + (d) provide end-to-end provenance traceability across
-    the full 2002–2025 IG return series — a CLAUDE.md Section 4b requirement.
+    In market_data_monthly, every row with date >= 2007-05-31 must cite a
+    BND-based IG source: 'ig_monthly_bnd' for the Excel-seeded history, or
+    'ig_monthly_bnd_yf' for the months auto-extended from yfinance beyond
+    the Excel period (see MONTHLY DATA AUTO-EXTENSION — the extension uses
+    BND, the same instrument, so the splice is a direct continuation).
+    Rows before the cutover are covered by test (c); together (c) + (d)
+    provide end-to-end provenance traceability across the full IG return
+    series — a CLAUDE.md Section 4b requirement.
     """
     _skip_if_no_excel()
     _skip_if_no_db()
@@ -256,7 +259,8 @@ def test_db_post_cutover_rows_cite_ig_monthly_bnd():
     if not rows:
         pytest.skip("No post-cutover rows in market_data_monthly — pipeline may not have run")
 
-    wrong = [r for r in rows if r["ig_source"] != "ig_monthly_bnd"]
+    wrong = [r for r in rows
+             if r["ig_source"] not in ("ig_monthly_bnd", "ig_monthly_bnd_yf")]
     assert len(wrong) == 0, (
         f"{len(wrong)} post-cutover rows have wrong ig_source. "
         f"Examples: {wrong[:3]}"
