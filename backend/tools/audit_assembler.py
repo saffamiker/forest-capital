@@ -42,6 +42,24 @@ REGIME_BREAK_DATE = "2022-01-01"
 BENCHMARK_LABEL = "100% equity (S&P 500)"
 FACTOR_MODEL = "Carhart four-factor (MKT-RF, SMB, HML, MOM)"
 
+# Carried in every audit run's metadata so the independent auditor — and
+# the Analytical Appendix — see the post-Excel data provenance. The Excel
+# file seeds the historical series; months after it are auto-extended from
+# yfinance, which is a documented source change for the HY series.
+DATA_SOURCE_NOTES = (
+    "Historical monthly observations come from the provided Excel file "
+    "(FNA_670_Project_Sources.xlsx), whose S&P 500 monthly sheet ends "
+    "2025-12. Months after that period are auto-extended: SPY (equity), "
+    "BND (investment grade) and HYG (high yield) total returns from "
+    "yfinance, and DTB3 from FRED for the risk-free rate. SOURCE CHANGE: "
+    "the historical HY series is the BAMLHYH0A0HYM2TRIV total-return "
+    "index; the HYG ETF used for the extension is a tradeable proxy for "
+    "that index (small expense-ratio drag and tracking error). Every "
+    "extension row is tagged with its true source in market_data_monthly "
+    "and data_series_registry — the extension months carry hy_source "
+    "'hy_monthly_hyg_yf', not the Excel 'hy_monthly_baml'."
+)
+
 # Formula specifications — written to match what the Analytics layer
 # (tools/analytics.py) ACTUALLY computes, so the auditor's independent
 # recomputation does not raise false discrepancies.
@@ -378,6 +396,7 @@ async def assemble_audit_payload() -> dict[str, Any]:
             "regime_break_date": REGIME_BREAK_DATE,
             "benchmark": BENCHMARK_LABEL,
             "factor_model": FACTOR_MODEL,
+            "data_source_notes": DATA_SOURCE_NOTES,
         }
 
         return {

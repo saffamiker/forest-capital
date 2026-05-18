@@ -116,7 +116,12 @@ def _yfinance_fetch(tickers: list[str], start: str, end: str) -> pd.DataFrame:
     Internal yfinance wrapper — exists solely so tests can monkeypatch it.
     All yfinance calls route through here; swapping the implementation for tests
     is then a one-line monkeypatch rather than a deep mock of the yfinance module.
-    Only used for SPY equity data — never for BND, HYG, or any bond ticker.
+
+    For the HISTORICAL period (the Excel-covered window) only SPY is fetched —
+    BND and HYG bond data comes from the Excel file, which is authoritative.
+    The forward MONTHLY extension (extend_market_data) is the one sanctioned
+    exception: months after the Excel period have no Excel data, so SPY/BND/HYG
+    total returns are fetched here to extend the series.
     """
     import yfinance as yf
 
@@ -1330,6 +1335,350 @@ def check_and_run_incremental_update() -> dict:
     )
     rows_added = _append_incremental_daily(from_date, to_date)
     return {"rows_added": rows_added, "updated": rows_added > 0}
+
+
+# ── Monthly data extension — auto-extend beyond the Excel file ────────────────
+#
+# The Excel file (FNA_670_Project_Sources.xlsx) is the historical SEED of the
+# monthly series, not its ceiling. Its "S&P 500 Monthly Returns" sheet ends
+# 2025-12, so the aligned market_data_monthly series ends there too. Once a
+# calendar month has fully closed, extend_market_data() fetches that month's
+# total return from yfinance — SPY (equity), BND (investment grade) and HYG
+# (high yield) — plus DTB3 from FRED for the risk-free rate, and splices the
+# new rows on with the same daily->month-end compounding the LQD bridge uses.
+#
+# SOURCE CHANGE at the splice: the historical HY series is the BAMLHYH0A0-
+# HYM2TRIV total-return INDEX (from Excel). HYG is the iShares ETF — a
+# tradeable proxy that tracks the same high-yield market with a small
+# expense-ratio drag (~0.49%/yr) and minor tracking error. This is a
+# deliberate, documented source change: every extension row is tagged
+# hy_source = "hy_monthly_hyg_yf" in market_data_monthly, that series_id
+# carries the full explanation in data_series_registry.source_detail, and
+# the audit payload metadata names it. FF factors are NOT handled here —
+# they already auto-extend via _load_ff_factors_with_cache().
+
+_EXTENSION_RETURN_BOUND = 0.50   # |monthly return| above this fails validation
+
+
+def _db_monthly_max_date() -> "datetime | None":
+    """The most recent date in market_data_monthly, or None — the anchor
+    the monthly extension splices onto."""
+    from database import DATABASE_URL
+    if not DATABASE_URL:
+        return None
+
+    async def _query() -> "datetime | None":
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        from sqlalchemy.pool import NullPool
+        engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+        try:
+            async with engine.connect() as conn:
+                row = await conn.execute(
+                    text("SELECT MAX(date) FROM market_data_monthly"))
+                return row.scalar()
+        except Exception:
+            return None
+        finally:
+            await engine.dispose()
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(lambda: asyncio.run(_query())).result(timeout=15)
+    except Exception:
+        return None
+
+
+def _most_recent_complete_month() -> pd.Timestamp:
+    """Month-end of the last FULLY-CLOSED calendar month — never the
+    current, still-running month."""
+    today = datetime.now(timezone.utc).date()
+    last_of_prev = today.replace(day=1) - timedelta(days=1)
+    return pd.Timestamp(last_of_prev) + pd.offsets.MonthEnd(0)
+
+
+def _fetch_monthly_total_returns(
+    ticker: str, start: str, end: str,
+) -> pd.Series:
+    """Daily total-return prices from yfinance (auto_adjust=True),
+    compounded to a month-end total-return series — the exact daily ->
+    month-end compounding the LQD bridge uses: (1+r1)...(1+rn) - 1."""
+    px = _yfinance_fetch([ticker], start, end)
+    if px is None or px.empty:
+        return pd.Series(dtype=float)
+    daily = px.iloc[:, 0].pct_change().dropna()
+    monthly = (1 + daily).resample("ME").prod() - 1
+    return monthly.dropna()
+
+
+def _fetch_monthly_risk_free(start: str, end: str) -> pd.Series:
+    """DTB3 (3-month T-bill, FRED) compounded to a monthly rate — the same
+    (1 + r/100)^(1/12) - 1 conversion build_monthly_returns applies to the
+    Excel DTB3 series."""
+    try:
+        df = _fred_fetch("DTB3", start, end)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("dtb3_extension_fetch_failed", error=str(exc))
+        return pd.Series(dtype=float)
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    monthly_avg = df.iloc[:, 0].resample("ME").mean().dropna()
+    return (1 + monthly_avg / 100) ** (1 / 12) - 1
+
+
+def _validate_extension_months(
+    cand: pd.DataFrame, anchor: pd.Timestamp, target: pd.Timestamp,
+) -> tuple[pd.DataFrame, list[str]]:
+    """
+    Splice validation (Part 4). Walks the expected month-end sequence from
+    anchor+1 month through target and keeps the longest VALID CONTIGUOUS
+    run — a gap would corrupt the aligned series, so the walk stops at the
+    first month that is missing, has a return outside +/-50%, or is not a
+    month-end date. Returns (valid_df, skipped_reasons).
+    """
+    skipped: list[str] = []
+    valid_idx: list[pd.Timestamp] = []
+    expected = anchor + pd.offsets.MonthEnd(1)
+    while expected <= target:
+        label = expected.strftime("%Y-%m")
+        if expected not in cand.index:
+            skipped.append(f"{label}: missing from fetched data")
+            break
+        if expected != expected + pd.offsets.MonthEnd(0):
+            skipped.append(f"{label}: index is not a month-end date")
+            break
+        row = cand.loc[expected]
+        rets = [row.get("equity_return"), row.get("ig_return"),
+                row.get("hy_return")]
+        if any(r is None or pd.isna(r) for r in rets):
+            skipped.append(f"{label}: a return value is missing")
+            break
+        if any(abs(float(r)) > _EXTENSION_RETURN_BOUND for r in rets):
+            skipped.append(f"{label}: a monthly return is outside +/-50%")
+            break
+        valid_idx.append(expected)
+        expected = expected + pd.offsets.MonthEnd(1)
+    return (cand.loc[valid_idx] if valid_idx else cand.iloc[0:0]), skipped
+
+
+def _extension_registry_entries(
+    start: str, end: str, n_rows: int,
+) -> list[dict]:
+    """data_series_registry rows for the four yfinance/FRED extension
+    series. Upserted BEFORE the market_data_monthly insert so the source
+    foreign keys resolve. The HYG entry documents the proxy source change."""
+    now_iso = datetime.now(timezone.utc).isoformat()
+    common = {"frequency": "monthly", "date_range_start": start,
+              "date_range_end": end, "row_count": n_rows,
+              "loaded_at": now_iso, "validation_status": "pass"}
+    return [
+        {"series_id": "equity_monthly_yf",
+         "display_name": "S&P 500 Monthly Return (SPY — yfinance extension)",
+         "source_type": "yfinance",
+         "source_detail": {
+             "ticker": "SPY", "auto_adjust": True,
+             "interval": "1d compounded to month-end",
+             "note": "Forward extension of the equity series beyond the "
+                     "Excel 'S&P 500 Monthly Returns' sheet (ends 2025-12). "
+                     "SPY total return; auto_adjust=True."},
+         **common},
+        {"series_id": "ig_monthly_bnd_yf",
+         "display_name": "Investment-Grade Bond Monthly Return "
+                         "(BND — yfinance extension)",
+         "source_type": "yfinance",
+         "source_detail": {
+             "ticker": "BND", "auto_adjust": True,
+             "interval": "1d compounded to month-end",
+             "note": "Forward extension of the IG series beyond the Excel "
+                     "BND sheet. Same instrument as the historical IG "
+                     "source — a direct continuation, total return."},
+         **common},
+        {"series_id": "hy_monthly_hyg_yf",
+         "display_name": "High-Yield Bond Monthly Return "
+                         "(HYG — yfinance extension)",
+         "source_type": "yfinance",
+         "source_detail": {
+             "ticker": "HYG", "auto_adjust": True,
+             "interval": "1d compounded to month-end",
+             "proxy_for": "BAMLHYH0A0HYM2TRIV — ICE BofA US High Yield "
+                          "Total Return Index",
+             "source_change_note": "DOCUMENTED SOURCE CHANGE. The "
+                 "historical HY series is the BAMLHYH0A0HYM2TRIV total-"
+                 "return INDEX (from Excel). The forward extension uses "
+                 "the HYG ETF as a tradeable proxy: it tracks the same "
+                 "high-yield market with a small expense-ratio drag "
+                 "(~0.49%/yr, ~0.04%/month) and minor tracking error. The "
+                 "splice point is the first month after the Excel period."},
+         **common},
+        {"series_id": "risk_free_dtb3_fred",
+         "display_name": "Risk-Free Rate Monthly (DTB3 — FRED extension)",
+         "source_type": "fred_api",
+         "source_detail": {
+             "series_id": "DTB3",
+             "note": "Forward extension of the risk-free series beyond the "
+                     "Excel DTB3 sheet. 3-month T-bill, monthly average "
+                     "compounded to a monthly rate."},
+         **common},
+    ]
+
+
+async def _async_extend_persist(
+    monthly_rows: list[dict], registry_entries: list[dict],
+) -> None:
+    """One NullPool transaction: upsert the registry entries, upsert the
+    extension rows into market_data_monthly, then clear strategy_results_
+    cache so the next /api/backtest/compare recomputes on the new data."""
+    from sqlalchemy import text
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy.pool import NullPool
+
+    from database import DATABASE_URL
+    engine = create_async_engine(DATABASE_URL, echo=False, poolclass=NullPool)
+    ins = text("""
+        INSERT INTO market_data_monthly
+            (date, equity_return, equity_source, ig_return, ig_source,
+             hy_return, hy_source, risk_free_rate, risk_free_source)
+        VALUES
+            (:date, :eq, 'equity_monthly_yf', :ig, 'ig_monthly_bnd_yf',
+             :hy, 'hy_monthly_hyg_yf', :rf, 'risk_free_dtb3_fred')
+        ON CONFLICT (date) DO UPDATE SET
+            equity_return    = EXCLUDED.equity_return,
+            equity_source    = EXCLUDED.equity_source,
+            ig_return        = EXCLUDED.ig_return,
+            ig_source        = EXCLUDED.ig_source,
+            hy_return        = EXCLUDED.hy_return,
+            hy_source        = EXCLUDED.hy_source,
+            risk_free_rate   = EXCLUDED.risk_free_rate,
+            risk_free_source = EXCLUDED.risk_free_source
+    """)
+    try:
+        async with engine.begin() as conn:
+            # Registry first — the source columns are foreign keys.
+            await _upsert_registry(conn, registry_entries, text)
+            for r in monthly_rows:
+                await conn.execute(ins, r)
+            await conn.execute(text("DELETE FROM strategy_results_cache"))
+    finally:
+        await engine.dispose()
+
+
+def _extend_monthly_market_data() -> dict:
+    """
+    Part 1 — extend the monthly equity/IG/HY/risk-free series beyond the
+    Excel file. Fetches every complete calendar month after the current
+    market_data_monthly max date, validates the splice, and stores the
+    valid contiguous run. Fail-open: every failure returns a status.
+    """
+    from database import DATABASE_URL
+    result: dict[str, Any] = {"rows_added": 0, "new_max": None,
+                              "skipped": [], "status": "current"}
+    if not DATABASE_URL:
+        result["status"] = "no_database"
+        return result
+    # Only extend a fully-seeded table — below the cache threshold the
+    # full Excel pipeline still has to run and populate the history.
+    if _db_monthly_row_count() < 200:
+        result["status"] = "awaiting_full_pipeline"
+        return result
+
+    max_date = _db_monthly_max_date()
+    if max_date is None:
+        result["status"] = "no_anchor"
+        return result
+    max_ts = pd.Timestamp(max_date) + pd.offsets.MonthEnd(0)
+    target = _most_recent_complete_month()
+    if target <= max_ts:
+        result["status"] = "current"
+        return result
+
+    from_date = (max_ts + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    to_date = datetime.now(timezone.utc).date().strftime("%Y-%m-%d")
+    log.info("monthly_extension_start", from_date=from_date,
+             to_date=to_date, target=str(target.date()))
+    try:
+        eq = _fetch_monthly_total_returns("SPY", from_date, to_date)
+        ig = _fetch_monthly_total_returns("BND", from_date, to_date)
+        hy = _fetch_monthly_total_returns("HYG", from_date, to_date)
+        rf = _fetch_monthly_risk_free(from_date, to_date)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("monthly_extension_fetch_failed", error=str(exc))
+        result["status"] = "fetch_failed"
+        return result
+
+    cand = pd.DataFrame({
+        "equity_return": eq, "ig_return": ig, "hy_return": hy,
+        "risk_free_rate": rf,
+    })
+    valid, skipped = _validate_extension_months(cand, max_ts, target)
+    result["skipped"] = skipped
+    for reason in skipped:
+        log.warning("monthly_extension_month_skipped", reason=reason)
+    if valid.empty:
+        result["status"] = "nothing_valid"
+        return result
+
+    monthly_rows = [{
+        "date": idx.date(),
+        "eq": float(row["equity_return"]),
+        "ig": float(row["ig_return"]),
+        "hy": float(row["hy_return"]),
+        "rf": (float(row["risk_free_rate"])
+               if pd.notna(row["risk_free_rate"]) else 0.0),
+    } for idx, row in valid.iterrows()]
+    reg = _extension_registry_entries(
+        str(valid.index.min().date()), str(valid.index.max().date()),
+        len(valid))
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(lambda: asyncio.run(
+                _async_extend_persist(monthly_rows, reg))).result(timeout=60)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("monthly_extension_persist_failed", error=str(exc))
+        result["status"] = "persist_failed"
+        return result
+
+    result["rows_added"] = len(valid)
+    result["new_max"] = str(valid.index.max().date())
+    result["status"] = "extended"
+    log.info("monthly_market_data_extended", rows=len(valid),
+             new_max=result["new_max"])
+    return result
+
+
+def extend_market_data() -> dict:
+    """
+    Auto-extend the monthly data pipeline beyond the Excel file. Runs the
+    monthly equity/IG/HY extension (Part 1); the Fama-French factors
+    extend on their own via _load_ff_factors_with_cache(). Fired on
+    startup and by POST /api/v1/admin/refresh-monthly-data.
+
+    Fail-open: a failure is logged and reported in `status`, never raised.
+    After a successful extension the strategy cache has already been
+    cleared inside the persist transaction; the audit auto-trigger then
+    re-verifies the new data in the background.
+    """
+    out: dict[str, Any] = {
+        "monthly_rows_added": 0, "monthly_new_max": None,
+        "monthly_skipped": [], "status": "current",
+    }
+    try:
+        m = _extend_monthly_market_data()
+        out["monthly_rows_added"] = m.get("rows_added", 0)
+        out["monthly_new_max"] = m.get("new_max")
+        out["monthly_skipped"] = m.get("skipped", [])
+        out["status"] = m.get("status", "current")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("extend_market_data_failed", error=str(exc))
+        out["status"] = "error"
+        return out
+
+    if out["monthly_rows_added"] > 0:
+        try:
+            from tools.audit_engine import trigger_audit_async
+            trigger_audit_async("data_ingestion")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("extend_audit_trigger_failed", error=str(exc))
+    return out
 
 
 # ── Database-first read helpers ───────────────────────────────────────────────

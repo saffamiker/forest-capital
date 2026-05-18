@@ -75,6 +75,17 @@ async def lifespan(app: FastAPI):
             await refresh_academic_context()
         except Exception as exc:  # noqa: BLE001
             log.warning("academic_context_warm_failed", error=str(exc))
+        # Auto-extend the monthly data pipeline beyond the Excel file —
+        # fetch any complete calendar months that have closed since the
+        # last run. A daemon thread so startup never blocks on yfinance;
+        # fail-open inside extend_market_data.
+        try:
+            import threading
+            from tools.data_fetcher import extend_market_data
+            threading.Thread(target=extend_market_data, daemon=True,
+                             name="monthly-data-extend").start()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("monthly_extend_startup_failed", error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
@@ -1982,6 +1993,30 @@ async def cache_invalidate(
     from tools.audit_engine import trigger_audit_async
     trigger_audit_async("cache_invalidation")
     return {"status": "cleared", "rows_removed": removed}
+
+
+@app.post("/api/v1/admin/refresh-monthly-data")
+async def refresh_monthly_data(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Extends the monthly data pipeline beyond the Excel file: fetches the
+    total return of every complete calendar month that has closed since
+    the last run — SPY (equity), BND (investment grade) and HYG (high
+    yield) from yfinance, DTB3 from FRED — validates the splice, and
+    appends the new rows to market_data_monthly. Sysadmin only.
+
+    After a successful extension the strategy cache is cleared and the
+    audits auto-trigger. The blocking fetch runs off the event loop.
+    """
+    import asyncio as _asyncio
+    from tools.data_fetcher import extend_market_data
+    result = await _asyncio.to_thread(extend_market_data)
+    log.info("refresh_monthly_data", by=session.get("email"),
+             status=result.get("status"),
+             rows_added=result.get("monthly_rows_added"),
+             new_max=result.get("monthly_new_max"))
+    return result
 
 
 # ── User management ───────────────────────────────────────────────────────────
