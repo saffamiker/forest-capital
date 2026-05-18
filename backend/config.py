@@ -264,3 +264,42 @@ TOUR_VERSION = 2
 # surfaces. Increment by 1 whenever a test script's steps change
 # materially, and bump the matching `version` field in testScripts.ts.
 TEST_SCRIPT_VERSION = 1
+
+# ── AI TOKEN COSTS ────────────────────────────────────────────────────────────
+# Per-token USD rates used to estimate the cost of every AI agent call.
+# ESTIMATES ONLY — based on published API rates as of May 2026; actual
+# billing from Anthropic / Google / xAI may differ. Update these when the
+# providers change their rates. Keys are matched against the model string
+# returned by each provider; an unknown model yields a null cost.
+TOKEN_COSTS_USD = {
+    "claude-sonnet-4-6": {"input": 0.000003,  "output": 0.000015},
+    "claude-opus-4-7":   {"input": 0.000015,  "output": 0.000075},
+    "claude-haiku-4-5":  {"input": 0.0000008, "output": 0.000004},
+    "gemini-2.0-flash":  {"input": 0.0000001, "output": 0.0000004},
+    "grok":              {"input": 0.000005,  "output": 0.000015},
+}
+
+
+def calculate_cost(model, input_tokens, output_tokens):
+    """
+    Estimated USD cost of one AI call. Returns None for an unknown model
+    or non-numeric token counts — the caller stores null rather than a
+    wrong figure. The model string is matched leniently: a provider may
+    return "claude-sonnet-4-6-20260514", so a prefix match against the
+    TOKEN_COSTS_USD keys is tried before giving up.
+    """
+    if input_tokens is None or output_tokens is None:
+        return None
+    rates = TOKEN_COSTS_USD.get(model)
+    if rates is None and isinstance(model, str):
+        for key, val in TOKEN_COSTS_USD.items():
+            if model.startswith(key) or key in model:
+                rates = val
+                break
+    if rates is None:
+        return None
+    try:
+        return (int(input_tokens) * rates["input"]
+                + int(output_tokens) * rates["output"])
+    except (TypeError, ValueError):
+        return None
