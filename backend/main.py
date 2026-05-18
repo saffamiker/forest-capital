@@ -3975,18 +3975,38 @@ async def export_presentation_deck(
         pptx_bytes = await asyncio.to_thread(
             build_presentation_deck, data, narratives, charts)
 
+        # Load the generated deck into a presentation_deck editor draft so
+        # Molly can open it directly in the slide editor; the draft_id
+        # rides back in the X-Draft-Id header. Never fails the download.
+        draft_id: int | None = None
+        try:
+            from tools.editor_content import deck_to_editor
+            from tools.editor_drafts import create_draft
+            content_json, content_text = deck_to_editor(narratives)
+            draft = await create_draft(
+                "presentation_deck", session["email"],
+                f"Presentation Deck — {date.today().isoformat()}",
+                content_json, content_text, created_from="generated")
+            if draft is not None:
+                draft_id = draft["id"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deck_draft_create_failed", error=str(exc))
+
         _log_interaction_bg(
             request, session, "export", agents_involved=["academic_writer"],
             response_summary="Presentation deck generated",
             metadata={"deliverable": "presentation_deck",
                       "data_available": data["available"],
-                      "charts_rendered": sum(1 for v in charts.values() if v)})
+                      "charts_rendered": sum(1 for v in charts.values() if v),
+                      "draft_id": draft_id})
 
         filename = f"forest-capital-presentation-deck-{date.today().isoformat()}.pptx"
-        return Response(
-            content=pptx_bytes, media_type=_PPTX_MEDIA,
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
+        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+        if draft_id is not None:
+            headers["X-Draft-Id"] = str(draft_id)
+            headers["Access-Control-Expose-Headers"] = "X-Draft-Id"
+        return Response(content=pptx_bytes, media_type=_PPTX_MEDIA,
+                        headers=headers)
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
         log.error("presentation_deck_export_error", ref=ref, error=str(exc))

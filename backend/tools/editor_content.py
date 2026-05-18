@@ -78,6 +78,65 @@ _MIDPOINT_SECTIONS = [
 ]
 
 
+# The 16 presentation-deck slides — (title, narratives key or None).
+# Mirrors tools/academic_deck.build_presentation_deck's slide order so a
+# deck draft opened in the editor matches the generated .pptx.
+_DECK_SLIDES: list[tuple[str, str | None]] = [
+    ("Title", None),
+    ("Agenda", None),
+    ("The Question", "thesis"),
+    ("Data and Methodology", None),
+    ("The 2022 Regime Break", "thesis"),
+    ("Static Allocation Results", None),
+    ("Dynamic Allocation Results", None),
+    ("Cumulative Returns — Growth of $1", None),
+    ("Risk-Return Profile", None),
+    ("Factor Analysis", None),
+    ("Drawdown Analysis", None),
+    ("Sensitivity Analysis", None),
+    ("Conclusions", "conclusions"),
+    ("Recommendations", "recommendations"),
+    ("How We Built This", "ai_leverage"),
+    ("Questions and Discussion", None),
+]
+
+
+def deck_to_editor(
+    narratives: dict[str, str],
+) -> tuple[dict[str, Any], str]:
+    """
+    Builds the editor content for a generated presentation deck.
+
+    Returns (content_json, content_text): content_json is
+    {"slides": [...]} — one slide object per deck slide, the editor's
+    slide-card format. Slide content is seeded from the generated
+    narratives where one applies; speaker_notes start EMPTY so Molly
+    writes her own (the slide-card Generate Talking Points helper offers
+    a starting point). content_text concatenates every slide for
+    Academic Review.
+    """
+    slides: list[dict[str, Any]] = []
+    text_lines: list[str] = []
+    for i, (title, key) in enumerate(_DECK_SLIDES, start=1):
+        content = (narratives.get(key, "").strip() if key else "")
+        slides.append({
+            "id": i,
+            "title": title,
+            "content": content,
+            "data_points": [],
+            "speaker_notes": "",
+            "verified": False,
+            "notes_written": False,
+        })
+        text_lines.append(f"Slide {i}: {title}")
+        if content:
+            text_lines.append(content)
+        text_lines.append("")
+    content_json = {"slides": slides}
+    content_text = "\n".join(text_lines).strip()
+    return content_json, content_text
+
+
 def midpoint_to_editor(
     narratives: dict[str, str],
 ) -> tuple[dict[str, Any], str]:
