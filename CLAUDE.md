@@ -5641,14 +5641,23 @@ contend for the concurrency lock). It is IDEMPOTENT: a no-op when
 is_audit_current() reports the cache still holds, so it is safe to fire
 after any data event. trigger_audit_async(reason) spawns it in the
 background — loop-or-thread adaptive (a task on an event loop, a daemon
-thread off one). Fail-open throughout. Two hooks fire it:
-  - data ingestion — after a successful incremental data append in
-    get_full_history (reason "data_ingestion").
+thread off one). Fail-open throughout. Three hooks fire it, all
+reason "data_ingestion" except where noted:
+  - the full-pipeline market_data_monthly write — _persist_to_db fires
+    it after a successful persist (the canonical monthly-data write; a
+    cold-boot rebuild of identical data is a harmless no-op via the
+    idempotency check).
+  - the incremental daily append — get_full_history fires it after
+    check_and_run_incremental_update reports new rows.
   - POST /api/v1/cache/invalidate — after the strategy cache is cleared
     (reason "cache_invalidation").
 The reason is logged (auto_audit_triggered / auto_audit_skipped_current)
 and stored as the audit_runs.triggered_by value, so the audit history
-distinguishes an auto-run from a manual one.
+distinguishes an auto-run from a manual one. After a data fetch lands
+new rows in market_data_monthly the data_hash changes, is_audit_current()
+returns false, both audits re-run in the background, and the strategy
+results cache misses on the next /api/backtest/compare and recomputes —
+no manual step beyond running the fetch.
 
 RUN LIVE DEMO — when is_current is True the QA tab also shows a
 confirmation-gated "Run Live Demo" button. It forces a fresh audit

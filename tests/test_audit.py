@@ -484,3 +484,37 @@ class TestSmartAuditCaching:
         body = resp.json()
         for key in ("is_current", "statistical_current", "qa_current"):
             assert key in body
+
+    # ── _persist_to_db auto-trigger hook (the market_data_monthly write) ──────
+
+    def test_persist_to_db_triggers_audit_on_success(self, monkeypatch):
+        import database
+        import tools.data_fetcher as df
+
+        monkeypatch.setattr(database, "DATABASE_URL",
+                            "postgresql+asyncpg://x/y", raising=False)
+
+        async def _noop_persist(*_a, **_k):
+            return None
+        monkeypatch.setattr(df, "_async_persist_all", _noop_persist)
+        calls: list[str] = []
+        monkeypatch.setattr("tools.audit_engine.trigger_audit_async",
+                            lambda reason: calls.append(reason))
+        df._persist_to_db({}, {}, None, None, {}, None)
+        assert calls == ["data_ingestion"]
+
+    def test_persist_to_db_skips_audit_on_failure(self, monkeypatch):
+        import database
+        import tools.data_fetcher as df
+
+        monkeypatch.setattr(database, "DATABASE_URL",
+                            "postgresql+asyncpg://x/y", raising=False)
+
+        async def _boom(*_a, **_k):
+            raise RuntimeError("persist failed")
+        monkeypatch.setattr(df, "_async_persist_all", _boom)
+        calls: list[str] = []
+        monkeypatch.setattr("tools.audit_engine.trigger_audit_async",
+                            lambda reason: calls.append(reason))
+        df._persist_to_db({}, {}, None, None, {}, None)
+        assert calls == []   # the monthly write failed — no audit fired

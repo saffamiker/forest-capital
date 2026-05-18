@@ -2020,12 +2020,28 @@ def _persist_to_db(
                 _async_persist_all(provided, supplemental, monthly, daily, signals, cv_result)
             )
 
+        persisted = False
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             future = pool.submit(_run_in_thread)
             future.result(timeout=120)
         log.info("db_persist_complete")
+        persisted = True
     except Exception as exc:
         log.warning("db_persist_failed", error=str(exc))
+        persisted = False
+
+    # Smart audit caching — market_data_monthly was just (re)written by the
+    # full pipeline. If the new data differs from what the last completed
+    # audit verified, run_full_audit re-verifies it in the background.
+    # Idempotent (a no-op when the data is unchanged) and fail-open, so a
+    # routine cold-boot rebuild of identical data triggers nothing and a
+    # hook failure never affects the pipeline.
+    if persisted:
+        try:
+            from tools.audit_engine import trigger_audit_async
+            trigger_audit_async("data_ingestion")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auto_audit_hook_failed", error=str(exc))
 
 
 async def _async_persist_all(
