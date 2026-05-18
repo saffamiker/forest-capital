@@ -201,9 +201,14 @@ function StrategyTableRow({ s, rank, selected, onSelect, showAll }: StrategyTabl
       </td>
       <td
         className={`px-3 py-2 font-mono text-white text-xs ${c(8)}`}
-        title="Average annual portfolio turnover — sum of absolute weight changes at each quarterly rebalance, annualised."
+        title="Average annual portfolio turnover — sum of absolute weight changes at each quarterly rebalance, annualised. Falls back to the rebalance-count proxy when the true figure is unavailable."
       >
-        {s.true_turnover != null ? `${(s.true_turnover * 100).toFixed(0)}%` : '—'}
+        {(() => {
+          // Prefer the genuine sum-of-absolute-weight-change figure;
+          // fall back to the legacy rebalance-count proxy if absent.
+          const t = s.true_turnover ?? s.avg_monthly_turnover
+          return t != null ? `${(t * 100).toFixed(0)}%` : '—'
+        })()}
       </td>
       <td className={`px-3 py-2 ${c(9)}`}>
         {isSignificant ? (

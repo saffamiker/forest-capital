@@ -5766,8 +5766,6 @@ was written, so the GitHub board was not updated programmatically).
   □ Move to develop → main PR flow with required status checks
   □ S3 (or equivalent) for screenshot storage — currently local disk,
     ephemeral on Render
-  □ True portfolio turnover computed in the backtester itself (the
-    analytics layer already surfaces it)
 
 ─── JUNE 3 MILESTONE ───────────────────────────────────────────────────
   Items that must land for the midpoint check-in:
