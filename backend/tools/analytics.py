@@ -148,6 +148,12 @@ def summary_statistics(
             "max_drawdown":   round(_max_drawdown(r), 4),
             "skewness":       round(float(r.skew()), 4) if len(r) >= 3 else 0.0,
             "n_months":       int(len(r)),
+            # Actual data period of this series — disclosure for the
+            # Period column. The four asset series all span the full
+            # study period; the dynamic strategies (shown on the
+            # cumulative-return chart) start later, see cumulative_returns.
+            "period_start":   str(r.index[0].date()) if len(r) else None,
+            "period_end":     str(r.index[-1].date()) if len(r) else None,
         })
     return rows
 
@@ -205,11 +211,14 @@ def cumulative_returns(strategy_results: dict[str, dict]) -> dict:
     Growth-of-$1 cumulative total return for every strategy.
 
     Each series starts at exactly 1.0 on a baseline month one period before
-    the first return, then compounds (1 + r) month by month. All strategies
-    share the aligned monthly index, so the baseline date is common — the
-    points list is directly chartable by a Recharts LineChart.
+    its first return, then compounds (1 + r) month by month. The dynamic
+    strategies consume an initialisation lookback window, so their baseline
+    is later than the full study period — `start_dates` carries each
+    strategy's first actual return month so the chart can disclose the
+    shorter histories rather than imply a flat or zero pre-history.
     """
     curves: dict[str, pd.Series] = {}
+    start_dates: dict[str, str] = {}
     for name, res in strategy_results.items():
         s = _pairs_to_series(res.get("monthly_returns") or [])
         if s.empty:
@@ -218,9 +227,10 @@ def cumulative_returns(strategy_results: dict[str, dict]) -> dict:
         base_date = s.index[0] - pd.offsets.MonthEnd(1)
         curve = (1.0 + s).cumprod()
         curves[label] = pd.concat([pd.Series([1.0], index=[base_date]), curve])
+        start_dates[label] = str(s.index[0].date())
 
     if not curves:
-        return {"strategies": [], "points": []}
+        return {"strategies": [], "points": [], "start_dates": {}}
 
     all_dates = sorted(set().union(*[set(c.index) for c in curves.values()]))
     strategies = sorted(curves.keys())
@@ -231,7 +241,8 @@ def cumulative_returns(strategy_results: dict[str, dict]) -> dict:
             v = curves[label].get(d)
             row[label] = None if v is None or pd.isna(v) else round(float(v), 4)
         points.append(row)
-    return {"strategies": strategies, "points": points}
+    return {"strategies": strategies, "points": points,
+            "start_dates": start_dates}
 
 
 # ── 2. Rolling correlation ────────────────────────────────────────────────────

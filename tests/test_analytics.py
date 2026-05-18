@@ -303,7 +303,8 @@ class TestCumulativeReturns:
 
     def test_empty_input_returns_empty(self):
         from tools.analytics import cumulative_returns
-        assert cumulative_returns({}) == {"strategies": [], "points": []}
+        assert cumulative_returns({}) == {
+            "strategies": [], "points": [], "start_dates": {}}
 
 
 # ── 8. Excess return and information ratio ────────────────────────────────────

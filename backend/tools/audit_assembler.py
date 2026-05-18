@@ -234,12 +234,27 @@ async def assemble_audit_payload() -> dict[str, Any]:
                 equity, ig, hy, window=12),
         }
 
+        # Per-strategy actual data periods. The dynamic strategies consume
+        # an initialisation lookback window, so they start later than the
+        # 2002-07 study period — carrying the actual start dates here means
+        # the Layer 1 return-series-length note can cite them rather than
+        # rely on hardcoded approximations.
+        strategy_periods = {}
+        for name, s in strategies.items():
+            pairs = s.get("monthly_returns") or []
+            strategy_periods[name] = {
+                "start": pairs[0][0] if pairs else None,
+                "end": pairs[-1][0] if pairs else None,
+                "months": len(pairs),
+            }
+
         metadata = {
             "study_period": {
                 "start": str(idx[0].date()) if n_months else None,
                 "end": str(idx[-1].date()) if n_months else None,
                 "months": n_months,
             },
+            "strategy_periods": strategy_periods,
             "risk_free_rate": {
                 "source": "FRED DTB3",
                 "value": rf_annual,

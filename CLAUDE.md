@@ -4230,6 +4230,36 @@ because it re-runs ~23 backtests).
 
 Every table exports to CSV for the midpoint paper.
 
+SHORTER-SERIES DISCLOSURE (May 17 2026): five dynamic strategies start
+later than the 2002-07 study period because they consume an
+initialisation lookback window before producing a first return — the
+window length is fixed by the backtester:
+
+  REGIME_SWITCHING    3-month  regime window  → starts ~2002-10 (279 mo)
+  MOMENTUM_ROTATION   12-month max lookback   → starts ~2003-07 (270 mo)
+  MIN_VARIANCE        36-month OPTIMIZATION_  → starts ~2005-07 (246 mo)
+  BLACK_LITTERMAN       WINDOW                → starts ~2005-07 (246 mo)
+  MAX_SHARPE_ROLLING                          → starts ~2005-07 (246 mo)
+
+This is correct by construction, not a data gap. The full study period
+is 2002-07 to 2025-12 (282 months); CAGR and every other metric for a
+shorter strategy is computed over its own actual data period, not the
+full window. The disclosure pattern, applied wherever shorter-series
+strategies appear alongside full-series ones:
+  - cumulative_returns() emits a `start_dates` map (first return month
+    per strategy); the Cumulative Total Return chart draws a subtle
+    vertical tick at each dynamic start date and a footnote attributing
+    each shorter history to its lookback window.
+  - summary_statistics() emits `period_start` / `period_end` per row;
+    the Summary Statistics table carries a Period column and a
+    shorter-series footnote.
+  - The Analytics page header notes the five shorter histories.
+  - audit_assembler.py's metadata carries a `strategy_periods` block
+    (per-strategy actual start/end/months) so the Layer 1 return-series
+    note cites real dates rather than approximations.
+The start dates are always data-derived (the series' first observation)
+— never hardcoded — so the disclosure stays exact.
+
 
 ─────────────────────────────────────────────────────────────────────────────
 MIDPOINT CHECK-IN

@@ -40,6 +40,8 @@ interface SummaryRow {
   max_drawdown: number
   skewness: number
   n_months: number
+  period_start: string | null
+  period_end: string | null
 }
 
 type RollingExcessPoint = { date: string } & Record<string, number | null>
@@ -122,6 +124,9 @@ type CumulativePoint = { date: string } & Record<string, number | null>
 interface CumulativeReturns {
   strategies: string[]
   points: CumulativePoint[]
+  // First actual return month per strategy. The dynamic strategies start
+  // later than the full study period — see the chart footnote.
+  start_dates?: Record<string, string>
 }
 
 interface StrategyMeta {
@@ -161,6 +166,13 @@ const pct = (x: number | null | undefined): string =>
   x == null ? '—' : `${(x * 100).toFixed(2)}%`
 const num = (x: number | null | undefined, dp = 2): string =>
   x == null ? '—' : x.toFixed(dp)
+
+// An ISO date → a "YYYY-MM" study-period label.
+const monthLabel = (iso: string | null | undefined): string =>
+  iso ? iso.slice(0, 7) : '—'
+// A row's actual study period as "YYYY-MM to YYYY-MM".
+const periodLabel = (start: string | null, end: string | null): string =>
+  start && end ? `${monthLabel(start)} to ${monthLabel(end)}` : '—'
 
 // Percentage with green/red sign colouring — used for excess return.
 function SignedPct({ x }: { x: number | null | undefined }) {
@@ -280,10 +292,12 @@ const TD = ({ children, right = false, mono = false, sticky = false }:
 // ── 1. Summary statistics table ───────────────────────────────────────────────
 
 function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
-  const headers = ['Asset', 'CAGR', 'Excess Return (ann.)', 'Ann. Volatility',
-                   'Sharpe', 'Information Ratio', 'Max Drawdown', 'Skewness']
+  const headers = ['Asset', 'Period', 'CAGR', 'Excess Return (ann.)',
+                   'Ann. Volatility', 'Sharpe', 'Information Ratio',
+                   'Max Drawdown', 'Skewness']
   const exportRows = rows.map((r) => [
-    r.asset, pct(r.cagr), pct(r.excess_return), pct(r.ann_volatility),
+    r.asset, periodLabel(r.period_start, r.period_end),
+    pct(r.cagr), pct(r.excess_return), pct(r.ann_volatility),
     num(r.sharpe_ratio), num(r.information_ratio), pct(r.max_drawdown),
     num(r.skewness),
   ])
@@ -297,6 +311,7 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
       <table className="w-full">
         <thead><tr className="border-b border-border">
           <TH sticky>Asset</TH>
+          <TH>Period</TH>
           <TH right infoKey="cagr" infoLabel="CAGR">CAGR</TH>
           <TH right infoKey="excess_return" infoLabel="Excess Return">Excess Return (ann.)</TH>
           <TH right infoKey="volatility" infoLabel="Annualised Volatility">Ann. Volatility</TH>
@@ -309,6 +324,7 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
           {rows.map((r) => (
             <tr key={r.asset} className="border-b border-border/50 hover:bg-navy-800/40 transition-colors">
               <TD sticky>{r.asset}</TD>
+              <TD mono>{periodLabel(r.period_start, r.period_end)}</TD>
               <TD right mono>{pct(r.cagr)}</TD>
               <TD right mono><SignedPct x={r.excess_return} /></TD>
               <TD right mono>{pct(r.ann_volatility)}</TD>
@@ -321,6 +337,12 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
         </tbody>
       </table>
       </div>
+      <p className="text-2xs text-muted mt-2 leading-relaxed">
+        Strategies with initialisation lookback windows have shorter study
+        periods than the four asset series shown here. CAGR and every other
+        metric is computed over each strategy's actual data period — see the
+        cumulative return chart footnote for the dynamic-strategy start dates.
+      </p>
     </SectionCard>
   )
 }
@@ -634,6 +656,19 @@ function FactorLoadingsTable({ rows }: { rows: FactorRow[] }) {
 
 // ── Cumulative total return chart ─────────────────────────────────────────────
 
+// The dynamic strategies consume an initialisation lookback window before
+// they produce a first return — window length is fixed by the backtester
+// (OPTIMIZATION_WINDOW=36 months; momentum max lookback=12; regime
+// window=3). Used only to attribute the shorter histories in the chart
+// footnote — this is disclosure metadata, not strategy logic.
+const LOOKBACK_WINDOWS: Record<string, number> = {
+  MIN_VARIANCE: 36,
+  BLACK_LITTERMAN: 36,
+  MAX_SHARPE_ROLLING: 36,
+  MOMENTUM_ROTATION: 12,
+  REGIME_SWITCHING: 3,
+}
+
 export function CumulativeReturnChart(
   { data, theme = DARK_CHART_THEME }:
   { data: CumulativeReturns; theme?: ChartTheme },
@@ -642,6 +677,37 @@ export function CumulativeReturnChart(
 
   // Snap the 2022 regime marker to the first plotted month at/after the break.
   const breakX = data.points.find((p) => p.date >= '2022-01-01')?.date
+
+  // Shorter-series disclosure — strategies whose first return month is
+  // later than the earliest series start. Each line already begins at 1.0
+  // at its own first point (a leading null draws nothing); the markers and
+  // footnote make the shorter history explicit rather than implied.
+  const starts = data.start_dates ?? {}
+  const startValues = Object.values(starts)
+  const earliest = startValues.length
+    ? startValues.reduce((a, b) => (a < b ? a : b))
+    : undefined
+  const shorter = earliest
+    ? Object.entries(starts)
+        .filter(([, d]) => d > earliest)
+        .sort((a, b) => (a[1] < b[1] ? -1 : 1))
+    : []
+  const markerDates = [...new Set(shorter.map(([, d]) => d))]
+  // Group the shorter strategies by lookback window for the footnote.
+  const windowGroups = new Map<number, { names: string[]; date: string }>()
+  for (const [name, d] of shorter) {
+    const w = LOOKBACK_WINDOWS[name] ?? 0
+    const g = windowGroups.get(w)
+    if (g) g.names.push(name)
+    else windowGroups.set(w, { names: [name], date: d })
+  }
+  const footnoteParts = [...windowGroups.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([w, g]) => {
+      const verb = g.names.length > 1 ? 'start' : 'starts'
+      const window = w > 0 ? ` (${w}-month initialisation window)` : ''
+      return `${g.names.join(', ')} ${verb} ${monthLabel(g.date)}${window}`
+    })
 
   const headers = ['Date', ...data.strategies]
   const exportRows = data.points.map((p) => [
@@ -702,6 +768,12 @@ export function CumulativeReturnChart(
               label={{ value: 'Correlation Regime Break', fill: theme.regimeBreak, fontSize: 11,
                        position: 'insideTopRight' }} />
           )}
+          {/* Subtle vertical tick at each dynamic strategy's start date. */}
+          {markerDates.map((d) => (
+            <ReferenceLine key={`start-${d}`} x={d}
+              stroke={theme.axisTick.fill} strokeWidth={1}
+              strokeDasharray="2 4" strokeOpacity={0.5} />
+          ))}
           {data.strategies.map((s, i) => {
             const bench = isBenchmark(s)
             return (
@@ -719,6 +791,13 @@ export function CumulativeReturnChart(
           })}
         </LineChart>
       </ResponsiveContainer>
+      {footnoteParts.length > 0 && (
+        <p className="text-2xs mt-2 leading-relaxed"
+           style={{ color: theme.textSecondary }}>
+          {'* '}{footnoteParts.join('. ')}. Growth-of-$1 is indexed to each
+          strategy&apos;s own start date.
+        </p>
+      )}
     </SectionCard>
   )
 }
@@ -930,9 +1009,13 @@ export default function AcademicAnalytics() {
           analytical backbone of the midpoint paper. Every table exports to CSV.
         </p>
         {data?.study_period && (
-          <p className="text-xs text-muted mt-1 font-mono">
-            Study period: {data.study_period.start} → {data.study_period.end}
-            {' '}({data.study_period.n_months} months)
+          <p className="text-xs text-muted mt-1">
+            <span className="font-mono">
+              Study period: {data.study_period.start} → {data.study_period.end}
+              {' '}({data.study_period.n_months} months)
+            </span>
+            . Five strategies have shorter histories due to initialisation
+            windows — see footnotes.
           </p>
         )}
       </div>
