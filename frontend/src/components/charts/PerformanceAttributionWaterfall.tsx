@@ -109,6 +109,16 @@ export default function PerformanceAttributionWaterfall({ attribution }: Props) 
     .sort(([, a], [, b]) => Math.abs(b.total_active) - Math.abs(a.total_active))
     .slice(0, 6)
 
+  // The lead strategy's decomposition, passed to the explainer.
+  const topAttr = sorted[0]
+  const explainValue =
+    `Brinson-Hood-Beebower attribution, top ${sorted.length} strategies by `
+    + `active return. ${prettyName(topAttr[0])}: allocation `
+    + `${(topAttr[1].allocation * 100).toFixed(2)}%, selection `
+    + `${(topAttr[1].selection * 100).toFixed(2)}%, interaction `
+    + `${(topAttr[1].interaction * 100).toFixed(2)}%, total active `
+    + `${(topAttr[1].total_active * 100).toFixed(2)}%.`
+
   return (
     <div className="card p-4" data-testid="performance-attribution-waterfall" ref={containerRef}>
       <div className="mb-3">
@@ -119,6 +129,7 @@ export default function PerformanceAttributionWaterfall({ attribution }: Props) 
               tooltipKey="performance_attribution_waterfall"
               metricLabel="Performance Attribution Waterfall"
               size="md"
+              currentValue={explainValue}
             />
           </h3>
           <ChartExportButton chartId="performance_attribution_waterfall" containerRef={containerRef} />

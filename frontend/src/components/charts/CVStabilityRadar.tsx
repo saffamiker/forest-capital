@@ -114,13 +114,22 @@ export default function CVStabilityRadar({ radar }: Props) {
     )
   }
 
+  // Highest / lowest composite stability — the explainer reads the spread.
+  const byStability = [...entries].sort(([, a], [, b]) => b.stability - a.stability)
+  const cvTop = byStability[0]
+  const cvLow = byStability[byStability.length - 1]
+  const explainValue =
+    `CV stability radar across ${entries.length} strategies. Highest `
+    + `composite stability: ${prettyName(cvTop[0])} ${cvTop[1].stability.toFixed(2)}; `
+    + `lowest: ${prettyName(cvLow[0])} ${cvLow[1].stability.toFixed(2)}.`
+
   return (
     <div className="card p-4" data-testid="cv-stability-radar" ref={containerRef}>
       <div className="mb-3">
         <div className="flex items-center justify-between">
           <h3 className="text-white font-semibold text-sm">
             CV Stability Radar
-            <InfoIcon tooltipKey="cv_stability_radar" metricLabel="CV Stability Radar" size="md" />
+            <InfoIcon tooltipKey="cv_stability_radar" metricLabel="CV Stability Radar" size="md" currentValue={explainValue} />
           </h3>
           <ChartExportButton chartId="cv_stability_radar" containerRef={containerRef} />
         </div>

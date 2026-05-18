@@ -439,6 +439,11 @@ export default function Dashboard() {
                   tooltipKey="cumulative_return_chart"
                   metricLabel="Cumulative Returns"
                   size="md"
+                  {...(cumulative && cumulative.points.length > 0
+                    ? { currentValue:
+                        `Growth of $1 across ${cumulative.strategies.length} `
+                        + `strategies over ${cumulative.points.length} months.` }
+                    : {})}
                 />
               </h3>
               <p className="text-muted text-xs mt-0.5">

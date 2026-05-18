@@ -66,13 +66,18 @@ export default function WalkForwardChart({ walkForward }: Props) {
     )
   }
 
+  const explainValue =
+    `Walk-forward out-of-sample Sharpe across ${strategies.length} `
+    + `strategies and ${data.length} rolling windows (36-month train, `
+    + `12-month test, stepped every 6 months).`
+
   return (
     <div className="card p-4" data-testid="walk-forward-chart" ref={containerRef}>
       <div className="mb-3">
         <div className="flex items-center justify-between">
           <h3 className="text-white font-semibold text-sm">
             Walk-Forward OOS Sharpe
-            <InfoIcon tooltipKey="walk_forward_chart" metricLabel="Walk-Forward OOS Sharpe" size="md" />
+            <InfoIcon tooltipKey="walk_forward_chart" metricLabel="Walk-Forward OOS Sharpe" size="md" currentValue={explainValue} />
           </h3>
           <ChartExportButton chartId="walk_forward_oos_sharpe" containerRef={containerRef} />
         </div>

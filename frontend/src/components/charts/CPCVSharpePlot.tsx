@@ -48,13 +48,22 @@ export default function CPCVSharpePlot({ cpcv }: Props) {
 
   const xPos = (v: number) => PAD_LEFT + ((v - xMin) / span) * innerW
 
+  // Best/worst median Sharpe — the explainer reads the actual spread.
+  const cpcvBest = sorted[sorted.length - 1]
+  const cpcvWorst = sorted[0]
+  const explainValue =
+    `CPCV Sharpe distribution across ${entries.length} strategies. Best `
+    + `median: ${prettyName(cpcvBest[0])} ${cpcvBest[1].sharpe_median.toFixed(2)} `
+    + `(range ${cpcvBest[1].sharpe_min.toFixed(2)}–${cpcvBest[1].sharpe_max.toFixed(2)}); `
+    + `worst: ${prettyName(cpcvWorst[0])} ${cpcvWorst[1].sharpe_median.toFixed(2)}.`
+
   return (
     <div className="card p-4" data-testid="cpcv-sharpe-plot" ref={containerRef}>
       <div className="mb-3">
         <div className="flex items-center justify-between">
           <h3 className="text-white font-semibold text-sm">
             CPCV Sharpe Distribution
-            <InfoIcon tooltipKey="cpcv_sharpe_plot" metricLabel="CPCV Sharpe Distribution" size="md" />
+            <InfoIcon tooltipKey="cpcv_sharpe_plot" metricLabel="CPCV Sharpe Distribution" size="md" currentValue={explainValue} />
           </h3>
           <ChartExportButton chartId="cpcv_sharpe_distribution" containerRef={containerRef} />
         </div>

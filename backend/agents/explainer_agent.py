@@ -635,14 +635,32 @@ def _metric_explain_prompt(metric: str, current_value: Any) -> str:
     and three parts. The deeper, contextual explanation belongs to the
     separate Data Explain feature (POST /api/council/explain-data).
     """
-    value_str = "not shown" if current_value in (None, "") else str(current_value)
+    has_value = current_value not in (None, "")
+    if has_value:
+        value_line = f"Current value: {current_value}\n\n"
+        step_two = (
+            f"2. How to interpret the current value shown ({current_value}) "
+            f"— one short paragraph: is it good, concerning, or typical?\n"
+        )
+    else:
+        # No on-screen value reached this request. Never refuse — explain
+        # what values in this metric typically indicate so the answer is
+        # still useful (the data IS live; the value just was not passed).
+        value_line = (
+            "No specific current value is available for this request.\n\n"
+        )
+        step_two = (
+            "2. What values in this metric typically indicate — one short "
+            "paragraph: the typical range, and what a high or low value "
+            "means in the context of an equity-bond asset allocation "
+            "strategy.\n"
+        )
     return (
         f"Explain the {metric} metric to a senior investment professional.\n\n"
-        f"Current value: {value_str}\n\n"
+        f"{value_line}"
         f"Cover exactly three things, in order:\n"
         f"1. What this metric or chart measures — one short paragraph.\n"
-        f"2. How to interpret the current value shown ({value_str}) — one "
-        f"short paragraph: is it good, concerning, or typical?\n"
+        f"{step_two}"
         f"3. One sentence connecting it to the project thesis (the 2022 "
         f"equity-bond correlation regime break).\n\n"
         f"Hard limits: maximum 150 words total. Plain English. No extended "
@@ -659,16 +677,29 @@ def _data_explain_prompt(metric: str, current_value: Any, context: Any) -> str:
     explains what the *specific values currently on screen* mean together.
     It is allowed the academic framing the InfoIcon prompt forbids.
     """
-    value_str = "not shown" if current_value in (None, "") else str(current_value)
+    has_value = current_value not in (None, "")
     context_str = "" if context in (None, "") else str(context)
     is_strategy = "strategy" in f"{metric} {context_str}".lower()
 
-    lines = [
-        f"Explain what these specific on-screen values mean — not what the "
-        f"metric type means in general — for: {metric}.",
-        "",
-        f"Values currently shown: {value_str}",
-    ]
+    if has_value:
+        lines = [
+            f"Explain what these specific on-screen values mean — not what "
+            f"the metric type means in general — for: {metric}.",
+            "",
+            f"Values currently shown: {current_value}",
+        ]
+    else:
+        # No on-screen values reached this request — never refuse. Give a
+        # general but specific reading of what values in this view
+        # typically indicate, referencing typical ranges.
+        lines = [
+            f"No specific current values are available for: {metric}.",
+            "",
+            "Provide a general but specific interpretation of what values "
+            "in this view typically indicate for an equity-bond asset "
+            "allocation strategy — reference typical ranges and what high "
+            "or low values mean.",
+        ]
     if context_str:
         lines.append(f"Context: {context_str}")
     lines.append("")

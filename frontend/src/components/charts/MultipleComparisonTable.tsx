@@ -33,13 +33,27 @@ export default function MultipleComparisonTable({ strategies }: Props) {
     (a, b) => (a.p_value_ttest ?? 1) - (b.p_value_ttest ?? 1),
   )
 
+  // Survival counts through the FDR correction — the explainer reads them.
+  const survived = strategies.filter(
+    (s) => (s.p_value_ttest ?? 1) < THRESHOLD
+      && (s.p_value_corrected ?? 1) < THRESHOLD,
+  ).length
+  const lostAfterFdr = strategies.filter(
+    (s) => (s.p_value_ttest ?? 1) < THRESHOLD
+      && (s.p_value_corrected ?? 1) >= THRESHOLD,
+  ).length
+  const explainValue =
+    `${strategies.length} strategies, Benjamini-Hochberg FDR threshold `
+    + `p<0.005. ${survived} survived correction; ${lostAfterFdr} lost `
+    + `significance after FDR.`
+
   return (
     <div className="card p-4" data-testid="multiple-comparison-table" ref={containerRef}>
       <div className="mb-3">
         <div className="flex items-center justify-between">
           <h3 className="text-white font-semibold text-sm">
             Multiple Comparison Correction
-            <InfoIcon tooltipKey="multiple_comparison_table" metricLabel="Multiple Comparison Correction" size="md" />
+            <InfoIcon tooltipKey="multiple_comparison_table" metricLabel="Multiple Comparison Correction" size="md" currentValue={explainValue} />
           </h3>
           <ChartExportButton chartId="multiple_comparison_correction" containerRef={containerRef} />
         </div>

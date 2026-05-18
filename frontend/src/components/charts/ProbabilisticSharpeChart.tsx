@@ -46,6 +46,14 @@ export default function ProbabilisticSharpeChart({ strategies }: Props) {
   const innerW = WIDTH - PAD_LEFT - PAD_RIGHT
   const xPos = (v: number) => PAD_LEFT + ((v - xMin) / span) * innerW
 
+  // The highest-Sharpe strategy with its interval — read by the explainer.
+  const psrBest = usable[usable.length - 1]
+  const explainValue =
+    `Sharpe 95% confidence intervals for ${usable.length} strategies. `
+    + `Highest: ${prettyName(psrBest.strategy_name)} `
+    + `${(psrBest.sharpe_ratio ?? 0).toFixed(2)} `
+    + `[${psrBest.sharpe_ci_95![0].toFixed(2)}, ${psrBest.sharpe_ci_95![1].toFixed(2)}].`
+
   return (
     <div className="card p-4" data-testid="probabilistic-sharpe-chart" ref={containerRef}>
       <div className="mb-3">
@@ -56,6 +64,7 @@ export default function ProbabilisticSharpeChart({ strategies }: Props) {
               tooltipKey="probabilistic_sharpe_chart"
               metricLabel="Probabilistic Sharpe — 95% Confidence Intervals"
               size="md"
+              currentValue={explainValue}
             />
           </h3>
           <ChartExportButton chartId="probabilistic_sharpe" containerRef={containerRef} />

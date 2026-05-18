@@ -43,13 +43,24 @@ export default function RegimeTransitionMatrix({ matrix }: Props) {
     )
   }
 
+  // The actual matrix entries, passed to the explainer so it interprets
+  // these probabilities rather than the metric in the abstract.
+  const pctOf = (from: Regime, to: Regime): string =>
+    `${((matrix[from]?.[to] ?? 0) * 100).toFixed(0)}%`
+  const explainValue =
+    `Persistence (diagonal): BULL→BULL ${pctOf('BULL', 'BULL')}, `
+    + `TRANSITION→TRANSITION ${pctOf('TRANSITION', 'TRANSITION')}, `
+    + `BEAR→BEAR ${pctOf('BEAR', 'BEAR')}. Key transitions: `
+    + `BULL→BEAR ${pctOf('BULL', 'BEAR')}, BEAR→BULL ${pctOf('BEAR', 'BULL')}, `
+    + `TRANSITION→BEAR ${pctOf('TRANSITION', 'BEAR')}.`
+
   return (
     <div className="card p-4" data-testid="regime-transition-matrix" ref={containerRef}>
       <div className="mb-3">
         <div className="flex items-center justify-between">
           <h3 className="text-white font-semibold text-sm">
             Regime Transition Matrix
-            <InfoIcon tooltipKey="regime_transition_matrix" metricLabel="Regime Transition Matrix" size="md" />
+            <InfoIcon tooltipKey="regime_transition_matrix" metricLabel="Regime Transition Matrix" size="md" currentValue={explainValue} />
           </h3>
           <ChartExportButton chartId="regime_transition_matrix" containerRef={containerRef} />
         </div>

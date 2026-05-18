@@ -79,6 +79,16 @@ export default function SignificanceJourneyMatrix({ strategies }: Props) {
     (a, b) => (b.tier1_gates_passed ?? 0) - (a.tier1_gates_passed ?? 0),
   )
 
+  // Gate pass-rate, read by the explainer.
+  const passingAll = strategies.filter(
+    (s) => (s.tier1_gates_passed ?? 0) >= 5,
+  ).length
+  const sjmTop = sorted[0]
+  const explainValue =
+    `${strategies.length} strategies against 5 Tier 1 gates. ${passingAll} `
+    + `pass all five. Top: ${prettyName(sjmTop.strategy_name)} at `
+    + `${sjmTop.tier1_gates_passed ?? 0}/5 gates.`
+
   return (
     <div className="card p-4" data-testid="significance-journey-matrix" ref={containerRef}>
       <div className="mb-3">
@@ -89,6 +99,7 @@ export default function SignificanceJourneyMatrix({ strategies }: Props) {
               tooltipKey="significance_journey_matrix"
               metricLabel="Significance Journey Matrix"
               size="md"
+              currentValue={explainValue}
             />
           </h3>
           <ChartExportButton chartId="significance_journey_matrix" containerRef={containerRef} />

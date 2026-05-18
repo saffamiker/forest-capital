@@ -56,13 +56,24 @@ export default function FactorExposureHeatmap({ factorLoadings }: Props) {
     ...entries.flatMap(([, l]) => FACTOR_KEYS.map((k) => Math.abs(l[k]))),
   )
 
+  // Per-factor loading ranges across all strategies — the explainer reads
+  // the actual heatmap spread rather than the metric in the abstract.
+  const factorRange = (k: typeof FACTOR_KEYS[number]): string => {
+    const vals = entries.map(([, l]) => l[k])
+    return `${FACTOR_LABELS[k]} ${Math.min(...vals).toFixed(2)} to `
+      + `${Math.max(...vals).toFixed(2)}`
+  }
+  const explainValue =
+    `Fama-French loadings across ${entries.length} strategies — `
+    + FACTOR_KEYS.map(factorRange).join(', ') + '.'
+
   return (
     <div className="card p-4" data-testid="factor-exposure-heatmap" ref={containerRef}>
       <div className="mb-3">
         <div className="flex items-center justify-between">
           <h3 className="text-white font-semibold text-sm">
             Factor Exposure Heatmap
-            <InfoIcon tooltipKey="factor_exposure_heatmap" metricLabel="Factor Exposure Heatmap" size="md" />
+            <InfoIcon tooltipKey="factor_exposure_heatmap" metricLabel="Factor Exposure Heatmap" size="md" currentValue={explainValue} />
           </h3>
           <ChartExportButton chartId="factor_exposure_heatmap" containerRef={containerRef} />
         </div>

@@ -231,7 +231,14 @@ function SectionCard({
             {/* truncate, never wrap, on a narrow header row */}
             <span className="truncate">{title}</span>
             {infoKey && (
-              <InfoIcon tooltipKey={infoKey} metricLabel={title} size="md" />
+              <InfoIcon
+                tooltipKey={infoKey}
+                metricLabel={title}
+                size="md"
+                {...(dataExplain?.currentValue
+                  ? { currentValue: dataExplain.currentValue }
+                  : {})}
+              />
             )}
           </h2>
           <p

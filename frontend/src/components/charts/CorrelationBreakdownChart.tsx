@@ -45,6 +45,11 @@ export default function CorrelationBreakdownChart({ correlation, pre2022, post20
     )
   }
 
+  const explainValue =
+    `Rolling 12-month equity-bond correlation. Pre-2022 average `
+    + `${summary.pre?.toFixed(2) ?? '—'}, post-2022 average `
+    + `${summary.post?.toFixed(2) ?? '—'} — the diversification breakdown.`
+
   return (
     <div className="card p-4" data-testid="correlation-breakdown-chart" ref={containerRef}>
       <div className="mb-3 flex items-end justify-between">
@@ -55,6 +60,7 @@ export default function CorrelationBreakdownChart({ correlation, pre2022, post20
               tooltipKey="rolling_correlation_chart"
               metricLabel="Equity-Bond Correlation — Rolling 12-Month"
               size="md"
+              currentValue={explainValue}
             />
           </h3>
           <p className="text-muted text-xs mt-0.5">

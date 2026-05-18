@@ -44,6 +44,15 @@ export default function RegimeConditionalPerformance({ regimeConditional }: Prop
     TRANSITION: regimes.TRANSITION.sharpe,
   }))
 
+  // Sharpe ranges per regime — the explainer reads the actual spread.
+  const sharpeRange = (key: 'BULL' | 'BEAR' | 'TRANSITION'): string => {
+    const vals = data.map((d) => d[key])
+    return `${key} ${Math.min(...vals).toFixed(2)} to ${Math.max(...vals).toFixed(2)}`
+  }
+  const explainValue =
+    `Sharpe ratio by regime across ${data.length} strategies — `
+    + (['BULL', 'BEAR', 'TRANSITION'] as const).map(sharpeRange).join(', ') + '.'
+
   return (
     <div className="card p-4" data-testid="regime-conditional-performance" ref={containerRef}>
       <div className="mb-3">
@@ -54,6 +63,7 @@ export default function RegimeConditionalPerformance({ regimeConditional }: Prop
               tooltipKey="regime_conditional_performance"
               metricLabel="Regime-Conditional Performance"
               size="md"
+              currentValue={explainValue}
             />
           </h3>
           <ChartExportButton chartId="regime_conditional_performance" containerRef={containerRef} />

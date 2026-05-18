@@ -60,13 +60,19 @@ export default function RegimeTimeline({ timeline }: Props) {
   // January 2022, used to place the standard dashed vertical line.
   const breakIndex = timeline.findIndex((p) => p.date >= '2022-01')
 
+  // The actual regime mix, passed to the explainer.
+  const explainValue =
+    `${timeline.length} months classified — BULL ${counts.BULL ?? 0}, `
+    + `TRANSITION ${counts.TRANSITION ?? 0}, BEAR ${counts.BEAR ?? 0}. `
+    + `Most recent month: ${timeline[timeline.length - 1]?.regime ?? '—'}.`
+
   return (
     <div className="card p-4" data-testid="regime-timeline">
       <div className="mb-3 flex items-end justify-between">
         <div>
           <h3 className="text-white font-semibold text-sm">
             Regime Timeline
-            <InfoIcon tooltipKey="regime_timeline" metricLabel="Regime Timeline" size="md" />
+            <InfoIcon tooltipKey="regime_timeline" metricLabel="Regime Timeline" size="md" currentValue={explainValue} />
           </h3>
           <p className="text-muted text-xs mt-0.5">
             Threshold classification per month · {timeline[0]?.date.slice(0, 7)} → {timeline[timeline.length - 1]?.date.slice(0, 7)}
