@@ -5425,6 +5425,98 @@ items referenced specifically, real patterns, effort estimates on every
 immediate / quick-win item, and an accurate SUMMARY.
 
 
+─────────────────────────────────────────────────────────────────────────────
+STATISTICAL AUDIT SYSTEM (migration 017, May 17 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+Every analytical figure on the platform can be independently
+re-verified. The audit sends the raw data and the formula
+specifications to a separate model (claude-opus-4-7) that recomputes
+every metric from scratch and flags any discrepancy — the platform's
+strongest accuracy guarantee. The audit model is independent of the
+computation model (claude-sonnet-4-6) and never sees the platform's
+intermediate calculations.
+
+TABLES (migration 017): audit_runs — one row per audit (triggered_by
+manual | scheduled | pre_submission, the three per-layer statuses,
+total/passed/failed/warnings counts, metadata). audit_findings — one
+row per check (layer, check_name, metric, strategy, severity, status,
+platform_value, auditor_value, discrepancy, formula_used, a SHA256
+raw_inputs_hash, the auditor's reasoning, resolution fields). Findings
+cascade-delete with their run. Changelog entry 36.
+
+THREE LAYERS run in sequence (tools/audit_engine._execute_audit):
+
+  Layer 1 — raw data verification (tools/audit_layer1.py). Six
+  deterministic Python checks, no model: benchmark CAGR sanity, asset
+  return ordering, Fama-French factor alignment, monthly return bounds
+  (+/-50%), the weight constraint, and return-series length. Fast.
+
+  Layer 2 — independent recomputation (tools/audit_layer2.py). The raw
+  data and formula specs go to the auditor model (claude-opus-4-7) in
+  five task groups, run in parallel: summary statistics (one call per
+  asset), Carhart factor loadings, the efficient-frontier max-Sharpe
+  point, the pre/post-2022 regime split, and the rolling correlation.
+  Each returns structured JSON; a discrepancy is PASS within 0.01%,
+  WARNING to 0.1%, FAIL beyond. FAIL-OPEN: a group that will not parse
+  is a WARNING, never a CRITICAL.
+
+  Layer 3 — cross-platform consistency (tools/audit_layer3.py). Ten
+  deterministic checks: CAGR consistency, the benchmark identity, the
+  regime-break date applied uniformly, risk-free plausibility, the
+  Carhart label, turnover direction, the null benchmark IR, and the
+  Sharpe-CI bracketing.
+
+ASSEMBLER: tools/audit_assembler.assemble_audit_payload() builds the
+payload — metadata, raw_data (asset / FF-factor / strategy return
+series), platform_computed (summary statistics, regime-conditional,
+factor loadings, the frontier max-Sharpe point, turnover, rolling
+correlation) and formula_specifications. A SHA256 of the raw_data block
+is the run's reproducibility key. All reads are light (no
+get_full_history / run_all_strategies).
+
+TWO COMPUTATION REGIMES — important. The Analytics layer annualises
+MONTHLY series with 12 / sqrt(12); the Dashboard strategy table
+annualises DAILY series with 252 / sqrt(252). The audit targets the
+Analytics layer; its formula specs describe that layer, and a dedicated
+`annualisation_regimes` spec documents the difference. CAGR is
+regime-INDEPENDENT (a geometric annual growth rate) and is cross-checked
+directly; Sharpe and max drawdown are regime-DEPENDENT, so their
+cross-layer checks are recorded as INFO findings that explain the
+difference rather than flagging it. The export report carries a
+COMPUTATION REGIMES section to the same end.
+
+PERSISTED-WEIGHTS LIMITATION: the backtester computes per-rebalance
+weight schedules but does not persist them — only monthly returns are
+cached. So raw_data.strategy_weights is empty, true_turnover cannot be
+independently recomputed, and Layer 1's weight-constraint check
+degrades to an honest SKIP (re-run the backtester with weight logging
+to audit turnover).
+
+ENDPOINTS (all manage_users-gated — sysadmin only):
+  POST /api/v1/audit/run            — fire an audit (background; returns
+                                      the audit_id; triggered_by manual
+                                      | pre_submission). A concurrent
+                                      run is refused with already_running.
+  GET  /api/v1/audit/runs           — every run, newest first
+  GET  /api/v1/audit/runs/latest    — the most recent run with findings
+  GET  /api/v1/audit/runs/{id}      — one run, findings grouped by layer
+  GET  /api/v1/audit/runs/{id}/export — the plain-text audit report
+A 'running' audit_runs row is the concurrency lock.
+
+FRONTEND: Settings → Statistical Audit (sysadmin only, below Users) —
+the latest run's status and per-layer progress, findings grouped as
+critical failures / warnings / passed checks, a run-history accordion,
+"Run Full Audit" / "Run Pre-Submission Audit" buttons (polling
+/audit/runs/latest every 10s) and a "Download Audit Report" button.
+TestNotifications shows an "⚠️ Statistical audit found discrepancies"
+login notification for a completed run under 24h old with failures.
+
+The pre-submission audit (triggered_by = pre_submission) is the same
+three layers; its export report is intended for inclusion in the
+Analytical Appendix as evidence of independent statistical verification.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -5477,6 +5569,10 @@ was written, so the GitHub board was not updated programmatically).
      lead into immediate actions / quick wins / patterns, with GitHub
      issues for the urgent items; threshold + test-pass + manual
      triggers, sysadmin-only (migration 016)
+  ✅ Statistical audit system — every analytical figure is independently
+     re-verified by a separate model (claude-opus-4-7); three layers
+     (raw-data / recomputation / consistency), a downloadable audit
+     report for the Analytical Appendix, sysadmin-only (migration 017)
   ✅ Changelog + What's New modal + CI/CD pipeline (ci.yml, changelog
      gate, migrations 011-012)
   ✅ Site tour — 15-step react-joyride walkthrough, academic-rationale

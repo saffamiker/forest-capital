@@ -1094,3 +1094,43 @@ Migration: 016 — operator runs `alembic upgrade head` on Render.
 
 Test counts (cumulative): 1177 backend pass, 21 skipped (HMM/Windows +
                            deployment), 232 frontend pass.
+
+
+## Statistical audit system ✅ COMPLETE (2026-05-17)
+Every analytical figure is independently re-verified — a separate model
+(claude-opus-4-7) recomputes every metric from the raw data and flags
+discrepancies, in three layers.
+
+Backend:
+  migrations/017_create_audit_tables.py — audit_runs + audit_findings
+    tables + changelog entry 36.
+  tools/audit_assembler.py — assemble_audit_payload() (metadata, raw
+    data, platform_computed, formula specifications + a SHA256 hash).
+  tools/audit_common.py — make_finding, layer_status,
+    classify_discrepancy (the 0.01% / 0.1% tolerance bands).
+  tools/audit_layer1.py — six deterministic raw-data checks.
+  tools/audit_layer2.py — five parallel Opus recomputation task groups.
+  tools/audit_layer3.py — ten deterministic consistency checks.
+  tools/audit_engine.py — the orchestrator (start_audit, _execute_audit,
+    the concurrency lock, the run reads, format_audit_report).
+  main.py — POST/GET /api/v1/audit/run and /runs* (manage_users-gated).
+
+  tests/test_audit.py — 27 tests: the sysadmin gate on the five audit
+    endpoints; the assembler's formula specs / two-regime spec /
+    deterministic hash; Layer 1 (clean pass, >50% return and broken
+    weight sum caught, absent weights skip); Layer 3 (benchmark-IR
+    null/numeric, a Sharpe-CI inversion); the engine (concurrent run
+    already_running, the export report sections incl. COMPUTATION
+    REGIMES, make_finding fields, classify_discrepancy bands).
+
+Frontend:
+  components/AuditPanel.tsx — the Settings → Statistical Audit section
+    (sysadmin only): latest run, per-layer progress, grouped findings,
+    run / pre-submission / download buttons, run history.
+  components/TestNotifications.tsx — the "⚠️ audit found discrepancies"
+    login notification.
+
+Migration: 017 — operator runs `alembic upgrade head` on Render.
+
+Test counts (cumulative): 1204 backend pass, 21 skipped (HMM/Windows +
+                           deployment), 232 frontend pass.
