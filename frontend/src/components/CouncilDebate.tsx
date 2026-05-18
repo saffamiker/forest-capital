@@ -180,7 +180,9 @@ export default function CouncilDebate() {
       </div>
 
       {/* Query input */}
-      <form onSubmit={handleSubmit} className="flex gap-2">
+      {/* Stacked full-width on mobile; the input and the action button
+          sit side by side from sm: up. */}
+      <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-2">
         <input
           ref={inputRef}
           type="text"
@@ -194,21 +196,25 @@ export default function CouncilDebate() {
           <button
             type="button"
             onClick={abort}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium
+            className="flex items-center justify-center gap-2 w-full sm:w-auto
+                       px-4 py-2.5 rounded-lg text-sm font-medium
                        border border-danger/30 bg-danger/10 text-danger
                        hover:bg-danger/20 transition-colors"
           >
             <X className="w-4 h-4" />
-            <span className="hidden sm:inline">Cancel</span>
+            <span>Cancel</span>
           </button>
         ) : (
           <button
             type="submit"
             disabled={!query.trim()}
-            className="flex items-center gap-2 px-4 py-2.5 bg-electric hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
+            className="flex items-center justify-center gap-2 w-full sm:w-auto
+                       px-4 py-2.5 bg-electric hover:bg-blue-500 disabled:opacity-40
+                       disabled:cursor-not-allowed text-white text-sm font-medium
+                       rounded-lg transition-colors"
           >
             <Send className="w-4 h-4" />
-            <span className="hidden sm:inline">Convene</span>
+            <span>Convene</span>
           </button>
         )}
       </form>

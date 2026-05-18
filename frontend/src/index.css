@@ -60,6 +60,11 @@
   from { transform: translateX(-100%); }
   to { transform: translateX(0); }
 }
+/* Mobile bottom-sheet entrance — ExplainerPanel / DataExplainPanel. */
+@keyframes fc-slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
 
 @layer components {
   .card {

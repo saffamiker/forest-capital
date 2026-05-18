@@ -104,13 +104,26 @@ export default function ExplainerPanel({
         onClick={onClose}
         aria-hidden="true"
       />
+      {/* Bottom sheet on mobile, right-side drawer from sm: up. */}
       <aside
         role="dialog"
         aria-label={`Explanation: ${metricLabel}`}
-        className="fixed inset-y-0 right-0 z-[61] w-[360px] max-w-[90vw]
-                   bg-navy-800 border-l border-border shadow-2xl
-                   flex flex-col"
+        className="fixed z-[61] bg-navy-800 shadow-2xl flex flex-col
+                   inset-x-0 bottom-0 h-[60vh] rounded-t-xl border-t border-border
+                   animate-[fc-slide-up_200ms_ease-out]
+                   sm:inset-x-auto sm:inset-y-0 sm:right-0 sm:h-auto
+                   sm:w-[360px] sm:max-w-[90vw] sm:rounded-t-none
+                   sm:border-t-0 sm:border-l sm:animate-none"
       >
+        {/* Drag handle — mobile bottom-sheet dismissal affordance. */}
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close explainer"
+          className="sm:hidden flex justify-center pt-2 pb-1 shrink-0"
+        >
+          <span className="block w-10 h-1 rounded-full bg-border" />
+        </button>
         <header className="flex items-start justify-between gap-3 px-4 py-3
                            border-b border-border shrink-0">
           <div className="min-w-0">

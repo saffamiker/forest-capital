@@ -174,7 +174,7 @@ export default function AcademicReviewButton() {
           platform's flagship evaluation feature; it must not read as a
           minor action next to the routine "Convene" query button. */}
       <div className="card p-4 border border-warning/30 bg-warning/5">
-        <div className="flex items-start justify-between gap-4">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
           <div className="min-w-0">
             <h3 className="text-white font-semibold text-sm flex items-center gap-1.5">
               <GraduationCap className="w-4 h-4 text-warning" />
@@ -196,7 +196,7 @@ export default function AcademicReviewButton() {
               </p>
             )}
           </div>
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-2 sm:shrink-0">
             {running && (
               <button
                 type="button"
@@ -212,7 +212,8 @@ export default function AcademicReviewButton() {
               onClick={() => void runReview()}
               disabled={running}
               title="Have the council evaluate your analytics, findings, and deliverables against project requirements"
-              className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold
+              className="flex flex-1 sm:flex-none items-center justify-center gap-2
+                         px-4 py-2.5 rounded-lg text-sm font-semibold
                          bg-warning text-navy-900 hover:bg-amber-400
                          disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
@@ -260,8 +261,8 @@ export default function AcademicReviewButton() {
           <button
             type="button"
             onClick={() => setPeersOpen((o) => !o)}
-            className="w-full flex items-center gap-2 px-4 py-2.5 text-sm text-white
-                       hover:bg-navy-700 transition-colors"
+            className="w-full flex items-center gap-2 px-4 py-2.5 min-h-[44px]
+                       text-sm text-white hover:bg-navy-700 transition-colors"
           >
             {peersOpen
               ? <ChevronDown className="w-4 h-4 text-muted" />
