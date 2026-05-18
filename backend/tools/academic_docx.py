@@ -205,18 +205,20 @@ def _add_callout(doc: Document, title: str, body_lines: list[str]) -> None:
 
 # Human-input callouts for the midpoint paper — Bob must act on these
 # before the document is submitted; the AI cannot write them authentically.
-_ROLES_CALLOUT_TITLE = "BOB — THIS SECTION NEEDS YOUR DIRECT INPUT"
+# The Roles callout sits BELOW its pre-seeded draft — the draft is a
+# factual scaffold from real platform activity, not the final text.
+_ROLES_CALLOUT_TITLE = "BOB — PERSONALISE THIS SECTION"
 _ROLES_CALLOUT_LINES = [
-    "Describe specifically:",
-    "•  What YOU personally did (written deliverables, literature review, "
-    "data interpretation, editing)",
-    "•  What Michael did (platform engineering, data infrastructure, "
-    "statistical implementation)",
-    "•  What Molly did (presentation design, visual storytelling, UAT "
-    "testing)",
+    "The draft above is pre-seeded with your actual platform activity "
+    "data. It is factually accurate but written in AI language.",
     "",
-    "The AI cannot write this authentically. Faculty will scrutinise this "
-    "section. Your own words only.",
+    "Your task:",
+    "1.  Confirm the numbers are correct",
+    "2.  Add specific examples of your analytical contributions — what "
+    "did you personally interpret, question, or discover?",
+    "3.  Rewrite in your own voice",
+    "4.  Add anything the platform data does not capture — literature "
+    "review, offline analysis, team discussions",
 ]
 _NEXT_STEPS_CALLOUT_TITLE = "BOB — REVIEW AND REFINE"
 _NEXT_STEPS_CALLOUT_LINES = [
@@ -331,9 +333,11 @@ def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> by
     _add_table(doc, "Table 2. Regime-Conditional Performance "
                      "(Pre- vs Post-2022)", h, r)
 
-    # Section 3 is a human-input callout, not AI prose — only Bob can
-    # describe the division of labour authentically.
+    # Section 3 is pre-seeded from real Team Activity counts — a factual
+    # draft — with a "BOB — PERSONALISE" callout beneath directing him to
+    # rewrite it in his own voice and add what the platform cannot show.
     _add_heading(doc, "3. Roles and Division of Labor")
+    _add_body(doc, narratives.get("roles", "[DATA PENDING]"))
     _add_callout(doc, _ROLES_CALLOUT_TITLE, _ROLES_CALLOUT_LINES)
 
     # Section 4 keeps the AI draft, but a callout above it directs Bob to

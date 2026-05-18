@@ -6010,6 +6010,23 @@ The Academic Review arbiter treats a submission that fails to quantify
 the 2022 break, or omits/misrepresents the FDR result, as materially
 incomplete.
 
+SECTION 3 ACTIVITY PRE-SEED: the midpoint paper's Roles and Division of
+Labor section is no longer a blank human-input callout — it is
+pre-seeded with a factual AI draft built from real platform activity.
+tools/academic_export.gather_roles_activity(team_summary) assembles a
+per-member team_activity_summary (keyed michael_ruurds / bob_thao /
+molly_murdock) from the get_activity_summary bundle plus two light reads
+— UAT sections attested (distinct test_results.script_id per user) and
+the completed-audit count (attributed to Michael, the sysadmin who runs
+audits). The /api/v1/export/midpoint-paper endpoint passes it as the
+"midpoint_roles" section context; the Academic Writer drafts a plain,
+count-attributed paragraph (it is told to omit a zero count, never
+invent a contribution). build_midpoint_paper renders the draft followed
+by a "BOB — PERSONALISE THIS SECTION" callout — the draft is a factual
+scaffold, not the final text. study_period also now carries
+ff_factors_end (the last Carhart-factor month) so Section 1's
+study-period description reflects the live database state.
+
 
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that

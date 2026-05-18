@@ -54,7 +54,8 @@ async def gather_document_data() -> dict[str, Any]:
     """
     bundle: dict[str, Any] = {
         "available": False,
-        "study_period": {"start": "—", "end": "—", "n_months": 0},
+        "study_period": {"start": "—", "end": "—", "n_months": 0,
+                         "ff_factors_end": None},
         "summary_statistics": [],
         "regime_conditional": [],
         "drawdown_comparison": [],
@@ -107,12 +108,21 @@ async def gather_document_data() -> dict[str, Any]:
                 STRATEGY_METADATA = {}
 
             rf_list = monthly.get("rf") or []
+            # ff_factors_end — the last Carhart-factor month on record, so
+            # Section 1's study-period description reflects the actual
+            # database state rather than a hardcoded value.
+            ff_end = None
+            if ff:
+                raw = str(ff[-1].get("yyyymm", "")).strip()
+                ff_end = (f"{raw[:4]}-{raw[4:6]}" if len(raw) == 6 else raw)
+
             bundle.update({
                 "available": True,
                 "study_period": {
                     "start": str(idx[0].date()),
                     "end": str(idx[-1].date()),
                     "n_months": len(idx),
+                    "ff_factors_end": ff_end,
                 },
                 "summary_statistics": an.summary_statistics(asset_series, rf),
                 "regime_conditional": an.regime_conditional_performance(strategies, rf),
@@ -150,6 +160,79 @@ async def gather_document_data() -> dict[str, Any]:
         log.warning("academic_export_docs_read_failed", error=str(exc))
 
     return bundle
+
+
+_ROLES_BY_EMAIL = {
+    "ruurdsm@queens.edu": ("michael_ruurds",
+                           "Platform Engineer and System Administrator"),
+    "thaob@queens.edu":   ("bob_thao",
+                           "Written Deliverables and Analysis"),
+    "murdockm@queens.edu": ("molly_murdock",
+                            "Presentation and User Acceptance Testing"),
+}
+
+
+async def gather_roles_activity(team_summary: dict[str, Any]) -> dict[str, Any]:
+    """
+    Builds the per-member team_activity_summary that pre-seeds the
+    midpoint paper's Roles and Division of Labor section.
+
+    team_summary is the get_activity_summary() bundle already gathered by
+    gather_document_data — its per_member counts and commits.by_author are
+    reused here, with two extra light reads (UAT sections attested, the
+    completed-audit count). The result is keyed by a stable member slug so
+    the Academic Writer can attribute documented activity to each person.
+
+    Fail-open: a missing table or query error simply drops that count to 0
+    — the section still pre-seeds from whatever activity is on record.
+    """
+    per_member = {m.get("user"): m for m in
+                  (team_summary or {}).get("per_member", [])}
+    by_author = (team_summary or {}).get("commits", {}).get("by_author", {})
+
+    # UAT sections attested — distinct script_id per tester.
+    uat: dict[str, int] = {}
+    audit_runs = 0
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is not None:
+            async with AsyncSessionLocal() as session:
+                rows = await session.execute(text(
+                    "SELECT user_email, COUNT(DISTINCT script_id) "
+                    "FROM test_results GROUP BY user_email"))
+                uat = {e: int(n) for e, n in rows.fetchall()}
+                arow = await session.execute(text(
+                    "SELECT COUNT(*) FROM audit_runs "
+                    "WHERE status = 'complete'"))
+                found = arow.fetchone()
+                audit_runs = int(found[0]) if found else 0
+    except Exception as exc:  # noqa: BLE001 — fail-open, counts drop to 0
+        log.warning("roles_activity_extra_reads_failed", error=str(exc))
+
+    summary: dict[str, Any] = {}
+    for email, (slug, role) in _ROLES_BY_EMAIL.items():
+        m = per_member.get(email, {})
+        entry: dict[str, Any] = {
+            "role": role,
+            "commits": int(by_author.get(email, 0)),
+            "council_sessions_run": int(m.get("council_interactions", 0)),
+            "academic_review_sessions": int(
+                m.get("academic_review_sessions", 0)),
+            "documents_uploaded": int(m.get("document_uploads", 0)),
+            "qa_audits": int(m.get("qa_audits", 0)),
+            "page_views": int(m.get("page_views", 0)),
+            "uat_sections_attested": int(uat.get(email, 0)),
+        }
+        # The completed-audit count is attributed to Michael — only the
+        # sysadmin runs the statistical audit; audit_runs carries no
+        # per-user attribution of its own.
+        if slug == "michael_ruurds":
+            entry["audit_runs"] = audit_runs
+            entry["platform_built"] = True
+        summary[slug] = entry
+    return summary
 
 
 async def _last_academic_review_verdict() -> str | None:

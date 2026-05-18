@@ -3385,13 +3385,26 @@ async def export_midpoint_paper(
     from datetime import date
 
     from tools.academic_docx import build_midpoint_paper
-    from tools.academic_export import DATA_PENDING, gather_document_data
+    from tools.academic_export import (
+        DATA_PENDING, gather_document_data, gather_roles_activity,
+    )
 
     try:
         data = await gather_document_data()
         period = data["study_period"]
         has_results = bool(data["summary_statistics"] or data["regime_conditional"])
         has_review = bool(data["last_review_text"])
+
+        # Section 3 (Roles) is pre-seeded from real per-member platform
+        # activity — commits, council runs, reviews, uploads, UAT — so Bob
+        # personalises a factual draft rather than writing from scratch.
+        roles_activity = await gather_roles_activity(data["team_summary"])
+        has_roles = any(
+            v.get("commits") or v.get("council_sessions_run")
+            or v.get("academic_review_sessions") or v.get("documents_uploaded")
+            or v.get("uat_sections_attested")
+            for v in roles_activity.values()
+        )
 
         specs = [
             {"key": "methodology", "available": True,
@@ -3449,10 +3462,29 @@ async def export_midpoint_paper(
                          "correlation_pre_post": {
                              "pre_2022": data["rolling_correlation"].get("pre_2022"),
                              "post_2022": data["rolling_correlation"].get("post_2022")}}},
-            # Section 3 (Roles and Division of Labor) is NOT AI-generated —
-            # build_midpoint_paper renders a human-input callout for Bob,
-            # who is the only one who can describe the division of labour
-            # authentically. No spec entry for it.
+            # Section 3 (Roles and Division of Labor) is pre-seeded from
+            # real Team Activity counts. The AI draft is factual, not
+            # authoritative — build_midpoint_paper renders a "BOB —
+            # PERSONALISE" callout beneath it directing him to rewrite it
+            # in his own voice and add what the platform data cannot show.
+            {"key": "roles", "available": has_roles,
+             "pending": (f"{DATA_PENDING} — no platform activity on record "
+                         "yet. Run council sessions, reviews and UAT, then "
+                         "regenerate; meanwhile describe the roles directly."),
+             "agent_id": "midpoint_roles",
+             "task": (
+                 "Write the Roles and Division of Labor section — about 150 "
+                 "words, APA style, past tense, third person. Use ONLY the "
+                 "team_activity_summary data provided. State each team "
+                 "member's role and attribute their documented platform "
+                 "activity — commits, council sessions run, academic review "
+                 "sessions, documents uploaded, UAT sections attested. Do "
+                 "NOT invent contributions the data does not show; if a "
+                 "count is zero, omit it rather than guessing. This is a "
+                 "factual pre-seed for the team to personalise — write it "
+                 "plainly and let each member's actual activity counts "
+                 "carry the section."),
+             "context": {"team_activity_summary": roles_activity}},
             {"key": "next_steps", "available": has_review,
              "pending": (f"{DATA_PENDING} — no Academic Review verdict on "
                          "record. Run an Academic Review on the Council "
