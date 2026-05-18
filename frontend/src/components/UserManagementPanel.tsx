@@ -286,7 +286,7 @@ export default function UserManagementPanel() {
             <thead>
               <tr className="border-b border-border text-2xs uppercase
                              tracking-wide text-muted text-left">
-                <th className="py-1.5 pr-2">Name / Email</th>
+                <th className="py-1.5 pr-2 sticky left-0 z-10 bg-navy-900">Name / Email</th>
                 <th className="py-1.5 px-2">Role</th>
                 <th className="py-1.5 px-2">Status</th>
                 <th className="py-1.5 px-2">Last login</th>
@@ -299,7 +299,7 @@ export default function UserManagementPanel() {
                 const custom = !matchesPreset(u.role, u.permissions)
                 return (
                   <tr key={u.id} className="border-b border-border/50">
-                    <td className="py-2 pr-2">
+                    <td className="py-2 pr-2 sticky left-0 z-[5] bg-navy-900">
                       <div className="text-white">{u.display_name || u.email}</div>
                       <div className="text-2xs text-muted">{u.email}</div>
                     </td>

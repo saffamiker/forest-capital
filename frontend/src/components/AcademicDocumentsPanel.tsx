@@ -120,11 +120,11 @@ export default function AcademicDocumentsPanel() {
 
       {/* Upload row — uploading agent-context documents is a team action. */}
       <TeamGate tooltip="Uploading documents is available to the project team">
-      <div className="flex flex-wrap items-center gap-2 mb-4">
+      <div className="flex flex-col sm:flex-row sm:flex-wrap sm:items-center gap-2 mb-4">
         <select
           value={docType}
           onChange={(e) => setDocType(e.target.value)}
-          className="bg-navy-800 border border-border rounded px-2 py-1.5 text-xs text-white"
+          className="w-full sm:w-auto bg-navy-800 border border-border rounded px-2 py-1.5 text-xs text-white"
         >
           {DOC_TYPE_OPTIONS.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
@@ -134,7 +134,7 @@ export default function AcademicDocumentsPanel() {
           ref={fileRef}
           type="file"
           accept=".pdf,.md"
-          className="text-xs text-muted file:mr-2 file:px-2 file:py-1 file:rounded
+          className="w-full sm:w-auto text-xs text-muted file:mr-2 file:px-2 file:py-1 file:rounded
                      file:border file:border-border file:bg-navy-800 file:text-white
                      file:text-xs"
         />
@@ -142,7 +142,8 @@ export default function AcademicDocumentsPanel() {
           type="button"
           onClick={() => void handleUpload()}
           disabled={uploading}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium
+          className="w-full sm:w-auto flex items-center justify-center gap-1.5
+                     px-3 py-1.5 min-h-[44px] sm:min-h-0 rounded text-xs font-medium
                      bg-electric/10 border border-electric/30 text-electric
                      hover:bg-electric/20 transition-colors disabled:opacity-50"
         >
@@ -188,7 +189,9 @@ export default function AcademicDocumentsPanel() {
                 type="button"
                 onClick={() => void handleDelete(d.id)}
                 aria-label={`Delete ${d.name}`}
-                className="text-muted hover:text-danger transition-colors p-1"
+                className="flex items-center justify-center shrink-0
+                           min-h-[44px] min-w-[44px] sm:min-h-0 sm:min-w-0
+                           text-muted hover:text-danger transition-colors p-1"
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </button>
