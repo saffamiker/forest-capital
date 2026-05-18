@@ -3259,6 +3259,77 @@ _DOCX_MEDIA = ("application/vnd.openxmlformats-officedocument."
 _PPTX_MEDIA = ("application/vnd.openxmlformats-officedocument."
                "presentationml.presentation")
 
+# Key analytical findings that MUST appear in the midpoint paper. These
+# are appended to the section task prompts (never overwrite the existing
+# instruction — the task string is one logical document). The findings
+# are split by the section they belong in; the Academic Review arbiter
+# scores the same set (agents/academic_review.py).
+_MIDPOINT_S1_KEY_FINDINGS = (
+    "\n\nKEY FINDINGS — Section 1 must state each of these disclosures "
+    "explicitly:\n"
+    "(a) The 2022 equity-IG correlation regime break — the equity-IG "
+    "correlation shifted from approximately -0.05 (pre-2022) to +0.61 "
+    "(post-2022), a structural break in the diversification assumption "
+    "underlying traditional fixed-income allocation. Introduce it here as "
+    "the central finding of the project; it is developed in the Results "
+    "section.\n"
+    "(b) Shorter return histories — five strategies start later than the "
+    "2002-07 study period because of initialisation lookback windows: "
+    "MIN_VARIANCE, BLACK_LITTERMAN and MAX_SHARPE_ROLLING begin "
+    "approximately 2005-07 (36-month window), MOMENTUM_ROTATION "
+    "approximately 2003-07 (12-month window), and REGIME_SWITCHING "
+    "approximately 2002-10 (3-month window). Their comparative metrics "
+    "cover their actual data period, not the full 2002-2026 study "
+    "period.\n"
+    "(c) Independent statistical audit — every metric in the project was "
+    "independently recomputed from raw data by a separate AI model "
+    "(Claude Opus) with no access to the platform's intermediate "
+    "calculations; the audit found zero critical failures across 59 "
+    "checks, and the full audit report is included as an analytical "
+    "appendix. Cite this as evidence of analytical rigour.\n"
+    "(d) Data provenance — investment-grade bond data uses an LQD-to-BND "
+    "splice (LQD pre-2007, BND 2007 onward); high-yield data uses the "
+    "BAMLHYH0A0HYM2TRIV total-return index through December 2025, "
+    "extended via the HYG ETF proxy (approximately 0.04% per month "
+    "tracking error — a documented source change) from January 2026; the "
+    "risk-free rate uses the FRED DTB3 monthly series throughout; the "
+    "monthly series auto-extends from the historical baseline using live "
+    "market-data feeds.\n\n"
+    "METHODOLOGY HIGHLIGHTS — name each of these explicitly: the Carhart "
+    "four-factor model (four factors, MOM included — not a generic "
+    "three-factor model); the time-varying DTB3 risk-free rate (not a "
+    "fixed 4.5%); the Probabilistic Sharpe Ratio with 95% confidence "
+    "intervals; the Deflated Sharpe Ratio (correcting for ten trials "
+    "across ten strategies); the Benjamini-Hochberg FDR correction at "
+    "q < 0.005; and true one-way portfolio turnover from the "
+    "drift-inclusive weight schedule."
+)
+_MIDPOINT_S2_KEY_FINDINGS = (
+    "\n\nKEY FINDINGS — present these in this order, the correlation "
+    "break FIRST:\n"
+    "(1) The 2022 correlation regime break is the central finding and "
+    "MUST be the first result discussed: the equity-IG correlation "
+    "shifted from approximately -0.05 (pre-2022) to +0.61 (post-2022) — "
+    "quote the pre/post values from the provided correlation_pre_post "
+    "data — and connect it to the divergence in strategy performance.\n"
+    "(2) Regime Switching is the only strategy that demonstrably adapts "
+    "to the post-2022 correlation environment; cite its post-2022 Sharpe "
+    "(approximately 0.2483) against the benchmark's post-2022 Sharpe, "
+    "using the actual values in the regime_conditional data.\n"
+    "(3) The FDR result — after Benjamini-Hochberg FDR correction across "
+    "all ten strategies (q < 0.005) no strategy achieves significance at "
+    "the corrected level; raw p-values range from 0.008 to 1.000. Frame "
+    "this as methodological honesty — preliminary evidence of "
+    "economically meaningful performance, NOT a failure and NOT a "
+    "positive significance claim.\n"
+    "(4) The efficient-frontier tangency portfolio concentrates "
+    "approximately 95.6% in high-yield bonds, reflecting HY's realised "
+    "risk-adjusted performance over the sample period. Disclose this "
+    "explicitly as a concentration risk that is sensitive to the "
+    "realised HY Sharpe and is not a strategic allocation recommendation "
+    "without out-of-sample validation."
+)
+
 
 async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
     """
@@ -3350,7 +3421,8 @@ async def export_midpoint_paper(
                  "NOT insert it silently — wrap it in an inline verification "
                  "marker of the form [[VERIFY: <claim>]] (for example "
                  "[[VERIFY: Sharpe ratio for Regime Switching = 0.63]]) so a "
-                 "team member checks it before submission."),
+                 "team member checks it before submission."
+                 + _MIDPOINT_S1_KEY_FINDINGS),
              "context": {"study_period": period,
                          "strategy_metadata": data.get("strategy_metadata"),
                          "risk_free_rate": data["risk_free_rate"]}},
@@ -3370,7 +3442,8 @@ async def export_midpoint_paper(
                  "numeric value, do NOT insert it silently — wrap it in an "
                  "inline verification marker of the form [[VERIFY: <claim>]] "
                  "(for example [[VERIFY: Sharpe ratio for Regime Switching = "
-                 "0.63]]) so a team member checks it before submission."),
+                 "0.63]]) so a team member checks it before submission."
+                 + _MIDPOINT_S2_KEY_FINDINGS),
              "context": {"summary_statistics": data["summary_statistics"],
                          "regime_conditional": data["regime_conditional"],
                          "correlation_pre_post": {

@@ -5968,6 +5968,49 @@ Migration 020 is changelog version 39. Operator step: alembic upgrade
 head on Render.
 
 
+─────────────────────────────────────────────────────────────────────────────
+KEY FINDINGS — REQUIRED IN ALL ACADEMIC DELIVERABLES (May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The midpoint paper, executive brief and presentation deck must all
+present the project's eight key analytical findings. The midpoint paper
+generation prompt (main.py, the /api/v1/export/midpoint-paper section
+task specs — constants _MIDPOINT_S1_KEY_FINDINGS / _MIDPOINT_S2_KEY_
+FINDINGS) instructs the Academic Writer to feature them; the Academic
+Review arbiter (agents/academic_review.py _ARBITER_INSTRUCTIONS and the
+academic_review_arbiter_evaluator_prompt in agents/evaluator_prompts.py)
+scores their presence.
+
+Section 1 (Data and Methodology) findings:
+  - Finding 1 — the 2022 equity-IG correlation regime break (approx
+    -0.05 → +0.61), the project's central finding (also in Section 2).
+  - Finding 5 — turnover reported one-way (two-way ≈ double);
+    Black-Litterman's static-like 4.7% turnover.
+  - Finding 6 — five shorter-series strategies disclosed with their
+    lookback-window start dates.
+  - Finding 7 — the independent statistical audit (zero critical
+    failures across 59 checks).
+  - Finding 8 — data provenance (LQD/BND splice, HYG source change,
+    DTB3 risk-free, monthly auto-extension).
+  Methodology highlights: Carhart four-factor, time-varying DTB3,
+  Probabilistic Sharpe Ratio with 95% CIs, Deflated Sharpe Ratio,
+  Benjamini-Hochberg FDR at q < 0.005, true one-way turnover.
+
+Section 2 (Preliminary Results) findings, in order:
+  - Finding 1 FIRST — the 2022 correlation break, quantified, connected
+    to strategy-performance divergence.
+  - Finding 2 — Regime Switching post-2022 leadership (Sharpe ≈ 0.2483
+    vs the benchmark's post-2022 Sharpe).
+  - Finding 3 — the FDR result (no strategy significant at q < 0.005;
+    raw p 0.008-1.000), framed as methodological honesty, NOT a failure.
+  - Finding 4 — the efficient-frontier tangency portfolio ≈ 95.6% HY,
+    disclosed as a concentration risk with a sensitivity caveat.
+
+The Academic Review arbiter treats a submission that fails to quantify
+the 2022 break, or omits/misrepresents the FDR result, as materially
+incomplete.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.

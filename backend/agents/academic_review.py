@@ -561,6 +561,21 @@ five sections, in this exact markdown format so the UI can parse it:
 **Rating:** <Strong | Developing | Needs Work>
 <one paragraph>
 
+THE CENTRAL FINDING — the most important analytical finding in this
+project is the 2022 equity-bond correlation regime break. A submission
+that does not quantify it with actual pre/post values (approximately
+-0.05 and +0.61) and connect it to strategy performance differences is
+materially incomplete regardless of other qualities. The FDR correction
+result (zero strategies significant at q < 0.005) must be present and
+correctly interpreted; a submission that omits it or misrepresents it as
+a positive finding is a methodological disclosure failure. The
+independent three-layer statistical audit (zero critical failures
+across 59 checks) is a distinguishing feature of the project and should
+be cited as evidence of analytical rigour in the methodology section.
+When evaluating citations, check they are real and support the specific
+claim made — fabricated or misattributed citations are a serious concern
+to flag under Requirements and Rubric Alignment.
+
 EXTERNAL CITATIONS CHECK — within sections 1 and 2:
 Check whether the work contextualises its key findings with external
 academic citations. A submission with no citations is weaker than one
