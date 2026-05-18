@@ -1,10 +1,14 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 
-import { findMarkers, countMarkers } from '../lib/editorMarkers'
+import {
+  findMarkers, countMarkers, nodeToText, docToText, transformBobMarkers,
+} from '../lib/editorMarkers'
+import { BobCalloutPanel } from '../lib/BobCalloutNode'
+import RichTextEditor, { VerifyPopup } from '../components/editor/RichTextEditor'
 import SlideEditor, { slideComplete } from '../components/editor/SlideEditor'
 import PresentationPreview from '../components/editor/PresentationPreview'
-import type { DeckContent, DeckSlide } from '../types/editor'
+import type { DeckContent, DeckSlide, TipTapDoc } from '../types/editor'
 
 // ── [[VERIFY]] / [[BOB]] marker detection ─────────────────────────────────────
 
@@ -33,6 +37,164 @@ describe('editorMarkers', () => {
   it('ignores plain text with no markers', () => {
     expect(countMarkers('no markers here at all')).toBe(0)
     expect(findMarkers('')).toEqual([])
+  })
+})
+
+// ── transformBobMarkers / docToText — [[BOB]] block-node projection ───────────
+
+describe('transformBobMarkers / docToText', () => {
+  it('promotes a whole-paragraph [[BOB]] marker to a bobCallout block node', () => {
+    const doc: TipTapDoc = {
+      type: 'doc',
+      content: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'Intro line.' }] },
+        { type: 'paragraph', content: [{ type: 'text',
+          text: '[[BOB: write the roles section]]' }] },
+      ],
+    }
+    const out = transformBobMarkers(doc)
+    expect(out.content?.[0]?.type).toBe('paragraph')
+    expect(out.content?.[1]?.type).toBe('bobCallout')
+    expect((out.content?.[1]?.attrs as { text: string }).text)
+      .toBe('write the roles section')
+  })
+
+  it('leaves an inline [[VERIFY]] marker in its paragraph — never a node', () => {
+    const doc: TipTapDoc = {
+      type: 'doc',
+      content: [{ type: 'paragraph', content: [{ type: 'text',
+        text: 'Sharpe was [[VERIFY: 0.63]] last year.' }] }],
+    }
+    const out = transformBobMarkers(doc)
+    expect(out.content?.[0]?.type).toBe('paragraph')
+    expect(JSON.stringify(out).includes('bobCallout')).toBe(false)
+  })
+
+  it('is idempotent — a doc already carrying bobCallout nodes is unchanged', () => {
+    const doc: TipTapDoc = {
+      type: 'doc',
+      content: [{ type: 'bobCallout', attrs: { text: 'already a node' } }],
+    }
+    expect(transformBobMarkers(doc)).toEqual(doc)
+  })
+
+  it('docToText projects a bobCallout node back to its [[BOB: …]] marker', () => {
+    const doc: TipTapDoc = {
+      type: 'doc',
+      content: [
+        { type: 'paragraph', content: [{ type: 'text', text: 'Body.' }] },
+        { type: 'bobCallout', attrs: { text: 'your input needed' } },
+      ],
+    }
+    const text = docToText(doc)
+    expect(text).toContain('[[BOB: your input needed]]')
+    // so the projected text still registers as an unresolved marker —
+    // section progress keeps counting a [[BOB]] node.
+    expect(countMarkers(text, 'bob')).toBe(1)
+  })
+
+  it('nodeToText returns the marker text for a lone bobCallout node', () => {
+    expect(nodeToText({ type: 'bobCallout', attrs: { text: 'x' } }))
+      .toBe('[[BOB: x]]')
+  })
+})
+
+// ── BobCalloutPanel — the [[BOB]] block panel ─────────────────────────────────
+
+describe('BobCalloutPanel', () => {
+  it('renders [[BOB]] as a full-width block panel, not an inline span', () => {
+    render(<BobCalloutPanel text="write the roles section"
+      onComplete={() => {}} />)
+    expect(screen.getByText('✏️ BOB — YOUR INPUT NEEDED')).toBeInTheDocument()
+    expect(screen.getByText('write the roles section')).toBeInTheDocument()
+    expect(screen.getByText('Mark as Complete')).toBeInTheDocument()
+  })
+
+  it('Mark as Complete fires onComplete — the callout is removed', () => {
+    const onComplete = vi.fn()
+    render(<BobCalloutPanel text="x" onComplete={onComplete} />)
+    fireEvent.click(screen.getByText('Mark as Complete'))
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── VerifyPopup — the floating [[VERIFY]] confirm popup ───────────────────────
+
+describe('VerifyPopup', () => {
+  it('shows the verify-against-Analytics message and the two actions', () => {
+    render(<VerifyPopup x={100} y={100} onVerify={() => {}}
+      onCancel={() => {}} />)
+    expect(screen.getByRole('dialog', { name: 'Verify marker' }))
+      .toBeInTheDocument()
+    expect(screen.getByText(/Verify this value against the Analytics page/))
+      .toBeInTheDocument()
+    expect(screen.getByText('Mark as Verified')).toBeInTheDocument()
+    expect(screen.getByText('Cancel')).toBeInTheDocument()
+  })
+
+  it('Mark as Verified fires onVerify — the marker is removed', () => {
+    const onVerify = vi.fn()
+    render(<VerifyPopup x={0} y={0} onVerify={onVerify} onCancel={() => {}} />)
+    fireEvent.click(screen.getByText('Mark as Verified'))
+    expect(onVerify).toHaveBeenCalledTimes(1)
+  })
+
+  it('Cancel and a backdrop click fire onCancel — the marker stays intact', () => {
+    const onCancel = vi.fn()
+    render(<VerifyPopup x={0} y={0} onVerify={() => {}} onCancel={onCancel} />)
+    fireEvent.click(screen.getByText('Cancel'))
+    fireEvent.click(screen.getByTestId('verify-backdrop'))
+    expect(onCancel).toHaveBeenCalledTimes(2)
+  })
+})
+
+// ── RichTextEditor — [[BOB]] block node + [[VERIFY]] inline marker ────────────
+
+describe('RichTextEditor markers', () => {
+  afterEach(() => { vi.restoreAllMocks() })
+
+  const bobDoc: TipTapDoc = {
+    type: 'doc',
+    content: [
+      { type: 'paragraph', content: [{ type: 'text', text: 'Section body.' }] },
+      { type: 'paragraph', content: [{ type: 'text',
+        text: '[[BOB: write the roles section]]' }] },
+    ],
+  }
+
+  it('renders a [[BOB]] marker as a block panel, not an inline span', async () => {
+    render(<RichTextEditor content={bobDoc} onChange={() => {}} />)
+    expect(await screen.findByText('✏️ BOB — YOUR INPUT NEEDED'))
+      .toBeInTheDocument()
+    expect(screen.getByText('write the roles section')).toBeInTheDocument()
+    // promoted to a node — no inline [[BOB]] marker decoration remains.
+    expect(document.querySelector('.editor-marker-bob')).toBeNull()
+  })
+
+  it('Mark as Complete removes the callout and drops the marker count', async () => {
+    const onChange = vi.fn()
+    render(<RichTextEditor content={bobDoc} onChange={onChange} />)
+    const btn = await screen.findByText('Mark as Complete')
+    fireEvent.click(btn)
+    const calls = onChange.mock.calls
+    expect(calls.length).toBeGreaterThan(0)
+    // the projected text no longer carries a [[BOB]] marker — section
+    // progress for that heading advances.
+    const lastText = calls[calls.length - 1][1] as string
+    expect(countMarkers(lastText, 'bob')).toBe(0)
+  })
+
+  it('renders a [[VERIFY]] marker as an inline amber marker span', async () => {
+    const verifyDoc: TipTapDoc = {
+      type: 'doc',
+      content: [{ type: 'paragraph', content: [{ type: 'text',
+        text: 'The Sharpe ratio was [[VERIFY: 0.63]] over the period.' }] }],
+    }
+    render(<RichTextEditor content={verifyDoc} onChange={() => {}} />)
+    await screen.findByText(/The Sharpe ratio was/)
+    const span = document.querySelector('.editor-marker-verify')
+    expect(span).not.toBeNull()
+    expect(span?.textContent).toContain('[[VERIFY: 0.63]]')
   })
 })
 

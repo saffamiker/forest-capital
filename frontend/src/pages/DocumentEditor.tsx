@@ -21,7 +21,7 @@ import EditorTasksCallout from '../components/editor/EditorTasksCallout'
 import PresentationPreview from '../components/editor/PresentationPreview'
 import type { NavSection } from '../components/editor/EditorNavigator'
 import WritingAssistant from '../components/editor/WritingAssistant'
-import { countMarkers } from '../lib/editorMarkers'
+import { countMarkers, nodeToText } from '../lib/editorMarkers'
 import type {
   DeckContent, EditorDraft, EditorDraftVersion, SaveState, TipTapDoc,
 } from '../types/editor'
@@ -42,22 +42,18 @@ const EXPORT_ENDPOINT: Record<string, string> = {
 }
 
 // Walks a TipTap doc into (heading, body-text) sections for the navigator.
+// nodeToText projects a bobCallout node back to its [[BOB: …]] marker, so a
+// resolved/unresolved callout still counts toward the section's progress.
 function tiptapSections(doc: TipTapDoc | null): { heading: string; text: string }[] {
   const out: { heading: string; text: string }[] = []
   let current: { heading: string; text: string } | null = null
-  const nodeText = (node: { content?: unknown[]; text?: string }): string => {
-    if (node.text) return node.text
-    return (node.content ?? [])
-      .map((c) => nodeText(c as { content?: unknown[]; text?: string }))
-      .join('')
-  }
   for (const raw of (doc?.content ?? [])) {
-    const node = raw as { type?: string; content?: unknown[]; text?: string }
+    const node = raw as { type?: string }
     if (node.type === 'heading') {
       if (current) out.push(current)
-      current = { heading: nodeText(node) || 'Section', text: '' }
+      current = { heading: nodeToText(raw) || 'Section', text: '' }
     } else if (current) {
-      current.text += '\n' + nodeText(node)
+      current.text += '\n' + nodeToText(raw)
     }
   }
   if (current) out.push(current)
