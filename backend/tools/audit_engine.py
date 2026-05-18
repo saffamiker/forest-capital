@@ -333,6 +333,129 @@ async def start_audit(
     return {"status": "started", "audit_id": run_id}
 
 
+# ── Smart audit caching — the auto-trigger ────────────────────────────────────
+
+
+async def _run_qa_methodology() -> None:
+    """
+    Runs the QA methodology checklist — Tier 1 synchronously, Tier 2 in
+    the background — against the current strategy results and caches the
+    verdict. The methodology half of run_full_audit(). Mirrors the
+    /api/v1/qa/run endpoint; the blocking pipeline work is offloaded to a
+    thread so this is safe to call from an event-loop background task.
+    """
+    import asyncio as _asyncio
+    import os
+
+    if os.getenv("ENVIRONMENT", "").lower() == "test":
+        return
+
+    from tools.cache import (
+        _compute_data_hash, get_strategy_cache, set_qa_cache,
+    )
+    from tools.qa_tiered import run_tier1_checks, schedule_tier2_background
+
+    def _history_and_hash() -> tuple[Any, str]:
+        from tools.data_fetcher import get_full_history
+        history = get_full_history()
+        monthly = history.get("equity_monthly")
+        n = len(monthly) if monthly is not None else 0
+        last = (str(monthly.index[-1])
+                if monthly is not None and n > 0 else "unknown")
+        return history, _compute_data_hash(n, last, n_strategies=10)
+
+    history, strategy_hash = await _asyncio.to_thread(_history_and_hash)
+    cached = await get_strategy_cache(strategy_hash)
+    if cached:
+        results_dict = cached
+    else:
+        from tools.backtester import run_all_strategies
+        results_dict = await _asyncio.to_thread(run_all_strategies, history)
+
+    t1 = await _asyncio.to_thread(run_tier1_checks, results_dict)
+    await set_qa_cache(strategy_hash, t1, tier=1)
+
+    # Tier 2 — fire and forget; off_loop write engine, see qa_run.
+    def _writer(h: str, v: dict, tier: int) -> None:
+        _asyncio.run(set_qa_cache(h, v, tier=tier, off_loop=True))
+    schedule_tier2_background(results_dict, strategy_hash, _writer)
+
+
+async def run_full_audit(reason: str = "scheduled") -> None:
+    """
+    The smart-audit-caching auto-trigger body: re-runs the statistical
+    audit and then the QA methodology audit — in sequence, never in
+    parallel, so the two never contend for the concurrency lock.
+
+    Idempotent: a no-op when the last completed audit is still current
+    for the data, so it is safe to fire after any data event. Fail-open
+    throughout — a failure in either audit is logged and swallowed.
+
+    reason — what prompted the run ("data_ingestion" | "cache_invalidation"
+    | "scheduled"); stored as the audit_runs.triggered_by value and logged.
+    """
+    try:
+        from tools.audit_assembler import is_audit_current
+        currency = await is_audit_current()
+        if currency.get("is_current"):
+            log.info("auto_audit_skipped_current", reason=reason)
+            return
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto_audit_currency_check_failed", reason=reason,
+                    error=str(exc))
+        # An unclear signal — better to run the audit than to skip it.
+
+    log.info("auto_audit_triggered", reason=reason)
+
+    # 1. Statistical audit — claim the concurrency lock, run the layers.
+    try:
+        if await is_audit_running() is None:
+            run_id = await _create_running_audit(reason, "auto")
+            if run_id is not None:
+                await _execute_audit(run_id)
+        else:
+            log.info("auto_audit_statistical_skipped_locked", reason=reason)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto_audit_statistical_failed", reason=reason,
+                    error=str(exc))
+
+    # 2. QA methodology audit — Tier 1 + Tier 2, after the statistical run.
+    try:
+        await _run_qa_methodology()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto_audit_qa_failed", reason=reason, error=str(exc))
+
+
+def trigger_audit_async(reason: str) -> None:
+    """
+    Fire run_full_audit() in the background — the smart-audit-caching
+    auto-trigger. Works whether or not the caller is on an event loop:
+    on a loop (an async endpoint) it schedules a task; off a loop (the
+    sync data pipeline) it runs in a daemon thread with its own loop.
+    Fail-open — a spawn failure is logged and never raised into the
+    caller's primary flow.
+    """
+    import asyncio
+    import threading
+
+    try:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            task = loop.create_task(run_full_audit(reason))
+            _audit_bg_tasks.add(task)
+            task.add_done_callback(_audit_bg_tasks.discard)
+        else:
+            threading.Thread(
+                target=lambda: asyncio.run(run_full_audit(reason)),
+                daemon=True, name="auto-audit",
+            ).start()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto_audit_spawn_failed", reason=reason, error=str(exc))
+
+
 # ── Export report ─────────────────────────────────────────────────────────────
 
 _COMPUTATION_REGIMES = (

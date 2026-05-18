@@ -1917,6 +1917,15 @@ def _compute_full_history() -> dict:
                 rows_added=incremental["rows_added"],
                 note="Strategy cache will be invalidated on next /compare call",
             )
+            # Smart audit caching — new rows were appended, so the data
+            # the last audit verified has changed. Re-run the audit in the
+            # background (idempotent: run_full_audit is a no-op if the
+            # cached audit somehow still matches). Fail-open.
+            try:
+                from tools.audit_engine import trigger_audit_async
+                trigger_audit_async("data_ingestion")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("auto_audit_hook_failed", error=str(exc))
         result = _read_history_from_db()
         log.info("get_full_history_complete", monthly_rows=row_count, source="db_cache")
         return result

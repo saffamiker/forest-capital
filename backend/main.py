@@ -1974,6 +1974,11 @@ async def cache_invalidate(
     removed = await clear_strategy_cache()
     log.info("strategy_cache_invalidated", rows_removed=removed,
              by=session.get("email"))
+    # Smart audit caching — the cache invalidation is a data event; if the
+    # last audit no longer reflects the data, run_full_audit re-verifies it
+    # in the background (idempotent — a no-op when already current).
+    from tools.audit_engine import trigger_audit_async
+    trigger_audit_async("cache_invalidation")
     return {"status": "cleared", "rows_removed": removed}
 
 
