@@ -2449,6 +2449,23 @@ async def activity_summary(
     return await get_activity_summary(analytical_only=not include_testing)
 
 
+@app.get("/api/v1/activity/cost-summary")
+async def activity_cost_summary(
+    request: Request,
+    include_testing: bool = Query(False),
+    session: dict = Depends(require_auth),
+):
+    """
+    AI token spend — grand total plus per-member and per-interaction-type
+    breakdowns, drawn from the agent_interactions cost columns. Drives the
+    Team Activity cost panel. Analytical sessions only unless
+    include_testing is set.
+    """
+    from tools.activity_log import get_cost_summary
+
+    return await get_cost_summary(analytical_only=not include_testing)
+
+
 # ── Changelog ─────────────────────────────────────────────────────────────────
 
 @app.get("/api/v1/changelog")

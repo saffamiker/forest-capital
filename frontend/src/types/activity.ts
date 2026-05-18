@@ -75,3 +75,25 @@ export interface ActivitySummary {
   analytical_sessions_only: boolean
   test_coverage?: { steps_attested: number; testers: number }
 }
+
+/** One row of the AI cost summary — a member or an interaction type. */
+export interface CostRow {
+  user?: string
+  user_name?: string
+  interaction_type?: string
+  cost_usd: number
+  input_tokens: number
+  output_tokens: number
+  interactions: number
+}
+
+/** GET /api/v1/activity/cost-summary — AI token spend. */
+export interface CostSummary {
+  total_cost_usd: number
+  total_input_tokens: number
+  total_output_tokens: number
+  total_interactions: number
+  by_member: CostRow[]
+  by_type: CostRow[]
+  analytical_sessions_only: boolean
+}

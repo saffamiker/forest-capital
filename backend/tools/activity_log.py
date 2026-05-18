@@ -720,6 +720,87 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
         return empty
 
 
+async def get_cost_summary(analytical_only: bool = True) -> dict[str, Any]:
+    """
+    AI token spend across every logged interaction — the Team Activity
+    cost panel. Aggregates the estimated_cost_usd / input_tokens /
+    output_tokens columns of agent_interactions into a grand total plus
+    per-member and per-interaction-type breakdowns.
+
+    Rows predating the migration-020 token columns carry NULL costs and
+    contribute zero — the figure is "spend since cost tracking shipped",
+    not lifetime spend. Fail-open: a query failure yields a zeroed shape.
+    """
+    empty = {
+        "total_cost_usd": 0.0, "total_input_tokens": 0,
+        "total_output_tokens": 0, "total_interactions": 0,
+        "by_member": [], "by_type": [],
+        "analytical_sessions_only": analytical_only,
+    }
+    if not _DB_AVAILABLE:
+        return empty
+    try:
+        from sqlalchemy import text
+        st_clause = " AND session_type = 'analytical'" if analytical_only else ""
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            by_member = await session.execute(text(
+                "SELECT user_email, "
+                " COALESCE(SUM(estimated_cost_usd), 0), "
+                " COALESCE(SUM(input_tokens), 0), "
+                " COALESCE(SUM(output_tokens), 0), COUNT(*) "
+                "FROM agent_interactions WHERE 1=1" + st_clause
+                + " GROUP BY user_email"
+            ))
+            by_type = await session.execute(text(
+                "SELECT interaction_type, "
+                " COALESCE(SUM(estimated_cost_usd), 0), "
+                " COALESCE(SUM(input_tokens), 0), "
+                " COALESCE(SUM(output_tokens), 0), COUNT(*) "
+                "FROM agent_interactions WHERE 1=1" + st_clause
+                + " GROUP BY interaction_type"
+            ))
+
+            members = []
+            t_cost = t_in = t_out = t_n = 0.0
+            for email, cost, in_tok, out_tok, n in by_member.fetchall():
+                cost, in_tok, out_tok, n = (
+                    float(cost), int(in_tok), int(out_tok), int(n))
+                t_cost += cost
+                t_in += in_tok
+                t_out += out_tok
+                t_n += n
+                members.append({
+                    "user": email, "user_name": display_name(email),
+                    "cost_usd": round(cost, 6), "input_tokens": in_tok,
+                    "output_tokens": out_tok, "interactions": n,
+                })
+
+            types = []
+            for itype, cost, in_tok, out_tok, n in by_type.fetchall():
+                types.append({
+                    "interaction_type": itype,
+                    "cost_usd": round(float(cost), 6),
+                    "input_tokens": int(in_tok),
+                    "output_tokens": int(out_tok),
+                    "interactions": int(n),
+                })
+
+        return {
+            "total_cost_usd": round(t_cost, 6),
+            "total_input_tokens": int(t_in),
+            "total_output_tokens": int(t_out),
+            "total_interactions": int(t_n),
+            "by_member": sorted(members, key=lambda m: m["cost_usd"],
+                                reverse=True),
+            "by_type": sorted(types, key=lambda t: t["cost_usd"],
+                              reverse=True),
+            "analytical_sessions_only": analytical_only,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cost_summary_failed", error=str(exc))
+        return empty
+
+
 # ── small helpers ─────────────────────────────────────────────────────────────
 
 async def _test_coverage() -> dict[str, int]:
