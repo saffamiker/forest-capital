@@ -416,23 +416,33 @@ export default function TestRunner() {
 
       {/* Free-form "Suggest an enhancement" — bottom-left, clears the
           test panel at bottom-right. */}
+      {/* Free-form Suggest — bottom-left on desktop; on mobile it moves
+          to the right and sits above the full-width control panel so the
+          two never overlap. */}
       <button
         type="button"
         onClick={() => setFreeForm(true)}
         title="Suggest an enhancement"
         aria-label="Suggest an enhancement"
-        className="fixed bottom-4 left-4 z-[90] w-10 h-10 rounded-full
+        className="fixed z-[90] w-11 h-11 rounded-full
                    flex items-center justify-center bg-navy-800
                    border border-electric/40 text-electric shadow-lg
-                   hover:bg-electric/15 transition-colors"
+                   hover:bg-electric/15 transition-colors
+                   bottom-[calc(50vh+1rem)] right-4
+                   sm:bottom-4 sm:left-4 sm:right-auto"
       >
         <Lightbulb className="w-4 h-4" />
       </button>
 
-      {/* Floating control panel — bottom-right, amber border. */}
+      {/* Floating control panel — a full-width bottom sheet on mobile
+          (capped at 50vh, scrollable, clear of the home-bar safe area);
+          a bottom-right card with an amber border from sm: up. */}
       <div
-        className="fixed bottom-4 right-4 z-[90] w-[360px] max-w-[92vw]
-                   rounded-lg border-2 border-warning bg-navy-800 shadow-2xl"
+        style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+        className="fixed z-[90] border-2 border-warning bg-navy-800 shadow-2xl
+                   overflow-y-auto inset-x-0 bottom-0 max-h-[50vh] rounded-t-lg
+                   sm:inset-x-auto sm:bottom-4 sm:right-4 sm:w-[360px]
+                   sm:max-w-[92vw] sm:max-h-none sm:rounded-lg sm:pb-0"
       >
         {minimised ? (
           <button type="button" onClick={() => setMinimised(false)}
@@ -523,8 +533,9 @@ export default function TestRunner() {
 
       {/* AI-categorisation toast after feedback */}
       {toast && (
-        <div className="fixed bottom-[5.5rem] right-4 z-[91] w-[360px]
-                        max-w-[92vw] rounded border border-electric/30
+        <div className="fixed right-4 z-[91] w-[360px] max-w-[92vw]
+                        bottom-[calc(50vh+1rem)] sm:bottom-[5.5rem]
+                        rounded border border-electric/30
                         bg-navy-800 px-3 py-2 text-2xs text-slate-200 shadow-lg">
           {toast}
         </div>

@@ -66,16 +66,20 @@ export default function WhatsNewModal() {
   return (
     <div
       className="fixed inset-0 z-[80] flex items-center justify-center
-                 bg-black/50 p-4"
+                 bg-black/50 p-0 sm:p-4"
       onClick={close}
       role="presentation"
     >
+      {/* Full-screen on mobile; a centred card from sm: up. The footer
+          stays pinned (shrink-0) while the entry list scrolls. */}
       <div
         role="dialog"
         aria-label="What's New"
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-lg max-h-[85vh] flex flex-col rounded-lg
-                   border border-border bg-navy-800 shadow-2xl"
+        className="w-full h-full rounded-none border-0 flex flex-col
+                   bg-navy-800 shadow-2xl
+                   sm:h-auto sm:max-h-[85vh] sm:max-w-lg sm:rounded-lg
+                   sm:border sm:border-border"
       >
         {/* Header */}
         <div className="flex items-start justify-between gap-3 px-5 py-4
