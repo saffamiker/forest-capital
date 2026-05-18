@@ -4211,9 +4211,10 @@ holds the pure compute functions.
   - Drawdown comparison table — max drawdown and recovery months,
     sorted by max drawdown ascending
   - Turnover column — added to the Dashboard strategy comparison table.
-    Shows true_turnover, the genuine sum-of-absolute-weight-change
-    figure (sum(|Δw|)/2 per rebalance, annualised), alongside the
-    legacy rebalance-count proxy avg_monthly_turnover
+    Shows true_turnover, the genuine annualised one-way trading figure
+    (see TRUE TURNOVER below); the legacy rebalance-count proxy
+    avg_monthly_turnover is still stored on every result (the audit
+    layer references it) but is no longer displayed
   - Carhart four-factor loadings table — OLS regression of each
     strategy's monthly excess return on MKT-RF / SMB / HML / MOM; betas,
     annualised alpha, R², and a p<0.05 significance flag per coefficient.
@@ -4987,8 +4988,16 @@ which is also how the contract tests exercise the degradation path.
   banner repeated in the header of every page. The midpoint paper has
   the brief's four sections (Data & Methodology, Preliminary Results
   with the summary-statistics and regime-conditional tables embedded,
-  Roles & Division of Labor from real Team Activity counts, Next Steps
-  from the last Academic Review verdict). The executive brief has a
+  Roles & Division of Labor, Next Steps from the last Academic Review
+  verdict). HUMAN-INPUT CALLOUTS: Section 3 (Roles) is NOT AI-generated
+  — _add_callout renders a boxed amber "BOB — THIS SECTION NEEDS YOUR
+  DIRECT INPUT" prompt, since only Bob can describe the division of
+  labour authentically; Section 4 keeps the AI draft but a "BOB —
+  REVIEW AND REFINE" callout sits above it. In Sections 1-2 the
+  Academic Writer is instructed to wrap any uncertain numeric value in
+  an inline [[VERIFY: …]] marker rather than insert it silently;
+  _add_body renders those markers bold with a yellow highlight. The
+  executive brief has a
   title page then Executive Summary, Methodology, four Key Findings
   (regime-conditional / summary-statistics / drawdown / factor-loadings
   tables embedded) plus Limitations and Final Recommendations.
@@ -5270,6 +5279,21 @@ USER-MANAGEMENT ENDPOINTS (all manage_users-gated):
   leave the platform with no active manage_users holder
   (count_active_sysadmins <= 1) — 400 "Cannot remove the last sysadmin."
 
+WELCOME EMAIL: POST /api/v1/admin/users sends a welcome email to the new
+user immediately after a successful create. auth.build_welcome_email()
+builds the (subject, plain-text body) — a pure, unit-testable function
+naming the platform, Group 1, how magic-link login works, the user's
+registered email, and what each screen offers; a notes line ("You have
+been added as: …") is added only when Michael recorded notes.
+auth.send_welcome_email() delivers it through the same SendGrid path and
+sender as the magic link (printed to the terminal in dev/test). It is
+FAIL-OPEN — returns True on send / False on any failure, never raises —
+so a delivery problem cannot block or undo the user creation; the
+endpoint's response carries welcome_email_sent and the Settings → Users
+panel shows "User added and welcome email sent to …" or "… could not be
+sent — check email configuration." The platform URL quoted in the email
+is config.PLATFORM_URL (env var, defaults to FRONTEND_URL).
+
 AUTH ENDPOINTS: the magic-link request gates on
 tools.platform_users.is_login_allowed (an active platform_users row is
 required when the table is reachable, so a deactivated user is correctly
@@ -5309,10 +5333,10 @@ ENDPOINTS: GET/POST/PATCH/DELETE /api/v1/admin/users.
 UI: Settings → Users (sysadmin only).
 Migration: 015 — operator runs `alembic upgrade head` on Render.
 
-FORWARD ITEM: agents/academic_review.py builds its team-member list from
-config.PROJECT_TEAM_EMAILS — it should eventually read the active
-team_member users from platform_users instead. Left as-is for now; the
-config list and the seeded table agree, so there is no behavioural gap.
+agents/academic_review.py resolves its team-member list from
+platform_users — _resolve_team_members() queries the active sysadmin
+and team_member rows, fail-open to config.PROJECT_TEAM_EMAILS if the
+table is unreachable.
 
 
 ─────────────────────────────────────────────────────────────────────────────
@@ -5520,12 +5544,18 @@ cross-layer checks are recorded as INFO findings that explain the
 difference rather than flagging it. The export report carries a
 COMPUTATION REGIMES section to the same end.
 
-PERSISTED-WEIGHTS LIMITATION: the backtester computes per-rebalance
-weight schedules but does not persist them — only monthly returns are
-cached. So raw_data.strategy_weights is empty, true_turnover cannot be
-independently recomputed, and Layer 1's weight-constraint check
-degrades to an honest SKIP (re-run the backtester with weight logging
-to audit turnover).
+WEIGHT SCHEDULE PERSISTENCE: the backtester persists each strategy's
+per-rebalance target weights as a `weight_schedule` list on its result
+dict (one {date, weights:{equity,ig,hy}} entry per rebalance), so the
+schedule survives into strategy_results_cache. audit_assembler builds
+raw_data.strategy_weights from it (columnar {name:{dates,equity,ig,hy}}),
+and Layer 1's weight-constraint check 5 now runs FULLY — sum-to-1,
+long-only and ≤1 verified at every rebalance, with a BENCHMARK
+100%-equity special case. A strategy cached BEFORE weight persistence
+shipped has an empty schedule; the check WARNs (not SKIPs, not FAILs)
+for it and the message points at POST /api/v1/cache/invalidate. That
+endpoint (manage_users-gated) clears strategy_results_cache so the next
+/api/backtest/compare recomputes and repopulates the weight schedule.
 
 ENDPOINTS (all manage_users-gated — sysadmin only):
   POST /api/v1/audit/run            — fire an audit (background; returns
@@ -5535,8 +5565,28 @@ ENDPOINTS (all manage_users-gated — sysadmin only):
   GET  /api/v1/audit/runs           — every run, newest first
   GET  /api/v1/audit/runs/latest    — the most recent run with findings
   GET  /api/v1/audit/runs/{id}      — one run, findings grouped by layer
-  GET  /api/v1/audit/runs/{id}/export — the plain-text audit report
+  GET  /api/v1/audit/runs/{id}/export — the Statistical Audit Report PDF
 A 'running' audit_runs row is the concurrency lock.
+
+AUDIT REPORT PDFs (May 18 2026): both audit exports are professionally
+formatted PDFs (tools/audit_pdf.py, reportlab) for the Analytical
+Appendix — white background, Forest Capital / McColl School of Business
+identity, page numbers, PASS/WARN/FAIL colour coding.
+  GET /api/v1/audit/runs/{id}/export → build_statistical_audit_pdf —
+    cover, executive summary (what the audit is, the three layers,
+    overall result, how to read PASS/WARN/FAIL, the independent
+    auditor), per-layer detailed findings, and a data-provenance page.
+    team_member-gated.
+  GET /api/v1/qa/export → build_methodology_audit_pdf — the QA agent's
+    methodology checklist as a PDF: cover, executive summary, and
+    findings grouped by category. Runs the audit fresh (the POST
+    /api/qa/audit path); require_auth (the Methodology Review is open to
+    every authenticated user). Filenames:
+    forest_capital_statistical_audit_<date>.pdf and
+    forest_capital_methodology_audit_<date>.pdf. The QA tab carries a
+    Download button on each section. (The /mnt/skills PDF skill is
+    absent in this environment; reportlab — already a pinned dependency
+    — is the engine, following the docx/pptx generator pattern.)
 
 FRONTEND: Settings → Statistical Audit (sysadmin only, below Users) —
 the latest run's status and per-layer progress, findings grouped as
@@ -5549,6 +5599,78 @@ login notification for a completed run under 24h old with failures.
 The pre-submission audit (triggered_by = pre_submission) is the same
 three layers; its export report is intended for inclusion in the
 Analytical Appendix as evidence of independent statistical verification.
+
+
+─────────────────────────────────────────────────────────────────────────────
+SMART AUDIT CACHING (migration 018, May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+An audit run independently recomputes every metric with claude-opus-4-7
+— the most expensive operation on the platform. Smart audit caching
+re-runs an audit ONLY when the data it verifies has actually changed; a
+cached, verified result is served instantly while the data is unchanged.
+
+THE DATA FINGERPRINT — audit_assembler.current_data_hash() is a cheap
+SHA256 fingerprint of the data the audit verifies: the row counts and
+newest dates of market_data_monthly, ff_factors_monthly and
+strategy_results_cache, read via get_data_status() (COUNT/MAX queries
+only — never a full payload assembly). It changes when rows are appended
+or the strategy cache is recomputed, not on a restart. Returns "" on any
+failure or when no relevant table is reported — an empty hash never
+matches, so the audit reads as stale rather than wrongly cached.
+audit_runs.data_hash (migration 018) stores the fingerprint of the data
+each completed run verified; _execute_audit computes and stores it.
+
+is_audit_current() compares TWO layers, returning a per-layer breakdown
+{is_current, statistical_current, qa_current, current_data_hash,
+last_hash, qa_strategy_hash, qa_last_hash}:
+  - statistical_current — current_data_hash() matches the data_hash on
+    the most recent COMPLETED audit_runs row.
+  - qa_current — the latest non-expired qa_results_cache verdict was
+    computed for the same strategy data as the latest
+    strategy_results_cache row (the two strategy_hash values match).
+is_current is True only when BOTH are current. GET /api/v1/audit/runs/
+latest carries the breakdown; the QA tab shows a green "Verified … ·
+Data unchanged · No re-run needed" banner when both are current, and a
+per-layer "Statistical audit: ✓ current / Methodology audit: ⚠️ stale"
+breakdown when only one has drifted.
+
+AUTO-TRIGGER — run_full_audit(reason) re-runs the statistical audit then
+the QA methodology audit, in sequence (never parallel — they would
+contend for the concurrency lock). It is IDEMPOTENT: a no-op when
+is_audit_current() reports the cache still holds, so it is safe to fire
+after any data event. trigger_audit_async(reason) spawns it in the
+background — loop-or-thread adaptive (a task on an event loop, a daemon
+thread off one). Fail-open throughout. Three hooks fire it, all
+reason "data_ingestion" except where noted:
+  - the full-pipeline market_data_monthly write — _persist_to_db fires
+    it after a successful persist (the canonical monthly-data write; a
+    cold-boot rebuild of identical data is a harmless no-op via the
+    idempotency check).
+  - the incremental daily append — get_full_history fires it after
+    check_and_run_incremental_update reports new rows.
+  - POST /api/v1/cache/invalidate — after the strategy cache is cleared
+    (reason "cache_invalidation").
+The reason is logged (auto_audit_triggered / auto_audit_skipped_current)
+and stored as the audit_runs.triggered_by value, so the audit history
+distinguishes an auto-run from a manual one. After a data fetch lands
+new rows in market_data_monthly the data_hash changes, is_audit_current()
+returns false, both audits re-run in the background, and the strategy
+results cache misses on the next /api/backtest/compare and recomputes —
+no manual step beyond running the fetch.
+
+RUN LIVE DEMO — when is_current is True the QA tab also shows a
+confirmation-gated "Run Live Demo" button. It forces a fresh audit
+regardless of cache currency — for showing the audit running live to
+Forest Capital — by POSTing /api/v1/audit/run with {"reason": "demo"}
+(accepted as an alias for triggered_by). The run is stored
+triggered_by="demo" and marked 🎯 in the audit history so a forced
+presentation run is never mistaken for a real data-driven audit.
+
+COST MODEL — the Opus audit model is charged only when the data
+genuinely changes (a data ingestion or cache invalidation) or when a
+demo run is explicitly requested. Navigating to the QA tab, polling, or
+re-mounting never spends the Opus budget — the cached verdict is served.
 
 
 ─────────────────────────────────────────────────────────────────────────────
@@ -5676,6 +5798,55 @@ PERMISSION SUMMARY:
   Statistical Audit full panel     — team_member+
   Run Full QA / Presentation View  — team_member+
   Non-team viewer                  — read-only audit summary only
+
+
+─────────────────────────────────────────────────────────────────────────────
+TRUE TURNOVER — DRIFT-INCLUSIVE (May 18 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+backtester._true_turnover() measures genuine annualised portfolio
+turnover — the one-way trading at every rebalance, INCLUDING drift
+correction.
+
+The earlier version compared consecutive schedule entries (target →
+target), so a fixed-weight strategy — whose target never changes —
+reported ~0 turnover even though it trades every quarter to correct
+drift. The fix: between two rebalances the realised weights drift as
+the assets earn different returns, and the rebalance trades from those
+drifted weights back to the new target.
+
+  growth_i   = product over the inter-rebalance months of (1 + r_i)
+  drifted_i  = prev_target_i * growth_i / sum_j(prev_target_j * growth_j)
+  turnover_t = sum_i |drifted_i - new_target_i| / 2     (one-way)
+  true_turnover = sum_t(turnover_t) / n_years
+
+_true_turnover(schedule, returns_df, n_months) takes returns_df so it
+can compound the inter-rebalance returns; it derives the drifted
+weights itself rather than reshaping the (date, weights) schedule tuple
+— so _portfolio_returns_monthly and every strategy's schedule
+construction are unchanged. The initial build-from-cash at the first
+schedule entry is a one-off and is not counted. BENCHMARK is 100%
+equity and never rebalances — its true_turnover is 0.0, which is
+correct and left as-is.
+
+Every result still also carries the legacy rebalance-count proxy
+avg_monthly_turnover (the statistical-audit layer references that
+field); only true_turnover is shown on the Dashboard, with no fallback.
+
+ONE-WAY CONVENTION: the sum(|Δw|)/2 figure is ONE-WAY annualised
+turnover — the proportion of the portfolio traded in one direction per
+year, the standard institutional convention. Two-way round-trip
+turnover is approximately double the reported figure. Wherever turnover
+is communicated — the Dashboard InfoIcon tooltip, the midpoint paper
+methodology section, the Academic Review arbiter evaluator — this
+convention is stated explicitly so a reader is never left guessing.
+
+BLACK-LITTERMAN FINDING: real-data turnover (2002-2025) runs ~4-5% for
+the fixed-weight statics, 18-56% for most dynamic strategies — and 4.7%
+for BLACK_LITTERMAN. Despite its dynamic classification, Black-Litterman
+exhibits static-like turnover because its quarterly views shift weights
+only modestly from the equilibrium prior. This is a genuine analytical
+finding, not a data issue, and is disclosed as such.
 
 
 Sprint structure is retired. Work is now Kanban with three columns:

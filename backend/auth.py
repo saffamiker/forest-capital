@@ -19,6 +19,7 @@ from config import (
     SESSION_EXPIRY_HOURS,
     ENVIRONMENT,
     FRONTEND_URL,
+    PLATFORM_URL,
     PERMISSIONS,
 )
 from logger import get_logger
@@ -243,6 +244,144 @@ async def send_magic_link(email: str, token: str) -> None:
     except Exception as exc:
         log.error("magic_link_send_failed", email=email, error=str(exc))
         raise HTTPException(status_code=500, detail="Failed to send magic link email.")
+
+
+# ── Welcome email (sent on user creation) ─────────────────────────────────────
+
+WELCOME_EMAIL_SUBJECT = (
+    "You've been granted access to the Forest Capital "
+    "Portfolio Intelligence System"
+)
+
+
+def build_welcome_email(
+    email: str,
+    display_name: str | None = None,
+    notes: str | None = None,
+) -> tuple[str, str]:
+    """
+    Builds the (subject, plain-text body) of the welcome email sent to a
+    newly-created platform user. Pure — no I/O — so it is unit-testable.
+    The greeting falls back to the email when no display name was given;
+    a notes line is added only when Michael recorded notes on the user.
+    """
+    greeting = display_name or email
+    notes_line = (f"\nYou have been added as: {notes}\n" if notes else "")
+    rule = "-" * 60
+    body = f"""Dear {greeting},
+
+Michael Ruurds has granted you access to the Forest Capital Portfolio
+Intelligence System, a platform developed by Group 1 for the FNA 670
+Industry Practicum at the McColl School of Business, Queens University
+Charlotte.
+
+Group 1: Michael Ruurds, Bob Thao, and Molly Murdock.
+{notes_line}
+{rule}
+
+ACCESSING THE PLATFORM
+
+Platform URL: {PLATFORM_URL}
+
+This platform uses magic link authentication — there is no password to
+remember.
+
+To log in:
+  1. Visit {PLATFORM_URL}
+  2. Enter your registered email address: {email}
+  3. Check your inbox for a magic link email
+  4. Click the link to be logged in instantly
+
+Important: you must use {email} to log in. Magic links expire after
+{MAGIC_LINK_EXPIRY_MINUTES} minutes, so use them promptly.
+
+{rule}
+
+WHAT YOU CAN EXPLORE
+
+Dashboard
+  Ten asset allocation strategies evaluated across a 23-year dataset
+  (2002-2026), with Sharpe ratios, CAGR, drawdown, and tier rankings.
+
+Analytics
+  Rolling correlations, regime-conditional performance, Carhart
+  four-factor loadings, sensitivity analysis, and the efficient frontier.
+
+AI Investment Council
+  A council of seven AI agents deliberates on portfolio questions in
+  real time. Ask any question about the strategies, data, or methodology.
+
+Statistical Evidence
+  Walk-forward validation, combinatorial purged cross-validation (CPCV),
+  probabilistic Sharpe ratios, and significance testing.
+
+Regime Analysis
+  Analysis of the 2022 equity-bond correlation regime break and its
+  implications for portfolio construction.
+
+Quality Assurance
+  A 39-point methodology audit and a three-layer independent statistical
+  audit — every metric independently verified.
+
+{rule}
+
+If you have any questions or encounter any issues, please contact
+Michael Ruurds at ruurdsm@queens.edu.
+
+We hope you find the platform useful and welcome your feedback.
+
+Michael Ruurds
+Group 1, FNA 670
+McColl School of Business
+Queens University Charlotte
+"""
+    return WELCOME_EMAIL_SUBJECT, body
+
+
+async def send_welcome_email(
+    email: str,
+    display_name: str | None = None,
+    notes: str | None = None,
+) -> bool:
+    """
+    Sends the welcome email to a newly-created platform user. Fail-open:
+    returns True when the email was sent (or printed, in dev/test), False
+    on any failure — never raises, so a delivery problem cannot block the
+    user-creation response.
+    """
+    subject, body = build_welcome_email(email, display_name, notes)
+
+    if ENVIRONMENT in ("development", "test"):
+        border = "=" * 64
+        print(f"\n{border}")
+        print(f"  [{ENVIRONMENT.upper()}] Welcome email for {email}")
+        print(f"  Subject: {subject}")
+        print(f"{border}\n")
+        log.info("welcome_email_dev_printed", email=email,
+                 environment=ENVIRONMENT)
+        return True
+
+    try:
+        import os
+
+        import sendgrid
+        from sendgrid.helpers.mail import Mail
+
+        sg = sendgrid.SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
+        message = Mail(
+            from_email=os.getenv("SENDGRID_FROM_EMAIL", "noreply@queens.edu"),
+            to_emails=email,
+            subject=subject,
+            plain_text_content=body,
+        )
+        resp = sg.send(message)
+        log.info("welcome_email_sent", email=email, status=resp.status_code)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        # Fail-open — the user is already created; a delivery failure is
+        # logged for the operator but never raised into the response.
+        log.error("welcome_email_send_failed", email=email, error=str(exc))
+        return False
 
 
 # ── FastAPI dependencies ──────────────────────────────────────────────────────

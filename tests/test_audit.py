@@ -33,7 +33,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from main import app  # noqa: E402
 from auth import generate_session_token  # noqa: E402
-from tools import audit_engine  # noqa: E402
+from tools import audit_assembler, audit_engine  # noqa: E402
 from tools.audit_assembler import (  # noqa: E402
     FORMULA_SPECIFICATIONS, _payload_hash, assemble_audit_payload,
 )
@@ -186,9 +186,11 @@ class TestLayer1:
 
     def test_catches_a_broken_weight_sum(self):
         payload = _clean_payload()
-        # A weight set that does not sum to 1.0.
+        # A persisted weight schedule (columnar) whose row does not
+        # sum to 1.0 — equity 0.5 + ig 0.3 + hy 0.1 = 0.9.
         payload["raw_data"]["strategy_weights"] = {
-            "S1": {"2022-01-31": {"equity": 0.5, "ig": 0.3, "hy": 0.1}},
+            "S1": {"dates": ["2022-01-31"], "equity": [0.5],
+                   "ig": [0.3], "hy": [0.1]},
         }
         result = layer_1_raw_data_audit(payload)
         weight = [f for f in result["findings"]
@@ -308,3 +310,211 @@ class TestAuditEngine:
         assert classify_discrepancy(1.0, 1.05)[0] == "fail"
         # A sign flip is always a failure.
         assert classify_discrepancy(0.5, -0.5)[0] == "fail"
+
+
+# ── Smart audit caching ───────────────────────────────────────────────────────
+
+
+def _status(tables: list[dict]) -> dict:
+    return {"available": True, "study_period": None, "tables": tables}
+
+
+class TestSmartAuditCaching:
+    """current_data_hash / is_audit_current / run_full_audit — the
+    data-fingerprint machinery behind smart audit caching."""
+
+    # ── current_data_hash ─────────────────────────────────────────────────────
+
+    def test_data_hash_consistent_for_same_data(self, monkeypatch):
+        async def _s() -> dict:
+            return _status([{"name": "market_data_monthly", "row_count": 282,
+                             "max_date": "2025-12-31", "last_updated": None}])
+        monkeypatch.setattr("tools.cache.get_data_status", _s)
+        h1 = asyncio.run(audit_assembler.current_data_hash())
+        h2 = asyncio.run(audit_assembler.current_data_hash())
+        assert h1 == h2 and h1 != ""
+
+    def test_data_hash_changes_with_row_count(self, monkeypatch):
+        def _mk(n: int) -> dict:
+            return _status([{"name": "market_data_monthly", "row_count": n,
+                             "max_date": "2025-12-31", "last_updated": None}])
+
+        async def _s1() -> dict:
+            return _mk(282)
+        monkeypatch.setattr("tools.cache.get_data_status", _s1)
+        h1 = asyncio.run(audit_assembler.current_data_hash())
+
+        async def _s2() -> dict:
+            return _mk(283)
+        monkeypatch.setattr("tools.cache.get_data_status", _s2)
+        h2 = asyncio.run(audit_assembler.current_data_hash())
+        assert h1 != h2
+
+    def test_data_hash_empty_when_unavailable(self, monkeypatch):
+        async def _unavail() -> dict:
+            return {"available": False, "tables": []}
+        monkeypatch.setattr("tools.cache.get_data_status", _unavail)
+        assert asyncio.run(audit_assembler.current_data_hash()) == ""
+
+    # ── is_audit_current ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _patch_currency(monkeypatch, *, cdh, last, strat, qa):
+        async def _cdh() -> str:
+            return cdh
+
+        async def _last() -> str | None:
+            return last
+
+        async def _strat() -> str | None:
+            return strat
+
+        async def _qa() -> str | None:
+            return qa
+        monkeypatch.setattr(audit_assembler, "current_data_hash", _cdh)
+        monkeypatch.setattr(
+            "tools.audit_engine.get_last_completed_audit_hash", _last)
+        monkeypatch.setattr("tools.cache.get_latest_strategy_hash", _strat)
+        monkeypatch.setattr("tools.cache.get_latest_qa_hash", _qa)
+
+    def test_is_audit_current_true_when_hashes_match(self, monkeypatch):
+        self._patch_currency(monkeypatch, cdh="abc", last="abc",
+                             strat="s1", qa="s1")
+        result = asyncio.run(audit_assembler.is_audit_current())
+        assert result["is_current"] is True
+        assert result["statistical_current"] and result["qa_current"]
+
+    def test_is_audit_current_false_when_no_prior_run(self, monkeypatch):
+        self._patch_currency(monkeypatch, cdh="abc", last=None,
+                             strat=None, qa=None)
+        result = asyncio.run(audit_assembler.is_audit_current())
+        assert result["is_current"] is False
+
+    def test_is_audit_current_false_when_hash_differs(self, monkeypatch):
+        # Statistical hash drifted, QA still in parity.
+        self._patch_currency(monkeypatch, cdh="abc", last="DIFFERENT",
+                             strat="s1", qa="s1")
+        result = asyncio.run(audit_assembler.is_audit_current())
+        assert result["is_current"] is False
+        assert result["statistical_current"] is False
+        assert result["qa_current"] is True
+
+    # ── run_full_audit — the idempotent auto-trigger body ─────────────────────
+
+    def test_run_full_audit_skips_when_current(self, monkeypatch):
+        async def _current() -> dict:
+            return {"is_current": True}
+        monkeypatch.setattr(audit_assembler, "is_audit_current", _current)
+        created: list[str] = []
+
+        async def _create(tb: str, em: str):
+            created.append(tb)
+            return None
+        monkeypatch.setattr(audit_engine, "_create_running_audit", _create)
+        asyncio.run(audit_engine.run_full_audit("data_ingestion"))
+        assert created == []   # idempotent — no run created on current data
+
+    def test_run_full_audit_proceeds_when_stale(self, monkeypatch):
+        async def _stale() -> dict:
+            return {"is_current": False}
+        monkeypatch.setattr(audit_assembler, "is_audit_current", _stale)
+
+        async def _no_lock():
+            return None
+        monkeypatch.setattr(audit_engine, "is_audit_running", _no_lock)
+        created: list[str] = []
+
+        async def _create(tb: str, em: str):
+            created.append(tb)
+            return 7
+        monkeypatch.setattr(audit_engine, "_create_running_audit", _create)
+        executed: list[int] = []
+
+        async def _exec(rid: int):
+            executed.append(rid)
+        monkeypatch.setattr(audit_engine, "_execute_audit", _exec)
+
+        async def _qa():
+            return None
+        monkeypatch.setattr(audit_engine, "_run_qa_methodology", _qa)
+        asyncio.run(audit_engine.run_full_audit("data_ingestion"))
+        assert created == ["data_ingestion"]   # triggered_by carries the reason
+        assert executed == [7]
+
+    def test_trigger_audit_async_spawns_run(self, monkeypatch):
+        # The data-ingestion hook calls trigger_audit_async — verify it
+        # actually fires run_full_audit in the background.
+        import threading
+        fired = threading.Event()
+        captured: list[str] = []
+
+        async def _fake_run(reason: str = "scheduled"):
+            captured.append(reason)
+            fired.set()
+        monkeypatch.setattr(audit_engine, "run_full_audit", _fake_run)
+        audit_engine.trigger_audit_async("data_ingestion")
+        assert fired.wait(timeout=5)
+        assert captured == ["data_ingestion"]
+
+    # ── Endpoint wiring ───────────────────────────────────────────────────────
+
+    def test_demo_reason_sets_triggered_by_demo(self, monkeypatch):
+        captured: dict[str, str] = {}
+
+        async def _fake_start(triggered_by: str, email: str) -> dict:
+            captured["triggered_by"] = triggered_by
+            return {"status": "started", "audit_id": 1}
+        monkeypatch.setattr("tools.audit_engine.start_audit", _fake_start)
+        resp = client.post("/api/v1/audit/run", headers=TEAM,
+                           json={"reason": "demo"})
+        assert resp.status_code == 200
+        assert captured["triggered_by"] == "demo"
+
+    def test_cache_invalidate_triggers_audit(self, monkeypatch):
+        calls: list[str] = []
+        monkeypatch.setattr("tools.audit_engine.trigger_audit_async",
+                            lambda reason: calls.append(reason))
+        resp = client.post("/api/v1/cache/invalidate", headers=SYSADMIN)
+        assert resp.status_code == 200
+        assert calls == ["cache_invalidation"]
+
+    def test_latest_run_endpoint_returns_currency(self):
+        resp = client.get("/api/v1/audit/runs/latest", headers=SYSADMIN)
+        assert resp.status_code == 200
+        body = resp.json()
+        for key in ("is_current", "statistical_current", "qa_current"):
+            assert key in body
+
+    # ── _persist_to_db auto-trigger hook (the market_data_monthly write) ──────
+
+    def test_persist_to_db_triggers_audit_on_success(self, monkeypatch):
+        import database
+        import tools.data_fetcher as df
+
+        monkeypatch.setattr(database, "DATABASE_URL",
+                            "postgresql+asyncpg://x/y", raising=False)
+
+        async def _noop_persist(*_a, **_k):
+            return None
+        monkeypatch.setattr(df, "_async_persist_all", _noop_persist)
+        calls: list[str] = []
+        monkeypatch.setattr("tools.audit_engine.trigger_audit_async",
+                            lambda reason: calls.append(reason))
+        df._persist_to_db({}, {}, None, None, {}, None)
+        assert calls == ["data_ingestion"]
+
+    def test_persist_to_db_skips_audit_on_failure(self, monkeypatch):
+        import database
+        import tools.data_fetcher as df
+
+        monkeypatch.setattr(database, "DATABASE_URL",
+                            "postgresql+asyncpg://x/y", raising=False)
+
+        async def _boom(*_a, **_k):
+            raise RuntimeError("persist failed")
+        monkeypatch.setattr(df, "_async_persist_all", _boom)
+        calls: list[str] = []
+        monkeypatch.setattr("tools.audit_engine.trigger_audit_async",
+                            lambda reason: calls.append(reason))
+        df._persist_to_db({}, {}, None, None, {}, None)
+        assert calls == []   # the monthly write failed — no audit fired

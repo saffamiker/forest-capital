@@ -161,36 +161,58 @@ def layer_1_raw_data_audit(payload: dict[str, Any]) -> dict[str, Any]:
           auditor_reasoning="Every monthly return is within +/-50%.")
 
     # ── Check 5 — weight constraints ──────────────────────────────────────
-    # The backtester does not persist per-rebalance weights, so this
-    # check cannot run from stored data — it skips honestly rather than
-    # passing a check it never performed.
+    # The backtester persists each strategy's per-rebalance target weights
+    # (weight_schedule), so this check runs in full: at every rebalance
+    # the weights must sum to 1.0, be non-negative (long-only) and not
+    # exceed 1. A strategy cached before weight persistence shipped has
+    # empty columns — the check warns rather than failing for it.
     weights = raw.get("strategy_weights", {})
-    if not weights:
+    populated = {n: cols for n, cols in weights.items()
+                 if cols and (cols.get("dates"))}
+    if not populated:
         f("Weight constraints", "weights", "warning", "info",
-          auditor_reasoning="Per-rebalance strategy weights are not "
-                            "persisted (only monthly returns are cached), so "
-                            "the sum-to-1 and long-only weight checks cannot "
-                            "run from stored data. Re-run the backtester with "
-                            "weight-schedule logging to audit turnover.")
+          auditor_reasoning="No persisted weight schedule is present in the "
+                            "audit payload — the sum-to-1 and long-only "
+                            "checks cannot run. Refresh the strategy cache "
+                            "(POST /api/v1/cache/invalidate) so the "
+                            "backtester repopulates the weight schedule.")
     else:
         bad: list[str] = []
-        for name, w in weights.items():
-            for date, alloc in (w or {}).items():
-                total = sum(float(v) for v in (alloc or {}).values())
-                if abs(total - 1.0) > _WEIGHT_TOLERANCE:
-                    bad.append(f"{name}@{date} sum={total:.4f}")
-                if any(float(v) < 0 for v in (alloc or {}).values()):
-                    bad.append(f"{name}@{date} negative weight")
+        n_rebalances = 0
+        for name, cols in populated.items():
+            dates = cols.get("dates") or []
+            eq = cols.get("equity") or []
+            ig = cols.get("ig") or []
+            hy = cols.get("hy") or []
+            for i in range(len(dates)):
+                n_rebalances += 1
+                e, g, h = float(eq[i]), float(ig[i]), float(hy[i])
+                if abs((e + g + h) - 1.0) > _WEIGHT_TOLERANCE:
+                    bad.append(f"{name}@{dates[i]} sum={e + g + h:.4f}")
+                if min(e, g, h) < -_WEIGHT_TOLERANCE:
+                    bad.append(f"{name}@{dates[i]} negative weight")
+                if max(e, g, h) > 1.0 + _WEIGHT_TOLERANCE:
+                    bad.append(f"{name}@{dates[i]} weight>1")
+                # BENCHMARK is 100% equity at all times.
+                if name == "BENCHMARK" and (
+                        abs(e - 1.0) > _WEIGHT_TOLERANCE
+                        or g > _WEIGHT_TOLERANCE or h > _WEIGHT_TOLERANCE):
+                    bad.append(f"BENCHMARK@{dates[i]} not 100% equity")
         if bad:
             f("Weight constraints", "weights", "fail", "critical",
               platform_value="; ".join(bad[:10]),
               discrepancy=f"{len(bad)} weight-constraint violation(s)",
-              auditor_reasoning="Strategy weights must sum to 1.0 and be "
-                                "non-negative at every rebalance.")
+              auditor_reasoning="Strategy weights must sum to 1.0, be "
+                                "non-negative and not exceed 1 at every "
+                                "rebalance.")
         else:
             f("Weight constraints", "weights", "pass", "info",
-              auditor_reasoning="All strategy weights sum to 1.0 and are "
-                                "non-negative.")
+              platform_value=f"{len(populated)} strategies × "
+                             f"{n_rebalances} rebalances",
+              auditor_reasoning=f"{len(populated)} strategies × "
+                                f"{n_rebalances} rebalances verified: all "
+                                "weights sum to 1.0, all non-negative, none "
+                                "exceed 1.")
 
     # ── Check 6 — return-series length consistency ────────────────────────
     n_assets = len(equity)

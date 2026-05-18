@@ -69,8 +69,9 @@ def make_history(n_months: int = 120, seed: int = 42) -> dict:
 
 _DYNAMIC = {"MOMENTUM_ROTATION", "REGIME_SWITCHING", "VOL_TARGETING",
             "BLACK_LITTERMAN", "MAX_SHARPE_ROLLING"}
-# Fixed-weight static strategies rebalance back to the SAME targets, so their
-# true turnover is ~0 — distinct from the optimised statics that re-solve.
+# BENCHMARK is 100% equity and never rebalances — its true turnover is 0.
+# The other fixed-weight statics rebalance to fixed targets but still trade
+# each quarter to correct drift, so their true turnover is genuine and > 0.
 _FIXED_WEIGHT_STATIC = {"BENCHMARK", "CLASSIC_60_40", "EQUAL_WEIGHT"}
 
 
@@ -92,18 +93,31 @@ class TestTrueTurnover:
                 continue
             assert tt >= 0.0, f"{name} reported negative true_turnover {tt}"
 
-    def test_fixed_weight_static_turnover_near_zero(self):
-        """A strategy that rebalances to fixed targets re-establishes the
-        SAME weights every period — its true turnover is approximately 0."""
+    def test_benchmark_turnover_is_zero(self):
+        """BENCHMARK is 100% equity and never rebalances — turnover is 0."""
         from tools.backtester import run_all_strategies
         results = run_all_strategies(make_history())
-        for name in _FIXED_WEIGHT_STATIC:
+        res = results.get("BENCHMARK", {})
+        if "error" not in res and res.get("true_turnover") is not None:
+            assert res["true_turnover"] == 0.0, (
+                f"BENCHMARK never rebalances — true_turnover should be 0, "
+                f"got {res['true_turnover']}"
+            )
+
+    def test_fixed_weight_static_turnover_is_genuine(self):
+        """A fixed-weight static rebalances to the SAME targets, but the
+        portfolio drifts between rebalances and is traded back each
+        quarter — so its true turnover is a genuine positive figure, not
+        zero, and stays within a plausible band."""
+        from tools.backtester import run_all_strategies
+        results = run_all_strategies(make_history())
+        for name in ("CLASSIC_60_40", "EQUAL_WEIGHT"):
             res = results.get(name, {})
             if "error" in res or res.get("true_turnover") is None:
                 continue
-            assert res["true_turnover"] < 0.05, (
-                f"{name} fixed-weight true_turnover unexpectedly high: "
-                f"{res['true_turnover']}"
+            tt = res["true_turnover"]
+            assert 0.0 < tt < 1.0, (
+                f"{name} drift-correction true_turnover implausible: {tt}"
             )
 
     def test_dynamic_turnover_exceeds_fixed_weight_static(self):

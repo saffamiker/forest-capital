@@ -221,11 +221,30 @@ async def get_ff_factors() -> list[dict[str, Any]] | None:
     return None
 
 
+_MONTH_NAMES = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+]
+
+
+def _display_label(iso_date: str | None) -> str | None:
+    """A human month-year label for a table's max_date — the data
+    currency indicator shows '2026-04-30' as 'April 2026'."""
+    if not iso_date:
+        return None
+    try:
+        parts = str(iso_date).split("-")
+        return f"{_MONTH_NAMES[int(parts[1]) - 1]} {int(parts[0])}"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 async def get_data_status() -> dict[str, Any]:
     """
     Read-only status of the data tables feeding the analytics layer:
     row count, data date range, last-updated timestamp where the table
-    carries one, and a green/amber/red staleness pill.
+    carries one, a green/amber/red staleness pill, and a human
+    display_label of the newest data month ("April 2026").
 
     Staleness keys off the newest data date vs today:
       red   — newest data > 30 days behind
@@ -323,6 +342,11 @@ async def get_data_status() -> dict[str, Any]:
         log.warning("data_status_failed", error=str(exc))
         return empty
 
+    # A human "April 2026" label per table — the data currency indicator
+    # on each visualisation screen reads it instead of reformatting dates.
+    for t in tables:
+        t["display_label"] = _display_label(t.get("max_date"))
+
     # Study period — derived from market_data_monthly's range.
     study_period = None
     mdm = next((t for t in tables if t["name"] == "market_data_monthly"), None)
@@ -372,6 +396,73 @@ async def set_strategy_cache(
             log.info("strategy_cache_written", strategy_hash=strategy_hash, n_strategies=len(results))
     except Exception as exc:
         log.warning("strategy_cache_write_error", error=str(exc))
+
+
+async def clear_strategy_cache() -> int:
+    """
+    Deletes every strategy_results_cache row so the backtester recomputes
+    from fresh data on the next request — used after a data update or to
+    repopulate results that predate a new result-dict field (e.g. the
+    weight_schedule). Returns the number of rows removed; fail-open to 0.
+    """
+    if not _DB_AVAILABLE:
+        return 0
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            res = await session.execute(
+                text("DELETE FROM strategy_results_cache"))
+            await session.commit()
+            removed = res.rowcount or 0
+            log.info("strategy_cache_cleared", rows=removed)
+            return removed
+    except Exception as exc:
+        log.warning("strategy_cache_clear_error", error=str(exc))
+        return 0
+
+
+async def get_latest_strategy_hash() -> str | None:
+    """
+    The strategy_hash of the most recently computed strategy_results_cache
+    row. Smart audit caching compares it against the latest QA verdict's
+    hash to tell whether the methodology audit is still current. None when
+    no strategies have been computed (or on a database error — fail-open).
+    """
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(text(
+                "SELECT strategy_hash FROM strategy_results_cache "
+                "ORDER BY computed_at DESC LIMIT 1"))
+            r = row.fetchone()
+            return str(r[0]) if r and r[0] else None
+    except Exception as exc:
+        log.warning("latest_strategy_hash_read_error", error=str(exc))
+    return None
+
+
+async def get_latest_qa_hash() -> str | None:
+    """
+    The strategy_hash of the most recent NON-EXPIRED qa_results_cache row
+    — the data block the latest methodology audit verified. The QA audit
+    is "current" when this matches get_latest_strategy_hash(). None when
+    no fresh QA verdict exists (or on a database error — fail-open).
+    """
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(text(
+                "SELECT strategy_hash FROM qa_results_cache "
+                "WHERE expires_at > now() ORDER BY run_at DESC LIMIT 1"))
+            r = row.fetchone()
+            return str(r[0]) if r and r[0] else None
+    except Exception as exc:
+        log.warning("latest_qa_hash_read_error", error=str(exc))
+    return None
 
 
 async def get_regime_cache() -> dict[str, Any] | None:

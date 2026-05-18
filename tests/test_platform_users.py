@@ -280,3 +280,93 @@ class TestPureHelpers:
         from config import ROLE_PRESETS
         assert _clean_permissions(None, "team_member") == list(
             ROLE_PRESETS["team_member"])
+
+
+class TestWelcomeEmail:
+    """A welcome email is sent — fail-open — after a user is created via
+    POST /api/v1/admin/users."""
+
+    @staticmethod
+    def _patch_creation(monkeypatch, *, created):
+        """Stubs create_user / email_exists so the endpoint reaches the
+        welcome-email step without a database."""
+        import tools.platform_users as pu
+
+        async def _exists(_email: str) -> bool:
+            return False
+
+        async def _create(**_kwargs):
+            return created
+        monkeypatch.setattr(pu, "email_exists", _exists)
+        monkeypatch.setattr(pu, "create_user", _create)
+
+    def test_welcome_email_sent_on_successful_creation(self, monkeypatch):
+        self._patch_creation(monkeypatch, created={
+            "id": 9, "email": "guest@queens.edu", "display_name": "Guest",
+            "role": "viewer", "notes": None, "permissions": [],
+            "is_active": True,
+        })
+        import auth
+        sent_to: list[str] = []
+
+        async def _send(email, display_name=None, notes=None):
+            sent_to.append(email)
+            return True
+        monkeypatch.setattr(auth, "send_welcome_email", _send)
+        resp = client.post(USERS,
+                            json={"email": "guest@queens.edu", "role": "viewer"},
+                            headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert sent_to == ["guest@queens.edu"]
+        assert resp.json()["welcome_email_sent"] is True
+
+    def test_welcome_email_not_sent_when_creation_fails(self, monkeypatch):
+        # create_user returns None (no database) → 503, and the email
+        # step is never reached.
+        self._patch_creation(monkeypatch, created=None)
+        import auth
+        sent: list[str] = []
+
+        async def _send(email, display_name=None, notes=None):
+            sent.append(email)
+            return True
+        monkeypatch.setattr(auth, "send_welcome_email", _send)
+        resp = client.post(USERS,
+                            json={"email": "guest@queens.edu", "role": "viewer"},
+                            headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 503
+        assert sent == []
+
+    def test_email_failure_does_not_block_creation(self, monkeypatch):
+        self._patch_creation(monkeypatch, created={
+            "id": 9, "email": "guest@queens.edu", "display_name": None,
+            "role": "viewer", "notes": None, "permissions": [],
+            "is_active": True,
+        })
+        import auth
+
+        async def _send(email, display_name=None, notes=None):
+            return False   # delivery failed — fail-open
+        monkeypatch.setattr(auth, "send_welcome_email", _send)
+        resp = client.post(USERS,
+                            json={"email": "guest@queens.edu", "role": "viewer"},
+                            headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200   # the user is still created
+        assert resp.json()["welcome_email_sent"] is False
+
+    def test_email_body_contains_registered_email(self):
+        from auth import build_welcome_email
+        _subject, body = build_welcome_email("guest@queens.edu", "Guest", None)
+        assert "guest@queens.edu" in body
+
+    def test_email_body_contains_platform_url(self):
+        from auth import build_welcome_email
+        from config import PLATFORM_URL
+        _subject, body = build_welcome_email("guest@queens.edu", None, None)
+        assert PLATFORM_URL in body
+
+    def test_email_body_includes_notes_when_given(self):
+        from auth import build_welcome_email
+        _subject, body = build_welcome_email(
+            "guest@queens.edu", "Guest", "FNA 670 guest reviewer")
+        assert "You have been added as: FNA 670 guest reviewer" in body

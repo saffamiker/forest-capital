@@ -118,7 +118,18 @@ def academic_review_arbiter_evaluator_prompt() -> str:
         "substantive and honest, not generic encouragement?\n\n"
         "WEIGHTS for the overall score: all_sections_present 0.30, "
         "all_sections_rated 0.25, investigation_specificity 0.20, "
-        "synthesis_quality 0.15, overall_readiness_substance 0.10."
+        "synthesis_quality 0.15, overall_readiness_substance 0.10.\n\n"
+        "TURNOVER DISCLOSURE — when the deliverable under review cites "
+        "portfolio turnover figures, the arbiter's verdict should verify, "
+        "and flag any gap under Requirements Alignment as a disclosure "
+        "gap, that the deliverable: (1) explicitly states turnover figures "
+        "are one-way annualised turnover; (2) acknowledges that two-way "
+        "round-trip turnover is approximately double; and (3) where "
+        "Black-Litterman turnover is cited alongside dynamic-strategy "
+        "turnover, notes that its static-like figure (4.7%) reflects the "
+        "framework's equilibrium prior rather than a data issue. Reward a "
+        "verdict that catches a missing turnover disclosure; do not "
+        "penalise one when the deliverable cites no turnover figures."
         + _JSON_CONTRACT
     )
 

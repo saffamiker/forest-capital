@@ -195,4 +195,40 @@ describe('UserManagementPanel', () => {
                                       .map((o) => o.getAttribute('value'))
     expect(options).toEqual(['viewer', 'team_member'])
   })
+
+  it('confirms the welcome email was sent after adding a user', async () => {
+    const user = userEvent.setup()
+    mockedAxios.post = vi.fn().mockResolvedValue({
+      data: { id: 2, welcome_email_sent: true },
+    })
+    render(<UserManagementPanel />)
+    await waitFor(() => expect(screen.getByText('Molly')).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: /add user/i }))
+    const dialog = screen.getByRole('dialog', { name: /add user/i })
+    await user.type(within(dialog).getAllByRole('textbox')[0],
+                    'newuser@queens.edu')
+    await user.click(within(dialog).getByRole('button', { name: 'Add User' }))
+
+    expect(await screen.findByText(
+      /welcome email sent to newuser@queens.edu/i)).toBeInTheDocument()
+  })
+
+  it('warns when the welcome email could not be sent', async () => {
+    const user = userEvent.setup()
+    mockedAxios.post = vi.fn().mockResolvedValue({
+      data: { id: 2, welcome_email_sent: false },
+    })
+    render(<UserManagementPanel />)
+    await waitFor(() => expect(screen.getByText('Molly')).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: /add user/i }))
+    const dialog = screen.getByRole('dialog', { name: /add user/i })
+    await user.type(within(dialog).getAllByRole('textbox')[0],
+                    'newuser@queens.edu')
+    await user.click(within(dialog).getByRole('button', { name: 'Add User' }))
+
+    expect(await screen.findByText(
+      /Welcome email could not be sent/i)).toBeInTheDocument()
+  })
 })

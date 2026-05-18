@@ -1870,13 +1870,19 @@ async def audit_run(
     """
     Triggers a full three-layer statistical audit in the background and
     returns immediately with the audit_id. A concurrent run is refused
-    with already_running. `triggered_by` may be "manual" (default) or
-    "pre_submission" — the latter marks an Analytical-Appendix audit.
+    with already_running.
+
+    `triggered_by` may be "manual" (default), "pre_submission" (an
+    Analytical-Appendix audit) or "demo" (a forced run for the live
+    presentation). The smart-audit-caching "Run Live Demo" button sends
+    {"reason": "demo"} — accepted here as an alias for triggered_by.
     Project team only — the Statistical Audit lives in the QA tab.
     """
     from tools.audit_engine import start_audit
-    triggered_by = str((body or {}).get("triggered_by") or "manual")
-    if triggered_by not in ("manual", "scheduled", "pre_submission"):
+    body = body or {}
+    triggered_by = str(body.get("triggered_by") or body.get("reason")
+                       or "manual")
+    if triggered_by not in ("manual", "scheduled", "pre_submission", "demo"):
         triggered_by = "manual"
     return await start_audit(triggered_by, session.get("email", ""))
 
@@ -1899,9 +1905,23 @@ async def audit_get_latest_run(
     authenticated user — viewers see the read-only audit summary in the
     QA tab; the full findings panel is gated to the project team in the
     frontend.
+
+    Carries the smart-audit-caching verdict: is_current is True when the
+    live data fingerprint matches the last completed run's data_hash, so
+    the QA tab can show a cached result instead of an unnecessary re-run.
     """
+    from tools.audit_assembler import is_audit_current
     from tools.audit_engine import get_latest_audit_run
-    return {"run": await get_latest_audit_run()}
+    run = await get_latest_audit_run()
+    currency = await is_audit_current()
+    return {
+        "run": run,
+        "is_current": currency["is_current"],
+        "statistical_current": currency["statistical_current"],
+        "qa_current": currency["qa_current"],
+        "current_data_hash": currency["current_data_hash"],
+        "last_hash": currency["last_hash"],
+    }
 
 
 @app.get("/api/v1/audit/runs/{run_id}")
@@ -1923,21 +1943,45 @@ async def audit_export_run(
     session: dict = Depends(require_permission("team_member")),
 ):
     """
-    The audit run as a downloadable plain-text report — suitable for the
-    Analytical Appendix as evidence of independent statistical
-    verification. Sysadmin only.
+    The audit run as a downloadable PDF — the Statistical Audit Report,
+    professionally formatted for inclusion in the Analytical Appendix as
+    evidence of independent statistical verification. Project team only.
     """
-    from tools.audit_engine import format_audit_report, get_audit_run
+    from datetime import date
+    from tools.audit_engine import get_audit_run
+    from tools.audit_pdf import build_statistical_audit_pdf
     run = await get_audit_run(run_id)
     if run is None:
         raise HTTPException(status_code=404, detail="Audit run not found.")
-    report = format_audit_report(run)
+    pdf = build_statistical_audit_pdf(run)
+    filename = f"forest_capital_statistical_audit_{date.today().isoformat()}.pdf"
     return Response(
-        content=report,
-        media_type="text/plain",
-        headers={"Content-Disposition":
-                 f'attachment; filename="audit_report_{run_id}.txt"'},
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@app.post("/api/v1/cache/invalidate")
+async def cache_invalidate(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Clears strategy_results_cache so the backtester recomputes from fresh
+    data on the next /api/backtest request — used after a data update or
+    to repopulate cached results that predate a new result-dict field
+    (e.g. the persisted weight_schedule). Sysadmin only.
+    """
+    from tools.cache import clear_strategy_cache
+    removed = await clear_strategy_cache()
+    log.info("strategy_cache_invalidated", rows_removed=removed,
+             by=session.get("email"))
+    # Smart audit caching — the cache invalidation is a data event; if the
+    # last audit no longer reflects the data, run_full_audit re-verifies it
+    # in the background (idempotent — a no-op when already current).
+    from tools.audit_engine import trigger_audit_async
+    trigger_audit_async("cache_invalidation")
+    return {"status": "cleared", "rows_removed": removed}
 
 
 # ── User management ───────────────────────────────────────────────────────────
@@ -2000,7 +2044,17 @@ async def admin_create_user(
     if created is None:
         raise HTTPException(status_code=503,
                             detail="Could not create the user — database unavailable.")
-    return created
+    # Welcome email — sent only after the user is successfully created.
+    # Fail-open: send_welcome_email never raises, so a delivery failure
+    # cannot undo or block the creation. welcome_email_sent tells the
+    # frontend which confirmation message to show.
+    from auth import send_welcome_email
+    welcome_email_sent = await send_welcome_email(
+        email=email,
+        display_name=created.get("display_name"),
+        notes=created.get("notes"),
+    )
+    return {**created, "welcome_email_sent": welcome_email_sent}
 
 
 @app.patch("/api/v1/admin/users/{user_id}")
@@ -2533,6 +2587,43 @@ async def qa_audit(request: Request, session: dict = Depends(require_auth)):
             log.error("qa_audit_error", error=str(exc))
 
     return MOCK_QA_AUDIT
+
+
+@app.get("/api/v1/qa/export")
+@limiter.limit("10/minute")
+async def qa_export(request: Request, session: dict = Depends(require_auth)):
+    """
+    The QA methodology audit as a downloadable PDF — the Methodology
+    Audit Report, formatted for inclusion in the Analytical Appendix.
+    Open to every authenticated user: the Methodology Review section of
+    the QA tab is not team-gated.
+
+    The audit is run fresh (the same path as POST /api/qa/audit) so the
+    PDF always reflects the current strategy results; the test
+    environment and a pipeline failure fall back to the mock audit so
+    the endpoint always returns a valid PDF.
+    """
+    from datetime import date
+    from tools.audit_pdf import build_methodology_audit_pdf
+    audit = MOCK_QA_AUDIT
+    if ENVIRONMENT != "test":
+        try:
+            from tools.data_fetcher import get_full_history
+            from tools.backtester import run_all_strategies
+            from agents.qa_agent import QAAgent
+            history = get_full_history()
+            strategy_results = run_all_strategies(history)
+            audit = QAAgent().run_audit(strategy_results, run_full_checklist=True)
+        except Exception as exc:
+            log.error("qa_export_error", error=str(exc))
+            audit = MOCK_QA_AUDIT
+    pdf = build_methodology_audit_pdf(audit)
+    filename = f"forest_capital_methodology_audit_{date.today().isoformat()}.pdf"
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/qa/ask")
@@ -3073,7 +3164,6 @@ async def export_midpoint_paper(
         data = await gather_document_data()
         period = data["study_period"]
         has_results = bool(data["summary_statistics"] or data["regime_conditional"])
-        has_team = bool((data["team_summary"] or {}).get("per_member"))
         has_review = bool(data["last_review_text"])
 
         specs = [
@@ -3088,7 +3178,23 @@ async def export_midpoint_paper(
                  "portfolio constraints (long-only, fully invested, no cash, "
                  "quarterly rebalancing), the ten strategies grouped as "
                  "static versus dynamic, and the Carhart four-factor "
-                 "attribution model."),
+                 "attribution model. When discussing portfolio turnover, "
+                 "always clarify: turnover is reported as one-way annualised "
+                 "turnover (the standard institutional convention) and "
+                 "two-way round-trip turnover is approximately double the "
+                 "reported figures; true turnover is computed from the "
+                 "drift-inclusive weight schedule at each quarterly "
+                 "rebalance, capturing both signal-driven reallocation and "
+                 "drift-correction trading back to target. Note that "
+                 "Black-Litterman, despite its dynamic classification, "
+                 "exhibits static-like turnover (4.7%) reflecting the "
+                 "framework's modest weight adjustments from its equilibrium "
+                 "prior — a genuine analytical finding, not a data issue. "
+                 "If you are uncertain about any specific numeric value, do "
+                 "NOT insert it silently — wrap it in an inline verification "
+                 "marker of the form [[VERIFY: <claim>]] (for example "
+                 "[[VERIFY: Sharpe ratio for Regime Switching = 0.63]]) so a "
+                 "team member checks it before submission."),
              "context": {"study_period": period,
                          "strategy_metadata": data.get("strategy_metadata"),
                          "risk_free_rate": data["risk_free_rate"]}},
@@ -3104,26 +3210,20 @@ async def export_midpoint_paper(
                  "discuss the 2022 equity-bond correlation break and what the "
                  "pre- versus post-2022 Sharpe ratios reveal. Reference "
                  "Table 1 (summary statistics) and Table 2 (regime-conditional "
-                 "performance)."),
+                 "performance). If you are uncertain about any specific "
+                 "numeric value, do NOT insert it silently — wrap it in an "
+                 "inline verification marker of the form [[VERIFY: <claim>]] "
+                 "(for example [[VERIFY: Sharpe ratio for Regime Switching = "
+                 "0.63]]) so a team member checks it before submission."),
              "context": {"summary_statistics": data["summary_statistics"],
                          "regime_conditional": data["regime_conditional"],
                          "correlation_pre_post": {
                              "pre_2022": data["rolling_correlation"].get("pre_2022"),
                              "post_2022": data["rolling_correlation"].get("post_2022")}}},
-            {"key": "roles", "available": has_team,
-             "pending": (f"{DATA_PENDING} — Team Activity data unavailable. "
-                         "State roles manually: Michael Ruurds (engineering "
-                         "lead), Bob Thao (written deliverables lead), Molly "
-                         "Murdock (presentation lead)."),
-             "agent_id": "midpoint_roles",
-             "task": (
-                 "Write the Roles and Division of Labor section — about 150 "
-                 "words. The team: Michael Ruurds (engineering lead), Bob "
-                 "Thao (written deliverables lead), Molly Murdock "
-                 "(presentation lead). Ground the coordination narrative in "
-                 "the supplied platform-activity counts — commits, council "
-                 "sessions, academic reviews — rather than generic claims."),
-             "context": {"team_summary": data["team_summary"]}},
+            # Section 3 (Roles and Division of Labor) is NOT AI-generated —
+            # build_midpoint_paper renders a human-input callout for Bob,
+            # who is the only one who can describe the division of labour
+            # authentically. No spec entry for it.
             {"key": "next_steps", "available": has_review,
              "pending": (f"{DATA_PENDING} — no Academic Review verdict on "
                          "record. Run an Academic Review on the Council "

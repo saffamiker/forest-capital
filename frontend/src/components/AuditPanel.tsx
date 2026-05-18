@@ -25,6 +25,12 @@ interface AuditFinding {
   auditor_reasoning: string | null
 }
 
+// A demo run (the QA tab's "Run Live Demo" button) is marked 🎯 in the
+// history so a forced presentation run is not mistaken for a real audit.
+function triggerLabel(triggeredBy: string): string {
+  return triggeredBy === 'demo' ? '🎯 demo' : triggeredBy
+}
+
 interface AuditRun {
   id: number
   triggered_by: string
@@ -204,7 +210,9 @@ export default function AuditPanel() {
       const url = URL.createObjectURL(res.data as Blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `audit_report_${id}.txt`
+      // The endpoint returns the formatted Statistical Audit Report PDF.
+      a.download = `forest_capital_statistical_audit_${
+        new Date().toISOString().slice(0, 10)}.pdf`
       a.click()
       URL.revokeObjectURL(url)
     } catch {
@@ -294,7 +302,7 @@ export default function AuditPanel() {
             <div className="text-2xs text-muted mt-1">
               {latest.total_checks} checks · {latest.passed} passed ·{' '}
               {latest.warnings} warnings · {latest.failed} failures ·{' '}
-              triggered by {latest.triggered_by}
+              triggered by {triggerLabel(latest.triggered_by)}
             </div>
             {/* Per-layer progress */}
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-2xs">
@@ -346,7 +354,8 @@ export default function AuditPanel() {
                     <div key={r.id} className="px-3 py-2 flex items-center
                                                 justify-between gap-2 flex-wrap">
                       <span className="text-2xs text-white">
-                        {relTime(r.triggered_at)} · {r.triggered_by} ·{' '}
+                        {relTime(r.triggered_at)} · {triggerLabel(r.triggered_by)}
+                        {' '}·{' '}
                         <span className={overallStatus(r).cls}>
                           {overallStatus(r).label}
                         </span>

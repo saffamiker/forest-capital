@@ -9,7 +9,7 @@
  */
 import { useCallback, useEffect, useState } from 'react'
 import axios from 'axios'
-import { UserPlus, Loader2, AlertCircle, X } from 'lucide-react'
+import { UserPlus, Loader2, AlertCircle, X, CheckCircle } from 'lucide-react'
 import {
   PERMISSIONS, ROLE_PRESETS, ASSIGNABLE_ROLES, matchesPreset,
 } from '../constants/permissions'
@@ -46,12 +46,19 @@ function relativeTime(iso: string | null): string {
   return `${Math.round(hrs / 24)}d ago`
 }
 
+// A confirmation surfaced after a save — e.g. whether the welcome email
+// sent on user creation actually went out.
+interface SaveNotice {
+  kind: 'success' | 'warning'
+  text: string
+}
+
 // ── Add / Edit form modal ─────────────────────────────────────────────────────
 
 function UserFormModal({ user, onClose, onSaved }: {
   user: PlatformUser | null   // null → Add; set → Edit
   onClose: () => void
-  onSaved: () => void
+  onSaved: (notice?: SaveNotice) => void
 }) {
   const editing = user !== null
   const [email, setEmail] = useState(user?.email ?? '')
@@ -85,12 +92,22 @@ function UserFormModal({ user, onClose, onSaved }: {
           display_name: displayName, role: effectiveRole,
           permissions: perms, notes,
         })
+        onSaved()
       } else {
-        await axios.post('/api/v1/admin/users', {
-          email, display_name: displayName, role, permissions: perms, notes,
-        })
+        const res = await axios.post<{ welcome_email_sent?: boolean }>(
+          '/api/v1/admin/users',
+          { email, display_name: displayName, role, permissions: perms, notes },
+        )
+        // The welcome email is sent fail-open server-side — surface
+        // whether it actually went out so the sysadmin knows.
+        const notice: SaveNotice = res.data.welcome_email_sent
+          ? { kind: 'success',
+              text: `User added and welcome email sent to ${email}.` }
+          : { kind: 'warning',
+              text: 'User added. Welcome email could not be sent — '
+                + 'check email configuration.' }
+        onSaved(notice)
       }
-      onSaved()
     } catch (err) {
       setError(axios.isAxiosError(err)
         ? (err.response?.data?.detail ?? err.message)
@@ -228,6 +245,7 @@ export default function UserManagementPanel() {
   const [users, setUsers] = useState<PlatformUser[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<SaveNotice | null>(null)
   const [adding, setAdding] = useState(false)
   const [editingUser, setEditingUser] = useState<PlatformUser | null>(null)
 
@@ -274,6 +292,18 @@ export default function UserManagementPanel() {
                         border-danger/30 bg-danger/5 text-danger text-xs">
           <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
           <span>{error}</span>
+        </div>
+      )}
+
+      {notice && (
+        <div className={`flex items-start gap-2 px-3 py-2 mb-2 rounded border
+                        text-xs ${notice.kind === 'success'
+            ? 'border-success/30 bg-success/5 text-success'
+            : 'border-warning/30 bg-warning/5 text-warning'}`}>
+          {notice.kind === 'success'
+            ? <CheckCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+            : <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />}
+          <span>{notice.text}</span>
         </div>
       )}
 
@@ -351,11 +381,15 @@ export default function UserManagementPanel() {
 
       {adding && (
         <UserFormModal user={null} onClose={() => setAdding(false)}
-          onSaved={() => { setAdding(false); load() }} />
+          onSaved={(n) => {
+            setAdding(false)
+            setNotice(n ?? null)
+            load()
+          }} />
       )}
       {editingUser && (
         <UserFormModal user={editingUser} onClose={() => setEditingUser(null)}
-          onSaved={() => { setEditingUser(null); load() }} />
+          onSaved={() => { setEditingUser(null); setNotice(null); load() }} />
       )}
     </div>
   )

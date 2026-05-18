@@ -109,8 +109,11 @@ async def _store_findings(run_id: int, findings: list[dict[str, Any]]) -> None:
 async def _finalise_audit(
     run_id: int, *, status: str, layer_statuses: dict[str, str],
     counts: dict[str, int], metadata: dict[str, Any],
+    data_hash: str | None = None,
 ) -> None:
-    """Writes the completed audit_runs row. Fail-open."""
+    """Writes the completed audit_runs row. data_hash is the lightweight
+    fingerprint of the data this run verified — smart audit caching
+    compares it against the live fingerprint. Fail-open."""
     try:
         from sqlalchemy import text
 
@@ -123,15 +126,38 @@ async def _finalise_audit(
                 "layer_1_status = :l1, layer_2_status = :l2, "
                 "layer_3_status = :l3, total_checks = :tc, passed = :p, "
                 "failed = :fl, warnings = :w, completed_at = now(), "
+                "data_hash = :dh, "
                 "metadata = CAST(:md AS jsonb) WHERE id = :id"
             ), {"st": status, "l1": layer_statuses.get("1"),
                 "l2": layer_statuses.get("2"), "l3": layer_statuses.get("3"),
                 "tc": counts["total"], "p": counts["passed"],
                 "fl": counts["failed"], "w": counts["warnings"],
+                "dh": data_hash,
                 "md": json.dumps(metadata), "id": run_id})
             await session.commit()
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_finalise_failed", run_id=run_id, error=str(exc))
+
+
+async def get_last_completed_audit_hash() -> str | None:
+    """The data_hash of the most recent COMPLETED audit run — what smart
+    audit caching compares the live data fingerprint against. None when
+    there is no completed run yet (or on a database error — fail-open)."""
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(text(
+                "SELECT data_hash FROM audit_runs WHERE status = 'complete' "
+                "ORDER BY id DESC LIMIT 1"))
+            found = row.fetchone()
+            return str(found[0]) if found and found[0] else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_last_hash_check_failed", error=str(exc))
+        return None
 
 
 async def get_audit_runs() -> list[dict[str, Any]]:
@@ -147,7 +173,8 @@ async def get_audit_runs() -> list[dict[str, Any]]:
                 "SELECT id, triggered_by, triggered_at, triggered_by_email, "
                 "status, layer_1_status, layer_2_status, layer_3_status, "
                 "total_checks, passed, failed, warnings, completed_at, "
-                "metadata FROM audit_runs ORDER BY triggered_at DESC"))
+                "metadata, data_hash FROM audit_runs "
+                "ORDER BY triggered_at DESC"))
             return [_run_row(r) for r in rows.fetchall()]
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_runs_read_failed", error=str(exc))
@@ -161,7 +188,7 @@ def _run_row(r: Any) -> dict[str, Any]:
         "layer_1_status": r[5], "layer_2_status": r[6],
         "layer_3_status": r[7], "total_checks": r[8], "passed": r[9],
         "failed": r[10], "warnings": r[11], "completed_at": _iso(r[12]),
-        "metadata": r[13] or {},
+        "metadata": r[13] or {}, "data_hash": r[14],
     }
 
 
@@ -178,7 +205,8 @@ async def get_audit_run(run_id: int) -> dict[str, Any] | None:
                 "SELECT id, triggered_by, triggered_at, triggered_by_email, "
                 "status, layer_1_status, layer_2_status, layer_3_status, "
                 "total_checks, passed, failed, warnings, completed_at, "
-                "metadata FROM audit_runs WHERE id = :id"), {"id": run_id})
+                "metadata, data_hash FROM audit_runs WHERE id = :id"),
+                {"id": run_id})
             found = run.fetchone()
             if not found:
                 return None
@@ -234,7 +262,9 @@ async def _execute_audit(run_id: int) -> None:
     """The three-layer audit body — runs in the background after the
     endpoint has returned the audit_id. Fail-open: a layer failure still
     finalises the run with status 'failed' and whatever completed."""
-    from tools.audit_assembler import assemble_audit_payload
+    from tools.audit_assembler import (
+        assemble_audit_payload, current_data_hash,
+    )
     from tools.audit_layer1 import layer_1_raw_data_audit
     from tools.audit_layer2 import layer_2_metric_audit
     from tools.audit_layer3 import layer_3_consistency_audit
@@ -243,7 +273,12 @@ async def _execute_audit(run_id: int) -> None:
     layer_statuses = {"1": "skip", "2": "skip", "3": "skip"}
     all_findings: list[dict[str, Any]] = []
     metadata: dict[str, Any] = {}
+    data_hash: str | None = None
     try:
+        # The lightweight fingerprint of the data this run verifies —
+        # stored on the run so smart audit caching can tell, cheaply,
+        # whether a later request still reflects the same data.
+        data_hash = await current_data_hash() or None
         payload = await assemble_audit_payload()
         metadata = {
             "available": payload.get("available"),
@@ -267,8 +302,9 @@ async def _execute_audit(run_id: int) -> None:
     counts = _tally(all_findings)
     await _finalise_audit(run_id, status=status,
                           layer_statuses=layer_statuses, counts=counts,
-                          metadata=metadata)
-    log.info("audit_complete", run_id=run_id, status=status, **counts)
+                          metadata=metadata, data_hash=data_hash)
+    log.info("audit_complete", run_id=run_id, status=status,
+             data_hash=data_hash, **counts)
 
 
 async def start_audit(
@@ -295,6 +331,129 @@ async def start_audit(
         return {"status": "failed", "reason": "could_not_start",
                 "audit_id": run_id}
     return {"status": "started", "audit_id": run_id}
+
+
+# ── Smart audit caching — the auto-trigger ────────────────────────────────────
+
+
+async def _run_qa_methodology() -> None:
+    """
+    Runs the QA methodology checklist — Tier 1 synchronously, Tier 2 in
+    the background — against the current strategy results and caches the
+    verdict. The methodology half of run_full_audit(). Mirrors the
+    /api/v1/qa/run endpoint; the blocking pipeline work is offloaded to a
+    thread so this is safe to call from an event-loop background task.
+    """
+    import asyncio as _asyncio
+    import os
+
+    if os.getenv("ENVIRONMENT", "").lower() == "test":
+        return
+
+    from tools.cache import (
+        _compute_data_hash, get_strategy_cache, set_qa_cache,
+    )
+    from tools.qa_tiered import run_tier1_checks, schedule_tier2_background
+
+    def _history_and_hash() -> tuple[Any, str]:
+        from tools.data_fetcher import get_full_history
+        history = get_full_history()
+        monthly = history.get("equity_monthly")
+        n = len(monthly) if monthly is not None else 0
+        last = (str(monthly.index[-1])
+                if monthly is not None and n > 0 else "unknown")
+        return history, _compute_data_hash(n, last, n_strategies=10)
+
+    history, strategy_hash = await _asyncio.to_thread(_history_and_hash)
+    cached = await get_strategy_cache(strategy_hash)
+    if cached:
+        results_dict = cached
+    else:
+        from tools.backtester import run_all_strategies
+        results_dict = await _asyncio.to_thread(run_all_strategies, history)
+
+    t1 = await _asyncio.to_thread(run_tier1_checks, results_dict)
+    await set_qa_cache(strategy_hash, t1, tier=1)
+
+    # Tier 2 — fire and forget; off_loop write engine, see qa_run.
+    def _writer(h: str, v: dict, tier: int) -> None:
+        _asyncio.run(set_qa_cache(h, v, tier=tier, off_loop=True))
+    schedule_tier2_background(results_dict, strategy_hash, _writer)
+
+
+async def run_full_audit(reason: str = "scheduled") -> None:
+    """
+    The smart-audit-caching auto-trigger body: re-runs the statistical
+    audit and then the QA methodology audit — in sequence, never in
+    parallel, so the two never contend for the concurrency lock.
+
+    Idempotent: a no-op when the last completed audit is still current
+    for the data, so it is safe to fire after any data event. Fail-open
+    throughout — a failure in either audit is logged and swallowed.
+
+    reason — what prompted the run ("data_ingestion" | "cache_invalidation"
+    | "scheduled"); stored as the audit_runs.triggered_by value and logged.
+    """
+    try:
+        from tools.audit_assembler import is_audit_current
+        currency = await is_audit_current()
+        if currency.get("is_current"):
+            log.info("auto_audit_skipped_current", reason=reason)
+            return
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto_audit_currency_check_failed", reason=reason,
+                    error=str(exc))
+        # An unclear signal — better to run the audit than to skip it.
+
+    log.info("auto_audit_triggered", reason=reason)
+
+    # 1. Statistical audit — claim the concurrency lock, run the layers.
+    try:
+        if await is_audit_running() is None:
+            run_id = await _create_running_audit(reason, "auto")
+            if run_id is not None:
+                await _execute_audit(run_id)
+        else:
+            log.info("auto_audit_statistical_skipped_locked", reason=reason)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto_audit_statistical_failed", reason=reason,
+                    error=str(exc))
+
+    # 2. QA methodology audit — Tier 1 + Tier 2, after the statistical run.
+    try:
+        await _run_qa_methodology()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto_audit_qa_failed", reason=reason, error=str(exc))
+
+
+def trigger_audit_async(reason: str) -> None:
+    """
+    Fire run_full_audit() in the background — the smart-audit-caching
+    auto-trigger. Works whether or not the caller is on an event loop:
+    on a loop (an async endpoint) it schedules a task; off a loop (the
+    sync data pipeline) it runs in a daemon thread with its own loop.
+    Fail-open — a spawn failure is logged and never raised into the
+    caller's primary flow.
+    """
+    import asyncio
+    import threading
+
+    try:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None:
+            task = loop.create_task(run_full_audit(reason))
+            _audit_bg_tasks.add(task)
+            task.add_done_callback(_audit_bg_tasks.discard)
+        else:
+            threading.Thread(
+                target=lambda: asyncio.run(run_full_audit(reason)),
+                daemon=True, name="auto-audit",
+            ).start()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("auto_audit_spawn_failed", reason=reason, error=str(exc))
 
 
 # ── Export report ─────────────────────────────────────────────────────────────

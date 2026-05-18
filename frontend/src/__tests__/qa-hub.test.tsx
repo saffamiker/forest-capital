@@ -122,6 +122,66 @@ describe('QAHub — Run Full QA', () => {
   })
 })
 
+describe('QAHub — smart audit caching', () => {
+  it('shows a muted "Re-run Audit" button when the cached audit is current', async () => {
+    vi.mocked(axios.get).mockResolvedValue({
+      data: {
+        run: auditRun(0, 0), is_current: true,
+        statistical_current: true, qa_current: true,
+      },
+    })
+    withPerms(TEAM_PERMS, <QAHub />)
+    const btn = await screen.findByRole('button', { name: /Re-run Audit/ })
+    // Muted styling — no prominent electric accent when no re-run is needed.
+    expect(btn.className).toContain('text-muted')
+    expect(btn.className).not.toContain('text-electric')
+  })
+
+  it('keeps the prominent "Run Full QA" button when data has changed', async () => {
+    vi.mocked(axios.get).mockResolvedValue({
+      data: {
+        run: auditRun(0, 0), is_current: false,
+        statistical_current: false, qa_current: true,
+      },
+    })
+    withPerms(TEAM_PERMS, <QAHub />)
+    const btn = await screen.findByRole('button', { name: /Run Full QA/ })
+    expect(btn.className).toContain('text-electric')
+  })
+
+  it('opens a confirmation dialog before a Run Live Demo audit', async () => {
+    vi.mocked(axios.get).mockResolvedValue({
+      data: {
+        run: auditRun(0, 0), is_current: true,
+        statistical_current: true, qa_current: true,
+      },
+    })
+    withPerms(TEAM_PERMS, <QAHub />)
+    const demoBtn = await screen.findByRole('button', { name: /Run Live Demo/ })
+    fireEvent.click(demoBtn)
+    expect(screen.getByText(/Run a live demo audit\?/)).toBeInTheDocument()
+    // The audit is not fired until the dialog is confirmed.
+    expect(vi.mocked(axios.post)).not.toHaveBeenCalled()
+  })
+
+  it('fires a demo audit with reason "demo" once the dialog is confirmed', async () => {
+    vi.mocked(axios.get).mockResolvedValue({
+      data: {
+        run: auditRun(0, 0), is_current: true,
+        statistical_current: true, qa_current: true,
+      },
+    })
+    withPerms(TEAM_PERMS, <QAHub />)
+    fireEvent.click(await screen.findByRole('button', { name: /Run Live Demo/ }))
+    // The dialog's confirm button is the second "Run Live Demo" control.
+    const confirmBtns = screen.getAllByRole('button', { name: /Run Live Demo/ })
+    fireEvent.click(confirmBtns[confirmBtns.length - 1])
+    expect(vi.mocked(axios.post)).toHaveBeenCalledWith(
+      '/api/v1/audit/run', { reason: 'demo' },
+    )
+  })
+})
+
 describe('QAHub — Presentation View certificate', () => {
   it('renders the certificate with all three status boxes', async () => {
     withPerms(TEAM_PERMS, <QAHub />)

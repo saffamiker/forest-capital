@@ -20,11 +20,13 @@ formula specs below describe that layer, and the regime difference is
 documented in formula_specifications so a cross-layer value gap is
 explained rather than flagged.
 
-PERSISTED-WEIGHTS LIMITATION: the backtester computes per-rebalance
-weight schedules but does not persist them — only monthly returns are
-cached. So raw_data.strategy_weights is empty and true_turnover cannot
-be independently recomputed. Layer 1's weight-constraint check degrades
-to a SKIP finding accordingly.
+WEIGHT SCHEDULES: the backtester persists each strategy's per-rebalance
+target weights on the result (weight_schedule), so raw_data.
+strategy_weights carries the full {dates, equity, ig, hy} columns and
+Layer 1's long-only / sum-to-1 weight-constraint check runs in full. A
+strategy cached before weight persistence shipped has no weight_schedule
+and contributes empty columns — Layer 1 then warns rather than failing
+until the cache is refreshed (POST /api/v1/cache/invalidate).
 """
 from __future__ import annotations
 
@@ -134,6 +136,97 @@ def _payload_hash(raw_data: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+# ── Smart audit caching — the data fingerprint ────────────────────────────────
+#
+# An audit run independently recomputes every metric with claude-opus-4-7 —
+# it is the most expensive operation on the platform. Re-running it on
+# unchanged data spends the Opus budget and tells the team nothing new.
+# current_data_hash() is a CHEAP fingerprint of the data the audit verifies
+# (three COUNT/MAX queries via get_data_status — never the full payload),
+# so the QA tab can call it on every mount and is_audit_current() can decide
+# whether the last completed audit still holds.
+
+
+async def current_data_hash() -> str:
+    """
+    A lightweight fingerprint of the data the statistical audit verifies:
+    the row counts and newest dates of market_data_monthly,
+    ff_factors_monthly and strategy_results_cache. It changes only when
+    new rows are appended or the strategy cache is recomputed — not on a
+    restart — so a matching hash means the audit is genuinely still current.
+
+    Cheap by design (get_data_status issues only COUNT/MAX queries, never
+    a full payload assembly). Returns "" on any failure — an empty hash
+    never matches, so the audit is treated as stale rather than wrongly
+    served from cache.
+    """
+    try:
+        from tools.cache import get_data_status
+
+        status = await get_data_status()
+        if not status.get("available"):
+            return ""
+        relevant = ("market_data_monthly", "ff_factors_monthly",
+                    "strategy_results_cache")
+        parts: list[str] = []
+        for t in status.get("tables", []):
+            if t.get("name") in relevant:
+                parts.append(
+                    f"{t.get('name')}:{t.get('row_count')}:"
+                    f"{t.get('max_date')}:{t.get('last_updated')}")
+        if not parts:
+            # No relevant table reported — treat as "nothing to fingerprint"
+            # rather than hashing an empty string into a matchable value.
+            return ""
+        parts.sort()
+        canonical = "|".join(parts)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("current_data_hash_failed", error=str(exc))
+        return ""
+
+
+async def is_audit_current() -> dict[str, Any]:
+    """
+    Whether BOTH audits — the statistical audit and the QA methodology
+    audit — still reflect the current data. Smart audit caching serves a
+    cached result only when is_current is True.
+
+    Statistical currency: current_data_hash() matches the data_hash on
+    the most recent COMPLETED audit_runs row.
+    QA currency: the most recent non-expired qa_results_cache verdict was
+    computed for the same strategy data as the latest strategy_results_cache
+    row (the two strategy_hash values match).
+
+    Returns a per-layer breakdown so the QA tab can show which audit is
+    stale when only one has changed:
+      {is_current, statistical_current, qa_current,
+       current_data_hash, last_hash, qa_strategy_hash, qa_last_hash}
+    Every field is fail-open — an empty/None hash never matches, so an
+    audit reads as stale rather than wrongly served from cache.
+    """
+    from tools.audit_engine import get_last_completed_audit_hash
+    from tools.cache import get_latest_qa_hash, get_latest_strategy_hash
+
+    current = await current_data_hash()
+    last = await get_last_completed_audit_hash()
+    statistical_current = bool(current) and bool(last) and current == last
+
+    strat_hash = await get_latest_strategy_hash()
+    qa_hash = await get_latest_qa_hash()
+    qa_current = bool(strat_hash) and bool(qa_hash) and strat_hash == qa_hash
+
+    return {
+        "is_current": statistical_current and qa_current,
+        "statistical_current": statistical_current,
+        "qa_current": qa_current,
+        "current_data_hash": current,
+        "last_hash": last,
+        "qa_strategy_hash": strat_hash,
+        "qa_last_hash": qa_hash,
+    }
+
+
 def _list_to_dict(rows: list[dict], key: str) -> dict[str, dict]:
     """Turns a list of analytics rows into a dict keyed by `key` (e.g.
     'asset' or 'strategy') — the per-entity shape the auditor expects."""
@@ -143,6 +236,23 @@ def _list_to_dict(rows: list[dict], key: str) -> dict[str, dict]:
         if name is not None:
             out[str(name)] = {k: v for k, v in r.items() if k != key}
     return out
+
+
+def _weight_columns(weight_schedule: list[dict]) -> dict[str, list]:
+    """
+    Converts a strategy's persisted weight_schedule — a list of
+    {date, weights:{equity,ig,hy}} — into the columnar shape the Layer 1
+    weight-constraint check consumes: {dates, equity, ig, hy}.
+    """
+    return {
+        "dates": [e.get("date") for e in weight_schedule],
+        "equity": [float((e.get("weights") or {}).get("equity", 0.0))
+                   for e in weight_schedule],
+        "ig": [float((e.get("weights") or {}).get("ig", 0.0))
+               for e in weight_schedule],
+        "hy": [float((e.get("weights") or {}).get("hy", 0.0))
+               for e in weight_schedule],
+    }
 
 
 async def assemble_audit_payload() -> dict[str, Any]:
@@ -204,10 +314,15 @@ async def assemble_audit_payload() -> dict[str, Any]:
                 name: [p[1] for p in (s.get("monthly_returns") or [])]
                 for name, s in strategies.items()
             },
-            # Per-rebalance weights are not persisted — see the module
-            # docstring. Empty by design; Layer 1's weight-constraint
-            # check skips accordingly.
-            "strategy_weights": {},
+            # Per-rebalance target weights, from each strategy's persisted
+            # weight_schedule — the columnar shape Layer 1's weight check
+            # consumes. A strategy cached before weight persistence shipped
+            # has no weight_schedule and contributes an empty column set;
+            # Layer 1 then warns rather than failing.
+            "strategy_weights": {
+                name: _weight_columns(s.get("weight_schedule") or [])
+                for name, s in strategies.items()
+            },
         }
 
         # ── platform_computed — the platform's current analytics output ──

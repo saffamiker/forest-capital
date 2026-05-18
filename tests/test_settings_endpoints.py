@@ -45,6 +45,23 @@ class TestDataStatus:
         assert isinstance(body["tables"], list)
 
 
+class TestDisplayLabel:
+    """_display_label turns a table's max_date into the human month-year
+    string the data currency indicator shows."""
+
+    def test_formats_a_month_year(self):
+        from tools.cache import _display_label
+        assert _display_label("2026-04-30") == "April 2026"
+        assert _display_label("2002-07-31") == "July 2002"
+        assert _display_label("2025-12-31") == "December 2025"
+
+    def test_none_and_garbage_yield_none(self):
+        from tools.cache import _display_label
+        assert _display_label(None) is None
+        assert _display_label("") is None
+        assert _display_label("not-a-date") is None
+
+
 class TestAnalyticsConfig:
     def test_requires_auth(self):
         assert client.get("/api/v1/analytics/config").status_code == 401

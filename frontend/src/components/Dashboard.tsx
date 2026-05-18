@@ -18,6 +18,7 @@ import ExplainableText from './ExplainableText'
 import InfoIcon from './InfoIcon'
 import ChartCommentStrip from './ChartCommentStrip'
 import LearnModeBanner from './LearnModeBanner'
+import DataCurrencyBar from './DataCurrencyBar'
 import ChartExportButton from './ChartExportButton'
 import TableExportButton from './TableExportButton'
 // Canonical strategy-colour map — one source of truth shared with every
@@ -201,14 +202,9 @@ function StrategyTableRow({ s, rank, selected, onSelect, showAll }: StrategyTabl
       </td>
       <td
         className={`px-3 py-2 font-mono text-white text-xs ${c(8)}`}
-        title="Average annual portfolio turnover — sum of absolute weight changes at each quarterly rebalance, annualised. Falls back to the rebalance-count proxy when the true figure is unavailable."
+        title="Genuine annualised portfolio turnover — one-way trading at each quarterly rebalance, including drift correction. The benchmark never rebalances, so its turnover is 0%."
       >
-        {(() => {
-          // Prefer the genuine sum-of-absolute-weight-change figure;
-          // fall back to the legacy rebalance-count proxy if absent.
-          const t = s.true_turnover ?? s.avg_monthly_turnover
-          return t != null ? `${(t * 100).toFixed(0)}%` : '—'
-        })()}
+        {`${((s.true_turnover ?? 0) * 100).toFixed(0)}%`}
       </td>
       <td className={`px-3 py-2 ${c(9)}`}>
         {isSignificant ? (
@@ -396,6 +392,7 @@ export default function Dashboard() {
             Ten portfolio strategies ranked by risk-adjusted performance against
             the 100% equity benchmark.
           </p>
+          <div className="mt-1"><DataCurrencyBar /></div>
         </div>
 
         {/* Commentary-mode banner — renders only when mode === 'commentary'.
