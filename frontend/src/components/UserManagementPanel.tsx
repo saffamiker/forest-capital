@@ -26,6 +26,8 @@ interface PlatformUser {
   last_login_at: string | null
   notes: string | null
   activity_count: number
+  // Estimated AI token spend across this user's interactions (USD).
+  ai_cost_usd: number
   // Lifetime council-query allocation. council_queries_limit null = unlimited.
   council_queries_used: number
   council_queries_limit: number | null
@@ -381,6 +383,7 @@ export default function UserManagementPanel() {
                 <th className="py-1.5 px-2">Status</th>
                 <th className="py-1.5 px-2">Last login</th>
                 <th className="py-1.5 px-2">Activity</th>
+                <th className="py-1.5 px-2">AI cost</th>
                 <th className="py-1.5 px-2">Council</th>
                 <th className="py-1.5 pl-2">Actions</th>
               </tr>
@@ -417,6 +420,10 @@ export default function UserManagementPanel() {
                     <td className="py-2 px-2 text-muted"
                         title="Total interactions and page views">
                       {u.activity_count}
+                    </td>
+                    <td className="py-2 px-2 font-mono text-success"
+                        title="Estimated AI token spend across this user's interactions">
+                      ${u.ai_cost_usd.toFixed(4)}
                     </td>
                     <td className="py-2 px-2"
                         title="Lifetime council query allocation">

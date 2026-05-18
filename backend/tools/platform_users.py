@@ -200,8 +200,19 @@ async def list_all_users() -> list[dict[str, Any]]:
                     "GROUP BY user_email"))
                 for email, n in agg.fetchall():
                     counts[email] = counts.get(email, 0) + int(n)
+            # AI token spend per user — the estimated_cost_usd column on
+            # agent_interactions (NULL for pre-token-logging rows). A
+            # sysadmin reviewing the user table sees what each account
+            # has cost, viewers included.
+            cost_by_email: dict[str, float] = {}
+            spend = await session.execute(text(
+                "SELECT user_email, COALESCE(SUM(estimated_cost_usd), 0) "
+                "FROM agent_interactions GROUP BY user_email"))
+            for email, total in spend.fetchall():
+                cost_by_email[email] = float(total or 0)
             for u in users:
                 u["activity_count"] = counts.get(u["email"], 0)
+                u["ai_cost_usd"] = round(cost_by_email.get(u["email"], 0.0), 6)
             return users
     except Exception as exc:  # noqa: BLE001
         log.warning("platform_users_list_failed", error=str(exc))
