@@ -232,6 +232,53 @@ _NEXT_STEPS_CALLOUT_LINES = [
     "That is what belongs here.",
 ]
 
+# Midpoint Section 2 (Preliminary Results) — the analytical core. The AI
+# drafts an interpretation, but the interpretation is what the grader
+# reads, so Bob must own it.
+_RESULTS_CALLOUT_TITLE = "BOB — YOUR INTERPRETATION REQUIRED"
+_RESULTS_CALLOUT_LINES = [
+    "The results above are AI-generated from the platform data. The "
+    "analytical interpretation is yours to own.",
+    "",
+    "What do these results mean for the investment thesis? What does "
+    "the 2022 correlation break tell you about the strategy's "
+    "robustness? What would you investigate next based on what you see "
+    "here?",
+    "",
+    "Rewrite this section in your own analytical voice — the grader is "
+    "reading your interpretation, not the AI's.",
+]
+
+# Executive-brief callouts — the three judgement sections.
+_BRIEF_SUMMARY_CALLOUT_TITLE = "BOB — YOUR FRAMING"
+_BRIEF_SUMMARY_CALLOUT_LINES = [
+    "The executive summary frames everything that follows. Rewrite it "
+    "to reflect your team's chosen emphasis and voice.",
+    "",
+    "What is the one thing you want the reader to take away from this "
+    "brief?",
+]
+_BRIEF_LIMITATIONS_CALLOUT_TITLE = "BOB — YOUR JUDGEMENT"
+_BRIEF_LIMITATIONS_CALLOUT_LINES = [
+    "Review these limitations and decide which to foreground. Are there "
+    "risks the AI has understated or missed entirely?",
+    "",
+    "The limitations section reflects your intellectual honesty about "
+    "the strategy — make it yours.",
+]
+_BRIEF_RECOMMENDATIONS_CALLOUT_TITLE = "BOB — YOUR RECOMMENDATION"
+_BRIEF_RECOMMENDATIONS_CALLOUT_LINES = [
+    "The strategic recommendation above is the AI's synthesis of the "
+    "data. The actual call is yours and your team's professional "
+    "judgement.",
+    "",
+    "Do you agree with this recommendation? What conditions or caveats "
+    "would you add? What would change your view?",
+    "",
+    "Rewrite this section to reflect the team's considered position — "
+    "this is the 20%-weighted deliverable.",
+]
+
 # CAVEAT 1 — the review-required warning box, rendered immediately below
 # the AI DRAFT banner on every generated document.
 _REVIEW_WARNING_TITLE = "AI DRAFT — REVIEW REQUIRED"
@@ -380,6 +427,8 @@ def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> by
     _add_heading(doc, "1. Data and Methodology")
     _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
 
+    # Section 2 is the analytical core — a [[BOB]] callout below the
+    # results directs Bob to own the interpretation in his own voice.
     _add_heading(doc, "2. Preliminary Results")
     _add_body(doc, narratives.get("results", "[DATA PENDING]"))
     h, r = table_summary_statistics(data.get("summary_statistics", []))
@@ -387,6 +436,7 @@ def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> by
     h, r = table_regime_conditional(data.get("regime_conditional", []))
     _add_table(doc, "Table 2. Regime-Conditional Performance "
                      "(Pre- vs Post-2022)", h, r)
+    _add_callout(doc, _RESULTS_CALLOUT_TITLE, _RESULTS_CALLOUT_LINES)
 
     # Section 3 is pre-seeded from real Team Activity counts — a factual
     # draft — with a "BOB — PERSONALISE" callout beneath directing him to
@@ -450,6 +500,8 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
 
     _add_heading(doc, "Executive Summary")
     _add_body(doc, narratives.get("exec_summary", "[DATA PENDING]"))
+    _add_callout(doc, _BRIEF_SUMMARY_CALLOUT_TITLE,
+                 _BRIEF_SUMMARY_CALLOUT_LINES)
 
     _add_heading(doc, "Methodology Overview")
     _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
@@ -480,9 +532,13 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
 
     _add_heading(doc, "Limitations and Risks")
     _add_body(doc, narratives.get("limitations", "[DATA PENDING]"))
+    _add_callout(doc, _BRIEF_LIMITATIONS_CALLOUT_TITLE,
+                 _BRIEF_LIMITATIONS_CALLOUT_LINES)
 
     _add_heading(doc, "Final Recommendations")
     _add_body(doc, narratives.get("recommendations", "[DATA PENDING]"))
+    _add_callout(doc, _BRIEF_RECOMMENDATIONS_CALLOUT_TITLE,
+                 _BRIEF_RECOMMENDATIONS_CALLOUT_LINES)
 
     _add_submission_checklist(doc)
 

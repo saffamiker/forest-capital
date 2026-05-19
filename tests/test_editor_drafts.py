@@ -103,8 +103,9 @@ class TestEditorContentBuilders:
         # Four H1 section headings.
         headings = [n for n in cj["content"] if n.get("type") == "heading"]
         assert len(headings) == 4
-        # The Roles and Next Steps [[BOB]] callouts are embedded.
-        assert ct.count("[[BOB:") == 2
+        # Three [[BOB]] callouts — Preliminary Results, Roles, Next Steps.
+        assert ct.count("[[BOB:") == 3
+        assert "BOB — YOUR INTERPRETATION REQUIRED" in ct  # Section 2
 
     def test_deck_to_editor_builds_sixteen_canvas_slides(self):
         from tools.editor_content import deck_to_editor
@@ -152,9 +153,13 @@ class TestEditorContentBuilders:
         # Eight H1 section headings.
         headings = [n for n in cj["content"] if n.get("type") == "heading"]
         assert len(headings) == 8
-        # The brief carries no [[BOB]] callouts.
-        assert "[[BOB:" not in ct
         assert "Executive Summary" in ct
+        # Three [[BOB]] callouts — the judgement sections: the framing,
+        # the limitations, and the recommendation.
+        assert ct.count("[[BOB:") == 3
+        assert "BOB — YOUR FRAMING" in ct
+        assert "BOB — YOUR JUDGEMENT" in ct
+        assert "BOB — YOUR RECOMMENDATION" in ct
 
 
 # ── CRUD round-trips — skip without a live database ───────────────────────────

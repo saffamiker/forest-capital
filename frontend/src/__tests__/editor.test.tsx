@@ -196,6 +196,32 @@ describe('RichTextEditor markers', () => {
     expect(span).not.toBeNull()
     expect(span?.textContent).toContain('[[VERIFY: 0.63]]')
   })
+
+  it('renders the four new [[BOB]] callouts as amber block panels',
+    async () => {
+      // The midpoint Section 2 callout and the three executive-brief
+      // callouts — each must promote to a [[BOB]] block panel.
+      const calloutDoc: TipTapDoc = {
+        type: 'doc',
+        content: [
+          'BOB — YOUR INTERPRETATION REQUIRED: own the interpretation',
+          'BOB — YOUR FRAMING: frame the brief',
+          'BOB — YOUR JUDGEMENT: foreground the limitations',
+          'BOB — YOUR RECOMMENDATION: the team’s considered call',
+        ].map((t) => ({
+          type: 'paragraph',
+          content: [{ type: 'text', text: `[[BOB: ${t}]]` }],
+        })),
+      }
+      render(<RichTextEditor content={calloutDoc} onChange={() => {}} />)
+      const panels = await screen.findAllByText('✏️ BOB — YOUR INPUT NEEDED')
+      expect(panels).toHaveLength(4)
+      expect(screen.getByText(/YOUR INTERPRETATION REQUIRED/))
+        .toBeInTheDocument()
+      expect(screen.getByText(/YOUR FRAMING/)).toBeInTheDocument()
+      expect(screen.getByText(/YOUR JUDGEMENT/)).toBeInTheDocument()
+      expect(screen.getByText(/YOUR RECOMMENDATION/)).toBeInTheDocument()
+    })
 })
 
 // ── canvasSlideStatus — deck slide completion logic ───────────────────────────

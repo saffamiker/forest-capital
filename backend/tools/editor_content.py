@@ -30,6 +30,41 @@ _NEXT_STEPS_CALLOUT = (
     "analytical priorities — what would you investigate next given these "
     "findings? That is what belongs here, not an engineering roadmap."
 )
+# Midpoint Section 2 (Preliminary Results) is the analytical core — the
+# AI drafts an interpretation, but the interpretation is what the grader
+# is reading, so it is Bob's to own.
+_RESULTS_CALLOUT = (
+    "BOB — YOUR INTERPRETATION REQUIRED: The results above are "
+    "AI-generated from the platform data. The analytical interpretation "
+    "is yours to own. What do these results mean for the investment "
+    "thesis? What does the 2022 correlation break tell you about the "
+    "strategy's robustness? What would you investigate next based on "
+    "what you see here? Rewrite this section in your own analytical "
+    "voice — the grader is reading your interpretation, not the AI's."
+)
+# Executive-brief callouts — the judgement sections. The recommendation,
+# the framing, and the honest limitations are the team's to own; the
+# four data-anchored Findings keep their AI draft + [[VERIFY]] markers.
+_BRIEF_SUMMARY_CALLOUT = (
+    "BOB — YOUR FRAMING: The executive summary frames everything that "
+    "follows. Rewrite it to reflect your team's chosen emphasis and "
+    "voice. What is the one thing you want the reader to take away from "
+    "this brief?"
+)
+_BRIEF_LIMITATIONS_CALLOUT = (
+    "BOB — YOUR JUDGEMENT: Review these limitations and decide which to "
+    "foreground. Are there risks the AI has understated or missed "
+    "entirely? The limitations section reflects your intellectual "
+    "honesty about the strategy — make it yours."
+)
+_BRIEF_RECOMMENDATIONS_CALLOUT = (
+    "BOB — YOUR RECOMMENDATION: The strategic recommendation above is "
+    "the AI's synthesis of the data. The actual call is yours and your "
+    "team's professional judgement. Do you agree with this "
+    "recommendation? What conditions or caveats would you add? What "
+    "would change your view? Rewrite this section to reflect the team's "
+    "considered position — this is the 20%-weighted deliverable."
+)
 
 
 def _text_node(text: str) -> dict[str, Any]:
@@ -72,24 +107,26 @@ def _section_blocks(
 # trailing [[BOB]] callout or None).
 _MIDPOINT_SECTIONS = [
     ("1. Data and Methodology", "methodology", None),
-    ("2. Preliminary Results", "results", None),
+    ("2. Preliminary Results", "results", _RESULTS_CALLOUT),
     ("3. Roles and Division of Labor", "roles", _ROLES_CALLOUT),
     ("4. Next Steps and Open Questions", "next_steps", _NEXT_STEPS_CALLOUT),
 ]
 
 
-# Section order for the executive brief — (heading, narratives key).
-# The brief carries no [[BOB]] callouts: it is a senior-investment-
-# audience document, not one with author-input gaps.
+# Section order for the executive brief — (heading, narratives key,
+# trailing [[BOB]] callout or None). The three judgement sections — the
+# framing, the honest limitations and the recommendation — carry a
+# callout; the four data-anchored Findings and the factual Methodology
+# Overview keep their AI draft and rely on [[VERIFY]] markers.
 _EXEC_BRIEF_SECTIONS = [
-    ("Executive Summary", "exec_summary"),
-    ("Methodology Overview", "methodology"),
-    ("Finding 1 — The 2022 Correlation Break", "finding_1"),
-    ("Finding 2 — Static Allocation Results", "finding_2"),
-    ("Finding 3 — Dynamic Allocation Results", "finding_3"),
-    ("Finding 4 — Factor Analysis", "finding_4"),
-    ("Limitations and Risks", "limitations"),
-    ("Final Recommendations", "recommendations"),
+    ("Executive Summary", "exec_summary", _BRIEF_SUMMARY_CALLOUT),
+    ("Methodology Overview", "methodology", None),
+    ("Finding 1 — The 2022 Correlation Break", "finding_1", None),
+    ("Finding 2 — Static Allocation Results", "finding_2", None),
+    ("Finding 3 — Dynamic Allocation Results", "finding_3", None),
+    ("Finding 4 — Factor Analysis", "finding_4", None),
+    ("Limitations and Risks", "limitations", _BRIEF_LIMITATIONS_CALLOUT),
+    ("Final Recommendations", "recommendations", _BRIEF_RECOMMENDATIONS_CALLOUT),
 ]
 
 
@@ -243,12 +280,14 @@ def executive_brief_to_editor(
     Returns (content_json, content_text): a TipTap doc and its plain-text
     projection — the same pattern as midpoint_to_editor. The eight
     sections become H1 headings with the generated prose as paragraphs;
-    the brief carries no [[BOB]] callouts.
+    the Executive Summary, Limitations and Final Recommendations sections
+    each carry a trailing [[BOB]] callout.
     """
     doc_content: list[dict] = []
     text_lines: list[str] = []
-    for heading, key in _EXEC_BRIEF_SECTIONS:
-        nodes, lines = _section_blocks(heading, narratives.get(key, ""), None)
+    for heading, key, callout in _EXEC_BRIEF_SECTIONS:
+        nodes, lines = _section_blocks(heading, narratives.get(key, ""),
+                                       callout)
         doc_content.extend(nodes)
         text_lines.extend(lines)
     content_json = {"type": "doc", "content": doc_content}
