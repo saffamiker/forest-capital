@@ -93,26 +93,66 @@ _EXEC_BRIEF_SECTIONS = [
 ]
 
 
-# The 16 presentation-deck slides — (title, narratives key or None).
-# Mirrors tools/academic_deck.build_presentation_deck's slide order so a
-# deck draft opened in the editor matches the generated .pptx.
-_DECK_SLIDES: list[tuple[str, str | None]] = [
-    ("Title", None),
-    ("Agenda", None),
-    ("The Question", "thesis"),
-    ("Data and Methodology", None),
-    ("The 2022 Regime Break", "thesis"),
-    ("Static Allocation Results", None),
-    ("Dynamic Allocation Results", None),
-    ("Cumulative Returns — Growth of $1", None),
-    ("Risk-Return Profile", None),
-    ("Factor Analysis", None),
-    ("Drawdown Analysis", None),
-    ("Sensitivity Analysis", None),
-    ("Conclusions", "conclusions"),
-    ("Recommendations", "recommendations"),
-    ("How We Built This", "ai_leverage"),
-    ("Questions and Discussion", None),
+# The 16 presentation-deck slides — (title, narratives key or None,
+# seed content). Mirrors tools/academic_deck.build_presentation_deck's
+# slide order so a deck draft opened in the editor matches the generated
+# .pptx. The five narrative-keyed slides take the generated prose; the
+# rest take the static seed — the deck endpoint's narratives dict only
+# carries the four keyed sections, and build_presentation_deck embeds the
+# other slides' bodies as inline bullet literals. The seed gives every
+# editor slide-card non-empty starting content rather than a blank field.
+_DECK_SLIDES: list[tuple[str, str | None, str]] = [
+    ("Title", None,
+     "Forest Capital Portfolio Intelligence System — does diversification "
+     "across equities and fixed income improve risk-adjusted performance?"),
+    ("Agenda", None,
+     "The research question, the data and methodology, the static and "
+     "dynamic strategy results, the 2022 regime break, and the "
+     "recommendation."),
+    ("The Question", "thesis",
+     "The research question and why it matters for portfolio construction."),
+    ("Data and Methodology", None,
+     "Aligned monthly returns for equities, investment-grade and "
+     "high-yield bonds over the 2002–2025 study period; ten strategies "
+     "grouped as static or dynamic; long-only, fully invested, quarterly "
+     "rebalancing; Carhart four-factor attribution."),
+    ("The 2022 Regime Break", "thesis",
+     "The 2022 equity-bond correlation break and what it means for "
+     "diversification."),
+    ("Static Allocation Results", None,
+     "How the fixed-weight strategies — 60/40, Risk Parity, Minimum "
+     "Variance, Equal Weight — performed against the 100% equity "
+     "benchmark."),
+    ("Dynamic Allocation Results", None,
+     "How the rules-based strategies — Regime Switching, Momentum "
+     "Rotation, Volatility Targeting, Black-Litterman, Max-Sharpe Rolling "
+     "— performed, and their drawdown behaviour."),
+    ("Cumulative Returns — Growth of $1", None,
+     "Growth of $1 invested at inception across every strategy and the "
+     "benchmark over the full study period."),
+    ("Risk-Return Profile", None,
+     "Each strategy plotted by annualised return against volatility, "
+     "against the efficient frontier of static allocations."),
+    ("Factor Analysis", None,
+     "Carhart four-factor loadings — market, size, value and momentum — "
+     "and the alpha each strategy generates beyond passive factor "
+     "exposure."),
+    ("Drawdown Analysis", None,
+     "Peak-to-trough losses and recovery periods, comparing the "
+     "strategies' worst-case behaviour against the benchmark."),
+    ("Sensitivity Analysis", None,
+     "How the headline results hold up when key parameters are varied — "
+     "a robustness check on the conclusions."),
+    ("Conclusions", "conclusions",
+     "What the analysis concludes about diversification and the 2022 "
+     "regime break."),
+    ("Recommendations", "recommendations",
+     "The strategic allocation recommendation for Forest Capital."),
+    ("How We Built This", "ai_leverage",
+     "How the team used AI — a multi-model council and quality harness — "
+     "to build and check the analysis."),
+    ("Questions and Discussion", None,
+     "Closing slide — questions from Forest Capital and the MSFA panel."),
 ]
 
 
@@ -124,16 +164,20 @@ def deck_to_editor(
 
     Returns (content_json, content_text): content_json is
     {"slides": [...]} — one slide object per deck slide, the editor's
-    slide-card format. Slide content is seeded from the generated
-    narratives where one applies; speaker_notes start EMPTY so Molly
-    writes her own (the slide-card Generate Talking Points helper offers
-    a starting point). content_text concatenates every slide for
-    Academic Review.
+    slide-card format. EVERY slide's content is seeded — from the
+    generated narrative where the slide maps to one, otherwise from the
+    static per-slide description in _DECK_SLIDES — so no slide opens as a
+    blank card. speaker_notes start EMPTY so Molly writes her own (the
+    slide-card Generate Talking Points helper offers a starting point).
+    content_text concatenates every slide for Academic Review.
     """
     slides: list[dict[str, Any]] = []
     text_lines: list[str] = []
-    for i, (title, key) in enumerate(_DECK_SLIDES, start=1):
-        content = (narratives.get(key, "").strip() if key else "")
+    for i, (title, key, seed) in enumerate(_DECK_SLIDES, start=1):
+        # The generated narrative when this slide maps to one, otherwise
+        # the static seed — never an empty content field.
+        narrative = narratives.get(key, "").strip() if key else ""
+        content = narrative or seed
         slides.append({
             "id": i,
             "title": title,

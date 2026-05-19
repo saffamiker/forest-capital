@@ -70,6 +70,20 @@ async def lifespan(app: FastAPI):
     # restart already carries the uploaded rubric / requirements documents.
     # Fail-open: a cold cache simply means agents run without that context.
     if ENVIRONMENT != "test":
+        # Reap any audit left 'running' by a crash or a redeploy before
+        # this boot — a hung run otherwise holds the statistical-audit
+        # lock until the first poll or audit-start happens to clear it.
+        try:
+            from tools.audit_engine import fail_stale_audits
+            reaped = await fail_stale_audits()
+            if reaped:
+                log.warning(
+                    f"Startup reap: marked {reaped} stale audit "
+                    f"run(s) as failed", count=reaped)
+            else:
+                log.info("Startup reap: no stale audit runs found")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("audit_startup_reap_failed", error=str(exc))
         try:
             from tools.academic_context import refresh_academic_context
             await refresh_academic_context()
@@ -2186,13 +2200,18 @@ async def audit_run(
     Project team only — the Statistical Audit lives in the QA tab.
     """
     from tools.audit_engine import start_audit
-    from tools.qa_guard import QA_BUSY_MESSAGE, qa_run_in_progress
+    from tools.qa_guard import (
+        QA_BUSY_MESSAGE_STATISTICAL, statistical_audit_in_progress,
+    )
 
-    # Global QA-run guard — rejects if a methodology audit or another
-    # statistical audit is already in progress. start_audit keeps its own
+    # Per-type lock — a statistical audit is blocked only by another
+    # statistical audit in flight, never by a methodology run. A run
+    # stuck past the 15-minute timeout is reaped inside is_audit_running,
+    # so a hung run never wedges this. start_audit keeps its own
     # is_audit_running() check as the race backstop.
-    if await qa_run_in_progress() is not None:
-        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
+    if await statistical_audit_in_progress():
+        raise HTTPException(status_code=409,
+                            detail=QA_BUSY_MESSAGE_STATISTICAL)
 
     body = body or {}
     triggered_by = str(body.get("triggered_by") or body.get("reason")
@@ -2226,7 +2245,10 @@ async def audit_get_latest_run(
     the QA tab can show a cached result instead of an unnecessary re-run.
     """
     from tools.audit_assembler import is_audit_current
-    from tools.audit_engine import get_latest_audit_run
+    from tools.audit_engine import fail_stale_audits, get_latest_audit_run
+    # Reap a hung run before reporting status — the latest run any user's
+    # poll sees is then never a stale 'running' row.
+    await fail_stale_audits()
     run = await get_latest_audit_run()
     currency = await is_audit_current()
     return {
@@ -2943,15 +2965,19 @@ async def qa_audit(request: Request, session: dict = Depends(require_auth)):
     the strategy results dict to guarantee pass/fail verdicts are never
     hallucinated. Falls back to mock audit if pipeline is unavailable.
 
-    Global QA-run guard: rejected with 409 if a statistical audit or
-    another methodology run is already in progress (tools/qa_guard.py).
+    Per-type guard: rejected with 409 only when another methodology
+    audit is already in progress — a statistical audit never blocks it
+    (tools/qa_guard.py).
     """
     from tools.qa_guard import (
-        QA_BUSY_MESSAGE, begin_methodology, end_methodology,
-        qa_run_in_progress,
+        QA_BUSY_MESSAGE_METHODOLOGY, begin_methodology, end_methodology,
+        methodology_in_progress,
     )
-    if await qa_run_in_progress() is not None:
-        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
+    # Per-type lock — a methodology audit is blocked only by another
+    # methodology audit, never by a statistical one.
+    if methodology_in_progress():
+        raise HTTPException(status_code=409,
+                            detail=QA_BUSY_MESSAGE_METHODOLOGY)
 
     begin_methodology()
     try:
@@ -3106,7 +3132,8 @@ async def qa_status(request: Request, session: dict = Depends(require_auth)):
         age_hours: float | null,
         strategy_hash: str,
         present_mode_allowed: bool,
-        running: bool,            # True while a Tier 2 audit is in flight
+        running: bool,            # a methodology or statistical audit is
+                                  #   in flight — global, not session-scoped
       }
 
     The nav-bar badge polls this endpoint every 30 seconds so the
@@ -3121,6 +3148,16 @@ async def qa_status(request: Request, session: dict = Depends(require_auth)):
 
     try:
         from tools.cache import get_latest_qa
+        from tools.qa_guard import (
+            methodology_in_progress, statistical_audit_in_progress,
+        )
+        # Cross-user run state: the statistical audit_runs row is global,
+        # the methodology flag is process-wide on the single worker — so
+        # every user's poll sees the same answer, not session-scoped
+        # state. statistical_audit_in_progress also reaps a run hung past
+        # the 15-minute timeout.
+        running = (methodology_in_progress()
+                   or await statistical_audit_in_progress())
         strategy_hash, _cached = await _current_strategy_hash()
         latest = await get_latest_qa(strategy_hash, min_tier=1)
 
@@ -3128,7 +3165,7 @@ async def qa_status(request: Request, session: dict = Depends(require_auth)):
             return {
                 "verdict": "UNKNOWN", "tier": None, "run_at": None,
                 "age_hours": None, "strategy_hash": strategy_hash,
-                "present_mode_allowed": False, "running": False,
+                "present_mode_allowed": False, "running": running,
             }
 
         # Present-mode gate: verdict ≥ WARN AND age < 48h AND hash matches.
@@ -3154,7 +3191,7 @@ async def qa_status(request: Request, session: dict = Depends(require_auth)):
             "age_hours":            round(age_hours, 2) if age_hours is not None else None,
             "strategy_hash":        strategy_hash,
             "present_mode_allowed": present_allowed,
-            "running":              False,
+            "running":              running,
         }
     except Exception as exc:
         log.warning("qa_status_fallback", error=str(exc))
@@ -3177,15 +3214,19 @@ async def qa_run(request: Request, session: dict = Depends(require_auth)):
     Auto-escalation to Tier 3 happens inside the background worker if
     Tier 2 returns FAIL (see schedule_tier2_background).
 
-    Global QA-run guard: rejected with 409 if a statistical audit or
-    another methodology run is already in progress (tools/qa_guard.py).
+    Per-type guard: rejected with 409 only when another methodology
+    audit is already in progress — a statistical audit never blocks it
+    (tools/qa_guard.py).
     """
     from tools.qa_guard import (
-        QA_BUSY_MESSAGE, begin_methodology, end_methodology,
-        qa_run_in_progress,
+        QA_BUSY_MESSAGE_METHODOLOGY, begin_methodology, end_methodology,
+        methodology_in_progress,
     )
-    if await qa_run_in_progress() is not None:
-        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
+    # Per-type lock — a methodology audit is blocked only by another
+    # methodology audit, never by a statistical one.
+    if methodology_in_progress():
+        raise HTTPException(status_code=409,
+                            detail=QA_BUSY_MESSAGE_METHODOLOGY)
 
     if ENVIRONMENT == "test":
         return {"verdict": "PASS", "tier": 1, "tier2_scheduled": False}
@@ -3253,15 +3294,19 @@ async def qa_full_review(request: Request, session: dict = Depends(require_auth)
     Master-key path: anyone with a valid session can trigger Tier 3,
     but the rate limit caps abuse at 5/minute.
 
-    Global QA-run guard: rejected with 409 if a statistical audit or
-    another methodology run is already in progress (tools/qa_guard.py).
+    Per-type guard: rejected with 409 only when another methodology
+    audit is already in progress — a statistical audit never blocks it
+    (tools/qa_guard.py).
     """
     from tools.qa_guard import (
-        QA_BUSY_MESSAGE, begin_methodology, end_methodology,
-        qa_run_in_progress,
+        QA_BUSY_MESSAGE_METHODOLOGY, begin_methodology, end_methodology,
+        methodology_in_progress,
     )
-    if await qa_run_in_progress() is not None:
-        raise HTTPException(status_code=409, detail=QA_BUSY_MESSAGE)
+    # Per-type lock — a methodology audit is blocked only by another
+    # methodology audit, never by a statistical one.
+    if methodology_in_progress():
+        raise HTTPException(status_code=409,
+                            detail=QA_BUSY_MESSAGE_METHODOLOGY)
 
     if ENVIRONMENT == "test":
         return {"verdict": "PASS", "tier": 3}

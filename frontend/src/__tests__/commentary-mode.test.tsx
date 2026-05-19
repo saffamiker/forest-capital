@@ -13,7 +13,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ReactNode } from 'react'
-import { render, renderHook, screen, act } from '@testing-library/react'
+import { render, renderHook, screen, act, fireEvent } from '@testing-library/react'
 import axios from 'axios'
 
 import { useGlossaryStore } from '../stores/glossaryStore'
@@ -39,10 +39,16 @@ const mockedAxios = axios as unknown as {
   isAxiosError: typeof axios.isAxiosError
 }
 
+// The real loadTerms action — captured once so beforeEach can restore it
+// after a test that stubs it with vi.fn() (a setState merge leaves a
+// stubbed action in place for every later test otherwise).
+const realLoadTerms = useGlossaryStore.getState().loadTerms
+
 beforeEach(() => {
   useGlossaryStore.setState({
     terms: {}, parameters: {}, personas: {}, qa: {}, charts: {},
     termsLoaded: false, termsLoading: false, inflight: new Set<string>(),
+    loadTerms: realLoadTerms,
   })
   useProvenanceStore.setState({
     series: {}, crossValidation: null, lastPipelineRun: null, loading: false, error: null,
@@ -141,11 +147,79 @@ describe('ExplainableText mode-conditional rendering', () => {
     expect(screen.getByLabelText(/Explain sharpe_ratio/i)).toBeInTheDocument()
   })
 
-  it('renders muted state in Commentary mode when glossary entry is missing', () => {
+  it('renders children bare when the glossary entry is missing', () => {
     renderInMode('commentary', <ExplainableText term="unknown_term">VALUE</ExplainableText>)
     // Children render, but no clickable explain button.
     expect(screen.getByText('VALUE')).toBeInTheDocument()
     expect(screen.queryByLabelText(/Explain unknown_term/i)).not.toBeInTheDocument()
+  })
+})
+
+
+describe('ExplainableText — no inert underlines', () => {
+  it('renders no underline while the glossary is still loading', () => {
+    // Glossary not loaded and no entry for this term yet.
+    useGlossaryStore.setState({
+      terms: {}, termsLoaded: false, loadTerms: vi.fn(),
+    })
+    const { container } = renderInMode(
+      'commentary', <ExplainableText term="sharpe_ratio">VALUE</ExplainableText>)
+    expect(screen.getByText('VALUE')).toBeInTheDocument()
+    // No dotted underline, no explain button — nothing inert.
+    expect(container.querySelector('.border-dotted')).toBeNull()
+    expect(screen.queryByLabelText(/Explain sharpe_ratio/i)).not.toBeInTheDocument()
+  })
+
+  it('renders no underline when the term has no glossary entry', () => {
+    // Glossary loaded, but it carries no entry for this term.
+    useGlossaryStore.setState({
+      terms: { other_term: { hover: 'h', what: 'w', why: 'w' } },
+      termsLoaded: true, loadTerms: vi.fn(),
+    })
+    const { container } = renderInMode(
+      'commentary', <ExplainableText term="missing_term">VALUE</ExplainableText>)
+    expect(screen.getByText('VALUE')).toBeInTheDocument()
+    expect(container.querySelector('.border-dotted')).toBeNull()
+  })
+
+  it('renders the dotted underline when the glossary is loaded and the entry exists', () => {
+    useGlossaryStore.setState({
+      terms: { sharpe_ratio: { hover: 'h', what: 'w', why: 'w' } },
+      termsLoaded: true,
+    })
+    const { container } = renderInMode(
+      'commentary', <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>)
+    expect(container.querySelector('.border-dotted')).not.toBeNull()
+    expect(screen.getByLabelText(/Explain sharpe_ratio/i)).toBeInTheDocument()
+  })
+})
+
+
+describe('ExplainableText — custom hover tooltip', () => {
+  function seedAndRender() {
+    useGlossaryStore.setState({
+      terms: { sharpe_ratio: {
+        hover: 'Return per unit of risk', what: 'w', why: 'w' } },
+      termsLoaded: true,
+    })
+    renderInMode('commentary',
+      <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>)
+    return screen.getByLabelText(/Explain sharpe_ratio/i)
+  }
+
+  it('shows a custom tooltip with the hover text on mouse-enter, hides on mouse-out', () => {
+    const btn = seedAndRender()
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+    fireEvent.mouseEnter(btn)
+    const tip = screen.getByRole('tooltip')
+    expect(tip).toHaveTextContent('Return per unit of risk')
+    fireEvent.mouseLeave(btn)
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('uses no native title attribute — the tooltip is the custom element', () => {
+    const btn = seedAndRender()
+    expect(btn).not.toHaveAttribute('title')
   })
 })
 

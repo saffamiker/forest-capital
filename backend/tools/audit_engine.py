@@ -21,6 +21,15 @@ log = structlog.get_logger(__name__)
 
 _audit_bg_tasks: set = set()
 
+# A run still 'running' past this many minutes is treated as hung — a
+# crash, an out-of-memory kill or a redeploy stopped _execute_audit
+# before it could finalise the row. fail_stale_audits() marks such a row
+# 'failed', which releases the concurrency lock the 'running' row
+# represents. Without this a single hung run blocks every future audit
+# indefinitely.
+_AUDIT_TIMEOUT_MINUTES = 15
+_TIMEOUT_REASON = "timeout — run exceeded 15 minutes"
+
 
 def _iso(value: Any) -> str | None:
     try:
@@ -31,9 +40,54 @@ def _iso(value: Any) -> str | None:
 
 # ── audit_runs / audit_findings persistence ───────────────────────────────────
 
+async def fail_stale_audits() -> int:
+    """
+    Marks every audit_runs row stuck in 'running' past
+    _AUDIT_TIMEOUT_MINUTES as 'failed' — releasing the concurrency lock
+    and recording the reason in metadata.timeout_reason. Returns the
+    number of rows reaped.
+
+    Called from is_audit_running() (so every lock check reaps first) and
+    from the status-poll endpoints, so a hung run is cleared within one
+    poll cycle of crossing the timeout. Fail-open.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return 0
+        async with AsyncSessionLocal() as session:
+            # The CASTs are required: asyncpg cannot infer the type of a
+            # bind parameter inside jsonb_build_object / make_interval and
+            # raises IndeterminateDatatypeError without them.
+            res = await session.execute(text(
+                "UPDATE audit_runs SET status = 'failed', "
+                "completed_at = now(), "
+                "metadata = COALESCE(metadata, '{}'::jsonb) || "
+                "  jsonb_build_object('timeout_reason', CAST(:reason AS text)) "
+                "WHERE status = 'running' "
+                "AND triggered_at < now() "
+                "  - make_interval(mins => CAST(:mins AS integer)) "
+                "RETURNING id"
+            ), {"reason": _TIMEOUT_REASON, "mins": _AUDIT_TIMEOUT_MINUTES})
+            reaped = [int(r[0]) for r in res.fetchall()]
+            await session.commit()
+        for rid in reaped:
+            log.warning("audit_run_timed_out", run_id=rid,
+                        timeout_minutes=_AUDIT_TIMEOUT_MINUTES)
+        return len(reaped)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_fail_stale_failed", error=str(exc))
+        return 0
+
+
 async def is_audit_running() -> int | None:
-    """The id of an audit still in the 'running' state — the concurrency
-    lock — or None. Fail-open: a database error reports None."""
+    """The id of an audit still in the 'running' state — the statistical
+    concurrency lock — or None. A run stuck past the 15-minute timeout is
+    reaped (marked failed) first, so a hung run never holds the lock.
+    Fail-open: a database error reports None."""
+    await fail_stale_audits()
     try:
         from sqlalchemy import text
 

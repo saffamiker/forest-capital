@@ -3,9 +3,9 @@
  *
  * Three-level explanation wrapper for any term, metric label, or value.
  *
- *   Level 1 — hover tooltip. Dotted underline + ⓘ icon. Native-feel
- *             tooltip with the 1-2 sentence `hover` text from
- *             glossaryStore.terms[term].
+ *   Level 1 — hover tooltip. Dotted underline + ⓘ icon. A small styled
+ *             tooltip (matching the click panel) with the 1-2 sentence
+ *             `hover` text from glossaryStore.terms[term].
  *   Level 2 — click panel. Inline expansion below the term showing
  *             what/why/in_context from glossaryStore. Closes on
  *             outside-click or Escape.
@@ -13,12 +13,13 @@
  *             drawer with academic context drawn from references.json
  *             (LearnMoreSidePanel).
  *
- * Renders children unchanged when:
- *   - mode is not 'commentary' (Analyst/Present mode → no chrome)
- *   - glossaryStore has no entry for `term` (no content to show)
+ * Renders children bare — no underline, no icon, no chrome — when:
+ *   - mode is not 'commentary' (Analyst/Present mode), OR
+ *   - the glossary has no entry for `term` (still loading, or the
+ *     Explainer returned nothing).
  *
- * Failing silently rather than rendering a broken "no data" tooltip
- * keeps the dashboard usable when the Explainer endpoint is down.
+ * The dotted underline appears ONLY when a hover/click would actually
+ * do something — there is no inert underline that leads nowhere.
  */
 import { useEffect, useRef, useState } from 'react'
 import { Info, BookOpen } from 'lucide-react'
@@ -38,7 +39,6 @@ interface Props {
 export default function ExplainableText({ term, strategy, children }: Props) {
   const { mode } = useUI()
   const entry = useGlossaryStore((s) => s.terms[term])
-  const termsLoading = useGlossaryStore((s) => s.termsLoading)
   const loadTerms = useGlossaryStore((s) => s.loadTerms)
 
   // Lazy-load the glossary on first Commentary-mode render. The store's
@@ -54,6 +54,7 @@ export default function ExplainableText({ term, strategy, children }: Props) {
   }, [mode, loadTerms])
 
   const [open, setOpen] = useState(false)
+  const [hovered, setHovered] = useState(false)
   const [learnMoreOpen, setLearnMoreOpen] = useState(false)
   const panelRef = useRef<HTMLSpanElement>(null)
 
@@ -76,23 +77,12 @@ export default function ExplainableText({ term, strategy, children }: Props) {
     }
   }, [open])
 
-  // Analyst / Present mode: render children with no chrome at all.
-  // CLAUDE.md: "explanations still available on explicit right-click only"
-  // — but for Sprint 6 we keep Analyst clean and rely on Commentary mode
-  // for any hover affordance.
-  if (mode !== 'commentary') {
+  // Analyst / Present mode, or no glossary entry yet (still loading, or
+  // the Explainer returned nothing for this term): render children bare.
+  // No inert underline — the dotted underline is shown only when a
+  // hover/click would actually surface an explanation.
+  if (mode !== 'commentary' || !entry) {
     return <>{children}</>
-  }
-
-  // Commentary mode but glossary not yet loaded → render the inline ⓘ icon
-  // but in a muted state so the user knows tooltips are coming.
-  if (!entry) {
-    return (
-      <span className="inline-flex items-center gap-1 border-b border-dotted border-muted/40">
-        <span>{children}</span>
-        {termsLoading && <Info className="w-3 h-3 text-muted/40 animate-pulse" aria-label="loading" />}
-      </span>
-    )
   }
 
   return (
@@ -100,14 +90,28 @@ export default function ExplainableText({ term, strategy, children }: Props) {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
+        onMouseEnter={() => setHovered(true)}
+        onMouseLeave={() => setHovered(false)}
         className="inline-flex items-center gap-1 border-b border-dotted border-electric/40 hover:border-electric cursor-help"
-        title={entry.hover}
         aria-expanded={open}
         aria-label={`Explain ${term}`}
       >
         <span>{children}</span>
         <Info className="w-3 h-3 text-electric/70" />
       </button>
+
+      {/* Level 1 — custom hover tooltip. Styled to match the click
+          panel; suppressed while the click panel is open so the two
+          never stack. pointer-events-none so it never steals the
+          mouse-out that dismisses it. */}
+      {hovered && !open && (
+        <span
+          role="tooltip"
+          className="absolute z-50 left-0 mt-1 w-56 card px-2.5 py-1.5 text-2xs leading-relaxed text-slate-200 shadow-card pointer-events-none"
+        >
+          {entry.hover}
+        </span>
+      )}
 
       {open && (
         <span

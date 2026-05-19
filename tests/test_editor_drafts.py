@@ -115,6 +115,26 @@ class TestEditorContentBuilders:
         assert all(s["speaker_notes"] == "" for s in cj["slides"])
         assert "Slide 1:" in ct
 
+    def test_deck_to_editor_populates_every_slide_content(self):
+        # Every one of the 16 slides carries non-empty content — the five
+        # narrative-keyed slides from the generated narratives, the rest
+        # from the static seed. No slide opens as a blank card.
+        from tools.editor_content import deck_to_editor
+        cj, _ = deck_to_editor({
+            "thesis": "A thesis.", "conclusions": "- one",
+            "recommendations": "- rec", "ai_leverage": "AI narrative."})
+        assert len(cj["slides"]) == 16
+        assert all(s["content"].strip() for s in cj["slides"])
+        # Speaker notes stay empty on every slide — unchanged behaviour.
+        assert all(s["speaker_notes"] == "" for s in cj["slides"])
+
+    def test_deck_to_editor_seeds_keyless_slides_when_narratives_empty(self):
+        # Even with no narratives at all, every slide still has content
+        # from its static seed.
+        from tools.editor_content import deck_to_editor
+        cj, _ = deck_to_editor({})
+        assert all(s["content"].strip() for s in cj["slides"])
+
     def test_executive_brief_to_editor_builds_tiptap_and_text(self):
         from tools.editor_content import executive_brief_to_editor
         cj, ct = executive_brief_to_editor({
