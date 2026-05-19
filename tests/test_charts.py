@@ -122,6 +122,56 @@ class TestChartRenderUnit:
         png = asyncio.run(render_chart_png("sensitivity", "dark", 200, 120))
         assert png.startswith(_PNG_MAGIC)
 
+    def test_all_chart_keys_listed_on_available_endpoint(self):
+        # Every key in AVAILABLE_CHARTS surfaces in the /charts/available
+        # response — the API and the registry must never drift apart, or
+        # the chart picker hides charts that still render server-side.
+        from tools.chart_render import AVAILABLE_CHARTS
+        resp = client.get("/api/v1/charts/available", headers=TEAM)
+        assert resp.status_code == 200
+        seen = {c["key"] for c in resp.json()}
+        registered = {c["key"] for c in AVAILABLE_CHARTS}
+        assert seen == registered
+
+    def test_every_chart_renders_a_png_in_test_environment(self):
+        # In the test environment the analytics caches are cold and
+        # matplotlib renders against missing data — the renderers must
+        # ALL degrade to the Pillow placeholder PNG rather than 500.
+        # This is the chart-library fail-open contract.
+        from tools.chart_render import AVAILABLE_CHARTS, render_chart_png
+        for chart in AVAILABLE_CHARTS:
+            png = asyncio.run(render_chart_png(
+                chart["key"], "light", 240, 160))
+            assert png.startswith(_PNG_MAGIC), \
+                f"{chart['key']} did not return a PNG"
+
+    def test_render_cache_hit_after_first_call_for_extended_charts(self):
+        # The 5-minute per-(chart_key, theme, w, h) cache must serve the
+        # extended renderers identically to the deck five. A second call
+        # for the same key/theme/size is bytes-identical to the first
+        # because the cache returns the same object — no re-render.
+        from tools.chart_render import _render_cache, render_chart_png
+        # Pick a Commit-3 key (single-strategy) and a Commit-4 key
+        # (multi-strategy gates) so both compute paths are exercised.
+        for key in ("drawdown_periods", "significance_journey"):
+            _render_cache.clear()
+            a = asyncio.run(render_chart_png(key, "light", 220, 140))
+            assert any(k[0] == key for k in _render_cache)
+            b = asyncio.run(render_chart_png(key, "light", 220, 140))
+            # Identical bytes — second call hit the cache, not the renderer.
+            assert a == b
+
+    def test_categories_cover_every_brief_group(self):
+        # The brief's chart-picker layout lists six section headers. Every
+        # one must have at least one chart on the registry, or the picker
+        # would render an empty section.
+        from tools.chart_render import AVAILABLE_CHARTS
+        cats = {c["category"] for c in AVAILABLE_CHARTS}
+        # The six display groups per Commit 5/7 of the chart-library build.
+        for expected in ("regime", "factors", "performance", "risk",
+                         "significance", "activity"):
+            assert expected in cats, f"no charts in '{expected}' category"
+
     def test_extended_chart_keys_registered_and_rendered(self):
         # The library expansion (commits 2-4) added canvas-only renderers
         # in three batches: regime + factors (Commit 2), performance +
