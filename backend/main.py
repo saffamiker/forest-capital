@@ -856,6 +856,44 @@ async def delete_academic_doc(doc_id: str, session: dict = Depends(require_team_
     return {"deleted": True, "id": doc_id}
 
 
+# ── Charts — server-rendered PNGs for the canvas presentation editor ──────────
+
+@app.get("/api/v1/charts/available")
+async def charts_available(session: dict = Depends(require_team_member)):
+    """The charts the canvas presentation editor can embed — every chart
+    render_deck_charts produces server-side. Project team only."""
+    from tools.chart_render import AVAILABLE_CHARTS
+    return AVAILABLE_CHARTS
+
+
+@app.get("/api/v1/charts/render/{chart_key}")
+@limiter.limit("60/minute")
+async def charts_render(
+    chart_key: str,
+    request: Request,
+    theme: str = "light",
+    width: int = 720,
+    height: int = 400,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Renders one chart server-side as a PNG for the canvas editor, sized
+    to width x height. theme=dark falls back to the light render (the
+    matplotlib renderers are light-only). The PNG is cached five minutes
+    per (chart_key, theme, width, height). 404 for an unknown chart_key.
+    Project team only.
+    """
+    from tools.chart_render import is_known_chart, render_chart_png
+    if not is_known_chart(chart_key):
+        raise HTTPException(status_code=404,
+                            detail=f"Unknown chart key: {chart_key}")
+    theme = "dark" if str(theme).lower() == "dark" else "light"
+    w = max(80, min(int(width), 2000))
+    h = max(80, min(int(height), 2000))
+    png = await render_chart_png(chart_key, theme, w, h)
+    return Response(content=png, media_type="image/png")
+
+
 # ── Document editor — editor_drafts / editor_draft_versions ────────────────────
 #
 # The in-platform editor for Bob's midpoint paper and Molly's presentation
