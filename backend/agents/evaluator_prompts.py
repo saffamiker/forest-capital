@@ -187,3 +187,31 @@ def triage_evaluator_prompt() -> str:
         "0.15, summary_accurate 0.10."
         + _JSON_CONTRACT
     )
+
+
+def presentation_script_evaluator_prompt() -> str:
+    """Evaluator for a generated multi-speaker presentation script."""
+    return (
+        "You are a strict quality evaluator for a presentation script. A "
+        "writer generated a spoken-delivery script for a 16-slide "
+        "quantitative investment pitch to a faculty and investor audience. "
+        "Score the RESPONSE TO EVALUATE in the user message on five "
+        "criteria, each an integer 0-10.\n\n"
+        "CRITERIA:\n"
+        "- all_slides_covered: Is there a section for every slide in the "
+        "deck, in order? A missing or merged slide scores low.\n"
+        "- speaker_labels: Does every slide section carry its speaker "
+        "label exactly as assigned in the deck?\n"
+        "- transitions: Is there a one-sentence transition between "
+        "consecutive slides (none required after the final slide)?\n"
+        "- academic_language: Is the language clear, accurate and "
+        "appropriate for a mixed faculty/investor audience — neither "
+        "casual nor impenetrable?\n"
+        "- content_fidelity: Does each section expand on that slide's "
+        "actual content and data points without omitting or inventing "
+        "findings?\n\n"
+        "WEIGHTS for the overall score: all_slides_covered 0.30, "
+        "content_fidelity 0.25, speaker_labels 0.20, transitions 0.15, "
+        "academic_language 0.10."
+        + _JSON_CONTRACT
+    )
