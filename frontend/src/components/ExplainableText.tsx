@@ -107,7 +107,7 @@ export default function ExplainableText({ term, strategy, children }: Props) {
       {hovered && !open && (
         <span
           role="tooltip"
-          className="absolute z-50 left-0 mt-1 w-56 card px-2.5 py-1.5 text-2xs leading-relaxed text-slate-200 shadow-card pointer-events-none"
+          className="absolute z-50 left-0 mt-1 w-56 card px-3 py-1.5 text-2xs leading-relaxed text-slate-200 shadow-card pointer-events-none"
         >
           {entry.hover}
         </span>

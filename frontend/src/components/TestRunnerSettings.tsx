@@ -125,9 +125,9 @@ function TestResultsBlock() {
         const pct = total ? Math.round((attested / total) * 100) : 0
 
         return (
-          <div key={script.id} className="rounded border border-border bg-navy-900 p-3">
+          <div key={script.id} className="card p-3">
             <div className="flex items-center justify-between gap-3">
-              <h3 className="text-white text-sm font-medium">{script.title}</h3>
+              <h3 className="text-white text-base font-medium">{script.title}</h3>
               <span className="text-2xs text-muted">{attested}/{total} steps</span>
             </div>
             <div className="mt-1.5 h-1.5 rounded-full bg-navy-700 overflow-hidden">
@@ -401,7 +401,7 @@ function FeedbackBacklogBlock() {
       )}
 
       {shown.map((f) => (
-        <div key={f.id} className="rounded border border-border bg-navy-900 p-2.5">
+        <div key={f.id} className="card p-2.5">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {/* Tester said */}
             <div className="min-w-0">
@@ -733,7 +733,7 @@ export function TestAdminSections() {
   return (
     <div className="space-y-6">
       <div>
-        <h3 className="text-sm font-semibold text-white flex items-center gap-1.5">
+        <h3 className="text-base font-semibold text-white flex items-center gap-1.5">
           <AlertTriangle className="w-3.5 h-3.5 text-danger" />
           Failure Reports
         </h3>
@@ -743,14 +743,14 @@ export function TestAdminSections() {
         <FailureReportsBlock />
       </div>
       <div>
-        <h3 className="text-sm font-semibold text-white">Feedback Backlog</h3>
+        <h3 className="text-base font-semibold text-white">Feedback Backlog</h3>
         <p className="text-2xs text-muted mt-0.5 mb-2">
           Tester feedback with AI categorisation — step-linked and free-form.
         </p>
         <FeedbackBacklogBlock />
       </div>
       <div>
-        <h3 className="text-sm font-semibold text-white flex items-center gap-1.5">
+        <h3 className="text-base font-semibold text-white flex items-center gap-1.5">
           <Search className="w-3.5 h-3.5 text-electric" />
           Triage Reports
         </h3>

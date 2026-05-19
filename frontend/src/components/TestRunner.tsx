@@ -306,7 +306,7 @@ export default function TestRunner() {
       {toastEl}
       <Modal onClose={closeRunner}>
         <div className="px-5 py-4">
-          <h2 className="text-white font-semibold text-sm">
+          <h2 className="text-white font-semibold text-base">
             Which test section would you like to run?
           </h2>
           <div className="mt-4 space-y-2">
@@ -351,7 +351,7 @@ export default function TestRunner() {
       {toastEl}
       <Modal>
         <div className="px-5 py-4">
-          <h2 className="text-white font-semibold text-sm">
+          <h2 className="text-white font-semibold text-base">
             Resume your test pass?
           </h2>
           <p className="text-xs text-muted mt-1.5">
@@ -387,7 +387,7 @@ export default function TestRunner() {
         <div className="px-5 py-4">
           <div className="flex items-center gap-2">
             <ClipboardList className="w-4 h-4 text-electric" />
-            <h2 className="text-white font-semibold text-sm">
+            <h2 className="text-white font-semibold text-base">
               Welcome to the Guided Test Pass
             </h2>
           </div>
@@ -433,7 +433,7 @@ export default function TestRunner() {
       {toastEl}
       <Modal onClose={closeRunner}>
         <div className="px-5 py-4">
-          <h2 className="text-white font-semibold text-sm">
+          <h2 className="text-white font-semibold text-base">
             Test pass complete
           </h2>
           <p className="text-xs text-slate-300 mt-2">
@@ -543,8 +543,7 @@ export default function TestRunner() {
               <p className="text-xs text-slate-300 mt-1 leading-relaxed">
                 {step.instruction}
               </p>
-              <div className="mt-2 rounded bg-navy-900 border border-border
-                              px-2.5 py-1.5">
+              <div className="mt-2 card px-3 py-1.5">
                 <div className="text-2xs uppercase tracking-wide text-muted">
                   Expected result
                 </div>
@@ -598,7 +597,7 @@ export default function TestRunner() {
       {showPrimer && phase === 'running' && (
         <Modal onClose={() => setShowPrimer(false)}>
           <div className="px-5 py-4">
-            <h2 className="text-white font-semibold text-sm">
+            <h2 className="text-white font-semibold text-base">
               How the Guided Test Pass works
             </h2>
             <ul className="mt-3 space-y-1 text-xs text-slate-300">

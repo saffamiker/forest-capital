@@ -85,8 +85,8 @@ export default function InfoIcon({
         <span
           role="tooltip"
           className={`absolute z-50 left-1/2 -translate-x-1/2 w-60
-                      rounded-md border border-border bg-navy-800 px-2.5 py-2
-                      text-2xs leading-relaxed text-slate-200 shadow-lg
+                      card px-3 py-2
+                      text-2xs leading-relaxed text-slate-200 shadow-card
                       ${above ? 'bottom-full mb-1.5' : 'top-full mt-1.5'}`}
         >
           {tooltip}
