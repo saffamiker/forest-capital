@@ -169,13 +169,15 @@ log = structlog.get_logger(__name__)
 #     the .pptx export ships.
 #   - The "extended" set (chart_renderers.render_extended_charts) — canvas-
 #     only, added by the chart-library expansion (commits 2-4 of that build).
+#
+# Order — and the `category` field — is the canvas chart picker's display
+# grouping (canvas editor Commit 5/7). The picker reads first-seen order
+# from this list and renders one section per category. rolling_correlation
+# is grouped with the time-series performance charts the user navigates to
+# from the central finding; risk_return and sensitivity are grouped under
+# "risk" because that is how a faculty panel reads them.
 AVAILABLE_CHARTS: list[dict[str, str]] = [
-    # ── regime ────────────────────────────────────────────────────────────
-    {"key": "rolling_correlation",
-     "label": "Rolling Correlation",
-     "description": "Equity-bond rolling correlation with the 2022 "
-                    "regime-break marker — the project's central finding.",
-     "category": "regime"},
+    # ── Regime Analysis ───────────────────────────────────────────────────
     {"key": "regime_signals",
      "label": "Regime Probability Over Time",
      "description": "HMM posterior probability of BULL / TRANSITION / "
@@ -186,7 +188,7 @@ AVAILABLE_CHARTS: list[dict[str, str]] = [
      "description": "Mean annualised return per asset class, split by "
                     "HMM regime state.",
      "category": "regime"},
-    # ── factors ───────────────────────────────────────────────────────────
+    # ── Factors ───────────────────────────────────────────────────────────
     {"key": "factor_loadings",
      "label": "Carhart Factor Loadings",
      "description": "Four-factor betas (MKT-RF, SMB, HML, MOM) with "
@@ -197,16 +199,16 @@ AVAILABLE_CHARTS: list[dict[str, str]] = [
      "description": "Stacked yearly breakdown of factor contributions "
                     "to the portfolio's annual return.",
      "category": "factors"},
-    # ── performance ───────────────────────────────────────────────────────
+    # ── Performance ───────────────────────────────────────────────────────
+    {"key": "rolling_correlation",
+     "label": "Rolling Correlation",
+     "description": "Equity-bond rolling correlation with the 2022 "
+                    "regime-break marker — the project's central finding.",
+     "category": "performance"},
     {"key": "cumulative_returns",
      "label": "Cumulative Returns",
      "description": "Growth of $1 across every strategy and the "
                     "benchmark over the full study period.",
-     "category": "performance"},
-    {"key": "risk_return",
-     "label": "Risk vs Return",
-     "description": "Each strategy plotted by annualised return against "
-                    "volatility.",
      "category": "performance"},
     {"key": "rolling_sharpe",
      "label": "Rolling Sharpe",
@@ -223,13 +225,23 @@ AVAILABLE_CHARTS: list[dict[str, str]] = [
      "description": "Calendar heatmap of monthly returns — strategy on "
                     "top, benchmark below, shared diverging colour scale.",
      "category": "performance"},
-    # ── risk ──────────────────────────────────────────────────────────────
+    # ── Risk ──────────────────────────────────────────────────────────────
     {"key": "drawdown_periods",
      "label": "Drawdown",
      "description": "Underwater equity curve — % below the running "
                     "peak — for the strategy and the benchmark.",
      "category": "risk"},
-    # ── significance ──────────────────────────────────────────────────────
+    {"key": "risk_return",
+     "label": "Risk vs Return",
+     "description": "Each strategy plotted by annualised return against "
+                    "volatility.",
+     "category": "risk"},
+    {"key": "sensitivity",
+     "label": "Sensitivity Analysis",
+     "description": "How the headline results hold up when key "
+                    "parameters are varied — a robustness check.",
+     "category": "risk"},
+    # ── Significance ──────────────────────────────────────────────────────
     {"key": "significance_journey",
      "label": "Significance Journey",
      "description": "Row per Tier 1 gate, column per strategy — green "
@@ -245,18 +257,12 @@ AVAILABLE_CHARTS: list[dict[str, str]] = [
      "description": "FDR-corrected p-value per strategy with the "
                     "0.005 Tier 1 threshold marked.",
      "category": "significance"},
-    # ── robustness ────────────────────────────────────────────────────────
-    {"key": "sensitivity",
-     "label": "Sensitivity Analysis",
-     "description": "How the headline results hold up when key "
-                    "parameters are varied — a robustness check.",
-     "category": "robustness"},
-    # ── process ───────────────────────────────────────────────────────────
+    # ── Activity ──────────────────────────────────────────────────────────
     {"key": "team_activity",
      "label": "Team Activity",
      "description": "The project build timeline — commits, council runs "
                     "and reviews per team member.",
-     "category": "process"},
+     "category": "activity"},
 ]
 
 # Charts backed by the deck renderer (academic_deck.render_deck_charts).

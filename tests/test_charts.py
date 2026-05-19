@@ -134,6 +134,10 @@ class TestChartRenderUnit:
             AVAILABLE_CHARTS, is_known_chart, render_chart_png,
         )
         registry = {c["key"]: c for c in AVAILABLE_CHARTS}
+        # Categories are the chart picker's display grouping (Commit 5 of
+        # the library expansion). rolling_correlation lives under
+        # "performance" (the time-series block); risk_return + sensitivity
+        # both live under "risk"; team_activity → "activity".
         expected = {
             # Commit 2
             "regime_signals":              "regime",
@@ -149,6 +153,11 @@ class TestChartRenderUnit:
             "significance_journey":        "significance",
             "oos_performance":             "significance",
             "p_value_distribution":        "significance",
+            # Picker regrouping (Commit 5)
+            "rolling_correlation":         "performance",
+            "risk_return":                 "risk",
+            "sensitivity":                 "risk",
+            "team_activity":               "activity",
         }
         for key, category in expected.items():
             assert is_known_chart(key), f"{key} not in _CHART_KEYS"

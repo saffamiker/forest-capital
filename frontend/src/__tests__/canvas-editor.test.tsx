@@ -212,3 +212,92 @@ describe('ChartPicker', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
   })
 })
+
+
+// ── ChartPicker — grouped layout (Commit 5 of the chart library) ──────────────
+
+describe('ChartPicker — grouped layout', () => {
+  // The picker preserves the API's first-seen order and renders one
+  // section per category with a friendly display label. The exact set
+  // of categories matches the AVAILABLE_CHARTS list on the backend.
+  beforeEach(() => {
+    mockedAxios.get.mockImplementation((url: string) => {
+      if (url.includes('/charts/available')) {
+        return Promise.resolve({ data: [
+          { key: 'regime_signals', label: 'Regime Probability',
+            description: 'P(regime) over time.', category: 'regime' },
+          { key: 'regime_conditional_returns',
+            label: 'Returns by Regime',
+            description: 'Mean per regime.', category: 'regime' },
+          { key: 'factor_loadings', label: 'Carhart Loadings',
+            description: 'Four-factor betas.', category: 'factors' },
+          { key: 'rolling_correlation', label: 'Rolling Correlation',
+            description: 'Equity-bond rolling.', category: 'performance' },
+          { key: 'drawdown_periods', label: 'Drawdown',
+            description: 'Underwater curve.', category: 'risk' },
+          { key: 'significance_journey', label: 'Significance Journey',
+            description: 'Tier 1 gates.', category: 'significance' },
+          { key: 'team_activity', label: 'Team Activity',
+            description: 'Build timeline.', category: 'activity' },
+        ] })
+      }
+      return Promise.resolve({ data: new Blob() })
+    })
+  })
+
+  it('renders a section header per category with the friendly label',
+    async () => {
+      render(<ChartPicker onSelect={() => {}} onClose={() => {}} />)
+      // Each category appears as a section header with its display label.
+      expect(await screen.findByText('Regime Analysis')).toBeInTheDocument()
+      expect(screen.getByText('Factors')).toBeInTheDocument()
+      expect(screen.getByText('Performance')).toBeInTheDocument()
+      expect(screen.getByText('Risk')).toBeInTheDocument()
+      expect(screen.getByText('Significance')).toBeInTheDocument()
+      expect(screen.getByText('Activity')).toBeInTheDocument()
+    })
+
+  it('renders the groups in the API\'s first-seen order', async () => {
+    render(<ChartPicker onSelect={() => {}} onClose={() => {}} />)
+    await screen.findByText('Regime Analysis')
+    const groups = document.querySelectorAll(
+      '[data-testid^="chart-picker-group-"]')
+    const ids = Array.from(groups).map((el) =>
+      el.getAttribute('data-testid'))
+    expect(ids).toEqual([
+      'chart-picker-group-regime',
+      'chart-picker-group-factors',
+      'chart-picker-group-performance',
+      'chart-picker-group-risk',
+      'chart-picker-group-significance',
+      'chart-picker-group-activity',
+    ])
+  })
+
+  it('places each chart card inside its category section', async () => {
+    render(<ChartPicker onSelect={() => {}} onClose={() => {}} />)
+    await screen.findByText('Regime Analysis')
+    const regimeGroup = document.querySelector(
+      '[data-testid="chart-picker-group-regime"]')
+    expect(regimeGroup).not.toBeNull()
+    // Both regime cards live under the Regime Analysis section.
+    expect(regimeGroup!.querySelector(
+      '[data-testid="chart-picker-item-regime_signals"]')).not.toBeNull()
+    expect(regimeGroup!.querySelector(
+      '[data-testid="chart-picker-item-regime_conditional_returns"]')).not.toBeNull()
+    // …and only those cards — rolling_correlation belongs in Performance,
+    // even though it is semantically a regime chart.
+    expect(regimeGroup!.querySelector(
+      '[data-testid="chart-picker-item-rolling_correlation"]')).toBeNull()
+  })
+
+  it('adding a chart from any category fires onSelect with the key',
+    async () => {
+      const onSelect = vi.fn()
+      render(<ChartPicker onSelect={onSelect} onClose={() => {}} />)
+      const card = await screen.findByTestId(
+        'chart-picker-item-significance_journey')
+      fireEvent.click(card)
+      expect(onSelect).toHaveBeenCalledWith('significance_journey')
+    })
+})
