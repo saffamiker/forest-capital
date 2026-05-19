@@ -275,6 +275,34 @@ export default function DocumentEditor() {
     }
   }, [draft, id, save])
 
+  // Script export — the master script, or one speaker's slides only.
+  const exportScript = useCallback(async (speaker?: string) => {
+    setExporting(true)
+    setError(null)
+    try {
+      await save()
+      const res = await axios.post(
+        `/api/v1/documents/drafts/${id}/export`,
+        speaker ? { speaker } : {}, { responseType: 'blob' })
+      const dispo = String(res.headers['content-disposition'] ?? '')
+      const match = /filename="?([^";]+)"?/i.exec(dispo)
+      const filename = match?.[1]
+        ?? `forest-capital-script-${speaker ?? 'master'}.docx`
+      const url = URL.createObjectURL(res.data as Blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch {
+      setError('Export failed — please try again.')
+    } finally {
+      setExporting(false)
+    }
+  }, [id, save])
+
   // "Ask AI" on an editor selection — opens the assistant panel and
   // pre-fills the chat input with the quoted passage.
   const handleAskAI = (text: string) => {
@@ -298,6 +326,13 @@ export default function DocumentEditor() {
   const scriptMetricTone: 'ok' | 'warn' | undefined = isScript
     ? (deliveryMinutes >= 18 && deliveryMinutes <= 27 ? 'ok' : 'warn')
     : undefined
+  // Unique speakers in the script — one export button per speaker.
+  const scriptSpeakers = isScript
+    ? Array.from(new Set(
+        scriptSections(contentJson as TipTapDoc | null)
+          .map((s) => s.speaker)
+          .filter((x): x is string => Boolean(x))))
+    : []
 
   // Deck speaker assignment — drives the navigator badges and the
   // Generate Script button.
@@ -453,16 +488,42 @@ export default function DocumentEditor() {
               : saveState === 'error' ? 'Save failed'
               : saveState === 'saved' ? `Saved ${lastSaved}` : 'Unsaved changes'}
           </span>
-          <button type="button" onClick={() => void exportDocument()}
-            disabled={exporting}
-            className="flex items-center gap-1 text-2xs px-2 py-1 rounded
-                       border border-electric/40 text-electric
-                       hover:bg-electric/10 disabled:opacity-50">
-            {exporting
-              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Exporting…</>
-              : <><Download className="w-3.5 h-3.5" />
-                  {isDeck ? 'Export PPTX' : 'Export DOCX'}</>}
-          </button>
+          {isScript ? (
+            <>
+              <button type="button" onClick={() => void exportScript()}
+                disabled={exporting}
+                className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                           border border-electric/40 text-electric
+                           hover:bg-electric/10 disabled:opacity-50">
+                {exporting
+                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Exporting…</>
+                  : <><Download className="w-3.5 h-3.5" />
+                      Export Master Script</>}
+              </button>
+              {scriptSpeakers.map((name) => (
+                <button key={name} type="button"
+                  onClick={() => void exportScript(name)} disabled={exporting}
+                  className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                             border border-electric/40 text-electric
+                             hover:bg-electric/10 disabled:opacity-50">
+                  <Download className="w-3.5 h-3.5" /> Export: {name}
+                </button>
+              ))}
+            </>
+          ) : (
+            <button type="button" onClick={() => void exportDocument()}
+              disabled={exporting}
+              className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                         border border-electric/40 text-electric
+                         hover:bg-electric/10 disabled:opacity-50">
+              {exporting
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Exporting…</>
+                : <><Download className="w-3.5 h-3.5" />
+                    {isDeck ? 'Export PPTX' : 'Export DOCX'}</>}
+            </button>
+          )}
           {isDeck && (
             <button type="button" onClick={() => setPreviewOpen(true)}
               className="flex items-center gap-1 text-2xs px-2 py-1 rounded

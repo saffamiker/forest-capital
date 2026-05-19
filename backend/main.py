@@ -1175,6 +1175,44 @@ async def generate_presentation_script(
     }
 
 
+@app.post("/api/v1/documents/drafts/{draft_id}/export")
+async def export_editor_draft(
+    draft_id: int,
+    body: dict | None = None,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Exports a presentation_script editor draft as a .docx — the master
+    script (every speaker) when no speaker is given, or one speaker's
+    individual script (their slides only) when {speaker} is provided.
+    Team members only.
+    """
+    import asyncio
+    from datetime import date
+
+    from tools.editor_drafts import get_draft
+    from tools.script_docx import build_script_docx
+
+    draft = await get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    if draft.get("document_type") != "presentation_script":
+        raise HTTPException(
+            status_code=400,
+            detail="This export is available for presentation scripts only.")
+
+    raw_speaker = (body or {}).get("speaker")
+    speaker = str(raw_speaker).strip() if raw_speaker else None
+    content = await asyncio.to_thread(build_script_docx, draft, speaker)
+
+    slug = (speaker.lower().replace(" ", "-") if speaker else "master")
+    filename = (f"forest-capital-script-{slug}-"
+                f"{date.today().isoformat()}.docx")
+    return Response(
+        content=content, media_type=_DOCX_MEDIA,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 # ── Regime ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/regime/current")
