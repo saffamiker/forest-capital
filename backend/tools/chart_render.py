@@ -12,6 +12,147 @@ PNG is resized to the requested dimensions with Pillow, and `theme=dark`
 falls back to the light render (the matplotlib renderers are light-only).
 A 5-minute per-(chart_key, theme, width, height) cache keeps repeated
 requests — thumbnails, re-fetches — off the render path.
+
+──────────────────────────────────────────────────────────────────────────
+CHART LIBRARY INVENTORY  (audit completed May 19 2026 — Commit 1)
+──────────────────────────────────────────────────────────────────────────
+
+SHIPPED — server-renderable today (5 charts):
+  rolling_correlation     regime      from data["rolling_correlation"]
+  cumulative_returns      performance from data["cumulative_returns"]
+  risk_return             performance from data["strategy_results"]
+  sensitivity             robustness  via compute_sensitivity() (heavy)
+  team_activity           process     from data["team_summary"]
+
+PROPOSED — Commit 2 (regime + factors):
+  regime_signals               regime
+    Data: HMM posterior probabilities per date.
+    Source: classify_hmm_regime() exposes historical_labels (label per
+            date) but NOT full per-date posteriors. Two paths:
+      A) Render a discrete colored regime band from historical_labels
+         (BULL/TRANSITION/BEAR bands) — works today with no detector
+         change. Falls short of "stacked area" but is the same signal.
+      B) Extend classify_hmm_regime to also return historical_probs
+         (posteriors[:] indexed by date) — small addition (~5 lines)
+         since posteriors are already computed internally.
+    Recommendation: A (band) for Commit 2 — adequate for the canvas
+    editor's grid; B can ship later if a true stacked-area is wanted.
+
+  regime_conditional_returns   regime
+    Data: regime label per month × monthly returns.
+    Source: historical_labels from classify_hmm_regime + monthly returns
+            from get_monthly_returns() OR per-strategy monthly_returns
+            from get_latest_strategy_cache(). Group returns by regime
+            label, render bar of mean monthly return per regime
+            (optionally per asset or top-strategies).
+    Ready today.
+
+  factor_loadings              factors
+    Data: Carhart betas with 95% confidence intervals.
+    Source: analytics.factor_loadings() returns betas + significance
+            flags but NOT CIs. statsmodels exposes model.conf_int(0.05)
+            for lower/upper bounds. Small extension to factor_loadings
+            (or compute in the renderer from the same regression).
+    Recommendation: extend analytics.factor_loadings to expose conf_int
+    lower/upper per coefficient (preserves a single source of truth).
+
+  factor_returns_attribution   factors
+    Data: Carhart factor returns × portfolio betas, summed per year.
+    Source: ff_factors_monthly (get_ff_factors) for factor returns;
+            per-strategy betas from analytics.factor_loadings; multiply
+            monthly to get per-factor monthly contribution, sum per
+            calendar year. Default strategy: BENCHMARK.
+    Ready today (pure compute in the renderer).
+
+PROPOSED — Commit 3 (performance + risk):
+  drawdown_periods             risk
+    Data: cumulative returns → running peak → underwater %.
+    Source: data["cumulative_returns"]["points"] already contains
+            growth-of-$1 per strategy. Pure derived compute.
+    Ready today.
+
+  monthly_returns_heatmap      performance
+    Data: monthly returns indexed by (year, month).
+    Source: a strategy's monthly_returns list — default BENCHMARK from
+            get_latest_strategy_cache(), or an asset series from
+            get_monthly_returns(). Pivot into a year × month grid.
+    Ready today.
+
+  rolling_sharpe               performance
+    Data: monthly returns + risk-free rate, 36-month rolling.
+    Source: get_monthly_returns() (asset rf) or a strategy's monthly
+            returns. rolling mean(excess) / rolling std(excess) × √12.
+    Ready today.
+
+  return_distribution          performance
+    Data: monthly returns series + normal overlay (mean, std).
+    Source: any strategy's monthly_returns. Default BENCHMARK.
+    Ready today.
+
+PROPOSED — Commit 4 (significance):
+  significance_journey         significance
+    Data: per-strategy Tier 1 gate results.
+    Source: get_latest_strategy_cache() — each strategy result already
+            carries p_value_ttest, p_value_corrected, dsr_p_value,
+            oos_significant, cv_stability_score, tier1_gates_passed.
+            Compose a row-per-gate × column-per-strategy matrix.
+    Ready today. Independent of qa_results_cache (which stores the
+    QA Agent's verdict, not the per-gate per-strategy data).
+
+  oos_performance              significance
+    Data: in-sample vs out-of-sample cumulative returns per strategy.
+    Source: PARTIAL — strategies carry oos_sharpe / oos_cagr (aggregate
+            stats) and walk_forward_test in backtester yields
+            oos_sharpe_mean/std/min/max across folds — but NEITHER
+            produces a per-date IS/OOS-split cumulative series. Two
+            paths:
+      A) Split data["cumulative_returns"] at a fixed cutoff (e.g. 80%
+         of the date range or the train_end constant from config) and
+         color the two halves IS vs OOS. Same data we already have,
+         renders today.
+      B) Run a fresh walk-forward and assemble a stitched OOS path.
+         Heavy — would need to be cached. Not worth Commit 4.
+    Recommendation: A for Commit 4. Add the IS/OOS cutoff as a
+    constant inside the renderer.
+
+  p_value_distribution         significance
+    Data: per-strategy p_value_corrected (FDR-corrected).
+    Source: get_latest_strategy_cache() — every strategy result has
+            p_value_corrected. Bar chart, bars colored pass/fail at
+            the 0.005 FDR threshold, dashed line at 0.005.
+    Ready today.
+
+──────────────────────────────────────────────────────────────────────────
+DATA-AVAILABILITY SUMMARY
+──────────────────────────────────────────────────────────────────────────
+  Ready today (no upstream change): 9 of 11 new charts
+  Needs a small upstream addition: 2 of 11 —
+    * regime_signals — expose HMM per-date posteriors (small detector
+      change) for the true stacked-area; the colored-band fallback
+      works today without any change
+    * factor_loadings — expose statsmodels conf_int() in
+      analytics.factor_loadings (single-source-of-truth principle)
+
+  Charts requiring the QA cache: NONE.
+    The significance charts read per-strategy fields from the strategy
+    results cache (the backtester output), not from qa_results_cache
+    (which stores the QA Agent's checklist verdict).
+
+  Charts requiring regime_signals_cache: NONE for time-series renders.
+    regime_signals_cache stores only the current/latest regime reading
+    (a single row, 15-minute TTL) — never a historical series. Charts
+    that need regime-over-time read from classify_hmm_regime's
+    historical_labels (run on the full monthly series) instead.
+
+  Heaviest compute paths to guard:
+    sensitivity (existing): already on its own opt-in path
+    regime_signals + regime_conditional_returns: classify_hmm_regime
+      fits a Baum-Welch HMM (~200 iters). Has an in-process cache; the
+      first render after a cold start takes ~1-2 s, then cached.
+    factor_loadings + factor_returns_attribution: a statsmodels OLS
+      per strategy — fast (<200 ms total).
+
+──────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
 
