@@ -37,12 +37,14 @@ interface Props {
   speakerSuggestions?: string[] | undefined
   /** Replaces the word-count line — e.g. the script's delivery estimate. */
   metricLine?: string | undefined
+  /** Tone for metricLine — 'ok' green, 'warn' amber, otherwise muted. */
+  metricTone?: 'ok' | 'warn' | undefined
 }
 
 export default function EditorNavigator({
   title, wordCount, wordTarget, lastSavedLabel, saveState, sections,
   versions, onJumpToSection, onSaveVersion, onRestoreVersion,
-  onAssignSpeaker, speakerSuggestions, metricLine,
+  onAssignSpeaker, speakerSuggestions, metricLine, metricTone,
 }: Props) {
   const [showSave, setShowSave] = useState(false)
   const [label, setLabel] = useState('')
@@ -68,7 +70,11 @@ export default function EditorNavigator({
             : `Last saved: ${lastSavedLabel}`}
         </div>
         {metricLine ? (
-          <div className="text-2xs text-muted mt-0.5">{metricLine}</div>
+          <div className={`text-2xs mt-0.5 ${metricTone === 'warn'
+            ? 'text-warning' : metricTone === 'ok'
+              ? 'text-success' : 'text-muted'}`}>
+            {metricLine}
+          </div>
         ) : (
           <div className="text-2xs text-muted mt-0.5">
             Word count:{' '}
@@ -105,11 +111,15 @@ export default function EditorNavigator({
                     </span>
                   </div>
                 </button>
-                {onAssignSpeaker && (
+                {onAssignSpeaker ? (
                   <SpeakerBadge speaker={s.speaker ?? null}
                     suggestions={speakerSuggestions ?? []}
                     onAssign={(sp) => onAssignSpeaker(s.heading, sp)} />
-                )}
+                ) : s.speaker ? (
+                  <div className="text-2xs text-electric mt-0.5">
+                    {s.speaker}
+                  </div>
+                ) : null}
               </div>
             ))}
           </div>

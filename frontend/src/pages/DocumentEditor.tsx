@@ -35,7 +35,11 @@ const WORD_TARGETS: Record<string, number> = {
   midpoint_paper: 1500,
   executive_brief: 2000,
   presentation_deck: 0,
+  presentation_script: 0,
 }
+
+// A spoken presentation is delivered at ~150 words per minute.
+const SCRIPT_WORDS_PER_MINUTE = 150
 
 // The export endpoint for each document type — the in-editor Export
 // button POSTs {editor_draft_id} to it and downloads the result.
@@ -58,6 +62,36 @@ function tiptapSections(doc: TipTapDoc | null): { heading: string; text: string 
       current = { heading: nodeToText(raw) || 'Section', text: '' }
     } else if (current) {
       current.text += '\n' + nodeToText(raw)
+    }
+  }
+  if (current) out.push(current)
+  return out
+}
+
+// Walks a presentation_script doc into per-slide sections — one per H2
+// heading, carrying the speaker from its H3 and whether it has any
+// delivery prose yet (the progress signal — a script has no [[BOB]]
+// markers).
+function scriptSections(doc: TipTapDoc | null): {
+  heading: string; speaker: string | null; hasContent: boolean
+}[] {
+  const out: { heading: string; speaker: string | null;
+               hasContent: boolean }[] = []
+  let current: { heading: string; speaker: string | null;
+                 hasContent: boolean } | null = null
+  for (const raw of (doc?.content ?? [])) {
+    const node = raw as { type?: string; attrs?: { level?: number } }
+    const level = node.attrs?.level ?? 1
+    if (node.type === 'heading' && level <= 2) {
+      if (current) out.push(current)
+      current = { heading: nodeToText(raw) || 'Section', speaker: null,
+                  hasContent: false }
+    } else if (current && node.type === 'heading' && level === 3) {
+      const m = /Speaker:\s*(.+)/i.exec(nodeToText(raw))
+      if (m) current.speaker = m[1].trim()
+    } else if (current && (node.type === 'paragraph'
+        || node.type === 'blockquote')) {
+      if (nodeToText(raw).trim()) current.hasContent = true
     }
   }
   if (current) out.push(current)
@@ -252,6 +286,18 @@ export default function DocumentEditor() {
   }
 
   const isDeck = draft?.document_type === 'presentation_deck'
+  const isScript = draft?.document_type === 'presentation_script'
+
+  // The script's left panel shows estimated delivery time (150 wpm)
+  // rather than a word-count target.
+  const scriptWordCount = isScript ? countWords(contentText) : 0
+  const deliveryMinutes = scriptWordCount / SCRIPT_WORDS_PER_MINUTE
+  const scriptMetricLine = isScript
+    ? `~${Math.round(deliveryMinutes)} min delivery · ${scriptWordCount} words`
+    : undefined
+  const scriptMetricTone: 'ok' | 'warn' | undefined = isScript
+    ? (deliveryMinutes >= 18 && deliveryMinutes <= 27 ? 'ok' : 'warn')
+    : undefined
 
   // Deck speaker assignment — drives the navigator badges and the
   // Generate Script button.
@@ -337,6 +383,17 @@ export default function DocumentEditor() {
           (s) => canvasSlideStatus(s) !== 'complete').length,
       }
     }
+    if (isScript) {
+      // One section per slide (H2); progress is "has delivery prose yet".
+      const secs: NavSection[] = scriptSections(contentJson as TipTapDoc | null)
+        .map((s) => ({
+          heading: s.heading,
+          totalMarkers: 1,
+          markersRemaining: s.hasContent ? 0 : 1,
+          speaker: s.speaker,
+        }))
+      return { sections: secs, unresolved: countMarkers(contentText) }
+    }
     const secs: NavSection[] = tiptapSections(contentJson as TipTapDoc | null)
       .map((s) => {
         const remaining = countMarkers(s.text)
@@ -345,7 +402,7 @@ export default function DocumentEditor() {
                  totalMarkers: total }
       })
     return { sections: secs, unresolved: countMarkers(contentText) }
-  }, [draft, isDeck, contentJson, contentText])
+  }, [draft, isDeck, isScript, contentJson, contentText])
 
   if (loading) {
     return (
@@ -467,6 +524,8 @@ export default function DocumentEditor() {
               onRestoreVersion={restoreVersion}
               onAssignSpeaker={isDeck ? handleAssignSpeaker : undefined}
               speakerSuggestions={isDeck ? speakerSuggestions : undefined}
+              metricLine={scriptMetricLine}
+              metricTone={scriptMetricTone}
             />
           </aside>
         )}
