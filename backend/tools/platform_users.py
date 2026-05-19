@@ -216,11 +216,6 @@ async def list_all_users() -> list[dict[str, Any]]:
             return users
     except Exception as exc:  # noqa: BLE001
         log.warning("platform_users_list_failed", error=str(exc))
-        # TEMPORARY DEBUG (do not commit) — log the full traceback so the
-        # actual swallowed exception is visible in Render logs. Remove
-        # once the sub-query isolation fix has landed.
-        import traceback
-        log.error("list_all_users_failed: " + traceback.format_exc())
         return []
 
 
