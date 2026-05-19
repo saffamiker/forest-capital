@@ -1,17 +1,32 @@
 /**
- * document-generation-panel.test.tsx — the Generate Documents cards.
+ * document-generation-panel.test.tsx — the Generate Documents cards
+ * and the async generation flow.
  *
- * Verifies the Executive Brief card persists to the editor: when the
- * generation endpoint returns an X-Draft-Id header, the card shows
- * [Open in Editor] (primary) and [Download] (secondary), and Open in
- * Editor navigates to /editor/{draft_id}.
+ * Generation is asynchronous: a POST returns a job_id, polling lives in
+ * the module-level store (lib/generationJobs), and the card derives its
+ * state from the tracked job. The GenerationToast announces a job that
+ * completed while the user was away.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import {
+  render, screen, fireEvent, waitFor, within,
+} from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import type { ReactNode } from 'react'
+
+vi.mock('axios', () => {
+  const mod = {
+    post: vi.fn(), get: vi.fn(), delete: vi.fn(),
+    isAxiosError: vi.fn(() => false),
+  }
+  return { default: mod }
+})
+
 import axios from 'axios'
 import { AuthContext } from '../App'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
+import GenerationToast from '../components/GenerationToast'
+import { trackJob, __resetGenerationJobs } from '../lib/generationJobs'
 
 const mockNavigate = vi.fn()
 vi.mock('react-router-dom', async () => {
@@ -20,19 +35,19 @@ vi.mock('react-router-dom', async () => {
   return { ...actual, useNavigate: () => mockNavigate }
 })
 
-vi.mock('axios', () => {
-  const fn = vi.fn()
-  return { default: Object.assign(fn, { isAxiosError: vi.fn(() => false) }) }
-})
-
-const axiosMock = axios as unknown as ReturnType<typeof vi.fn>
+const mockedAxios = axios as unknown as {
+  post: ReturnType<typeof vi.fn>
+  get: ReturnType<typeof vi.fn>
+  delete: ReturnType<typeof vi.fn>
+  isAxiosError: ReturnType<typeof vi.fn>
+}
 
 const TEAM_PERMS = [
   'view_analytics', 'ask_council', 'team_member',
   'generate_documents', 'export_package',
 ]
 
-function renderPanel(ui: ReactNode) {
+function renderPanel(ui: ReactNode, route = '/reports') {
   const value = {
     session: {
       token: 't', email: 'thaob@queens.edu', permissions: TEAM_PERMS,
@@ -42,70 +57,128 @@ function renderPanel(ui: ReactNode) {
     logout: vi.fn(),
   }
   return render(
-    <AuthContext.Provider value={value}>{ui}</AuthContext.Provider>,
-  )
+    <AuthContext.Provider value={value}>
+      <MemoryRouter initialEntries={[route]}>{ui}</MemoryRouter>
+    </AuthContext.Provider>)
 }
 
-/** A generation response carrying an editor draft id. */
-function briefResponse(draftId: string) {
-  return {
-    data: new Blob(['docx-bytes']),
-    headers: {
-      'content-disposition':
-        'attachment; filename="forest-capital-executive-brief.docx"',
-      'content-type':
-        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'x-draft-id': draftId,
-    },
-  }
+function briefCard(): HTMLElement {
+  return screen.getByText('Executive Brief').closest('.card') as HTMLElement
 }
 
-describe('DocumentGenerationPanel — Executive Brief editor persistence', () => {
-  beforeEach(() => {
-    mockNavigate.mockClear()
-    axiosMock.mockReset()
-    localStorage.clear()
+beforeEach(() => {
+  __resetGenerationJobs()
+  mockNavigate.mockClear()
+  mockedAxios.post.mockReset()
+  mockedAxios.get.mockReset()
+  mockedAxios.delete.mockReset()
+  mockedAxios.isAxiosError.mockReturnValue(false)
+  // loadExistingJobs() — default to no prior jobs.
+  mockedAxios.get.mockResolvedValue({ data: { jobs: [] } })
+  localStorage.clear()
+})
+
+afterEach(() => {
+  vi.useRealTimers()
+  __resetGenerationJobs()
+})
+
+describe('DocumentGenerationPanel — async generation', () => {
+  it('shows the in-progress state with the navigate-away message', async () => {
+    mockedAxios.post.mockResolvedValue({
+      data: { job_id: 'j-brief', status: 'pending' } })
+    renderPanel(<DocumentGenerationPanel />)
+    fireEvent.click(within(briefCard()).getByRole('button',
+      { name: /Generate/ }))
+    await waitFor(() => expect(
+      within(briefCard()).getByText(/Generating your/)).toBeInTheDocument())
+    expect(within(briefCard()).getByText(/You can navigate away/))
+      .toBeInTheDocument()
+    expect(within(briefCard()).getByRole('button', { name: /Cancel/ }))
+      .toBeInTheDocument()
+    expect(mockedAxios.post).toHaveBeenCalledWith('/api/v1/export/executive-brief')
   })
 
-  it('shows Open in Editor and Download after the brief generates a draft', async () => {
-    axiosMock.mockResolvedValue(briefResponse('4242'))
+  it('polls to completion and shows Open in Editor and Download', async () => {
+    vi.useFakeTimers()
     renderPanel(<DocumentGenerationPanel />)
-
-    const card = screen.getByText('Executive Brief')
-      .closest('.card') as HTMLElement
-    fireEvent.click(within(card).getByRole('button', { name: /Generate/ }))
-
-    // The draft-backed result offers Open in Editor (primary) and
-    // Download (secondary).
-    await waitFor(() =>
-      expect(within(card).getByText('Open in Editor')).toBeInTheDocument())
-    expect(within(card).getByText('Download')).toBeInTheDocument()
+    // A running job is already tracked (e.g. started moments ago).
+    trackJob({
+      job_id: 'j-brief', document_type: 'executive_brief',
+      status: 'running', draft_id: null, download_url: null, error: null,
+    })
+    mockedAxios.get.mockResolvedValue({
+      data: {
+        job_id: 'j-brief', document_type: 'executive_brief',
+        status: 'complete', draft_id: 4242,
+        download_url: '/api/v1/jobs/j-brief/download', error: null,
+      } })
+    await vi.advanceTimersByTimeAsync(3100)   // the 3s poll fires
+    expect(within(briefCard()).getByText('Open in Editor'))
+      .toBeInTheDocument()
+    expect(within(briefCard()).getByText('Download')).toBeInTheDocument()
   })
 
   it('Open in Editor navigates to /editor/{draft_id}', async () => {
-    axiosMock.mockResolvedValue(briefResponse('4242'))
     renderPanel(<DocumentGenerationPanel />)
-
-    const card = screen.getByText('Executive Brief')
-      .closest('.card') as HTMLElement
-    fireEvent.click(within(card).getByRole('button', { name: /Generate/ }))
-    const openBtn = await within(card).findByText('Open in Editor')
-    fireEvent.click(openBtn)
-
-    expect(mockNavigate).toHaveBeenCalledWith('/editor/4242')
+    trackJob({
+      job_id: 'j-brief', document_type: 'executive_brief',
+      status: 'complete', draft_id: 99,
+      download_url: '/api/v1/jobs/j-brief/download', error: null,
+    })
+    fireEvent.click(await within(briefCard()).findByText('Open in Editor'))
+    expect(mockNavigate).toHaveBeenCalledWith('/editor/99')
   })
 
-  it('posts to the executive-brief generation endpoint', async () => {
-    axiosMock.mockResolvedValue(briefResponse('7'))
+  it('resumes an in-progress job found on page load', async () => {
+    mockedAxios.get.mockResolvedValue({
+      data: { jobs: [{
+        job_id: 'j-mid', document_type: 'midpoint_paper',
+        status: 'running', draft_id: null, download_url: null, error: null,
+      }] } })
     renderPanel(<DocumentGenerationPanel />)
+    const midCard = await screen.findByText('Midpoint Submission Paper')
+    await waitFor(() => expect(
+      within(midCard.closest('.card') as HTMLElement)
+        .getByText(/Generating your/)).toBeInTheDocument())
+  })
 
-    const card = screen.getByText('Executive Brief')
-      .closest('.card') as HTMLElement
-    fireEvent.click(within(card).getByRole('button', { name: /Generate/ }))
-
-    await waitFor(() => expect(axiosMock).toHaveBeenCalled())
-    expect(axiosMock.mock.calls[0][0]).toMatchObject({
-      url: '/api/v1/export/executive-brief', method: 'POST',
+  it('shows the error state with Try Again on a failed job', async () => {
+    renderPanel(<DocumentGenerationPanel />)
+    trackJob({
+      job_id: 'j-brief', document_type: 'executive_brief',
+      status: 'failed', draft_id: null, download_url: null,
+      error: 'Generation failed (ref: abcd1234)',
     })
+    // trackJob → store emit → useSyncExternalStore re-render. Flush via
+    // findByText (async) — synchronous getByText would race the schedule.
+    expect(await within(briefCard()).findByText(/Generation failed/))
+      .toBeInTheDocument()
+    expect(within(briefCard()).getByRole('button', { name: 'Try Again' }))
+      .toBeInTheDocument()
+  })
+})
+
+describe('GenerationToast — background completion', () => {
+  it('announces a completed job away from the Reports page', () => {
+    trackJob({
+      job_id: 'j-deck', document_type: 'presentation_deck',
+      status: 'complete', draft_id: 7,
+      download_url: '/api/v1/jobs/j-deck/download', error: null,
+    })
+    renderPanel(<GenerationToast />, '/dashboard')
+    expect(screen.getByText(/presentation deck is ready/)).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Open in Editor'))
+    expect(mockNavigate).toHaveBeenCalledWith('/editor/7')
+  })
+
+  it('is suppressed on the Reports page', () => {
+    trackJob({
+      job_id: 'j-deck', document_type: 'presentation_deck',
+      status: 'complete', draft_id: 7,
+      download_url: '/api/v1/jobs/j-deck/download', error: null,
+    })
+    renderPanel(<GenerationToast />, '/reports')
+    expect(screen.queryByText(/is ready/)).toBeNull()
   })
 })

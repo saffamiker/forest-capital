@@ -2,31 +2,30 @@
  * DocumentGenerationPanel — the "Generate Documents" section on the
  * Reports screen.
  *
- * Three cards, one per graded deliverable, each backed by a server-side
- * generation endpoint that assembles a first-draft .docx / .pptx from
- * real platform data, light-mode charts and AI-written narrative:
- *
- *   Midpoint Submission Paper  → POST /api/v1/export/midpoint-paper
- *   Executive Brief            → POST /api/v1/export/executive-brief
- *   Final Presentation Deck    → POST /api/v1/export/presentation-deck
- *
- * All three documents also load the generated content into an editor
- * draft (the endpoint returns the new draft id in the X-Draft-Id
- * header); the card then offers Open in Editor as the primary CTA,
- * with Download as a secondary action. The downloaded files are FIRST
- * DRAFTS — every one carries the AI DRAFT banner.
+ * Three cards, one per graded deliverable. Generation is asynchronous:
+ * the POST returns a job_id and the work runs as a backend job. Polling
+ * lives in a module-level store (lib/generationJobs) so it continues
+ * when the user navigates away — a global toast then announces
+ * completion. Each card derives its state from the tracked job for its
+ * document type: in-progress → spinner + Cancel; complete → Open in
+ * Editor + Download; failed → Try Again.
  */
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, Presentation, Download, Loader2, AlertCircle, CheckCircle,
-  PenLine,
+  PenLine, X,
 } from 'lucide-react'
 import TeamGate from './TeamGate'
+import {
+  useGenerationJobs, trackJob, cancelJob, dismissJob, loadExistingJobs,
+  jobForType, type GenJob,
+} from '../lib/generationJobs'
 
 interface DocSpec {
   id: string
+  documentType: string
   title: string
   description: string
   endpoint: string
@@ -36,6 +35,7 @@ interface DocSpec {
 const DOCS: DocSpec[] = [
   {
     id: 'midpoint',
+    documentType: 'midpoint_paper',
     title: 'Midpoint Submission Paper',
     description:
       'Three-page academic paper formatted to midpoint requirements. '
@@ -45,6 +45,7 @@ const DOCS: DocSpec[] = [
   },
   {
     id: 'brief',
+    documentType: 'executive_brief',
     title: 'Executive Brief',
     description:
       'Five-page investment-audience brief covering methodology, '
@@ -54,6 +55,7 @@ const DOCS: DocSpec[] = [
   },
   {
     id: 'deck',
+    documentType: 'presentation_deck',
     title: 'Final Presentation Deck',
     description:
       '16-slide deck with real data charts in light mode, ready to '
@@ -74,14 +76,6 @@ function readGeneratedAt(): Record<string, string> {
   }
 }
 
-/** A completed generation — the file is held in memory until the user
- *  downloads it or opens the draft in the editor. */
-interface GenResult {
-  blob: Blob
-  filename: string
-  draftId: number | null
-}
-
 function triggerDownload(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -95,64 +89,77 @@ function triggerDownload(blob: Blob, filename: string): void {
 
 export default function DocumentGenerationPanel() {
   const navigate = useNavigate()
-  const [busyId, setBusyId] = useState<string | null>(null)
+  useGenerationJobs()   // re-render as tracked job states change
+  // The POST that creates a job is brief; this guards the button until
+  // the job appears in the store.
+  const [postingId, setPostingId] = useState<string | null>(null)
   const [errors, setErrors] = useState<Record<string, string>>({})
-  const [results, setResults] = useState<Record<string, GenResult>>({})
   const [generatedAt, setGeneratedAt] =
     useState<Record<string, string>>(readGeneratedAt)
+  // Job ids whose completion has already been written to "last generated".
+  const recorded = useRef<Set<string>>(new Set())
+
+  // On mount, resume polling any in-progress jobs and surface recently
+  // completed ones (e.g. generation finished while the user was away).
+  useEffect(() => { void loadExistingJobs() }, [])
+
+  // Stamp "last generated" the first time a job for a type completes.
+  const jobs = useGenerationJobs()
+  useEffect(() => {
+    for (const job of jobs) {
+      if (job.status !== 'complete' || recorded.current.has(job.job_id)) {
+        continue
+      }
+      recorded.current.add(job.job_id)
+      const doc = DOCS.find((d) => d.documentType === job.document_type)
+      if (!doc) continue
+      const now = new Date().toISOString()
+      setGeneratedAt((prev) => {
+        const next = { ...prev, [doc.id]: now }
+        try { localStorage.setItem(LS_KEY, JSON.stringify(next)) }
+        catch { /* best-effort */ }
+        return next
+      })
+    }
+  }, [jobs])
 
   const handleGenerate = async (doc: DocSpec) => {
-    setBusyId(doc.id)
+    setPostingId(doc.id)
     setErrors((prev) => {
       const next = { ...prev }
       delete next[doc.id]
       return next
     })
     try {
-      const res = await axios({
-        url: doc.endpoint, method: 'POST', responseType: 'blob',
-      })
-      const dispo = String(res.headers['content-disposition'] ?? '')
-      const match = /filename="?([^";]+)"?/i.exec(dispo)
-      const filename = match?.[1] ?? `forest-capital-${doc.id}`
-      const draftHeader = res.headers['x-draft-id']
-      const draftId = draftHeader != null ? Number(draftHeader) : null
-      const blob = new Blob([res.data as BlobPart], {
-        type: String(res.headers['content-type']
-          ?? 'application/octet-stream'),
-      })
-
-      // A document with no editor draft (draft storage unavailable)
-      // downloads immediately. One with a draft keeps the file in
-      // memory and offers Open in Editor as the primary action.
-      if (draftId === null || Number.isNaN(draftId)) {
-        triggerDownload(blob, filename)
-      } else {
-        setResults((prev) => ({
-          ...prev, [doc.id]: { blob, filename, draftId },
-        }))
-      }
-
-      const now = new Date().toISOString()
-      setGeneratedAt((prev) => {
-        const next = { ...prev, [doc.id]: now }
-        try { localStorage.setItem(LS_KEY, JSON.stringify(next)) } catch { /* best-effort */ }
-        return next
+      const res = await axios.post<{ job_id: string; status: string }>(
+        doc.endpoint)
+      trackJob({
+        job_id: res.data.job_id, document_type: doc.documentType,
+        status: 'pending', draft_id: null, download_url: null, error: null,
       })
     } catch (err) {
       let msg = 'Generation failed. Please try again.'
-      if (axios.isAxiosError(err) && err.response?.data instanceof Blob) {
-        try {
-          const parsed = JSON.parse(await err.response.data.text()) as
-            { detail?: string }
-          if (parsed.detail) msg = parsed.detail
-        } catch { /* keep the generic message */ }
-      } else if (axios.isAxiosError(err)) {
-        msg = err.message
+      if (axios.isAxiosError(err)) {
+        const detail = (err.response?.data as { detail?: string })?.detail
+        msg = detail || err.message
       }
       setErrors((prev) => ({ ...prev, [doc.id]: msg }))
     } finally {
-      setBusyId(null)
+      setPostingId(null)
+    }
+  }
+
+  const handleDownload = async (job: GenJob) => {
+    if (!job.download_url) return
+    try {
+      const res = await axios.get(job.download_url, { responseType: 'blob' })
+      const dispo = String(res.headers['content-disposition'] ?? '')
+      const match = /filename="?([^";]+)"?/i.exec(dispo)
+      const filename = match?.[1] ?? `forest-capital-${job.document_type}`
+      triggerDownload(res.data as Blob, filename)
+      dismissJob(job.job_id)
+    } catch {
+      /* a stale job (expired) — the card will show as such on next poll */
     }
   }
 
@@ -167,11 +174,11 @@ export default function DocumentGenerationPanel() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {DOCS.map((doc) => {
           const Icon = doc.icon
-          const busy = busyId === doc.id
-          const anyBusy = busyId !== null
+          const job = jobForType(doc.documentType)
+          const inProgress = job?.status === 'pending'
+            || job?.status === 'running' || postingId === doc.id
           const error = errors[doc.id]
           const ts = generatedAt[doc.id]
-          const result = results[doc.id]
           return (
             <div key={doc.id} className="card p-4 flex flex-col gap-3">
               <div className="flex items-start gap-3">
@@ -180,7 +187,9 @@ export default function DocumentGenerationPanel() {
                   <Icon className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <h3 className="text-white font-semibold text-sm">{doc.title}</h3>
+                  <h3 className="text-white font-semibold text-sm">
+                    {doc.title}
+                  </h3>
                   <p className="text-muted text-xs mt-1 leading-relaxed">
                     {doc.description}
                   </p>
@@ -194,54 +203,91 @@ export default function DocumentGenerationPanel() {
                 ) : <>Last generated: Never</>}
               </div>
 
-              {/* Post-generation: a draft-backed document offers Open in
-                  Editor (primary), Download (secondary), View on Reports
-                  (tertiary). */}
-              {result ? (
+              {inProgress ? (
                 <div className="flex flex-col gap-1.5">
+                  <div className="flex items-start gap-1.5 text-xs text-electric">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0
+                                        mt-0.5" />
+                    <span>
+                      Generating your {doc.title.toLowerCase()}…
+                      <span className="block text-2xs text-muted mt-0.5">
+                        This takes 30–60 seconds. You can navigate away —
+                        we'll notify you when it's ready.
+                      </span>
+                    </span>
+                  </div>
+                  {job && (
+                    <button type="button"
+                      onClick={() => void cancelJob(job.job_id)}
+                      className="w-full flex items-center justify-center gap-1.5
+                                 px-3 py-1.5 rounded text-2xs border
+                                 border-border text-muted hover:text-white">
+                      <X className="w-3 h-3" /> Cancel
+                    </button>
+                  )}
+                </div>
+              ) : job?.status === 'complete' ? (
+                <div className="flex flex-col gap-1.5">
+                  {job.draft_id != null && (
+                    <button type="button"
+                      onClick={() => {
+                        dismissJob(job.job_id)
+                        navigate(`/editor/${job.draft_id}`)
+                      }}
+                      className="w-full flex items-center justify-center gap-1.5
+                                 px-3 py-2 rounded text-xs font-semibold
+                                 bg-electric text-white hover:bg-blue-500">
+                      <PenLine className="w-3 h-3" /> Open in Editor
+                    </button>
+                  )}
                   <button type="button"
-                    onClick={() => navigate(`/editor/${result.draftId}`)}
+                    onClick={() => void handleDownload(job)}
                     className="w-full flex items-center justify-center gap-1.5
-                               px-3 py-2 rounded text-xs font-semibold
-                               bg-electric text-white hover:bg-blue-500">
-                    <PenLine className="w-3 h-3" /> Open in Editor
-                  </button>
-                  <button type="button"
-                    onClick={() => triggerDownload(result.blob, result.filename)}
-                    className="w-full flex items-center justify-center gap-1.5
-                               px-3 py-1.5 rounded text-xs border border-electric/40
-                               text-electric hover:bg-electric/10">
+                               px-3 py-1.5 rounded text-xs border
+                               border-electric/40 text-electric
+                               hover:bg-electric/10">
                     <Download className="w-3 h-3" /> Download
                   </button>
-                  <button type="button"
-                    onClick={() => setResults((prev) => {
-                      const next = { ...prev }
-                      delete next[doc.id]
-                      return next
-                    })}
-                    className="text-2xs text-muted hover:text-white">
-                    View on Reports page
-                  </button>
+                </div>
+              ) : job?.status === 'failed' ? (
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex items-start gap-1.5 px-2 py-1.5 rounded
+                                  text-2xs border border-danger/30
+                                  bg-danger/5 text-danger">
+                    <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+                    <span>{job.error || 'Generation failed.'}</span>
+                  </div>
+                  <TeamGate block permission="generate_documents"
+                    tooltip="Document generation is available to the project team">
+                    <button type="button"
+                      onClick={() => void handleGenerate(doc)}
+                      className="w-full flex items-center justify-center gap-1.5
+                                 px-3 py-2 rounded text-xs font-semibold
+                                 bg-electric text-white hover:bg-blue-500">
+                      Try Again
+                    </button>
+                  </TeamGate>
                 </div>
               ) : (
-                <TeamGate block permission="generate_documents"
-                  tooltip="Document generation is available to the project team">
-                  <button type="button" disabled={anyBusy}
-                    onClick={() => void handleGenerate(doc)}
-                    className="w-full flex items-center justify-center gap-1.5
-                               px-3 py-2 rounded text-xs font-semibold
-                               transition-colors bg-electric text-white
-                               hover:bg-blue-500 disabled:opacity-50
-                               disabled:cursor-not-allowed">
-                    {busy ? (
-                      <><Loader2 className="w-3 h-3 animate-spin" />
-                        Generating… 30–60 seconds</>
-                    ) : (
-                      <><Download className="w-3 h-3" />
-                        {ts ? 'Regenerate' : 'Generate'}</>
-                    )}
-                  </button>
-                </TeamGate>
+                <div className="flex flex-col gap-1.5">
+                  {job?.status === 'cancelled' && (
+                    <div className="text-2xs text-muted">
+                      Generation cancelled.
+                    </div>
+                  )}
+                  <TeamGate block permission="generate_documents"
+                    tooltip="Document generation is available to the project team">
+                    <button type="button"
+                      onClick={() => void handleGenerate(doc)}
+                      className="w-full flex items-center justify-center gap-1.5
+                                 px-3 py-2 rounded text-xs font-semibold
+                                 transition-colors bg-electric text-white
+                                 hover:bg-blue-500">
+                      <Download className="w-3 h-3" />
+                      {ts ? 'Regenerate' : 'Generate'}
+                    </button>
+                  </TeamGate>
+                </div>
               )}
 
               {error && (
