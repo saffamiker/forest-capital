@@ -1092,6 +1092,7 @@ async def _stream_haiku(user_message: str, mock_chunks: list[str],
     free. Test environments and a missing key fall back to mock_chunks.
     """
     import asyncio
+    import contextvars
     import threading
 
     if os.getenv("ENVIRONMENT", "development") == "test" \
@@ -1116,6 +1117,17 @@ async def _stream_haiku(user_message: str, mock_chunks: list[str],
             ) as stream:
                 for text in stream.text_stream:
                     loop.call_soon_threadsafe(queue.put_nowait, text)
+                # Token-usage capture after the stream completes.
+                # MessageStream.get_final_message() returns the assembled
+                # message; its .usage carries the input/output token totals.
+                try:
+                    from agents.usage import record_usage
+                    final = stream.get_final_message()
+                    record_usage(HAIKU_MODEL,
+                                 final.usage.input_tokens,
+                                 final.usage.output_tokens)
+                except Exception:  # noqa: BLE001
+                    pass
         except Exception as exc:  # noqa: BLE001
             log.error("explainer_stream_failed", label=label, error=str(exc))
             loop.call_soon_threadsafe(
@@ -1125,7 +1137,13 @@ async def _stream_haiku(user_message: str, mock_chunks: list[str],
         finally:
             loop.call_soon_threadsafe(queue.put_nowait, sentinel)
 
-    threading.Thread(target=_worker, daemon=True).start()
+    # A plain threading.Thread does NOT inherit ContextVars from its parent
+    # (unlike asyncio.to_thread, which copies the context). The worker calls
+    # record_usage(), which reads the per-request usage ContextVar — so we
+    # must run it inside a copy of the parent context, otherwise the capture
+    # bucket the endpoint seeded would be invisible to the worker thread.
+    ctx = contextvars.copy_context()
+    threading.Thread(target=lambda: ctx.run(_worker), daemon=True).start()
     while True:
         item = await queue.get()
         if item is sentinel:

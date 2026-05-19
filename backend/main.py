@@ -85,6 +85,31 @@ async def lifespan(app: FastAPI):
                 log.info("Startup reap: no stale audit runs found")
         except Exception as exc:  # noqa: BLE001
             log.warning("audit_startup_reap_failed", error=str(exc))
+        # One-time baseline log — counts the historical rows that landed
+        # before the cost-tracking deploy (pre-migration 020 token columns
+        # are null). Sets a clear line in the Render logs: everything from
+        # this deploy forward carries cost data; rows older than this can
+        # never be backfilled.
+        try:
+            from datetime import date
+            from sqlalchemy import text
+            from database import AsyncSessionLocal
+            async with AsyncSessionLocal() as ses:  # type: ignore[union-attr]
+                result = await ses.execute(text(
+                    "SELECT COUNT(*) FROM agent_interactions "
+                    "WHERE estimated_cost_usd IS NULL"))
+                n_null = int(result.scalar() or 0)
+            today = date.today().isoformat()
+            log.info(
+                "cost_tracking_baseline",
+                active_from=today,
+                n_historical_null=n_null,
+                message=(f"cost tracking active from {today}. "
+                         f"{n_null} historical interactions have no cost "
+                         "data (pre-migration 020)."),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cost_tracking_baseline_failed", error=str(exc))
         try:
             from tools.academic_context import refresh_academic_context
             await refresh_academic_context()
@@ -1911,6 +1936,12 @@ async def council_explain(
     current_value = body.get("current_value")
 
     from agents.explainer_agent import stream_metric_explanation
+    from agents.usage import start_usage_capture
+
+    # Seed the usage bucket before the Haiku stream starts; _stream_haiku
+    # copies the request context into its worker thread so record_usage
+    # after the stream completes lands here.
+    start_usage_capture()
 
     async def gen():
         collected: list[str] = []
@@ -1957,6 +1988,11 @@ async def council_explain_data(
     context = body.get("context")
 
     from agents.explainer_agent import stream_data_explanation
+    from agents.usage import start_usage_capture
+
+    # Same pattern as /api/council/explain — seed before the stream worker
+    # thread starts so its copied context inherits this bucket.
+    start_usage_capture()
 
     async def gen():
         collected: list[str] = []
@@ -2278,6 +2314,11 @@ async def testing_quality_check(
     actual_result = body.get("actual_result")
 
     from tools.test_runner import quality_check
+    from agents.usage import start_usage_capture
+
+    # quality_check is a Sonnet call wrapped in asyncio.to_thread, which DOES
+    # propagate the contextvars — so seeding the bucket here captures it.
+    start_usage_capture()
     verdict = await asyncio.to_thread(
         quality_check, submission_type, step_context, description,
         str(actual_result) if actual_result else None)
@@ -3168,10 +3209,14 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
                 from tools.data_fetcher import get_full_history
                 from tools.backtester import run_all_strategies
                 from agents.qa_agent import QAAgent
+                from agents.usage import start_usage_capture
 
                 history = get_full_history()
                 strategy_results = run_all_strategies(history)
 
+                # Seed the per-request usage bucket before the QA agent's
+                # call_claude invocations so their token usage is captured.
+                start_usage_capture()
                 qa = QAAgent()
                 audit = qa.run_audit(strategy_results, run_full_checklist=True)
                 # Team Activity — record the audit run (non-blocking).
@@ -3419,6 +3464,7 @@ async def qa_run(request: Request, session: dict = Depends(require_sysadmin)):
         from tools.cache import set_qa_cache
         from tools.backtester import run_all_strategies
         from tools.data_fetcher import get_full_history
+        from agents.usage import start_usage_capture
 
         strategy_hash, cached = await _current_strategy_hash()
         if cached:
@@ -3426,7 +3472,11 @@ async def qa_run(request: Request, session: dict = Depends(require_sysadmin)):
         else:
             results_dict = run_all_strategies(get_full_history())
 
-        # Tier 1 — synchronous, deterministic, free.
+        # Tier 1 — synchronous, deterministic, free. Tier 2 runs on a
+        # background executor that does NOT inherit this context, so its
+        # cost is not captured here; Tier 1 is sync and free of AI calls
+        # today but the seed is here for forward-compatibility.
+        start_usage_capture()
         t1 = run_tier1_checks(results_dict)
         await set_qa_cache(strategy_hash, t1, tier=1)
 
@@ -3626,6 +3676,13 @@ async def export_package(
     import io
     import zipfile
     from datetime import date
+
+    # Seeded for consistency with every other interaction-logging endpoint.
+    # No AI work runs in this handler today (descriptions are curated and
+    # deterministic), so this is a no-op for cost — but a future change that
+    # adds an AI-generated README or chart caption would be captured for free.
+    from agents.usage import start_usage_capture
+    start_usage_capture()
 
     try:
         # A malformed metadata string must not break the export — the ZIP
@@ -3959,11 +4016,19 @@ _generation_bg_tasks: set = set()
 def _start_generation_job(
     document_type: str, session: dict, request: Request,
 ) -> JSONResponse:
-    """Creates a job, spawns generation on the event loop, returns 202."""
+    """Creates a job, spawns generation on the event loop, returns 202.
+
+    Seeds the per-request usage bucket BEFORE the task spawns so the
+    Academic Writer harness calls inside _generate_async (which run on
+    the same loop, inheriting this context) populate it. The task ends
+    by calling _log_interaction_bg which reads collect_usage().
+    """
     import asyncio
 
     from tools.generation_jobs import create_job, update_job
+    from agents.usage import start_usage_capture
 
+    start_usage_capture()
     job = create_job(document_type, session["email"])
     task = asyncio.create_task(
         _generate_async(job["job_id"], document_type, session, request))

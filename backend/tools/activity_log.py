@@ -176,7 +176,7 @@ async def insert_session_events(events: list[dict], user_email: str) -> int:
 # ── Writes — agent interactions ───────────────────────────────────────────────
 
 async def log_agent_interaction(
-    user_email: str,
+    user_email: str | None,
     session_id: str | None,
     session_type: str | None,
     interaction_type: str,
@@ -196,9 +196,23 @@ async def log_agent_interaction(
     Allowlist-gated: a non-team user produces no row. Fail-open — wrap
     the call in asyncio.create_task() at the call site so it never
     blocks or breaks the primary response. Returns True on a write.
+
+    Auto-triggered interactions (no authenticated user — startup hooks,
+    scheduled audits, etc.) are attributed to the sysadmin so the row
+    still lands and the work is visible in Team Activity. The sysadmin
+    holds the team_member permission, so the is_team_member gate admits
+    the substituted email.
     """
     if not _DB_AVAILABLE:
         return False
+    if not user_email:
+        try:
+            from config import SYSADMIN_EMAILS
+            user_email = next(iter(sorted(SYSADMIN_EMAILS)), "")
+        except Exception:  # noqa: BLE001
+            user_email = ""
+        if not user_email:
+            return False
     if not await is_team_member(user_email):
         return False
     if interaction_type not in _INTERACTION_TYPES:
