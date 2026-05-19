@@ -83,6 +83,17 @@ _DISTRIBUTION_BINS = 30
 # Every chart_key the extended renderer family handles. Listed
 # explicitly so chart_render can dispatch without importing
 # implementation details.
+# IS/OOS cutoff for oos_performance — last 60 months are OOS, matching
+# the brief's decision (a five-year OOS window is the most defensible
+# split to the faculty panel; an 80/20 split is less explainable).
+_OOS_WINDOW_MONTHS = 60
+
+# FDR threshold the Tier 1 gates apply to p_value_corrected.
+_FDR_THRESHOLD = 0.005
+
+# CV Stability gate threshold per CLAUDE.md Section 7.
+_CV_STABILITY_THRESHOLD = 0.60
+
 EXTENDED_KEYS: frozenset[str] = frozenset({
     "regime_signals",
     "regime_conditional_returns",
@@ -92,6 +103,9 @@ EXTENDED_KEYS: frozenset[str] = frozenset({
     "monthly_returns_heatmap",
     "rolling_sharpe",
     "return_distribution",
+    "significance_journey",
+    "oos_performance",
+    "p_value_distribution",
 })
 
 
@@ -719,6 +733,201 @@ def _render_return_distribution(
     return _finish(fig, plt)
 
 
+# ── significance_journey — Tier 1 gate pass/fail matrix ───────────────────────
+
+def _render_significance_journey(
+    data: dict[str, Any], extras: dict[str, Any], plt,
+) -> bytes | None:
+    """
+    A row-per-gate × column-per-strategy matrix of green (PASS) / red
+    (FAIL) markers — the project's CLAUDE.md Section 7 Tier-1 gates
+    applied to every strategy in the cached results.
+
+    Reads the per-gate per-strategy fields directly off the strategy
+    results cache (the backtester output), not off qa_results_cache
+    (which stores the QA Agent's checklist verdict). See the chart
+    library inventory at the top of chart_render.py for the source
+    map.
+    """
+    results = data.get("strategy_results") or {}
+    # Order: BENCHMARK first, then alphabetically — keeps the matrix
+    # column order predictable run-to-run.
+    names = []
+    if "BENCHMARK" in results:
+        names.append("BENCHMARK")
+    names.extend(sorted(k for k in results if k != "BENCHMARK"))
+    if not names:
+        return None
+
+    # Each gate is (label, predicate(strategy_dict) → bool).
+    gates: list[tuple[str, Any]] = [
+        ("Full-period p < 0.005",
+         lambda r: float(r.get("p_value_ttest", 1.0)) < _FDR_THRESHOLD),
+        ("FDR-corrected q < 0.005",
+         lambda r: float(r.get("p_value_corrected", 1.0)) < _FDR_THRESHOLD),
+        ("Deflated Sharpe p < 0.005",
+         lambda r: float(r.get("dsr_p_value", 1.0)) < _FDR_THRESHOLD),
+        ("Out-of-sample significant",
+         lambda r: bool(r.get("oos_significant"))),
+        (f"CV Stability ≥ {_CV_STABILITY_THRESHOLD:.2f}",
+         lambda r: float(r.get("cv_stability_score", 0.0))
+                   >= _CV_STABILITY_THRESHOLD),
+    ]
+
+    fig, ax = plt.subplots(figsize=(max(6, len(names) * 0.85), 4.0))
+    n_rows = len(gates)
+    n_cols = len(names)
+
+    # Render each cell as a coloured dot. Scatter is simplest.
+    xs = []
+    ys = []
+    colours = []
+    for col, name in enumerate(names):
+        r = results.get(name, {})
+        for row, (_, predicate) in enumerate(gates):
+            xs.append(col)
+            ys.append(row)
+            try:
+                ok = bool(predicate(r))
+            except Exception:  # noqa: BLE001 — a missing field is FAIL
+                ok = False
+            colours.append(_MPL_GREEN if ok else _MPL_RED)
+    ax.scatter(xs, ys, c=colours, s=200, edgecolors="white",
+               linewidths=1.5, zorder=3)
+
+    ax.set_xticks(range(n_cols))
+    ax.set_xticklabels(names, rotation=35, ha="right", fontsize=7.5)
+    ax.set_yticks(range(n_rows))
+    ax.set_yticklabels([g[0] for g in gates], fontsize=8)
+    ax.set_xlim(-0.6, n_cols - 0.4)
+    ax.set_ylim(-0.6, n_rows - 0.4)
+    ax.invert_yaxis()  # Gate 1 at top — reading order
+    ax.set_title("Tier 1 Significance Gates — strategy × gate matrix",
+                 fontsize=11)
+    _style(ax)
+
+    # Legend — green = PASS, red = FAIL.
+    from matplotlib.patches import Patch
+    legend_handles = [
+        Patch(color=_MPL_GREEN, label="Pass"),
+        Patch(color=_MPL_RED, label="Fail"),
+    ]
+    ax.legend(handles=legend_handles, fontsize=8, frameon=False,
+              loc="upper right", bbox_to_anchor=(1.02, 1.18), ncol=2)
+    return _finish(fig, plt)
+
+
+# ── oos_performance — IS vs OOS cumulative returns ─────────────────────────────
+
+def _render_oos_performance(
+    data: dict[str, Any], extras: dict[str, Any], plt,
+) -> bytes | None:
+    """
+    Cumulative growth-of-$1 for the strategy, with the last
+    _OOS_WINDOW_MONTHS coloured separately as the out-of-sample
+    window. A vertical dashed line marks the IS/OOS split — the same
+    line the faculty-friendly five-year-OOS framing references.
+
+    Reads the existing data["cumulative_returns"] series, splits at a
+    fixed date offset. No fresh walk-forward, no extra compute.
+    """
+    import pandas as pd
+
+    cr = data.get("cumulative_returns") or {}
+    points = cr.get("points") or []
+    strategies = cr.get("strategies") or []
+    if not points or not strategies:
+        return None
+
+    # Strategy choice: same default + fallback as the rest of the
+    # extended library — REGIME_SWITCHING, then the first non-BENCHMARK
+    # strategy in the cumulative_returns payload.
+    name = (_DEFAULT_STRATEGY if _DEFAULT_STRATEGY in strategies else
+            next((s for s in strategies if s != "BENCHMARK"), ""))
+    if not name:
+        return None
+
+    dates = [pd.to_datetime(p["date"]) for p in points]
+    values = [p.get(name) for p in points]
+    series = pd.Series(values, index=dates).dropna()
+    if len(series) <= _OOS_WINDOW_MONTHS:
+        # Not enough history to define a meaningful IS window — the
+        # chart would be all-OOS.
+        return None
+
+    split_idx = len(series) - _OOS_WINDOW_MONTHS
+    is_part = series.iloc[:split_idx + 1]   # include split point on both
+    oos_part = series.iloc[split_idx:]      # sides so the line is continuous
+    split_date = series.index[split_idx]
+
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    ax.plot(is_part.index, is_part.values, color=_MPL_ACCENT,
+            linewidth=1.6, label=f"In-sample ({len(is_part) - 1} mo)")
+    ax.plot(oos_part.index, oos_part.values, color=_MPL_AMBER,
+            linewidth=1.6,
+            label=f"Out-of-sample ({_OOS_WINDOW_MONTHS} mo)")
+    ax.axvline(split_date, color=_MPL_GREY, linestyle="--", linewidth=1.0)
+    ax.set_title(f"In-Sample vs Out-of-Sample — {name}", fontsize=11)
+    ax.set_ylabel("Growth of $1")
+    ax.legend(fontsize=8, frameon=False, loc="upper left")
+    _style(ax)
+    return _finish(fig, plt)
+
+
+# ── p_value_distribution — FDR-corrected p-values across strategies ───────────
+
+def _render_p_value_distribution(
+    data: dict[str, Any], extras: dict[str, Any], plt,
+) -> bytes | None:
+    """
+    Bar chart of every strategy's FDR-corrected p-value with a dashed
+    line at the Tier 1 threshold (0.005). Bars are coloured green when
+    they clear the threshold, red when they do not. A bar that exceeds
+    the y-axis ceiling is clipped to keep the threshold-crossing area
+    readable — the strategy's actual p-value is annotated above the bar.
+    """
+    results = data.get("strategy_results") or {}
+    rows = [(name, float(r.get("p_value_corrected", 1.0)))
+            for name, r in results.items()]
+    if not rows:
+        return None
+    rows.sort(key=lambda r: r[1])  # most significant left
+
+    names = [r[0] for r in rows]
+    pvals = [r[1] for r in rows]
+    colours = [_MPL_GREEN if p < _FDR_THRESHOLD else _MPL_RED for p in pvals]
+
+    # Display ceiling — the threshold needs to be visible even when
+    # every p-value is far above it. Use a sensible cap.
+    y_max = max(0.05, min(1.0, max(pvals) * 1.10))
+
+    fig, ax = plt.subplots(figsize=(max(6, len(names) * 0.7), 4.2))
+    x = list(range(len(names)))
+    plotted = [min(p, y_max) for p in pvals]
+    ax.bar(x, plotted, color=colours, edgecolor="white", linewidth=0.5)
+
+    # Threshold line.
+    ax.axhline(_FDR_THRESHOLD, color=_MPL_AMBER, linestyle="--",
+               linewidth=1.4,
+               label=f"FDR threshold (q = {_FDR_THRESHOLD})")
+
+    # Annotate each bar with its actual p-value — handy when the cap
+    # clips a tall bar.
+    for xi, p in zip(x, pvals):
+        ax.text(xi, min(p, y_max) + y_max * 0.02,
+                f"{p:.3f}", ha="center", va="bottom",
+                fontsize=7, color=_MPL_GREY)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(names, rotation=35, ha="right", fontsize=7.5)
+    ax.set_ylim(0, y_max)
+    ax.set_ylabel("FDR-corrected p-value")
+    ax.set_title("FDR-Corrected p-values by Strategy", fontsize=11)
+    ax.legend(fontsize=8, frameon=False, loc="upper right")
+    _style(ax)
+    return _finish(fig, plt)
+
+
 _DISPATCH: dict[str, Any] = {
     "regime_signals":              _render_regime_signals,
     "regime_conditional_returns":  _render_regime_conditional_returns,
@@ -728,4 +937,7 @@ _DISPATCH: dict[str, Any] = {
     "monthly_returns_heatmap":     _render_monthly_returns_heatmap,
     "rolling_sharpe":              _render_rolling_sharpe,
     "return_distribution":         _render_return_distribution,
+    "significance_journey":        _render_significance_journey,
+    "oos_performance":             _render_oos_performance,
+    "p_value_distribution":        _render_p_value_distribution,
 }

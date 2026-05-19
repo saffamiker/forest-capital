@@ -145,6 +145,10 @@ class TestChartRenderUnit:
             "return_distribution":         "performance",
             "monthly_returns_heatmap":     "performance",
             "drawdown_periods":            "risk",
+            # Commit 4
+            "significance_journey":        "significance",
+            "oos_performance":             "significance",
+            "p_value_distribution":        "significance",
         }
         for key, category in expected.items():
             assert is_known_chart(key), f"{key} not in _CHART_KEYS"

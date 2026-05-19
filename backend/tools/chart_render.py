@@ -229,6 +229,22 @@ AVAILABLE_CHARTS: list[dict[str, str]] = [
      "description": "Underwater equity curve — % below the running "
                     "peak — for the strategy and the benchmark.",
      "category": "risk"},
+    # ── significance ──────────────────────────────────────────────────────
+    {"key": "significance_journey",
+     "label": "Significance Journey",
+     "description": "Row per Tier 1 gate, column per strategy — green "
+                    "PASS / red FAIL for each of the five gates.",
+     "category": "significance"},
+    {"key": "oos_performance",
+     "label": "In-Sample vs Out-of-Sample",
+     "description": "Cumulative growth-of-$1 for the strategy with the "
+                    "last 60 months coloured as the OOS window.",
+     "category": "significance"},
+    {"key": "p_value_distribution",
+     "label": "p-value Distribution",
+     "description": "FDR-corrected p-value per strategy with the "
+                    "0.005 Tier 1 threshold marked.",
+     "category": "significance"},
     # ── robustness ────────────────────────────────────────────────────────
     {"key": "sensitivity",
      "label": "Sensitivity Analysis",
