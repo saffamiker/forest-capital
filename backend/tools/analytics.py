@@ -409,26 +409,44 @@ def factor_loadings(
 
         params = model.params
         pvals = model.pvalues
+        # 95% confidence intervals for every coefficient. The
+        # factor_loadings chart in the canvas editor renders each beta
+        # as a horizontal bar with error bars drawn from these CIs —
+        # statsmodels exposes them on the fitted OLS directly so the
+        # analytics layer remains the single source of truth.
+        ci = model.conf_int(alpha=0.05)
         row: dict = {
             "strategy":   res.get("strategy_name") or name,
             "model":      model_label,
             "alpha_annualized": round(float(params["const"]) * _ANN, 4),
             "alpha_significant": bool(pvals["const"] < 0.05),
+            "alpha_lo": round(float(ci.loc["const", 0]) * _ANN, 4),
+            "alpha_hi": round(float(ci.loc["const", 1]) * _ANN, 4),
             "mkt_rf":     round(float(params["mkt_rf"]), 4),
             "mkt_rf_significant": bool(pvals["mkt_rf"] < 0.05),
+            "mkt_rf_lo": round(float(ci.loc["mkt_rf", 0]), 4),
+            "mkt_rf_hi": round(float(ci.loc["mkt_rf", 1]), 4),
             "smb":        round(float(params["smb"]), 4),
             "smb_significant": bool(pvals["smb"] < 0.05),
+            "smb_lo": round(float(ci.loc["smb", 0]), 4),
+            "smb_hi": round(float(ci.loc["smb", 1]), 4),
             "hml":        round(float(params["hml"]), 4),
             "hml_significant": bool(pvals["hml"] < 0.05),
+            "hml_lo": round(float(ci.loc["hml", 0]), 4),
+            "hml_hi": round(float(ci.loc["hml", 1]), 4),
             "r_squared":  round(float(model.rsquared), 4),
             "n_months":   int(len(fit_df)),
         }
         if "mom" in factors:
             row["mom"] = round(float(params["mom"]), 4)
             row["mom_significant"] = bool(pvals["mom"] < 0.05)
+            row["mom_lo"] = round(float(ci.loc["mom", 0]), 4)
+            row["mom_hi"] = round(float(ci.loc["mom", 1]), 4)
         else:
             row["mom"] = None
             row["mom_significant"] = False
+            row["mom_lo"] = None
+            row["mom_hi"] = None
         rows.append(row)
     rows.sort(key=lambda r: r["strategy"])
     return rows

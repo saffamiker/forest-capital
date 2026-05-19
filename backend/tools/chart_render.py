@@ -164,14 +164,40 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-# The charts academic_deck.render_deck_charts() can produce server-side.
-# `key` must match a key of that function's return dict.
+# Server-renderable canvas charts. Two backing renderer families:
+#   - The "deck" five (academic_deck.render_deck_charts) — the same ones
+#     the .pptx export ships.
+#   - The "extended" set (chart_renderers.render_extended_charts) — canvas-
+#     only, added by the chart-library expansion (commits 2-4 of that build).
 AVAILABLE_CHARTS: list[dict[str, str]] = [
+    # ── regime ────────────────────────────────────────────────────────────
     {"key": "rolling_correlation",
      "label": "Rolling Correlation",
      "description": "Equity-bond rolling correlation with the 2022 "
                     "regime-break marker — the project's central finding.",
      "category": "regime"},
+    {"key": "regime_signals",
+     "label": "Regime Probability Over Time",
+     "description": "HMM posterior probability of BULL / TRANSITION / "
+                    "BEAR regime over the full monthly history.",
+     "category": "regime"},
+    {"key": "regime_conditional_returns",
+     "label": "Returns by Regime",
+     "description": "Mean annualised return per asset class, split by "
+                    "HMM regime state.",
+     "category": "regime"},
+    # ── factors ───────────────────────────────────────────────────────────
+    {"key": "factor_loadings",
+     "label": "Carhart Factor Loadings",
+     "description": "Four-factor betas (MKT-RF, SMB, HML, MOM) with "
+                    "95% confidence intervals, BENCHMARK portfolio.",
+     "category": "factors"},
+    {"key": "factor_returns_attribution",
+     "label": "Factor Return Attribution",
+     "description": "Stacked yearly breakdown of factor contributions "
+                    "to the portfolio's annual return.",
+     "category": "factors"},
+    # ── performance ───────────────────────────────────────────────────────
     {"key": "cumulative_returns",
      "label": "Cumulative Returns",
      "description": "Growth of $1 across every strategy and the "
@@ -182,17 +208,26 @@ AVAILABLE_CHARTS: list[dict[str, str]] = [
      "description": "Each strategy plotted by annualised return against "
                     "volatility.",
      "category": "performance"},
+    # ── robustness ────────────────────────────────────────────────────────
     {"key": "sensitivity",
      "label": "Sensitivity Analysis",
      "description": "How the headline results hold up when key "
                     "parameters are varied — a robustness check.",
      "category": "robustness"},
+    # ── process ───────────────────────────────────────────────────────────
     {"key": "team_activity",
      "label": "Team Activity",
      "description": "The project build timeline — commits, council runs "
                     "and reviews per team member.",
      "category": "process"},
 ]
+
+# Charts backed by the deck renderer (academic_deck.render_deck_charts).
+# Every other key on AVAILABLE_CHARTS is routed to the extended renderer.
+_DECK_KEYS = frozenset({
+    "rolling_correlation", "cumulative_returns", "risk_return",
+    "sensitivity", "team_activity",
+})
 
 _CHART_KEYS = frozenset(c["key"] for c in AVAILABLE_CHARTS)
 _CACHE_TTL_SECONDS = 300  # 5 minutes
@@ -245,27 +280,81 @@ def _resize(png: bytes, width: int, height: int) -> bytes:
 
 
 async def _render_raw(chart_key: str) -> bytes | None:
-    """The raw chart PNG from render_deck_charts, or None when its
-    source data is unavailable (cold caches / the test environment)."""
+    """The raw chart PNG from whichever renderer family backs this key,
+    or None when its source data is unavailable (cold caches / the test
+    environment). Dispatches between the deck renderer (the five charts
+    the .pptx export ships) and the extended renderer (canvas-only)."""
     import asyncio
 
-    from tools.academic_deck import render_deck_charts
     from tools.academic_export import gather_document_data
 
     data = await gather_document_data()
-    sensitivity: dict[str, Any] | None = None
-    if chart_key == "sensitivity":
-        # Sensitivity is a heavier compute — only paid for its own chart.
-        try:
-            from tools.data_fetcher import get_full_history
-            from tools.sensitivity import compute_sensitivity
-            sensitivity = await asyncio.to_thread(
-                lambda: compute_sensitivity(get_full_history()))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("chart_render_sensitivity_unavailable", error=str(exc))
 
-    charts = await asyncio.to_thread(render_deck_charts, data, sensitivity)
+    if chart_key in _DECK_KEYS:
+        from tools.academic_deck import render_deck_charts
+        sensitivity: dict[str, Any] | None = None
+        if chart_key == "sensitivity":
+            # Sensitivity is a heavier compute — only paid for its own chart.
+            try:
+                from tools.data_fetcher import get_full_history
+                from tools.sensitivity import compute_sensitivity
+                sensitivity = await asyncio.to_thread(
+                    lambda: compute_sensitivity(get_full_history()))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("chart_render_sensitivity_unavailable", error=str(exc))
+        charts = await asyncio.to_thread(render_deck_charts, data, sensitivity)
+        return charts.get(chart_key)
+
+    # Extended renderers — gather the per-chart extras (HMM history, raw
+    # monthly returns, ff_factors) before crossing into the thread.
+    from tools.chart_renderers import render_extended_charts
+    extras = await _gather_extended_extras(chart_key)
+    charts = await asyncio.to_thread(
+        render_extended_charts, chart_key, data, extras)
     return charts.get(chart_key)
+
+
+async def _gather_extended_extras(chart_key: str) -> dict[str, Any]:
+    """Per-chart extras the extended renderers need beyond the data
+    bundle. Each branch is fail-open — a missing extra produces a None
+    PNG, which the caller turns into the placeholder.
+
+    Heavy work — the HMM fit and the FF read — is paid only for the
+    charts that consume it, not on every extended-chart render.
+    """
+    import asyncio
+
+    extras: dict[str, Any] = {}
+
+    if chart_key in {"regime_signals", "regime_conditional_returns"}:
+        # HMM on the monthly equity series. The detector has its own
+        # in-process cache keyed by series fingerprint — a second chart
+        # request in the same trading day hits that cache and skips the
+        # Baum-Welch fit.
+        try:
+            from tools.cache import get_monthly_returns
+            monthly = await get_monthly_returns()
+            extras["monthly"] = monthly
+            if monthly:
+                import pandas as pd
+                from tools.regime_detector import fit_hmm_historical
+                idx = pd.to_datetime(monthly["dates"])
+                equity = pd.Series(monthly["equity"], index=idx)
+                extras["hmm"] = await asyncio.to_thread(
+                    fit_hmm_historical, equity)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chart_render_hmm_unavailable",
+                        chart_key=chart_key, error=str(exc))
+
+    if chart_key == "factor_returns_attribution":
+        try:
+            from tools.cache import get_ff_factors
+            extras["ff_factors"] = await get_ff_factors()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chart_render_ff_unavailable",
+                        chart_key=chart_key, error=str(exc))
+
+    return extras
 
 
 async def render_chart_png(

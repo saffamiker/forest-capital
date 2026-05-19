@@ -57,7 +57,13 @@ class TestChartEndpoints:
         resp = client.get("/api/v1/charts/available", headers=TEAM)
         assert resp.status_code == 200
         charts = resp.json()
-        assert isinstance(charts, list) and len(charts) == 5
+        # The library grew beyond the original five with the extended
+        # renderers (regime + factors landed in Commit 2 of the chart
+        # library expansion). Assert against the known-set length, which
+        # tracks AVAILABLE_CHARTS exactly.
+        from tools.chart_render import AVAILABLE_CHARTS
+        assert isinstance(charts, list)
+        assert len(charts) == len(AVAILABLE_CHARTS)
         for c in charts:
             assert {"key", "label", "description", "category"} <= set(c)
 
@@ -95,8 +101,15 @@ class TestChartRenderUnit:
 
     def test_available_charts_keys_match_the_known_set(self):
         from tools.chart_render import AVAILABLE_CHARTS, is_known_chart
-        assert len(AVAILABLE_CHARTS) == 5
+        # Every entry on AVAILABLE_CHARTS must be in the known-keys
+        # frozenset _CHART_KEYS — the two are derived together and must
+        # stay in sync as the library grows. The size assertion is
+        # parameterised on the registry length, so a future addition to
+        # AVAILABLE_CHARTS does not require touching this test.
+        assert len(AVAILABLE_CHARTS) > 0
         assert all(is_known_chart(c["key"]) for c in AVAILABLE_CHARTS)
+        # Categories are stable strings the chart picker groups on.
+        assert all(c["category"] for c in AVAILABLE_CHARTS)
 
     def test_render_chart_png_returns_a_png(self):
         from tools.chart_render import render_chart_png
@@ -108,6 +121,29 @@ class TestChartRenderUnit:
         from tools.chart_render import render_chart_png
         png = asyncio.run(render_chart_png("sensitivity", "dark", 200, 120))
         assert png.startswith(_PNG_MAGIC)
+
+    def test_extended_chart_keys_registered_and_rendered(self):
+        # Commit 2 of the library expansion added four canvas-only
+        # renderers. Each new key must (a) be in AVAILABLE_CHARTS with
+        # the correct category, (b) resolve via is_known_chart, and
+        # (c) round-trip through render_chart_png to a PNG (or the
+        # placeholder PNG when source data is unavailable — also a PNG).
+        from tools.chart_render import (
+            AVAILABLE_CHARTS, is_known_chart, render_chart_png,
+        )
+        registry = {c["key"]: c for c in AVAILABLE_CHARTS}
+        expected = {
+            "regime_signals":              "regime",
+            "regime_conditional_returns":  "regime",
+            "factor_loadings":             "factors",
+            "factor_returns_attribution":  "factors",
+        }
+        for key, category in expected.items():
+            assert is_known_chart(key), f"{key} not in _CHART_KEYS"
+            assert key in registry, f"{key} not in AVAILABLE_CHARTS"
+            assert registry[key]["category"] == category
+            png = asyncio.run(render_chart_png(key, "light", 240, 160))
+            assert png.startswith(_PNG_MAGIC), f"{key} did not render a PNG"
 
 
 # ── Migration 022 — slide-card ↔ canvas conversion ────────────────────────────
