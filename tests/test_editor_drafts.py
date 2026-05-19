@@ -106,34 +106,40 @@ class TestEditorContentBuilders:
         # The Roles and Next Steps [[BOB]] callouts are embedded.
         assert ct.count("[[BOB:") == 2
 
-    def test_deck_to_editor_builds_sixteen_slides(self):
+    def test_deck_to_editor_builds_sixteen_canvas_slides(self):
         from tools.editor_content import deck_to_editor
         cj, ct = deck_to_editor({"conclusions": "- one", "thesis": "A thesis."})
         assert len(cj["slides"]) == 16
-        assert all("speaker_notes" in s for s in cj["slides"])
-        # Speaker notes start empty — Molly writes her own.
-        assert all(s["speaker_notes"] == "" for s in cj["slides"])
+        # Canvas schema (migration 022) — every slide carries an elements
+        # array, a background, and empty speaker notes.
+        for s in cj["slides"]:
+            assert isinstance(s["elements"], list)
+            assert s["background"] == "#FFFFFF"
+            assert s["speaker_notes"] == ""
         assert "Slide 1:" in ct
 
-    def test_deck_to_editor_populates_every_slide_content(self):
-        # Every one of the 16 slides carries non-empty content — the five
-        # narrative-keyed slides from the generated narratives, the rest
-        # from the static seed. No slide opens as a blank card.
+    def test_deck_to_editor_populates_every_slide_body(self):
+        # Every one of the 16 slides carries a non-empty body text element
+        # — the five narrative-keyed slides from the generated narratives,
+        # the rest from the static seed. No slide opens blank.
         from tools.editor_content import deck_to_editor
         cj, _ = deck_to_editor({
             "thesis": "A thesis.", "conclusions": "- one",
             "recommendations": "- rec", "ai_leverage": "AI narrative."})
         assert len(cj["slides"]) == 16
-        assert all(s["content"].strip() for s in cj["slides"])
-        # Speaker notes stay empty on every slide — unchanged behaviour.
-        assert all(s["speaker_notes"] == "" for s in cj["slides"])
+        for s in cj["slides"]:
+            body = next(e for e in s["elements"] if e["id"] == "el_002")
+            assert body["type"] == "text"
+            assert body["content"].strip()
 
     def test_deck_to_editor_seeds_keyless_slides_when_narratives_empty(self):
-        # Even with no narratives at all, every slide still has content
-        # from its static seed.
+        # Even with no narratives at all, every slide still has a body
+        # element seeded from its static description.
         from tools.editor_content import deck_to_editor
         cj, _ = deck_to_editor({})
-        assert all(s["content"].strip() for s in cj["slides"])
+        for s in cj["slides"]:
+            body = next(e for e in s["elements"] if e["id"] == "el_002")
+            assert body["content"].strip()
 
     def test_executive_brief_to_editor_builds_tiptap_and_text(self):
         from tools.editor_content import executive_brief_to_editor
