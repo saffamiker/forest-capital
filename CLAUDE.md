@@ -5020,15 +5020,94 @@ which is also how the contract tests exercise the degradation path.
 
 FRONTEND — frontend/src/components/DocumentGenerationPanel.tsx:
   A "Generate Documents" section on the Reports screen, above Team
-  Activity. Three cards (one per deliverable) — each a Generate button
-  that POSTs for a blob download, shows a "Generating… 30–60 seconds"
-  state, surfaces an error with a Retry, and records the last-generated
-  timestamp in localStorage.
+  Activity. Three cards (one per deliverable). The three POST endpoints
+  are ASYNCHRONOUS (see the next section): the card POSTs, receives a
+  job_id, and derives its state from the tracked job — in-progress shows
+  the spinner + a navigate-away message, complete shows Open in Editor
+  + Download, failed shows Try Again.
 
 SKILL FILES: the docx/pptx skill files named in the build brief
 (/mnt/skills/public/{docx,pptx}/SKILL.md) do not exist in this
 environment. The builders follow the proven, test-covered patterns
 already established in tools/docx_generator.py and tools/pptx_generator.py.
+
+
+─────────────────────────────────────────────────────────────────────────────
+ASYNC DOCUMENT GENERATION (May 19 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The three generation endpoints take 30–90 seconds end-to-end (the
+Academic Writer runs Sonnet calls through the Generator-Evaluator
+harness, plus matplotlib chart rendering for the deck). Holding the HTTP
+request open that long does not survive Render's proxy on a slow run
+and gives a poor UX. The endpoints are therefore JOB-BASED:
+
+  POST /api/v1/export/midpoint-paper     →  202 {job_id, status:"pending"}
+  POST /api/v1/export/executive-brief    →  202 {job_id, status:"pending"}
+  POST /api/v1/export/presentation-deck  →  202 {job_id, status:"pending"}
+
+JOB REGISTRY — tools/generation_jobs.py:
+  In-memory dict keyed by job_id (uuid4().hex). Module-level — survives
+  the request, lost on restart (the user simply regenerates). Two-hour
+  TTL pruned on every get_job() read. All access is on the FastAPI
+  event loop (the endpoints and the background generation tasks all
+  run there), so the plain dict needs no lock.
+
+  Each job: job_id, document_type, owner_email, status, draft_id,
+  download_url, error, created_at, completed_at, plus four internal
+  underscore keys — _file_bytes, _filename, _media_type, _task —
+  stripped by public_view() before serialisation. _task is the
+  asyncio.Task handle so DELETE can cancel an in-flight job.
+
+JOB LIFECYCLE: pending → running → complete | failed | cancelled.
+  The background task runs _generate_async, which calls the matching
+  _generate_{midpoint,brief,deck}_document helper. On success it patches
+  status=complete + draft_id + _file_bytes + _filename + _media_type +
+  download_url. On exception it patches status=failed + error.
+  asyncio.CancelledError propagates untouched — the DELETE handler set
+  status=cancelled before cancelling the task.
+
+FOUR JOB ENDPOINTS (all require auth, owner-only on per-job routes):
+  GET    /api/v1/jobs/{id}            poll one job → public_view
+  GET    /api/v1/jobs                 caller's last-10, most recent first
+  GET    /api/v1/jobs/{id}/download   completed file bytes (409 if not
+                                      complete, 404 if unknown)
+  DELETE /api/v1/jobs/{id}            cancel — pending/running → cancelled
+                                      + task.cancel(); completed = no-op
+
+FRONTEND — module-level poller (frontend/src/lib/generationJobs.ts):
+  The polling store lives at MODULE scope, NOT in component state, so
+  polling continues when the user navigates away from the Reports page.
+  Polls GET /api/v1/jobs/{id} every 3 s until terminal. A
+  useSyncExternalStore hook (useGenerationJobs) subscribes the Reports
+  card and the global GenerationToast to the same store; both re-render
+  on every status change. A dismissed-set hides terminal jobs the user
+  has already acted on so the toast does not nag after Open in Editor
+  or Download.
+
+  loadExistingJobs() runs on mount of the Reports panel — fetches GET
+  /api/v1/jobs, resumes polling any in-progress job, and surfaces a job
+  that completed while the user was in a different tab.
+
+GENERATIONTOAST — mounted once in MainLayout. Suppressed on /reports
+  (the panel itself shows completion there). Open in Editor navigates
+  to the draft and dismisses; the close button dismisses.
+
+USAGE-CAPTURE SEED — _start_generation_job() calls start_usage_capture()
+  before asyncio.create_task(_generate_async(...)) so the spawned task
+  inherits the capture bucket via context propagation. The Academic
+  Writer's call_claude invocations inside the task append to it; at the
+  end, _log_interaction_bg reads collect_usage() and writes the totals
+  + the per-agent breakdown into agent_interactions for the export row.
+
+TESTS — tests/test_generation_jobs.py (28 tests) covers the registry
+contract and the four endpoint behaviours. The .post() → 202 → job_id
+contract for the three generation endpoints lives in
+tests/test_document_generation.py — the registry tests do not duplicate
+it. The background task's completion is never relied on: Starlette's
+TestClient does not complete asyncio.create_task work reliably, so the
+endpoint tests set up registry state directly (create_job + update_job)
+and exercise the route against that state.
 
 
 ─────────────────────────────────────────────────────────────────────────────
