@@ -22,13 +22,20 @@ interface SignificanceBadgeProps {
   label: string
   pValue: number | undefined
   threshold?: number
+  /** Glossary term ID — when set, the label is wrapped in
+   *  ExplainableText so Commentary mode explains the test. */
+  term?: string
 }
 
-function SignificanceBadge({ label, pValue, threshold = 0.005 }: SignificanceBadgeProps) {
+function SignificanceBadge({
+  label, pValue, threshold = 0.005, term,
+}: SignificanceBadgeProps) {
   const pass = pValue != null && pValue <= threshold
   return (
     <div className="flex items-center justify-between py-1 border-b border-border/50 last:border-0">
-      <span className="text-muted text-2xs">{label}</span>
+      <span className="text-muted text-2xs">
+        {term ? <ExplainableText term={term}>{label}</ExplainableText> : label}
+      </span>
       <div className="flex items-center gap-1.5">
         <span className="font-mono text-2xs text-slate-400">p={pFmt(pValue)}</span>
         {pass ? (
@@ -235,9 +242,12 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
             </div>
             <SignificanceBadge label="Paired t-test"         pValue={s.p_value_ttest} />
             <SignificanceBadge label="Jobson-Korkie Sharpe"  pValue={s.p_value_sharpe_jk} />
-            <SignificanceBadge label="Alpha (Newey-West)"    pValue={s.p_value_alpha} />
-            <SignificanceBadge label="FDR corrected"         pValue={s.p_value_corrected} />
-            <SignificanceBadge label="OOS walk-forward"      pValue={s.oos_p_value} />
+            <SignificanceBadge label="Alpha (Newey-West)"    pValue={s.p_value_alpha}
+              term="alpha_newey_west" />
+            <SignificanceBadge label="FDR corrected"         pValue={s.p_value_corrected}
+              term="p_fdr" />
+            <SignificanceBadge label="OOS walk-forward"      pValue={s.oos_p_value}
+              term="walk_forward_oos" />
           </div>
 
           {/* DSR / PSR — labels carry stable term IDs so the glossary

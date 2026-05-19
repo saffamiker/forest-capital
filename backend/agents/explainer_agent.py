@@ -340,6 +340,304 @@ def _safe_json_parse(response: str, fallback: Any) -> Any:
     return fallback
 
 
+# ── Glossary term contract ────────────────────────────────────────────────────
+#
+# The EXACT snake_case keys ExplainableText looks up via
+# glossaryStore.terms[term]. explain_terms() instructs the LLM to return
+# exactly these keys and merges the result over _FALLBACK_TERMS, so every
+# key resolves — the feature is never "dark" on a wrapped term.
+_GLOSSARY_TERM_KEYS: tuple[str, ...] = (
+    "cagr", "sharpe_ratio", "sharpe_ci", "max_drawdown", "volatility",
+    "turnover", "tier", "dsr", "p_fdr", "cv_score", "tier1_gates",
+    "tier1_t_test", "tier1_fdr_correction", "tier1_dsr", "tier1_oos",
+    "tier1_cv", "walk_forward_oos", "regime_classification",
+    "equity_bond_correlation_breakdown", "alpha_newey_west", "skewness",
+    "mkt_rf", "smb", "hml", "mom", "alpha", "r_squared", "info_ratio",
+)
+
+# Static definitions — the safety net when the Explainer LLM is
+# unavailable or its JSON does not parse. Every _GLOSSARY_TERM_KEYS key
+# is present, so a wrapped term always resolves to content.
+_FALLBACK_TERMS: dict[str, dict[str, str]] = {
+    "cagr": {
+        "hover": "Compound annual growth rate of the strategy.",
+        "what": "CAGR is the constant yearly rate that would grow the "
+                "starting value to the ending value over the period. It "
+                "smooths uneven year-to-year returns into one figure.",
+        "why": "It is the headline return number — the fairest single "
+               "measure of how fast capital compounded.",
+        "this_session": "Compare each strategy's CAGR against the 100% "
+                        "equity benchmark.",
+    },
+    "sharpe_ratio": {
+        "hover": "Return earned per unit of risk — higher is better.",
+        "what": "The Sharpe ratio divides return above the risk-free rate "
+                "by volatility. A Sharpe of 1.0 means one unit of excess "
+                "return for each unit of risk.",
+        "why": "Raw return alone is misleading; the Sharpe ratio shows "
+               "whether a return justified the risk taken.",
+        "this_session": "Higher-Sharpe strategies delivered more return "
+                        "for the volatility they carried.",
+    },
+    "sharpe_ci": {
+        "hover": "The plausible range around the Sharpe estimate.",
+        "what": "A Sharpe ratio computed from history is an estimate. The "
+                "95% confidence interval is the range the true Sharpe "
+                "plausibly falls within; a narrow interval is precise.",
+        "why": "Two strategies with the same Sharpe are not equal if one "
+               "has a far wider interval — that one is far less certain.",
+        "this_session": "Strategies whose interval lower bound still beats "
+                        "the benchmark are the most reliable.",
+    },
+    "max_drawdown": {
+        "hover": "The largest peak-to-trough loss in the period.",
+        "what": "Maximum drawdown is the worst loss an investor would have "
+                "suffered buying at a peak and holding to the next trough, "
+                "as a percentage of the peak.",
+        "why": "It measures the pain an investor must endure — a deep "
+               "drawdown may be impossible to hold through.",
+        "this_session": "Smaller drawdowns mark strategies an investor "
+                        "could realistically have held.",
+    },
+    "volatility": {
+        "hover": "How much returns swing around their average.",
+        "what": "Volatility is the annualised standard deviation of "
+                "returns. Higher volatility means wider, less predictable "
+                "swings in value.",
+        "why": "It is the standard risk measure and the denominator of "
+               "the Sharpe ratio.",
+        "this_session": "Lower-volatility strategies traded smoother but "
+                        "not necessarily higher returns.",
+    },
+    "turnover": {
+        "hover": "How much of the portfolio is traded each year.",
+        "what": "Annualised one-way turnover is the share of the portfolio "
+                "traded over a year, including drift-correction trading. "
+                "Two-way round-trip turnover is roughly double.",
+        "why": "Turnover drives transaction costs — a high-turnover "
+               "strategy must clear a higher return hurdle.",
+        "this_session": "Static strategies show low turnover; dynamic "
+                        "strategies trade more to follow their signals.",
+    },
+    "tier": {
+        "hover": "How many of the five Tier 1 gates the strategy passed.",
+        "what": "Tier shows a strategy's score out of five mandatory "
+                "statistical gates. A strategy must pass all five to be "
+                "recommended.",
+        "why": "It is the at-a-glance verdict on whether a strategy's "
+               "edge is statistically real.",
+        "this_session": "A strategy at 5/5 cleared every gate; anything "
+                        "lower is not formally significant.",
+    },
+    "dsr": {
+        "hover": "Sharpe ratio adjusted for testing many strategies.",
+        "what": "The Deflated Sharpe Ratio corrects the Sharpe for the "
+                "number of strategies tested, the backtest length, and "
+                "non-normal returns — a stricter, more honest bar.",
+        "why": "Testing ten strategies and picking the best inflates the "
+               "winner's Sharpe; DSR removes that selection bias.",
+        "this_session": "A strategy clearing DSR has an edge that survives "
+                        "the multiple-testing correction.",
+    },
+    "p_fdr": {
+        "hover": "P-value adjusted for testing ten strategies at once.",
+        "what": "The FDR-corrected p-value applies the Benjamini-Hochberg "
+                "correction across all strategies tested, so apparent "
+                "significance is not just luck from many tries.",
+        "why": "Without correction, testing ten strategies would produce "
+               "a false positive by chance alone.",
+        "this_session": "A strategy below q < 0.005 here is genuinely "
+                        "significant across the full set.",
+    },
+    "cv_score": {
+        "hover": "How consistently the strategy works across periods.",
+        "what": "The CV Stability Score combines six cross-validation "
+                "methods into a 0-1 measure of how reliably a strategy "
+                "performs across different windows and regimes.",
+        "why": "A strategy that works in one period and fails in another "
+               "was lucky, not robust.",
+        "this_session": "A score at or above 0.60 is the threshold to "
+                        "recommend a strategy.",
+    },
+    "tier1_gates": {
+        "hover": "The five mandatory significance tests.",
+        "what": "The Tier 1 gates are five tests — full-period "
+                "significance, FDR correction, Deflated Sharpe, "
+                "out-of-sample, and CV stability. A strategy must pass "
+                "all five.",
+        "why": "Any single test can produce a false positive; requiring "
+               "all five makes a lucky result very hard to pass.",
+        "this_session": "Only strategies passing all five gates are "
+                        "formally recommended.",
+    },
+    "tier1_t_test": {
+        "hover": "Full-period significance test versus the benchmark.",
+        "what": "A paired t-test on the strategy's monthly returns against "
+                "the benchmark over the full period, at p < 0.005.",
+        "why": "It is the first gate — evidence the strategy beat the "
+               "benchmark over the whole sample, not by chance.",
+        "this_session": "A green cell means the strategy cleared the "
+                        "full-period test.",
+    },
+    "tier1_fdr_correction": {
+        "hover": "Significance after correcting for ten strategies.",
+        "what": "The Benjamini-Hochberg FDR correction applied across all "
+                "ten strategies, at q < 0.005.",
+        "why": "It guards against a false positive arising simply because "
+               "many strategies were tested.",
+        "this_session": "A strategy still significant after FDR correction "
+                        "has a robust edge.",
+    },
+    "tier1_dsr": {
+        "hover": "Deflated Sharpe Ratio gate.",
+        "what": "The Deflated Sharpe Ratio gate adjusts the Sharpe for the "
+                "number of trials, backtest length, and return skew and "
+                "kurtosis.",
+        "why": "It corrects the selection bias of picking the best of ten "
+               "strategies.",
+        "this_session": "Passing this gate means the Sharpe survives the "
+                        "multiple-testing deflation.",
+    },
+    "tier1_oos": {
+        "hover": "Out-of-sample walk-forward gate.",
+        "what": "The out-of-sample gate tests the strategy on data it was "
+                "never fitted on, via rolling walk-forward windows, at "
+                "p < 0.005.",
+        "why": "Any strategy can look good in-sample; only out-of-sample "
+               "evidence is honest.",
+        "this_session": "A green cell means the edge held on unseen data.",
+    },
+    "tier1_cv": {
+        "hover": "Cross-validation stability gate.",
+        "what": "The CV gate requires the CV Stability Score to be at "
+                "least 0.60 across the six cross-validation methods.",
+        "why": "It confirms the strategy is consistent across periods and "
+               "regimes, not period-dependent.",
+        "this_session": "Passing this gate means performance did not hinge "
+                        "on one lucky window.",
+    },
+    "walk_forward_oos": {
+        "hover": "Performance on data never used to fit the strategy.",
+        "what": "Walk-forward out-of-sample testing trains on a rolling "
+                "window then tests on the next, unseen period, repeated "
+                "across history — it simulates real-time deployment.",
+        "why": "In-sample results can be overfitted; out-of-sample is the "
+               "only honest measure of robustness.",
+        "this_session": "A small gap between in-sample and OOS Sharpe "
+                        "indicates a robust strategy.",
+    },
+    "regime_classification": {
+        "hover": "The current market regime — bull, bear or transition.",
+        "what": "The regime classifier combines VIX, the yield curve, "
+                "equity trend and credit spreads with a Hidden Markov "
+                "Model to label the market state.",
+        "why": "Strategy performance is regime-dependent; the regime "
+               "frames every other result.",
+        "this_session": "When the threshold and HMM methods disagree, the "
+                        "regime is flagged uncertain.",
+    },
+    "equity_bond_correlation_breakdown": {
+        "hover": "When stocks and bonds stopped offsetting each other.",
+        "what": "For decades bonds rose when stocks fell, cushioning a "
+                "60/40 portfolio. In 2022 aggressive rate hikes drove both "
+                "down together — the correlation flipped positive.",
+        "why": "It is the central finding of this project: static "
+               "diversification cannot be relied on in every regime.",
+        "this_session": "Compare the pre-2022 and post-2022 correlation "
+                        "values to see the break.",
+    },
+    "alpha_newey_west": {
+        "hover": "Benchmark-beating return, autocorrelation-robust.",
+        "what": "Alpha is the strategy's return not explained by market "
+                "exposure. Newey-West standard errors correct the "
+                "significance test for autocorrelation in monthly returns.",
+        "why": "Naive standard errors overstate significance when returns "
+               "are autocorrelated; Newey-West gives an honest p-value.",
+        "this_session": "A significant positive alpha means the strategy "
+                        "added value beyond market beta.",
+    },
+    "skewness": {
+        "hover": "Whether returns lean toward gains or losses.",
+        "what": "Skewness measures the asymmetry of the return "
+                "distribution. Negative skew means occasional large "
+                "losses; positive skew means occasional large gains.",
+        "why": "Two strategies with the same volatility differ in risk if "
+               "one has negative skew — rare deep losses.",
+        "this_session": "Negative-skew strategies carry tail risk the "
+                        "Sharpe ratio does not show.",
+    },
+    "mkt_rf": {
+        "hover": "Sensitivity to the overall market return.",
+        "what": "MKT-RF is the market factor in the Carhart model — the "
+                "strategy's exposure to the broad equity market above the "
+                "risk-free rate. A loading near 1.0 moves with the market.",
+        "why": "It separates returns earned by simply taking market risk "
+               "from genuine skill.",
+        "this_session": "A lower MKT-RF loading means the strategy depends "
+                        "less on the market rising.",
+    },
+    "smb": {
+        "hover": "Exposure to small-cap versus large-cap stocks.",
+        "what": "SMB (Small Minus Big) is the size factor — a positive "
+                "loading means the strategy behaves like small-cap "
+                "stocks, negative like large-cap.",
+        "why": "It shows whether returns came from a size tilt rather "
+               "than strategy skill.",
+        "this_session": "A near-zero SMB loading means size is not driving "
+                        "the strategy's returns.",
+    },
+    "hml": {
+        "hover": "Exposure to value versus growth stocks.",
+        "what": "HML (High Minus Low) is the value factor — a positive "
+                "loading means a value tilt, negative a growth tilt.",
+        "why": "It reveals whether returns came from a value or growth "
+               "style rather than strategy design.",
+        "this_session": "A near-zero HML loading means the strategy is "
+                        "style-neutral on value.",
+    },
+    "mom": {
+        "hover": "Exposure to the momentum factor.",
+        "what": "MOM is the momentum factor — a positive loading means "
+                "the strategy behaves like recent winners, negative like "
+                "recent losers.",
+        "why": "Momentum is a well-known return driver; a high loading "
+               "means returns are momentum-harvested, not unique.",
+        "this_session": "A dash means the strategy's history predates the "
+                        "momentum backfill (a three-factor fit was used).",
+    },
+    "alpha": {
+        "hover": "Return not explained by factor exposure.",
+        "what": "Alpha is the annualised return left over after the "
+                "Carhart four-factor model accounts for market, size, "
+                "value and momentum exposure.",
+        "why": "Significant positive alpha is the cleanest evidence a "
+               "strategy added value beyond passive factor harvesting.",
+        "this_session": "A strategy with positive significant alpha beat "
+                        "what its factor exposures alone would predict.",
+    },
+    "r_squared": {
+        "hover": "How much of returns the factor model explains.",
+        "what": "R-squared is the share of the strategy's return "
+                "variation explained by the four Carhart factors, from "
+                "0 to 1.",
+        "why": "A high R-squared means returns are mostly factor "
+               "exposure; a low one means more is unexplained.",
+        "this_session": "A high R-squared makes the alpha estimate more "
+                        "reliable.",
+    },
+    "info_ratio": {
+        "hover": "Active return per unit of tracking error.",
+        "what": "The Information Ratio divides a strategy's return above "
+                "the benchmark by its tracking error — the volatility of "
+                "that active return.",
+        "why": "It measures the consistency of out-performance, not just "
+               "its size.",
+        "this_session": "The benchmark's own information ratio is "
+                        "undefined — it has zero tracking error.",
+    },
+}
+
+
 class ExplainerAgent:
     """
     Generates contextual plain-English explanations anchored to real session data.
@@ -379,31 +677,40 @@ class ExplainerAgent:
         )
 
         user_message = (
-            f"Generate contextual explanations for these key terms from this session's "
-            f"findings. {n_sig} strategies passed all Tier 1 gates. "
-            f"Reference specific numbers from the data in every explanation.\n\n"
-            f"Generate plain-English explanations for:\n"
-            f"1. p < 0.005 (using actual results)\n"
-            f"2. Sharpe ratio (referencing the actual best/worst values found)\n"
-            f"3. Walk-forward OOS (referencing actual OOS degradation found)\n"
-            f"4. FDR correction (referencing how many strategies passed/failed)\n"
-            f"5. CV Stability Score (referencing the actual stability scores)\n\n"
-            f"DATA:\n{context}\n\n"
-            f"Return JSON: {{term: {{hover: str, what: str, why: str, in_context: str}}}}"
+            "Generate a contextual glossary for a quantitative "
+            "portfolio-analysis dashboard. Return ONE JSON object whose "
+            "keys are EXACTLY these snake_case strings — use these exact "
+            "key names, not display names, not spaces, not capitalised "
+            "variants, and include EVERY one:\n"
+            + ", ".join(_GLOSSARY_TERM_KEYS) + "\n\n"
+            "Each key maps to an object with four string fields:\n"
+            "  hover: a one-line definition, at most 12 words\n"
+            "  what: a 2-3 sentence plain-English explanation\n"
+            "  why: why this metric matters when comparing strategies\n"
+            "  this_session: a concrete observation drawn from the council "
+            "output below; if the output is empty, a brief general note\n\n"
+            f"{n_sig} strategies passed all Tier 1 gates this session.\n"
+            f"COUNCIL OUTPUT:\n{context}\n\n"
+            "Return ONLY the JSON object — every key listed above must be "
+            "present, spelled exactly as given."
         )
 
         try:
-            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=800)
+            response = _call_llm(_SYSTEM_PROMPT, user_message, max_tokens=4000)
             parsed = _safe_json_parse(response, fallback=None)
-            if parsed is None:
-                # Parsing failed even after the defensive extract — fall
-                # through to the curated fallback rather than return an
-                # empty dict that would look like "no explanations exist".
-                return self._fallback_terms(significant)
-            return parsed
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001
             log.error("explainer_terms_error", error=str(exc))
-            return self._fallback_terms(significant)
+            parsed = None
+
+        # The fallback is the base layer — every _GLOSSARY_TERM_KEYS key is
+        # guaranteed present. A valid LLM result is merged OVER it, so the
+        # glossary is never "dark" on a wrapped term even when the LLM
+        # omits or mis-keys an entry.
+        glossary = self._fallback_terms()
+        if isinstance(parsed, dict):
+            glossary.update({k: v for k, v in parsed.items()
+                             if isinstance(v, dict)})
+        return glossary
 
     def explain_parameter(
         self,
@@ -618,23 +925,14 @@ class ExplainerAgent:
 
     # ── Fallbacks ────────────────────────────────────────────────────────────
 
-    def _fallback_terms(self, significant: list[str]) -> dict[str, Any]:
-        """Returns minimal glossary when Haiku is unavailable."""
-        n = len(significant)
-        return {
-            "p < 0.005": {
-                "hover": "Less than 0.5% chance the result is due to luck.",
-                "what": "The probability threshold for calling a result genuine.",
-                "why": "10 strategies tested means some will look good by chance. p < 0.005 guards against this.",
-                "in_context": f"{n} strategies cleared this threshold across all five Tier 1 gates.",
-            },
-            "Sharpe ratio": {
-                "hover": "Return earned per unit of risk — higher is better.",
-                "what": "Divides excess return by volatility.",
-                "why": "Lets you compare strategies with different risk levels on equal terms.",
-                "in_context": f"{n} strategies beat the benchmark Sharpe after all tests.",
-            },
-        }
+    def _fallback_terms(self) -> dict[str, Any]:
+        """
+        The static glossary — every _GLOSSARY_TERM_KEYS key resolves to a
+        definition. Used as the base layer under the LLM result in
+        explain_terms(), and on its own when the Explainer LLM is
+        unavailable, so an ExplainableText wrapper is never "dark".
+        """
+        return {key: dict(value) for key, value in _FALLBACK_TERMS.items()}
 
     def _fallback_chart(
         self, chart_id: str, chart_type: str, significant: list[str]

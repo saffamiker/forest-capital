@@ -22,6 +22,7 @@
  */
 import { create } from 'zustand'
 import axios from 'axios'
+import { useCouncilStore } from './councilStore'
 import type {
   GlossaryTerm,
   ParameterExplanation,
@@ -86,9 +87,17 @@ export const useGlossaryStore = create<GlossaryState>((set, get) => ({
     if (get().termsLoaded || get().termsLoading) return
     set({ termsLoading: true })
     try {
+      // Anchor the glossary in the current session: when the caller does
+      // not pass council output explicitly, fall back to the last
+      // council result so the Explainer can fill each term's
+      // `this_session` field. An empty object when no council has run.
+      const council = councilOutput
+        ?? (useCouncilStore.getState().result as
+            Record<string, unknown> | null)
+        ?? {}
       const res = await axios.post<Record<string, GlossaryTerm>>(
         '/api/explain/terms',
-        { council_output: councilOutput ?? {} },
+        { council_output: council },
       )
       set({
         terms: res.data ?? {},

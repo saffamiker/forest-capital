@@ -21,6 +21,7 @@ import {
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import TableExportButton from '../components/TableExportButton'
 import InfoIcon from '../components/InfoIcon'
+import ExplainableText from '../components/ExplainableText'
 import DataExplainButton from '../components/DataExplainButton'
 import DataCurrencyBar from '../components/DataCurrencyBar'
 import { useDataStatus, tableOf } from '../hooks/useDataStatus'
@@ -289,12 +290,16 @@ function SectionCard({
   )
 }
 
-const TH = ({ children, right = false, infoKey, infoLabel, sticky = false }: {
+const TH = ({ children, right = false, infoKey, infoLabel, term,
+              sticky = false }: {
   children: React.ReactNode
   right?: boolean
   /** When set, an InfoIcon is placed after the header label. */
   infoKey?: string
   infoLabel?: string
+  /** Glossary term ID — when set, the header label is wrapped in
+   *  ExplainableText so Commentary mode explains the metric. */
+  term?: string
   /** Freezes the column (sticky-left) so it stays visible while the
    *  table scrolls horizontally on a narrow screen. */
   sticky?: boolean
@@ -303,7 +308,9 @@ const TH = ({ children, right = false, infoKey, infoLabel, sticky = false }: {
                   whitespace-nowrap ${right ? 'text-right' : 'text-left'}
                   ${sticky ? 'sticky left-0 z-10 bg-navy-800' : ''}`}>
     <span className={`inline-flex items-center ${right ? 'flex-row-reverse' : ''}`}>
-      {children}
+      {term
+        ? <ExplainableText term={term}>{children}</ExplainableText>
+        : children}
       {infoKey && (
         <InfoIcon tooltipKey={infoKey} metricLabel={infoLabel ?? infoKey} />
       )}
@@ -343,13 +350,13 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
         <thead><tr className="border-b border-border">
           <TH sticky>Asset</TH>
           <TH>Period</TH>
-          <TH right infoKey="cagr" infoLabel="CAGR">CAGR</TH>
+          <TH right infoKey="cagr" infoLabel="CAGR" term="cagr">CAGR</TH>
           <TH right infoKey="excess_return" infoLabel="Excess Return">Excess Return (ann.)</TH>
           <TH right infoKey="volatility" infoLabel="Annualised Volatility">Ann. Volatility</TH>
-          <TH right infoKey="sharpe" infoLabel="Sharpe Ratio">Sharpe</TH>
-          <TH right infoKey="information_ratio" infoLabel="Information Ratio">Information Ratio</TH>
-          <TH right infoKey="max_drawdown" infoLabel="Maximum Drawdown">Max Drawdown</TH>
-          <TH right infoKey="skewness" infoLabel="Skewness">Skewness</TH>
+          <TH right infoKey="sharpe" infoLabel="Sharpe Ratio" term="sharpe_ratio">Sharpe</TH>
+          <TH right infoKey="information_ratio" infoLabel="Information Ratio" term="info_ratio">Information Ratio</TH>
+          <TH right infoKey="max_drawdown" infoLabel="Maximum Drawdown" term="max_drawdown">Max Drawdown</TH>
+          <TH right infoKey="skewness" infoLabel="Skewness" term="skewness">Skewness</TH>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
@@ -651,12 +658,12 @@ function FactorLoadingsTable(
       <table className="w-full">
         <thead><tr className="border-b border-border">
           <TH sticky>Strategy</TH>
-          <TH right infoKey="ff_alpha" infoLabel="Carhart Alpha">Alpha (annualized)</TH>
-          <TH right infoKey="ff_mkt_rf" infoLabel="Market Beta (MKT-RF)">MKT-RF</TH>
-          <TH right infoKey="ff_smb" infoLabel="SMB Factor Loading">SMB</TH>
-          <TH right infoKey="ff_hml" infoLabel="HML Factor Loading">HML</TH>
-          <TH right infoKey="ff_mom" infoLabel="Momentum Factor Loading">MOM</TH>
-          <TH right infoKey="ff_r2" infoLabel="R-squared">R²</TH>
+          <TH right infoKey="ff_alpha" infoLabel="Carhart Alpha" term="alpha">Alpha (annualized)</TH>
+          <TH right infoKey="ff_mkt_rf" infoLabel="Market Beta (MKT-RF)" term="mkt_rf">MKT-RF</TH>
+          <TH right infoKey="ff_smb" infoLabel="SMB Factor Loading" term="smb">SMB</TH>
+          <TH right infoKey="ff_hml" infoLabel="HML Factor Loading" term="hml">HML</TH>
+          <TH right infoKey="ff_mom" infoLabel="Momentum Factor Loading" term="mom">MOM</TH>
+          <TH right infoKey="ff_r2" infoLabel="R-squared" term="r_squared">R²</TH>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
