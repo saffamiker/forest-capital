@@ -67,15 +67,31 @@ _FACTOR_LABELS = {
     "mom":    "MOM",
 }
 
-# Charts that read solely from the gather_document_data bundle (no
-# extras needed). Empty for now — all four Commit-2 charts need extras.
-# Listed here so the dispatcher can decide whether to skip the extras
-# fetch when the only requested chart is data-bundle-only.
+# The single-strategy charts (drawdown, heatmap, rolling Sharpe,
+# distribution) default to the project's headline strategy and fall
+# back to the first non-benchmark strategy when it is absent. This is
+# the chart-vs-benchmark default; the canvas editor does not yet
+# expose a strategy picker.
+_DEFAULT_STRATEGY = "REGIME_SWITCHING"
+
+# Rolling Sharpe window — 36 months matches the platform convention.
+_ROLLING_SHARPE_WINDOW = 36
+
+# Monthly-returns histogram bin count.
+_DISTRIBUTION_BINS = 30
+
+# Every chart_key the extended renderer family handles. Listed
+# explicitly so chart_render can dispatch without importing
+# implementation details.
 EXTENDED_KEYS: frozenset[str] = frozenset({
     "regime_signals",
     "regime_conditional_returns",
     "factor_loadings",
     "factor_returns_attribution",
+    "drawdown_periods",
+    "monthly_returns_heatmap",
+    "rolling_sharpe",
+    "return_distribution",
 })
 
 
@@ -414,9 +430,302 @@ def _render_factor_returns_attribution(
     return _finish(fig, plt)
 
 
+# ── Single-strategy helpers ───────────────────────────────────────────────────
+
+def _pick_strategy_pair(data: dict[str, Any]) -> tuple[str, dict, dict] | None:
+    """Resolves (strategy_name, strategy_result, benchmark_result) from
+    data["strategy_results"]. Default strategy = REGIME_SWITCHING with
+    a fall-back to the first non-BENCHMARK row. Returns None when
+    neither side is available."""
+    results = data.get("strategy_results") or {}
+    benchmark = results.get("BENCHMARK")
+    if not isinstance(benchmark, dict):
+        return None
+
+    if _DEFAULT_STRATEGY in results:
+        name = _DEFAULT_STRATEGY
+    else:
+        # Pick the first non-BENCHMARK strategy with a non-empty
+        # monthly_returns list; falls through to None when only the
+        # benchmark is cached.
+        name = next(
+            (k for k, v in results.items()
+             if k != "BENCHMARK" and isinstance(v, dict)
+             and v.get("monthly_returns")),
+            "",
+        )
+        if not name:
+            return None
+    strategy = results.get(name)
+    if not isinstance(strategy, dict):
+        return None
+    return name, strategy, benchmark
+
+
+def _pairs_to_indexed_series(pairs: list[Any]):
+    """Converts a [[iso_date, value], ...] list to a date-indexed series.
+    Empty / malformed inputs return an empty series so callers can guard
+    on len()==0 rather than on a missing key."""
+    import pandas as pd
+    if not pairs:
+        return pd.Series(dtype="float64")
+    try:
+        dates = [pd.to_datetime(p[0]) for p in pairs]
+        values = [float(p[1]) for p in pairs]
+        return pd.Series(values, index=dates).dropna()
+    except Exception:  # noqa: BLE001
+        return pd.Series(dtype="float64")
+
+
+# ── drawdown_periods — underwater equity curve, strategy vs benchmark ─────────
+
+def _render_drawdown_periods(
+    data: dict[str, Any], extras: dict[str, Any], plt,
+) -> bytes | None:
+    """
+    Underwater curve — % below the running peak — for the strategy and
+    benchmark on a single chart. The deepest drawdowns show as filled
+    troughs below zero. Strategy in navy, benchmark in amber, the same
+    palette the deck uses for IS-vs-OOS lines.
+    """
+    picked = _pick_strategy_pair(data)
+    if picked is None:
+        return None
+    name, strategy, benchmark = picked
+
+    s = _pairs_to_indexed_series(strategy.get("monthly_returns") or [])
+    b = _pairs_to_indexed_series(benchmark.get("monthly_returns") or [])
+    if s.empty or b.empty:
+        return None
+
+    # Cumulative growth → running peak → underwater %.
+    def _underwater(returns):
+        wealth = (1.0 + returns).cumprod()
+        peak = wealth.cummax()
+        return wealth / peak - 1.0
+
+    s_dd = _underwater(s)
+    b_dd = _underwater(b)
+
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    ax.fill_between(b_dd.index, b_dd.values, 0, color=_MPL_AMBER,
+                    alpha=0.15)
+    ax.fill_between(s_dd.index, s_dd.values, 0, color=_MPL_ACCENT,
+                    alpha=0.18)
+    ax.plot(s_dd.index, s_dd.values, color=_MPL_ACCENT, linewidth=1.6,
+            label=name)
+    ax.plot(b_dd.index, b_dd.values, color=_MPL_AMBER, linewidth=1.4,
+            label="BENCHMARK")
+    ax.axhline(0, color=_MPL_GREY, linewidth=0.8)
+    ax.set_title(f"Drawdown — {name} vs BENCHMARK", fontsize=11)
+    ax.set_ylabel("Drawdown")
+    ax.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda v, _: f"{v * 100:.0f}%"))
+    ax.legend(fontsize=8, frameon=False, loc="lower left")
+    _style(ax)
+    return _finish(fig, plt)
+
+
+# ── monthly_returns_heatmap — year × month grid, strategy on top, bench below ─
+
+def _render_monthly_returns_heatmap(
+    data: dict[str, Any], extras: dict[str, Any], plt,
+) -> bytes | None:
+    """
+    Two stacked calendar heatmaps — the strategy on top, the benchmark
+    on the bottom — sharing a diverging red→white→green colormap so the
+    two grids are directly comparable. Each cell is one month's return.
+    """
+    import numpy as np
+    import pandas as pd
+
+    picked = _pick_strategy_pair(data)
+    if picked is None:
+        return None
+    name, strategy, benchmark = picked
+
+    s = _pairs_to_indexed_series(strategy.get("monthly_returns") or [])
+    b = _pairs_to_indexed_series(benchmark.get("monthly_returns") or [])
+    if s.empty or b.empty:
+        return None
+
+    def _grid(series):
+        """Pivots a date-indexed monthly series into a year × month
+        2D array. Missing months render as NaN."""
+        df = series.copy()
+        df.index = pd.to_datetime(df.index)
+        years = sorted({d.year for d in df.index})
+        grid = np.full((len(years), 12), np.nan)
+        year_to_row = {y: i for i, y in enumerate(years)}
+        for d, v in df.items():
+            grid[year_to_row[d.year], d.month - 1] = v
+        return years, grid
+
+    s_years, s_grid = _grid(s)
+    b_years, b_grid = _grid(b)
+
+    # Shared colour scale — symmetric around zero on the maximum
+    # absolute return across both grids, so the same cell colour means
+    # the same return on either heatmap.
+    all_vals = np.concatenate([s_grid[~np.isnan(s_grid)],
+                               b_grid[~np.isnan(b_grid)]])
+    vmax = float(np.nanmax(np.abs(all_vals))) if len(all_vals) else 0.1
+    vmax = max(vmax, 0.01)
+
+    fig, axes = plt.subplots(2, 1, figsize=(9, 6.4),
+                             gridspec_kw={"hspace": 0.30})
+    months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+              "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+    for ax, years, grid, title in (
+        (axes[0], s_years, s_grid, name),
+        (axes[1], b_years, b_grid, "BENCHMARK"),
+    ):
+        im = ax.imshow(grid, aspect="auto", cmap="RdYlGn",
+                       vmin=-vmax, vmax=vmax, interpolation="nearest")
+        ax.set_xticks(range(12))
+        ax.set_xticklabels(months, fontsize=8)
+        ax.set_yticks(range(len(years)))
+        ax.set_yticklabels(years, fontsize=7)
+        ax.set_title(f"Monthly Returns — {title}", fontsize=10,
+                     color=_MPL_INK)
+        ax.tick_params(colors=_MPL_GREY)
+        for spine in ax.spines.values():
+            spine.set_color(_MPL_GRID)
+
+    cbar = fig.colorbar(im, ax=axes.ravel().tolist(), shrink=0.78,
+                        pad=0.02)
+    cbar.ax.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda v, _: f"{v * 100:.0f}%"))
+    cbar.ax.tick_params(colors=_MPL_GREY, labelsize=8)
+    return _finish(fig, plt)
+
+
+# ── rolling_sharpe — 36-month rolling Sharpe, strategy vs benchmark ───────────
+
+def _render_rolling_sharpe(
+    data: dict[str, Any], extras: dict[str, Any], plt,
+) -> bytes | None:
+    """
+    36-month rolling Sharpe ratio for the strategy and benchmark on a
+    single chart. Rolling mean(excess) / rolling std(excess) × √12.
+    The risk-free rate (DTB3 monthly) lives on the benchmark result's
+    monthly_returns counterpart in the bundle — we read it once and
+    align it to each series' index.
+    """
+    import numpy as np
+    import pandas as pd
+
+    picked = _pick_strategy_pair(data)
+    if picked is None:
+        return None
+    name, strategy, benchmark = picked
+
+    s = _pairs_to_indexed_series(strategy.get("monthly_returns") or [])
+    b = _pairs_to_indexed_series(benchmark.get("monthly_returns") or [])
+    if s.empty or b.empty:
+        return None
+
+    # Monthly DTB3 risk-free rate from extras (gathered by
+    # chart_render._gather_extended_extras). When the cache is cold and
+    # rf is unavailable, falls back to a flat zero — the result is the
+    # "raw Sharpe" without rf-subtraction, still comparable strategy-
+    # to-benchmark since both lines lose the same constant.
+    rf_pairs = extras.get("monthly_rf") or []
+    rf = _pairs_to_indexed_series(rf_pairs)
+
+    def _rolling_sharpe(series):
+        excess = series.subtract(rf.reindex(series.index).fillna(0.0))
+        mean = excess.rolling(_ROLLING_SHARPE_WINDOW).mean()
+        std = excess.rolling(_ROLLING_SHARPE_WINDOW).std()
+        return (mean / std) * np.sqrt(12)
+
+    s_sh = _rolling_sharpe(s).dropna()
+    b_sh = _rolling_sharpe(b).dropna()
+    if s_sh.empty or b_sh.empty:
+        return None
+
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    ax.plot(s_sh.index, s_sh.values, color=_MPL_ACCENT, linewidth=1.6,
+            label=name)
+    ax.plot(b_sh.index, b_sh.values, color=_MPL_AMBER, linewidth=1.4,
+            label="BENCHMARK")
+    ax.axhline(0, color=_MPL_GREY, linewidth=0.8, linestyle="--")
+    ax.set_title(f"{_ROLLING_SHARPE_WINDOW}-Month Rolling Sharpe — "
+                 f"{name} vs BENCHMARK", fontsize=11)
+    ax.set_ylabel("Sharpe ratio")
+    ax.legend(fontsize=8, frameon=False)
+    _style(ax)
+    return _finish(fig, plt)
+
+
+# ── return_distribution — histogram with normal overlay, strategy vs benchmark
+
+def _render_return_distribution(
+    data: dict[str, Any], extras: dict[str, Any], plt,
+) -> bytes | None:
+    """
+    Overlaid monthly-return histograms — strategy and benchmark — with
+    the corresponding normal-distribution curves drawn on top so the
+    departure from normality is visible. Two semi-transparent histograms
+    on a single axis with a shared bin grid keeps the comparison clean.
+    """
+    import math
+    import numpy as np
+
+    picked = _pick_strategy_pair(data)
+    if picked is None:
+        return None
+    name, strategy, benchmark = picked
+
+    s = _pairs_to_indexed_series(strategy.get("monthly_returns") or [])
+    b = _pairs_to_indexed_series(benchmark.get("monthly_returns") or [])
+    if s.empty or b.empty:
+        return None
+
+    vals_s = s.values.astype(float)
+    vals_b = b.values.astype(float)
+    lo = float(min(vals_s.min(), vals_b.min()))
+    hi = float(max(vals_s.max(), vals_b.max()))
+    bins = np.linspace(lo, hi, _DISTRIBUTION_BINS + 1)
+
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+    # density=True so the y-axis is the probability density — keeps
+    # the two distributions comparable when their counts differ.
+    ax.hist(vals_b, bins=bins, density=True, color=_MPL_AMBER, alpha=0.40,
+            label="BENCHMARK", edgecolor="white", linewidth=0.5)
+    ax.hist(vals_s, bins=bins, density=True, color=_MPL_ACCENT, alpha=0.55,
+            label=name, edgecolor="white", linewidth=0.5)
+
+    # Normal-curve overlays — same colour as the matching histogram.
+    xs = np.linspace(lo, hi, 200)
+    for vals, colour in ((vals_b, _MPL_AMBER), (vals_s, _MPL_ACCENT)):
+        mu = float(np.mean(vals))
+        sd = float(np.std(vals))
+        if sd > 0:
+            pdf = (1.0 / (sd * math.sqrt(2 * math.pi))) \
+                * np.exp(-0.5 * ((xs - mu) / sd) ** 2)
+            ax.plot(xs, pdf, color=colour, linewidth=1.4)
+
+    ax.axvline(0, color=_MPL_GREY, linewidth=0.8, linestyle="--")
+    ax.set_title(f"Monthly Return Distribution — "
+                 f"{name} vs BENCHMARK", fontsize=11)
+    ax.set_xlabel("Monthly return")
+    ax.xaxis.set_major_formatter(
+        plt.FuncFormatter(lambda v, _: f"{v * 100:.0f}%"))
+    ax.set_ylabel("Density")
+    ax.legend(fontsize=8, frameon=False)
+    _style(ax)
+    return _finish(fig, plt)
+
+
 _DISPATCH: dict[str, Any] = {
     "regime_signals":              _render_regime_signals,
     "regime_conditional_returns":  _render_regime_conditional_returns,
     "factor_loadings":             _render_factor_loadings,
     "factor_returns_attribution":  _render_factor_returns_attribution,
+    "drawdown_periods":            _render_drawdown_periods,
+    "monthly_returns_heatmap":     _render_monthly_returns_heatmap,
+    "rolling_sharpe":              _render_rolling_sharpe,
+    "return_distribution":         _render_return_distribution,
 }

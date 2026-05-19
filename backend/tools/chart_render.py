@@ -208,6 +208,27 @@ AVAILABLE_CHARTS: list[dict[str, str]] = [
      "description": "Each strategy plotted by annualised return against "
                     "volatility.",
      "category": "performance"},
+    {"key": "rolling_sharpe",
+     "label": "Rolling Sharpe",
+     "description": "36-month rolling Sharpe ratio for the strategy and "
+                    "the benchmark, with a zero reference line.",
+     "category": "performance"},
+    {"key": "return_distribution",
+     "label": "Return Distribution",
+     "description": "Histogram of monthly returns with a normal-curve "
+                    "overlay — strategy vs benchmark.",
+     "category": "performance"},
+    {"key": "monthly_returns_heatmap",
+     "label": "Monthly Returns Heatmap",
+     "description": "Calendar heatmap of monthly returns — strategy on "
+                    "top, benchmark below, shared diverging colour scale.",
+     "category": "performance"},
+    # ── risk ──────────────────────────────────────────────────────────────
+    {"key": "drawdown_periods",
+     "label": "Drawdown",
+     "description": "Underwater equity curve — % below the running "
+                    "peak — for the strategy and the benchmark.",
+     "category": "risk"},
     # ── robustness ────────────────────────────────────────────────────────
     {"key": "sensitivity",
      "label": "Sensitivity Analysis",
@@ -352,6 +373,25 @@ async def _gather_extended_extras(chart_key: str) -> dict[str, Any]:
             extras["ff_factors"] = await get_ff_factors()
         except Exception as exc:  # noqa: BLE001
             log.warning("chart_render_ff_unavailable",
+                        chart_key=chart_key, error=str(exc))
+
+    if chart_key == "rolling_sharpe":
+        # Excess-return Sharpe needs the monthly DTB3 risk-free rate
+        # alongside each series. The raw values live in get_monthly_returns
+        # under the "rf" key; we surface them as a [[iso_date, value]]
+        # list so the renderer can _pairs_to_indexed_series them like
+        # every other monthly series.
+        try:
+            from tools.cache import get_monthly_returns
+            monthly = await get_monthly_returns()
+            if monthly:
+                dates = monthly.get("dates") or []
+                rf = monthly.get("rf") or []
+                extras["monthly_rf"] = [
+                    [d, v] for d, v in zip(dates, rf) if v is not None
+                ]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chart_render_rf_unavailable",
                         chart_key=chart_key, error=str(exc))
 
     return extras

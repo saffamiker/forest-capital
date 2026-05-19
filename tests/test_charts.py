@@ -123,20 +123,28 @@ class TestChartRenderUnit:
         assert png.startswith(_PNG_MAGIC)
 
     def test_extended_chart_keys_registered_and_rendered(self):
-        # Commit 2 of the library expansion added four canvas-only
-        # renderers. Each new key must (a) be in AVAILABLE_CHARTS with
-        # the correct category, (b) resolve via is_known_chart, and
-        # (c) round-trip through render_chart_png to a PNG (or the
-        # placeholder PNG when source data is unavailable — also a PNG).
+        # The library expansion (commits 2-4) added canvas-only renderers
+        # in three batches: regime + factors (Commit 2), performance +
+        # risk (Commit 3), and significance (Commit 4). Each new key must
+        # (a) be in AVAILABLE_CHARTS with the correct category,
+        # (b) resolve via is_known_chart, and (c) round-trip through
+        # render_chart_png to a PNG (the placeholder when source data is
+        # unavailable — also a PNG).
         from tools.chart_render import (
             AVAILABLE_CHARTS, is_known_chart, render_chart_png,
         )
         registry = {c["key"]: c for c in AVAILABLE_CHARTS}
         expected = {
+            # Commit 2
             "regime_signals":              "regime",
             "regime_conditional_returns":  "regime",
             "factor_loadings":             "factors",
             "factor_returns_attribution":  "factors",
+            # Commit 3
+            "rolling_sharpe":              "performance",
+            "return_distribution":         "performance",
+            "monthly_returns_heatmap":     "performance",
+            "drawdown_periods":            "risk",
         }
         for key, category in expected.items():
             assert is_known_chart(key), f"{key} not in _CHART_KEYS"
