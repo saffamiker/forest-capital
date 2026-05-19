@@ -1108,6 +1108,111 @@ async def editor_chat(
     return {"response": reply}
 
 
+@app.post("/api/v1/documents/script/generate")
+@limiter.limit("6/minute")
+async def generate_presentation_script(
+    request: Request,
+    body: dict | None = None,
+    session: dict = Depends(require_permission("team_member")),
+):
+    """
+    Generates a presentation script from a presentation_deck draft.
+
+    Reads the deck (draft_id in the body), the caller's current
+    executive_brief and midpoint_paper drafts as academic context (both
+    optional — generation degrades gracefully without them), runs the
+    Academic Writer through the generator-evaluator harness, and stores
+    the result as a new presentation_script editor draft. Returns the new
+    draft id and its word / speaker / slide counts.
+
+    400 when no slide has a speaker assigned; 404 when the deck draft is
+    not found. Team members only.
+    """
+    import asyncio
+
+    from tools.editor_drafts import create_draft, get_current_draft, get_draft
+    from tools.script_generation import deck_speakers, generate_script
+
+    raw_id = (body or {}).get("draft_id")
+    try:
+        deck_id = int(raw_id)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="'draft_id' is required.")
+
+    deck = await get_draft(deck_id)
+    if deck is None or deck.get("document_type") != "presentation_deck":
+        raise HTTPException(
+            status_code=404, detail="Presentation deck draft not found.")
+
+    content = deck.get("content_json") or {}
+    slides = content.get("slides", []) if isinstance(content, dict) else []
+    if not deck_speakers(slides):
+        raise HTTPException(
+            status_code=400,
+            detail="Assign speakers to slides before generating the script.")
+
+    email = session["email"]
+    exec_brief = await get_current_draft(email, "executive_brief")
+    midpoint = await get_current_draft(email, "midpoint_paper")
+    result = await asyncio.to_thread(
+        generate_script, deck, exec_brief, midpoint)
+
+    new_draft = await create_draft(
+        "presentation_script", email, "Presentation Script",
+        result["content_json"], result["content_text"],
+        created_from="generated")
+    if new_draft is None:
+        ref = uuid.uuid4().hex[:8]
+        log.error("script_draft_create_failed", ref=ref)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not save the generated script (ref: {ref})")
+    return {
+        "draft_id": new_draft["id"],
+        "word_count": result["word_count"],
+        "speaker_count": result["speaker_count"],
+        "slide_count": result["slide_count"],
+    }
+
+
+@app.post("/api/v1/documents/drafts/{draft_id}/export")
+async def export_editor_draft(
+    draft_id: int,
+    body: dict | None = None,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Exports a presentation_script editor draft as a .docx — the master
+    script (every speaker) when no speaker is given, or one speaker's
+    individual script (their slides only) when {speaker} is provided.
+    Team members only.
+    """
+    import asyncio
+    from datetime import date
+
+    from tools.editor_drafts import get_draft
+    from tools.script_docx import build_script_docx
+
+    draft = await get_draft(draft_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    if draft.get("document_type") != "presentation_script":
+        raise HTTPException(
+            status_code=400,
+            detail="This export is available for presentation scripts only.")
+
+    raw_speaker = (body or {}).get("speaker")
+    speaker = str(raw_speaker).strip() if raw_speaker else None
+    content = await asyncio.to_thread(build_script_docx, draft, speaker)
+
+    slug = (speaker.lower().replace(" ", "-") if speaker else "master")
+    filename = (f"forest-capital-script-{slug}-"
+                f"{date.today().isoformat()}.docx")
+    return Response(
+        content=content, media_type=_DOCX_MEDIA,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 # ── Regime ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/regime/current")

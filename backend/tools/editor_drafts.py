@@ -18,7 +18,8 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-DOCUMENT_TYPES = ("midpoint_paper", "executive_brief", "presentation_deck")
+DOCUMENT_TYPES = ("midpoint_paper", "executive_brief", "presentation_deck",
+                  "presentation_script")
 CREATED_FROM = ("generated", "uploaded", "manual")
 
 _DRAFT_COLS = (

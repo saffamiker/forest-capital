@@ -321,118 +321,201 @@ deliverables lead.*
 ## Section 4: Molly Murdock — Presentation and Visualisation Validation
 
 *Complete Section 1 first. This section is your primary workflow as
-presentation and visualisation lead.*
+presentation and visualisation lead. Record ✅ Pass / ❌ Fail / ⏭ Skip
+inline for each numbered item (4.1–4.14).*
 
-### Chart quality and comprehension
+### 4.1 Presentation deck generation
 
-- [ ] Navigate to Analytics.
-- [ ] For each chart, hover the ⓘ and verify the tooltip explains it clearly
-      in plain English.
-- [ ] Click the ⓘ on Rolling Correlation — verify the explanation mentions
-      the 2022 regime break.
-- [ ] Click the ⓘ on Factor Loadings — verify the Carhart four-factor model
-      is explained.
-- [ ] Click the ⓘ on Efficient Frontier — verify the point for a dynamic
-      strategy above the curve is explained.
-- [ ] Verify the 2022 regime-break marker is consistent across Rolling
-      Correlation, Rolling Excess Return, and Cumulative Returns.
+- Navigate to the Reports page.
+- Click **[Generate Presentation Deck]**.
+- Wait for generation to complete.
+- Verify the **[Open in Editor]** button appears as the primary CTA.
+- Click **[Open in Editor]**.
+- Verify the editor loads at `/editor/:draft_id`.
 
-### Presentation View
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 
-- [ ] Navigate to Reports → Team Activity and click Presentation View.
-- [ ] Verify three charts display at full-screen scale: Activity over time /
-      Team contribution split / Agent engagement breakdown.
-- [ ] Charts must be readable at 1920×1080 (projected-room quality).
-- [ ] Verify the charts show real data (not empty).
-- [ ] The team contribution split shows all three team members.
-- [ ] Exit Presentation View cleanly.
+### 4.2 Canvas editor — basic interaction
 
-### Presentation deck
+- Verify 16 slide cards are visible in the left-panel navigator.
+- Verify the centre panel shows a Konva canvas Stage (not a stack of
+  text cards).
+- Click a slide in the navigator — verify the canvas updates to show
+  that slide.
+- Verify the **[[MOLLY]]** task callout is visible at the top of the
+  editor.
+- Dismiss the callout — verify it disappears and does not return on the
+  same session.
 
-- [ ] Navigate to Reports → Generate Documents.
-- [ ] Click **Generate Presentation Deck** and wait for generation (30–60s).
-- [ ] Download the `.pptx` file, open it in PowerPoint, and verify:
-  - [ ] 16 slides present.
-  - [ ] A navy/white professional theme (not the dark platform theme).
-  - [ ] The title slide is formatted correctly.
-  - [ ] Charts embedded on the relevant slides (not broken image
-        placeholders).
-  - [ ] Slide 5 has the rolling correlation chart (the 2022 regime break).
-  - [ ] Slide 8 has the cumulative returns chart.
-  - [ ] Slide 15 ("How We Built This") has real activity counts.
-  - [ ] All text is readable (not white-on-white or black-on-black).
-  - [ ] No lorem ipsum or placeholder text.
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 
-### Presentation Editor
+### 4.3 Canvas editor — text elements
 
-*Run after generating the presentation deck above.*
+- Click a text element on the canvas.
+- Verify selection handles appear.
+- Drag the element to a new position — verify it moves correctly.
+- Double-click the element — verify an inline textarea appears for
+  editing.
+- Edit the text and click away — verify the new text is saved.
+- Verify auto-save fires within 2 seconds ("Saving…" → "Saved [time]").
 
-- [ ] On the presentation-deck card, click **[Open in Editor]**.
-- [ ] Verify the centre panel renders **slide cards** — an editable title,
-      content and speaker-notes field per slide — not a rich-text editor.
-- [ ] Verify at least one slide shows amber **data-point markers**.
-- [ ] Click **Mark data points verified** on a slide — verify the marker
-      row clears to a verified state.
-- [ ] Click the speaker-notes field on any slide and type a sentence.
-- [ ] Click **[Generate Talking Points]** below the notes field — verify
-      4-6 bullet points return.
-- [ ] Click the insert (+) control on one bullet — verify it appends to
-      the speaker-notes field.
-- [ ] Verify the slide shows a **Complete** indicator once its notes are
-      written and its data points are verified.
-- [ ] Verify the left-panel progress indicator updates for that slide.
-- [ ] Click **[Presentation Preview]** in the header bar — verify a
-      full-screen overlay opens.
-- [ ] Verify the speaker notes show in a strip below each slide, labelled
-      "Your notes (not visible to audience)".
-- [ ] Navigate with the arrow keys — verify slides advance and the
-      counter ("N / 16") updates.
-- [ ] Press **Esc** — verify the overlay closes and returns to the editor.
-- [ ] Click **[Export PPTX]** in the editor header — verify a `.pptx`
-      file downloads, and open it to confirm your edited speaker notes
-      are present on the slides.
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 
-### Writing Assistant (Presentation)
+### 4.4 Canvas editor — chart elements
 
-- [ ] In the editor, open the Writing Assistant panel (right) and type a
-      question about a slide — verify a specific, relevant response.
-- [ ] Select a word or phrase in a slide's content or speaker-notes
-      field, then use the Writing Assistant chat to ask about it —
-      verify the response is specific to the slide content.
+- Click **[+ Chart]** in the toolbar.
+- Verify the chart picker drawer opens.
+- Verify chart thumbnails load (5 charts visible).
+- Click a chart to add it to the current slide.
+- Verify the chart element appears on the canvas with an amber border.
+- Click the chart element — verify the verify popup appears:
+  "Verify this chart reflects current platform data."
+- Click **[Mark as Verified]** — verify the amber border disappears.
 
-### Export package
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 
-- [ ] Navigate to Reports and click **Export Academic Package**.
-- [ ] Watch the progress steps complete.
-- [ ] Download the ZIP file and verify it contains:
-  - [ ] A `/charts/` folder with PNG files.
-  - [ ] A `/tables/` folder with CSV files.
-  - [ ] A `/metadata/` folder with `study_period.txt` and `README.txt`.
-  - [ ] Charts are light mode (white background, dark text).
-  - [ ] Charts are high resolution (not blurry).
-- [ ] Open one chart PNG in an image viewer — verify it is suitable for
-      embedding in a Word document.
+### 4.5 Canvas editor — format toolbar
 
-### Peer review preparation
+- Click a text element to select it.
+- Verify the format toolbar appears with font size, bold, italic and a
+  colour picker.
+- Change the font size — verify the text updates on the canvas.
+- Toggle bold — verify the text weight changes.
+- Change the colour using a preset — verify the text colour updates.
+- Click **[Delete element]** — verify the element is removed from the
+  canvas.
 
-- [ ] Navigate to Council and run an Academic Review session.
-- [ ] Read the Overall Readiness section.
-- [ ] Identify the top Priority Area for Further Investigation.
-- [ ] Ask the council: *"What questions might a peer reviewer ask about our
-      regime analysis methodology?"*
-- [ ] Verify the response is specific and helpful for preparation.
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
+### 4.6 Canvas editor — speaker assignment
+
+- In the left-panel navigator, click **[+ Speaker]** on Slide 1.
+- Type "Molly" and confirm.
+- Verify a "Molly" badge appears on Slide 1 in the navigator.
+- Verify a "Presenter: Molly" label appears above the canvas.
+- Assign a different name to Slide 2 (e.g. "Bob").
+- Verify previously-used names appear as suggestions on subsequent
+  slides.
+- Verify the **[Generate Script]** button is now enabled in the header.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
+### 4.7 Canvas editor — AI features
+
+- Click **[AI Layout]** in the toolbar.
+- Verify a layout suggestion returns.
+- Verify the current vs suggested preview is shown side by side.
+- Click **[Dismiss]** — verify the canvas is unchanged.
+- Click **[AI Layout]** again, then **[Apply]** — verify the canvas
+  elements reposition.
+- Select a text element — verify the **[AI Copy]** button appears in
+  the toolbar.
+- Click **[AI Copy]** — verify suggested replacement text appears.
+- Click **[Apply]** — verify the text updates on the canvas.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
+### 4.8 Canvas editor — speaker notes
+
+- Scroll below the canvas to the speaker-notes field.
+- Type a note for the current slide.
+- Click **[Generate Talking Points]** — verify 3-5 bullet points return.
+- Click **[Insert]** on one bullet — verify it appends to the notes
+  field.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
+### 4.9 Presentation Preview
+
+- Click **[Presentation Preview]** in the header.
+- Verify a full-screen overlay opens.
+- Verify the slide content is visible.
+- Verify the speaker notes are visible in the strip at the bottom.
+- Navigate with the arrow keys — verify slides advance.
+- Verify the slide counter shows "N / 16".
+- Press **Esc** — verify the overlay closes cleanly.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
+### 4.10 Export PPTX
+
+- Click **[Export PPTX]** in the header.
+- Verify a `.pptx` file downloads.
+- Open it in PowerPoint.
+- Verify the slide layout matches the canvas positions approximately.
+- Verify the speaker notes are present on the slides.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
+### 4.11 Script generation
+
+- Ensure at least one slide has a speaker assigned (from 4.6).
+- Click **[Generate Script]** in the header.
+- Verify the loading state is shown (generation takes 30-60 seconds).
+- Verify the editor opens at `/editor/:draft_id` on completion.
+- Verify the document type is `presentation_script`.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
+### 4.12 Script editor
+
+- Verify the **[[MOLLY]]** task callout is visible at the top.
+- Verify the left panel shows slide sections with speaker names.
+- Verify the delivery-time indicator is visible (e.g. "~22 min
+  delivery").
+- Verify the delivery time is amber if outside 18-27 minutes.
+- Verify all 16 slides are covered in the script.
+- Verify speaker labels are present for each slide section.
+- Verify transitions are present between slides (blockquote style).
+- Edit a paragraph — verify the delivery time updates live.
+- Verify auto-save fires.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
+### 4.13 Script export
+
+- Verify the **[Export Master Script]** button is visible in the header.
+- Verify an **[Export: {Name}]** button is visible for each unique
+  speaker.
+- Click **[Export Master Script]** — verify a `.docx` downloads.
+- Open it in Word — verify all slides are present, speaker labels are
+  visible, and transitions are italicised.
+- Click **[Export: Molly]** (or whichever name was assigned) — verify a
+  `.docx` downloads.
+- Open it in Word — verify only Molly's slides are present, slide
+  numbers and titles are included, and the page header shows
+  "Molly — Forest Capital Presentation Script".
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
+### 4.14 Submission Guide
+
+- Navigate to the Reports page.
+- Click **[Submission Guide]** in the header.
+- Verify Guide 2 is visible (Molly's guide).
+- Verify steps 8-11 are present:
+  Step 8 — Assign speakers; Step 9 — Generate script;
+  Step 10 — Rewrite in your voice; Step 11 — Export scripts.
+- Verify the deadline countdown shows June 3rd.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 
 ---
 
 ## Test Sign-Off
 
-At the end of your section, record:
+At the end of your section, record the summary below. Sections 1-3 are
+recorded as `- [ ]` checklist items; Section 4 (Molly) is recorded as
+fourteen numbered items (4.1–4.14), each carrying an inline
+✅ Pass / ❌ Fail / ⏭ Skip result — note the result and any failure
+detail against each.
 
 | Field | Value |
 |---|---|
 | Tester | |
 | Date | |
 | Section completed | |
+| Section 4 items 4.1–4.14 (Molly only) | _e.g. 14/14 pass_ |
 | Failures found | |
 | Notes | |
 
@@ -463,3 +546,11 @@ Send the completed sign-off and any failure notes to **ruurdsm@queens.edu**.
 - `[[BOB]]` callouts render as block panels resolved via [Mark as
   Complete]. `[[VERIFY]]` markers resolve via a popup with
   [Mark as Verified] / [Cancel].
+- The canvas editor renders charts and runs AI Layout / AI Copy
+  synchronously — stay on the page while a request is in flight;
+  navigating away loses the result.
+- Script generation takes 30-60 seconds. Do not navigate away from the
+  editor while the **[Generate Script]** loading state is shown.
+- The chart picker shows the **five server-renderable charts** only
+  (rolling correlation, cumulative returns, risk vs return, sensitivity,
+  team activity) — not every chart on the Analytics page.

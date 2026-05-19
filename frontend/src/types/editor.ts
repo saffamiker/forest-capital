@@ -6,6 +6,7 @@ import type { JSONContent } from '@tiptap/core'
 
 export type EditorDocumentType =
   | 'midpoint_paper' | 'executive_brief' | 'presentation_deck'
+  | 'presentation_script'
 
 /** A TipTap document JSON object (paper/brief). */
 export type TipTapDoc = JSONContent
@@ -54,6 +55,8 @@ export interface CanvasSlide {
   background: string
   speaker_notes: string
   elements: CanvasElement[]
+  /** The presenter assigned to this slide — null/absent until assigned. */
+  speaker?: string | null
 }
 
 /** A presentation_deck draft stores {slides:[...]} in content_json. */

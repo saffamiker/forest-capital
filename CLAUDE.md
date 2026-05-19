@@ -6197,6 +6197,64 @@ the Vitest setup (konva's Node build needs the native 'canvas' package,
 absent under jsdom). Operator step: alembic upgrade head on Render.
 
 
+─────────────────────────────────────────────────────────────────────────────
+PRESENTATION SCRIPT WRITER (May 19 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The script writer turns a finished presentation_deck into a spoken
+multi-speaker presentation script. No migration — presentation_script
+is a new editor_drafts.document_type value on the existing schema; the
+canvas schema (022) is extended with a per-slide speaker field.
+
+SPEAKER ASSIGNMENT — each canvas slide's content_json gains an optional
+`speaker` field (null/absent until assigned). In the deck editor the
+left navigator gives every slide a speaker badge — [+ Speaker] when
+unassigned, [Name ▾] when assigned, an inline dropdown of
+previously-used names (the deck's other speakers) plus free-text entry
+and Remove. The canvas shows a muted "Presenter: <name>" label above
+the Stage — informational, never part of the exported slide. Speaker
+changes ride the existing 2-second deck auto-save.
+
+SCRIPT GENERATION — POST /api/v1/documents/script/generate (team_member,
+body {draft_id}) reads the presentation_deck draft, the caller's current
+executive_brief and midpoint_paper drafts as academic context (both
+optional — generation degrades gracefully), and runs the Academic
+Writer through the GENERATOR-EVALUATOR HARNESS (a document generation,
+not a conversational reply — the harness, not a bare call_claude, the
+same pattern as the midpoint paper). presentation_script_evaluator_
+prompt scores five criteria: all 16 slides covered, speaker labels,
+transitions, academic language, content fidelity. The generated
+markdown is parsed into a TipTap document — '## ' → H2, '**Speaker:
+…**' → H3, '*Transition: …*' → blockquote, prose → paragraphs — and
+stored as a new presentation_script editor draft (is_current,
+superseding any prior script draft). tools/script_generation.py holds
+the prompt builder, the parser, and a deterministic fallback that
+assembles a complete script (real slide headers + speaker labels,
+[DATA PENDING] prose) whenever generation is unavailable (test env) or
+covers fewer slides than the deck — so the draft is always complete.
+The [Generate Script] button in the deck editor header is enabled once
+at least one slide has a speaker. The endpoint 422s a missing draft_id,
+404s an unknown deck, 400s a deck with no speakers assigned.
+
+SCRIPT EDITOR — a presentation_script draft opens in the existing
+TipTap rich-text editor. The navigator lists one section per slide
+(H2) with the speaker read from its H3 shown beneath it (read-only —
+not the deck's editable badge); section progress is "has delivery prose
+yet". The word-count target is replaced by an estimated DELIVERY TIME
+at 150 words/minute ("~22 min delivery · N words"), green inside 18-27
+minutes and amber outside. A MOLLY task callout shows once per draft.
+
+EXPORT — POST /api/v1/documents/drafts/{id}/export (team_member, body
+{speaker?}) renders the script to .docx via tools/script_docx.py. With
+no speaker it builds the MASTER script (every section); with a speaker
+it builds that speaker's INDIVIDUAL script — only their slide sections,
+their name in the per-page header, slide numbers and titles kept so
+they can follow along. Each speaker is given a STABLE COLOUR for the
+whole document (a six-colour palette assigned by first-seen order) so
+the master script can be scanned for one presenter's parts. The script
+editor header shows [Export Master Script] plus one [Export: <name>]
+per unique speaker.
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -6292,6 +6350,17 @@ is maintained separately. The `gh` CLI is authenticated with the
         mapping, CanvasSlideEditor + ChartPicker
      ✅ react-konva mocked in the Vitest setup (konva's Node build
         needs the native 'canvas' package, absent under jsdom)
+  ✅ Presentation script writer stream (7 commits, no migration):
+     ✅ Per-slide speaker assignment in the canvas editor — navigator
+        badge, canvas "Presenter:" label, [Generate Script] button
+     ✅ POST /api/v1/documents/script/generate — deck + executive
+        brief + midpoint context → Academic Writer via the harness →
+        a presentation_script editor draft
+     ✅ Script editor — speaker section navigator, 150-wpm delivery
+        time indicator, MOLLY callout
+     ✅ Master / per-speaker DOCX export (POST /documents/drafts/{id}/
+        export), stable per-speaker colour
+     ✅ Submission Guide 2 updated; tests (backend 20, frontend 11)
   ◐ alembic upgrade head on Render — in-flight: migrations through 022
      are ready locally; migrations 019–022 are NOT yet on production.
      `alembic upgrade head` runs on Render post-merge, pending the

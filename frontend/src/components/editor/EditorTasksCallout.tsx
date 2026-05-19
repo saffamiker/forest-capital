@@ -61,6 +61,19 @@ const TASKS: Record<EditorDocumentType, TaskSet> = {
       'Run Presentation Preview and rehearse before June 3rd',
     ],
   },
+  presentation_script: {
+    owner: 'MOLLY',
+    note: 'This script was generated from your deck and academic context. '
+      + 'It is a starting point — rewrite every section in your own voice '
+      + 'before rehearsing.',
+    tasks: [
+      'Read through the full script',
+      'Rewrite each section in your own voice',
+      'Time yourself — aim for 20-25 minutes',
+      'Export individual scripts for each speaker',
+      'Export the master script for the full team',
+    ],
+  },
 }
 
 interface Props {

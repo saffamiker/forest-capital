@@ -108,6 +108,39 @@ const GUIDES: Guide[] = [
       },
       { step: 'Export PPTX for submission.' },
       { step: 'Run Academic Review against the final deck.' },
+      {
+        step: 'Assign speakers to slides.',
+        detail: [
+          'In the presentation canvas editor, click [+ Speaker] on each '
+            + 'slide and assign a presenter name.',
+          'Every slide should have a speaker before generating the script.',
+        ],
+      },
+      {
+        step: 'Generate your script.',
+        detail: [
+          'Click [Generate Script] in the editor header.',
+          'The script opens automatically in a new editor tab.',
+          'Generation takes 30-60 seconds.',
+        ],
+      },
+      {
+        step: 'Rewrite in your own voice.',
+        detail: [
+          'Work through every section. The generated script is a starting '
+            + 'point — the substance is correct but the voice needs to be '
+            + 'yours and your team’s.',
+          'Use the Writing Assistant panel for help with phrasing.',
+          'Watch the delivery time indicator — aim for 18-27 minutes.',
+        ],
+      },
+      {
+        step: 'Export scripts.',
+        detail: [
+          'Click [Export: {Name}] for each speaker’s individual script.',
+          'Click [Export Master Script] for the full team version.',
+        ],
+      },
     ],
   },
 ]

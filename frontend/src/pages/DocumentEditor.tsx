@@ -11,7 +11,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   ArrowLeft, Loader2, PanelLeftClose, PanelLeftOpen,
-  PanelRightClose, PanelRightOpen, MonitorPlay, Download,
+  PanelRightClose, PanelRightOpen, MonitorPlay, Download, FileSignature,
 } from 'lucide-react'
 
 import RichTextEditor from '../components/editor/RichTextEditor'
@@ -35,7 +35,11 @@ const WORD_TARGETS: Record<string, number> = {
   midpoint_paper: 1500,
   executive_brief: 2000,
   presentation_deck: 0,
+  presentation_script: 0,
 }
+
+// A spoken presentation is delivered at ~150 words per minute.
+const SCRIPT_WORDS_PER_MINUTE = 150
 
 // The export endpoint for each document type — the in-editor Export
 // button POSTs {editor_draft_id} to it and downloads the result.
@@ -58,6 +62,36 @@ function tiptapSections(doc: TipTapDoc | null): { heading: string; text: string 
       current = { heading: nodeToText(raw) || 'Section', text: '' }
     } else if (current) {
       current.text += '\n' + nodeToText(raw)
+    }
+  }
+  if (current) out.push(current)
+  return out
+}
+
+// Walks a presentation_script doc into per-slide sections — one per H2
+// heading, carrying the speaker from its H3 and whether it has any
+// delivery prose yet (the progress signal — a script has no [[BOB]]
+// markers).
+function scriptSections(doc: TipTapDoc | null): {
+  heading: string; speaker: string | null; hasContent: boolean
+}[] {
+  const out: { heading: string; speaker: string | null;
+               hasContent: boolean }[] = []
+  let current: { heading: string; speaker: string | null;
+                 hasContent: boolean } | null = null
+  for (const raw of (doc?.content ?? [])) {
+    const node = raw as { type?: string; attrs?: { level?: number } }
+    const level = node.attrs?.level ?? 1
+    if (node.type === 'heading' && level <= 2) {
+      if (current) out.push(current)
+      current = { heading: nodeToText(raw) || 'Section', speaker: null,
+                  hasContent: false }
+    } else if (current && node.type === 'heading' && level === 3) {
+      const m = /Speaker:\s*(.+)/i.exec(nodeToText(raw))
+      if (m) current.speaker = m[1].trim()
+    } else if (current && (node.type === 'paragraph'
+        || node.type === 'blockquote')) {
+      if (nodeToText(raw).trim()) current.hasContent = true
     }
   }
   if (current) out.push(current)
@@ -90,6 +124,7 @@ export default function DocumentEditor() {
   // picker drawer while a chart is being added to a slide.
   const [rightPanelMode, setRightPanelMode] =
     useState<'assistant' | 'chartpicker'>('assistant')
+  const [generatingScript, setGeneratingScript] = useState(false)
   // A quoted passage pushed into the Writing Assistant by the "Ask AI"
   // selection action; the nonce re-triggers the panel's prefill effect.
   const [assistantPrefill, setAssistantPrefill] =
@@ -240,6 +275,34 @@ export default function DocumentEditor() {
     }
   }, [draft, id, save])
 
+  // Script export — the master script, or one speaker's slides only.
+  const exportScript = useCallback(async (speaker?: string) => {
+    setExporting(true)
+    setError(null)
+    try {
+      await save()
+      const res = await axios.post(
+        `/api/v1/documents/drafts/${id}/export`,
+        speaker ? { speaker } : {}, { responseType: 'blob' })
+      const dispo = String(res.headers['content-disposition'] ?? '')
+      const match = /filename="?([^";]+)"?/i.exec(dispo)
+      const filename = match?.[1]
+        ?? `forest-capital-script-${speaker ?? 'master'}.docx`
+      const url = URL.createObjectURL(res.data as Blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    } catch {
+      setError('Export failed — please try again.')
+    } finally {
+      setExporting(false)
+    }
+  }, [id, save])
+
   // "Ask AI" on an editor selection — opens the assistant panel and
   // pre-fills the chat input with the quoted passage.
   const handleAskAI = (text: string) => {
@@ -251,6 +314,33 @@ export default function DocumentEditor() {
   }
 
   const isDeck = draft?.document_type === 'presentation_deck'
+  const isScript = draft?.document_type === 'presentation_script'
+
+  // The script's left panel shows estimated delivery time (150 wpm)
+  // rather than a word-count target.
+  const scriptWordCount = isScript ? countWords(contentText) : 0
+  const deliveryMinutes = scriptWordCount / SCRIPT_WORDS_PER_MINUTE
+  const scriptMetricLine = isScript
+    ? `~${Math.round(deliveryMinutes)} min delivery · ${scriptWordCount} words`
+    : undefined
+  const scriptMetricTone: 'ok' | 'warn' | undefined = isScript
+    ? (deliveryMinutes >= 18 && deliveryMinutes <= 27 ? 'ok' : 'warn')
+    : undefined
+  // Unique speakers in the script — one export button per speaker.
+  const scriptSpeakers = isScript
+    ? Array.from(new Set(
+        scriptSections(contentJson as TipTapDoc | null)
+          .map((s) => s.speaker)
+          .filter((x): x is string => Boolean(x))))
+    : []
+
+  // Deck speaker assignment — drives the navigator badges and the
+  // Generate Script button.
+  const deckSlides = isDeck
+    ? ((contentJson as CanvasDeck | null)?.slides ?? []) : []
+  const deckHasSpeaker = deckSlides.some((s) => Boolean(s.speaker))
+  const speakerSuggestions = Array.from(new Set(
+    deckSlides.map((s) => s.speaker).filter((x): x is string => Boolean(x))))
 
   const jumpToSection = (heading: string) => {
     // A deck navigator entry selects the slide shown on the canvas.
@@ -280,6 +370,37 @@ export default function DocumentEditor() {
     return () => clearTimeout(timer)
   }, [isDeck, contentJson, save])
 
+  // Assigns (or clears) a slide's presenter from the deck navigator.
+  const handleAssignSpeaker = (heading: string, speaker: string | null) => {
+    const deck = contentJson as CanvasDeck | null
+    if (!deck) return
+    const m = /^Slide (\d+):/.exec(heading)
+    if (!m) return
+    const idx = Number(m[1]) - 1
+    onDeckChange({
+      slides: deck.slides.map((s, i) =>
+        (i === idx ? { ...s, speaker } : s)),
+    })
+  }
+
+  // Generates a presentation script from this deck, then opens it.
+  const generateScript = useCallback(async () => {
+    setGeneratingScript(true)
+    setError(null)
+    try {
+      await save()  // flush speaker assignments before generation reads them
+      const res = await axios.post<{ draft_id: number }>(
+        '/api/v1/documents/script/generate', { draft_id: id })
+      const newId = res.data?.draft_id
+      if (newId) navigate(`/editor/${newId}`)
+      else setError('Script generation returned no draft.')
+    } catch {
+      setError('Could not generate the script — please retry.')
+    } finally {
+      setGeneratingScript(false)
+    }
+  }, [id, save, navigate])
+
   // Navigator sections + the unresolved-marker total.
   const { sections, unresolved } = useMemo(() => {
     if (!draft) return { sections: [] as NavSection[], unresolved: 0 }
@@ -289,12 +410,24 @@ export default function DocumentEditor() {
         heading: `Slide ${i + 1}: ${s.title}`,
         totalMarkers: 1,
         markersRemaining: canvasSlideStatus(s) === 'complete' ? 0 : 1,
+        speaker: s.speaker ?? null,
       }))
       return {
         sections: secs,
         unresolved: slides.filter(
           (s) => canvasSlideStatus(s) !== 'complete').length,
       }
+    }
+    if (isScript) {
+      // One section per slide (H2); progress is "has delivery prose yet".
+      const secs: NavSection[] = scriptSections(contentJson as TipTapDoc | null)
+        .map((s) => ({
+          heading: s.heading,
+          totalMarkers: 1,
+          markersRemaining: s.hasContent ? 0 : 1,
+          speaker: s.speaker,
+        }))
+      return { sections: secs, unresolved: countMarkers(contentText) }
     }
     const secs: NavSection[] = tiptapSections(contentJson as TipTapDoc | null)
       .map((s) => {
@@ -304,7 +437,7 @@ export default function DocumentEditor() {
                  totalMarkers: total }
       })
     return { sections: secs, unresolved: countMarkers(contentText) }
-  }, [draft, isDeck, contentJson, contentText])
+  }, [draft, isDeck, isScript, contentJson, contentText])
 
   if (loading) {
     return (
@@ -355,22 +488,64 @@ export default function DocumentEditor() {
               : saveState === 'error' ? 'Save failed'
               : saveState === 'saved' ? `Saved ${lastSaved}` : 'Unsaved changes'}
           </span>
-          <button type="button" onClick={() => void exportDocument()}
-            disabled={exporting}
-            className="flex items-center gap-1 text-2xs px-2 py-1 rounded
-                       border border-electric/40 text-electric
-                       hover:bg-electric/10 disabled:opacity-50">
-            {exporting
-              ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Exporting…</>
-              : <><Download className="w-3.5 h-3.5" />
-                  {isDeck ? 'Export PPTX' : 'Export DOCX'}</>}
-          </button>
+          {isScript ? (
+            <>
+              <button type="button" onClick={() => void exportScript()}
+                disabled={exporting}
+                className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                           border border-electric/40 text-electric
+                           hover:bg-electric/10 disabled:opacity-50">
+                {exporting
+                  ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      Exporting…</>
+                  : <><Download className="w-3.5 h-3.5" />
+                      Export Master Script</>}
+              </button>
+              {scriptSpeakers.map((name) => (
+                <button key={name} type="button"
+                  onClick={() => void exportScript(name)} disabled={exporting}
+                  className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                             border border-electric/40 text-electric
+                             hover:bg-electric/10 disabled:opacity-50">
+                  <Download className="w-3.5 h-3.5" /> Export: {name}
+                </button>
+              ))}
+            </>
+          ) : (
+            <button type="button" onClick={() => void exportDocument()}
+              disabled={exporting}
+              className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                         border border-electric/40 text-electric
+                         hover:bg-electric/10 disabled:opacity-50">
+              {exporting
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Exporting…</>
+                : <><Download className="w-3.5 h-3.5" />
+                    {isDeck ? 'Export PPTX' : 'Export DOCX'}</>}
+            </button>
+          )}
           {isDeck && (
             <button type="button" onClick={() => setPreviewOpen(true)}
               className="flex items-center gap-1 text-2xs px-2 py-1 rounded
                          border border-electric/40 text-electric
                          hover:bg-electric/10">
               <MonitorPlay className="w-3.5 h-3.5" /> Presentation Preview
+            </button>
+          )}
+          {isDeck && (
+            <button type="button" onClick={() => void generateScript()}
+              disabled={!deckHasSpeaker || generatingScript}
+              title={deckHasSpeaker
+                ? 'Generate a presentation script from this deck'
+                : 'Assign speakers to slides before generating the script.'}
+              className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                         border border-electric/40 text-electric
+                         hover:bg-electric/10 disabled:opacity-50">
+              {generatingScript
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Generating…</>
+                : <><FileSignature className="w-3.5 h-3.5" />
+                    Generate Script</>}
             </button>
           )}
           <button type="button" onClick={() => setLeftOpen((v) => !v)}
@@ -408,6 +583,10 @@ export default function DocumentEditor() {
               onJumpToSection={jumpToSection}
               onSaveVersion={saveVersion}
               onRestoreVersion={restoreVersion}
+              onAssignSpeaker={isDeck ? handleAssignSpeaker : undefined}
+              speakerSuggestions={isDeck ? speakerSuggestions : undefined}
+              metricLine={scriptMetricLine}
+              metricTone={scriptMetricTone}
             />
           </aside>
         )}
