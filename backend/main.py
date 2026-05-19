@@ -70,6 +70,20 @@ async def lifespan(app: FastAPI):
     # restart already carries the uploaded rubric / requirements documents.
     # Fail-open: a cold cache simply means agents run without that context.
     if ENVIRONMENT != "test":
+        # Reap any audit left 'running' by a crash or a redeploy before
+        # this boot — a hung run otherwise holds the statistical-audit
+        # lock until the first poll or audit-start happens to clear it.
+        try:
+            from tools.audit_engine import fail_stale_audits
+            reaped = await fail_stale_audits()
+            if reaped:
+                log.warning(
+                    f"Startup reap: marked {reaped} stale audit "
+                    f"run(s) as failed", count=reaped)
+            else:
+                log.info("Startup reap: no stale audit runs found")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("audit_startup_reap_failed", error=str(exc))
         try:
             from tools.academic_context import refresh_academic_context
             await refresh_academic_context()

@@ -683,3 +683,57 @@ class TestAuditTimeout:
                     await s.commit()
 
         asyncio.run(scenario())
+
+    def test_startup_reaps_a_stale_audit_run(self, monkeypatch):
+        # Driving the app's lifespan startup must reap a run hung from
+        # before the boot, before the server accepts its first request.
+        if not _db_ready():
+            pytest.skip("no live database with the audit tables")
+        import main
+        from structlog.testing import capture_logs
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal, engine
+
+        # Force the lifespan's non-test startup branch to run; stub the
+        # other startup tasks so only the reap is exercised.
+        monkeypatch.setattr(main, "ENVIRONMENT", "production")
+
+        async def _noop_ctx():
+            return None
+        monkeypatch.setattr("tools.academic_context.refresh_academic_context",
+                            _noop_ctx)
+        monkeypatch.setattr("tools.data_fetcher.extend_market_data",
+                            lambda *a, **k: {"status": "current"})
+
+        async def scenario():
+            if engine is not None:
+                await engine.dispose()
+            async with AsyncSessionLocal() as s:
+                row = await s.execute(text(
+                    "INSERT INTO audit_runs (triggered_by, status, "
+                    "triggered_at) VALUES ('manual', 'running', "
+                    "now() - interval '20 minutes') RETURNING id"))
+                rid = int(row.scalar())
+                await s.commit()
+            try:
+                # Enter the lifespan — startup runs to completion (the
+                # reap included) before yield, i.e. before any request.
+                with capture_logs() as logs:
+                    async with main.lifespan(main.app):
+                        pass
+                async with AsyncSessionLocal() as s:
+                    r = await s.execute(text(
+                        "SELECT status FROM audit_runs WHERE id = :i"),
+                        {"i": rid})
+                    status = r.fetchone()[0]
+                assert status == "failed"
+                events = [str(e.get("event", "")) for e in logs]
+                assert any("Startup reap" in e for e in events)
+            finally:
+                async with AsyncSessionLocal() as s:
+                    await s.execute(text(
+                        "DELETE FROM audit_runs WHERE id = :i"), {"i": rid})
+                    await s.commit()
+
+        asyncio.run(scenario())
