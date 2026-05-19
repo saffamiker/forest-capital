@@ -11,7 +11,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   ArrowLeft, Loader2, PanelLeftClose, PanelLeftOpen,
-  PanelRightClose, PanelRightOpen, MonitorPlay, Download,
+  PanelRightClose, PanelRightOpen, MonitorPlay, Download, FileSignature,
 } from 'lucide-react'
 
 import RichTextEditor from '../components/editor/RichTextEditor'
@@ -90,6 +90,7 @@ export default function DocumentEditor() {
   // picker drawer while a chart is being added to a slide.
   const [rightPanelMode, setRightPanelMode] =
     useState<'assistant' | 'chartpicker'>('assistant')
+  const [generatingScript, setGeneratingScript] = useState(false)
   // A quoted passage pushed into the Writing Assistant by the "Ask AI"
   // selection action; the nonce re-triggers the panel's prefill effect.
   const [assistantPrefill, setAssistantPrefill] =
@@ -252,6 +253,14 @@ export default function DocumentEditor() {
 
   const isDeck = draft?.document_type === 'presentation_deck'
 
+  // Deck speaker assignment — drives the navigator badges and the
+  // Generate Script button.
+  const deckSlides = isDeck
+    ? ((contentJson as CanvasDeck | null)?.slides ?? []) : []
+  const deckHasSpeaker = deckSlides.some((s) => Boolean(s.speaker))
+  const speakerSuggestions = Array.from(new Set(
+    deckSlides.map((s) => s.speaker).filter((x): x is string => Boolean(x))))
+
   const jumpToSection = (heading: string) => {
     // A deck navigator entry selects the slide shown on the canvas.
     if (isDeck) {
@@ -280,6 +289,37 @@ export default function DocumentEditor() {
     return () => clearTimeout(timer)
   }, [isDeck, contentJson, save])
 
+  // Assigns (or clears) a slide's presenter from the deck navigator.
+  const handleAssignSpeaker = (heading: string, speaker: string | null) => {
+    const deck = contentJson as CanvasDeck | null
+    if (!deck) return
+    const m = /^Slide (\d+):/.exec(heading)
+    if (!m) return
+    const idx = Number(m[1]) - 1
+    onDeckChange({
+      slides: deck.slides.map((s, i) =>
+        (i === idx ? { ...s, speaker } : s)),
+    })
+  }
+
+  // Generates a presentation script from this deck, then opens it.
+  const generateScript = useCallback(async () => {
+    setGeneratingScript(true)
+    setError(null)
+    try {
+      await save()  // flush speaker assignments before generation reads them
+      const res = await axios.post<{ draft_id: number }>(
+        '/api/v1/documents/script/generate', { draft_id: id })
+      const newId = res.data?.draft_id
+      if (newId) navigate(`/editor/${newId}`)
+      else setError('Script generation returned no draft.')
+    } catch {
+      setError('Could not generate the script — please retry.')
+    } finally {
+      setGeneratingScript(false)
+    }
+  }, [id, save, navigate])
+
   // Navigator sections + the unresolved-marker total.
   const { sections, unresolved } = useMemo(() => {
     if (!draft) return { sections: [] as NavSection[], unresolved: 0 }
@@ -289,6 +329,7 @@ export default function DocumentEditor() {
         heading: `Slide ${i + 1}: ${s.title}`,
         totalMarkers: 1,
         markersRemaining: canvasSlideStatus(s) === 'complete' ? 0 : 1,
+        speaker: s.speaker ?? null,
       }))
       return {
         sections: secs,
@@ -373,6 +414,22 @@ export default function DocumentEditor() {
               <MonitorPlay className="w-3.5 h-3.5" /> Presentation Preview
             </button>
           )}
+          {isDeck && (
+            <button type="button" onClick={() => void generateScript()}
+              disabled={!deckHasSpeaker || generatingScript}
+              title={deckHasSpeaker
+                ? 'Generate a presentation script from this deck'
+                : 'Assign speakers to slides before generating the script.'}
+              className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                         border border-electric/40 text-electric
+                         hover:bg-electric/10 disabled:opacity-50">
+              {generatingScript
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Generating…</>
+                : <><FileSignature className="w-3.5 h-3.5" />
+                    Generate Script</>}
+            </button>
+          )}
           <button type="button" onClick={() => setLeftOpen((v) => !v)}
             aria-label="Toggle navigator"
             className="text-muted hover:text-white">
@@ -408,6 +465,8 @@ export default function DocumentEditor() {
               onJumpToSection={jumpToSection}
               onSaveVersion={saveVersion}
               onRestoreVersion={restoreVersion}
+              onAssignSpeaker={isDeck ? handleAssignSpeaker : undefined}
+              speakerSuggestions={isDeck ? speakerSuggestions : undefined}
             />
           </aside>
         )}

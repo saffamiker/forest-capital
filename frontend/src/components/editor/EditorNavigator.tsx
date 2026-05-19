@@ -15,6 +15,8 @@ export interface NavSection {
   heading: string
   markersRemaining: number
   totalMarkers: number
+  /** The slide's presenter — deck navigator only; absent otherwise. */
+  speaker?: string | null
 }
 
 interface Props {
@@ -28,11 +30,19 @@ interface Props {
   onJumpToSection: (heading: string) => void
   onSaveVersion: (label: string) => void
   onRestoreVersion: (versionId: number) => void
+  /** Deck only — when set, each section row carries a speaker badge. */
+  onAssignSpeaker?: ((heading: string, speaker: string | null) => void)
+    | undefined
+  /** Speaker names already used in the deck — dropdown suggestions. */
+  speakerSuggestions?: string[] | undefined
+  /** Replaces the word-count line — e.g. the script's delivery estimate. */
+  metricLine?: string | undefined
 }
 
 export default function EditorNavigator({
   title, wordCount, wordTarget, lastSavedLabel, saveState, sections,
   versions, onJumpToSection, onSaveVersion, onRestoreVersion,
+  onAssignSpeaker, speakerSuggestions, metricLine,
 }: Props) {
   const [showSave, setShowSave] = useState(false)
   const [label, setLabel] = useState('')
@@ -57,10 +67,15 @@ export default function EditorNavigator({
                 <Loader2 className="w-3 h-3 animate-spin" /> Saving…</span>
             : `Last saved: ${lastSavedLabel}`}
         </div>
-        <div className="text-2xs text-muted mt-0.5">
-          Word count: <span className="font-mono text-slate-300">{wordCount}</span>
-          {' '}/ ~{wordTarget} target
-        </div>
+        {metricLine ? (
+          <div className="text-2xs text-muted mt-0.5">{metricLine}</div>
+        ) : (
+          <div className="text-2xs text-muted mt-0.5">
+            Word count:{' '}
+            <span className="font-mono text-slate-300">{wordCount}</span>
+            {' '}/ ~{wordTarget} target
+          </div>
+        )}
       </div>
 
       {/* Section navigator */}
@@ -71,20 +86,31 @@ export default function EditorNavigator({
           </div>
           <div className="space-y-1.5">
             {sections.map((s) => (
-              <button key={s.heading} type="button"
-                onClick={() => onJumpToSection(s.heading)}
-                className="w-full text-left group">
-                <div className="text-slate-300 group-hover:text-white truncate">
-                  {s.heading}
-                </div>
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  <div className="flex-1 h-1 rounded bg-navy-700 overflow-hidden">
-                    <div className="h-full bg-electric"
-                      style={{ width: `${pct(s)}%` }} />
+              <div key={s.heading}>
+                <button type="button"
+                  onClick={() => onJumpToSection(s.heading)}
+                  className="w-full text-left group">
+                  <div className="text-slate-300 group-hover:text-white
+                                  truncate">
+                    {s.heading}
                   </div>
-                  <span className="text-2xs text-muted shrink-0">{pct(s)}%</span>
-                </div>
-              </button>
+                  <div className="flex items-center gap-1.5 mt-0.5">
+                    <div className="flex-1 h-1 rounded bg-navy-700
+                                    overflow-hidden">
+                      <div className="h-full bg-electric"
+                        style={{ width: `${pct(s)}%` }} />
+                    </div>
+                    <span className="text-2xs text-muted shrink-0">
+                      {pct(s)}%
+                    </span>
+                  </div>
+                </button>
+                {onAssignSpeaker && (
+                  <SpeakerBadge speaker={s.speaker ?? null}
+                    suggestions={speakerSuggestions ?? []}
+                    onAssign={(sp) => onAssignSpeaker(s.heading, sp)} />
+                )}
+              </div>
             ))}
           </div>
         </div>
@@ -146,6 +172,64 @@ export default function EditorNavigator({
           </div>
         )}
       </div>
+    </div>
+  )
+}
+
+// ── Speaker badge — assigns a presenter to a deck slide ────────────────────────
+function SpeakerBadge({
+  speaker, suggestions, onAssign,
+}: {
+  speaker: string | null
+  suggestions: string[]
+  onAssign: (speaker: string | null) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const [draft, setDraft] = useState('')
+
+  const pick = (name: string | null) => {
+    onAssign(name)
+    setOpen(false)
+    setDraft('')
+  }
+  const addDraft = () => {
+    const name = draft.trim()
+    if (name) pick(name)
+  }
+
+  return (
+    <div className="relative mt-0.5">
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        className={`text-2xs px-1.5 py-0.5 rounded border ${speaker
+          ? 'border-electric/40 text-electric'
+          : 'border-border text-muted hover:text-white'}`}>
+        {speaker ? `${speaker} ▾` : '+ Speaker'}
+      </button>
+      {open && (
+        <div className="absolute z-20 mt-1 w-44 card p-1.5 space-y-0.5">
+          {suggestions.filter((n) => n !== speaker).map((name) => (
+            <button key={name} type="button" onClick={() => pick(name)}
+              className="w-full text-left text-2xs text-slate-300
+                         hover:text-white px-1 py-0.5 rounded
+                         hover:bg-navy-700">
+              {name}
+            </button>
+          ))}
+          <input value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') addDraft() }}
+            placeholder="New speaker name…"
+            className="w-full bg-navy-800 border border-border rounded
+                       text-2xs text-white px-1.5 py-1" />
+          {speaker && (
+            <button type="button" onClick={() => pick(null)}
+              className="w-full text-left text-2xs text-danger
+                         hover:underline px-1 py-0.5">
+              Remove speaker
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }

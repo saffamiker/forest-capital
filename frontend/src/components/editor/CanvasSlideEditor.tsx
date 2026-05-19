@@ -388,6 +388,14 @@ export default function CanvasSlideEditor({
         </div>
       </div>
 
+      {/* Presenter label — informational, not part of the exported slide. */}
+      {slide.speaker && (
+        <div className="shrink-0 px-3 py-1 text-xs text-muted text-right
+                        border-b border-border bg-navy-900">
+          Presenter: <span className="text-slate-300">{slide.speaker}</span>
+        </div>
+      )}
+
       {/* Canvas */}
       <div ref={areaRef}
         className="relative flex-1 min-h-0 overflow-auto flex items-center
