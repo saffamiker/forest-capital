@@ -156,6 +156,29 @@ _DECK_SLIDES: list[tuple[str, str | None, str]] = [
 ]
 
 
+def _canvas_slide(slide_id: int, title: str, content: str) -> dict[str, Any]:
+    """A generated deck slide in the canvas element schema (migration 022)
+    — the title and body as positioned text elements on a 960x540
+    canvas, matching migration 022's _slide_to_canvas mapping so a freshly
+    generated deck and a migrated one open identically in the editor."""
+    return {
+        "id": slide_id,
+        "title": title,
+        "background": "#FFFFFF",
+        "speaker_notes": "",
+        "elements": [
+            {"id": "el_001", "type": "text",
+             "x": 60, "y": 40, "width": 840, "height": 80,
+             "content": title, "fontSize": 36, "fontWeight": "bold",
+             "fontStyle": "normal", "color": "#1B2A4A", "locked": False},
+            {"id": "el_002", "type": "text",
+             "x": 60, "y": 150, "width": 840, "height": 330,
+             "content": content, "fontSize": 18, "fontWeight": "normal",
+             "fontStyle": "normal", "color": "#333333", "locked": False},
+        ],
+    }
+
+
 def deck_to_editor(
     narratives: dict[str, str],
 ) -> tuple[dict[str, Any], str]:
@@ -163,30 +186,22 @@ def deck_to_editor(
     Builds the editor content for a generated presentation deck.
 
     Returns (content_json, content_text): content_json is
-    {"slides": [...]} — one slide object per deck slide, the editor's
-    slide-card format. EVERY slide's content is seeded — from the
-    generated narrative where the slide maps to one, otherwise from the
-    static per-slide description in _DECK_SLIDES — so no slide opens as a
-    blank card. speaker_notes start EMPTY so Molly writes her own (the
-    slide-card Generate Talking Points helper offers a starting point).
-    content_text concatenates every slide for Academic Review.
+    {"slides": [...]} in the canvas element schema (migration 022) — each
+    slide carries its title and body as positioned text elements so the
+    deck opens directly in the Konva canvas editor. EVERY slide's body is
+    seeded — from the generated narrative where the slide maps to one,
+    otherwise from the static per-slide description in _DECK_SLIDES — so
+    no slide opens blank. speaker_notes start EMPTY so Molly writes her
+    own. content_text concatenates every slide for Academic Review.
     """
     slides: list[dict[str, Any]] = []
     text_lines: list[str] = []
     for i, (title, key, seed) in enumerate(_DECK_SLIDES, start=1):
         # The generated narrative when this slide maps to one, otherwise
-        # the static seed — never an empty content field.
+        # the static seed — never an empty body.
         narrative = narratives.get(key, "").strip() if key else ""
         content = narrative or seed
-        slides.append({
-            "id": i,
-            "title": title,
-            "content": content,
-            "data_points": [],
-            "speaker_notes": "",
-            "verified": False,
-            "notes_written": False,
-        })
+        slides.append(_canvas_slide(i, title, content))
         text_lines.append(f"Slide {i}: {title}")
         if content:
             text_lines.append(content)

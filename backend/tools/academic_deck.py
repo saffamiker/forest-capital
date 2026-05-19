@@ -697,52 +697,136 @@ def build_presentation_deck(
 
 # ── Editor-content export ─────────────────────────────────────────────────────
 
-def build_editor_pptx(draft: dict[str, Any]) -> bytes:
+# The editor canvas is a fixed 960x540 (16:9) space (migration 022). The
+# exported deck uses the 10in x 5.625in 16:9 slide size, so the canvas
+# maps onto the slide 1:1 — every element coordinate scales by a single
+# EMU factor per axis, and the export matches the editor pixel-for-pixel.
+_CANVAS_W = 960
+_CANVAS_H = 540
+_EDITOR_SLIDE_W = 9144000   # EMU — 10 in
+_EDITOR_SLIDE_H = 5143500   # EMU — 5.625 in
+# 960 canvas px span a 720 pt-wide slide — font sizes scale by 0.75.
+_CANVAS_PT_FACTOR = 720.0 / _CANVAS_W
+
+
+def _emu_x(x: float) -> int:
+    """A canvas x-coordinate (or width), in px, to EMU."""
+    return round(float(x) / _CANVAS_W * _EDITOR_SLIDE_W)
+
+
+def _emu_y(y: float) -> int:
+    """A canvas y-coordinate (or height), in px, to EMU."""
+    return round(float(y) / _CANVAS_H * _EDITOR_SLIDE_H)
+
+
+def _canvas_color(value: Any, default: RGBColor) -> RGBColor:
+    """Parses a '#RRGGBB' canvas colour, falling back to `default`."""
+    try:
+        s = str(value or "").lstrip("#")
+        if len(s) == 6:
+            return RGBColor.from_string(s.upper())
+    except Exception:  # noqa: BLE001 — a bad colour never fails the export
+        pass
+    return default
+
+
+def _canvas_text(slide, el: dict[str, Any], left, top, width, height) -> None:
+    """Places a canvas text element — its content, font size, weight,
+    style and colour mapped onto a pptx textbox."""
+    box = slide.shapes.add_textbox(left, top, width, height)
+    tf = box.text_frame
+    tf.word_wrap = True
+    size_pt = max(1, round(float(el.get("fontSize", 18)) * _CANVAS_PT_FACTOR))
+    bold = str(el.get("fontWeight", "")) == "bold"
+    italic = str(el.get("fontStyle", "")) == "italic"
+    color = _canvas_color(el.get("color"), _INK)
+    # Konva wraps a single string; explicit newlines become paragraphs.
+    for i, line in enumerate(str(el.get("content") or "").split("\n")):
+        p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
+        run = p.add_run()
+        run.text = line
+        run.font.size = Pt(size_pt)
+        run.font.bold = bold
+        run.font.italic = italic
+        run.font.color.rgb = color
+
+
+def build_editor_pptx(
+    draft: dict[str, Any],
+    chart_pngs: dict[str, bytes] | None = None,
+) -> bytes:
     """
     Renders a presentation_deck editor draft to a .pptx straight from its
-    {slides:[...]} content_json — one slide per editor slide, with the
-    title, content, data points, and the presenter's speaker notes
-    exactly as edited. Speaker notes from the editor are written into
-    each slide's notes, so the exported file carries them.
+    canvas content_json (migration 022). Each slide's positioned text and
+    chart elements are mapped onto a 10x5.625in 16:9 slide so the export
+    matches the editor canvas 1:1.
 
-    A faithful export of the editor content — it does not regenerate the
-    sixteen-slide template or render data charts.
+    `chart_pngs` maps a chart element id to its server-rendered PNG — the
+    caller renders them, since that path is async — and a missing PNG
+    degrades to a [DATA PENDING] note rather than failing the export.
+
+    The presenter's speaker notes are carried into each slide's notes,
+    prefixed with the AI-draft verification reminder (the editor export
+    is a faithful WYSIWYG render, so it carries no on-slide chrome).
     """
     from pptx import Presentation
+    from pptx.util import Emu
 
+    pngs = chart_pngs or {}
     prs = Presentation()
-    prs.slide_width = _SLIDE_W
-    prs.slide_height = _SLIDE_H
+    prs.slide_width = Emu(_EDITOR_SLIDE_W)
+    prs.slide_height = Emu(_EDITOR_SLIDE_H)
 
     content = draft.get("content_json") or {}
     slides = content.get("slides", []) if isinstance(content, dict) else []
-    total = len(slides)
 
-    for i, sl in enumerate(slides, start=1):
+    for sl in slides:
+        if not isinstance(sl, dict):
+            continue
         s = _blank(prs)
-        _bg(s, _WHITE)
-        _title_bar(s, str(sl.get("title") or f"Slide {i}"))
-        body = str(sl.get("content") or "")
-        if body.strip():
-            _textbox(s, Inches(0.7), Inches(1.3), Inches(12.0), Inches(3.2),
-                     body, size=18)
-        data_points = [str(d) for d in (sl.get("data_points") or []) if d]
-        if data_points:
-            _bullets(s, data_points, top=Inches(4.6), height=Inches(2.0),
-                     size=16)
-        # The presenter's speaker notes — carried into the exported file.
+        # Slide background — the canvas background colour, full bleed.
+        bg = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0,
+                                Emu(_EDITOR_SLIDE_W), Emu(_EDITOR_SLIDE_H))
+        bg.fill.solid()
+        bg.fill.fore_color.rgb = _canvas_color(sl.get("background"), _WHITE)
+        bg.line.fill.background()
+        bg.shadow.inherit = False
+        s.shapes._spTree.remove(bg._element)
+        s.shapes._spTree.insert(2, bg._element)
+
+        for el in (sl.get("elements") or []):
+            if not isinstance(el, dict):
+                continue
+            left = Emu(_emu_x(el.get("x", 0)))
+            top = Emu(_emu_y(el.get("y", 0)))
+            width = Emu(_emu_x(el.get("width", 0)))
+            height = Emu(_emu_y(el.get("height", 0)))
+            if el.get("type") == "text":
+                _canvas_text(s, el, left, top, width, height)
+            elif el.get("type") == "chart":
+                png = pngs.get(str(el.get("id")))
+                if png:
+                    s.shapes.add_picture(io.BytesIO(png), left, top,
+                                         width=width, height=height)
+                else:
+                    _textbox(s, left, top, width, height,
+                             "[DATA PENDING] — chart unavailable. Warm the "
+                             "analytics caches, then re-export.",
+                             size=12, color=_AMBER, anchor=MSO_ANCHOR.MIDDLE)
+
+        # Speaker notes — the verify reminder, then the presenter's notes.
         try:
-            s.notes_slide.notes_text_frame.text = str(
-                sl.get("speaker_notes") or "")
+            notes = str(sl.get("speaker_notes") or "").strip()
+            s.notes_slide.notes_text_frame.text = (
+                _MOLLY_VERIFY_NOTE + ("\n\n" + notes if notes else ""))
         except Exception:  # noqa: BLE001 — a notes failure never fails export
             pass
-        _footer(s, i, total)
 
-    if total == 0:
+    if not slides:
         s = _blank(prs)
-        _bg(s, _WHITE)
-        _textbox(s, Inches(1.0), Inches(3.0), Inches(11.0), Inches(1.0),
-                 "This deck draft has no slides yet.", size=20)
+        _textbox(s, Emu(_emu_x(120)), Emu(_emu_y(230)),
+                 Emu(_emu_x(720)), Emu(_emu_y(80)),
+                 "This deck draft has no slides yet.", size=18)
 
     buf = io.BytesIO()
     prs.save(buf)

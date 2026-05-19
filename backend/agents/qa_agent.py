@@ -238,7 +238,16 @@ assert len(_CHECKLIST_ITEMS) == 39, f"QA checklist must have exactly 39 items, g
 # is the authoritative source, so the badge agrees with the reasoning.
 
 _CHECK_IDS: set[str] = {item["check_id"] for item in _CHECKLIST_ITEMS}
-_CHECK_HEADER_RE = re.compile(r"\*\*\s*([A-Z]{1,3}\d{2})\b")
+# A check-section header. Permissive by design: case-insensitive, leading
+# -zero agnostic (P4 reads as P04), and tolerant of any markdown / colon
+# / dash / whitespace around the id — the QA agent's exact header style
+# drifts, and a too-strict match silently dropped P04 / P05 / S01 / S02.
+# A space is NOT allowed between the letters and the number unless a
+# punctuation separator sits between them, so prose like "An 04 things"
+# never false-matches a header.
+_CHECK_HEADER_RE = re.compile(
+    r"^[\s#>*_.\-–—]*([A-Za-z]{1,3})"
+    r"(?:[.:\-–—]\s*)?0*(\d{1,2})\b")
 _VERDICT_TOKEN_RE = re.compile(r"\b(PASS|WARNING|WARN|FAIL)\b")
 _VERDICT_MARKER_RE = re.compile(
     r"(?:status|verdict)\s*[:=\-—]+\s*\**\s*(PASS|WARNING|WARN|FAIL)",
@@ -246,20 +255,35 @@ _VERDICT_MARKER_RE = re.compile(
 )
 
 
+def _match_check_header(line: str) -> str | None:
+    """The canonical check_id a line's header denotes, or None.
+
+    Permissive: case-insensitive, leading-zero agnostic (P4 == P04), and
+    tolerant of markdown / punctuation / whitespace around the id. The
+    normalised id must be a real check for the line to count as a header."""
+    m = _CHECK_HEADER_RE.match(line.lstrip())
+    if not m:
+        return None
+    cid = f"{m.group(1).upper()}{int(m.group(2)):02d}"
+    return cid if cid in _CHECK_IDS else None
+
+
 def _split_raw_analysis(raw: str) -> dict[str, str]:
     """Splits the QA LLM analysis into per-check sections keyed by check_id.
 
-    Each section runs from its '**D01 —'-style header to the next header.
-    A check_id absent from the text simply has no entry — the caller then
-    falls back to the full text for that check."""
+    Each section runs from its 'D01 —'-style header to the next header.
+    Header matching is permissive (see _match_check_header) so a drift in
+    the agent's header style does not silently drop a check. A check_id
+    absent from the text simply has no entry — the caller then falls back
+    for that check."""
     if not raw:
         return {}
     sections: dict[str, list[str]] = {}
     current: str | None = None
     for line in raw.splitlines(keepends=True):
-        m = _CHECK_HEADER_RE.match(line.lstrip())
-        if m and m.group(1) in _CHECK_IDS:
-            current = m.group(1)
+        cid = _match_check_header(line)
+        if cid:
+            current = cid
             sections.setdefault(current, [])
         if current is not None:
             sections[current].append(line)
@@ -638,7 +662,9 @@ class QAAgent:
                     # WARN. NEVER fall back to the whole analysis blob: that
                     # would show every other check's reasoning under this one.
                     status = "WARN"
-                    evidence = "No detailed analysis available for this check."
+                    evidence = ("The QA agent did not return analysis for "
+                                "this check. Re-run the QA audit to generate "
+                                "a full report.")
                 item_results.append({
                     "check_id": cid,
                     "category": item["category"],

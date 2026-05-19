@@ -771,3 +771,196 @@ class TestQARunEndpointGating:
                             _fake_start_audit)
         resp = client.post("/api/v1/audit/run", headers=SYSADMIN)
         assert resp.status_code == 200
+
+
+# ── Fixes: findings persistence, PDF layer status, WARN acknowledge ───────────
+
+
+def _audit_run_fixture(**over) -> dict:
+    """A complete audit_runs dict for the PDF builder."""
+    run = {
+        "id": 99, "triggered_by": "manual", "triggered_at": "2026-05-19T10:00:00",
+        "triggered_by_email": "ruurdsm@queens.edu", "status": "complete",
+        "layer_1_status": "pass", "layer_2_status": "skip",
+        "layer_3_status": "pass", "total_checks": 56, "passed": 50,
+        "failed": 0, "warnings": 6, "completed_at": "2026-05-19T10:05:00",
+        "metadata": {"raw_inputs_hash": "deadbeef",
+                     "study_period": {"start": "2002-07", "end": "2024-12",
+                                      "months": 270},
+                     "risk_free_rate": {"value": 0.025, "source": "FRED DTB3"}},
+        "data_hash": "deadbeef",
+        "findings": {"layer_1": [], "layer_2": [], "layer_3": []},
+    }
+    run.update(over)
+    return run
+
+
+def _pdf_text(pdf: bytes) -> str:
+    import io
+
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(pdf))
+    return "\n".join(p.extract_text() or "" for p in reader.pages)
+
+
+class TestStoreFindingsRobustness:
+    def test_trunc_truncates_to_the_column_limit(self):
+        assert audit_engine._trunc("x" * 200, 120) == "x" * 120
+        assert audit_engine._trunc("short", 120) == "short"
+        assert audit_engine._trunc(None, 80) is None
+        # A non-string value is stringified before truncation.
+        assert audit_engine._trunc(123456, 3) == "123"
+
+    def test_column_limits_match_migration_017(self):
+        limits = audit_engine._FINDING_COLUMN_LIMITS
+        assert limits["check_name"] == 120
+        assert limits["metric"] == 80
+        assert limits["strategy"] == 80
+        assert limits["raw_inputs_hash"] == 64
+
+    def test_store_findings_commits_per_row_truncating_and_skipping(self):
+        # Per-row commit: an over-long field is truncated and stored; a
+        # malformed finding is skipped; neither drops the whole batch.
+        if not _db_ready():
+            pytest.skip("no live database")
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+
+        async def _run() -> tuple[int, list[str]]:
+            async with AsyncSessionLocal() as s:
+                r = await s.execute(text(
+                    "INSERT INTO audit_runs (triggered_by, status) "
+                    "VALUES ('manual', 'running') RETURNING id"))
+                run_id = r.fetchone()[0]
+                await s.commit()
+            findings = [
+                make_finding(1, "Good check", "cagr", "pass", "info"),
+                make_finding(1, "L" * 250, "metric", "warning", "warning"),
+                {"check_name": "no layer key"},   # malformed — skipped
+            ]
+            await audit_engine._store_findings(run_id, findings)
+            async with AsyncSessionLocal() as s:
+                rows = await s.execute(text(
+                    "SELECT check_name FROM audit_findings "
+                    "WHERE audit_run_id = :id ORDER BY id"), {"id": run_id})
+                names = [row[0] for row in rows.fetchall()]
+                await s.execute(text("DELETE FROM audit_runs WHERE id = :id"),
+                                {"id": run_id})
+                await s.commit()
+            return run_id, names
+
+        _run_id, names = asyncio.run(_run())
+        # The good row and the truncated row stored; the malformed skipped.
+        assert len(names) == 2
+        assert any(len(name) == 120 for name in names)   # truncated to 120
+
+
+class TestAuditPdfLayerStatus:
+    def test_layer_empty_message_distinguishes_ran_from_skipped(self):
+        from tools.audit_pdf import _layer_empty_message
+        assert "no individual findings" in _layer_empty_message("pass")
+        assert "no individual findings" in _layer_empty_message("warn")
+        assert "no individual findings" in _layer_empty_message("warning")
+        assert _layer_empty_message("skip") == "This layer was skipped."
+        assert _layer_empty_message(None) == "This layer was skipped."
+
+    def test_pdf_reports_a_ran_layer_with_no_findings(self):
+        from tools.audit_pdf import build_statistical_audit_pdf
+        # Layer 1 ran (status pass) but recorded no findings — the PDF
+        # must not call it "skipped".
+        pdf = build_statistical_audit_pdf(_audit_run_fixture())
+        assert pdf.startswith(b"%PDF")
+        assert "no individual findings" in _pdf_text(pdf)
+
+    def test_pdf_includes_an_acknowledged_resolution_note(self):
+        from tools.audit_pdf import build_statistical_audit_pdf
+        finding = make_finding(3, "Turnover direction", "true_turnover",
+                               "warning", "warning", discrepancy="minor")
+        finding["resolved"] = True
+        finding["resolution_note"] = "ACKNOTETOKEN reviewed and accepted"
+        pdf = build_statistical_audit_pdf(
+            _audit_run_fixture(findings={"layer_1": [], "layer_2": [],
+                                         "layer_3": [finding]}))
+        text = _pdf_text(pdf)
+        assert "Acknowledged" in text
+        assert "ACKNOTETOKEN" in text
+
+
+class TestWarnAcknowledgeEndpoints:
+    RESOLVE = "/api/v1/audit/findings/{}/resolve"
+    UNRESOLVE = "/api/v1/audit/findings/{}/unresolve"
+
+    def test_resolve_unauthenticated_is_401(self):
+        assert client.post(self.RESOLVE.format(1),
+                           json={"resolution_note": "x"}).status_code == 401
+
+    def test_resolve_rejects_a_viewer(self):
+        # The acknowledge endpoints are team_member-gated.
+        assert client.post(self.RESOLVE.format(1), headers=VIEWER,
+                           json={"resolution_note": "x"}).status_code == 403
+
+    def test_resolve_requires_a_note(self):
+        # A team member clears the gate; a blank note is a 422.
+        resp = client.post(self.RESOLVE.format(1), headers=TEAM,
+                           json={"resolution_note": "   "})
+        assert resp.status_code == 422
+
+    def test_resolve_unknown_finding_is_404(self):
+        resp = client.post(self.RESOLVE.format(999999999), headers=TEAM,
+                           json={"resolution_note": "accepted"})
+        assert resp.status_code == 404
+
+    def test_unresolve_rejects_a_viewer(self):
+        assert client.post(self.UNRESOLVE.format(1),
+                           headers=VIEWER).status_code == 403
+
+    def test_unresolve_unknown_finding_is_404(self):
+        assert client.post(self.UNRESOLVE.format(999999999),
+                           headers=TEAM).status_code == 404
+
+    def test_resolve_then_unresolve_round_trip(self):
+        # Acknowledging sets resolved + the note; unresolving clears both.
+        if not _db_ready():
+            pytest.skip("no live database")
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+
+        async def _seed() -> tuple[int, int]:
+            async with AsyncSessionLocal() as s:
+                r = await s.execute(text(
+                    "INSERT INTO audit_runs (triggered_by, status) "
+                    "VALUES ('manual', 'complete') RETURNING id"))
+                run_id = r.fetchone()[0]
+                fr = await s.execute(text(
+                    "INSERT INTO audit_findings (audit_run_id, layer, "
+                    "check_name, metric, severity, status) VALUES "
+                    "(:rid, 3, 'Turnover', 'true_turnover', 'warning', "
+                    "'warning') RETURNING id"), {"rid": run_id})
+                finding_id = fr.fetchone()[0]
+                await s.commit()
+            return run_id, finding_id
+
+        run_id, finding_id = asyncio.run(_seed())
+        try:
+            resolved = client.post(self.RESOLVE.format(finding_id), headers=TEAM,
+                                   json={"resolution_note": "accepted as a "
+                                         "documented limitation"})
+            assert resolved.status_code == 200
+            assert resolved.json()["resolved"] is True
+            assert "documented limitation" in resolved.json()["resolution_note"]
+
+            cleared = client.post(self.UNRESOLVE.format(finding_id),
+                                  headers=TEAM)
+            assert cleared.status_code == 200
+            assert cleared.json()["resolved"] is False
+            assert cleared.json()["resolution_note"] is None
+        finally:
+            async def _clean() -> None:
+                async with AsyncSessionLocal() as s:
+                    await s.execute(text(
+                        "DELETE FROM audit_runs WHERE id = :id"),
+                        {"id": run_id})
+                    await s.commit()
+            asyncio.run(_clean())

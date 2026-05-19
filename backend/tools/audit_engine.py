@@ -127,8 +127,31 @@ async def _create_running_audit(triggered_by: str, email: str) -> int | None:
         return None
 
 
+# String() column limits on audit_findings (migration 017) — a finding
+# whose value exceeds one of these is truncated rather than dropped.
+_FINDING_COLUMN_LIMITS = {
+    "check_name": 120, "metric": 80, "strategy": 80,
+    "severity": 10, "status": 10, "raw_inputs_hash": 64,
+}
+
+
+def _trunc(value: Any, limit: int) -> Any:
+    """Truncates a value to a column's character limit. None stays None."""
+    if value is None:
+        return None
+    text_value = str(value)
+    return text_value[:limit] if len(text_value) > limit else text_value
+
+
 async def _store_findings(run_id: int, findings: list[dict[str, Any]]) -> None:
-    """Bulk-inserts the audit findings for a run. Fail-open."""
+    """
+    Inserts the audit findings for a run, COMMITTING PER ROW so one bad
+    finding cannot drop the whole batch. String fields are truncated to
+    their column limits before insert. Fail-open: a row that still fails
+    is logged and skipped; a partial store logs a summary. The run's
+    summary counts are persisted separately, so a findings-store failure
+    must never go silent.
+    """
     if not findings:
         return
     try:
@@ -137,27 +160,56 @@ async def _store_findings(run_id: int, findings: list[dict[str, Any]]) -> None:
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return
-        async with AsyncSessionLocal() as session:
-            for fnd in findings:
-                await session.execute(text(
-                    "INSERT INTO audit_findings (audit_run_id, layer, "
-                    "check_name, metric, strategy, severity, status, "
-                    "platform_value, auditor_value, discrepancy, "
-                    "formula_used, raw_inputs_hash, auditor_reasoning) "
-                    "VALUES (:rid, :layer, :cn, :metric, :strat, :sev, "
-                    ":status, :pv, :av, :disc, :fu, :hash, :reason)"
-                ), {"rid": run_id, "layer": fnd["layer"],
-                    "cn": fnd["check_name"], "metric": fnd["metric"],
-                    "strat": fnd.get("strategy"), "sev": fnd["severity"],
-                    "status": fnd["status"], "pv": fnd.get("platform_value"),
-                    "av": fnd.get("auditor_value"),
-                    "disc": fnd.get("discrepancy"),
-                    "fu": fnd.get("formula_used"),
-                    "hash": fnd.get("raw_inputs_hash"),
-                    "reason": fnd.get("auditor_reasoning")})
-            await session.commit()
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_store_findings_failed", run_id=run_id, error=str(exc))
+        return
+
+    stored = 0
+    skipped = 0
+    try:
+        async with AsyncSessionLocal() as session:
+            for fnd in findings:
+                try:
+                    await session.execute(text(
+                        "INSERT INTO audit_findings (audit_run_id, layer, "
+                        "check_name, metric, strategy, severity, status, "
+                        "platform_value, auditor_value, discrepancy, "
+                        "formula_used, raw_inputs_hash, auditor_reasoning) "
+                        "VALUES (:rid, :layer, :cn, :metric, :strat, :sev, "
+                        ":status, :pv, :av, :disc, :fu, :hash, :reason)"
+                    ), {"rid": run_id, "layer": fnd["layer"],
+                        "cn": _trunc(fnd.get("check_name"),
+                                     _FINDING_COLUMN_LIMITS["check_name"]),
+                        "metric": _trunc(fnd.get("metric"),
+                                         _FINDING_COLUMN_LIMITS["metric"]),
+                        "strat": _trunc(fnd.get("strategy"),
+                                        _FINDING_COLUMN_LIMITS["strategy"]),
+                        "sev": _trunc(fnd.get("severity"),
+                                      _FINDING_COLUMN_LIMITS["severity"]),
+                        "status": _trunc(fnd.get("status"),
+                                         _FINDING_COLUMN_LIMITS["status"]),
+                        "pv": fnd.get("platform_value"),
+                        "av": fnd.get("auditor_value"),
+                        "disc": fnd.get("discrepancy"),
+                        "fu": fnd.get("formula_used"),
+                        "hash": _trunc(fnd.get("raw_inputs_hash"),
+                                       _FINDING_COLUMN_LIMITS["raw_inputs_hash"]),
+                        "reason": fnd.get("auditor_reasoning")})
+                    await session.commit()
+                    stored += 1
+                except Exception as exc:  # noqa: BLE001
+                    await session.rollback()
+                    skipped += 1
+                    log.warning("audit_store_finding_skipped", run_id=run_id,
+                                layer=fnd.get("layer"),
+                                check_name=fnd.get("check_name"),
+                                error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_store_findings_failed", run_id=run_id, error=str(exc))
+        return
+    if skipped:
+        log.warning("audit_store_findings_partial", run_id=run_id,
+                    stored=stored, total=len(findings), skipped=skipped)
 
 
 async def _finalise_audit(
@@ -265,7 +317,7 @@ async def get_audit_run(run_id: int) -> dict[str, Any] | None:
             if not found:
                 return None
             rows = await session.execute(text(
-                "SELECT layer, check_name, metric, strategy, severity, "
+                "SELECT id, layer, check_name, metric, strategy, severity, "
                 "status, platform_value, auditor_value, discrepancy, "
                 "formula_used, raw_inputs_hash, auditor_reasoning, "
                 "resolved, resolution_note FROM audit_findings "
@@ -285,12 +337,47 @@ async def get_audit_run(run_id: int) -> dict[str, Any] | None:
 
 def _finding_row(r: Any) -> dict[str, Any]:
     return {
-        "layer": r[0], "check_name": r[1], "metric": r[2], "strategy": r[3],
-        "severity": r[4], "status": r[5], "platform_value": r[6],
-        "auditor_value": r[7], "discrepancy": r[8], "formula_used": r[9],
-        "raw_inputs_hash": r[10], "auditor_reasoning": r[11],
-        "resolved": r[12], "resolution_note": r[13],
+        "id": r[0], "layer": r[1], "check_name": r[2], "metric": r[3],
+        "strategy": r[4], "severity": r[5], "status": r[6],
+        "platform_value": r[7], "auditor_value": r[8], "discrepancy": r[9],
+        "formula_used": r[10], "raw_inputs_hash": r[11],
+        "auditor_reasoning": r[12], "resolved": r[13], "resolution_note": r[14],
     }
+
+
+async def resolve_finding(
+    finding_id: int, resolved: bool, note: str | None,
+) -> dict[str, Any] | None:
+    """
+    Sets or clears the acknowledgement on an audit finding — the WARN
+    acknowledge/resolve workflow. Acknowledgement is a recorded response,
+    not a correction: the run's overall verdict is unchanged. Returns the
+    updated finding, or None when the finding is absent or on a database
+    error (fail-open).
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(text(
+                "UPDATE audit_findings SET resolved = :r, "
+                "resolution_note = :n WHERE id = :id "
+                "RETURNING id, layer, check_name, metric, strategy, "
+                "severity, status, platform_value, auditor_value, "
+                "discrepancy, formula_used, raw_inputs_hash, "
+                "auditor_reasoning, resolved, resolution_note"),
+                {"r": resolved, "n": note if resolved else None,
+                 "id": finding_id})
+            row = result.fetchone()
+            await session.commit()
+            return _finding_row(row) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_resolve_finding_failed",
+                    finding_id=finding_id, error=str(exc))
+        return None
 
 
 async def get_latest_audit_run() -> dict[str, Any] | None:

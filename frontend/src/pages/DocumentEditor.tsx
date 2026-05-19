@@ -15,15 +15,19 @@ import {
 } from 'lucide-react'
 
 import RichTextEditor from '../components/editor/RichTextEditor'
-import SlideEditor, { slideComplete } from '../components/editor/SlideEditor'
+import CanvasSlideEditor from '../components/editor/CanvasSlideEditor'
+import ChartPicker from '../components/editor/ChartPicker'
 import EditorNavigator from '../components/editor/EditorNavigator'
 import EditorTasksCallout from '../components/editor/EditorTasksCallout'
 import PresentationPreview from '../components/editor/PresentationPreview'
 import type { NavSection } from '../components/editor/EditorNavigator'
 import WritingAssistant from '../components/editor/WritingAssistant'
+import {
+  canvasSlideStatus, deckToText, newChartElement,
+} from '../components/editor/canvasSlide'
 import { countMarkers, nodeToText } from '../lib/editorMarkers'
 import type {
-  DeckContent, EditorDraft, EditorDraftVersion, SaveState, TipTapDoc,
+  CanvasDeck, EditorDraft, EditorDraftVersion, SaveState, TipTapDoc,
 } from '../types/editor'
 
 const AI_DRAFT_BANNER = 'AI DRAFT — REQUIRES HUMAN REVIEW'
@@ -71,7 +75,7 @@ export default function DocumentEditor() {
   const [error, setError] = useState<string | null>(null)
 
   // Working content — kept in state so auto-save and the navigator see it.
-  const [contentJson, setContentJson] = useState<TipTapDoc | DeckContent | null>(null)
+  const [contentJson, setContentJson] = useState<TipTapDoc | CanvasDeck | null>(null)
   const [contentText, setContentText] = useState('')
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [lastSaved, setLastSaved] = useState<string>('not yet')
@@ -79,6 +83,13 @@ export default function DocumentEditor() {
   const [rightOpen, setRightOpen] = useState(true)
   const [previewOpen, setPreviewOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
+  // The deck slide shown on the canvas — owned here so the left
+  // navigator and the canvas always agree on the active slide.
+  const [activeSlideId, setActiveSlideId] = useState<number | null>(null)
+  // The editor's right panel: the Writing Assistant, or the chart
+  // picker drawer while a chart is being added to a slide.
+  const [rightPanelMode, setRightPanelMode] =
+    useState<'assistant' | 'chartpicker'>('assistant')
   // A quoted passage pushed into the Writing Assistant by the "Ask AI"
   // selection action; the nonce re-triggers the panel's prefill effect.
   const [assistantPrefill, setAssistantPrefill] =
@@ -101,7 +112,10 @@ export default function DocumentEditor() {
       setContentJson(d.data.content_json)
       setContentText(d.data.content_text ?? '')
       // Capture the per-section marker baseline once, on load.
-      if (d.data.document_type !== 'presentation_deck') {
+      if (d.data.document_type === 'presentation_deck') {
+        const first = (d.data.content_json as CanvasDeck | null)?.slides?.[0]
+        setActiveSlideId(first?.id ?? null)
+      } else {
         const base: Record<string, number> = {}
         for (const s of tiptapSections(d.data.content_json as TipTapDoc)) {
           base[s.heading] = countMarkers(s.text)
@@ -149,12 +163,25 @@ export default function DocumentEditor() {
     setSaveState('idle')
   }
 
-  const onDeckChange = (deck: DeckContent) => {
+  const onDeckChange = (deck: CanvasDeck) => {
     setContentJson(deck)
-    setContentText(deck.slides.map(
-      (s) => `${s.title}\n${s.content}\n${s.speaker_notes}`).join('\n\n'))
+    setContentText(deckToText(deck.slides))
     dirtyRef.current = true
     setSaveState('idle')
+  }
+
+  // Adds a chart element (from the chart picker) to the active slide,
+  // then returns the right panel to the Writing Assistant.
+  const handleAddChart = (chartKey: string) => {
+    const deck = contentJson as CanvasDeck | null
+    if (!deck) return
+    const targetId = activeSlideId ?? deck.slides[0]?.id
+    onDeckChange({
+      slides: deck.slides.map((s) => (s.id === targetId
+        ? { ...s, elements: [...s.elements, newChartElement(chartKey)] }
+        : s)),
+    })
+    setRightPanelMode('assistant')
   }
 
   const saveVersion = async (label: string) => {
@@ -176,6 +203,10 @@ export default function DocumentEditor() {
       setDraft(d.data)
       setContentJson(d.data.content_json)
       setContentText(d.data.content_text ?? '')
+      if (d.data.document_type === 'presentation_deck') {
+        const first = (d.data.content_json as CanvasDeck | null)?.slides?.[0]
+        setActiveSlideId(first?.id ?? null)
+      }
       dirtyRef.current = false
       setSaveState('saved')
     } catch { setError('Restore failed.') }
@@ -219,10 +250,20 @@ export default function DocumentEditor() {
     })
   }
 
+  const isDeck = draft?.document_type === 'presentation_deck'
+
   const jumpToSection = (heading: string) => {
-    // Headings render as <h1>..<h3>; find the one whose text matches.
+    // A deck navigator entry selects the slide shown on the canvas.
+    if (isDeck) {
+      const m = /^Slide (\d+):/.exec(heading)
+      const slides = (contentJson as CanvasDeck | null)?.slides ?? []
+      const target = m ? slides[Number(m[1]) - 1] : undefined
+      if (target) setActiveSlideId(target.id)
+      return
+    }
+    // Paper/brief headings render as <h1>..<h3>; scroll to the match.
     const nodes = document.querySelectorAll('.editor-prose h1, '
-      + '.editor-prose h2, .editor-prose h3, [data-tour="slide-card"]')
+      + '.editor-prose h2, .editor-prose h3')
     for (const n of Array.from(nodes)) {
       if ((n.textContent ?? '').includes(heading)) {
         n.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -231,21 +272,28 @@ export default function DocumentEditor() {
     }
   }
 
-  const isDeck = draft?.document_type === 'presentation_deck'
+  // A deck auto-saves on a 2-second debounce after any canvas change —
+  // the 30s interval above still covers a paper/brief.
+  useEffect(() => {
+    if (!isDeck || !dirtyRef.current) return
+    const timer = setTimeout(() => { void save() }, 2000)
+    return () => clearTimeout(timer)
+  }, [isDeck, contentJson, save])
 
   // Navigator sections + the unresolved-marker total.
   const { sections, unresolved } = useMemo(() => {
     if (!draft) return { sections: [] as NavSection[], unresolved: 0 }
     if (isDeck) {
-      const slides = (contentJson as DeckContent | null)?.slides ?? []
+      const slides = (contentJson as CanvasDeck | null)?.slides ?? []
       const secs: NavSection[] = slides.map((s, i) => ({
         heading: `Slide ${i + 1}: ${s.title}`,
         totalMarkers: 1,
-        markersRemaining: slideComplete(s) ? 0 : 1,
+        markersRemaining: canvasSlideStatus(s) === 'complete' ? 0 : 1,
       }))
       return {
         sections: secs,
-        unresolved: slides.filter((s) => !slideComplete(s)).length,
+        unresolved: slides.filter(
+          (s) => canvasSlideStatus(s) !== 'complete').length,
       }
     }
     const secs: NavSection[] = tiptapSections(contentJson as TipTapDoc | null)
@@ -366,9 +414,14 @@ export default function DocumentEditor() {
 
         <main className="flex-1 min-w-0 bg-navy-900">
           {isDeck ? (
-            <SlideEditor draftId={id}
-              deck={(contentJson as DeckContent | null) ?? { slides: [] }}
-              onChange={onDeckChange} />
+            <CanvasSlideEditor draftId={id}
+              deck={(contentJson as CanvasDeck | null) ?? { slides: [] }}
+              activeSlideId={activeSlideId}
+              onChange={onDeckChange}
+              onRequestChartPicker={() => {
+                setRightOpen(true)
+                setRightPanelMode('chartpicker')
+              }} />
           ) : (
             <RichTextEditor
               content={(contentJson as TipTapDoc | null)}
@@ -380,8 +433,13 @@ export default function DocumentEditor() {
         {rightOpen && (
           <aside className="w-[300px] shrink-0 border-l border-border
                             bg-navy-900">
-            <WritingAssistant draftId={id} unresolvedMarkers={unresolved}
-              prefill={assistantPrefill} />
+            {isDeck && rightPanelMode === 'chartpicker' ? (
+              <ChartPicker onSelect={handleAddChart}
+                onClose={() => setRightPanelMode('assistant')} />
+            ) : (
+              <WritingAssistant draftId={id} unresolvedMarkers={unresolved}
+                prefill={assistantPrefill} />
+            )}
           </aside>
         )}
       </div>
@@ -389,7 +447,7 @@ export default function DocumentEditor() {
       {/* Presentation Preview — a full-screen rehearsal view for a deck. */}
       {previewOpen && isDeck && (
         <PresentationPreview
-          slides={(contentJson as DeckContent | null)?.slides ?? []}
+          slides={(contentJson as CanvasDeck | null)?.slides ?? []}
           onClose={() => setPreviewOpen(false)} />
       )}
     </div>

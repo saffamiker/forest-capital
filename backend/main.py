@@ -856,6 +856,44 @@ async def delete_academic_doc(doc_id: str, session: dict = Depends(require_team_
     return {"deleted": True, "id": doc_id}
 
 
+# ── Charts — server-rendered PNGs for the canvas presentation editor ──────────
+
+@app.get("/api/v1/charts/available")
+async def charts_available(session: dict = Depends(require_team_member)):
+    """The charts the canvas presentation editor can embed — every chart
+    render_deck_charts produces server-side. Project team only."""
+    from tools.chart_render import AVAILABLE_CHARTS
+    return AVAILABLE_CHARTS
+
+
+@app.get("/api/v1/charts/render/{chart_key}")
+@limiter.limit("60/minute")
+async def charts_render(
+    chart_key: str,
+    request: Request,
+    theme: str = "light",
+    width: int = 720,
+    height: int = 400,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Renders one chart server-side as a PNG for the canvas editor, sized
+    to width x height. theme=dark falls back to the light render (the
+    matplotlib renderers are light-only). The PNG is cached five minutes
+    per (chart_key, theme, width, height). 404 for an unknown chart_key.
+    Project team only.
+    """
+    from tools.chart_render import is_known_chart, render_chart_png
+    if not is_known_chart(chart_key):
+        raise HTTPException(status_code=404,
+                            detail=f"Unknown chart key: {chart_key}")
+    theme = "dark" if str(theme).lower() == "dark" else "light"
+    w = max(80, min(int(width), 2000))
+    h = max(80, min(int(height), 2000))
+    png = await render_chart_png(chart_key, theme, w, h)
+    return Response(content=png, media_type="image/png")
+
+
 # ── Document editor — editor_drafts / editor_draft_versions ────────────────────
 #
 # The in-platform editor for Bob's midpoint paper and Molly's presentation
@@ -2302,6 +2340,42 @@ async def audit_export_run(
     )
 
 
+@app.post("/api/v1/audit/findings/{finding_id}/resolve")
+async def audit_resolve_finding(
+    finding_id: int,
+    body: dict | None = None,
+    session: dict = Depends(require_permission("team_member")),
+):
+    """
+    Acknowledges an audit finding — the WARN acknowledge/resolve workflow.
+    Records the team's response (resolution_note) and sets resolved. This
+    is a response, not a correction: the audit's overall verdict does not
+    change. Project team only.
+    """
+    from tools.audit_engine import resolve_finding
+    note = str((body or {}).get("resolution_note") or "").strip()
+    if not note:
+        raise HTTPException(
+            status_code=422, detail="A resolution note is required.")
+    finding = await resolve_finding(finding_id, True, note)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="Audit finding not found.")
+    return finding
+
+
+@app.post("/api/v1/audit/findings/{finding_id}/unresolve")
+async def audit_unresolve_finding(
+    finding_id: int,
+    session: dict = Depends(require_permission("team_member")),
+):
+    """Clears the acknowledgement on an audit finding. Project team only."""
+    from tools.audit_engine import resolve_finding
+    finding = await resolve_finding(finding_id, False, None)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="Audit finding not found.")
+    return finding
+
+
 @app.post("/api/v1/cache/invalidate")
 async def cache_invalidate(
     session: dict = Depends(require_permission("manage_users")),
@@ -3735,7 +3809,28 @@ async def _editor_export(editor_draft_id: int) -> Response:
 
     if draft["document_type"] == "presentation_deck":
         from tools.academic_deck import build_editor_pptx
-        content = await asyncio.to_thread(build_editor_pptx, draft)
+        from tools.chart_render import is_known_chart, render_chart_png
+
+        # Render each chart element's PNG server-side (an async path) and
+        # hand the {element_id: png} map to the sync .pptx builder. A
+        # failed render is left out — the builder degrades it gracefully.
+        content_json = draft.get("content_json") or {}
+        deck_slides = (content_json.get("slides", [])
+                       if isinstance(content_json, dict) else [])
+        chart_pngs: dict[str, bytes] = {}
+        for sl in deck_slides:
+            for el in (sl.get("elements") or [] if isinstance(sl, dict) else []):
+                if (isinstance(el, dict) and el.get("type") == "chart"
+                        and is_known_chart(str(el.get("chartKey", "")))):
+                    try:
+                        # Render at 2x the element box for print quality.
+                        w = min(2000, max(80, int(el.get("width") or 360) * 2))
+                        h = min(2000, max(80, int(el.get("height") or 220) * 2))
+                        chart_pngs[str(el.get("id"))] = await render_chart_png(
+                            str(el["chartKey"]), "light", w, h)
+                    except Exception:  # noqa: BLE001 — skip, builder degrades
+                        pass
+        content = await asyncio.to_thread(build_editor_pptx, draft, chart_pngs)
         media, ext = _PPTX_MEDIA, "pptx"
     else:
         from tools.academic_docx import build_editor_docx

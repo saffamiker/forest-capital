@@ -6133,6 +6133,70 @@ Migration 021 is changelog version 40. TipTap v2 (the React-18 line) is
 a frontend dependency. Operator step: alembic upgrade head on Render.
 
 
+─────────────────────────────────────────────────────────────────────────────
+CANVAS PRESENTATION EDITOR (migration 022, May 19 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The presentation_deck editor moved from a fixed slide-card layout to a
+free-form Konva canvas — drag, resize and style text, and drop in live
+platform charts. The midpoint paper and executive brief keep the TipTap
+rich-text editor; only presentation_deck uses the canvas.
+
+CANVAS SCHEMA — migration 022 is a DATA migration (no schema change).
+It converts every presentation_deck editor_drafts row from the
+slide-card shape to the canvas shape, idempotently and reversibly:
+
+  {slides:[{id, title, background, speaker_notes,
+            elements:[{id, type, x, y, width, height, ...}]}]}
+
+Each slide is a 960x540 (16:9) canvas. An element is either a `text`
+element (content, fontSize, fontWeight, fontStyle, color) or a `chart`
+element (chartKey, verified). The slide-card title/content/data_points
+map to text elements el_001/el_002/el_003; verified/notes_written are
+dropped (per-element `verified` replaces them on chart elements). The
+downgrade restores the slide-card shape. Migration 022 is changelog
+version 41. tools/editor_content.deck_to_editor emits the SAME canvas
+shape for newly generated decks, so a generated deck and a migrated one
+open identically.
+
+CHART RENDER ENDPOINTS — the canvas embeds live platform charts as
+server-rendered PNGs. tools/chart_render.py exposes the five charts
+academic_deck.render_deck_charts() can produce (rolling_correlation,
+cumulative_returns, risk_return, sensitivity, team_activity):
+  GET /api/v1/charts/available        — the renderable chart list
+  GET /api/v1/charts/render/{key}     — the chart as a PNG, sized to
+    the ?width/?height query (theme=dark falls back to the light
+    render — the matplotlib renderers are light-only)
+Both are team_member-gated. render_chart_png() reuses the matplotlib
+renderers the PPTX export uses, resizes with Pillow, and a 5-minute
+per-(key, theme, w, h) cache keeps repeated requests (thumbnails,
+re-fetches) off the render path. A chart whose source data is cold
+degrades to a placeholder PNG — the canvas always receives an image.
+
+FRONTEND — the centre panel for a presentation_deck draft is
+CanvasSlideEditor (a react-konva Stage). DocumentEditor owns the active
+slide id, so the left navigator and the canvas always agree; switching
+slides commits cleanly (every element change flows up through onChange,
+so nothing is lost). The deck auto-saves on a 2-second debounce. Text
+elements drag, resize via a Konva Transformer and inline-edit on
+double-click through a floating textarea; chart elements show the PNG
+with an amber "unverified" border until the presenter confirms them.
+ChartPicker replaces the Writing Assistant panel while a chart is being
+added. AI Layout (repositions the slide's elements) and AI Copy
+(rewrites a selected text element) run through the document-assistant
+endpoint and show an Apply/Dismiss review overlay.
+
+PPTX EXPORT — build_editor_pptx renders the canvas to a .pptx: the
+960x540 canvas maps 1:1 onto a 10x5.625in 16:9 slide (element
+coordinates scale by a fixed EMU factor per axis, font sizes by 0.75).
+Chart elements embed a server-rendered PNG; a missing render degrades
+to a [DATA PENDING] note. Speaker notes carry into each slide's notes.
+
+konva / react-konva are frontend dependencies. react-konva is mocked in
+the Vitest setup (konva's Node build needs the native 'canvas' package,
+absent under jsdom). Operator step: alembic upgrade head on Render.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -6213,10 +6277,25 @@ is maintained separately. The `gh` CLI is authenticated with the
      ✅ [[BOB]] block panel + [[VERIFY]] popup UX (commit 599296c)
      ✅ UAT guide + site tour updated for the editor (commit 64704b6)
      ✅ UAT guide [[BOB]]/[[VERIFY]] UX fix (commit 62461b8)
-  ◐ alembic upgrade head on Render — in-flight: migrations through 021
-     are ready locally; migrations 019, 020 and 021 are NOT yet on
-     production. `alembic upgrade head` runs on Render post-merge,
-     pending the develop → main deploy
+  ✅ Canvas presentation editor stream (7 commits, migration 022):
+     ✅ Migration 022 — presentation_deck content_json: slide-card →
+        free-form 960x540 canvas element schema (idempotent, reversible)
+     ✅ Chart render endpoints — GET /api/v1/charts/available and
+        /render/{key} (PNG, Pillow-resized, 5-minute cache)
+     ✅ CanvasSlideEditor — Konva canvas; drag/resize/inline-edit text,
+        embedded chart elements with a verify gate; ChartPicker drawer
+     ✅ PPTX export honours the canvas layout (960x540 → 10x5.625in,
+        EMU coordinate mapping)
+     ✅ AI Layout / AI Copy — element repositioning and copy rewrite
+        with an Apply/Dismiss review overlay
+     ✅ Tests — chart endpoints, migration 022 conversion, PPTX EMU
+        mapping, CanvasSlideEditor + ChartPicker
+     ✅ react-konva mocked in the Vitest setup (konva's Node build
+        needs the native 'canvas' package, absent under jsdom)
+  ◐ alembic upgrade head on Render — in-flight: migrations through 022
+     are ready locally; migrations 019–022 are NOT yet on production.
+     `alembic upgrade head` runs on Render post-merge, pending the
+     develop → main deploy
   ✅ S3 (or equivalent) for screenshot storage — Render persistent
      disk at /data/test_screenshots; screenshots survive redeploys
   ✅ CLAUDE.md + README brought current

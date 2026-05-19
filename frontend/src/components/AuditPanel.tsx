@@ -10,10 +10,12 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
 import {
   ShieldCheck, Loader2, ChevronDown, ChevronRight, Download, FileSearch,
+  CheckCircle2,
 } from 'lucide-react'
 import TeamGate from './TeamGate'
 
 interface AuditFinding {
+  id: number
   layer: number
   check_name: string
   metric: string
@@ -24,6 +26,8 @@ interface AuditFinding {
   auditor_value: string | null
   discrepancy: string | null
   auditor_reasoning: string | null
+  resolved?: boolean
+  resolution_note?: string | null
 }
 
 // A demo run (the QA tab's "Run Live Demo" button) is marked 🎯 in the
@@ -79,10 +83,39 @@ function allFindings(r: AuditRun): AuditFinding[] {
 
 // ── One finding row ───────────────────────────────────────────────────────────
 
-function FindingRow({ f }: { f: AuditFinding }) {
+export function FindingRow({ f }: { f: AuditFinding }) {
   const [open, setOpen] = useState(false)
+  // WARN acknowledge/resolve — local so a save needs no full reload.
+  const [resolved, setResolved] = useState(Boolean(f.resolved))
+  const [note, setNote] = useState(f.resolution_note ?? '')
+  const [editing, setEditing] = useState(false)
+  const [draft, setDraft] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [ackError, setAckError] = useState<string | null>(null)
+
+  const isWarn = f.status === 'warning'
   const dot = f.status === 'fail' ? 'bg-danger'
-    : f.status === 'warning' ? 'bg-warning' : 'bg-success'
+    : isWarn ? 'bg-warning' : 'bg-success'
+  // A WARN finding is always expandable so its acknowledge control is
+  // reachable even when it carries no platform value or reasoning.
+  const expandable = Boolean(f.auditor_reasoning || f.platform_value || isWarn)
+
+  const saveAck = async () => {
+    setSaving(true)
+    setAckError(null)
+    try {
+      await axios.post(`/api/v1/audit/findings/${f.id}/resolve`,
+        { resolution_note: draft.trim() })
+      setResolved(true)
+      setNote(draft.trim())
+      setEditing(false)
+    } catch {
+      setAckError('Could not save the acknowledgement.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
   return (
     <div className="border-b border-border/40 last:border-0 py-1.5">
       <button
@@ -94,13 +127,19 @@ function FindingRow({ f }: { f: AuditFinding }) {
         <span className="flex-1 min-w-0">
           <span className="text-xs text-white">
             L{f.layer} · {f.check_name}
+            {resolved && (
+              <span className="ml-1.5 inline-flex items-center gap-0.5
+                               text-2xs text-success align-middle">
+                <CheckCircle2 className="w-3 h-3" /> Acknowledged
+              </span>
+            )}
           </span>
           <span className="text-2xs text-muted block">
             {f.metric}{f.strategy ? ` · ${f.strategy}` : ''}
             {f.discrepancy ? ` · ${f.discrepancy}` : ''}
           </span>
         </span>
-        {(f.auditor_reasoning || f.platform_value) && (
+        {expandable && (
           open ? <ChevronDown className="w-3.5 h-3.5 text-muted shrink-0" />
             : <ChevronRight className="w-3.5 h-3.5 text-muted shrink-0" />
         )}
@@ -115,6 +154,62 @@ function FindingRow({ f }: { f: AuditFinding }) {
           )}
           {f.auditor_reasoning && (
             <div className="leading-relaxed">{f.auditor_reasoning}</div>
+          )}
+
+          {/* WARN acknowledge/resolve — a recorded response to the
+              limitation. It does not change the audit's verdict. */}
+          {isWarn && (
+            <div className="pt-1.5 mt-1 border-t border-border/40">
+              {resolved && !editing && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1 text-success">
+                    <CheckCircle2 className="w-3 h-3" /> Acknowledged
+                  </div>
+                  {note && (
+                    <div className="text-slate-300 leading-relaxed">{note}</div>
+                  )}
+                  <button type="button"
+                    onClick={() => { setDraft(note); setEditing(true) }}
+                    className="text-electric hover:underline">
+                    Edit
+                  </button>
+                </div>
+              )}
+              {!resolved && !editing && (
+                <button type="button"
+                  onClick={() => { setDraft(note); setEditing(true) }}
+                  className="text-electric hover:underline">
+                  Acknowledge
+                </button>
+              )}
+              {editing && (
+                <div className="space-y-1">
+                  <textarea
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    rows={3}
+                    placeholder="Describe how you have addressed or accepted
+                                 this limitation…"
+                    className="w-full bg-navy-800 border border-border rounded
+                               text-2xs text-white px-2 py-1.5 resize-y"
+                  />
+                  <div className="flex items-center gap-2">
+                    <button type="button" onClick={() => void saveAck()}
+                      disabled={saving || !draft.trim()}
+                      className="px-2 py-1 rounded bg-electric/15 text-electric
+                                 border border-electric/30 hover:bg-electric/25
+                                 disabled:opacity-50">
+                      {saving ? 'Saving…' : 'Save acknowledgement'}
+                    </button>
+                    <button type="button" onClick={() => setEditing(false)}
+                      className="text-muted hover:text-white">
+                      Cancel
+                    </button>
+                  </div>
+                  {ackError && <p className="text-danger">{ackError}</p>}
+                </div>
+              )}
+            </div>
           )}
         </div>
       )}

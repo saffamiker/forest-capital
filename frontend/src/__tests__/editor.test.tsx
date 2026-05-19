@@ -6,9 +6,9 @@ import {
 } from '../lib/editorMarkers'
 import { BobCalloutPanel } from '../lib/BobCalloutNode'
 import RichTextEditor, { VerifyPopup } from '../components/editor/RichTextEditor'
-import SlideEditor, { slideComplete } from '../components/editor/SlideEditor'
 import PresentationPreview from '../components/editor/PresentationPreview'
-import type { DeckContent, DeckSlide, TipTapDoc } from '../types/editor'
+import { canvasSlideStatus } from '../components/editor/canvasSlide'
+import type { CanvasSlide, TipTapDoc } from '../types/editor'
 
 // ── [[VERIFY]] / [[BOB]] marker detection ─────────────────────────────────────
 
@@ -198,80 +198,58 @@ describe('RichTextEditor markers', () => {
   })
 })
 
-// ── Slide completion logic ────────────────────────────────────────────────────
+// ── canvasSlideStatus — deck slide completion logic ───────────────────────────
 
-describe('slideComplete', () => {
-  const base: DeckSlide = {
-    id: 1, title: 'T', content: 'C', data_points: [],
-    speaker_notes: '', verified: false, notes_written: false,
-  }
-
-  it('is complete only when verified AND notes written', () => {
-    expect(slideComplete(base)).toBe(false)
-    expect(slideComplete({ ...base, verified: true })).toBe(false)
-    expect(slideComplete({ ...base, notes_written: true })).toBe(false)
-    expect(slideComplete({ ...base, verified: true, notes_written: true }))
-      .toBe(true)
-  })
-})
-
-// ── SlideEditor — the presentation-deck centre panel ──────────────────────────
-
-function deck(): DeckContent {
-  return {
-    slides: [
-      { id: 1, title: 'Title slide', content: 'Intro', data_points: ['Sharpe 0.63'],
-        speaker_notes: '', verified: false, notes_written: false },
-      { id: 2, title: 'Results', content: 'Results body', data_points: [],
-        speaker_notes: 'already written', verified: false, notes_written: true },
-    ],
-  }
-}
-
-describe('SlideEditor', () => {
-  afterEach(() => { vi.restoreAllMocks() })
-
-  it('renders a slide card per slide (not a TipTap surface)', () => {
-    render(<SlideEditor draftId={1} deck={deck()} onChange={() => {}} />)
-    expect(screen.getByDisplayValue('Title slide')).toBeInTheDocument()
-    expect(screen.getByDisplayValue('Results')).toBeInTheDocument()
-    expect(screen.getByText('Slide 1 of 2')).toBeInTheDocument()
+describe('canvasSlideStatus', () => {
+  const slide = (over: Partial<CanvasSlide>): CanvasSlide => ({
+    id: 1, title: 'T', background: '#FFFFFF', speaker_notes: '',
+    elements: [], ...over,
   })
 
-  it('has an editable speaker-notes field that fires onChange', () => {
-    const onChange = vi.fn()
-    render(<SlideEditor draftId={1} deck={deck()} onChange={onChange} />)
-    const notes = screen.getAllByPlaceholderText(
-      'Write your speaker notes here…')[0]
-    fireEvent.change(notes, { target: { value: 'my talking points' } })
-    expect(onChange).toHaveBeenCalled()
-    const next = onChange.mock.calls[0][0] as DeckContent
-    expect(next.slides[0].speaker_notes).toBe('my talking points')
-    // Writing notes flips notes_written.
-    expect(next.slides[0].notes_written).toBe(true)
+  it('is not_started for an untouched slide (no notes, no charts)', () => {
+    expect(canvasSlideStatus(slide({}))).toBe('not_started')
   })
 
-  it('marks data points verified on click', () => {
-    const onChange = vi.fn()
-    render(<SlideEditor draftId={1} deck={deck()} onChange={onChange} />)
-    fireEvent.click(screen.getByText('Mark data points verified'))
-    const next = onChange.mock.calls[0][0] as DeckContent
-    expect(next.slides[0].verified).toBe(true)
+  it('is complete when notes are written and every chart is verified', () => {
+    expect(canvasSlideStatus(slide({ speaker_notes: 'done' })))
+      .toBe('complete')
+    expect(canvasSlideStatus(slide({
+      speaker_notes: 'done',
+      elements: [{ id: 'c1', type: 'chart', x: 0, y: 0, width: 10,
+        height: 10, chartKey: 'risk_return', verified: true, locked: false }],
+    }))).toBe('complete')
+  })
+
+  it('is in_progress when a chart is unverified or notes are missing', () => {
+    expect(canvasSlideStatus(slide({
+      speaker_notes: 'done',
+      elements: [{ id: 'c1', type: 'chart', x: 0, y: 0, width: 10,
+        height: 10, chartKey: 'risk_return', verified: false, locked: false }],
+    }))).toBe('in_progress')
+    expect(canvasSlideStatus(slide({
+      elements: [{ id: 'c1', type: 'chart', x: 0, y: 0, width: 10,
+        height: 10, chartKey: 'risk_return', verified: true, locked: false }],
+    }))).toBe('in_progress')
   })
 })
 
 // ── PresentationPreview — the full-screen rehearsal overlay ───────────────────
 
 describe('PresentationPreview', () => {
-  const slides: DeckSlide[] = [
-    { id: 1, title: 'Opening', content: 'Intro body', data_points: [],
-      speaker_notes: 'Say hello and set up the question', verified: false,
-      notes_written: true },
-    { id: 2, title: 'Findings', content: 'Findings body', data_points: [],
-      speaker_notes: 'Walk through the 2022 break', verified: false,
-      notes_written: true },
-    { id: 3, title: 'Close', content: 'Closing body', data_points: [],
-      speaker_notes: '', verified: false, notes_written: false },
+  const textEl = (id: string, content: string): CanvasSlide['elements'][0] => ({
+    id, type: 'text', x: 60, y: 40, width: 800, height: 80,
+    content, fontSize: 36, fontWeight: 'bold', color: '#1B2A4A',
+    locked: false,
+  })
+  const slides: CanvasSlide[] = [
+    { id: 1, title: 'Opening', background: '#FFFFFF',
+      speaker_notes: 'Say hello and set up the question',
+      elements: [textEl('e1', 'Opening')] },
+    { id: 2, title: 'Findings', background: '#FFFFFF',
+      speaker_notes: 'Walk through the 2022 break',
+      elements: [textEl('e2', 'Findings')] },
+    { id: 3, title: 'Close', background: '#FFFFFF',
+      speaker_notes: '', elements: [textEl('e3', 'Close')] },
   ]
 
   it('opens a full-screen overlay showing the first slide', () => {

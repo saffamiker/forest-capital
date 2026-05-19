@@ -10,20 +10,55 @@ export type EditorDocumentType =
 /** A TipTap document JSON object (paper/brief). */
 export type TipTapDoc = JSONContent
 
-/** One slide in a presentation_deck draft's content_json. */
-export interface DeckSlide {
+// ── Canvas presentation-deck schema ──────────────────────────────────────
+// A presentation_deck draft stores a free-form 960x540 (16:9) canvas per
+// slide — see migration 022. Each element carries absolute coordinates;
+// the centre panel renders them on a Konva Stage.
+
+/** Fields shared by every positioned canvas element. */
+export interface CanvasElementBase {
+  id: string
+  x: number
+  y: number
+  width: number
+  height: number
+  locked: boolean
+}
+
+/** A text element — Konva.Text, inline-editable on double-click. */
+export interface CanvasTextElement extends CanvasElementBase {
+  type: 'text'
+  content: string
+  fontSize: number
+  fontWeight: 'normal' | 'bold'
+  /** Optional — migration 022 emits no italic; absent reads as 'normal'. */
+  fontStyle?: 'normal' | 'italic'
+  color: string
+}
+
+/** A chart element — a platform chart rendered server-side as a PNG. */
+export interface CanvasChartElement extends CanvasElementBase {
+  type: 'chart'
+  /** A key from GET /api/v1/charts/available. */
+  chartKey: string
+  /** The presenter confirms the chart reflects current platform data. */
+  verified: boolean
+}
+
+export type CanvasElement = CanvasTextElement | CanvasChartElement
+
+/** One slide of a presentation_deck draft's content_json. */
+export interface CanvasSlide {
   id: number
   title: string
-  content: string
-  data_points: string[]
+  background: string
   speaker_notes: string
-  verified: boolean
-  notes_written: boolean
+  elements: CanvasElement[]
 }
 
 /** A presentation_deck draft stores {slides:[...]} in content_json. */
-export interface DeckContent {
-  slides: DeckSlide[]
+export interface CanvasDeck {
+  slides: CanvasSlide[]
 }
 
 export interface EditorDraft {
@@ -31,7 +66,7 @@ export interface EditorDraft {
   document_type: EditorDocumentType
   owner_email: string
   title: string
-  content_json: TipTapDoc | DeckContent | null
+  content_json: TipTapDoc | CanvasDeck | null
   content_text: string | null
   word_count: number
   version: number
@@ -46,7 +81,7 @@ export interface EditorDraftVersion {
   id: number
   draft_id: number
   version: number
-  content_json: TipTapDoc | DeckContent | null
+  content_json: TipTapDoc | CanvasDeck | null
   content_text: string | null
   word_count: number
   version_label: string | null

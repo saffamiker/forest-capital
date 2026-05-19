@@ -199,7 +199,8 @@ class TestQAPerCheckFiltering:
         assert missing
         for item in missing:
             assert item["evidence"] == (
-                "No detailed analysis available for this check.")
+                "The QA agent did not return analysis for this check. "
+                "Re-run the QA audit to generate a full report.")
 
     def test_no_item_ever_shows_the_whole_blob(self, qa):
         response = (
