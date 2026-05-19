@@ -23,6 +23,7 @@ import type Konva from 'konva'
 import type { KonvaEventObject } from 'konva/lib/Node'
 import {
   Type, BarChart3, Bold, Italic, Trash2, Loader2, Sparkles, Plus,
+  Wand2, LayoutGrid, X,
 } from 'lucide-react'
 
 import type {
@@ -43,6 +44,45 @@ interface Props {
   onRequestChartPicker: () => void
 }
 
+/** One element's AI-suggested geometry (AI Layout). */
+interface LayoutSuggestion {
+  id: string
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+function clampNum(v: unknown, fallback: number, lo: number, hi: number): number {
+  const n = typeof v === 'number' ? v : Number(v)
+  if (!Number.isFinite(n)) return fallback
+  return Math.min(Math.max(n, lo), hi)
+}
+
+/** Extracts a [{id,x,y,width,height}] array from a possibly-prose AI reply. */
+function parseLayoutSuggestion(text: string): LayoutSuggestion[] | null {
+  const match = /\[[\s\S]*\]/.exec(text)
+  if (!match) return null
+  try {
+    const raw: unknown = JSON.parse(match[0])
+    if (!Array.isArray(raw)) return null
+    const out: LayoutSuggestion[] = []
+    for (const item of raw) {
+      if (item && typeof item === 'object' && 'id' in item) {
+        const o = item as Record<string, unknown>
+        out.push({
+          id: String(o.id),
+          x: Number(o.x), y: Number(o.y),
+          width: Number(o.width), height: Number(o.height),
+        })
+      }
+    }
+    return out.length ? out : null
+  } catch {
+    return null
+  }
+}
+
 export default function CanvasSlideEditor({
   draftId, deck, activeSlideId, onChange, onRequestChartPicker,
 }: Props) {
@@ -53,6 +93,18 @@ export default function CanvasSlideEditor({
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [verifyPopupId, setVerifyPopupId] = useState<string | null>(null)
+
+  // AI Layout / AI Copy — a pending suggestion the user accepts or rejects.
+  const [aiBusy, setAiBusy] = useState<null | 'layout' | 'copy'>(null)
+  const [aiLayout, setAiLayout] = useState<LayoutSuggestion[] | null>(null)
+  const [aiCopy, setAiCopy] =
+    useState<{ elId: string; text: string } | null>(null)
+  const [aiError, setAiError] = useState<string | null>(null)
+  const clearAi = () => {
+    setAiLayout(null)
+    setAiCopy(null)
+    setAiError(null)
+  }
 
   const stageRef = useRef<Konva.Stage | null>(null)
   const transformerRef = useRef<Konva.Transformer | null>(null)
@@ -66,6 +118,7 @@ export default function CanvasSlideEditor({
     setSelectedId(null)
     setEditingId(null)
     setVerifyPopupId(null)
+    clearAi()
   }, [activeSlideId])
 
   // Scale the 960x540 stage to fit the available panel area.
@@ -113,6 +166,92 @@ export default function CanvasSlideEditor({
     const el = newTextElement()
     updateSlide({ elements: [...slide.elements, el] })
     setSelectedId(el.id)
+  }
+
+  // ── AI Layout — the AI repositions the slide's elements ────────────
+  const runAiLayout = async () => {
+    if (!slide || aiBusy) return
+    setAiBusy('layout')
+    clearAi()
+    try {
+      const elementsJson = JSON.stringify(slide.elements.map((e) => ({
+        id: e.id, type: e.type,
+        x: Math.round(e.x), y: Math.round(e.y),
+        width: Math.round(e.width), height: Math.round(e.height),
+      })))
+      const res = await axios.post(`/api/documents/${draftId}/assistant`, {
+        message: 'Reposition these slide elements into a clean, balanced '
+          + 'layout on a 960x540 canvas. Return ONLY a JSON array using the '
+          + 'same element ids — change x, y, width and height only, never '
+          + 'the id or type, and keep every element fully on the canvas.',
+        context_content: elementsJson,
+        context_type: 'slide',
+      })
+      const text: string = res.data?.suggestion || res.data?.explanation || ''
+      const parsed = parseLayoutSuggestion(text)
+      if (!parsed) {
+        setAiError('The AI did not return a usable layout.')
+      } else {
+        setAiLayout(parsed)
+      }
+    } catch {
+      setAiError('AI Layout is unavailable — please retry.')
+    } finally {
+      setAiBusy(null)
+    }
+  }
+
+  const applyAiLayout = () => {
+    if (!slide || !aiLayout) return
+    const byId = new Map(aiLayout.map((s) => [s.id, s]))
+    updateSlide({
+      elements: slide.elements.map((e) => {
+        const s = byId.get(e.id)
+        if (!s) return e
+        return {
+          ...e,
+          x: clampNum(s.x, e.x, 0, CANVAS_WIDTH - 20),
+          y: clampNum(s.y, e.y, 0, CANVAS_HEIGHT - 20),
+          width: clampNum(s.width, e.width, 40, CANVAS_WIDTH),
+          height: clampNum(s.height, e.height, 30, CANVAS_HEIGHT),
+        }
+      }),
+    })
+    clearAi()
+  }
+
+  // ── AI Copy — the AI rewrites the selected text element ────────────
+  const runAiCopy = async () => {
+    if (!slide || aiBusy) return
+    const el = slide.elements.find((e) => e.id === selectedId)
+    if (!el || el.type !== 'text') return
+    setAiBusy('copy')
+    clearAi()
+    try {
+      const res = await axios.post(`/api/documents/${draftId}/assistant`, {
+        message: 'Rewrite this presentation slide text to be clearer and '
+          + 'more impactful for an investor audience. Return only the '
+          + 'rewritten text — no quotes, no commentary.',
+        context_content: el.content,
+        context_type: 'slide',
+      })
+      const text: string =
+        (res.data?.suggestion || res.data?.explanation || '').trim()
+      if (!text) {
+        setAiError('The AI did not return any copy.')
+      } else {
+        setAiCopy({ elId: el.id, text })
+      }
+    } catch {
+      setAiError('AI Copy is unavailable — please retry.')
+    } finally {
+      setAiBusy(null)
+    }
+  }
+
+  const applyAiCopy = () => {
+    if (aiCopy) updateElement(aiCopy.elId, { content: aiCopy.text })
+    clearAi()
   }
 
   // ── Transformer attaches to the selected, unlocked, non-editing node ─
@@ -217,19 +356,41 @@ export default function CanvasSlideEditor({
             onPatch={(p) => updateElement(selectedEl.id, p)} />
         )}
 
-        {selectedEl && (
-          <button type="button" onClick={() => deleteElement(selectedEl.id)}
+        <div className="flex items-center gap-1.5 ml-auto">
+          {selectedEl?.type === 'text' && (
+            <button type="button" onClick={() => void runAiCopy()}
+              disabled={aiBusy !== null}
+              className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                         border border-purple-400/40 text-purple-300
+                         hover:bg-purple-400/10 disabled:opacity-50">
+              {aiBusy === 'copy'
+                ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                : <Wand2 className="w-3.5 h-3.5" />} AI Copy
+            </button>
+          )}
+          <button type="button" onClick={() => void runAiLayout()}
+            disabled={aiBusy !== null}
             className="flex items-center gap-1 text-2xs px-2 py-1 rounded
-                       border border-danger/40 text-danger
-                       hover:bg-danger/10 ml-auto">
-            <Trash2 className="w-3.5 h-3.5" /> Delete element
+                       border border-purple-400/40 text-purple-300
+                       hover:bg-purple-400/10 disabled:opacity-50">
+            {aiBusy === 'layout'
+              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              : <LayoutGrid className="w-3.5 h-3.5" />} AI Layout
           </button>
-        )}
+          {selectedEl && (
+            <button type="button" onClick={() => deleteElement(selectedEl.id)}
+              className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                         border border-danger/40 text-danger
+                         hover:bg-danger/10">
+              <Trash2 className="w-3.5 h-3.5" /> Delete element
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Canvas */}
       <div ref={areaRef}
-        className="flex-1 min-h-0 overflow-auto flex items-center
+        className="relative flex-1 min-h-0 overflow-auto flex items-center
                    justify-center bg-navy-950 p-4">
         <div className="relative shadow-lg"
           style={{ width: stageW, height: stageH }}>
@@ -343,6 +504,14 @@ export default function CanvasSlideEditor({
             </div>
           )}
         </div>
+
+        {/* AI Layout / AI Copy suggestion review. */}
+        {(aiLayout || aiCopy || aiError) && (
+          <AiSuggestionOverlay slide={slide}
+            layout={aiLayout} copy={aiCopy} error={aiError}
+            onApplyLayout={applyAiLayout} onApplyCopy={applyAiCopy}
+            onDismiss={clearAi} />
+        )}
       </div>
 
       {/* Speaker notes */}
@@ -546,6 +715,120 @@ function SpeakerNotes({
           ))}
         </div>
       )}
+    </div>
+  )
+}
+
+// ── AI Layout / AI Copy suggestion review overlay ──────────────────────
+function AiSuggestionOverlay({
+  slide, layout, copy, error, onApplyLayout, onApplyCopy, onDismiss,
+}: {
+  slide: CanvasSlide
+  layout: LayoutSuggestion[] | null
+  copy: { elId: string; text: string } | null
+  error: string | null
+  onApplyLayout: () => void
+  onApplyCopy: () => void
+  onDismiss: () => void
+}) {
+  const copyEl = copy
+    ? slide.elements.find((e): e is CanvasTextElement =>
+        e.id === copy.elId && e.type === 'text')
+    : undefined
+
+  return (
+    <div data-testid="ai-suggestion-overlay"
+      className="absolute inset-0 z-30 flex items-center justify-center
+                 bg-navy-950/70">
+      <div className="card w-[460px] max-w-[90%] max-h-[80%]
+                      overflow-y-auto p-4">
+        <div className="flex items-center justify-between mb-2">
+          <span className="text-sm text-white flex items-center gap-1.5">
+            <Sparkles className="w-4 h-4 text-purple-300" />
+            {layout ? 'AI Layout suggestion'
+              : copy ? 'AI Copy suggestion' : 'AI suggestion'}
+          </span>
+          <button type="button" onClick={onDismiss} aria-label="Dismiss"
+            className="text-muted hover:text-white">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        {error && <p className="text-xs text-danger">{error}</p>}
+
+        {layout && (
+          <>
+            <p className="text-2xs text-muted mb-2">
+              The AI repositioned {layout.length} element
+              {layout.length === 1 ? '' : 's'} — current → suggested:
+            </p>
+            <div className="space-y-1 mb-3">
+              {layout.map((s) => {
+                const cur = slide.elements.find((e) => e.id === s.id)
+                if (!cur) return null
+                return (
+                  <div key={s.id}
+                    className="text-2xs font-mono flex items-center gap-2">
+                    <span className="text-muted w-20 truncate">{s.id}</span>
+                    <span className="text-slate-400">
+                      {Math.round(cur.x)},{Math.round(cur.y)} ·{' '}
+                      {Math.round(cur.width)}×{Math.round(cur.height)}
+                    </span>
+                    <span className="text-purple-300">→</span>
+                    <span className="text-white">
+                      {Math.round(s.x)},{Math.round(s.y)} ·{' '}
+                      {Math.round(s.width)}×{Math.round(s.height)}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+            <div className="flex gap-2">
+              <button type="button" onClick={onApplyLayout}
+                className="flex-1 text-xs bg-electric/15 text-electric
+                           border border-electric/40 rounded py-1.5
+                           hover:bg-electric/25">
+                Apply
+              </button>
+              <button type="button" onClick={onDismiss}
+                className="text-xs text-muted hover:text-white px-3">
+                Dismiss
+              </button>
+            </div>
+          </>
+        )}
+
+        {copy && (
+          <>
+            <div className="text-2xs text-muted uppercase tracking-wide mb-1">
+              Current
+            </div>
+            <div className="text-xs text-slate-400 bg-navy-800 rounded p-2
+                            mb-2 whitespace-pre-wrap">
+              {copyEl?.content || '(empty)'}
+            </div>
+            <div className="text-2xs text-muted uppercase tracking-wide mb-1">
+              Suggested
+            </div>
+            <div className="text-xs text-white bg-navy-800 rounded p-2 mb-3
+                            whitespace-pre-wrap">
+              {copy.text}
+            </div>
+            <div className="flex gap-2">
+              <button type="button" onClick={onApplyCopy}
+                className="flex-1 text-xs bg-electric/15 text-electric
+                           border border-electric/40 rounded py-1.5
+                           hover:bg-electric/25">
+                Apply
+              </button>
+              <button type="button" onClick={onDismiss}
+                className="text-xs text-muted hover:text-white px-3">
+                Keep original
+              </button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   )
 }
