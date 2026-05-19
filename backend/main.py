@@ -2340,6 +2340,42 @@ async def audit_export_run(
     )
 
 
+@app.post("/api/v1/audit/findings/{finding_id}/resolve")
+async def audit_resolve_finding(
+    finding_id: int,
+    body: dict | None = None,
+    session: dict = Depends(require_permission("team_member")),
+):
+    """
+    Acknowledges an audit finding — the WARN acknowledge/resolve workflow.
+    Records the team's response (resolution_note) and sets resolved. This
+    is a response, not a correction: the audit's overall verdict does not
+    change. Project team only.
+    """
+    from tools.audit_engine import resolve_finding
+    note = str((body or {}).get("resolution_note") or "").strip()
+    if not note:
+        raise HTTPException(
+            status_code=422, detail="A resolution note is required.")
+    finding = await resolve_finding(finding_id, True, note)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="Audit finding not found.")
+    return finding
+
+
+@app.post("/api/v1/audit/findings/{finding_id}/unresolve")
+async def audit_unresolve_finding(
+    finding_id: int,
+    session: dict = Depends(require_permission("team_member")),
+):
+    """Clears the acknowledgement on an audit finding. Project team only."""
+    from tools.audit_engine import resolve_finding
+    finding = await resolve_finding(finding_id, False, None)
+    if finding is None:
+        raise HTTPException(status_code=404, detail="Audit finding not found.")
+    return finding
+
+
 @app.post("/api/v1/cache/invalidate")
 async def cache_invalidate(
     session: dict = Depends(require_permission("manage_users")),

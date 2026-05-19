@@ -168,6 +168,15 @@ def _overall(run: dict[str, Any]) -> str:
     return "PASS"
 
 
+def _layer_empty_message(layer_status: Any) -> str:
+    """The caption for a layer that recorded no findings. The layer's own
+    status column is authoritative — a layer that ran (pass/warn) but
+    stored no findings is NOT the same as a skipped layer."""
+    ran = str(layer_status or "").lower() in {"pass", "warn", "warning"}
+    return ("This layer ran but no individual findings were recorded."
+            if ran else "This layer was skipped.")
+
+
 def build_statistical_audit_pdf(run: dict[str, Any]) -> bytes:
     """
     Renders an audit_runs row (with grouped layer findings) as the
@@ -272,16 +281,19 @@ def build_statistical_audit_pdf(run: dict[str, Any]) -> bytes:
     story.append(Paragraph("Detailed Findings", s["h1"]))
     story.append(_rule())
     layers = [
-        ("layer_1", "LAYER 1: RAW DATA VERIFICATION"),
-        ("layer_2", "LAYER 2: INDEPENDENT RECOMPUTATION"),
-        ("layer_3", "LAYER 3: CONSISTENCY CHECKS"),
+        ("layer_1", "LAYER 1: RAW DATA VERIFICATION", run.get("layer_1_status")),
+        ("layer_2", "LAYER 2: INDEPENDENT RECOMPUTATION",
+         run.get("layer_2_status")),
+        ("layer_3", "LAYER 3: CONSISTENCY CHECKS", run.get("layer_3_status")),
     ]
-    for key, label in layers:
+    for key, label, layer_status in layers:
         story.append(Paragraph(label, s["h2"]))
         rows = findings.get(key) or []
         if not rows:
-            story.append(Paragraph("No findings — this layer was skipped.",
-                                   s["caption"]))
+            # An empty findings list is NOT the same as a skipped layer —
+            # the layer's own status column is authoritative.
+            story.append(Paragraph(
+                _layer_empty_message(layer_status), s["caption"]))
             continue
         for f in rows:
             strat = f" · {_esc(f.get('strategy'))}" if f.get("strategy") else ""
@@ -303,6 +315,14 @@ def build_statistical_audit_pdf(run: dict[str, Any]) -> bytes:
             if f.get("auditor_reasoning"):
                 story.append(Paragraph(_esc(f.get("auditor_reasoning")),
                                        s["detail"]))
+            # An acknowledged WARN — the team's recorded response. The
+            # finding's verdict is unchanged; this documents the response.
+            if f.get("resolved"):
+                story.append(Paragraph(
+                    f'<font color="{_GREEN.hexval()}"><b>Acknowledged</b>'
+                    f'</font> — Response: '
+                    f'{_esc(f.get("resolution_note") or "(no note)")}',
+                    s["detail"]))
     story.append(PageBreak())
 
     # ── Final page — data provenance ──
