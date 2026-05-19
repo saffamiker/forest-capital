@@ -111,10 +111,27 @@ def _extract_text(message: Any) -> str:
     return getattr(first, "text", "") if first is not None else ""
 
 
+# Process-wide Anthropic client singleton. Every call_claude invocation
+# (council, the editor chat endpoint, the QA agent, the academic writer,
+# the statistical audit) reuses it, rather than constructing a fresh
+# anthropic.Anthropic() — and with it a fresh httpx.Client connection pool
+# and TLS context — on every call. The same singleton pattern as the
+# SQLAlchemy read engine and the Tier-2 executor. The anthropic.Anthropic
+# client is safe to share across threads (call_claude runs under
+# asyncio.to_thread and the council's specialist ThreadPoolExecutor).
+_anthropic_client: anthropic.Anthropic | None = None
+
+
 def get_anthropic_client() -> anthropic.Anthropic:
-    """Returns an authenticated Anthropic client using the environment key."""
-    api_key = os.getenv("ANTHROPIC_API_KEY", "")
-    return anthropic.Anthropic(api_key=api_key)
+    """The shared Anthropic client, created once on first use.
+
+    A benign first-call race (two threads both seeing None) only discards
+    one transient client; no lock is needed."""
+    global _anthropic_client
+    if _anthropic_client is None:
+        api_key = os.getenv("ANTHROPIC_API_KEY", "")
+        _anthropic_client = anthropic.Anthropic(api_key=api_key)
+    return _anthropic_client
 
 
 def call_claude(

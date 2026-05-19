@@ -115,6 +115,21 @@ class TestEditorContentBuilders:
         assert all(s["speaker_notes"] == "" for s in cj["slides"])
         assert "Slide 1:" in ct
 
+    def test_executive_brief_to_editor_builds_tiptap_and_text(self):
+        from tools.editor_content import executive_brief_to_editor
+        cj, ct = executive_brief_to_editor({
+            "exec_summary": "Summary para.", "methodology": "Method para.",
+            "finding_1": "F1.", "finding_2": "F2.", "finding_3": "F3.",
+            "finding_4": "F4.", "limitations": "Limits.",
+            "recommendations": "Recs."})
+        assert cj["type"] == "doc"
+        # Eight H1 section headings.
+        headings = [n for n in cj["content"] if n.get("type") == "heading"]
+        assert len(headings) == 8
+        # The brief carries no [[BOB]] callouts.
+        assert "[[BOB:" not in ct
+        assert "Executive Summary" in ct
+
 
 # ── CRUD round-trips — skip without a live database ───────────────────────────
 
@@ -200,6 +215,22 @@ class TestDraftOnGeneration:
         assert draft_id is not None
         got = client.get(f"{DRAFTS}/{draft_id}", headers=TEAM)
         assert got.status_code == 200
+        assert got.json()["created_from"] == "generated"
+
+    def test_executive_brief_generation_creates_a_draft(
+        self, clean_editor_drafts,
+    ):
+        if not _db_ready():
+            pytest.skip("no live database")
+        resp = client.post("/api/v1/export/executive-brief", headers=TEAM)
+        assert resp.status_code == 200
+        # The brief now loads its content into an editor draft too — the
+        # draft_id rides back in the X-Draft-Id header.
+        draft_id = resp.headers.get("x-draft-id")
+        assert draft_id is not None
+        got = client.get(f"{DRAFTS}/{draft_id}", headers=TEAM)
+        assert got.status_code == 200
+        assert got.json()["document_type"] == "executive_brief"
         assert got.json()["created_from"] == "generated"
 
 

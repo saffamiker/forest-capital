@@ -28,6 +28,7 @@ import type { TestScript, TestStep } from '../constants/testScripts'
 import { registerTestRunner } from '../lib/testRunnerBus'
 import type { StartTestRunOptions } from '../lib/testRunnerBus'
 import { useAuth } from '../App'
+import { useSession } from '../context/SessionContext'
 import TestSubmissionPanel from './TestSubmissionPanel'
 import type { FeedbackCategorization } from './TestSubmissionPanel'
 
@@ -108,6 +109,10 @@ export default function TestRunner() {
   const location = useLocation()
   const { session } = useAuth()
   const email = session?.email ?? ''
+  // Testing Mode is enforced for the whole runner lifecycle — see start()
+  // and closeRunner() — so a test pass is never logged as real activity
+  // and a finished tester never silently keeps excluding their work.
+  const { sessionType, setTestingMode } = useSession()
 
   const [phase, setPhase] = useState<Phase>('idle')
   const [script, setScript] = useState<TestScript | null>(null)
@@ -122,6 +127,15 @@ export default function TestRunner() {
   const [toast, setToast] = useState<string | null>(null)
 
   const step: TestStep | null = script ? script.steps[stepIndex] ?? null : null
+
+  // A transient toast — auto-clears after 5s. Rendered in every phase
+  // (see toastEl below) so the auto-enable / auto-disable message
+  // survives the phase change that triggered it, including the close
+  // to the idle phase.
+  const showToast = useCallback((text: string) => {
+    setToast(text)
+    window.setTimeout(() => setToast(null), 5000)
+  }, [])
 
   // ── Existing results — used for resume detection ─────────────────────
   const loadExisting = useCallback(async (s: TestScript) => {
@@ -181,12 +195,22 @@ export default function TestRunner() {
     setSubmission(null)
     setFreeForm(false)
     setMinimised(false)
+    // Every runner start path runs with Testing Mode on, so a test pass
+    // is never logged as real activity. Enforced here, in the single
+    // testRunnerBus entry point, so it covers the Settings button, the
+    // login notifications and the Test Results re-test links alike. The
+    // Settings "Start Test Pass" button only shows while Testing Mode is
+    // already on, so it never re-triggers this.
+    if (sessionType !== 'testing') {
+      setTestingMode(true)
+      showToast('Testing Mode enabled automatically for this test session.')
+    }
     if (opts?.scriptId) {
       const s = TEST_SCRIPTS.find((x) => x.id === opts.scriptId)
       if (s) { void beginScript(s, opts.stepId); return }
     }
     setPhase('selecting')
-  }, [beginScript])
+  }, [beginScript, sessionType, setTestingMode, showToast])
 
   useEffect(() => {
     registerTestRunner(start)
@@ -253,15 +277,33 @@ export default function TestRunner() {
 
   const closeRunner = () => {
     setPhase('idle'); setScript(null); setSubmission(null); setFreeForm(false)
+    // Leaving the runner returns the session to real-activity logging,
+    // so a finished tester never silently keeps excluding their work.
+    setTestingMode(false)
+    showToast('Testing Mode off. Your work is now logged as real activity.')
   }
 
   // ── Render ───────────────────────────────────────────────────────────
-  if (phase === 'idle') return null
+  // The toast renders in every phase — auto-enable fires as the runner
+  // opens, auto-disable as it closes to idle — so it cannot live only
+  // inside the running view.
+  const toastEl = toast ? (
+    <div className="fixed right-4 z-[91] w-[360px] max-w-[92vw]
+                    bottom-[calc(50vh+1rem)] sm:bottom-[5.5rem]
+                    rounded border border-electric/30
+                    bg-navy-800 px-3 py-2 text-2xs text-slate-200 shadow-lg">
+      {toast}
+    </div>
+  ) : null
+
+  if (phase === 'idle') return toastEl
 
   // Script selector
   if (phase === 'selecting') {
     const mine = scriptForEmail(email)
     return (
+      <>
+      {toastEl}
       <Modal onClose={closeRunner}>
         <div className="px-5 py-4">
           <h2 className="text-white font-semibold text-sm">
@@ -297,6 +339,7 @@ export default function TestRunner() {
           </button>
         </div>
       </Modal>
+      </>
     )
   }
 
@@ -304,6 +347,8 @@ export default function TestRunner() {
   if (phase === 'resume' && script) {
     const done = Object.keys(results).length
     return (
+      <>
+      {toastEl}
       <Modal>
         <div className="px-5 py-4">
           <h2 className="text-white font-semibold text-sm">
@@ -329,12 +374,15 @@ export default function TestRunner() {
           </div>
         </div>
       </Modal>
+      </>
     )
   }
 
   // Primer
   if (phase === 'primer' && showPrimer) {
     return (
+      <>
+      {toastEl}
       <Modal>
         <div className="px-5 py-4">
           <div className="flex items-center gap-2">
@@ -370,6 +418,7 @@ export default function TestRunner() {
           </button>
         </div>
       </Modal>
+      </>
     )
   }
 
@@ -380,6 +429,8 @@ export default function TestRunner() {
     const failed = counts.filter((r) => r === 'fail').length
     const skipped = counts.filter((r) => r === 'skip').length
     return (
+      <>
+      {toastEl}
       <Modal onClose={closeRunner}>
         <div className="px-5 py-4">
           <h2 className="text-white font-semibold text-sm">
@@ -404,6 +455,7 @@ export default function TestRunner() {
           </div>
         </div>
       </Modal>
+      </>
     )
   }
 
@@ -411,7 +463,7 @@ export default function TestRunner() {
   if (phase !== 'running' || !script || !step) {
     // Free-form / submission panels can still be open over a non-running
     // phase only transiently; nothing to render here otherwise.
-    return null
+    return toastEl
   }
 
   const total = script.steps.length
@@ -538,15 +590,9 @@ export default function TestRunner() {
         )}
       </div>
 
-      {/* AI-categorisation toast after feedback */}
-      {toast && (
-        <div className="fixed right-4 z-[91] w-[360px] max-w-[92vw]
-                        bottom-[calc(50vh+1rem)] sm:bottom-[5.5rem]
-                        rounded border border-electric/30
-                        bg-navy-800 px-3 py-2 text-2xs text-slate-200 shadow-lg">
-          {toast}
-        </div>
-      )}
+      {/* Toast — AI-categorisation after feedback, plus the Testing Mode
+          auto-enable/disable messages. */}
+      {toastEl}
 
       {/* The How-this-works primer, re-openable via the ? button */}
       {showPrimer && phase === 'running' && (
