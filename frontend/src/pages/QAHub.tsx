@@ -469,7 +469,7 @@ export default function QAHub() {
               <Presentation className="w-4 h-4" /> Presentation View
             </button>
           </TeamGate>
-          <TeamGate permission="team_member">
+          <TeamGate permission="manage_users">
             <button
               type="button"
               onClick={() => runFullQA(false)}
@@ -526,7 +526,7 @@ export default function QAHub() {
             </div>
           )}
           {isCurrent && (
-            <TeamGate permission="team_member">
+            <TeamGate permission="manage_users">
               <button
                 type="button"
                 onClick={() => setShowDemoConfirm(true)}

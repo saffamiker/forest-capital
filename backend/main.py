@@ -29,6 +29,7 @@ from logger import configure_logging, get_logger
 from auth import (
     require_auth,
     require_team_member,
+    require_sysadmin,
     require_permission,
     require_master_key,
     generate_magic_token,
@@ -2186,7 +2187,7 @@ async def testing_get_latest_triage_report(
 @app.post("/api/v1/audit/run")
 async def audit_run(
     body: dict | None = None,
-    session: dict = Depends(require_permission("team_member")),
+    session: dict = Depends(require_sysadmin),
 ):
     """
     Triggers a full three-layer statistical audit in the background and
@@ -2197,7 +2198,9 @@ async def audit_run(
     Analytical-Appendix audit) or "demo" (a forced run for the live
     presentation). The smart-audit-caching "Run Live Demo" button sends
     {"reason": "demo"} — accepted here as an alias for triggered_by.
-    Project team only — the Statistical Audit lives in the QA tab.
+    Sysadmin only — triggering a QA/audit run is restricted to the
+    platform sysadmin (Michael); the read-only audit views remain open
+    to the project team.
     """
     from tools.audit_engine import start_audit
     from tools.qa_guard import (
@@ -2957,7 +2960,7 @@ async def advisor_citations(
 
 @app.post("/api/qa/audit")
 @limiter.limit("10/minute")
-async def qa_audit(request: Request, session: dict = Depends(require_auth)):
+async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
     """
     Runs the full QA methodology audit against real strategy results.
 
@@ -3204,7 +3207,7 @@ async def qa_status(request: Request, session: dict = Depends(require_auth)):
 
 @app.post("/api/v1/qa/run")
 @limiter.limit("20/minute")
-async def qa_run(request: Request, session: dict = Depends(require_auth)):
+async def qa_run(request: Request, session: dict = Depends(require_sysadmin)):
     """
     Runs Tier 1 synchronously and triggers Tier 2 in the background.
     Returns immediately with the Tier 1 verdict — the audience never
@@ -3285,14 +3288,14 @@ async def qa_run(request: Request, session: dict = Depends(require_auth)):
 
 @app.post("/api/v1/qa/full-review")
 @limiter.limit("5/minute")
-async def qa_full_review(request: Request, session: dict = Depends(require_auth)):
+async def qa_full_review(request: Request, session: dict = Depends(require_sysadmin)):
     """
     Manually triggers a Tier 3 (Opus) deep review. Synchronous because
     the caller (Admin screen Full Review button) is willing to wait
     20-30 seconds — unlike the dashboard, which never waits.
 
-    Master-key path: anyone with a valid session can trigger Tier 3,
-    but the rate limit caps abuse at 5/minute.
+    Sysadmin only — triggering a QA run is restricted to the platform
+    sysadmin; the rate limit caps abuse at 5/minute.
 
     Per-type guard: rejected with 409 only when another methodology
     audit is already in progress — a statistical audit never blocks it

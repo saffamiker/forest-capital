@@ -321,6 +321,9 @@ export default function MainLayout() {
   const { sessionType } = useSession()
   const { brand } = useBrand()
   const navigate = useNavigate()
+  // Shared QA status — QAStatusBadge polls /api/v1/qa/status into this
+  // store; the nav-ribbon "QA Running" pill reads it.
+  const { status: qaStatus } = useQAStore()
 
   const [drawerOpen, setDrawerOpen] = useState(false)
 
@@ -402,6 +405,28 @@ export default function MainLayout() {
             <LearnModeToggle />
             <QAStatusBadge />
           </div>
+
+          {/* QA running indicator — a QA audit (methodology or
+              statistical) is in progress. Driven by the same qaStore
+              status QAStatusBadge polls, so it is visible to every
+              logged-in user and disappears automatically when the run
+              completes. Mirrors the Testing Mode pill below. */}
+          {qaStatus === 'running' && (
+            <button
+              type="button"
+              onClick={() => navigate('/qa')}
+              title="A QA audit is running — click to view progress"
+              className="flex items-center gap-1 min-h-[44px] sm:min-h-0
+                         px-2 py-1 rounded-full text-2xs font-medium
+                         bg-warning/15 text-warning border border-warning/40
+                         hover:bg-warning/25 transition-colors
+                         whitespace-nowrap shrink-0"
+              style={{ boxShadow: '0 0 10px rgba(245,158,11,0.35)' }}
+            >
+              <span aria-hidden="true">⚙️</span>
+              <span className="hidden min-[380px]:inline">QA Running</span>
+            </button>
+          )}
 
           {/* Testing Mode indicator — shown when the session is banded as
               testing. On the smallest screens (<380px) the label drops to
