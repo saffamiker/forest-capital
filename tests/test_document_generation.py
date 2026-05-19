@@ -91,71 +91,70 @@ def _pptx_text(content: bytes) -> str:
 # ── Endpoint contract — runs in CI ────────────────────────────────────────────
 
 class TestDocumentGenerationContract:
-    def test_midpoint_paper_returns_valid_docx(self):
+    # The endpoints are async: a POST creates a job and returns 202 with
+    # a job_id; the file is produced by a background task. The document
+    # CONTENT checks call the generation helpers directly — the
+    # background task does not complete under Starlette's TestClient.
+
+    def test_midpoint_paper_returns_202_job(self):
         resp = client.post(MIDPOINT, headers=SESSION_HEADERS)
-        assert resp.status_code == 200
-        assert _DOCX_CT in resp.headers["content-type"]
-        disposition = resp.headers["content-disposition"]
-        assert "attachment" in disposition
-        assert "midpoint-paper" in disposition
-        assert disposition.endswith('.docx"')
-        # Opening with Document() raises if the bytes are not a valid .docx.
-        doc = Document(io.BytesIO(resp.content))
-        assert doc.paragraphs
+        assert resp.status_code == 202
+        body = resp.json()
+        assert body["status"] == "pending"
+        assert body["job_id"]
 
-    def test_executive_brief_returns_valid_docx(self):
+    def test_executive_brief_returns_202_job(self):
         resp = client.post(BRIEF, headers=SESSION_HEADERS)
-        assert resp.status_code == 200
-        assert _DOCX_CT in resp.headers["content-type"]
-        disposition = resp.headers["content-disposition"]
-        assert "executive-brief" in disposition
-        assert disposition.endswith('.docx"')
-        doc = Document(io.BytesIO(resp.content))
-        assert doc.paragraphs
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "pending"
+        assert resp.json()["job_id"]
 
-    def test_presentation_deck_returns_valid_pptx(self):
+    def test_presentation_deck_returns_202_job(self):
         resp = client.post(DECK, headers=SESSION_HEADERS)
-        assert resp.status_code == 200
-        assert _PPTX_CT in resp.headers["content-type"]
-        disposition = resp.headers["content-disposition"]
-        assert "presentation-deck" in disposition
-        assert disposition.endswith('.pptx"')
-        # Opening with Presentation() raises if the bytes are not a .pptx.
-        prs = Presentation(io.BytesIO(resp.content))
-        assert len(prs.slides) == 16
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "pending"
+        assert resp.json()["job_id"]
 
-    def test_midpoint_paper_carries_section_headings(self):
-        text = _docx_text(client.post(MIDPOINT, headers=SESSION_HEADERS).content)
+    def test_midpoint_document_is_a_valid_docx_with_headings(self):
+        import main
+        docx_bytes, filename, media, _draft = _run(
+            main._generate_midpoint_document(TEAM_EMAIL))
+        assert _DOCX_CT in media
+        assert filename.endswith(".docx")
+        text = _docx_text(docx_bytes)
         assert "Data and Methodology" in text
         assert "Preliminary Results" in text
         assert "Roles and Division of Labor" in text
         assert "Next Steps" in text
-        assert "AI DRAFT" in text  # mandatory banner
+        assert "AI DRAFT" in text          # mandatory banner
+        # Cold caches in the test environment — every data-dependent
+        # section degrades to a [DATA PENDING] marker.
+        assert "[DATA PENDING]" in text
 
-    def test_executive_brief_carries_section_headings(self):
-        text = _docx_text(client.post(BRIEF, headers=SESSION_HEADERS).content)
+    def test_executive_brief_document_is_a_valid_docx_with_headings(self):
+        import main
+        docx_bytes, filename, media, _draft = _run(
+            main._generate_brief_document(TEAM_EMAIL))
+        assert _DOCX_CT in media
+        assert filename.endswith(".docx")
+        text = _docx_text(docx_bytes)
         assert "Executive Summary" in text
         assert "Methodology Overview" in text
         assert "Key Findings" in text
         assert "Limitations and Risks" in text
         assert "Final Recommendations" in text
-
-    def test_midpoint_paper_degrades_to_data_pending(self):
-        """With cold caches and no academic documents (the test
-        environment), every data-dependent section falls back to a
-        [DATA PENDING] marker rather than failing the document."""
-        text = _docx_text(client.post(MIDPOINT, headers=SESSION_HEADERS).content)
         assert "[DATA PENDING]" in text
 
-    def test_executive_brief_degrades_to_data_pending(self):
-        text = _docx_text(client.post(BRIEF, headers=SESSION_HEADERS).content)
-        assert "[DATA PENDING]" in text
-
-    def test_presentation_deck_degrades_to_data_pending(self):
-        """Missing analytics data (and no matplotlib in the test env) must
-        not fail the deck — affected slides carry a [DATA PENDING] note."""
-        text = _pptx_text(client.post(DECK, headers=SESSION_HEADERS).content)
-        assert "[DATA PENDING]" in text
+    def test_presentation_deck_document_is_a_valid_16_slide_pptx(self):
+        import main
+        pptx_bytes, filename, media, _draft = _run(
+            main._generate_deck_document(TEAM_EMAIL))
+        assert _PPTX_CT in media
+        assert filename.endswith(".pptx")
+        prs = Presentation(io.BytesIO(pptx_bytes))
+        assert len(prs.slides) == 16
+        # Missing analytics data / no matplotlib must not fail the deck.
+        assert "[DATA PENDING]" in _pptx_text(pptx_bytes)
 
     def test_all_three_require_authentication(self):
         for endpoint in (MIDPOINT, BRIEF, DECK):
