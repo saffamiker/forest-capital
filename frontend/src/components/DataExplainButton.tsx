@@ -33,7 +33,7 @@ export default function DataExplainButton({
       <button
         type="button"
         onClick={() => setOpen(true)}
-        className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs
+        className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs
                     border border-electric/30 bg-electric/5 text-electric
                     hover:bg-electric/15 transition-colors ${className}`}
       >

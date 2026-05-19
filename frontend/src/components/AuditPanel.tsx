@@ -11,6 +11,7 @@ import axios from 'axios'
 import {
   ShieldCheck, Loader2, ChevronDown, ChevronRight, Download, FileSearch,
 } from 'lucide-react'
+import TeamGate from './TeamGate'
 
 interface AuditFinding {
   layer: number
@@ -235,8 +236,12 @@ export default function AuditPanel() {
         consistency.
       </p>
 
-      {/* Actions */}
+      {/* Actions — triggering an audit run is sysadmin-only (the backend
+          gates POST /api/v1/audit/run on manage_users); the gate keeps
+          the UI honest for a team_member who can see this panel. */}
       <div className="flex flex-wrap items-center gap-2 mb-3">
+        <TeamGate permission="manage_users"
+          tooltip="Running an audit is restricted to the platform sysadmin">
         <button
           type="button"
           onClick={() => void runAudit('manual')}
@@ -250,6 +255,9 @@ export default function AuditPanel() {
             ? <><Loader2 className="w-3 h-3 animate-spin" /> Audit running…</>
             : <><ShieldCheck className="w-3 h-3" /> Run Full Audit</>}
         </button>
+        </TeamGate>
+        <TeamGate permission="manage_users"
+          tooltip="Running an audit is restricted to the platform sysadmin">
         <button
           type="button"
           onClick={() => void runAudit('pre_submission')}
@@ -261,6 +269,7 @@ export default function AuditPanel() {
         >
           <FileSearch className="w-3 h-3" /> Run Pre-Submission Audit
         </button>
+        </TeamGate>
         {latest && latest.status !== 'running' && (
           <button
             type="button"

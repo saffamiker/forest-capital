@@ -470,6 +470,12 @@ def require_permission(permission: str):
 # named dependency so existing imports and call sites need no change.
 require_team_member = require_permission("team_member")
 
+# require_sysadmin gates the QA-run and statistical-audit triggers.
+# "sysadmin" is a role, not a permission — "manage_users" is the
+# permission only the sysadmin role's preset carries, so it is the
+# effective sysadmin-only gate (the same one user management uses).
+require_sysadmin = require_permission("manage_users")
+
 
 async def require_master_key(x_api_key: Optional[str] = Header(None)) -> dict:
     """Master API key only — developer endpoints."""

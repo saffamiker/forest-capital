@@ -13,6 +13,7 @@
 
 import { create } from 'zustand'
 import axios from 'axios'
+import { useGlossaryStore } from './glossaryStore'
 import type { CouncilResponse } from '../types/agents'
 
 interface CouncilResult extends CouncilResponse {
@@ -64,6 +65,17 @@ export const useCouncilStore = create<CouncilState>((set, get) => ({
             limit: res.data.council_queries_limit }
         : get().councilUsage
       set({ result: res.data, loading: false, councilUsage: usage })
+      // Re-anchor the Commentary-mode glossary to this completed
+      // session: clear the once-per-session termsLoaded guard and
+      // reload terms with the council output, so each term's
+      // `this_session` field reflects the actual results rather than
+      // the empty context of the first mount-time load. Fire-and-forget
+      // — it runs only on this success path (never on error or cancel),
+      // updates the glossary in the background, and never blocks or
+      // delays the council results rendering.
+      useGlossaryStore.setState({ termsLoaded: false })
+      void useGlossaryStore.getState().loadTerms(
+        res.data as unknown as Record<string, unknown>)
     } catch (err) {
       // A user-initiated cancel is not an error — clear loading, show nothing.
       if (axios.isCancel(err)) {

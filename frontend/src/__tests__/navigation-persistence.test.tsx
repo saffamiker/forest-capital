@@ -20,6 +20,7 @@ import { useChartsStore } from '../stores/chartsStore'
 import { useRegimeStore } from '../stores/regimeStore'
 import { useQAStore } from '../stores/qaStore'
 import { useCouncilStore } from '../stores/councilStore'
+import { useGlossaryStore } from '../stores/glossaryStore'
 
 vi.mock('axios')
 const mockedAxios = axios as unknown as { get: ReturnType<typeof vi.fn>; post: ReturnType<typeof vi.fn>; isAxiosError: typeof axios.isAxiosError }
@@ -32,6 +33,11 @@ beforeEach(() => {
   useRegimeStore.setState({ regime: null, loading: false, error: null, fetchedAt: null })
   useQAStore.setState({ result: null, status: 'unknown', loading: false, error: null, loaded: false })
   useCouncilStore.setState({ query: '', lastQuery: '', result: null, loading: false, error: null })
+  // A successful council session re-anchors the glossary (councilStore →
+  // loadTerms). Stub loadTerms to a no-op so that background reload does
+  // not fire its own /api/explain/terms POST and inflate the axios count
+  // this test asserts on.
+  useGlossaryStore.setState({ termsLoaded: true, termsLoading: false, loadTerms: vi.fn() })
   mockedAxios.get = vi.fn().mockResolvedValue({ data: { strategies: [] } })
   mockedAxios.post = vi.fn().mockResolvedValue({ data: { messages: [], final_recommendation: '', query: '', consensus_reached: true, checks_passed: 0, checks_warned: 0, checks_failed: 0, items: [], verdict: 'PASS', checks_total: 0 } })
   mockedAxios.isAxiosError = (() => false) as never

@@ -224,6 +224,48 @@ describe('ExplainableText — custom hover tooltip', () => {
 })
 
 
+describe('glossary term contract', () => {
+  it('populates every key /api/explain/terms returns — none undefined', async () => {
+    const FULL: Record<string, { hover: string; what: string; why: string;
+      this_session: string }> = {
+      cagr: { hover: 'h', what: 'w', why: 'y', this_session: 's' },
+      sharpe_ratio: { hover: 'h', what: 'w', why: 'y', this_session: 's' },
+      tier1_t_test: { hover: 'h', what: 'w', why: 'y', this_session: 's' },
+      alpha_newey_west: { hover: 'h', what: 'w', why: 'y', this_session: 's' },
+      regime_classification: { hover: 'h', what: 'w', why: 'y', this_session: 's' },
+    }
+    mockedAxios.post = vi.fn().mockResolvedValue({ data: FULL })
+    const { result } = renderHook(() => useGlossaryStore())
+    await act(async () => { await result.current.loadTerms() })
+    for (const key of Object.keys(FULL)) {
+      expect(result.current.terms[key]).toBeDefined()
+    }
+  })
+
+  it('resolves the FIX-4 coverage terms as underlined ExplainableText', () => {
+    // The new SignificanceBadge / Analytics-header term IDs resolve the
+    // same as any other glossary term — the underline proves the lookup
+    // hit (post the no-inert-underline rule).
+    useGlossaryStore.setState({
+      terms: {
+        alpha_newey_west: { hover: 'h', what: 'w', why: 'y' },
+        skewness: { hover: 'h', what: 'w', why: 'y' },
+        mkt_rf: { hover: 'h', what: 'w', why: 'y' },
+      },
+      termsLoaded: true,
+    })
+    const { container } = renderInMode('commentary', (
+      <>
+        <ExplainableText term="alpha_newey_west">Alpha (Newey-West)</ExplainableText>
+        <ExplainableText term="skewness">Skewness</ExplainableText>
+        <ExplainableText term="mkt_rf">MKT-RF</ExplainableText>
+      </>
+    ))
+    expect(container.querySelectorAll('.border-dotted').length).toBe(3)
+  })
+})
+
+
 describe('LearnModeBanner', () => {
   it('renders nothing in Analyst mode', () => {
     const { container } = renderInMode('analyst', <LearnModeBanner />)

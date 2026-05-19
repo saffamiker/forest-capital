@@ -380,12 +380,32 @@ class TestCIO:
 
 
 class TestExplainerAgent:
-    def test_fallback_terms_returns_dict(self):
-        from agents.explainer_agent import ExplainerAgent
+    def test_fallback_terms_covers_every_glossary_key(self):
+        # The fallback is the safety net — it must resolve every key that
+        # ExplainableText looks up, so no wrapped term is ever "dark".
+        from agents.explainer_agent import (
+            _GLOSSARY_TERM_KEYS, ExplainerAgent,
+        )
         agent = ExplainerAgent()
-        result = agent._fallback_terms(["VOL_TARGETING"])
+        result = agent._fallback_terms()
         assert isinstance(result, dict)
-        assert len(result) > 0
+        for key in _GLOSSARY_TERM_KEYS:
+            assert key in result, f"fallback missing {key}"
+            entry = result[key]
+            for field in ("hover", "what", "why", "this_session"):
+                assert entry.get(field), f"{key}.{field} empty"
+
+    def test_glossary_term_keys_include_the_required_set(self):
+        # The 19 keys the four ExplainableText components hard-code.
+        from agents.explainer_agent import _GLOSSARY_TERM_KEYS
+        required = {
+            "cagr", "sharpe_ratio", "sharpe_ci", "max_drawdown",
+            "volatility", "turnover", "tier", "dsr", "p_fdr", "cv_score",
+            "tier1_gates", "tier1_t_test", "tier1_fdr_correction",
+            "tier1_dsr", "tier1_oos", "tier1_cv", "walk_forward_oos",
+            "regime_classification", "equity_bond_correlation_breakdown",
+        }
+        assert required <= set(_GLOSSARY_TERM_KEYS)
 
     def test_fallback_chart_returns_required_keys(self):
         from agents.explainer_agent import ExplainerAgent
@@ -396,14 +416,16 @@ class TestExplainerAgent:
         assert "key_callouts" in result
         assert "narrative" in result
 
-    def test_explain_terms_in_test_env(self):
-        """In test env Haiku won't be called — fallback returns dict."""
-        from agents.explainer_agent import ExplainerAgent
+    def test_explain_terms_returns_every_glossary_key(self):
+        """explain_terms merges the LLM result over the fallback, so every
+        _GLOSSARY_TERM_KEYS key resolves regardless of the LLM."""
+        from agents.explainer_agent import (
+            _GLOSSARY_TERM_KEYS, ExplainerAgent,
+        )
         agent = ExplainerAgent()
-        council_output = {
-            "significant_strategies": ["VOL_TARGETING"],
-            "agents": {},
-        }
-        # May return fallback dict or parsed JSON — either must be a dict
-        result = agent.explain_terms(council_output)
+        result = agent.explain_terms({
+            "significant_strategies": ["VOL_TARGETING"], "agents": {},
+        })
         assert isinstance(result, dict)
+        for key in _GLOSSARY_TERM_KEYS:
+            assert key in result, f"explain_terms missing {key}"

@@ -6,7 +6,7 @@
  * in from the right; closes on outside-click, Escape, or the X button.
  *
  * The body of the panel is divided into three sections:
- *   - In this session: the glossary entry's "in_context" field
+ *   - In this session: the glossary entry's "this_session" field
  *   - The mechanism: glossary entry's "why" field expanded
  *   - Further reading: APA citation from references.json (when found)
  *
@@ -82,7 +82,7 @@ export default function LearnMoreSidePanel({ term, entry, onClose }: Props) {
           <section>
             <h3 className="text-2xs uppercase tracking-wide text-muted mb-1.5">In this session</h3>
             <p className="text-white">
-              {entry.in_context ?? 'No session-specific context available.'}
+              {entry.this_session ?? 'No session-specific context available.'}
             </p>
           </section>
 

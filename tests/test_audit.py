@@ -126,20 +126,13 @@ class TestAuditEndpointGating:
     def test_run_rejects_a_viewer(self):
         assert client.post("/api/v1/audit/run", headers=VIEWER).status_code == 403
 
-    def test_run_admits_a_team_member(self, monkeypatch):
-        # The Statistical Audit moved to the QA tab — running it requires
-        # team_member, not sysadmin. start_audit is stubbed so this stays
-        # a pure auth/contract test: it does not insert a real 'running'
-        # audit_runs row (which would leak and 409 later QA-run tests via
-        # the global guard), and is_audit_running is stubbed clear so the
-        # guard itself does not 409 on a pre-existing row.
-        monkeypatch.setattr("tools.audit_engine.is_audit_running",
-                            _no_run_running)
-        monkeypatch.setattr("tools.audit_engine.start_audit",
-                            _fake_start_audit)
-        resp = client.post("/api/v1/audit/run", headers=TEAM)
-        assert resp.status_code == 200
-        assert "status" in resp.json()
+    def test_run_rejects_a_team_member(self):
+        # Triggering a statistical audit is sysadmin-only — a team_member
+        # (Bob / Molly) is refused. The 403 fires at the require_sysadmin
+        # dependency, so start_audit is never reached and no stubbing is
+        # needed.
+        assert client.post("/api/v1/audit/run",
+                           headers=TEAM).status_code == 403
 
     def test_run_admits_the_sysadmin(self, monkeypatch):
         # As above — guard and start_audit both stubbed so this stays an
@@ -543,7 +536,7 @@ class TestSmartAuditCaching:
             return None
         monkeypatch.setattr("tools.audit_engine.is_audit_running", _none)
         monkeypatch.setattr("tools.audit_engine.start_audit", _fake_start)
-        resp = client.post("/api/v1/audit/run", headers=TEAM,
+        resp = client.post("/api/v1/audit/run", headers=SYSADMIN,
                            json={"reason": "demo"})
         assert resp.status_code == 200
         assert captured["triggered_by"] == "demo"
@@ -737,3 +730,44 @@ class TestAuditTimeout:
                     await s.commit()
 
         asyncio.run(scenario())
+
+
+# ── QA / audit run endpoints are sysadmin-only ────────────────────────────────
+
+class TestQARunEndpointGating:
+    """Triggering any QA or statistical-audit run is sysadmin-only
+    (require_sysadmin = the manage_users permission). A team_member
+    (Bob / Molly) or a viewer is refused with 403."""
+
+    QA_RUN_ENDPOINTS = (
+        "/api/qa/audit", "/api/v1/qa/run", "/api/v1/qa/full-review",
+        "/api/v1/audit/run",
+    )
+
+    def test_team_member_gets_403_on_every_qa_run_endpoint(self):
+        for path in self.QA_RUN_ENDPOINTS:
+            resp = client.post(path, headers=TEAM)
+            assert resp.status_code == 403, f"{path} should 403 a team_member"
+
+    def test_viewer_gets_403_on_every_qa_run_endpoint(self):
+        for path in self.QA_RUN_ENDPOINTS:
+            resp = client.post(path, headers=VIEWER)
+            assert resp.status_code == 403, f"{path} should 403 a viewer"
+
+    def test_sysadmin_can_trigger_the_methodology_audit(self):
+        # The sysadmin clears the gate; the methodology endpoints
+        # short-circuit to 200 in the test environment.
+        assert client.post("/api/qa/audit",
+                           headers=SYSADMIN).status_code == 200
+        assert client.post("/api/v1/qa/run",
+                           headers=SYSADMIN).status_code == 200
+
+    def test_sysadmin_can_trigger_the_statistical_audit(self, monkeypatch):
+        # start_audit is stubbed so this contract test inserts no real
+        # audit_runs row — the point is the sysadmin clears the gate.
+        monkeypatch.setattr("tools.audit_engine.is_audit_running",
+                            _no_run_running)
+        monkeypatch.setattr("tools.audit_engine.start_audit",
+                            _fake_start_audit)
+        resp = client.post("/api/v1/audit/run", headers=SYSADMIN)
+        assert resp.status_code == 200

@@ -7,7 +7,7 @@
  *             tooltip (matching the click panel) with the 1-2 sentence
  *             `hover` text from glossaryStore.terms[term].
  *   Level 2 — click panel. Inline expansion below the term showing
- *             what/why/in_context from glossaryStore. Closes on
+ *             what/why/this_session from glossaryStore. Closes on
  *             outside-click or Escape.
  *   Level 3 — "Learn More" link inside the click panel. Opens a side
  *             drawer with academic context drawn from references.json
@@ -107,7 +107,7 @@ export default function ExplainableText({ term, strategy, children }: Props) {
       {hovered && !open && (
         <span
           role="tooltip"
-          className="absolute z-50 left-0 mt-1 w-56 card px-2.5 py-1.5 text-2xs leading-relaxed text-slate-200 shadow-card pointer-events-none"
+          className="absolute z-50 left-0 mt-1 w-56 card px-3 py-1.5 text-2xs leading-relaxed text-slate-200 shadow-card pointer-events-none"
         >
           {entry.hover}
         </span>
@@ -127,12 +127,12 @@ export default function ExplainableText({ term, strategy, children }: Props) {
             <span className="text-2xs uppercase tracking-wide text-muted">Why it matters</span>
             <span className="block text-white mt-0.5">{entry.why}</span>
           </span>
-          {entry.in_context && (
+          {entry.this_session && (
             <span className="block mt-2">
               <span className="text-2xs uppercase tracking-wide text-muted">
                 {strategy ? `For ${strategy.replace(/_/g, ' ')}` : 'This session'}
               </span>
-              <span className="block text-white mt-0.5">{entry.in_context}</span>
+              <span className="block text-white mt-0.5">{entry.this_session}</span>
             </span>
           )}
           <button

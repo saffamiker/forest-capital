@@ -2,7 +2,7 @@ export interface GlossaryTerm {
   hover: string
   what: string
   why: string
-  in_context?: string
+  this_session?: string
   verdict?: string
 }
 

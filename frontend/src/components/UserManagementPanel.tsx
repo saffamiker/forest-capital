@@ -144,7 +144,7 @@ function UserFormModal({ user, onClose, onSaved }: {
                       border border-border bg-navy-800 shadow-2xl">
         <header className="flex items-center justify-between px-4 py-3
                            border-b border-border shrink-0">
-          <h2 className="text-sm font-semibold text-white">
+          <h2 className="text-base font-semibold text-white">
             {editing ? `Edit ${user.display_name || user.email}` : 'Add User'}
           </h2>
           <button type="button" onClick={onClose} aria-label="Close"
@@ -253,7 +253,7 @@ function UserFormModal({ user, onClose, onSaved }: {
             </Field>
           )}
 
-          <div className="rounded border border-border bg-navy-900 px-2.5 py-2
+          <div className="rounded border border-border bg-navy-900 px-3 py-2
                           text-2xs text-muted leading-relaxed">
             <strong className="text-slate-300">Viewer</strong> — explore all
             analytics and ask the council.{' '}
@@ -285,7 +285,7 @@ function UserFormModal({ user, onClose, onSaved }: {
   )
 }
 
-const inputCls = 'w-full rounded border border-border bg-navy-900 px-2 py-1.5 '
+const inputCls = 'w-full rounded border border-border bg-navy-800 px-2 py-1.5 '
   + 'text-xs text-white focus:border-electric focus:outline-none'
 
 function Field({ label, required, children }: {
@@ -398,7 +398,7 @@ export default function UserManagementPanel() {
                       <div className="text-2xs text-muted">{u.email}</div>
                     </td>
                     <td className="py-2 px-2">
-                      <span className={`text-2xs px-1.5 py-0.5 rounded border ${
+                      <span className={`text-2xs px-2 py-0.5 rounded-full border ${
                         ROLE_BADGE[u.role] ?? ROLE_BADGE.viewer}`}>
                         {u.role}
                       </span>
@@ -410,7 +410,10 @@ export default function UserManagementPanel() {
                       )}
                     </td>
                     <td className="py-2 px-2">
-                      <span className={u.is_active ? 'text-success' : 'text-danger'}>
+                      <span className={`text-2xs px-2 py-0.5 rounded-full border ${
+                        u.is_active
+                          ? 'bg-success/15 text-success border-success/30'
+                          : 'bg-danger/15 text-danger border-danger/30'}`}>
                         {u.is_active ? 'Active' : 'Inactive'}
                       </span>
                     </td>
