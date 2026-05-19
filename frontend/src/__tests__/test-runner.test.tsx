@@ -6,13 +6,19 @@
  * server-backed flows (endpoint calls, quality gate, resume) are
  * exercised by the backend suite (tests/test_test_runner.py).
  */
-import { describe, it, expect, vi } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
+import axios from 'axios'
 import {
   TEST_SCRIPTS, TEST_SCRIPT_VERSION, getTestScript, scriptForEmail,
 } from '../constants/testScripts'
 import TestSubmissionPanel from '../components/TestSubmissionPanel'
+import TestRunner from '../components/TestRunner'
 import type { TestStep } from '../constants/testScripts'
+import { AuthContext } from '../App'
+import { SessionProvider, useSession } from '../context/SessionContext'
+import { startTestRun } from '../lib/testRunnerBus'
 
 // ── Test scripts config ───────────────────────────────────────────────────────
 
@@ -101,5 +107,84 @@ describe('TestSubmissionPanel', () => {
     )
     expect(screen.getByText(/logged independently of your current test step/i))
       .toBeInTheDocument()
+  })
+})
+
+// ── TestRunner — Testing Mode is enforced on every start/close ────────────────
+
+/** Surfaces the live session_type so a test can assert Testing Mode. */
+function SessionProbe() {
+  const { sessionType } = useSession()
+  return <div data-testid="session-type">{sessionType}</div>
+}
+
+function renderRunner() {
+  const authValue = {
+    session: {
+      token: 't', email: 'thaob@queens.edu', permissions: ['team_member'],
+    },
+    isVerifying: false, login: vi.fn(), logout: vi.fn(),
+  }
+  return render(
+    <AuthContext.Provider value={authValue}>
+      <SessionProvider>
+        <MemoryRouter>
+          <SessionProbe />
+          <TestRunner />
+        </MemoryRouter>
+      </SessionProvider>
+    </AuthContext.Provider>,
+  )
+}
+
+describe('TestRunner — Testing Mode enforcement', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    // loadExisting() GETs the prior results — no prior run.
+    vi.spyOn(axios, 'get').mockResolvedValue({ data: { results: {} } })
+  })
+  afterEach(() => { vi.restoreAllMocks() })
+
+  it('starting via the notification path enables Testing Mode', async () => {
+    renderRunner()
+    expect(screen.getByTestId('session-type')).toHaveTextContent('analytical')
+    act(() => { startTestRun({ scriptId: 'all_testers_v1' }) })
+    await waitFor(() =>
+      expect(screen.getByTestId('session-type')).toHaveTextContent('testing'))
+  })
+
+  it('starting via a Test Results re-test link enables Testing Mode', async () => {
+    renderRunner()
+    const firstStep = TEST_SCRIPTS[0].steps[0].id
+    act(() => {
+      startTestRun({ scriptId: 'all_testers_v1', stepId: firstStep })
+    })
+    await waitFor(() =>
+      expect(screen.getByTestId('session-type')).toHaveTextContent('testing'))
+  })
+
+  it('closing the runner disables Testing Mode', async () => {
+    renderRunner()
+    act(() => { startTestRun() })   // no scriptId → the script selector
+    await waitFor(() =>
+      expect(screen.getByTestId('session-type')).toHaveTextContent('testing'))
+    fireEvent.click(screen.getByText('Cancel'))
+    await waitFor(() =>
+      expect(screen.getByTestId('session-type')).toHaveTextContent('analytical'))
+  })
+
+  it('shows a toast when Testing Mode is auto-enabled', async () => {
+    renderRunner()
+    act(() => { startTestRun({ scriptId: 'all_testers_v1' }) })
+    expect(await screen.findByText(/Testing Mode enabled automatically/))
+      .toBeInTheDocument()
+  })
+
+  it('shows a toast when Testing Mode is auto-disabled on close', async () => {
+    renderRunner()
+    act(() => { startTestRun() })
+    await screen.findByText('Cancel')
+    fireEvent.click(screen.getByText('Cancel'))
+    expect(await screen.findByText(/Testing Mode off/)).toBeInTheDocument()
   })
 })
