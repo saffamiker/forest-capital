@@ -3773,7 +3773,28 @@ async def _editor_export(editor_draft_id: int) -> Response:
 
     if draft["document_type"] == "presentation_deck":
         from tools.academic_deck import build_editor_pptx
-        content = await asyncio.to_thread(build_editor_pptx, draft)
+        from tools.chart_render import is_known_chart, render_chart_png
+
+        # Render each chart element's PNG server-side (an async path) and
+        # hand the {element_id: png} map to the sync .pptx builder. A
+        # failed render is left out — the builder degrades it gracefully.
+        content_json = draft.get("content_json") or {}
+        deck_slides = (content_json.get("slides", [])
+                       if isinstance(content_json, dict) else [])
+        chart_pngs: dict[str, bytes] = {}
+        for sl in deck_slides:
+            for el in (sl.get("elements") or [] if isinstance(sl, dict) else []):
+                if (isinstance(el, dict) and el.get("type") == "chart"
+                        and is_known_chart(str(el.get("chartKey", "")))):
+                    try:
+                        # Render at 2x the element box for print quality.
+                        w = min(2000, max(80, int(el.get("width") or 360) * 2))
+                        h = min(2000, max(80, int(el.get("height") or 220) * 2))
+                        chart_pngs[str(el.get("id"))] = await render_chart_png(
+                            str(el["chartKey"]), "light", w, h)
+                    except Exception:  # noqa: BLE001 — skip, builder degrades
+                        pass
+        content = await asyncio.to_thread(build_editor_pptx, draft, chart_pngs)
         media, ext = _PPTX_MEDIA, "pptx"
     else:
         from tools.academic_docx import build_editor_docx
