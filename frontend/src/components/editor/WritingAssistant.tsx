@@ -14,12 +14,18 @@ import {
 
 import Markdown from '../Markdown'
 
+import type { EditorDocumentType } from '../../types/editor'
+
 interface Props {
   draftId: number
   unresolvedMarkers: number
   /** A passage to drop into the chat input — set by the editor's
    *  "Ask AI" selection action. The nonce re-triggers on each request. */
   prefill?: { text: string; nonce: number } | null
+  /** The draft's type — drives a per-type note below the Review button
+   *  (e.g. the script editor reminds the user that Academic Review is
+   *  optimised for written submissions). */
+  documentType?: EditorDocumentType | undefined
 }
 
 const SUGGESTED = [
@@ -35,7 +41,7 @@ interface ChatMessage {
 }
 
 export default function WritingAssistant({
-  draftId, unresolvedMarkers, prefill,
+  draftId, unresolvedMarkers, prefill, documentType,
 }: Props) {
   const [reviewPhase, setReviewPhase] =
     useState<'idle' | 'running' | 'done' | 'error'>('idle')
@@ -149,6 +155,17 @@ export default function WritingAssistant({
             ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Consulting the council…</>
             : <><GraduationCap className="w-3.5 h-3.5" /> Run Academic Review</>}
         </button>
+        {documentType === 'presentation_script' && (
+          // Script-specific framing — the arbiter rubric is tuned for
+          // written deliverables (citation density, paragraph structure).
+          // Surface the caveat so a presenter focuses on the verdicts
+          // that DO apply rather than worrying about formatting scores.
+          <p className="text-2xs text-muted mt-1.5 leading-relaxed">
+            Academic Review is optimised for written submissions. For
+            a presentation script, focus on coherence and argument
+            structure verdicts and disregard formatting scores.
+          </p>
+        )}
         {reviewPhase === 'error' && (
           <p className="text-2xs text-danger mt-1">
             The review could not be completed — please retry.

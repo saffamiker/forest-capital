@@ -47,7 +47,10 @@ interface GlossaryState extends LoadFlags {
   qa: Record<string, QAItemExplanation>
   charts: Record<string, ChartExplanation>
 
-  loadTerms: (councilOutput?: Record<string, unknown>) => Promise<void>
+  loadTerms: (
+    councilOutput?: Record<string, unknown>,
+    options?: { force?: boolean },
+  ) => Promise<void>
   loadParameter: (
     parameter: string,
     value: unknown,
@@ -80,12 +83,20 @@ export const useGlossaryStore = create<GlossaryState>((set, get) => ({
   termsLoading: false,
   inflight:     new Set<string>(),
 
-  // ── Terms: loaded once per session. The backend accepts any council_output
-  //    shape — we pass current strategy results when no council has run yet
-  //    so the explanations are still anchored to real numbers.
-  loadTerms: async (councilOutput) => {
-    if (get().termsLoaded || get().termsLoading) return
-    set({ termsLoading: true })
+  // ── Terms: loaded once per session by default; force:true bypasses the
+  //    guard for a silent re-anchor after a council session completes.
+  //
+  //    Default path — set termsLoading=true, fetch, set terms+loaded.
+  //    Force path — bypasses both guards (termsLoaded AND termsLoading
+  //      so a still-in-flight initial load doesn't block the reload),
+  //      DOES NOT toggle termsLoading so the UI never flashes a loading
+  //      state during the silent reload, and overwrites terms with the
+  //      fresh response so each term's `this_session` field reflects the
+  //      completed council output.
+  loadTerms: async (councilOutput, options) => {
+    const force = options?.force ?? false
+    if (!force && (get().termsLoaded || get().termsLoading)) return
+    if (!force) set({ termsLoading: true })
     try {
       // Anchor the glossary in the current session: when the caller does
       // not pass council output explicitly, fall back to the last

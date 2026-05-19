@@ -220,4 +220,64 @@ describe('DocumentEditor — script export', () => {
     mountEditor(scriptDraft())
     expect(await screen.findByText(/min delivery/)).toBeInTheDocument()
   })
+
+  it('shows the Academic Review script note in the writing assistant',
+    async () => {
+      // FIX 3 — the note appears below the Run Academic Review button
+      // only when the draft is a presentation_script. Reminds the
+      // presenter that the arbiter rubric is tuned for written work.
+      mountEditor(scriptDraft())
+      expect(await screen.findByText(
+        /Academic Review is optimised for written submissions/))
+        .toBeInTheDocument()
+    })
+
+  it('does NOT show the Academic Review script note for a deck draft',
+    async () => {
+      mountEditor(deckDraft(true))
+      // The button is anchored by data-tour; the note must be absent.
+      await screen.findByRole('button', { name: /Run Academic Review/ })
+      expect(screen.queryByText(
+        /Academic Review is optimised for written submissions/))
+        .toBeNull()
+    })
+
+  it('shows the rehearsal note in the script navigator', async () => {
+    // FIX 4 — the rehearsal note sits below the delivery-time line
+    // in the EditorNavigator only for a presentation_script draft.
+    mountEditor(scriptDraft())
+    expect(await screen.findByText(/To rehearse with slides/))
+      .toBeInTheDocument()
+  })
+
+  it('does NOT show the rehearsal note for a deck draft', async () => {
+    mountEditor(deckDraft(true))
+    // The deck has its own speaker/canvas affordances — the script-
+    // specific rehearsal note must not appear there.
+    await screen.findByRole('button', { name: /Generate Script/ })
+    expect(screen.queryByText(/To rehearse with slides/)).toBeNull()
+  })
+})
+
+// ── FIX 4 — EditorNavigator footnote rendering (no router needed) ─────────────
+
+describe('EditorNavigator — footnote prop', () => {
+  const base = {
+    title: 'Script', wordCount: 0, wordTarget: 0, lastSavedLabel: 'never',
+    saveState: 'idle' as const, sections: [], versions: [],
+    onJumpToSection: () => {}, onSaveVersion: () => {},
+    onRestoreVersion: () => {},
+  }
+
+  it('renders the rehearsal footnote when set', () => {
+    render(<EditorNavigator {...base}
+      footnote="To rehearse with slides: open your presentation deck in a second tab." />)
+    expect(screen.getByText(/To rehearse with slides/))
+      .toBeInTheDocument()
+  })
+
+  it('omits the footnote when not set', () => {
+    render(<EditorNavigator {...base} />)
+    expect(screen.queryByText(/To rehearse/)).toBeNull()
+  })
 })

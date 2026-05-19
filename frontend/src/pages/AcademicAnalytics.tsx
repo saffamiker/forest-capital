@@ -311,7 +311,11 @@ const TH = ({ children, right = false, infoKey, infoLabel, term,
       {term
         ? <ExplainableText term={term}>{children}</ExplainableText>
         : children}
-      {infoKey && (
+      {/* No double affordance — InfoIcon (hover tooltip) is suppressed
+          when the header is already wrapped in ExplainableText (dotted
+          underline + click panel, the richer affordance). Headers that
+          do not declare a glossary term keep the InfoIcon. */}
+      {!term && infoKey && (
         <InfoIcon tooltipKey={infoKey} metricLabel={infoLabel ?? infoKey} />
       )}
     </span>
