@@ -6239,17 +6239,18 @@ shape for newly generated decks, so a generated deck and a migrated one
 open identically.
 
 CHART RENDER ENDPOINTS — the canvas embeds live platform charts as
-server-rendered PNGs. tools/chart_render.py exposes the five charts
-academic_deck.render_deck_charts() can produce (rolling_correlation,
-cumulative_returns, risk_return, sensitivity, team_activity):
+server-rendered PNGs. tools/chart_render.py exposes the full chart
+library (expanded May 19 2026 — see CHART LIBRARY section below):
   GET /api/v1/charts/available        — the renderable chart list
   GET /api/v1/charts/render/{key}     — the chart as a PNG, sized to
     the ?width/?height query (theme=dark falls back to the light
     render — the matplotlib renderers are light-only)
-Both are team_member-gated. render_chart_png() reuses the matplotlib
-renderers the PPTX export uses, resizes with Pillow, and a 5-minute
-per-(key, theme, w, h) cache keeps repeated requests (thumbnails,
-re-fetches) off the render path. A chart whose source data is cold
+Both are team_member-gated. render_chart_png() dispatches between two
+matplotlib renderer families (academic_deck.render_deck_charts for the
+five charts the .pptx export ships, tools/chart_renderers for the
+canvas-only extended set), resizes with Pillow, and a 5-minute per-
+(key, theme, w, h) cache keeps repeated requests (thumbnails, re-
+fetches) off the render path. A chart whose source data is cold
 degrades to a placeholder PNG — the canvas always receives an image.
 
 FRONTEND — the centre panel for a presentation_deck draft is
@@ -6333,6 +6334,141 @@ whole document (a six-colour palette assigned by first-seen order) so
 the master script can be scanned for one presenter's parts. The script
 editor header shows [Export Master Script] plus one [Export: <name>]
 per unique speaker.
+
+
+─────────────────────────────────────────────────────────────────────────────
+CHART LIBRARY — canvas editor server-rendered charts (May 19 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The chart picker drawer in the Konva canvas editor offers a library of
+sixteen server-renderable charts grouped into six categories. The full
+inventory — chart_key, category, data sources, renderer — lives as a
+comment block at the top of tools/chart_render.py; this section is the
+narrative reference for the team.
+
+ARCHITECTURE — two renderer families behind chart_render.render_chart_png:
+  - tools.academic_deck.render_deck_charts — the five charts the .pptx
+    export ships (rolling_correlation, cumulative_returns, risk_return,
+    sensitivity, team_activity)
+  - tools.chart_renderers.render_extended_charts — eleven canvas-only
+    charts added by the chart-library expansion build. Same matplotlib
+    light theme as academic_deck so a canvas chart matches a deck
+    chart side by side in the final presentation.
+
+The dispatcher is _DECK_KEYS-based in chart_render._render_raw — every
+key NOT in the deck five routes to the extended renderer. Per-chart
+extras (HMM history, raw monthly returns, ff_factors, monthly rf) are
+gathered by chart_render._gather_extended_extras BEFORE the
+asyncio.to_thread call, so the renderer stays sync and heavy fetches
+are paid only by the charts that consume them.
+
+FULL INVENTORY by display group (the chart picker's section headers):
+
+  Regime Analysis
+    regime_signals               HMM posterior probability over time
+                                   as a stacked area (BULL/TRANSITION/
+                                   BEAR sum to 1.0 at every t)
+    regime_conditional_returns   Mean annualised return per asset
+                                   (Equity / IG / HY) split by regime
+
+  Factors
+    factor_loadings              BENCHMARK Carhart four-factor betas
+                                   (MKT-RF, SMB, HML, MOM) with 95%
+                                   CI error bars
+    factor_returns_attribution   Stacked yearly factor contribution to
+                                   the BENCHMARK annual return
+
+  Performance
+    rolling_correlation          Equity-bond rolling correlation with
+                                   the 2022 regime-break marker
+    cumulative_returns           Growth of $1 across every strategy +
+                                   the benchmark
+    rolling_sharpe               36-month rolling Sharpe — strategy +
+                                   benchmark, zero reference dashed
+    return_distribution          Overlaid histograms with normal-curve
+                                   overlays — strategy vs benchmark
+    monthly_returns_heatmap      Stacked year × month grids (strategy
+                                   on top, benchmark below) sharing a
+                                   diverging colour scale
+
+  Risk
+    drawdown_periods             Underwater equity curve — strategy +
+                                   benchmark on one chart
+    risk_return                  Every strategy by annualised return ×
+                                   volatility
+    sensitivity                  Headline metrics under +/-20%
+                                   parameter perturbation
+
+  Significance
+    significance_journey         Row-per-Tier-1-gate × column-per-
+                                   strategy matrix; green PASS / red
+                                   FAIL per cell
+    oos_performance              Cumulative growth-of-$1 for the
+                                   strategy with the last 60 months
+                                   coloured as the OOS window
+    p_value_distribution         FDR-corrected p-value per strategy
+                                   with a dashed line at q = 0.005
+
+  Activity
+    team_activity                Per-member commits / council runs /
+                                   page views
+
+DATA SOURCES — the inventory comment in chart_render.py is the
+authoritative source map. Three notes the team should know:
+
+  CHARTS NEEDING THE QA CACHE: none. The Tier 1 gate fields read by
+  significance_journey, p_value_distribution, and oos_performance
+  (p_value_ttest, p_value_corrected, dsr_p_value, oos_significant,
+  cv_stability_score, tier1_gates_passed) live in
+  strategy_results_cache, NOT qa_results_cache. qa_results_cache stores
+  the QA Agent's checklist verdict, a different artefact.
+
+  CHARTS NEEDING REGIME SIGNALS CACHE: none for time-series renders.
+  regime_signals_cache stores only the current/latest regime reading
+  (single row, 15-minute TTL). Time-series regime charts read from
+  classify_hmm_regime's historical_probs / labelled_series on the full
+  monthly series, fitted on demand and cached by series fingerprint.
+
+  CHARTS NEEDING A FRESH HMM FIT: regime_signals and
+  regime_conditional_returns. The detector's in-process cache keys on
+  series fingerprint so a second call in the same trading day skips the
+  Baum-Welch fit. tools/regime_detector.fit_hmm_historical was extended
+  in this build to also return historical_probs (label → list-of-
+  probabilities) and dates, computed from the forward-backward
+  score_samples already run internally.
+
+UPSTREAM CHANGES from this build:
+  tools/regime_detector.fit_hmm_historical — gains historical_probs +
+    dates in its return dict. Existing callers (the regime-analysis
+    dashboard) are unchanged; the new fields are additive.
+  tools/analytics.factor_loadings — gains 95% confidence intervals
+    (alpha_lo/hi, mkt_rf_lo/hi, smb_lo/hi, hml_lo/hi, mom_lo/hi)
+    extracted from statsmodels model.conf_int(0.05). The
+    factor-loadings table on Analytics renders betas + significance
+    flags only, so the change is purely additive — same single-source-
+    of-truth, richer output for the factor_loadings chart's error bars.
+
+SINGLE-STRATEGY DEFAULT — the four single-strategy renderers
+(drawdown_periods, monthly_returns_heatmap, rolling_sharpe,
+return_distribution, oos_performance) default to REGIME_SWITCHING vs
+BENCHMARK. When REGIME_SWITCHING is absent from the cache they fall
+back to the first non-BENCHMARK strategy. The canvas editor does not
+yet expose a strategy picker; the default + fallback covers every
+realistic dataset state.
+
+OOS WINDOW — oos_performance splits the cumulative returns series at
+the last 60 months. Five years is the most defensible OOS framing to
+the faculty panel; an 80/20 split is less explainable. Constant lives
+as _OOS_WINDOW_MONTHS in tools/chart_renderers.py.
+
+FRONTEND — components/editor/ChartPicker.tsx renders the library as
+ordered category sections. CATEGORY_LABELS maps the API's compact
+kebab keys ("regime", "performance") to display labels ("Regime
+Analysis", "Performance"). Section headers carry an electric-blue
+underline so the grouped layout reads as a structured library. Each
+group div carries data-testid="chart-picker-group-<category>" and each
+card data-testid="chart-picker-item-<key>" for the grouped-layout
+tests.
 
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
