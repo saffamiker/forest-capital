@@ -1,20 +1,22 @@
 """
 tests/test_qa_guard.py
 
-The global QA-run concurrency guard (tools/qa_guard.py). Only one QA run
-— a statistical audit or a methodology audit — may be in progress
-platform-wide; a second is rejected with HTTP 409, not queued.
+The per-type QA-run concurrency guards (tools/qa_guard.py).
 
-Covers: the guard reports the in-progress kind correctly, a blocked run
-returns the 409 + message on every run-triggering endpoint, a run
-proceeds when none is in progress, and the guard lifts cleanly when the
-active run completes.
+There are two INDEPENDENT locks — methodology and statistical — and one
+must never block the other. A second run OF THE SAME TYPE is rejected
+with HTTP 409; a run of the OTHER type proceeds.
+
+Covers: each guard reports its own type correctly, the methodology flag
+auto-clears when stale, a same-type second run 409s on its endpoints, a
+cross-type run is NOT blocked, and the guard lifts cleanly on completion.
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import sys
+import time
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,19 +32,28 @@ os.environ.setdefault(
 
 from main import app  # noqa: E402
 from auth import generate_session_token  # noqa: E402
-from tools import qa_guard  # noqa: E402
+from tools import audit_engine, qa_guard  # noqa: E402
 
 client = TestClient(app)
 # ruurdsm@ is the sysadmin — holds team_member, so /api/v1/audit/run is reachable.
 HEADERS = {"X-API-Key": generate_session_token("ruurdsm@queens.edu")}
 
-# Every run-triggering endpoint the guard protects.
-RUN_ENDPOINTS = [
+METHODOLOGY_ENDPOINTS = [
     "/api/qa/audit",
     "/api/v1/qa/run",
     "/api/v1/qa/full-review",
-    "/api/v1/audit/run",
 ]
+STATISTICAL_ENDPOINT = "/api/v1/audit/run"
+
+
+async def _none():
+    return None
+
+
+async def _fake_start_audit(triggered_by: str, email: str) -> dict:
+    """Stubs start_audit so a contract test never inserts a real
+    'running' audit_runs row that would leak into later tests."""
+    return {"status": "started", "audit_id": 1}
 
 
 @pytest.fixture(autouse=True)
@@ -50,17 +61,13 @@ def _reset_guard(monkeypatch):
     """
     Isolates each test from process-global and database state.
 
-    The methodology flag is process-global — it is cleared before and
-    after every test. The statistical check reads audit_runs from the
-    live database; a stale 'running' row left by another suite would
-    make the guard non-deterministic here, so is_audit_running is
-    stubbed to "nothing running" by default. The statistical tests
-    override the stub with their own monkeypatch.
+    The methodology flag is process-global — cleared before and after
+    every test. The statistical check reads audit_runs from the live
+    database; a stale 'running' row from another suite would make the
+    guard non-deterministic, so is_audit_running is stubbed to "nothing
+    running" by default. Statistical tests override the stub themselves.
     """
     qa_guard.end_methodology()
-
-    async def _none():
-        return None
     monkeypatch.setattr("tools.audit_engine.is_audit_running", _none)
     yield
     qa_guard.end_methodology()
@@ -70,86 +77,112 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-# ── qa_run_in_progress — the guard signal ─────────────────────────────────────
+# ── Guard signals ─────────────────────────────────────────────────────────────
 
 class TestGuardSignal:
-    def test_no_run_in_progress_returns_none(self):
-        qa_guard.end_methodology()
-        assert _run(qa_guard.qa_run_in_progress()) is None
-
-    def test_methodology_flag_reports_methodology(self):
-        qa_guard.begin_methodology()
-        assert qa_guard.methodology_in_progress() is True
-        assert _run(qa_guard.qa_run_in_progress()) == "methodology"
-
-    def test_guard_lifts_when_methodology_ends(self):
-        qa_guard.begin_methodology()
-        assert _run(qa_guard.qa_run_in_progress()) == "methodology"
+    def test_no_methodology_run_returns_false(self):
         qa_guard.end_methodology()
         assert qa_guard.methodology_in_progress() is False
-        assert _run(qa_guard.qa_run_in_progress()) is None
 
-    def test_running_statistical_audit_reports_statistical(self, monkeypatch):
-        # A 'running' audit_runs row → is_audit_running returns its id.
-        async def _fake_running():
+    def test_methodology_flag_reports_in_progress(self):
+        qa_guard.begin_methodology()
+        assert qa_guard.methodology_in_progress() is True
+
+    def test_methodology_guard_lifts_on_end(self):
+        qa_guard.begin_methodology()
+        assert qa_guard.methodology_in_progress() is True
+        qa_guard.end_methodology()
+        assert qa_guard.methodology_in_progress() is False
+
+    def test_methodology_flag_auto_clears_when_stale(self):
+        # A flag set more than 15 minutes ago is a crashed run that never
+        # reached end_methodology — methodology_in_progress() reaps it.
+        qa_guard.begin_methodology()
+        qa_guard._methodology["started_at"] = time.time() - 16 * 60
+        assert qa_guard.methodology_in_progress() is False
+
+    def test_statistical_in_progress_true_when_audit_running(self, monkeypatch):
+        async def _running():
             return 42
-        monkeypatch.setattr("tools.audit_engine.is_audit_running",
-                            _fake_running)
-        assert _run(qa_guard.qa_run_in_progress()) == "statistical"
+        monkeypatch.setattr("tools.audit_engine.is_audit_running", _running)
+        assert _run(qa_guard.statistical_audit_in_progress()) is True
+
+    def test_statistical_in_progress_false_when_none(self):
+        assert _run(qa_guard.statistical_audit_in_progress()) is False
 
     def test_statistical_check_fails_open(self, monkeypatch):
-        # A database error in the statistical check must not wedge the
-        # guard — it reports "no run in progress".
+        # A database error must not wedge the guard — it reports "free".
         async def _boom():
             raise RuntimeError("db down")
         monkeypatch.setattr("tools.audit_engine.is_audit_running", _boom)
-        assert _run(qa_guard.qa_run_in_progress()) is None
+        assert _run(qa_guard.statistical_audit_in_progress()) is False
 
 
-# ── Endpoint contract — a blocked run returns 409 ─────────────────────────────
+# ── Per-type independence — one type never blocks the other ───────────────────
+
+class TestPerTypeIndependence:
+    def test_a_methodology_run_does_not_block_a_statistical_audit(
+        self, monkeypatch,
+    ):
+        # A methodology audit is in progress; a statistical audit must
+        # still be allowed to start. start_audit is stubbed so this stays
+        # a contract test (no real audit_runs row inserted).
+        qa_guard.begin_methodology()
+        monkeypatch.setattr("tools.audit_engine.start_audit",
+                            _fake_start_audit)
+        resp = client.post(STATISTICAL_ENDPOINT, headers=HEADERS)
+        assert resp.status_code == 200, "a methodology run must not block it"
+
+    def test_a_statistical_audit_does_not_block_methodology_runs(
+        self, monkeypatch,
+    ):
+        # A statistical audit is in progress; every methodology endpoint
+        # must still proceed (test-env 200, not 409).
+        async def _running():
+            return 7
+        monkeypatch.setattr("tools.audit_engine.is_audit_running", _running)
+        for path in METHODOLOGY_ENDPOINTS:
+            resp = client.post(path, headers=HEADERS)
+            assert resp.status_code == 200, f"{path} must not be blocked"
+
+
+# ── Same-type rejection — a second run of the same type 409s ──────────────────
 
 class TestBlockedRuns:
-    def test_every_run_endpoint_409s_during_a_methodology_run(self):
+    def test_methodology_endpoints_409_during_a_methodology_run(self):
         qa_guard.begin_methodology()
-        for path in RUN_ENDPOINTS:
+        for path in METHODOLOGY_ENDPOINTS:
             resp = client.post(path, headers=HEADERS)
             assert resp.status_code == 409, f"{path} should be blocked"
-            assert "QA run is currently in progress" in resp.json()["detail"]
+            assert "methodology audit is already in progress" \
+                in resp.json()["detail"]
 
-    def test_run_endpoints_409_during_a_statistical_audit(self, monkeypatch):
-        async def _fake_running():
+    def test_audit_run_409s_during_a_statistical_audit(self, monkeypatch):
+        async def _running():
             return 7
-        monkeypatch.setattr("tools.audit_engine.is_audit_running",
-                            _fake_running)
-        for path in RUN_ENDPOINTS:
-            resp = client.post(path, headers=HEADERS)
-            assert resp.status_code == 409, f"{path} should be blocked"
-            assert "QA run is currently in progress" in resp.json()["detail"]
+        monkeypatch.setattr("tools.audit_engine.is_audit_running", _running)
+        resp = client.post(STATISTICAL_ENDPOINT, headers=HEADERS)
+        assert resp.status_code == 409
+        assert "statistical audit is already in progress" \
+            in resp.json()["detail"]
 
 
-# ── Endpoint contract — a run proceeds when the platform is free ──────────────
+# ── A run proceeds when the platform is free ──────────────────────────────────
 
 class TestRunsProceedWhenFree:
     def test_methodology_endpoints_proceed_when_nothing_running(self):
-        # No run in progress → the methodology endpoints reach their
-        # test-environment path (a 200, not a 409).
         qa_guard.end_methodology()
-        for path in ("/api/qa/audit", "/api/v1/qa/run",
-                     "/api/v1/qa/full-review"):
+        for path in METHODOLOGY_ENDPOINTS:
             resp = client.post(path, headers=HEADERS)
             assert resp.status_code == 200, f"{path} should proceed"
 
-    def test_run_proceeds_after_the_guard_lifts(self):
-        # Blocked while a run is active, proceeds once it completes.
+    def test_methodology_run_proceeds_after_the_guard_lifts(self):
         qa_guard.begin_methodology()
         assert client.post("/api/qa/audit", headers=HEADERS).status_code == 409
         qa_guard.end_methodology()
         assert client.post("/api/qa/audit", headers=HEADERS).status_code == 200
 
     def test_methodology_endpoint_clears_the_flag_after_running(self):
-        # A completed run must leave the guard clear for the next run —
-        # the endpoint's begin/end bracket lifts the guard on the way out.
         qa_guard.end_methodology()
         client.post("/api/qa/audit", headers=HEADERS)
         assert qa_guard.methodology_in_progress() is False
-        assert _run(qa_guard.qa_run_in_progress()) is None

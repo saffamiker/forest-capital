@@ -20,6 +20,8 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-at-least-32-characters-long")
@@ -87,6 +89,35 @@ async def _no_run_running() -> None:
 
 async def _fake_start_audit(triggered_by: str, email: str) -> dict:
     return {"status": "started", "audit_id": 1}
+
+
+_db_ready_cache: bool | None = None
+
+
+def _db_ready() -> bool:
+    """True when a live PostgreSQL with the audit tables is reachable."""
+    global _db_ready_cache
+    if _db_ready_cache is not None:
+        return _db_ready_cache
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal, engine
+        if AsyncSessionLocal is None:
+            _db_ready_cache = False
+            return False
+
+        async def _probe() -> bool:
+            if engine is not None:
+                await engine.dispose()
+            async with AsyncSessionLocal() as s:
+                await s.execute(text("SELECT 1 FROM audit_runs LIMIT 1"))
+            return True
+
+        _db_ready_cache = asyncio.run(_probe())
+    except Exception:
+        _db_ready_cache = False
+    return _db_ready_cache
 
 
 # ── Endpoint gating ───────────────────────────────────────────────────────────
@@ -565,3 +596,90 @@ class TestSmartAuditCaching:
                             lambda reason: calls.append(reason))
         df._persist_to_db({}, {}, None, None, {}, None)
         assert calls == []   # the monthly write failed — no audit fired
+
+
+# ── Audit timeout — a hung 'running' row is reaped ────────────────────────────
+
+class TestAuditTimeout:
+    """fail_stale_audits — a run stuck 'running' past 15 minutes is
+    marked failed so the concurrency lock releases."""
+
+    def test_timeout_is_fifteen_minutes(self):
+        assert audit_engine._AUDIT_TIMEOUT_MINUTES == 15
+
+    def test_fail_stale_audits_no_database_returns_zero(self, monkeypatch):
+        # Fail-open — no database configured reaps nothing, never raises.
+        import database
+        monkeypatch.setattr(database, "AsyncSessionLocal", None,
+                            raising=False)
+        assert asyncio.run(audit_engine.fail_stale_audits()) == 0
+
+    def test_fail_stale_audits_reaps_a_hung_run(self):
+        if not _db_ready():
+            pytest.skip("no live database with the audit tables")
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal, engine
+
+        async def scenario():
+            if engine is not None:
+                await engine.dispose()
+            # A run 'running' for 20 minutes — past the 15-minute timeout.
+            async with AsyncSessionLocal() as s:
+                row = await s.execute(text(
+                    "INSERT INTO audit_runs (triggered_by, status, "
+                    "triggered_at) VALUES ('manual', 'running', "
+                    "now() - interval '20 minutes') RETURNING id"))
+                rid = int(row.scalar())
+                await s.commit()
+            try:
+                reaped = await audit_engine.fail_stale_audits()
+                assert reaped >= 1
+                async with AsyncSessionLocal() as s:
+                    r = await s.execute(text(
+                        "SELECT status, metadata FROM audit_runs "
+                        "WHERE id = :i"), {"i": rid})
+                    status, metadata = r.fetchone()
+                assert status == "failed"
+                assert "timeout" in str(
+                    (metadata or {}).get("timeout_reason", "")).lower()
+            finally:
+                async with AsyncSessionLocal() as s:
+                    await s.execute(text(
+                        "DELETE FROM audit_runs WHERE id = :i"), {"i": rid})
+                    await s.commit()
+
+        asyncio.run(scenario())
+
+    def test_fail_stale_audits_leaves_a_fresh_run(self):
+        if not _db_ready():
+            pytest.skip("no live database with the audit tables")
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal, engine
+
+        async def scenario():
+            if engine is not None:
+                await engine.dispose()
+            # A run that started just now — well inside the timeout.
+            async with AsyncSessionLocal() as s:
+                row = await s.execute(text(
+                    "INSERT INTO audit_runs (triggered_by, status) "
+                    "VALUES ('manual', 'running') RETURNING id"))
+                rid = int(row.scalar())
+                await s.commit()
+            try:
+                await audit_engine.fail_stale_audits()
+                async with AsyncSessionLocal() as s:
+                    r = await s.execute(text(
+                        "SELECT status FROM audit_runs WHERE id = :i"),
+                        {"i": rid})
+                    status = r.fetchone()[0]
+                assert status == "running"   # the fresh run is untouched
+            finally:
+                async with AsyncSessionLocal() as s:
+                    await s.execute(text(
+                        "DELETE FROM audit_runs WHERE id = :i"), {"i": rid})
+                    await s.commit()
+
+        asyncio.run(scenario())

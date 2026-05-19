@@ -1,30 +1,31 @@
 """
-tools/qa_guard.py — global QA-run concurrency guard.
+tools/qa_guard.py — per-type QA-run concurrency guards.
 
-Only one QA run may be in progress platform-wide at a time. A QA run is
-either a statistical audit (the three-layer recomputation) or a
-methodology audit (the QA-agent checklist / tiered checks). A second run
-of either kind, started while one is in flight, is REJECTED — not
-queued — with a clear message.
+There are two INDEPENDENT kinds of QA run, each with its own lock so one
+never blocks the other:
 
-Two in-progress signals are combined:
+  - Statistical — the three-layer recomputation. Its lock is the
+    'running' row in audit_runs (tools.audit_engine.is_audit_running) —
+    a cross-process lock that survives a restart and is visible to every
+    worker. is_audit_running() reaps any run stuck 'running' past the
+    15-minute timeout, so a crashed run can never hold the lock forever.
 
-  - Statistical — the 'running' row in audit_runs. This is the existing
-    cross-process lock: it survives a restart and is visible to every
-    worker (tools.audit_engine.is_audit_running).
+  - Methodology — the QA-agent checklist / tiered checks. Its lock is a
+    process-level flag, set for the synchronous run's duration. The
+    backend runs a single uvicorn worker, so the flag is platform-wide
+    for this deployment. A flag still set past the 15-minute timeout
+    (a crashed run that never reached end_methodology) is treated as
+    stale and auto-cleared — the in-memory counterpart of the
+    statistical audit's audit_runs timeout.
 
-  - Methodology — a process-level flag. The methodology audits run
-    synchronously inside their request, so a flag set for the request's
-    duration is sufficient. The backend runs a single uvicorn worker, so
-    the flag is platform-wide for this deployment; were it ever scaled
-    to multiple workers the methodology audits would need their own
-    audit_runs-style row.
+A statistical audit and a methodology audit MAY run concurrently — they
+verify different things and contend for nothing. Each run-triggering
+endpoint guards ONLY on its own type: statistical_audit_in_progress()
+gates /api/v1/audit/run; methodology_in_progress() gates the QA-agent
+endpoints.
 
-qa_run_in_progress() checks both, so a guard placed on EITHER run path
-sees a run started on the other — that cross-visibility is the point.
-
-Fail-open: a check error reports "no run in progress" rather than
-wedging every QA run behind a guard that cannot clear.
+Fail-open: a check error reports "not running" rather than wedging every
+QA run behind a guard that cannot clear.
 """
 from __future__ import annotations
 
@@ -34,11 +35,20 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-# The message returned to a caller whose run is rejected.
-QA_BUSY_MESSAGE = (
-    "A QA run is currently in progress. Please wait for it to complete "
-    "before starting a new one."
+# The 409 messages returned to a caller whose run is rejected.
+QA_BUSY_MESSAGE_STATISTICAL = (
+    "A statistical audit is already in progress. Please wait for it to "
+    "complete before starting another."
 )
+QA_BUSY_MESSAGE_METHODOLOGY = (
+    "A methodology audit is already in progress. Please wait for it to "
+    "complete before starting another."
+)
+
+# A methodology flag still set past this is treated as a crashed run that
+# never reached end_methodology, and auto-cleared. Mirrors the statistical
+# audit's 15-minute audit_runs timeout (audit_engine._AUDIT_TIMEOUT_MINUTES).
+_METHODOLOGY_TIMEOUT_SECONDS = 15 * 60
 
 # Process-level methodology-run flag. Set for the duration of a
 # synchronous methodology audit; cleared in a finally so an exception
@@ -47,8 +57,21 @@ _methodology: dict[str, object] = {"active": False, "started_at": None}
 
 
 def methodology_in_progress() -> bool:
-    """True while a methodology audit is running in this process."""
-    return bool(_methodology["active"])
+    """True while a methodology audit is running in this process. A flag
+    still set past the timeout is a crashed run that never reached
+    end_methodology — treated as stale and cleared, so a hung run can
+    never block methodology audits indefinitely."""
+    if not _methodology["active"]:
+        return False
+    started = _methodology["started_at"]
+    if isinstance(started, (int, float)) and (
+            time.time() - started > _METHODOLOGY_TIMEOUT_SECONDS):
+        log.warning("methodology_run_timed_out",
+                    timeout_minutes=_METHODOLOGY_TIMEOUT_SECONDS // 60)
+        _methodology["active"] = False
+        _methodology["started_at"] = None
+        return False
+    return True
 
 
 def begin_methodology() -> None:
@@ -64,21 +87,21 @@ def end_methodology() -> None:
     _methodology["started_at"] = None
 
 
-async def qa_run_in_progress() -> str | None:
+async def statistical_audit_in_progress() -> bool:
     """
-    The kind of QA run currently in progress — "methodology" or
-    "statistical" — or None when the platform is free to start one.
+    True while a statistical (three-layer) audit is in flight.
 
-    Fail-open: any error in the statistical (database) check is logged
-    and treated as "not running", so the guard can never permanently
-    block QA runs because of a transient database problem.
+    Reads the audit_runs 'running' row via is_audit_running(), which
+    first reaps any run stuck past the 15-minute timeout — so a crashed
+    run never reports as in-progress here.
+
+    Fail-open: any error in the database check is logged and treated as
+    "not running", so the guard can never permanently block statistical
+    audits because of a transient database problem.
     """
-    if methodology_in_progress():
-        return "methodology"
     try:
         from tools.audit_engine import is_audit_running
-        if await is_audit_running() is not None:
-            return "statistical"
+        return await is_audit_running() is not None
     except Exception as exc:  # noqa: BLE001 — fail-open
         log.warning("qa_guard_statistical_check_failed", error=str(exc))
-    return None
+        return False
