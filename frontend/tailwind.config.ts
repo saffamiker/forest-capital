@@ -2,6 +2,16 @@ import type { Config } from 'tailwindcss'
 
 const config: Config = {
   content: ['./index.html', './src/**/*.{js,jsx,ts,tsx}'],
+  // iOS Safari Layer A — hover:* utilities now compile inside
+  // @media (hover: hover) { … }, so a phone tap never makes a hover
+  // style fire and stick on the tapped button. Devices that support
+  // hover (mouse / trackpad / iPad-with-pencil) behave identically —
+  // the media query is true on every desktop, so the AI buttons,
+  // [+ Text] button, and chart-card hover states render the same as
+  // before. The four called out in the GROUP 3C report are covered by
+  // this flag; so is every other hover:* class in the codebase, which
+  // is the upside of fixing it at config level rather than per-button.
+  future: { hoverOnlyWhenSupported: true },
   theme: {
     extend: {
       colors: {

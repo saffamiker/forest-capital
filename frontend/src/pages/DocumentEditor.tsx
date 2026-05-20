@@ -490,7 +490,12 @@ export default function DocumentEditor() {
   }
 
   return (
-    <div className="flex flex-col h-[calc(100vh-3rem)]">
+    // 100dvh — the dynamic viewport unit accounts for iOS Safari's URL
+    // bar, which is included in 100vh and would otherwise push the
+    // editor shell ~50px below the visible viewport on first paint.
+    // 100dvh is supported by every browser the project targets; it
+    // resolves identically to 100vh on desktop.
+    <div className="flex flex-col h-[calc(100dvh-3rem)]">
       {/* AI DRAFT banner — permanent, non-dismissable. */}
       <div className="bg-warning text-navy-900 text-2xs font-bold uppercase
                       tracking-wide text-center py-1">

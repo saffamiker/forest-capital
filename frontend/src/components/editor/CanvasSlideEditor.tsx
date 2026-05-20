@@ -411,11 +411,16 @@ export default function CanvasSlideEditor({
         </div>
       )}
 
-      {/* Canvas */}
+      {/* Canvas.
+          overscroll-contain stops iOS Safari's rubber-band bounce from
+          fighting a near-the-edge canvas pan; touch-none on the inner
+          Stage wrapper disables browser pinch-zoom and two-finger
+          page-scroll intercepting Konva's drag handlers. Layer A iOS
+          Safari defensive CSS — no behaviour change on desktop. */}
       <div ref={areaRef}
-        className="relative flex-1 min-h-0 overflow-auto flex items-center
-                   justify-center bg-navy-950 p-4">
-        <div className="relative shadow-lg"
+        className="relative flex-1 min-h-0 overflow-auto overscroll-contain
+                   flex items-center justify-center bg-navy-950 p-4">
+        <div className="relative shadow-lg touch-none"
           style={{ width: stageW, height: stageH }}>
           <Stage ref={stageRef} width={stageW} height={stageH}
             scaleX={scale} scaleY={scale}
