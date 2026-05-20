@@ -5348,6 +5348,9 @@ GATING:
 
 USER-MANAGEMENT ENDPOINTS (all manage_users-gated):
   GET    /api/v1/admin/users          — every user + an activity_count
+  GET    /api/v1/admin/users/activity-breakdown — per-user 30-day breakdown
+                                        (see PER-USER ACTIVITY BREAKDOWN
+                                        below)
   POST   /api/v1/admin/users          — add a user (422 on a bad email /
                                         role, 409 on a duplicate email)
   PATCH  /api/v1/admin/users/{id}     — edit display_name / role /
@@ -5359,6 +5362,49 @@ USER-MANAGEMENT ENDPOINTS (all manage_users-gated):
   LAST-SYSADMIN GUARD: PATCH and DELETE refuse any change that would
   leave the platform with no active manage_users holder
   (count_active_sysadmins <= 1) — 400 "Cannot remove the last sysadmin."
+
+PER-USER ACTIVITY BREAKDOWN (May 19 2026):
+  GET /api/v1/admin/users/activity-breakdown surfaces the data behind
+  the Settings → Users → "Platform Engagement" panel. Returns:
+    { users: [...], period_days: 30, generated_at: <ISO> }
+  Each user row:
+    email, display_name, role,
+    breakdown:         { <interaction_type>: count },
+    session_breakdown: { analytical: page_views, testing: page_views },
+    total_interactions, total_cost_usd,
+    first_seen, last_seen     (ISO timestamps for the window)
+
+  THREE SOURCE TABLES, three sub-queries — each in its own session
+  with its own try/except, the same isolation pattern as
+  list_all_users (commit 0bb0086). A failure in one sub-query drops
+  only that column; the rest of the response still lands.
+
+    _fetch_platform_users()         — base user list (LEFT-JOIN
+                                       semantics for the merged
+                                       response; a zero-activity user
+                                       still appears)
+    _fetch_interaction_breakdowns() — GROUP BY (user_email,
+                                       interaction_type) on
+                                       agent_interactions over a
+                                       30-day window. Aggregates
+                                       count, SUM(estimated_cost_usd),
+                                       MIN/MAX(timestamp) per group.
+    _fetch_session_breakdowns()     — GROUP BY (user_email,
+                                       session_type) on
+                                       session_events filtered to
+                                       event_type='page_view' (the
+                                       most informative engagement
+                                       signal; login / export are
+                                       noisier). 30-day window.
+
+  Frontend: components/ActivityBreakdownPanel.tsx renders one card
+  per user — display name, total-interactions count, a recharts
+  horizontal stacked Bar of interaction-type counts, a two-column
+  per-type / session-type summary, and an AI-spend line (shown only
+  when total_cost_usd > 0). Zero-activity users show "No activity in
+  the last 30 days" instead of an empty bar. Colours match
+  TeamActivityCharts on the Reports page so a sysadmin scanning both
+  surfaces reads the same signal both places.
 
 WELCOME EMAIL: POST /api/v1/admin/users sends a welcome email to the new
 user immediately after a successful create. auth.build_welcome_email()
