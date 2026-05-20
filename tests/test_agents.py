@@ -37,6 +37,9 @@ MOCK_RESULTS = {
         "oos_cagr": 0.079,
         "alpha_after_costs_bps": 0.0,
         "avg_monthly_turnover": 0.0,
+        # BENCHMARK never rebalances → genuine annualised one-way
+        # turnover is exactly zero.
+        "true_turnover": 0.0,
         "avg_bond_weight": 0.0,
         "avg_equity_weight": 1.0,
         "cross_validation": {"cv_stability_score": 0.55},
@@ -62,6 +65,9 @@ MOCK_RESULTS = {
         "oos_cagr": 0.088,
         "alpha_after_costs_bps": 72.0,
         "avg_monthly_turnover": 0.12,
+        # 42% genuine annualised one-way turnover — typical for a
+        # dynamic vol-targeting strategy that rescales each month.
+        "true_turnover": 0.42,
         "avg_bond_weight": 0.35,
         "avg_equity_weight": 0.65,
         "cross_validation": {"cv_stability_score": 0.81},
@@ -212,13 +218,62 @@ class TestQuantBacktester:
         vt = summary["oos_comparison"]["VOL_TARGETING"]
         assert vt["potentially_overfitted"] is False
 
-    def test_cost_drag_computed(self):
+    def test_cost_drag_uses_true_turnover_not_avg_monthly(self):
+        # The cost-drag arithmetic must read true_turnover (annualised
+        # one-way) rather than the legacy avg_monthly_turnover proxy
+        # (a rebalance-count). VOL_TARGETING has true_turnover=0.42 and
+        # avg_monthly_turnover=0.12 in the mock — the two would yield
+        # very different cost figures, so this assertion catches a
+        # silent regression to the old field.
         from agents.quant_backtester import QuantBacktester
+        from config import TRANSACTION_COST_BPS
         agent = QuantBacktester()
         summary = agent._compute_quant_summary(MOCK_RESULTS)
         vt = summary["oos_comparison"]["VOL_TARGETING"]
-        # turnover=0.12, cost=10bps, 12 months → 14.4 bps/year
-        assert vt["cost_drag_bps_year"] == pytest.approx(0.12 * 10 * 12, rel=0.01)
+        # true_turnover=0.42, cost=TRANSACTION_COST_BPS → 0.42 × cost
+        assert vt["cost_drag_bps_year"] == pytest.approx(
+            0.42 * TRANSACTION_COST_BPS, rel=0.01)
+
+    def test_cost_drag_is_not_multiplied_by_12(self):
+        # true_turnover is ALREADY annualised — multiplying by 12 was
+        # the bug in the legacy path that treated a monthly proxy as
+        # if it were a monthly rate. Verify the formula does not
+        # double-annualise.
+        from agents.quant_backtester import QuantBacktester
+        from config import TRANSACTION_COST_BPS
+        agent = QuantBacktester()
+        summary = agent._compute_quant_summary(MOCK_RESULTS)
+        vt = summary["oos_comparison"]["VOL_TARGETING"]
+        # If the cost-drag were still ×12 the figure would be ~50 bps;
+        # the correct figure for a 42% turnover at 10bps is ~4.2 bps.
+        wrong_old_formula = 0.42 * TRANSACTION_COST_BPS * 12
+        correct_formula = 0.42 * TRANSACTION_COST_BPS
+        assert vt["cost_drag_bps_year"] != pytest.approx(
+            wrong_old_formula, rel=0.01)
+        assert vt["cost_drag_bps_year"] == pytest.approx(
+            correct_formula, rel=0.01)
+
+    def test_llm_context_carries_true_turnover_field(self):
+        # The Sonnet agent's review prompt must narrate on the genuine
+        # turnover figure, not the legacy proxy. _build_context emits a
+        # JSON blob — every per-strategy block must carry true_turnover
+        # and must NOT carry avg_monthly_turnover (which would let the
+        # model reach back to the wrong field).
+        import json
+        from agents.quant_backtester import QuantBacktester
+        agent = QuantBacktester()
+        summary = agent._compute_quant_summary(MOCK_RESULTS)
+        ctx_json = agent._build_context(MOCK_RESULTS, summary)
+        ctx = json.loads(ctx_json)
+        for name in ("BENCHMARK", "VOL_TARGETING"):
+            block = ctx["strategy_metrics"][name]
+            assert "true_turnover" in block, (
+                f"{name} must carry true_turnover in the LLM context")
+            assert "avg_monthly_turnover" not in block, (
+                f"{name} must NOT carry the legacy avg_monthly_turnover")
+        # The value passed for VOL_TARGETING is the mock's true_turnover.
+        assert ctx["strategy_metrics"]["VOL_TARGETING"][
+            "true_turnover"] == pytest.approx(0.42, rel=0.01)
 
 
 class TestIndependentAnalyst:

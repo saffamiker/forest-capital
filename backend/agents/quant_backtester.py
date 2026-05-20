@@ -135,9 +135,15 @@ class QuantBacktester:
         for name, r in strategy_results.items():
             is_sharpe = r.get("sharpe_ratio")
             oos_sharpe = r.get("oos_sharpe")
-            turnover = r.get("avg_monthly_turnover", 0.0)
+            # true_turnover is genuine annualised one-way turnover —
+            # sum(|drifted_i - new_target_i|)/2 over rebalances divided
+            # by n_years (see backtester._true_turnover). It needs no
+            # ×12 multiplier; the legacy avg_monthly_turnover proxy did
+            # because it was a per-month rebalance-count, but that
+            # field is no longer the basis for cost drag.
+            turnover = r.get("true_turnover", 0.0)
             cost_drag_bps_year = (
-                float(turnover) * TRANSACTION_COST_BPS * 12
+                float(turnover) * TRANSACTION_COST_BPS
                 if isinstance(turnover, (int, float))
                 else None
             )
@@ -200,7 +206,10 @@ class QuantBacktester:
                 "sharpe_ratio": r.get("sharpe_ratio"),
                 "oos_sharpe": r.get("oos_sharpe"),
                 "oos_cagr": r.get("oos_cagr"),
-                "avg_monthly_turnover": r.get("avg_monthly_turnover"),
+                # Genuine annualised one-way turnover — the figure the
+                # Dashboard surfaces and the standard institutional
+                # convention. The Sonnet agent narrates on this.
+                "true_turnover": r.get("true_turnover"),
                 "is_significant": r.get("is_significant"),
                 "alpha_after_costs_bps": r.get("alpha_after_costs_bps"),
             }
