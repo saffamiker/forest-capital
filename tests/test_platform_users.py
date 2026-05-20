@@ -22,6 +22,8 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("SECRET_KEY", "test-secret-key-at-least-32-characters-long")
@@ -99,6 +101,136 @@ class TestManageUsersGate:
     def test_unauthenticated_request_is_401_not_403(self):
         resp = client.get(USERS)
         assert resp.status_code == 401
+
+
+class TestActivityBreakdownEndpoint:
+    """The /api/v1/admin/users/activity-breakdown endpoint — per-user
+    interaction-type and session-type counts over a 30-day rolling
+    window. manage_users-gated like every other /admin/users route."""
+
+    ENDPOINT = "/api/v1/admin/users/activity-breakdown"
+
+    def test_requires_auth(self):
+        # Unauthenticated request — 401, not the 403 we use for a
+        # logged-in user missing the permission.
+        assert client.get(self.ENDPOINT).status_code == 401
+
+    def test_rejects_a_team_member(self):
+        # team_member alone does not include manage_users.
+        resp = client.get(self.ENDPOINT, headers=TEAM_HEADERS)
+        assert resp.status_code == 403
+
+    def test_rejects_a_viewer(self):
+        resp = client.get(self.ENDPOINT, headers=VIEWER_HEADERS)
+        assert resp.status_code == 403
+
+    def test_admits_the_sysadmin_and_returns_the_shape(self):
+        resp = client.get(self.ENDPOINT, headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+        body = resp.json()
+        # Top-level shape — three keys.
+        assert set(body) == {"users", "period_days", "generated_at"}
+        assert body["period_days"] == 30
+        assert isinstance(body["users"], list)
+        assert isinstance(body["generated_at"], str)
+
+    def test_admits_the_master_key(self):
+        resp = client.get(self.ENDPOINT, headers=MASTER_HEADERS)
+        assert resp.status_code == 200
+
+    def test_user_row_carries_the_full_breakdown_shape(self, monkeypatch):
+        # Patch the data layer so we exercise the JSON-shaping in the
+        # endpoint without a database. Verifies every documented field
+        # appears on each user row and that the merge logic interleaves
+        # the per-email breakdown / session_counts / user rows correctly.
+        from tools import platform_users as pu
+
+        async def _stub_users():
+            return [
+                {"id": 1, "email": "a@x.com", "display_name": "A User",
+                 "role": "team_member", "permissions": ["team_member"],
+                 "is_active": True, "created_at": None, "created_by": None,
+                 "last_login_at": None, "notes": None,
+                 "council_queries_used": 0, "council_queries_limit": None},
+                {"id": 2, "email": "b@x.com", "display_name": "B User",
+                 "role": "viewer", "permissions": [],
+                 "is_active": True, "created_at": None, "created_by": None,
+                 "last_login_at": None, "notes": None,
+                 "council_queries_used": 0, "council_queries_limit": None},
+            ]
+
+        async def _stub_interactions():
+            return {
+                "a@x.com": {
+                    "by_type": {"council": 12, "academic_review": 4,
+                                "explain": 8, "qa": 2},
+                    "total_interactions": 26,
+                    "total_cost_usd": 0.6886,
+                    "first_seen": "2026-05-01T10:00:00+00:00",
+                    "last_seen":  "2026-05-19T17:00:00+00:00",
+                },
+                # b@x.com is intentionally absent — verifies the LEFT-JOIN
+                # contract: every platform_users row appears even with
+                # zero interactions.
+            }
+
+        async def _stub_sessions():
+            return {
+                "a@x.com": {"analytical": 280, "testing": 45},
+            }
+
+        monkeypatch.setattr(pu, "_fetch_platform_users", _stub_users)
+        monkeypatch.setattr(pu, "_fetch_interaction_breakdowns",
+                            _stub_interactions)
+        monkeypatch.setattr(pu, "_fetch_session_breakdowns", _stub_sessions)
+
+        resp = client.get(self.ENDPOINT, headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+        body = resp.json()
+        users = body["users"]
+        assert len(users) == 2
+
+        # User A — fully populated breakdown.
+        a = next(u for u in users if u["email"] == "a@x.com")
+        for key in ("email", "display_name", "role", "breakdown",
+                    "session_breakdown", "total_interactions",
+                    "total_cost_usd", "first_seen", "last_seen"):
+            assert key in a, f"a@x.com row missing {key}"
+        assert a["breakdown"] == {"council": 12, "academic_review": 4,
+                                  "explain": 8, "qa": 2}
+        assert a["session_breakdown"] == {"analytical": 280, "testing": 45}
+        assert a["total_interactions"] == 26
+        assert a["total_cost_usd"] == pytest.approx(0.6886, rel=1e-6)
+        assert a["display_name"] == "A User"
+        assert a["role"] == "team_member"
+
+        # User B — zero-activity row still appears (LEFT-JOIN contract).
+        b = next(u for u in users if u["email"] == "b@x.com")
+        assert b["breakdown"] == {}
+        assert b["session_breakdown"] == {}
+        assert b["total_interactions"] == 0
+        assert b["total_cost_usd"] == 0.0
+        assert b["first_seen"] is None
+        assert b["last_seen"] is None
+
+    def test_empty_result_when_no_users(self, monkeypatch):
+        from tools import platform_users as pu
+
+        async def _no_users():
+            return []
+
+        async def _no_data():
+            return {}
+
+        monkeypatch.setattr(pu, "_fetch_platform_users", _no_users)
+        monkeypatch.setattr(pu, "_fetch_interaction_breakdowns", _no_data)
+        monkeypatch.setattr(pu, "_fetch_session_breakdowns", _no_data)
+
+        resp = client.get(self.ENDPOINT, headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["users"] == []
+        assert body["period_days"] == 30
 
 
 class TestCreateUserValidation:

@@ -2620,6 +2620,27 @@ async def admin_list_users(
     return {"users": await list_all_users()}
 
 
+@app.get("/api/v1/admin/users/activity-breakdown")
+async def admin_users_activity_breakdown(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Per-user activity broken down by interaction_type and session_type
+    over a 30-day rolling window — the analytics behind the Settings →
+    Users → Platform Engagement panel.
+
+    Joins against platform_users (LEFT JOIN) so every user appears even
+    when they have zero interactions in the window. The breakdown
+    aggregates two source tables:
+      agent_interactions  → counts by interaction_type + SUM(cost)
+      session_events      → counts by session_type for page_view events
+
+    Sysadmin only. Fail-open — a DB error returns an empty users list.
+    """
+    from tools.platform_users import users_activity_breakdown
+    return await users_activity_breakdown()
+
+
 @app.post("/api/v1/admin/users")
 async def admin_create_user(
     body: dict, session: dict = Depends(require_permission("manage_users")),

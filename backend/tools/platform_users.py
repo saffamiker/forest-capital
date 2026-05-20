@@ -325,6 +325,140 @@ async def email_exists(email: str) -> bool:
         return False
 
 
+async def users_activity_breakdown() -> dict[str, Any]:
+    """
+    Per-user activity over the last 30 days, broken down by
+    interaction_type (agent_interactions) and session_type
+    (session_events page-view counts). Joins against platform_users
+    (LEFT JOIN-equivalent) so every active user appears even with zero
+    interactions in the window.
+
+    Returns a JSON-ready dict:
+      { "users": [...], "period_days": 30,
+        "generated_at": "<ISO timestamp>" }
+
+    Each user row:
+      { email, display_name, role, breakdown: {<type>: <count>},
+        session_breakdown: {analytical: n, testing: n},
+        total_interactions, total_cost_usd, first_seen, last_seen }
+
+    Three sub-queries, each in its own session with its own try/except —
+    same isolation pattern as list_all_users. A failure in one sub-query
+    drops only that column; the user list itself survives.
+    """
+    from datetime import datetime, timezone
+
+    users = await _fetch_platform_users()
+    breakdowns = await _fetch_interaction_breakdowns()
+    session_counts = await _fetch_session_breakdowns()
+
+    rows: list[dict[str, Any]] = []
+    for u in users:
+        email = u.get("email", "")
+        b = breakdowns.get(email, {})
+        s = session_counts.get(email, {})
+        rows.append({
+            "email":              email,
+            "display_name":       u.get("display_name"),
+            "role":               u.get("role"),
+            "breakdown":          b.get("by_type", {}),
+            "session_breakdown":  s,
+            "total_interactions": b.get("total_interactions", 0),
+            "total_cost_usd":     round(b.get("total_cost_usd", 0.0), 6),
+            "first_seen":         b.get("first_seen"),
+            "last_seen":          b.get("last_seen"),
+        })
+
+    return {
+        "users":        rows,
+        "period_days":  30,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _fetch_interaction_breakdowns() -> dict[str, dict[str, Any]]:
+    """
+    Per-email interaction-type counts + cost sums + first/last-seen
+    timestamps over the last 30 days. Own session + try/except so a
+    failure here only drops the agent_interactions column from the
+    response; the user list (and session_events counts) still land.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return out
+        async with AsyncSessionLocal() as session:
+            rows = await session.execute(text(
+                "SELECT user_email, interaction_type, "
+                "       COUNT(*) AS n, "
+                "       COALESCE(SUM(estimated_cost_usd), 0) AS cost, "
+                "       MIN(timestamp) AS first_seen, "
+                "       MAX(timestamp) AS last_seen "
+                "FROM agent_interactions "
+                "WHERE timestamp > NOW() - INTERVAL '30 days' "
+                "GROUP BY user_email, interaction_type"
+            ))
+            for email, itype, n, cost, first_seen, last_seen in rows.fetchall():
+                bucket = out.setdefault(email, {
+                    "by_type": {}, "total_interactions": 0,
+                    "total_cost_usd": 0.0,
+                    "first_seen": None, "last_seen": None,
+                })
+                bucket["by_type"][itype] = int(n)
+                bucket["total_interactions"] += int(n)
+                bucket["total_cost_usd"] += float(cost or 0.0)
+                fs = _iso(first_seen)
+                ls = _iso(last_seen)
+                if fs and (bucket["first_seen"] is None
+                           or fs < bucket["first_seen"]):
+                    bucket["first_seen"] = fs
+                if ls and (bucket["last_seen"] is None
+                           or ls > bucket["last_seen"]):
+                    bucket["last_seen"] = ls
+    except Exception as exc:  # noqa: BLE001
+        log.warning("activity_breakdown_interactions_failed", error=str(exc))
+    return out
+
+
+async def _fetch_session_breakdowns() -> dict[str, dict[str, int]]:
+    """
+    Per-email session-type page-view counts over the last 30 days.
+    page_view is the most informative session event for "how much
+    time has this user spent on the platform"; login / export rows
+    are noisier and are excluded from this breakdown.
+
+    Own session + try/except — see _fetch_interaction_breakdowns.
+    """
+    out: dict[str, dict[str, int]] = {}
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return out
+        async with AsyncSessionLocal() as session:
+            rows = await session.execute(text(
+                "SELECT user_email, session_type, COUNT(*) "
+                "FROM session_events "
+                "WHERE timestamp > NOW() - INTERVAL '30 days' "
+                "  AND event_type = 'page_view' "
+                "GROUP BY user_email, session_type"
+            ))
+            for email, stype, n in rows.fetchall():
+                bucket = out.setdefault(email, {"analytical": 0, "testing": 0})
+                if stype in bucket:
+                    bucket[stype] = int(n)
+                else:
+                    # Unknown session_type — fold into analytical.
+                    bucket["analytical"] += int(n)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("activity_breakdown_sessions_failed", error=str(exc))
+    return out
+
+
 async def count_active_sysadmins() -> int:
     """
     The number of active users holding the manage_users permission — the
