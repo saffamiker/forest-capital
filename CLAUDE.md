@@ -6609,11 +6609,135 @@ is maintained separately. The `gh` CLI is authenticated with the
   □ All — UAT Section 1 test pass
 
 ─── JUNE 3 MILESTONE ───────────────────────────────────────────────────
-  Items that must land for the midpoint check-in:
-  □ Midpoint paper submitted (May 27)
-  □ An Academic Review session run
-  □ Midpoint draft uploaded
-  □ All UAT sections attested via the guided test runner
+
+  Tracks the midpoint check-in (Tuesday June 3, 6pm, Sykes 326). The
+  "REMAINING" list is the only thing that gates the deliverable —
+  every other build is captured in POST-DEADLINE BACKLOG below.
+
+  COMPLETED:
+    ✅ Midpoint paper editor (Bob) — TipTap RichTextEditor, [[BOB]]
+       callouts as block panels, [[VERIFY]] inline popups, 30s
+       auto-save, Save Version + Restore
+    ✅ Executive Brief editor (Bob) — same editor surface, brief
+       layout with the three judgement callouts
+    ✅ Presentation deck canvas editor (Molly) — free-form Konva
+       canvas, text + chart elements, AI Layout / AI Copy with
+       Apply/Dismiss review, PPTX export with EMU mapping
+    ✅ Presentation script writer (Molly) — per-slide speaker
+       assignment, generate-from-deck endpoint, script TipTap editor
+       with 150-wpm delivery time, master / per-speaker DOCX exports
+       with stable per-speaker colours
+    ✅ Rehearsal mode (Molly) — combined script + slide view (built
+       May 19; see CLAUDE.md rehearsal section once it lands)
+    ✅ Academic Review integration — peer fan-out + Opus arbiter, the
+       script-specific arbiter rubric branch, every editor draft
+       overlaid onto the documents-by-type map so reviews target the
+       current working copy
+    ✅ Async document generation — job-based 202+poll pattern,
+       module-level frontend store survives navigation, completion
+       toast announces a job finished off-Reports, bytes cleared
+       after the first download (410 Gone on re-attempt)
+    ✅ Full cost tracking coverage — every interaction-logging
+       endpoint seeds start_usage_capture, _stream_haiku records
+       usage after the stream completes, sysadmin attribution for
+       auto-triggered runs, pricing-rate Sonnet fallback for
+       null/unrecognised model
+    ✅ UAT guide updated (Section 4) — canvas editor + script writer
+       walkthrough rewritten for the May-19 build
+
+  REMAINING:
+    □ Molly UAT pass
+    □ Bob UAT pass (Section 3)
+    □ Bob midpoint paper submission (May 27th)
+    □ Molly presentation submission (June 3rd)
+
+
+─── POST-DEADLINE BACKLOG ──────────────────────────────────────────────
+
+  Everything here is explicitly deferred until after June 3 so the
+  team can land the deliverables without scope creep. Each item names
+  the surface and the reason a fix waits — most are quality
+  refinements, not blockers.
+
+  Technical debt:
+    □ Canvas editor mobile experience — the 960×540 Konva Stage is
+      unusable at 380px (auto-scales to ≈0.36×, pixel-precise editing
+      impossible on touch). Needs a responsive layout or a mobile-
+      specific view-only mode with the Transformer disabled. See
+      docs/MOBILE_AUDIT.md — flagged DEGRADED, component-change-class.
+    □ Strategy InfoIcon mobile tap-target inflation — ⓘ buttons are
+      ~24px below the project's 44px standard. Wrap each in a
+      min-h-[44px] min-w-[44px] button on mobile only. Trivial CSS.
+    □ Academic Review rubric refinements — once Bob and Molly have
+      run reviews against real drafts, the arbiter prompt and the
+      per-document-type rubric branches will need tuning against
+      what graders actually flag.
+    □ Rehearsal mode chart loading — chart elements currently render
+      as placeholder boxes with the chart label. Loading the real
+      chart PNG via /api/v1/charts/render is straightforward; deferred
+      so rehearsal mode ships before June 3 with the simpler surface.
+    □ Per-speaker colour consistency between the script editor and
+      the exported DOCX — the script editor renders each speaker's
+      sections in a stable palette colour, and the DOCX export does
+      the same, but the palettes are not pinned to identical hex
+      values. Pin them.
+
+  Analytics:
+    □ Additional matplotlib renderers for the remaining Recharts-only
+      Analytics charts — every chart NOT yet in
+      tools/chart_render.AVAILABLE_CHARTS is canvas-editor-invisible
+      today. Add the missing renderers (e.g. the regime-transition
+      matrix, the factor-exposure heatmap as a dedicated chart, the
+      sub-period regime timeline) so the chart picker can offer them
+      too.
+    □ Puppeteer / headless-browser option for frontend chart capture
+      — the export package today rasterises off-screen Recharts via
+      html2canvas at 2× (browser-side). A headless browser run from
+      the backend would let the matplotlib renderers be retired in
+      favour of the live frontend charts; bigger lift than its
+      payoff today.
+
+  Infrastructure:
+    □ S3 migration if /data disk fills — the persistent Render disk is
+      1 GB and the project will not approach that ceiling. The
+      tools.test_runner.cleanup_old_screenshots sweep on startup
+      bounds growth at 30 days; if the platform sees broader use the
+      durable next step is an object-store migration (boto3 +
+      bucket-name env var). Not needed for the project deliverable.
+    □ True portfolio turnover in the backtester — the analytics layer
+      already surfaces real one-way turnover (sum(|Δw|)/2) per the
+      May-18 audit fix, but the backtester's tier1_gates pipeline
+      still uses the legacy turnover proxy in a couple of derived
+      fields. Replace those references with the true measure.
+    □ Option B / C document refinement after Bob and Molly review pass
+      — Bob writes the midpoint paper and exec brief in their final
+      voice; Molly writes the presentation deck and script. After
+      they each run a review pass, edit the [[BOB]] / [[MOLLY]]
+      callout copy in academic_docx.py to match what they actually
+      asked for.
+
+  Platform:
+    □ Script rehearsal mode refinements post-Molly feedback —
+      timing display tweaks, slide-overlay font sizing, presenter
+      cue ordering, and any UX feedback she surfaces during her
+      rehearsals on the real deck.
+    □ Presentation Preview theme matching PPTX export exactly — the
+      in-app PresentationPreview component renders slides with the
+      canvas dark theme, but the PPTX export uses the academic_deck
+      navy-on-white print theme. The preview should show the
+      print-theme version when "Preview as exported" is toggled, so
+      Molly can confirm a slide reads correctly in the deliverable's
+      colours.
+    □ InfoIcon vs ExplainableText final unification decision — both
+      surfaces explain a metric; the May-17 double-affordance fix
+      suppressed the InfoIcon when ExplainableText is present, but
+      the codebase still has two patterns. Pick one for the long
+      term.
+    □ this_session glossary timing — the May-17 force-reload fix
+      (loadTerms(councilOutput, { force: true })) addresses the race
+      via the force path; the full fix is to drop the termsLoaded
+      guard for the council-completion code path entirely and rely
+      on a request-id to dedupe in-flight loads. Defensive cleanup.
 
 
 
