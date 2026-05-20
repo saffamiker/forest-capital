@@ -6895,12 +6895,17 @@ is maintained separately. The `gh` CLI is authenticated with the
       May-18 audit fix, but the backtester's tier1_gates pipeline
       still references the legacy turnover proxy in a couple of
       derived fields. Replace those references with the true measure.
-    □ Option B / C document refinement after Bob and Molly review
-      pass — Bob writes the midpoint paper and exec brief in their
-      final voice; Molly writes the presentation deck and script.
-      After they each run a real review pass, edit the [[BOB]] /
-      [[MOLLY]] callout copy in academic_docx.py to match what they
-      actually asked for.
+    □ Bob and Molly callout copy refinement after a real review pass
+      — Bob writes the midpoint paper and exec brief in his final
+      voice; Molly writes the presentation deck and script. After
+      they each run a real review pass against a generated draft,
+      tune the [[BOB]] / [[MOLLY]] callout copy in academic_docx.py
+      and academic_deck.py to match the prompts they actually find
+      useful. Pure copy edit — the constants are
+      _ROLES_CALLOUT_*, _NEXT_STEPS_CALLOUT_*, _RESULTS_CALLOUT_*,
+      _BRIEF_SUMMARY_CALLOUT_*, _BRIEF_LIMITATIONS_CALLOUT_*,
+      _BRIEF_RECOMMENDATIONS_CALLOUT_* on the .docx side, and
+      _MOLLY_VERIFY_NOTE / _DECK_TITLE_NOTE on the .pptx side.
 
   PLATFORM:
     □ Script rehearsal mode refinements post-Molly feedback —
