@@ -6581,7 +6581,12 @@ is maintained separately. The `gh` CLI is authenticated with the
      `alembic upgrade head` runs on Render post-merge, pending the
      develop → main deploy
   ✅ S3 (or equivalent) for screenshot storage — Render persistent
-     disk at /data/test_screenshots; screenshots survive redeploys
+     disk at /data/test_screenshots; screenshots survive redeploys.
+     Files older than 30 days are unlinked by cleanup_old_screenshots()
+     on lifespan startup so the disk never grows unbounded
+     (tools.test_runner.cleanup_old_screenshots + delete_screenshots).
+     Async docgen job bytes are also cleared after the first download —
+     a second download returns 410 Gone with guidance to regenerate.
   ✅ CLAUDE.md + README brought current
 
 ─── IN PROGRESS ───────────────────────────────────────────────────────

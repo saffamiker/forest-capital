@@ -85,6 +85,29 @@ async def lifespan(app: FastAPI):
                 log.info("Startup reap: no stale audit runs found")
         except Exception as exc:  # noqa: BLE001
             log.warning("audit_startup_reap_failed", error=str(exc))
+        # Screenshot cleanup — drops UAT screenshots older than 30 days
+        # from SCREENSHOT_DIR. The disk is the persistent Render volume
+        # in production; without this sweep, every failure-report
+        # screenshot ever uploaded would accumulate forever. Fail-open
+        # — a missing directory or unreadable file logs and continues.
+        try:
+            from tools.test_runner import cleanup_old_screenshots
+            deleted, remaining = cleanup_old_screenshots()
+            if deleted == 0 and remaining == 0:
+                log.info("screenshot_cleanup: directory empty or absent")
+            else:
+                log.info(
+                    "screenshot_cleanup",
+                    deleted=deleted,
+                    remaining=remaining,
+                    message=(
+                        f"screenshot_cleanup: deleted {deleted} "
+                        f"screenshots older than 30 days, "
+                        f"{remaining} remain"
+                    ),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("screenshot_cleanup_failed", error=str(exc))
         # One-time baseline log — counts the historical rows that landed
         # before the cost-tracking deploy (pre-migration 020 token columns
         # are null). Sets a clear line in the Render logs: everything from
@@ -4580,19 +4603,40 @@ async def list_generation_jobs(session: dict = Depends(require_auth)):
 async def download_generation_job(
     job_id: str, session: dict = Depends(require_auth),
 ):
-    """Downloads a completed job's rendered file. Owner-only."""
-    from tools.generation_jobs import get_job
+    """Downloads a completed job's rendered file. Owner-only.
+
+    Serves the bytes once. After the first download the buffer is
+    cleared (mark_downloaded) to free memory — a 2 MB PPTX would
+    otherwise hold a buffer for the full 2-hour job TTL. A second
+    download attempt returns 410 Gone with guidance to regenerate;
+    the job record itself stays so the client can still poll status.
+    """
+    from tools.generation_jobs import get_job, mark_downloaded, was_downloaded
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     if job["owner_email"] != session.get("email"):
         raise HTTPException(status_code=403, detail="This is not your job.")
+    if was_downloaded(job_id):
+        # Bytes already cleared — a re-attempt is a 410 (Gone), not 409
+        # (Conflict). The download was successful; the buffer is intentionally
+        # absent now.
+        raise HTTPException(
+            status_code=410,
+            detail=("This download has already been served. "
+                    "Regenerate the document if needed."))
     if job["status"] != "complete" or job["_file_bytes"] is None:
         raise HTTPException(status_code=409,
                             detail="The job has no downloadable file yet.")
+    # Snapshot the bytes BEFORE marking served — mark_downloaded sets
+    # _file_bytes to None, so we must build the response from the
+    # snapshot rather than from the (now-cleared) job dict.
+    content = job["_file_bytes"]
+    media_type = job["_media_type"]
     fname = job["_filename"] or "forest-capital-document"
+    mark_downloaded(job_id)
     return Response(
-        content=job["_file_bytes"], media_type=job["_media_type"],
+        content=content, media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 

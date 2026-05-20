@@ -120,6 +120,104 @@ class TestScreenshotStorage:
         assert save_screenshots([]) == []
 
 
+class TestScreenshotCleanup:
+    """The startup lifespan calls cleanup_old_screenshots() to drop files
+    older than 30 days; delete_screenshots() is the per-row helper for
+    a future explicit-delete endpoint. Both are fail-open."""
+
+    def _make_screenshot(self, dir_path, age_days: float) -> str:
+        """Writes one fake PNG into dir_path and stamps its mtime so
+        age_days have notionally passed since it was created."""
+        import os
+        import time
+        import uuid as _uuid
+        name = f"{_uuid.uuid4().hex}.png"
+        target = dir_path / name
+        target.write_bytes(b"\x89PNG_fake")
+        past = time.time() - age_days * 86400
+        os.utime(target, (past, past))
+        return name
+
+    def test_cleanup_deletes_screenshots_older_than_30_days(
+        self, tmp_path, monkeypatch,
+    ):
+        from tools import test_runner
+        monkeypatch.setattr(test_runner, "SCREENSHOT_DIR", str(tmp_path))
+        # Two stale, one fresh.
+        old_a = self._make_screenshot(tmp_path, age_days=45)
+        old_b = self._make_screenshot(tmp_path, age_days=31)
+        fresh = self._make_screenshot(tmp_path, age_days=2)
+        deleted, remaining = test_runner.cleanup_old_screenshots()
+        assert deleted == 2 and remaining == 1
+        # The 45-day and 31-day files are gone; the 2-day file survives.
+        names = {p.name for p in tmp_path.iterdir() if p.is_file()}
+        assert old_a not in names and old_b not in names
+        assert fresh in names
+
+    def test_cleanup_leaves_recent_screenshots_intact(
+        self, tmp_path, monkeypatch,
+    ):
+        from tools import test_runner
+        monkeypatch.setattr(test_runner, "SCREENSHOT_DIR", str(tmp_path))
+        # Three fresh files — all under 30 days — survive the sweep.
+        for age in (0.5, 5, 29):
+            self._make_screenshot(tmp_path, age_days=age)
+        deleted, remaining = test_runner.cleanup_old_screenshots()
+        assert deleted == 0 and remaining == 3
+
+    def test_cleanup_on_missing_directory_returns_zero(
+        self, tmp_path, monkeypatch,
+    ):
+        from tools import test_runner
+        # A path that doesn't exist — the sweep must not raise.
+        monkeypatch.setattr(
+            test_runner, "SCREENSHOT_DIR", str(tmp_path / "does-not-exist"))
+        assert test_runner.cleanup_old_screenshots() == (0, 0)
+
+    def test_delete_screenshots_removes_matching_files(
+        self, tmp_path, monkeypatch,
+    ):
+        # Match the production layout exactly: SCREENSHOT_DIR is the
+        # test_screenshots subdirectory; the DB stores a path like
+        # "test_screenshots/<uuid>.png" relative to SCREENSHOT_DIR's
+        # parent (so the /uploads StaticFiles mount resolves it).
+        from tools import test_runner
+        shot_dir = tmp_path / "test_screenshots"
+        shot_dir.mkdir()
+        monkeypatch.setattr(test_runner, "SCREENSHOT_DIR", str(shot_dir))
+        a = self._make_screenshot(shot_dir, age_days=1)
+        b = self._make_screenshot(shot_dir, age_days=1)
+        c = self._make_screenshot(shot_dir, age_days=1)
+        removed = test_runner.delete_screenshots([
+            f"test_screenshots/{a}",
+            f"test_screenshots/{b}",
+            "test_screenshots/does-not-exist.png",  # absent → silent skip
+        ])
+        assert removed == 2
+        names = {p.name for p in shot_dir.iterdir() if p.is_file()}
+        assert a not in names and b not in names
+        assert c in names  # not in the delete list — preserved
+
+    def test_delete_screenshots_handles_empty_input(self):
+        from tools.test_runner import delete_screenshots
+        assert delete_screenshots(None) == 0
+        assert delete_screenshots([]) == 0
+
+    def test_delete_screenshots_refuses_path_escape(
+        self, tmp_path, monkeypatch,
+    ):
+        from tools import test_runner
+        shot_dir = tmp_path / "test_screenshots"
+        shot_dir.mkdir()
+        # A sibling file outside SCREENSHOT_DIR — must not be reachable.
+        sibling = tmp_path / "outside_file.png"
+        sibling.write_bytes(b"\x89PNG_fake")
+        monkeypatch.setattr(test_runner, "SCREENSHOT_DIR", str(shot_dir))
+        removed = test_runner.delete_screenshots(["../outside_file.png"])
+        assert removed == 0
+        assert sibling.exists()  # untouched
+
+
 # ── DB round-trip — skips without a live database ─────────────────────────────
 
 _db_ready_cache: bool | None = None

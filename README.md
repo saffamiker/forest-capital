@@ -315,7 +315,7 @@ See `backend/.env.example` for all required variables. Key ones:
 
 ## Known Limitations
 
-- **UAT screenshots are ephemeral.** Test-runner failure-report screenshots are stored on Render's ephemeral filesystem and do not survive a redeploy. The `test_results` attestation row (result, description, severity, timestamps) is the durable record — screenshots are supporting evidence only. An object store (S3 or equivalent) is the post-deadline fix.
+- **UAT screenshots** are stored on the persistent disk at `/data` and survive redeploys. Screenshots older than 30 days are automatically cleaned up on startup (`tools.test_runner.cleanup_old_screenshots`). The `test_results` attestation row (result, description, severity, timestamps) is the durable record; the screenshots are supporting evidence.
 - **Two agent-registry structures in `main.py` are not merged.** The model strings were centralised, but the two registry tables remain separate — merging them is a deferred refactor (code review M2/M7).
 - **`schemas.py` example model strings are literals.** They do not reference the agent-model constants, to avoid a `models → agents` import cycle (code review M16).
 - **`extract_document_text()` is PDF-only.** Markdown handling lives upstream in the `/api/v1/documents/academic/upload` endpoint (raw UTF-8 decode); the function's former non-PDF text branch was removed as dead code.
