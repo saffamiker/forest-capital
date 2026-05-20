@@ -145,9 +145,26 @@ const USER_FIXTURE = {
   ai_cost_usd: 0.0312,
 }
 
+// Default activity-breakdown payload — empty users list keeps the
+// section quiet for the existing user-table tests. Tests that exercise
+// ActivityBreakdownPanel itself override this in their own beforeEach.
+const EMPTY_BREAKDOWN = {
+  users: [], period_days: 30,
+  generated_at: '2026-05-19T00:00:00+00:00',
+}
+
 describe('UserManagementPanel', () => {
   beforeEach(() => {
-    mockedAxios.get = vi.fn().mockResolvedValue({ data: { users: [USER_FIXTURE] } })
+    // URL-routed get mock — the panel makes two endpoint calls (the
+    // user list AND the activity breakdown) and each needs its own
+    // payload shape. A single mockResolvedValue would feed the user
+    // list to the breakdown panel and crash it.
+    mockedAxios.get = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/activity-breakdown')) {
+        return Promise.resolve({ data: EMPTY_BREAKDOWN })
+      }
+      return Promise.resolve({ data: { users: [USER_FIXTURE] } })
+    })
     mockedAxios.post = vi.fn()
     mockedAxios.patch = vi.fn()
     mockedAxios.delete = vi.fn()
@@ -231,5 +248,136 @@ describe('UserManagementPanel', () => {
 
     expect(await screen.findByText(
       /Welcome email could not be sent/i)).toBeInTheDocument()
+  })
+})
+
+
+// ── ActivityBreakdownPanel ────────────────────────────────────────────────────
+
+import ActivityBreakdownPanel from '../components/ActivityBreakdownPanel'
+
+const BREAKDOWN_FIXTURE = {
+  users: [
+    {
+      email: 'thaob@queens.edu',
+      display_name: 'Bob Thao',
+      role: 'team_member',
+      breakdown: {
+        council: 12,
+        academic_review: 4,
+        writing_assistant: 6,
+        explain: 8,
+        qa: 2,
+      },
+      session_breakdown: { analytical: 280, testing: 45 },
+      total_interactions: 32,
+      total_cost_usd: 0.6886,
+      first_seen: '2026-05-01T10:00:00+00:00',
+      last_seen:  '2026-05-19T17:00:00+00:00',
+    },
+    {
+      email: 'murdockm@queens.edu',
+      display_name: 'Molly Murdock',
+      role: 'team_member',
+      breakdown: {},
+      session_breakdown: {},
+      total_interactions: 0,
+      total_cost_usd: 0,
+      first_seen: null,
+      last_seen:  null,
+    },
+    {
+      email: 'ruurdsm@queens.edu',
+      display_name: 'Michael',
+      role: 'sysadmin',
+      breakdown: { council: 5 },
+      session_breakdown: { analytical: 120, testing: 0 },
+      total_interactions: 5,
+      total_cost_usd: 0,
+      first_seen: '2026-05-18T10:00:00+00:00',
+      last_seen:  '2026-05-19T11:00:00+00:00',
+    },
+  ],
+  period_days: 30,
+  generated_at: '2026-05-19T12:00:00+00:00',
+}
+
+describe('ActivityBreakdownPanel', () => {
+  beforeEach(() => {
+    mockedAxios.get = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/activity-breakdown')) {
+        return Promise.resolve({ data: BREAKDOWN_FIXTURE })
+      }
+      return Promise.resolve({ data: { users: [] } })
+    })
+    mockedAxios.isAxiosError = ((() => false) as unknown) as typeof axios.isAxiosError
+  })
+
+  it('renders the section header and subtitle', async () => {
+    render(<ActivityBreakdownPanel />)
+    expect(await screen.findByTestId('activity-breakdown-header'))
+      .toBeInTheDocument()
+    // The subtitle is in the header block — locate it via the testid
+    // and then assert on its sibling. "Last 30 days" also appears on
+    // user cards once they render, hence the scoped lookup.
+    expect(screen.getByText(/Last 30 days — analytical sessions only/i))
+      .toBeInTheDocument()
+  })
+
+  it('renders one card per user', async () => {
+    render(<ActivityBreakdownPanel />)
+    // Each card has a stable data-testid keyed on the email.
+    await waitFor(() => {
+      expect(screen.getByTestId(
+        'activity-breakdown-thaob@queens.edu')).toBeInTheDocument()
+    })
+    expect(screen.getByTestId(
+      'activity-breakdown-murdockm@queens.edu')).toBeInTheDocument()
+    expect(screen.getByTestId(
+      'activity-breakdown-ruurdsm@queens.edu')).toBeInTheDocument()
+  })
+
+  it('shows the empty state for a zero-interaction user', async () => {
+    render(<ActivityBreakdownPanel />)
+    expect(await screen.findByTestId(
+      'activity-zero-murdockm@queens.edu')).toBeInTheDocument()
+    expect(screen.getByText(/No activity in the last 30 days/i))
+      .toBeInTheDocument()
+  })
+
+  it('shows the per-type breakdown counts on an active user', async () => {
+    render(<ActivityBreakdownPanel />)
+    const card = await screen.findByTestId(
+      'activity-breakdown-thaob@queens.edu')
+    // Bob has 12 council, 4 academic_review, 8 explain, 6
+    // writing_assistant, 2 qa — every label appears in the per-type list.
+    expect(within(card).getByText('Council')).toBeInTheDocument()
+    expect(within(card).getByText('Academic Review')).toBeInTheDocument()
+    expect(within(card).getByText('Explain')).toBeInTheDocument()
+    expect(within(card).getByText('Writing Assistant')).toBeInTheDocument()
+    expect(within(card).getByText('QA')).toBeInTheDocument()
+    // The count appears alongside each label.
+    expect(within(card).getByText('12')).toBeInTheDocument()
+  })
+
+  it('shows the session-type breakdown counts', async () => {
+    render(<ActivityBreakdownPanel />)
+    const card = await screen.findByTestId(
+      'activity-breakdown-thaob@queens.edu')
+    expect(within(card).getByText('280 page views')).toBeInTheDocument()
+    expect(within(card).getByText('45 page views')).toBeInTheDocument()
+  })
+
+  it('shows the AI spend line only when total cost > 0', async () => {
+    render(<ActivityBreakdownPanel />)
+    // Bob: $0.6886 → cost line rendered ("$0.69" — two decimal places).
+    const bob = await screen.findByTestId(
+      'activity-breakdown-thaob@queens.edu')
+    expect(within(bob).getByText(/AI spend:/i)).toBeInTheDocument()
+    expect(within(bob).getByText(/\$0\.69/)).toBeInTheDocument()
+    // Michael: $0.00 → cost line hidden.
+    const michael = screen.getByTestId(
+      'activity-breakdown-ruurdsm@queens.edu')
+    expect(within(michael).queryByText(/AI spend:/i)).toBeNull()
   })
 })

@@ -13,6 +13,7 @@ import { UserPlus, Loader2, AlertCircle, X, CheckCircle } from 'lucide-react'
 import {
   PERMISSIONS, ROLE_PRESETS, ASSIGNABLE_ROLES, matchesPreset,
 } from '../constants/permissions'
+import ActivityBreakdownPanel from './ActivityBreakdownPanel'
 
 interface PlatformUser {
   id: number
@@ -461,6 +462,13 @@ export default function UserManagementPanel() {
           </table>
         </div>
       )}
+
+      {/* Platform Engagement — per-user 30-day activity breakdown.
+          Below the user-management table so a sysadmin reads the WHO
+          first (the table) and the WHAT each is doing here. */}
+      <div className="mt-6 pt-4 border-t border-border/60">
+        <ActivityBreakdownPanel />
+      </div>
 
       {adding && (
         <UserFormModal user={null} onClose={() => setAdding(false)}
