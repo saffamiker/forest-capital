@@ -6383,6 +6383,69 @@ per unique speaker.
 
 
 ─────────────────────────────────────────────────────────────────────────────
+PRESENTATION REHEARSAL MODE (May 19 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+A combined script + slide rehearsal overlay that pairs Molly's
+presentation_deck with her presentation_script and renders both side
+by side. Opens from a [Rehearse] button in the script editor's
+header — only renders when document_type is presentation_script.
+
+Backend — GET /api/v1/documents/rehearsal (team_member gated):
+  Reads the requesting user's current (is_current=true)
+  presentation_deck AND presentation_script editor drafts.
+  Returns {
+    deck:   { draft_id, slides[] },
+    script: { draft_id, sections[], total_words, estimated_minutes },
+  }
+  Returns 404 with a clear message when either draft is absent:
+    deck:   "No presentation deck found. Generate your deck first."
+    script: "No presentation script found. Generate your script first."
+  estimated_minutes = max(1, round(total_words / 150)) — the
+  platform-wide 150-wpm convention.
+
+Script section parsing — tools/rehearsal.parse_script_sections(json):
+  Walks the TipTap doc and produces per-slide sections:
+    H2 "Slide N: Title"      → slide_number + title (starts a section)
+    H3 "Speaker: Name"       → speaker (attaches to current section)
+    Blockquote "Transition:" → transition (attaches to current)
+    Paragraph / other prose  → script_text (joined with \n\n)
+  Each section also carries a word_count that drives the 150-wpm
+  minutes estimate the endpoint returns. Fail-open shape contract:
+  malformed input returns []; a draft without H2 headings returns
+  ONE section containing all prose; an H2 that does NOT match the
+  slide pattern is body content of the current section (so a writer's
+  sub-headings don't lose their text).
+
+Frontend — components/editor/RehearsalOverlay.tsx:
+  Two-panel side-by-side layout:
+    Left (40%)  — script panel: bold slide N: title, speaker label,
+                  body prose (scrollable), transition line at the
+                  bottom prefixed →.
+    Right (60%) — slide panel: static canvas render of the deck
+                  slide (reuses PresentationPreview's text positioning
+                  math). Speaker notes strip at the bottom as muted
+                  presenter-only context.
+  Chart elements render as labelled placeholder boxes —
+  "[rolling correlation]" instead of a network call. Rehearsal mode is
+  deliberately content-only; loading real chart PNGs is on the post-
+  deadline backlog (per CLAUDE.md).
+  Header — "Rehearsal Mode", live "~N min remaining" counter (sum of
+  remaining sections' word counts / 150), Exit button (also Esc).
+  Navigation — arrow keys advance both panels together; on-screen ‹ ›
+  buttons mirror the keys.
+  States — loading spinner, 404 modal ("Rehearsal requires both your
+  presentation deck and script. {endpoint detail}"), and a generic
+  error card all render in the same surface area; Close button on
+  each calls onClose().
+
+The [Rehearse] button sits next to [Export Master Script] in the
+script editor header (data-tour="editor-rehearse"). Guide 2 of the
+Submission Guides points presenters to it from the "Rewrite in your
+own voice" step.
+
+
+─────────────────────────────────────────────────────────────────────────────
 CHART LIBRARY — canvas editor server-rendered charts (May 19 2026)
 ─────────────────────────────────────────────────────────────────────────────
 

@@ -322,7 +322,7 @@ deliverables lead.*
 
 *Complete Section 1 first. This section is your primary workflow as
 presentation and visualisation lead. Record ✅ Pass / ❌ Fail / ⏭ Skip
-inline for each numbered item (4.1–4.14).*
+inline for each numbered item (4.1–4.15).*
 
 ### 4.1 Presentation deck generation
 
@@ -500,13 +500,42 @@ inline for each numbered item (4.1–4.14).*
 
 **Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 
+### 4.15 Rehearsal mode
+
+- Open your generated `presentation_script` draft in the editor.
+- Click **[Rehearse]** in the editor header.
+- Verify a full-screen overlay opens with a top bar reading
+  "Rehearsal Mode", a slide counter "Slide 1 of N", and an Exit
+  button (also Esc).
+- Verify the **left panel** shows the script for slide 1 — slide
+  number + title (bold), speaker label, the section's body prose,
+  and the transition line at the bottom prefixed →.
+- Verify the **right panel** shows a static render of the slide
+  itself — text elements positioned as in the canvas, chart elements
+  as labelled placeholder boxes ("[rolling correlation]" etc.); the
+  presenter's speaker notes appear in a muted strip at the bottom.
+- Press the right arrow key — verify **both panels advance together**
+  to slide 2's script and slide 2's canvas. Press the left arrow —
+  verify both step back.
+- Verify the **delivery time counter** ("~N min remaining") at the
+  top right counts down as you advance slides — slide 1 should show
+  more remaining time than the last slide.
+- Press **Esc** — verify the overlay closes and the script editor is
+  visible again with no state loss.
+- If your script OR your deck is missing when you click [Rehearse],
+  verify the overlay shows "Rehearsal requires both your presentation
+  deck and script." with the specific missing-resource message, and
+  a Close button that dismisses the modal.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
 ---
 
 ## Test Sign-Off
 
 At the end of your section, record the summary below. Sections 1-3 are
 recorded as `- [ ]` checklist items; Section 4 (Molly) is recorded as
-fourteen numbered items (4.1–4.14), each carrying an inline
+fifteen numbered items (4.1–4.15), each carrying an inline
 ✅ Pass / ❌ Fail / ⏭ Skip result — note the result and any failure
 detail against each.
 
@@ -515,7 +544,7 @@ detail against each.
 | Tester | |
 | Date | |
 | Section completed | |
-| Section 4 items 4.1–4.14 (Molly only) | _e.g. 14/14 pass_ |
+| Section 4 items 4.1–4.15 (Molly only) | _e.g. 15/15 pass_ |
 | Failures found | |
 | Notes | |
 
