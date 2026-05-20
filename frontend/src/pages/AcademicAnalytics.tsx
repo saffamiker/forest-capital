@@ -290,6 +290,23 @@ function SectionCard({
   )
 }
 
+/**
+ * ResponsiveHeader — a column-header label that abbreviates on mobile
+ * to keep the row to a single line in a narrow viewport. The full
+ * label still appears in the InfoIcon tooltip (set via infoLabel on
+ * the surrounding TH) so a tap surfaces the original wording.
+ */
+function ResponsiveHeader(
+  { full, short }: { full: string; short: string },
+) {
+  return (
+    <>
+      <span className="hidden sm:inline">{full}</span>
+      <span className="inline sm:hidden">{short}</span>
+    </>
+  )
+}
+
 const TH = ({ children, right = false, infoKey, infoLabel, term,
               sticky = false }: {
   children: React.ReactNode
@@ -355,11 +372,19 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
           <TH sticky>Asset</TH>
           <TH>Period</TH>
           <TH right infoKey="cagr" infoLabel="CAGR" term="cagr">CAGR</TH>
-          <TH right infoKey="excess_return" infoLabel="Excess Return">Excess Return (ann.)</TH>
-          <TH right infoKey="volatility" infoLabel="Annualised Volatility">Ann. Volatility</TH>
+          <TH right infoKey="excess_return" infoLabel="Excess Return">
+            <ResponsiveHeader full="Excess Return (ann.)" short="Ex. Ret." />
+          </TH>
+          <TH right infoKey="volatility" infoLabel="Annualised Volatility">
+            <ResponsiveHeader full="Ann. Volatility" short="Vol." />
+          </TH>
           <TH right infoKey="sharpe" infoLabel="Sharpe Ratio" term="sharpe_ratio">Sharpe</TH>
-          <TH right infoKey="information_ratio" infoLabel="Information Ratio" term="info_ratio">Information Ratio</TH>
-          <TH right infoKey="max_drawdown" infoLabel="Maximum Drawdown" term="max_drawdown">Max Drawdown</TH>
+          <TH right infoKey="information_ratio" infoLabel="Information Ratio" term="info_ratio">
+            <ResponsiveHeader full="Information Ratio" short="IR" />
+          </TH>
+          <TH right infoKey="max_drawdown" infoLabel="Maximum Drawdown" term="max_drawdown">
+            <ResponsiveHeader full="Max Drawdown" short="Max DD" />
+          </TH>
           <TH right infoKey="skewness" infoLabel="Skewness" term="skewness">Skewness</TH>
         </tr></thead>
         <tbody>
@@ -421,7 +446,7 @@ export function RollingExcessReturnChart(
       exportButton={<TableExportButton tableId="rolling_excess_return" headers={headers} rows={exportRows} />}
     >
       <ResponsiveContainer width="100%" height={320}>
-        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 4 }}>
+        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 12 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
           <XAxis dataKey="date" tick={theme.axisTick} minTickGap={56} />
           <YAxis
@@ -479,7 +504,7 @@ export function RollingCorrelationChart(
         + `${data.window_months}-month window; regime break ${data.regime_break}.` }}
     >
       <ResponsiveContainer width="100%" height={300}>
-        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 0 }}>
+        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 12 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
           <XAxis dataKey="date" tick={theme.axisTick}
                  minTickGap={48} />
@@ -595,7 +620,13 @@ function DrawdownComparisonTable({ rows }: { rows: DrawdownRow[] }) {
       <div className="overflow-x-auto">
       <table className="w-full">
         <thead><tr className="border-b border-border">
-          <TH sticky>Strategy</TH><TH right>Max Drawdown</TH><TH right>Recovery (months)</TH>
+          <TH sticky>Strategy</TH>
+          <TH right>
+            <ResponsiveHeader full="Max Drawdown" short="Max DD" />
+          </TH>
+          <TH right>
+            <ResponsiveHeader full="Recovery (months)" short="Rec. (mo)" />
+          </TH>
         </tr></thead>
         <tbody>
           {rows.map((r) => (
@@ -795,7 +826,7 @@ export function CumulativeReturnChart(
       }
     >
       <ResponsiveContainer width="100%" height={340}>
-        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 4 }}>
+        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 12 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
           <XAxis dataKey="date" tick={theme.axisTick} minTickGap={56} />
           <YAxis
@@ -874,7 +905,7 @@ function SensitivityChart(
         {s.parameter}
       </div>
       <ResponsiveContainer width="100%" height={200}>
-        <LineChart data={s.points} margin={{ top: 8, right: 12, bottom: 4, left: 0 }}>
+        <LineChart data={s.points} margin={{ top: 8, right: 12, bottom: 4, left: 12 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
           <XAxis dataKey="value" type="number" domain={['dataMin', 'dataMax']}
                  tick={{ fill: theme.axisTick.fill, fontSize: 10 }} />

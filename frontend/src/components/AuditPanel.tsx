@@ -178,7 +178,10 @@ export function FindingRow({ f }: { f: AuditFinding }) {
               {!resolved && !editing && (
                 <button type="button"
                   onClick={() => { setDraft(note); setEditing(true) }}
-                  className="text-electric hover:underline">
+                  /* 44px tap-target on mobile (the audit's standard);
+                     resets to natural inline size from sm: up. */
+                  className="text-electric hover:underline inline-flex
+                             items-center min-h-[44px] sm:min-h-0">
                   Acknowledge
                 </button>
               )}

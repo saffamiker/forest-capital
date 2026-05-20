@@ -281,3 +281,57 @@ describe('EditorNavigator — footnote prop', () => {
     expect(screen.queryByText(/To rehearse/)).toBeNull()
   })
 })
+
+
+// ── Mobile pass — Document editor overlay treatment + canvas banner ───────────
+
+describe('DocumentEditor — mobile overlay treatment', () => {
+  // Force the matchMedia branch to "mobile" (lg query does NOT match) so
+  // isDesktop is false and the editor renders the mobile overlay path.
+  // The default jsdom env reports matchMedia undefined → falls back to
+  // desktop. Patching it here is the simplest way to exercise the
+  // mobile rendering branch from a unit test.
+  beforeEach(() => {
+    const _mq = vi.fn().mockImplementation(() => ({
+      matches: false,
+      media: '(min-width: 1024px)',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+      onchange: null,
+    }))
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true, configurable: true, value: _mq,
+    })
+  })
+
+  it('defaults both panels CLOSED on mobile', async () => {
+    mountEditor(scriptDraft())
+    // The script editor's delivery-time pill lives inside EditorNavigator
+    // — present only when the left panel is open. On mobile both panels
+    // default closed, so the delivery-time text must NOT appear.
+    await screen.findByRole('button', { name: /Run Academic Review/i })
+      .catch(() => null)
+    // Give the page one render cycle. The "Generating…" Generate-Script
+    // button anchors the editor is mounted.
+    await screen.findByText('Presentation Script')
+    expect(screen.queryByText(/min delivery/)).toBeNull()
+  })
+
+  it('shows the canvas-editor mobile banner for a deck draft', async () => {
+    mountEditor(deckDraft(true))
+    expect(await screen.findByText(
+      /presentation canvas editor works best on desktop/i,
+    )).toBeInTheDocument()
+  })
+
+  it('does NOT show the canvas banner for a script draft', async () => {
+    mountEditor(scriptDraft())
+    await screen.findByText('Presentation Script')
+    expect(screen.queryByText(
+      /presentation canvas editor works best on desktop/i,
+    )).toBeNull()
+  })
+})

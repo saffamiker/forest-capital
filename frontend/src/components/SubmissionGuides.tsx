@@ -238,16 +238,29 @@ export default function SubmissionGuidePanel({ onClose }: { onClose: () => void 
   return (
     <>
       <div className="fixed inset-0 bg-black/40 z-[69]" onClick={onClose} />
-      <aside className="fixed right-0 top-0 h-full w-full sm:w-[420px]
-                        bg-navy-900 border-l border-border z-[70]
-                        flex flex-col">
+      {/* On lg+ the guide renders as a right-side drawer (420 px aside).
+          Below lg it slides up from the bottom as a full-width sheet
+          (max-h 80vh, scrollable) so the narrow-viewport user sees the
+          guide content rather than a 200-300 px side column. The
+          rounded-t-lg drag-handle look is the established mobile-sheet
+          pattern (matches TestRunner, ExplainerPanel). */}
+      <aside className="fixed bg-navy-900 border-border z-[70] flex flex-col
+                        max-lg:inset-x-0 max-lg:bottom-0 max-lg:rounded-t-lg
+                        max-lg:border-t max-lg:max-h-[80vh]
+                        lg:right-0 lg:top-0 lg:h-full lg:w-[420px]
+                        lg:border-l">
+        {/* Drag-handle pill — mobile sheet visual only. */}
+        <div className="lg:hidden flex justify-center pt-2 pb-1">
+          <div className="w-10 h-1 rounded-full bg-border" />
+        </div>
         <div className="flex items-center justify-between px-4 py-3
                         border-b border-border">
           <h2 className="text-white font-semibold text-sm">
             📋 Submission Guide
           </h2>
           <button type="button" onClick={onClose} aria-label="Close"
-            className="text-muted hover:text-white">
+            className="text-muted hover:text-white min-h-[44px] min-w-[44px]
+                       sm:min-h-0 sm:min-w-0 flex items-center justify-center">
             <X className="w-4 h-4" />
           </button>
         </div>

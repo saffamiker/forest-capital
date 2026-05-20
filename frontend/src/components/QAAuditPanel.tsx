@@ -91,6 +91,73 @@ function CheckRow({ check, open, onToggle, explanation }: CheckRowProps) {
   )
 }
 
+/**
+ * CategoryAccordion — mobile-only grouped view of QA checks.
+ *
+ * Collapsed: a tappable header with the category name and three count
+ * pills (pass / warn / fail). Tap the header to expand; expanded view
+ * renders the same CheckRow each check uses on desktop. Per-category
+ * open state is local — opening one category does not close another.
+ */
+function CategoryAccordion(
+  { category, items, openChecks, onToggleCheck, explanations }: {
+    category: string
+    items: QACheck[]
+    openChecks: Set<string>
+    onToggleCheck: (id: string) => void
+    explanations: Record<string, QAItemExplanation>
+  },
+) {
+  const [open, setOpen] = useState(false)
+  const pass = items.filter((i) => i.status === 'PASS').length
+  const warn = items.filter((i) => i.status === 'WARN').length
+  const fail = items.filter((i) => i.status === 'FAIL').length
+  return (
+    <div className="border border-border rounded-lg overflow-hidden">
+      <button type="button" onClick={() => setOpen((o) => !o)}
+        className="w-full flex items-center gap-2 px-3 py-2.5 text-left
+                   bg-navy-800 hover:bg-navy-700 transition-colors
+                   min-h-[44px]">
+        <span className="text-white text-xs font-semibold flex-1
+                         truncate">
+          {category}
+        </span>
+        <div className="flex items-center gap-1.5 shrink-0 text-2xs
+                        font-mono">
+          {pass > 0 && (
+            <span className="text-success">{pass}P</span>
+          )}
+          {warn > 0 && (
+            <span className="text-warning">{warn}W</span>
+          )}
+          {fail > 0 && (
+            <span className="text-danger">{fail}F</span>
+          )}
+        </div>
+        {open ? (
+          <ChevronUp className="w-3.5 h-3.5 text-muted shrink-0" />
+        ) : (
+          <ChevronDown className="w-3.5 h-3.5 text-muted shrink-0" />
+        )}
+      </button>
+      {open && (
+        <div className="p-2 bg-navy-900">
+          {items.map((check) => (
+            <CheckRow
+              key={check.check_id}
+              check={check}
+              open={openChecks.has(check.check_id)}
+              onToggle={() => onToggleCheck(check.check_id)}
+              explanation={explanations[check.check_id]}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 export default function QAAuditPanel() {
   // Audit result lives in qaStore — survives navigation away and back.
   // load() is a no-op when loaded=true, so re-entering this tab is instant
@@ -194,8 +261,9 @@ export default function QAAuditPanel() {
         </div>
       </div>
 
-      {/* Category filter */}
-      <div className="flex gap-1.5 flex-wrap">
+      {/* Category filter — sm: and up only. Below sm: the checklist
+          renders as a grouped accordion (see the mobile block below). */}
+      <div className="hidden sm:flex gap-1.5 flex-wrap">
         {categories.map((cat) => (
           <button
             key={cat}
@@ -211,8 +279,8 @@ export default function QAAuditPanel() {
         ))}
       </div>
 
-      {/* Checklist */}
-      <div>
+      {/* Checklist — desktop flat list. */}
+      <div className="hidden sm:block">
         {filtered.map((check) => (
           <CheckRow
             key={check.check_id}
@@ -222,6 +290,27 @@ export default function QAAuditPanel() {
             explanation={qaExplanations[check.check_id]}
           />
         ))}
+      </div>
+
+      {/* Checklist — mobile (below sm:) grouped accordion view. Each
+          category becomes a collapsible section; the header carries
+          the pass/warn/fail count badges for that group. Tapping the
+          header expands the group to the same CheckRow set used on
+          desktop. Keeps the QA checklist scannable on a narrow phone
+          where 39 checks in a flat list would require a long scroll. */}
+      <div className="sm:hidden space-y-2">
+        {categories
+          .filter((c) => c !== 'ALL')
+          .map((cat) => (
+            <CategoryAccordion
+              key={cat}
+              category={cat}
+              items={items.filter((c) => c.category === cat)}
+              openChecks={openChecks}
+              onToggleCheck={toggleCheck}
+              explanations={qaExplanations}
+            />
+          ))}
       </div>
 
       {/* Legend */}
