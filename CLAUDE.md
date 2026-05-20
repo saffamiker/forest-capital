@@ -6720,45 +6720,100 @@ is maintained separately. The `gh` CLI is authenticated with the
 ─── JUNE 3 MILESTONE ───────────────────────────────────────────────────
 
   Tracks the midpoint check-in (Tuesday June 3, 6pm, Sykes 326). The
-  "REMAINING" list is the only thing that gates the deliverable —
+  REMAINING list is the only thing that gates the deliverable —
   every other build is captured in POST-DEADLINE BACKLOG below.
 
-  COMPLETED:
+  COMPLETED (platform features):
     ✅ Midpoint paper editor (Bob) — TipTap RichTextEditor, [[BOB]]
        callouts as block panels, [[VERIFY]] inline popups, 30s
        auto-save, Save Version + Restore
     ✅ Executive Brief editor (Bob) — same editor surface, brief
        layout with the three judgement callouts
+    ✅ [[BOB]] callout coverage — Section 2 of the midpoint paper +
+       three judgement callouts on the executive brief (Summary /
+       Limitations / Recommendations), all surfaced in the editor and
+       in the DOCX export
     ✅ Presentation deck canvas editor (Molly) — free-form Konva
        canvas, text + chart elements, AI Layout / AI Copy with
        Apply/Dismiss review, PPTX export with EMU mapping
-    ✅ Presentation script writer (Molly) — per-slide speaker
-       assignment, generate-from-deck endpoint, script TipTap editor
-       with 150-wpm delivery time, master / per-speaker DOCX exports
-       with stable per-speaker colours
-    ✅ Rehearsal mode (Molly) — combined script + slide view (built
-       May 19; see CLAUDE.md rehearsal section once it lands)
-    ✅ Academic Review integration — peer fan-out + Opus arbiter, the
-       script-specific arbiter rubric branch, every editor draft
-       overlaid onto the documents-by-type map so reviews target the
-       current working copy
-    ✅ Async document generation — job-based 202+poll pattern,
+    ✅ Presentation script writer (Molly) — generate-from-deck
+       endpoint, script TipTap editor with 150-wpm delivery time
+    ✅ Rehearsal mode (Molly) — combined script + slide overlay with
+       arrow-key navigation and the live "min remaining" counter
+    ✅ Speaker assignment per slide — speaker badge in the deck
+       navigator, presenter label above the canvas, validated by
+       Generate Script
+    ✅ Master + per-speaker DOCX export — one master script plus one
+       per unique speaker, stable per-speaker colours within each file
+    ✅ Academic Review integration (all document types) — every
+       editor draft overlaid onto the review's documents-by-type map
+       so reviews target the current working copy
+    ✅ Script-specific AR rubric — five spoken-delivery sections
+       (coherence / clarity / coverage / speaker differentiation /
+       delivery readiness), Strong / Needs Work / Incomplete scale,
+       citation-formatting criteria explicitly skipped
+    ✅ Async document generation (all three types) — 202+poll pattern,
        module-level frontend store survives navigation, completion
        toast announces a job finished off-Reports, bytes cleared
        after the first download (410 Gone on re-attempt)
-    ✅ Full cost tracking coverage — every interaction-logging
-       endpoint seeds start_usage_capture, _stream_haiku records
-       usage after the stream completes, sysadmin attribution for
-       auto-triggered runs, pricing-rate Sonnet fallback for
-       null/unrecognised model
-    ✅ UAT guide updated (Section 4) — canvas editor + script writer
-       walkthrough rewritten for the May-19 build
+    ✅ Full cost tracking coverage (all interaction types) — every
+       interaction-logging endpoint seeds start_usage_capture,
+       _stream_haiku records usage after the stream completes,
+       sysadmin attribution for auto-triggered runs, Sonnet fallback
+       for null / unrecognised model
+    ✅ Per-user activity breakdown (Settings) — 30-day rolling
+       interaction + session-type counts per user, recharts stacked
+       bar, AI-spend line shown only when > 0, LEFT-JOIN contract
+       (zero-activity users still appear)
+    ✅ Mobile pass (BLOCKING + DEGRADED items) — document editor
+       three-panel overlay treatment below lg, canvas-editor banner
+       on touch devices, InfoIcon touch targets, chart margins,
+       column-header abbreviations, [[VERIFY]] popup viewport clamp,
+       section navigator truncation, Submission Guide bottom sheet,
+       QA methodology accordion, WARN-acknowledge touch target,
+       [[BOB]] panel full-width button
+    ✅ UAT guide updated (Section 4) — canvas editor + script writer +
+       rehearsal mode (4.15) walkthrough rewritten for the May-19 build
+    ✅ Additional chart library (16 charts, 6 categories) — regime,
+       factors, performance, risk, significance, activity. Two
+       renderer families (deck five + tools/chart_renderers extended
+       eleven); single-strategy default REGIME_SWITCHING vs BENCHMARK
+    ✅ WARN acknowledge workflow — Audit findings table carries the
+       acknowledgement note, the audit verdict is unaffected, the
+       audit report renders the acknowledgement alongside the WARN
+    ✅ Audit findings persistence fix — per-row commit + truncation,
+       PDF layer status differentiation, QA parser permissive header
+       matching
+    ✅ QA sysadmin-only gates — every /api/v1/audit/* and the
+       statistical-audit run routes gated to manage_users
+    ✅ Global QA running pill — nav-bar indicator while a Tier 2 /
+       Tier 3 audit is in progress, with concurrent-run protection
+       on every QA endpoint
+    ✅ Commentary Mode full coverage — ExplainableText on every
+       Analytics column header that has a glossary term, every
+       chart title with a Sources line, every QA checklist item with
+       four-section narrative
+    ✅ Glossary reload on council completion — force-reload bypasses
+       the termsLoaded guard so this_session reflects the actual
+       council output, no UI flash during the silent reload
+    ✅ Submission Guide (Bob + Molly) — two-guide right-side drawer
+       on lg+, full-width bottom sheet on mobile, deadline countdown
+       per owner
+    ✅ Testing Mode auto-manage — session-scoped, auto-resets to
+       analytical on next login, amber 🧪 pill in nav while on
+    ✅ File storage cleanup — screenshot directory swept on startup
+       for files older than 30 days, async docgen job bytes cleared
+       after the first download to free the in-process buffer
 
-  REMAINING:
-    □ Molly UAT pass
-    □ Bob UAT pass (Section 3)
-    □ Bob midpoint paper submission (May 27th)
-    □ Molly presentation submission (June 3rd)
+  REMAINING (team actions):
+    □ Molly — UAT pass (Section 4)
+    □ Bob — UAT pass (Section 3)
+    □ Michael — UAT pass (Section 2)
+    □ All — UAT Section 1
+    □ Bob — midpoint paper submission (May 27)
+    □ Bob — Academic Review session before writing the midpoint draft
+    □ Bob — midpoint draft upload (Settings → Academic Documents)
+    □ Molly — presentation submission (June 3)
 
 
 ─── POST-DEADLINE BACKLOG ──────────────────────────────────────────────
@@ -6768,64 +6823,82 @@ is maintained separately. The `gh` CLI is authenticated with the
   the surface and the reason a fix waits — most are quality
   refinements, not blockers.
 
-  Technical debt:
+  TECHNICAL DEBT:
     □ Canvas editor mobile experience — the 960×540 Konva Stage is
       unusable at 380px (auto-scales to ≈0.36×, pixel-precise editing
-      impossible on touch). Needs a responsive layout or a mobile-
-      specific view-only mode with the Transformer disabled. See
-      docs/MOBILE_AUDIT.md — flagged DEGRADED, component-change-class.
-    □ Strategy InfoIcon mobile tap-target inflation — ⓘ buttons are
-      ~24px below the project's 44px standard. Wrap each in a
-      min-h-[44px] min-w-[44px] button on mobile only. Trivial CSS.
-    □ Academic Review rubric refinements — once Bob and Molly have
-      run reviews against real drafts, the arbiter prompt and the
-      per-document-type rubric branches will need tuning against
-      what graders actually flag.
+      impossible on touch). The May-19 mobile pass added a banner
+      and disables the Transformer + chart picker on touch devices,
+      so a touch user can navigate slides and edit speaker notes —
+      precise canvas editing still needs a responsive layout or a
+      mobile-specific view. See docs/MOBILE_AUDIT.md — component-
+      change class.
+    □ Strategy InfoIcon mobile tap-target inflation — the ⓘ button
+      carries a 44px minimum at the button level, but align-middle
+      only partly mitigates inline placement next to a metric label;
+      the tap surface is still tight when an InfoIcon sits inside a
+      narrow cell. Promote the InfoIcon to its own row on mobile or
+      use a larger hit area extending into the cell padding.
     □ Rehearsal mode chart loading — chart elements currently render
-      as placeholder boxes with the chart label. Loading the real
-      chart PNG via /api/v1/charts/render is straightforward; deferred
-      so rehearsal mode ships before June 3 with the simpler surface.
-    □ Per-speaker colour consistency between the script editor and
-      the exported DOCX — the script editor renders each speaker's
-      sections in a stable palette colour, and the DOCX export does
-      the same, but the palettes are not pinned to identical hex
-      values. Pin them.
+      as placeholder boxes with the chart label. The /api/v1/charts/
+      render endpoint already serves the right PNGs; rehearsal mode
+      ships content-only for June 3 so the overlay never blocks on
+      a network call. Wire real chart images post-deadline.
+    □ Per-speaker colour consistency between the script editor
+      display and the exported DOCX — the script editor renders each
+      speaker's sections in a stable palette colour, and the DOCX
+      export does the same, but the palettes are not pinned to
+      identical hex values. Pin them so a presenter scanning the
+      DOCX recognises the same colour they saw in the editor.
+    □ InfoIcon vs ExplainableText final unification decision — the
+      May-17 double-affordance fix suppressed the InfoIcon when
+      ExplainableText is already present on Analytics table headers,
+      but the codebase still has two patterns. On chart titles the
+      InfoIcon still appears alongside ExplainableText on some
+      surfaces. Pick one pattern for the long term and migrate.
+    □ this_session glossary timing — full fix. The May-17 force-
+      reload fix (loadTerms(councilOutput, { force: true })) makes
+      the reload work after every council session, but the
+      termsLoaded guard is still in the code path. The clean fix is
+      to drop the guard entirely for the council-completion code
+      path and rely on a request-id to dedupe in-flight loads — the
+      glossary becomes continuously session-anchored rather than
+      "loaded once + force reloaded on council completion".
 
-  Analytics:
+  ANALYTICS:
     □ Additional matplotlib renderers for the remaining Recharts-only
-      Analytics charts — every chart NOT yet in
+      Analytics charts — every Recharts chart NOT yet in
       tools/chart_render.AVAILABLE_CHARTS is canvas-editor-invisible
       today. Add the missing renderers (e.g. the regime-transition
-      matrix, the factor-exposure heatmap as a dedicated chart, the
-      sub-period regime timeline) so the chart picker can offer them
-      too.
+      matrix, the sub-period regime timeline) so the chart picker
+      can offer them too.
     □ Puppeteer / headless-browser option for frontend chart capture
       — the export package today rasterises off-screen Recharts via
       html2canvas at 2× (browser-side). A headless browser run from
       the backend would let the matplotlib renderers be retired in
-      favour of the live frontend charts; bigger lift than its
-      payoff today.
+      favour of the live frontend charts — alternative to matplotlib
+      for any chart. Bigger lift than its payoff today.
 
-  Infrastructure:
-    □ S3 migration if /data disk fills — the persistent Render disk is
-      1 GB and the project will not approach that ceiling. The
-      tools.test_runner.cleanup_old_screenshots sweep on startup
-      bounds growth at 30 days; if the platform sees broader use the
-      durable next step is an object-store migration (boto3 +
-      bucket-name env var). Not needed for the project deliverable.
-    □ True portfolio turnover in the backtester — the analytics layer
-      already surfaces real one-way turnover (sum(|Δw|)/2) per the
+  INFRASTRUCTURE:
+    □ S3 migration if /data disk fills — the persistent Render disk
+      is 1 GB and the project will not approach that ceiling.
+      tools.test_runner.cleanup_old_screenshots sweeps the disk on
+      every startup and drops files older than 30 days, so growth
+      is bounded. If the platform sees broader use the durable next
+      step is an object-store migration (boto3 + bucket-name env
+      var). Not needed for the project deliverable.
+    □ True portfolio turnover in the backtester — the analytics
+      layer surfaces real one-way turnover (sum(|Δw|)/2) per the
       May-18 audit fix, but the backtester's tier1_gates pipeline
-      still uses the legacy turnover proxy in a couple of derived
-      fields. Replace those references with the true measure.
-    □ Option B / C document refinement after Bob and Molly review pass
-      — Bob writes the midpoint paper and exec brief in their final
-      voice; Molly writes the presentation deck and script. After
-      they each run a review pass, edit the [[BOB]] / [[MOLLY]]
-      callout copy in academic_docx.py to match what they actually
-      asked for.
+      still references the legacy turnover proxy in a couple of
+      derived fields. Replace those references with the true measure.
+    □ Option B / C document refinement after Bob and Molly review
+      pass — Bob writes the midpoint paper and exec brief in their
+      final voice; Molly writes the presentation deck and script.
+      After they each run a real review pass, edit the [[BOB]] /
+      [[MOLLY]] callout copy in academic_docx.py to match what they
+      actually asked for.
 
-  Platform:
+  PLATFORM:
     □ Script rehearsal mode refinements post-Molly feedback —
       timing display tweaks, slide-overlay font sizing, presenter
       cue ordering, and any UX feedback she surfaces during her
@@ -6837,16 +6910,23 @@ is maintained separately. The `gh` CLI is authenticated with the
       print-theme version when "Preview as exported" is toggled, so
       Molly can confirm a slide reads correctly in the deliverable's
       colours.
-    □ InfoIcon vs ExplainableText final unification decision — both
-      surfaces explain a metric; the May-17 double-affordance fix
-      suppressed the InfoIcon when ExplainableText is present, but
-      the codebase still has two patterns. Pick one for the long
-      term.
-    □ this_session glossary timing — the May-17 force-reload fix
-      (loadTerms(councilOutput, { force: true })) addresses the race
-      via the force path; the full fix is to drop the termsLoaded
-      guard for the council-completion code path entirely and rely
-      on a request-id to dedupe in-flight loads. Defensive cleanup.
+    □ Academic Review rubric refinements based on Bob and Molly
+      feedback — once Bob and Molly have run reviews against real
+      drafts AND received grades against real submissions, the
+      arbiter prompt and the per-document-type rubric branches
+      (written + script) will need tuning against what graders
+      actually flag.
+    □ Real-device touch behaviour on Konva canvas — iOS Safari
+      pinch / zoom behaviour on the canvas Stage is beyond what a
+      static code review can verify. The May-19 mobile pass disables
+      the Transformer and chart picker on touch devices, so the
+      canvas is now in a documented "view-only on touch" state, but
+      real-device validation is still pending.
+    □ TipTap toolbar pixel density on high-DPI mobile screens — the
+      mobile audit could not assess the TipTap toolbar's pixel
+      density at static review time; an in-browser check on a real
+      device is the only reliable measure. Bump button sizes if the
+      toolbar looks cramped on a Retina iPhone.
 
 
 
