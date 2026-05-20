@@ -1223,6 +1223,67 @@ async def generate_presentation_script(
     }
 
 
+@app.get("/api/v1/documents/rehearsal")
+async def get_rehearsal_payload(
+    session: dict = Depends(require_team_member),
+):
+    """
+    Combined deck + script payload for the presentation rehearsal mode
+    (combined-script-and-slide-view overlay in the script editor).
+
+    Reads the requesting user's current (is_current=true)
+    presentation_deck and presentation_script editor drafts and returns
+    them side by side, with the script parsed into per-slide sections.
+
+    Returns 404 when either draft is absent — the rehearsal needs both:
+      deck missing:    "No presentation deck found. Generate your deck first."
+      script missing:  "No presentation script found. Generate your script first."
+
+    Estimated delivery time is total_words / 150 (the platform-wide
+    150-wpm convention; the script editor's delivery time pill uses
+    the same rate).
+    """
+    from tools.editor_drafts import get_current_draft
+    from tools.rehearsal import parse_script_sections
+
+    email = session.get("email", "")
+    deck = await get_current_draft("presentation_deck", email)
+    if deck is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No presentation deck found. Generate your deck first.")
+    script = await get_current_draft("presentation_script", email)
+    if script is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No presentation script found. Generate your script first.")
+
+    # Deck slides — pass through the canvas shape verbatim. The frontend
+    # rehearsal overlay reuses the same CanvasSlide / CanvasElement
+    # types the editor itself uses to render the static preview.
+    deck_json = deck.get("content_json") or {}
+    slides = deck_json.get("slides") if isinstance(deck_json, dict) else []
+
+    # Script — parse the TipTap doc into per-slide sections.
+    script_json = script.get("content_json") or {}
+    sections = parse_script_sections(script_json)
+    total_words = sum(s.get("word_count", 0) for s in sections)
+    estimated_minutes = max(1, round(total_words / 150))
+
+    return {
+        "deck": {
+            "draft_id": deck.get("id"),
+            "slides":   slides or [],
+        },
+        "script": {
+            "draft_id":          script.get("id"),
+            "sections":          sections,
+            "total_words":       total_words,
+            "estimated_minutes": estimated_minutes,
+        },
+    }
+
+
 @app.post("/api/v1/documents/drafts/{draft_id}/export")
 async def export_editor_draft(
     draft_id: int,
