@@ -2699,14 +2699,22 @@ async def admin_users_activity_breakdown(
 ):
     """
     Per-user activity broken down by interaction_type and session_type
-    over a 30-day rolling window — the analytics behind the Settings →
-    Users → Platform Engagement panel.
+    over BOTH a lifetime window and a rolling 30-day window — the
+    analytics behind the Settings → Users → Platform Engagement panel.
+    The panel renders LIFETIME as the headline (the figure that matters
+    for academic-integrity tracking) and the 30-day count as
+    recent-activity context.
 
     Joins against platform_users (LEFT JOIN) so every user appears even
-    when they have zero interactions in the window. The breakdown
+    when they have zero interactions in either window. The breakdown
     aggregates two source tables:
       agent_interactions  → counts by interaction_type + SUM(cost)
       session_events      → counts by session_type for page_view events
+
+    Each user row carries both a `lifetime` block (breakdown,
+    session_breakdown, total_interactions, total_cost_usd, first_seen,
+    last_seen) and a `rolling_30d` block (the same minus the
+    lifetime-only first/last_seen pair).
 
     Sysadmin only. Fail-open — a DB error returns an empty users list.
     """

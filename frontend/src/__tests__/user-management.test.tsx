@@ -256,49 +256,81 @@ describe('UserManagementPanel', () => {
 
 import ActivityBreakdownPanel from '../components/ActivityBreakdownPanel'
 
+// Lifetime is the HEADLINE on the panel; rolling_30d is context.
+// Bob's lifetime exceeds his 30-day numbers — that is the realistic
+// shape a sysadmin sees and the panel pins as the academic-integrity
+// figure.
 const BREAKDOWN_FIXTURE = {
   users: [
     {
       email: 'thaob@queens.edu',
       display_name: 'Bob Thao',
       role: 'team_member',
-      breakdown: {
-        council: 12,
-        academic_review: 4,
-        writing_assistant: 6,
-        explain: 8,
-        qa: 2,
+      lifetime: {
+        breakdown: {
+          council: 12,
+          academic_review: 4,
+          writing_assistant: 6,
+          explain: 8,
+          qa: 2,
+        },
+        session_breakdown: { analytical: 280, testing: 45 },
+        total_interactions: 32,
+        total_cost_usd: 0.6886,
+        first_seen: '2026-05-01T10:00:00+00:00',
+        last_seen:  '2026-05-19T17:00:00+00:00',
       },
-      session_breakdown: { analytical: 280, testing: 45 },
-      total_interactions: 32,
-      total_cost_usd: 0.6886,
-      first_seen: '2026-05-01T10:00:00+00:00',
-      last_seen:  '2026-05-19T17:00:00+00:00',
+      // Rolling total is 14 (not 12) so the assertion on "12" in
+      // Bob's per-type list (his lifetime council count) does not
+      // collide with the "12" that would appear in the rolling-line
+      // body — keeps the per-type test unambiguous.
+      rolling_30d: {
+        breakdown: { council: 10, academic_review: 2, qa: 2 },
+        session_breakdown: { analytical: 200, testing: 30 },
+        total_interactions: 14,
+        total_cost_usd: 0.21,
+      },
     },
     {
       email: 'murdockm@queens.edu',
       display_name: 'Molly Murdock',
       role: 'team_member',
-      breakdown: {},
-      session_breakdown: {},
-      total_interactions: 0,
-      total_cost_usd: 0,
-      first_seen: null,
-      last_seen:  null,
+      lifetime: {
+        breakdown: {},
+        session_breakdown: {},
+        total_interactions: 0,
+        total_cost_usd: 0,
+        first_seen: null,
+        last_seen:  null,
+      },
+      rolling_30d: {
+        breakdown: {},
+        session_breakdown: {},
+        total_interactions: 0,
+        total_cost_usd: 0,
+      },
     },
     {
       email: 'ruurdsm@queens.edu',
       display_name: 'Michael',
       role: 'sysadmin',
-      breakdown: { council: 5 },
-      session_breakdown: { analytical: 120, testing: 0 },
-      total_interactions: 5,
-      total_cost_usd: 0,
-      first_seen: '2026-05-18T10:00:00+00:00',
-      last_seen:  '2026-05-19T11:00:00+00:00',
+      lifetime: {
+        breakdown: { council: 5 },
+        session_breakdown: { analytical: 120, testing: 0 },
+        total_interactions: 5,
+        total_cost_usd: 0,
+        first_seen: '2026-05-18T10:00:00+00:00',
+        last_seen:  '2026-05-19T11:00:00+00:00',
+      },
+      rolling_30d: {
+        breakdown: { council: 3 },
+        session_breakdown: { analytical: 80, testing: 0 },
+        total_interactions: 3,
+        total_cost_usd: 0,
+      },
     },
   ],
-  period_days: 30,
+  rolling_window_days: 30,
   generated_at: '2026-05-19T12:00:00+00:00',
 }
 
@@ -313,14 +345,14 @@ describe('ActivityBreakdownPanel', () => {
     mockedAxios.isAxiosError = ((() => false) as unknown) as typeof axios.isAxiosError
   })
 
-  it('renders the section header and subtitle', async () => {
+  it('renders the section header and the life-to-date subtitle', async () => {
     render(<ActivityBreakdownPanel />)
     expect(await screen.findByTestId('activity-breakdown-header'))
       .toBeInTheDocument()
-    // The subtitle is in the header block — locate it via the testid
-    // and then assert on its sibling. "Last 30 days" also appears on
-    // user cards once they render, hence the scoped lookup.
-    expect(screen.getByText(/Last 30 days — analytical sessions only/i))
+    // The subtitle reflects the new headline window — lifetime, not
+    // 30 days. The 30-day figure still appears as a per-user context
+    // line below the bar (covered by a separate test).
+    expect(screen.getByText(/Life-to-date analytical activity/i))
       .toBeInTheDocument()
   })
 
@@ -337,11 +369,14 @@ describe('ActivityBreakdownPanel', () => {
       'activity-breakdown-ruurdsm@queens.edu')).toBeInTheDocument()
   })
 
-  it('shows the empty state for a zero-interaction user', async () => {
+  it('shows the empty state for a zero-lifetime user', async () => {
     render(<ActivityBreakdownPanel />)
     expect(await screen.findByTestId(
       'activity-zero-murdockm@queens.edu')).toBeInTheDocument()
-    expect(screen.getByText(/No activity in the last 30 days/i))
+    // The empty-state copy is "No activity yet" now that lifetime is
+    // the headline — "in the last 30 days" was the previous wording
+    // when the panel only carried the rolling window.
+    expect(screen.getByText(/No activity yet/i))
       .toBeInTheDocument()
   })
 
@@ -368,14 +403,39 @@ describe('ActivityBreakdownPanel', () => {
     expect(within(card).getByText('45 page views')).toBeInTheDocument()
   })
 
-  it('shows the AI spend line only when total cost > 0', async () => {
+  it('renders the LIFETIME total in the headline interaction count',
+    async () => {
+      // Bob's lifetime.total_interactions is 32; his rolling_30d total
+      // is 14. The chip top-right of the card must show the lifetime
+      // figure — that is what matters for academic-integrity tracking.
+      render(<ActivityBreakdownPanel />)
+      const card = await screen.findByTestId(
+        'activity-breakdown-thaob@queens.edu')
+      expect(within(card).getByText('32 interactions')).toBeInTheDocument()
+    })
+
+  it('renders the rolling 30-day count as a secondary context line',
+    async () => {
+      // Below the bar, a small "Last 30 days: N interactions" line so
+      // a sysadmin sees recent activity without losing the lifetime
+      // headline. Pinned via a stable data-testid.
+      render(<ActivityBreakdownPanel />)
+      const ctx = await screen.findByTestId(
+        'activity-rolling-thaob@queens.edu')
+      expect(ctx).toHaveTextContent(/Last 30 days/)
+      expect(ctx).toHaveTextContent(/14/)
+    })
+
+  it('shows the AI spend line only when LIFETIME cost > 0', async () => {
     render(<ActivityBreakdownPanel />)
-    // Bob: $0.6886 → cost line rendered ("$0.69" — two decimal places).
+    // Bob: lifetime $0.6886 → cost line rendered ("$0.69" — two decimals).
     const bob = await screen.findByTestId(
       'activity-breakdown-thaob@queens.edu')
     expect(within(bob).getByText(/AI spend:/i)).toBeInTheDocument()
     expect(within(bob).getByText(/\$0\.69/)).toBeInTheDocument()
-    // Michael: $0.00 → cost line hidden.
+    // Michael: lifetime $0.00 → cost line hidden (even though his
+    // rolling spend would also be zero — both windows here happen to
+    // agree, but the LIFETIME value is what gates the line).
     const michael = screen.getByTestId(
       'activity-breakdown-ruurdsm@queens.edu')
     expect(within(michael).queryByText(/AI spend:/i)).toBeNull()
