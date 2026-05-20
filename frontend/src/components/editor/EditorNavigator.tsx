@@ -10,6 +10,7 @@ import { useState } from 'react'
 import { History, Save, RotateCcw, FileText, Loader2 } from 'lucide-react'
 
 import type { EditorDraftVersion, SaveState } from '../../types/editor'
+import { getSpeakerColour } from '../../lib/speakerColours'
 
 export interface NavSection {
   heading: string
@@ -35,6 +36,9 @@ interface Props {
     | undefined
   /** Speaker names already used in the deck — dropdown suggestions. */
   speakerSuggestions?: string[] | undefined
+  /** Script-mode only — unique speakers in first-seen order, drives the
+   *  per-speaker colour palette (shared with the DOCX export). */
+  scriptSpeakers?: readonly string[] | undefined
   /** Replaces the word-count line — e.g. the script's delivery estimate. */
   metricLine?: string | undefined
   /** Tone for metricLine — 'ok' green, 'warn' amber, otherwise muted. */
@@ -47,7 +51,8 @@ interface Props {
 export default function EditorNavigator({
   title, wordCount, wordTarget, lastSavedLabel, saveState, sections,
   versions, onJumpToSection, onSaveVersion, onRestoreVersion,
-  onAssignSpeaker, speakerSuggestions, metricLine, metricTone, footnote,
+  onAssignSpeaker, speakerSuggestions, scriptSpeakers, metricLine,
+  metricTone, footnote,
 }: Props) {
   const [showSave, setShowSave] = useState(false)
   const [label, setLabel] = useState('')
@@ -126,9 +131,22 @@ export default function EditorNavigator({
                     suggestions={speakerSuggestions ?? []}
                     onAssign={(sp) => onAssignSpeaker(s.heading, sp)} />
                 ) : s.speaker ? (
-                  <div className="text-2xs text-electric mt-0.5">
-                    {s.speaker}
-                  </div>
+                  // Script mode — colour the read-only speaker label
+                  // from the shared palette so the navigator and the
+                  // exported DOCX agree on who is which colour. Falls
+                  // back to electric blue when no speaker list is
+                  // supplied (defensive — every script caller passes it).
+                  scriptSpeakers && scriptSpeakers.length > 0 ? (
+                    <div className="text-2xs mt-0.5"
+                      style={{ color:
+                        getSpeakerColour(s.speaker, scriptSpeakers) }}>
+                      {s.speaker}
+                    </div>
+                  ) : (
+                    <div className="text-2xs text-electric mt-0.5">
+                      {s.speaker}
+                    </div>
+                  )
                 ) : null}
               </div>
             ))}

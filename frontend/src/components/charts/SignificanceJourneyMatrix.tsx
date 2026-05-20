@@ -13,7 +13,6 @@ import { prettyName, tooltipLine } from '../../lib/strategyColors'
 import StrategyTypeBadge from '../StrategyTypeBadge'
 import ExplainableText from '../ExplainableText'
 import ChartExportButton from '../ChartExportButton'
-import InfoIcon from '../InfoIcon'
 
 interface Gate {
   label: string
@@ -79,28 +78,16 @@ export default function SignificanceJourneyMatrix({ strategies }: Props) {
     (a, b) => (b.tier1_gates_passed ?? 0) - (a.tier1_gates_passed ?? 0),
   )
 
-  // Gate pass-rate, read by the explainer.
-  const passingAll = strategies.filter(
-    (s) => (s.tier1_gates_passed ?? 0) >= 5,
-  ).length
-  const sjmTop = sorted[0]
-  const explainValue =
-    `${strategies.length} strategies against 5 Tier 1 gates. ${passingAll} `
-    + `pass all five. Top: ${prettyName(sjmTop.strategy_name)} at `
-    + `${sjmTop.tier1_gates_passed ?? 0}/5 gates.`
-
   return (
     <div className="card p-4" data-testid="significance-journey-matrix" ref={containerRef}>
       <div className="mb-3">
+        {/* No chart-title InfoIcon — every Tier 1 gate column header is
+            already wrapped in ExplainableText, so a single explanation
+            affordance per gate is sufficient. (Adding a title-level
+            InfoIcon here used to double up against the column ones.) */}
         <div className="flex items-center justify-between">
           <h3 className="text-white font-semibold text-sm">
             Significance Journey Matrix
-            <InfoIcon
-              tooltipKey="significance_journey_matrix"
-              metricLabel="Significance Journey Matrix"
-              size="md"
-              currentValue={explainValue}
-            />
           </h3>
           <ChartExportButton chartId="significance_journey_matrix" containerRef={containerRef} />
         </div>

@@ -670,7 +670,9 @@ function FactorLoadingsTable(
     <SectionCard
       title="Carhart Four-Factor Loadings"
       tourId="factor-loadings"
-      infoKey="ff_factor_loadings"
+      // No title-level InfoIcon — every metric column header
+      // (Alpha / MKT-RF / SMB / HML / MOM / R²) is already wrapped in
+      // ExplainableText, so a single affordance per metric is enough.
       subtitle={
         'OLS regression of each strategy\'s monthly excess return on the '
         + 'Carhart four-factor model (MKT-RF, SMB, HML, MOM). * marks loadings '

@@ -28,6 +28,7 @@ import {
   canvasSlideStatus, deckToText, newChartElement,
 } from '../components/editor/canvasSlide'
 import { countMarkers, nodeToText } from '../lib/editorMarkers'
+import { getSpeakerColour } from '../lib/speakerColours'
 import type {
   CanvasDeck, EditorDraft, EditorDraftVersion, SaveState, TipTapDoc,
 } from '../types/editor'
@@ -541,15 +542,22 @@ export default function DocumentEditor() {
                   : <><Download className="w-3.5 h-3.5" />
                       Export Master Script</>}
               </button>
-              {scriptSpeakers.map((name) => (
-                <button key={name} type="button"
-                  onClick={() => void exportScript(name)} disabled={exporting}
-                  className="flex items-center gap-1 text-2xs px-2 py-1 rounded
-                             border border-electric/40 text-electric
-                             hover:bg-electric/10 disabled:opacity-50">
-                  <Download className="w-3.5 h-3.5" /> Export: {name}
-                </button>
-              ))}
+              {scriptSpeakers.map((name) => {
+                // Per-speaker colour from the shared palette — the same
+                // colour the navigator label uses and the DOCX export
+                // applies to the SPEAKER: heading. A presenter scanning
+                // the editor recognises their own colour everywhere.
+                const colour = getSpeakerColour(name, scriptSpeakers)
+                return (
+                  <button key={name} type="button"
+                    onClick={() => void exportScript(name)} disabled={exporting}
+                    style={{ color: colour, borderColor: `${colour}66` }}
+                    className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                               border hover:bg-electric/10 disabled:opacity-50">
+                    <Download className="w-3.5 h-3.5" /> Export: {name}
+                  </button>
+                )
+              })}
             </>
           ) : (
             <button type="button" onClick={() => void exportDocument()}
@@ -643,6 +651,7 @@ export default function DocumentEditor() {
               onRestoreVersion={restoreVersion}
               onAssignSpeaker={isDeck ? handleAssignSpeaker : undefined}
               speakerSuggestions={isDeck ? speakerSuggestions : undefined}
+              scriptSpeakers={isScript ? scriptSpeakers : undefined}
               metricLine={scriptMetricLine}
               metricTone={scriptMetricTone}
               footnote={isScript
@@ -728,6 +737,7 @@ export default function DocumentEditor() {
                 onRestoreVersion={restoreVersion}
                 onAssignSpeaker={isDeck ? handleAssignSpeaker : undefined}
                 speakerSuggestions={isDeck ? speakerSuggestions : undefined}
+                scriptSpeakers={isScript ? scriptSpeakers : undefined}
                 metricLine={scriptMetricLine}
                 metricTone={scriptMetricTone}
                 footnote={isScript

@@ -28,14 +28,10 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.shared import Inches, Pt
 
 from tools.academic_docx import _add_page_number, _set_run_color
+from tools.speaker_colours import get_speaker_colour
 
 _BODY_FONT = "Times New Roman"
 _AI_DRAFT_BANNER = "AI DRAFT — REQUIRES HUMAN REVIEW"
-
-# A stable colour per speaker, assigned by first-seen order.
-_SPEAKER_COLOURS = [
-    "#1D4ED8", "#B45309", "#0D9488", "#7C3AED", "#BE123C", "#15803D",
-]
 
 _SPEAKER_RE = re.compile(r"Speaker:\s*(.+)", re.IGNORECASE)
 
@@ -94,11 +90,6 @@ def script_speakers(content_json: Any) -> list[str]:
         if sec.speaker and sec.speaker not in out:
             out.append(sec.speaker)
     return out
-
-
-def _speaker_colour(name: str, order: list[str]) -> str:
-    idx = order.index(name) if name in order else 0
-    return _SPEAKER_COLOURS[idx % len(_SPEAKER_COLOURS)]
 
 
 def _is_slide_section(sec: _Section) -> bool:
@@ -190,7 +181,7 @@ def build_script_docx(
             sprun.bold = True
             sprun.font.name = _BODY_FONT
             sprun.font.size = Pt(12)
-            _set_run_color(sprun, _speaker_colour(section.speaker, speakers))
+            _set_run_color(sprun, get_speaker_colour(section.speaker, speakers))
 
         for kind, text in section.blocks:
             para = doc.add_paragraph()
