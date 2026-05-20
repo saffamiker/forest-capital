@@ -111,6 +111,19 @@ export default function CanvasSlideEditor({
   const areaRef = useRef<HTMLDivElement | null>(null)
   const editTextRef = useRef<HTMLTextAreaElement | null>(null)
 
+  // Touch-device gating — the Konva Transformer's resize handles and
+  // the chart-picker drag flow assume pointer-grade precision; on a
+  // touch screen the handles are smaller than a fingertip and the
+  // chart picker drawer overlaps the slide. Elements can still be
+  // selected and dragged on touch — only the resize Transformer is
+  // suppressed, and the [+ Chart] button is hidden. Computed once on
+  // mount via navigator.maxTouchPoints — does not toggle if a hybrid
+  // device gains/loses a pointer mid-session.
+  const isTouchDevice = useMemo(
+    () => (typeof navigator !== 'undefined'
+           && (navigator.maxTouchPoints ?? 0) > 0),
+    [])
+
   // Switching slides resets every per-slide interaction. The element
   // edits themselves are already committed (onChange runs on each
   // change), so this only clears the selection/edit overlay state.
@@ -344,12 +357,14 @@ export default function CanvasSlideEditor({
                      hover:bg-electric/10">
           <Type className="w-3.5 h-3.5" /> Text
         </button>
-        <button type="button" onClick={onRequestChartPicker}
-          className="flex items-center gap-1 text-2xs px-2 py-1 rounded
-                     border border-electric/40 text-electric
-                     hover:bg-electric/10">
-          <BarChart3 className="w-3.5 h-3.5" /> Chart
-        </button>
+        {!isTouchDevice && (
+          <button type="button" onClick={onRequestChartPicker}
+            className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                       border border-electric/40 text-electric
+                       hover:bg-electric/10">
+            <BarChart3 className="w-3.5 h-3.5" /> Chart
+          </button>
+        )}
 
         {selectedEl?.type === 'text' && (
           <TextFormatBar el={selectedEl}
@@ -444,10 +459,16 @@ export default function CanvasSlideEditor({
                 )
               })}
 
-              <Transformer ref={transformerRef}
-                rotateEnabled={false}
-                boundBoxFunc={(oldBox, newBox) =>
-                  (newBox.width < 40 || newBox.height < 30 ? oldBox : newBox)} />
+              {/* Resize Transformer — desktop / pointer devices only.
+                  On touch screens the handles are smaller than a
+                  fingertip; selection and drag still work via the
+                  per-element handlers, only resize is gated. */}
+              {!isTouchDevice && (
+                <Transformer ref={transformerRef}
+                  rotateEnabled={false}
+                  boundBoxFunc={(oldBox, newBox) =>
+                    (newBox.width < 40 || newBox.height < 30 ? oldBox : newBox)} />
+              )}
             </Layer>
           </Stage>
 

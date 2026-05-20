@@ -19,10 +19,18 @@ Two halves:
   categorize_feedback returns empty categorisation.
 
 Screenshots: stored to the local uploads directory, never as BLOBs; the
-DB holds only relative paths. NOTE — on Render the filesystem is
-ephemeral and these image files do NOT survive a redeploy. The
-attestation row (result, description, severity, timestamps) is the
-durable record; screenshots are supporting evidence only.
+DB holds only relative paths. config.SCREENSHOT_DIR is /data/test_screenshots
+on Render (a persistent disk — survives redeployments) and
+backend/data/test_screenshots in local development. The attestation
+row remains the durable record (result, description, severity,
+timestamps); screenshots are supporting evidence.
+
+Cleanup — cleanup_old_screenshots() runs from the application lifespan
+on every cold start and drops files older than 30 days, so the disk
+does not grow forever. delete_screenshots(paths) is a per-row helper
+for an explicit delete (no production code path deletes test_results
+or test_feedback rows today; the helper is provided so a future delete
+endpoint can keep the disk in sync with the database).
 """
 from __future__ import annotations
 
@@ -75,6 +83,86 @@ def save_screenshots(files: list[tuple[str, bytes]]) -> list[str]:
     except Exception as exc:  # noqa: BLE001
         log.warning("test_screenshot_save_failed", error=str(exc))
     return saved
+
+
+# Screenshots older than this on startup are unlinked. 30 days matches
+# the typical UAT cycle plus a one-cycle buffer — old enough that
+# anything still attached to an open failure report would already have
+# been resolved.
+_SCREENSHOT_RETENTION_DAYS = 30
+
+
+def cleanup_old_screenshots() -> tuple[int, int]:
+    """
+    Drops every file under SCREENSHOT_DIR whose mtime is older than
+    _SCREENSHOT_RETENTION_DAYS. Returns (deleted, remaining) — counts of
+    files removed and files still present after the sweep.
+
+    Fail-open — a missing or unreadable directory returns (0, 0) and
+    logs a warning; never raises. The caller (the lifespan startup
+    hook) treats the result as informational, not a gate.
+    """
+    import time
+    deleted = 0
+    remaining = 0
+    try:
+        dest = Path(SCREENSHOT_DIR)
+        if not dest.exists():
+            return 0, 0
+        cutoff = time.time() - _SCREENSHOT_RETENTION_DAYS * 86400
+        for entry in dest.iterdir():
+            if not entry.is_file():
+                continue
+            try:
+                if entry.stat().st_mtime < cutoff:
+                    entry.unlink()
+                    deleted += 1
+                else:
+                    remaining += 1
+            except OSError as exc:
+                # A file we can't stat or unlink — log and skip, do not
+                # abort the sweep. Treat as remaining (it survived).
+                log.warning("test_screenshot_skip", file=entry.name,
+                            error=str(exc))
+                remaining += 1
+    except Exception as exc:  # noqa: BLE001
+        log.warning("test_screenshot_cleanup_failed", error=str(exc))
+    return deleted, remaining
+
+
+def delete_screenshots(paths: list[str] | None) -> int:
+    """
+    Removes the on-disk files for the given DB-stored relative paths
+    (e.g. ["test_screenshots/<uuid>.png", ...]). Returns the number of
+    files actually deleted.
+
+    A row's screenshot paths sit on disk under SCREENSHOT_DIR's parent
+    (see the /uploads StaticFiles mount in main.py — rooted one level
+    above SCREENSHOT_DIR so the "test_screenshots/<uuid>" prefix
+    resolves). The per-row delete helper for any future endpoint that
+    removes test_results / test_feedback rows; fail-open per file so
+    a missing or already-deleted file is not an error.
+    """
+    if not paths:
+        return 0
+    parent = Path(SCREENSHOT_DIR).parent
+    removed = 0
+    for relpath in paths:
+        try:
+            target = parent / str(relpath)
+            # Refuse to follow a path that escapes SCREENSHOT_DIR — the
+            # stored prefix is "test_screenshots/<uuid>", any ".." or
+            # absolute-path argument is a misuse.
+            if not str(target.resolve()).startswith(
+                    str(Path(SCREENSHOT_DIR).resolve())):
+                continue
+            if target.exists() and target.is_file():
+                target.unlink()
+                removed += 1
+        except Exception as exc:  # noqa: BLE001
+            log.warning("test_screenshot_delete_failed",
+                        path=str(relpath), error=str(exc))
+    return removed
 
 
 # ── test_results persistence ──────────────────────────────────────────────────

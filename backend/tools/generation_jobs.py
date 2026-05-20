@@ -62,9 +62,40 @@ def create_job(document_type: str, owner_email: str) -> dict[str, Any]:
         "_filename": None,
         "_media_type": None,
         "_task": None,
+        # _bytes_served flips true after the download endpoint serves
+        # the file once. _file_bytes is then cleared to free memory —
+        # large PPTX renders (2 MB+) would otherwise hold a buffer for
+        # the full 2-hour job TTL. The job record itself is kept so the
+        # client can still poll status; a second download attempt
+        # returns 410 Gone (the contract the download endpoint enforces).
+        "_bytes_served": False,
     }
     _jobs[job_id] = job
     return job
+
+
+def mark_downloaded(job_id: str) -> bool:
+    """
+    Marks a job's file as served — clears _file_bytes (and the buffered
+    filename / media_type) to free the in-process buffer. Returns True
+    when a non-empty payload was cleared (a job that already had no
+    bytes returns False — the second-download contract).
+    """
+    job = _jobs.get(job_id)
+    if job is None:
+        return False
+    had_bytes = job.get("_file_bytes") is not None
+    job["_file_bytes"] = None
+    job["_filename"] = None
+    job["_media_type"] = None
+    job["_bytes_served"] = True
+    return had_bytes
+
+
+def was_downloaded(job_id: str) -> bool:
+    """True when this job's bytes have already been served."""
+    job = _jobs.get(job_id)
+    return bool(job and job.get("_bytes_served"))
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:

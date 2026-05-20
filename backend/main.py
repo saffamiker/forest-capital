@@ -85,6 +85,29 @@ async def lifespan(app: FastAPI):
                 log.info("Startup reap: no stale audit runs found")
         except Exception as exc:  # noqa: BLE001
             log.warning("audit_startup_reap_failed", error=str(exc))
+        # Screenshot cleanup — drops UAT screenshots older than 30 days
+        # from SCREENSHOT_DIR. The disk is the persistent Render volume
+        # in production; without this sweep, every failure-report
+        # screenshot ever uploaded would accumulate forever. Fail-open
+        # — a missing directory or unreadable file logs and continues.
+        try:
+            from tools.test_runner import cleanup_old_screenshots
+            deleted, remaining = cleanup_old_screenshots()
+            if deleted == 0 and remaining == 0:
+                log.info("screenshot_cleanup: directory empty or absent")
+            else:
+                log.info(
+                    "screenshot_cleanup",
+                    deleted=deleted,
+                    remaining=remaining,
+                    message=(
+                        f"screenshot_cleanup: deleted {deleted} "
+                        f"screenshots older than 30 days, "
+                        f"{remaining} remain"
+                    ),
+                )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("screenshot_cleanup_failed", error=str(exc))
         # One-time baseline log — counts the historical rows that landed
         # before the cost-tracking deploy (pre-migration 020 token columns
         # are null). Sets a clear line in the Render logs: everything from
@@ -1200,6 +1223,67 @@ async def generate_presentation_script(
     }
 
 
+@app.get("/api/v1/documents/rehearsal")
+async def get_rehearsal_payload(
+    session: dict = Depends(require_team_member),
+):
+    """
+    Combined deck + script payload for the presentation rehearsal mode
+    (combined-script-and-slide-view overlay in the script editor).
+
+    Reads the requesting user's current (is_current=true)
+    presentation_deck and presentation_script editor drafts and returns
+    them side by side, with the script parsed into per-slide sections.
+
+    Returns 404 when either draft is absent — the rehearsal needs both:
+      deck missing:    "No presentation deck found. Generate your deck first."
+      script missing:  "No presentation script found. Generate your script first."
+
+    Estimated delivery time is total_words / 150 (the platform-wide
+    150-wpm convention; the script editor's delivery time pill uses
+    the same rate).
+    """
+    from tools.editor_drafts import get_current_draft
+    from tools.rehearsal import parse_script_sections
+
+    email = session.get("email", "")
+    deck = await get_current_draft("presentation_deck", email)
+    if deck is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No presentation deck found. Generate your deck first.")
+    script = await get_current_draft("presentation_script", email)
+    if script is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No presentation script found. Generate your script first.")
+
+    # Deck slides — pass through the canvas shape verbatim. The frontend
+    # rehearsal overlay reuses the same CanvasSlide / CanvasElement
+    # types the editor itself uses to render the static preview.
+    deck_json = deck.get("content_json") or {}
+    slides = deck_json.get("slides") if isinstance(deck_json, dict) else []
+
+    # Script — parse the TipTap doc into per-slide sections.
+    script_json = script.get("content_json") or {}
+    sections = parse_script_sections(script_json)
+    total_words = sum(s.get("word_count", 0) for s in sections)
+    estimated_minutes = max(1, round(total_words / 150))
+
+    return {
+        "deck": {
+            "draft_id": deck.get("id"),
+            "slides":   slides or [],
+        },
+        "script": {
+            "draft_id":          script.get("id"),
+            "sections":          sections,
+            "total_words":       total_words,
+            "estimated_minutes": estimated_minutes,
+        },
+    }
+
+
 @app.post("/api/v1/documents/drafts/{draft_id}/export")
 async def export_editor_draft(
     draft_id: int,
@@ -1839,6 +1923,11 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
     the generator-evaluator harness. The arbiter is generated IN FULL and
     harness-evaluated before any chunk is streamed — a failed attempt is
     never shown, only the accepted verdict.
+
+    document_type query param — when "presentation_script", the arbiter
+    runs the SCRIPT-SPECIFIC rubric (coherence, audience clarity, slide
+    coverage, speaker differentiation; skips citation formatting and
+    paragraph structure). Default rubric otherwise.
     """
     import asyncio
     from agents.academic_review import (
@@ -1847,6 +1936,12 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
     )
     from agents.harness import start_harness_capture, collect_harness_metrics
     from agents.usage import start_usage_capture
+
+    # Rubric switch — read once at the top of the handler so a future
+    # gather_review_context refactor can also consume it. Only the literal
+    # string "presentation_script" enables the script rubric.
+    script_review = (
+        request.query_params.get("document_type") == "presentation_script")
 
     async def event_stream():
         try:
@@ -1870,6 +1965,7 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                 risk_free_rate=ctx["analytics"].get("risk_free_rate"),
                 document_types_present=ctx["document_types_present"],
                 document_types_missing=ctx["document_types_missing"],
+                script_review=script_review,
             )
             yield _sse("peer_responses", data=peer_responses)
 
@@ -1878,7 +1974,7 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             # The loading state on the frontend covers the evaluation wait.
             arbiter_text = await asyncio.to_thread(
                 run_arbiter_with_harness, context_block, peer_responses,
-                multi_user)
+                multi_user, script_review)
             for chunk in chunk_arbiter_text(arbiter_text):
                 yield _sse("arbiter_chunk", text=chunk)
             log.info("academic_review_arbiter_complete",
@@ -2595,6 +2691,27 @@ async def admin_list_users(
     """Every platform user, with an activity count. Sysadmin only."""
     from tools.platform_users import list_all_users
     return {"users": await list_all_users()}
+
+
+@app.get("/api/v1/admin/users/activity-breakdown")
+async def admin_users_activity_breakdown(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Per-user activity broken down by interaction_type and session_type
+    over a 30-day rolling window — the analytics behind the Settings →
+    Users → Platform Engagement panel.
+
+    Joins against platform_users (LEFT JOIN) so every user appears even
+    when they have zero interactions in the window. The breakdown
+    aggregates two source tables:
+      agent_interactions  → counts by interaction_type + SUM(cost)
+      session_events      → counts by session_type for page_view events
+
+    Sysadmin only. Fail-open — a DB error returns an empty users list.
+    """
+    from tools.platform_users import users_activity_breakdown
+    return await users_activity_breakdown()
 
 
 @app.post("/api/v1/admin/users")
@@ -4580,19 +4697,40 @@ async def list_generation_jobs(session: dict = Depends(require_auth)):
 async def download_generation_job(
     job_id: str, session: dict = Depends(require_auth),
 ):
-    """Downloads a completed job's rendered file. Owner-only."""
-    from tools.generation_jobs import get_job
+    """Downloads a completed job's rendered file. Owner-only.
+
+    Serves the bytes once. After the first download the buffer is
+    cleared (mark_downloaded) to free memory — a 2 MB PPTX would
+    otherwise hold a buffer for the full 2-hour job TTL. A second
+    download attempt returns 410 Gone with guidance to regenerate;
+    the job record itself stays so the client can still poll status.
+    """
+    from tools.generation_jobs import get_job, mark_downloaded, was_downloaded
     job = get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     if job["owner_email"] != session.get("email"):
         raise HTTPException(status_code=403, detail="This is not your job.")
+    if was_downloaded(job_id):
+        # Bytes already cleared — a re-attempt is a 410 (Gone), not 409
+        # (Conflict). The download was successful; the buffer is intentionally
+        # absent now.
+        raise HTTPException(
+            status_code=410,
+            detail=("This download has already been served. "
+                    "Regenerate the document if needed."))
     if job["status"] != "complete" or job["_file_bytes"] is None:
         raise HTTPException(status_code=409,
                             detail="The job has no downloadable file yet.")
+    # Snapshot the bytes BEFORE marking served — mark_downloaded sets
+    # _file_bytes to None, so we must build the response from the
+    # snapshot rather than from the (now-cleared) job dict.
+    content = job["_file_bytes"]
+    media_type = job["_media_type"]
     fname = job["_filename"] or "forest-capital-document"
+    mark_downloaded(job_id)
     return Response(
-        content=job["_file_bytes"], media_type=job["_media_type"],
+        content=content, media_type=media_type,
         headers={"Content-Disposition": f'attachment; filename="{fname}"'})
 
 

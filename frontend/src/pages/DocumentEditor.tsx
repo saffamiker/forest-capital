@@ -12,6 +12,7 @@ import axios from 'axios'
 import {
   ArrowLeft, Loader2, PanelLeftClose, PanelLeftOpen,
   PanelRightClose, PanelRightOpen, MonitorPlay, Download, FileSignature,
+  Mic, X,
 } from 'lucide-react'
 
 import RichTextEditor from '../components/editor/RichTextEditor'
@@ -20,6 +21,7 @@ import ChartPicker from '../components/editor/ChartPicker'
 import EditorNavigator from '../components/editor/EditorNavigator'
 import EditorTasksCallout from '../components/editor/EditorTasksCallout'
 import PresentationPreview from '../components/editor/PresentationPreview'
+import RehearsalOverlay from '../components/editor/RehearsalOverlay'
 import type { NavSection } from '../components/editor/EditorNavigator'
 import WritingAssistant from '../components/editor/WritingAssistant'
 import {
@@ -113,9 +115,36 @@ export default function DocumentEditor() {
   const [contentText, setContentText] = useState('')
   const [saveState, setSaveState] = useState<SaveState>('idle')
   const [lastSaved, setLastSaved] = useState<string>('not yet')
-  const [leftOpen, setLeftOpen] = useState(true)
-  const [rightOpen, setRightOpen] = useState(true)
+  // Viewport gating — desktop renders the side-aside panels; mobile
+  // (below the lg breakpoint) renders the same panels as full-screen
+  // overlay drawers. We track isDesktop as JS state so the two
+  // rendering paths are mutually exclusive (the matchMedia change
+  // listener updates this on viewport resize). The matchMedia call is
+  // guarded for jsdom envs that have no media-query implementation —
+  // fall back to "lg" so the test contract (panels render by default)
+  // is preserved.
+  const [isDesktop, setIsDesktop] = useState(() => (
+    typeof window !== 'undefined'
+      && typeof window.matchMedia === 'function'
+      ? window.matchMedia('(min-width: 1024px)').matches
+      : true
+  ))
+  useEffect(() => {
+    if (typeof window === 'undefined'
+        || typeof window.matchMedia !== 'function') return
+    const mq = window.matchMedia('(min-width: 1024px)')
+    const handler = () => setIsDesktop(mq.matches)
+    mq.addEventListener('change', handler)
+    return () => mq.removeEventListener('change', handler)
+  }, [])
+  // Panel state — default open on desktop, default closed on mobile.
+  const [leftOpen, setLeftOpen] = useState(isDesktop)
+  const [rightOpen, setRightOpen] = useState(isDesktop)
   const [previewOpen, setPreviewOpen] = useState(false)
+  // Rehearsal mode — script editor's combined script + slide view.
+  // The overlay fetches GET /api/v1/documents/rehearsal on mount, so
+  // no precondition gate is needed here beyond document_type.
+  const [rehearsalOpen, setRehearsalOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
   // The deck slide shown on the canvas — owned here so the left
   // navigator and the canvas always agree on the active slide.
@@ -490,6 +519,17 @@ export default function DocumentEditor() {
           </span>
           {isScript ? (
             <>
+              {/* Rehearse — opens the combined script + slide overlay.
+                  Fetches /api/v1/documents/rehearsal on mount; a missing
+                  deck or script surfaces a "Rehearsal requires both…"
+                  modal inside the overlay itself. */}
+              <button type="button" onClick={() => setRehearsalOpen(true)}
+                data-tour="editor-rehearse"
+                className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                           border border-electric/40 text-electric
+                           hover:bg-electric/10">
+                <Mic className="w-3.5 h-3.5" /> Rehearse
+              </button>
               <button type="button" onClick={() => void exportScript()}
                 disabled={exporting}
                 className="flex items-center gap-1 text-2xs px-2 py-1 rounded
@@ -567,9 +607,27 @@ export default function DocumentEditor() {
           document type, dismissible per draft. */}
       <EditorTasksCallout documentType={draft.document_type} draftId={id} />
 
-      {/* Three panels */}
+      {/* Mobile canvas-editor banner — the Konva Stage scales but
+          pixel-precise editing is not feasible on touch. The banner
+          surfaces the constraint clearly; the navigator drawer still
+          works and the speaker notes field is fully editable. */}
+      {isDeck && (
+        <div className="lg:hidden px-3 py-2 bg-warning/10 border-b
+                        border-warning/30 text-2xs text-warning">
+          The presentation canvas editor works best on desktop. Open
+          on a larger screen for full editing capability.
+        </div>
+      )}
+
+      {/* Three panels.
+          Desktop (lg+): two side asides with the centre between them.
+          Mobile/tablet: centre fills the viewport; the two panels
+          render as full-screen overlay drawers when opened. The
+          mutual exclusion is JS-driven on isDesktop (not pure CSS)
+          so jsdom tests see exactly one rendering at a time. */}
       <div className="flex flex-1 min-h-0">
-        {leftOpen && (
+        {/* Left navigator — desktop aside. */}
+        {isDesktop && leftOpen && (
           <aside className="w-[220px] shrink-0 border-r border-border
                             bg-navy-900">
             <EditorNavigator
@@ -614,9 +672,10 @@ export default function DocumentEditor() {
           )}
         </main>
 
-        {rightOpen && (
-          <aside className="w-[300px] shrink-0 border-l border-border
-                            bg-navy-900">
+        {/* Right Writing Assistant / chart picker — desktop aside. */}
+        {isDesktop && rightOpen && (
+          <aside className="w-[300px] shrink-0
+                            border-l border-border bg-navy-900">
             {isDeck && rightPanelMode === 'chartpicker' ? (
               <ChartPicker onSelect={handleAddChart}
                 onClose={() => setRightPanelMode('assistant')} />
@@ -629,11 +688,105 @@ export default function DocumentEditor() {
         )}
       </div>
 
+      {/* Mobile/tablet panel overlays — full-screen drawers when open.
+          The trigger buttons in the header bar toggle the same state
+          as the desktop side asides, but below lg the panel renders
+          as a slide-in overlay so the editor body keeps the viewport.
+          !isDesktop gates the entire block so jsdom (which defaults
+          to desktop) never renders both this overlay AND the side
+          aside at the same time. */}
+      {!isDesktop && leftOpen && (
+        <div className="fixed inset-0 z-[70] flex"
+             role="dialog" aria-label="Editor navigator" aria-modal="true">
+          <div className="fixed inset-0 bg-black/40"
+               onClick={() => setLeftOpen(false)} />
+          <aside className="relative w-full max-w-[320px] h-full
+                            bg-navy-900 border-r border-border
+                            flex flex-col">
+            <div className="flex items-center justify-between px-3 py-2
+                            border-b border-border">
+              <span className="text-2xs text-muted uppercase tracking-wide">
+                Sections
+              </span>
+              <button type="button" onClick={() => setLeftOpen(false)}
+                aria-label="Close navigator"
+                className="text-muted hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              <EditorNavigator
+                title={draft.title}
+                wordCount={countWords(contentText)}
+                wordTarget={WORD_TARGETS[draft.document_type] ?? 1500}
+                lastSavedLabel={lastSaved}
+                saveState={saveState}
+                sections={sections}
+                versions={versions}
+                onJumpToSection={(h) => { jumpToSection(h); setLeftOpen(false) }}
+                onSaveVersion={saveVersion}
+                onRestoreVersion={restoreVersion}
+                onAssignSpeaker={isDeck ? handleAssignSpeaker : undefined}
+                speakerSuggestions={isDeck ? speakerSuggestions : undefined}
+                metricLine={scriptMetricLine}
+                metricTone={scriptMetricTone}
+                footnote={isScript
+                  ? 'To rehearse with slides: open your presentation '
+                    + 'deck in a second tab and use Presentation Preview '
+                    + 'alongside this script.'
+                  : undefined}
+              />
+            </div>
+          </aside>
+        </div>
+      )}
+
+      {!isDesktop && rightOpen && (
+        <div className="fixed inset-0 z-[70] flex justify-end"
+             role="dialog" aria-label="Writing assistant" aria-modal="true">
+          <div className="fixed inset-0 bg-black/40"
+               onClick={() => setRightOpen(false)} />
+          <aside className="relative w-full max-w-[360px] h-full
+                            bg-navy-900 border-l border-border
+                            flex flex-col">
+            <div className="flex items-center justify-between px-3 py-2
+                            border-b border-border">
+              <span className="text-2xs text-muted uppercase tracking-wide">
+                Assistant
+              </span>
+              <button type="button" onClick={() => setRightOpen(false)}
+                aria-label="Close assistant"
+                className="text-muted hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto">
+              {isDeck && rightPanelMode === 'chartpicker' ? (
+                <ChartPicker onSelect={(k) => { handleAddChart(k); setRightOpen(false) }}
+                  onClose={() => setRightPanelMode('assistant')} />
+              ) : (
+                <WritingAssistant draftId={id} unresolvedMarkers={unresolved}
+                  prefill={assistantPrefill}
+                  documentType={draft.document_type} />
+              )}
+            </div>
+          </aside>
+        </div>
+      )}
+
       {/* Presentation Preview — a full-screen rehearsal view for a deck. */}
       {previewOpen && isDeck && (
         <PresentationPreview
           slides={(contentJson as CanvasDeck | null)?.slides ?? []}
           onClose={() => setPreviewOpen(false)} />
+      )}
+
+      {/* Rehearsal Mode — combined script + slide overlay for a script.
+          Fetches the deck and script in one call, renders side-by-side
+          with keyboard navigation. The overlay handles its own
+          loading / 404 / error states. */}
+      {rehearsalOpen && isScript && (
+        <RehearsalOverlay onClose={() => setRehearsalOpen(false)} />
       )}
     </div>
   )

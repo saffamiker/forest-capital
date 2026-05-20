@@ -103,9 +103,11 @@ export default function EditorNavigator({
               <div key={s.heading}>
                 <button type="button"
                   onClick={() => onJumpToSection(s.heading)}
-                  className="w-full text-left group">
+                  className="w-full text-left group min-w-0">
+                  {/* truncate clips a long heading rather than wrapping
+                      it to two/three lines in the narrow navigator. */}
                   <div className="text-slate-300 group-hover:text-white
-                                  truncate">
+                                  truncate whitespace-nowrap overflow-hidden">
                     {s.heading}
                   </div>
                   <div className="flex items-center gap-1.5 mt-0.5">

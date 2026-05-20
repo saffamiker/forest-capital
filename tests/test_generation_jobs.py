@@ -245,6 +245,54 @@ class TestDownload:
             "/api/v1/jobs/does-not-exist/download", headers=OWNER_HEADERS)
         assert resp.status_code == 404
 
+    def test_download_clears_bytes_after_first_serve(self):
+        # Large PPTX renders (2 MB+) would otherwise sit in the _jobs
+        # dict for the full 2-hour TTL. The first successful download
+        # serves the bytes, then flips _bytes_served and nulls
+        # _file_bytes / _filename / _media_type. The job record itself
+        # stays so the client can still poll status.
+        job = generation_jobs.create_job("presentation_deck", OWNER)
+        bytes_ = b"PK\x03\x04stub pptx" * 1024
+        generation_jobs.update_job(
+            job["job_id"], status="complete", _file_bytes=bytes_,
+            _filename="deck.pptx",
+            _media_type=("application/vnd.openxmlformats-officedocument."
+                          "presentationml.presentation"))
+        resp = client.get(
+            f"/api/v1/jobs/{job['job_id']}/download", headers=OWNER_HEADERS)
+        assert resp.status_code == 200
+        assert resp.content == bytes_
+        stored = generation_jobs.get_job(job["job_id"])
+        assert stored is not None
+        assert stored["_file_bytes"] is None         # buffer cleared
+        assert stored["_filename"] is None
+        assert stored["_media_type"] is None
+        assert stored["_bytes_served"] is True       # served flag set
+        # Status preserved so the client's polling still sees "complete".
+        assert stored["status"] == "complete"
+
+    def test_second_download_returns_410_gone(self):
+        # After the bytes have been served once, a re-attempt is a 410
+        # Gone with regenerate guidance — never a 409 or 500. The first
+        # download succeeded; the buffer is intentionally absent now.
+        job = generation_jobs.create_job("executive_brief", OWNER)
+        generation_jobs.update_job(
+            job["job_id"], status="complete", _file_bytes=b"once",
+            _filename="brief.docx",
+            _media_type=("application/vnd.openxmlformats-officedocument."
+                          "wordprocessingml.document"))
+        # First download — succeeds.
+        first = client.get(
+            f"/api/v1/jobs/{job['job_id']}/download", headers=OWNER_HEADERS)
+        assert first.status_code == 200
+        # Second download — 410.
+        second = client.get(
+            f"/api/v1/jobs/{job['job_id']}/download", headers=OWNER_HEADERS)
+        assert second.status_code == 410
+        detail = second.json().get("detail", "")
+        assert "already been served" in detail.lower()
+        assert "regenerate" in detail.lower()
+
 
 # ── Endpoints — cancellation ──────────────────────────────────────────────────
 

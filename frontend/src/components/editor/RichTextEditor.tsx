@@ -219,8 +219,11 @@ export function VerifyPopup(
       <div role="dialog" aria-label="Verify marker"
         style={{ position: 'fixed', top: y + 12,
                  left: Math.min(x, window.innerWidth - 280), zIndex: 65 }}
-        className="w-[260px] rounded border border-warning/50 bg-navy-800
-                   shadow-2xl p-3">
+        /* max-w clamps the popup so it can never extend past the viewport
+           edge on a narrow phone — the floating coordinate anchors near
+           the right edge would otherwise overflow. */
+        className="w-[260px] max-w-[calc(100vw-32px)] rounded border
+                   border-warning/50 bg-navy-800 shadow-2xl p-3">
         <p className="text-2xs text-slate-300 mb-2">
           Verify this value against the Analytics page before removing
           this marker.

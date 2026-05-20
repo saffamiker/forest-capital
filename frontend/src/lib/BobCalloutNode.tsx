@@ -21,15 +21,20 @@ export function BobCalloutPanel(
   return (
     <div contentEditable={false}
       className="my-3 rounded border border-warning/50 bg-warning/10 p-3">
-      <div className="text-warning font-semibold text-xs mb-1.5">
+      {/* Title — full-width bold heading; never inline with body text so
+          a long callout cannot push it off-screen on mobile. */}
+      <div className="text-warning font-semibold text-xs mb-1.5 w-full">
         ✏️ BOB — YOUR INPUT NEEDED
       </div>
       <p className="text-xs text-amber-100/90 whitespace-pre-wrap mb-2">
         {text || '(no callout text)'}
       </p>
+      {/* Button — full width on mobile, natural inline width on sm: up. */}
       <button type="button" onClick={onComplete}
-        className="text-2xs px-2 py-1 rounded bg-warning/20 text-warning
-                   border border-warning/40 hover:bg-warning/30">
+        className="w-full sm:w-auto text-2xs px-2 py-2 sm:py-1 rounded
+                   bg-warning/20 text-warning border border-warning/40
+                   hover:bg-warning/30 min-h-[44px] sm:min-h-0
+                   flex items-center justify-center sm:inline-flex">
         Mark as Complete
       </button>
     </div>

@@ -186,6 +186,48 @@ role-specific section.
 - [ ] `academic_documents` shows green (recently uploaded).
 - [ ] Analytics Configuration shows the DTB3 risk-free rate value.
 
+### Settings — Platform Engagement panel
+
+- [ ] Navigate to Settings → Users.
+- [ ] Scroll below the user table.
+- [ ] Verify the **Platform Engagement** section is visible with the
+      subtitle "Last 30 days — analytical sessions only".
+- [ ] Verify a stacked-bar chart renders per user, showing activity
+      broken down by interaction type (Council / Academic Review /
+      Writing Assistant / Explain / QA / Export / Test Quality / Document
+      Upload).
+- [ ] Hover over a bar segment — verify a tooltip shows the interaction
+      type and the count (e.g. "12 interactions" + "Council").
+- [ ] Verify any zero-interaction user shows the muted "No activity in
+      the last 30 days" state instead of an empty bar.
+- [ ] Verify the **AI spend** line is visible for users with cost > $0
+      (formatted as `$X.XX`), and absent on a $0 user.
+- [ ] Verify the per-type list (left column) and the analytical /
+      testing page-view split (right column) appear below each user's
+      bar.
+
+### QA page and audit controls
+
+- [ ] Navigate to the **QA** page.
+- [ ] Verify the **[Run Full QA]** and **[Run Full Audit]** buttons are
+      visible at the top (sysadmin-only — confirm they are not visible
+      when signed in as a viewer or team member).
+- [ ] Click **[Run Full Audit]** — verify the global **QA Running** pill
+      appears in the nav bar within ~1 second.
+- [ ] Navigate to the Dashboard and back to the QA page — verify the
+      pill is still present (it tracks the audit, not the route).
+- [ ] On the **Statistical Audit** panel, find a finding with status
+      **WARN**.
+- [ ] Click **[Acknowledge]** on the WARN finding — verify a textarea
+      opens for the resolution note.
+- [ ] Enter a brief resolution note ("Reviewed; accepted as a documented
+      limitation") and click **[Save acknowledgement]**.
+- [ ] Verify the saved finding now shows an **Acknowledged** badge and
+      the resolution note renders below the evidence.
+- [ ] Click **[Download Audit Report]** to export the PDF.
+- [ ] Open the PDF and verify the resolution note appears on the WARN
+      finding's row — the acknowledgement carries into the export.
+
 ### Team Activity validation
 
 - [ ] Michael Ruurds' commits appear in the Team Activity timeline.
@@ -242,25 +284,61 @@ deliverables lead.*
 > review *before* generating the midpoint paper so that section is complete
 > rather than `[DATA PENDING]`.
 
-### Document generation
+### Document generation — async pattern
+
+Document generation runs as a background job: the **Generate** click
+returns a job id immediately, the panel polls the job's status, and a
+completion toast announces a job that finished while you were on
+another screen. The polling store lives at module scope, so navigating
+away from Reports never cancels the run.
 
 - [ ] Navigate to Reports → Generate Documents.
-- [ ] Click **Generate Midpoint Paper** and wait for generation (30–60s).
-- [ ] Download the `.docx` file, open it in Word, and verify:
+- [ ] Click **[Generate Midpoint Paper]**.
+- [ ] Verify the card **immediately** shows a spinner and "Generating
+      your midpoint paper…".
+- [ ] Verify the message "You can navigate away — we'll notify you
+      when it's ready" appears below the spinner.
+- [ ] Navigate to the Dashboard and back to Reports — verify
+      generation continues in the background (the spinner and the
+      navigate-away message are still on the card; the job did not
+      restart).
+- [ ] Wait for completion (30-60 seconds end-to-end).
+- [ ] On completion, verify **[Open in Editor]** appears as the
+      primary (electric-blue) button and **[Download DOCX]** as the
+      secondary button.
+- [ ] Verify the **Last generated** timestamp updates to "Just now".
+- [ ] **Cancel test:** click **[Generate Midpoint Paper]** again, then
+      click **[Cancel]** before it completes — verify the card
+      resets to the initial state (Generate button visible, no
+      spinner, the previous completed run's Open in Editor /
+      Download still available).
+- [ ] Click **[Download DOCX]** and verify:
   - [ ] Double-spaced, 12 pt font.
   - [ ] Four sections present with headings.
   - [ ] Real data tables embedded (summary statistics, regime table).
   - [ ] Team activity data in Section 3.
-  - [ ] No `[DATA PENDING]` placeholders (if an Academic Review has been run
-        and the dashboard caches are warm).
+  - [ ] No `[DATA PENDING]` placeholders (if an Academic Review has been
+        run and the dashboard caches are warm).
   - [ ] Three pages or under.
   - [ ] Page numbers present.
-- [ ] Click **Generate Executive Brief**, download, and verify:
+- [ ] **Re-download test:** click **[Download DOCX]** a second time on
+      the same job — verify a 410 Gone surfaces with the message
+      "This download has already been served. Regenerate the
+      document if needed." The Open in Editor link still works
+      because the draft survives.
+- [ ] Click **[Generate Executive Brief]** and repeat the spinner +
+      navigate-away + completion flow. Verify the brief carries:
   - [ ] Five sections present.
   - [ ] The title page is formatted correctly.
   - [ ] Tables embedded with real data.
   - [ ] An investment-audience tone.
   - [ ] A Limitations section is present.
+- [ ] **Completion toast test:** click **[Generate Executive Brief]**,
+      navigate to the Dashboard, and stay there. Verify a toast
+      "Your executive brief is ready" appears in the Dashboard
+      corner when generation completes — clicking [Open in Editor]
+      on the toast navigates back to the editor; the close button
+      dismisses.
 
 ### Document Editor
 
@@ -322,7 +400,7 @@ deliverables lead.*
 
 *Complete Section 1 first. This section is your primary workflow as
 presentation and visualisation lead. Record ✅ Pass / ❌ Fail / ⏭ Skip
-inline for each numbered item (4.1–4.14).*
+inline for each numbered item (4.1–4.15, plus 4.10b and 4.13b).*
 
 ### 4.1 Presentation deck generation
 
@@ -447,6 +525,40 @@ inline for each numbered item (4.1–4.14).*
 
 **Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 
+### 4.10b Mobile editor experience
+
+*Test on a mobile device (iPhone / iPad portrait) or in a desktop
+browser with the window resized below 1024 px wide.*
+
+- Open the document editor on a screen narrower than 1024 px (any
+  document type — start with a midpoint paper or script if you have
+  one open).
+- Verify the **left navigator** panel is hidden by default; the
+  centre editor is full-width.
+- Tap the **[≡ Sections]** button in the editor header — verify the
+  navigator opens as a full-screen overlay drawer.
+- Tap outside the drawer (or tap **[✕]**) — verify the drawer
+  closes and the editor is visible again.
+- Tap the **[✨ Assistant]** button in the editor header — verify
+  the Writing Assistant opens as a full-screen overlay drawer with
+  its own close button.
+- Tap outside the assistant drawer (or **[✕]**) — verify it closes.
+- Verify the centre editor remains full-width throughout — the
+  drawers overlay the page, they do not push the centre column.
+- Open the **canvas editor** (a `presentation_deck` draft) on the
+  same narrow viewport.
+- Verify the amber banner appears at the top:
+  *"The presentation canvas editor works best on desktop. Open on a
+  larger screen for full editing capability."*
+- Verify the **[+ Chart]** toolbar button is hidden on touch — only
+  Text and the format controls are shown.
+- Tap a text element on the canvas — verify selection works but
+  resize handles (the Konva Transformer) do not appear.
+- Verify the speaker-notes textarea below the canvas is fully
+  editable on mobile.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
 ### 4.11 Script generation
 
 - Ensure at least one slide has a speaker assigned (from 4.6).
@@ -488,6 +600,32 @@ inline for each numbered item (4.1–4.14).*
 
 **Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 
+### 4.13b Academic Review from the script editor
+
+- In the script editor, open the Writing Assistant panel (right
+  side on desktop, [✨ Assistant] drawer on mobile).
+- Verify the note below **[Run Academic Review]** reads:
+  *"Academic Review for presentation scripts evaluates argument
+  coherence, audience clarity, and slide coverage. Formatting
+  scores do not apply."*
+- Click **[Run Academic Review]**.
+- Wait for the verdict (30–45 seconds).
+- Verify the verdict renders inline below the button.
+- Verify the verdict uses the **script-specific rubric** — five
+  sections, each rated **Strong / Needs Work / Incomplete** (NOT
+  the written-submission Strong / Developing / Needs Work scale).
+- Verify the five section headings are:
+  1. Argument Coherence Across Slides
+  2. Clarity for a Mixed Faculty / Investor Audience
+  3. Coverage of Key Findings
+  4. Speaker Differentiation and Voice
+  5. Overall Delivery Readiness
+- Verify the verdict does NOT comment on citation formatting,
+  paragraph structure, or footnotes — those criteria are skipped
+  for a spoken-delivery document.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
 ### 4.14 Submission Guide
 
 - Navigate to the Reports page.
@@ -500,22 +638,52 @@ inline for each numbered item (4.1–4.14).*
 
 **Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 
+### 4.15 Rehearsal mode
+
+- Open your generated `presentation_script` draft in the editor.
+- Click **[Rehearse]** in the editor header.
+- Verify a full-screen overlay opens with a top bar reading
+  "Rehearsal Mode", a slide counter "Slide 1 of N", and an Exit
+  button (also Esc).
+- Verify the **left panel** shows the script for slide 1 — slide
+  number + title (bold), speaker label, the section's body prose,
+  and the transition line at the bottom prefixed →.
+- Verify the **right panel** shows a static render of the slide
+  itself — text elements positioned as in the canvas, chart elements
+  as labelled placeholder boxes ("[rolling correlation]" etc.); the
+  presenter's speaker notes appear in a muted strip at the bottom.
+- Press the right arrow key — verify **both panels advance together**
+  to slide 2's script and slide 2's canvas. Press the left arrow —
+  verify both step back.
+- Verify the **delivery time counter** ("~N min remaining") at the
+  top right counts down as you advance slides — slide 1 should show
+  more remaining time than the last slide.
+- Press **Esc** — verify the overlay closes and the script editor is
+  visible again with no state loss.
+- If your script OR your deck is missing when you click [Rehearse],
+  verify the overlay shows "Rehearsal requires both your presentation
+  deck and script." with the specific missing-resource message, and
+  a Close button that dismisses the modal.
+
+**Result:** ✅ Pass / ❌ Fail / ⏭ Skip
+
 ---
 
 ## Test Sign-Off
 
 At the end of your section, record the summary below. Sections 1-3 are
 recorded as `- [ ]` checklist items; Section 4 (Molly) is recorded as
-fourteen numbered items (4.1–4.14), each carrying an inline
-✅ Pass / ❌ Fail / ⏭ Skip result — note the result and any failure
-detail against each.
+seventeen numbered items (4.1–4.15 plus the two May-19 additions
+4.10b "Mobile editor experience" and 4.13b "Academic Review from the
+script editor"), each carrying an inline ✅ Pass / ❌ Fail / ⏭ Skip
+result — note the result and any failure detail against each.
 
 | Field | Value |
 |---|---|
 | Tester | |
 | Date | |
 | Section completed | |
-| Section 4 items 4.1–4.14 (Molly only) | _e.g. 14/14 pass_ |
+| Section 4 items 4.1–4.15 + 4.10b + 4.13b (Molly only) | _e.g. 17/17 pass_ |
 | Failures found | |
 | Notes | |
 
@@ -549,8 +717,10 @@ Send the completed sign-off and any failure notes to **ruurdsm@queens.edu**.
 - The canvas editor renders charts and runs AI Layout / AI Copy
   synchronously — stay on the page while a request is in flight;
   navigating away loses the result.
-- Script generation takes 30-60 seconds. Do not navigate away from the
-  editor while the **[Generate Script]** loading state is shown.
+- Document generation runs in the background. You can navigate away
+  freely — a toast notification will appear when your document is
+  ready. A second download attempt after the file has been served
+  returns 410 Gone — regenerate the document if needed.
 - The chart picker shows **sixteen server-renderable charts** grouped
   by category — Regime Analysis, Factors, Performance, Risk,
   Significance, and Activity. Charts requiring QA or regime data show

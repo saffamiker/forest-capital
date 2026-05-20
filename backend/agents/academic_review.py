@@ -637,6 +637,101 @@ Every rating is exactly one of: Strong, Developing, Needs Work. Be direct
 and actionable — the team is preparing a graded submission, so generic
 encouragement is not useful."""
 
+# Script-specific rubric — used when Academic Review runs against a
+# presentation_script editor draft. The default rubric evaluates a
+# written academic submission (citation formatting, paragraph
+# structure, footnotes). Applying that against a SPOKEN delivery script
+# scores formatting low even when the script itself is coherent — the
+# verdict misleads the presenter. The script rubric evaluates the
+# things that DO matter for a spoken delivery (argument coherence,
+# audience clarity, slide coverage, transitions) and explicitly skips
+# the written-submission criteria that don't apply.
+#
+# Verdict categories are also adjusted:
+#   Strong       — ready to deliver
+#   Needs Work   — sections unclear or missing key findings
+#   Incomplete   — slides missing script content
+# (replaces the default Strong / Developing / Needs Work scale; the
+# downgrade from Developing → Incomplete signals the specific failure
+# mode of a script that has gaps rather than just being weak prose.)
+_ARBITER_INSTRUCTIONS_SCRIPT = """=== YOUR TASK — ARBITER VERDICT (PRESENTATION SCRIPT) ===
+You are the arbiter for a presentation script — a spoken delivery
+document, NOT a written academic submission. Integrate and WEIGH the
+peer review notes above. Produce a structured, rubric-mapped verdict
+with EXACTLY five sections in this exact markdown format so the UI can
+parse it:
+
+### 1. Argument Coherence Across Slides
+**Rating:** <Strong | Needs Work | Incomplete>
+<Does the argument build cleanly from slide to slide? Are transitions
+logical? Does the overall arc lead the audience from the research
+question to the conclusion?>
+
+### 2. Clarity for a Mixed Faculty / Investor Audience
+**Rating:** <Strong | Needs Work | Incomplete>
+<Is technical depth appropriate — neither dumbed down nor opaque?
+Are statistical concepts (FDR, Sharpe, regime correlation) introduced
+with enough context for a non-specialist? Is jargon defined when first
+used?>
+
+### 3. Coverage of Key Findings
+**Rating:** <Strong | Needs Work | Incomplete>
+<Does the script cover the project's central findings — the 2022
+equity-bond correlation regime break (pre/post values), the FDR
+result (zero strategies significant at q < 0.005), the
+regime-conditional performance pattern, the independent statistical
+audit? Each must be present and explained, not just named.>
+
+### 4. Speaker Differentiation and Voice
+**Rating:** <Strong | Needs Work | Incomplete>
+<Do different speakers carry distinct material? Is the voice
+consistent across a single speaker's sections? Are speaker labels
+present on every slide? A script with every slide assigned to one
+speaker, or speaker boundaries that interrupt a finding mid-flow,
+scores lower.>
+
+### 5. Overall Delivery Readiness
+**Rating:** <Strong | Needs Work | Incomplete>
+<One paragraph. Strong = ready to deliver; Needs Work = sections
+unclear or missing key findings; Incomplete = slides missing script
+content.>
+
+EVALUATION SCOPE — what this rubric DOES evaluate:
+  - Argument coherence and flow across slides
+  - Clarity for a mixed faculty / investor audience
+  - Coverage of all key findings (the 2022 break, the FDR result,
+    the audit, regime-conditional performance)
+  - Appropriate technical depth (statistical concepts introduced
+    with enough context for a non-specialist; jargon defined)
+  - Logical transitions between sections
+  - Speaker differentiation (different speakers + consistent voice
+    per speaker)
+
+EVALUATION SCOPE — what this rubric DOES NOT evaluate (and you must
+NOT comment on these, because they don't apply to a spoken delivery):
+  - Citation formatting
+  - Academic writing style or paragraph structure
+  - Footnotes or APA reference lists
+  - Page count or word count formatting
+
+THE CENTRAL FINDING — the 2022 equity-bond correlation regime break
+remains the single most important analytical point. A script that
+does not name the pre/post correlation values and connect them to
+strategy performance differences is Incomplete on Section 3
+regardless of how polished the other slides are. The FDR result must
+be present and framed correctly — as methodological honesty under a
+strict threshold, NOT as a positive significance finding.
+
+UNRESOLVED MARKERS CHECK — if the script still contains [[VERIFY]]
+or [[BOB]] / [[MOLLY]] callouts, flag prominently under section 5,
+Overall Delivery Readiness: the presenter has unresolved working aids
+that must be addressed before delivery.
+
+Every rating is exactly one of: Strong, Needs Work, Incomplete. Be
+direct and actionable — the team is preparing a graded delivery, so
+generic encouragement is not useful."""
+
+
 # Section 6 — appended only when more than one team member has recorded
 # activity. With a single active user, assessing division of labour would
 # penalise an adoption gap rather than a real task-sharing problem.
@@ -652,20 +747,34 @@ claims the midpoint paper makes.>"""
 
 def build_arbiter_user_message(
     context_block: str, peer_responses: dict[str, str],
-    multi_user: bool = False,
+    multi_user: bool = False, script_review: bool = False,
 ) -> str:
     """Builds the arbiter's user message: the context block, every peer's
-    review notes, and the verdict instructions. The sixth section —
-    division of labour — is included only when more than one team member
-    has platform activity."""
+    review notes, and the verdict instructions.
+
+    script_review — when True (a presentation_script editor draft is the
+    target), the script-specific rubric is used instead of the default
+    written-submission rubric. The script rubric evaluates spoken-
+    delivery criteria (coherence, audience clarity, slide coverage,
+    speaker differentiation) and explicitly skips citation formatting /
+    paragraph structure / footnotes. Section 6 (division of labour) is
+    NOT applied in script mode — a script's verdict stays focused on
+    delivery readiness, not team engagement.
+
+    multi_user — only consulted in the default (written) review mode.
+    """
     parts = [context_block, "", "=== PEER REVIEW NOTES ==="]
     for agent_id, text in peer_responses.items():
         name = _PEER_AGENTS.get(agent_id, {}).get("name", agent_id)
         parts.append(f"\n--- {name} ---\n{text}")
     parts.append("")
-    instructions = _ARBITER_INSTRUCTIONS
-    if multi_user:
-        instructions += _ARBITER_SECTION_6
+    if script_review:
+        # Script rubric is self-contained — no section-6 append.
+        instructions = _ARBITER_INSTRUCTIONS_SCRIPT
+    else:
+        instructions = _ARBITER_INSTRUCTIONS
+        if multi_user:
+            instructions += _ARBITER_SECTION_6
     parts.append(instructions)
     return "\n".join(parts)
 
@@ -699,12 +808,19 @@ def run_arbiter_with_harness(
     context_block: str,
     peer_responses: dict[str, str],
     multi_user: bool = False,
+    script_review: bool = False,
 ) -> str:
     """
     Generates the arbiter verdict IN FULL and runs it through the
     generator-evaluator harness — a verdict scoring below threshold is
     regenerated with the evaluator's feedback. Returns the best-scoring
     verdict text.
+
+    script_review — when True, the script-specific rubric is used (see
+    build_arbiter_user_message). The verdict's rating scale switches
+    from Strong/Developing/Needs Work to Strong/Needs Work/Incomplete
+    and the evaluation categories move from written-submission criteria
+    to spoken-delivery criteria.
 
     The verdict is generated in full (non-streaming) before the endpoint
     streams it, so a failed attempt is never shown to the client — only
@@ -714,7 +830,7 @@ def run_arbiter_with_harness(
     deterministic mock verdict rather than raising.
     """
     user_message = build_arbiter_user_message(
-        context_block, peer_responses, multi_user)
+        context_block, peer_responses, multi_user, script_review)
     if _is_test_env() or not os.getenv("ANTHROPIC_API_KEY"):
         return _mock_arbiter_text()
 

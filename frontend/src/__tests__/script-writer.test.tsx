@@ -26,6 +26,7 @@ const mockedAxios = axios as unknown as {
   get: ReturnType<typeof vi.fn>
   post: ReturnType<typeof vi.fn>
   patch: ReturnType<typeof vi.fn>
+  isAxiosError: typeof axios.isAxiosError
 }
 
 beforeEach(() => {
@@ -223,12 +224,13 @@ describe('DocumentEditor — script export', () => {
 
   it('shows the Academic Review script note in the writing assistant',
     async () => {
-      // FIX 3 — the note appears below the Run Academic Review button
-      // only when the draft is a presentation_script. Reminds the
-      // presenter that the arbiter rubric is tuned for written work.
+      // The note appears below the Run Academic Review button only
+      // when the draft is a presentation_script. The wording shifted
+      // when the rubric was tuned for scripts (May 19) — it now names
+      // what the rubric DOES evaluate rather than what to disregard.
       mountEditor(scriptDraft())
       expect(await screen.findByText(
-        /Academic Review is optimised for written submissions/))
+        /Academic Review for presentation scripts evaluates/))
         .toBeInTheDocument()
     })
 
@@ -238,7 +240,7 @@ describe('DocumentEditor — script export', () => {
       // The button is anchored by data-tour; the note must be absent.
       await screen.findByRole('button', { name: /Run Academic Review/ })
       expect(screen.queryByText(
-        /Academic Review is optimised for written submissions/))
+        /Academic Review for presentation scripts evaluates/))
         .toBeNull()
     })
 
@@ -280,4 +282,178 @@ describe('EditorNavigator — footnote prop', () => {
     render(<EditorNavigator {...base} />)
     expect(screen.queryByText(/To rehearse/)).toBeNull()
   })
+})
+
+
+// ── Mobile pass — Document editor overlay treatment + canvas banner ───────────
+
+describe('DocumentEditor — mobile overlay treatment', () => {
+  // Force the matchMedia branch to "mobile" (lg query does NOT match) so
+  // isDesktop is false and the editor renders the mobile overlay path.
+  // The default jsdom env reports matchMedia undefined → falls back to
+  // desktop. Patching it here is the simplest way to exercise the
+  // mobile rendering branch from a unit test.
+  beforeEach(() => {
+    const _mq = vi.fn().mockImplementation(() => ({
+      matches: false,
+      media: '(min-width: 1024px)',
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+      onchange: null,
+    }))
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true, configurable: true, value: _mq,
+    })
+  })
+
+  it('defaults both panels CLOSED on mobile', async () => {
+    mountEditor(scriptDraft())
+    // The script editor's delivery-time pill lives inside EditorNavigator
+    // — present only when the left panel is open. On mobile both panels
+    // default closed, so the delivery-time text must NOT appear.
+    await screen.findByRole('button', { name: /Run Academic Review/i })
+      .catch(() => null)
+    // Give the page one render cycle. The "Generating…" Generate-Script
+    // button anchors the editor is mounted.
+    await screen.findByText('Presentation Script')
+    expect(screen.queryByText(/min delivery/)).toBeNull()
+  })
+
+  it('shows the canvas-editor mobile banner for a deck draft', async () => {
+    mountEditor(deckDraft(true))
+    expect(await screen.findByText(
+      /presentation canvas editor works best on desktop/i,
+    )).toBeInTheDocument()
+  })
+
+  it('does NOT show the canvas banner for a script draft', async () => {
+    mountEditor(scriptDraft())
+    await screen.findByText('Presentation Script')
+    expect(screen.queryByText(
+      /presentation canvas editor works best on desktop/i,
+    )).toBeNull()
+  })
+})
+
+
+// ── Rehearsal Mode — combined script + slide overlay ──────────────────────────
+
+describe('Rehearsal Mode', () => {
+  // Rehearsal mode is gated on the document_type — only a script draft
+  // shows the [Rehearse] button in the header.
+
+  it('shows the Rehearse button only in the script editor', async () => {
+    mountEditor(scriptDraft())
+    expect(await screen.findByRole('button', { name: /^Rehearse$/i }))
+      .toBeInTheDocument()
+  })
+
+  it('does NOT show the Rehearse button in a deck editor', async () => {
+    mountEditor(deckDraft(true))
+    await screen.findByRole('button', { name: /Generate Script/i })
+    expect(screen.queryByRole('button', { name: /^Rehearse$/i })).toBeNull()
+  })
+
+  it('opens the rehearsal overlay with both deck and script when present',
+    async () => {
+      // Wire the rehearsal endpoint to return a fully populated payload;
+      // mountEditor's mock returns the script draft for the
+      // /documents/drafts/:id load. Both must resolve for the overlay
+      // to render its two panels.
+      mockedAxios.get.mockImplementation((url: string) => {
+        if (url.endsWith('/documents/rehearsal')) {
+          return Promise.resolve({
+            data: {
+              deck: { draft_id: 1, slides: [{
+                id: 1, title: 'Opening', background: '#FFFFFF',
+                speaker_notes: 'Hold for applause.', speaker: 'Molly',
+                elements: [{
+                  id: 'el_001', type: 'text', x: 50, y: 60,
+                  width: 800, height: 100, content: 'Opening',
+                  fontSize: 48, fontWeight: 'bold', fontStyle: 'normal',
+                  color: '#1A1A2E',
+                }],
+              }] },
+              script: { draft_id: 2, total_words: 300,
+                estimated_minutes: 2, sections: [{
+                  slide_number: 1, title: 'Opening',
+                  speaker: 'Molly',
+                  script_text: 'Good evening. The question…',
+                  transition: 'Move to the architecture.',
+                  word_count: 300,
+                }] },
+            },
+          })
+        }
+        if (url.endsWith('/versions')) {
+          return Promise.resolve({ data: { versions: [] } })
+        }
+        if (url.includes('/documents/drafts/')) {
+          return Promise.resolve({ data: scriptDraft() })
+        }
+        return Promise.resolve({ data: new Blob() })
+      })
+      render(
+        <MemoryRouter initialEntries={['/editor/7']}>
+          <Routes>
+            <Route path="/editor/:draftId" element={<DocumentEditor />} />
+          </Routes>
+        </MemoryRouter>)
+      // Click the header [Rehearse] button.
+      const btn = await screen.findByRole('button', { name: /^Rehearse$/i })
+      fireEvent.click(btn)
+      // The overlay mounts; both the script panel and the slide panel
+      // render via their stable data-testids.
+      expect(await screen.findByTestId('rehearsal-overlay'))
+        .toBeInTheDocument()
+      await screen.findByTestId('rehearsal-script-panel')
+      expect(screen.getByTestId('rehearsal-slide-panel')).toBeInTheDocument()
+      // The min-remaining counter renders.
+      expect(screen.getByTestId('rehearsal-min-remaining'))
+        .toBeInTheDocument()
+    })
+
+  it('shows the missing-data modal when the rehearsal endpoint 404s',
+    async () => {
+      mockedAxios.isAxiosError = ((() => true) as unknown) as typeof axios.isAxiosError
+      mockedAxios.get.mockImplementation((url: string) => {
+        if (url.endsWith('/documents/rehearsal')) {
+          return Promise.reject({
+            response: {
+              status: 404,
+              data: { detail: 'No presentation deck found. '
+                              + 'Generate your deck first.' },
+            },
+          })
+        }
+        if (url.endsWith('/versions')) {
+          return Promise.resolve({ data: { versions: [] } })
+        }
+        if (url.includes('/documents/drafts/')) {
+          return Promise.resolve({ data: scriptDraft() })
+        }
+        return Promise.resolve({ data: new Blob() })
+      })
+      render(
+        <MemoryRouter initialEntries={['/editor/7']}>
+          <Routes>
+            <Route path="/editor/:draftId" element={<DocumentEditor />} />
+          </Routes>
+        </MemoryRouter>)
+      const btn = await screen.findByRole('button', { name: /^Rehearse$/i })
+      fireEvent.click(btn)
+      // The "Rehearsal requires both…" modal renders inside the overlay.
+      expect(await screen.findByText(
+        /Rehearsal requires both/i)).toBeInTheDocument()
+      expect(screen.getByText(
+        /No presentation deck found/i)).toBeInTheDocument()
+      // Close button works.
+      const close = screen.getByRole('button', { name: /Close/i })
+      fireEvent.click(close)
+      // After closing, the overlay's content is gone (only the editor remains).
+      expect(screen.queryByText(/Rehearsal requires both/i)).toBeNull()
+    })
 })

@@ -5348,6 +5348,9 @@ GATING:
 
 USER-MANAGEMENT ENDPOINTS (all manage_users-gated):
   GET    /api/v1/admin/users          — every user + an activity_count
+  GET    /api/v1/admin/users/activity-breakdown — per-user 30-day breakdown
+                                        (see PER-USER ACTIVITY BREAKDOWN
+                                        below)
   POST   /api/v1/admin/users          — add a user (422 on a bad email /
                                         role, 409 on a duplicate email)
   PATCH  /api/v1/admin/users/{id}     — edit display_name / role /
@@ -5359,6 +5362,49 @@ USER-MANAGEMENT ENDPOINTS (all manage_users-gated):
   LAST-SYSADMIN GUARD: PATCH and DELETE refuse any change that would
   leave the platform with no active manage_users holder
   (count_active_sysadmins <= 1) — 400 "Cannot remove the last sysadmin."
+
+PER-USER ACTIVITY BREAKDOWN (May 19 2026):
+  GET /api/v1/admin/users/activity-breakdown surfaces the data behind
+  the Settings → Users → "Platform Engagement" panel. Returns:
+    { users: [...], period_days: 30, generated_at: <ISO> }
+  Each user row:
+    email, display_name, role,
+    breakdown:         { <interaction_type>: count },
+    session_breakdown: { analytical: page_views, testing: page_views },
+    total_interactions, total_cost_usd,
+    first_seen, last_seen     (ISO timestamps for the window)
+
+  THREE SOURCE TABLES, three sub-queries — each in its own session
+  with its own try/except, the same isolation pattern as
+  list_all_users (commit 0bb0086). A failure in one sub-query drops
+  only that column; the rest of the response still lands.
+
+    _fetch_platform_users()         — base user list (LEFT-JOIN
+                                       semantics for the merged
+                                       response; a zero-activity user
+                                       still appears)
+    _fetch_interaction_breakdowns() — GROUP BY (user_email,
+                                       interaction_type) on
+                                       agent_interactions over a
+                                       30-day window. Aggregates
+                                       count, SUM(estimated_cost_usd),
+                                       MIN/MAX(timestamp) per group.
+    _fetch_session_breakdowns()     — GROUP BY (user_email,
+                                       session_type) on
+                                       session_events filtered to
+                                       event_type='page_view' (the
+                                       most informative engagement
+                                       signal; login / export are
+                                       noisier). 30-day window.
+
+  Frontend: components/ActivityBreakdownPanel.tsx renders one card
+  per user — display name, total-interactions count, a recharts
+  horizontal stacked Bar of interaction-type counts, a two-column
+  per-type / session-type summary, and an AI-spend line (shown only
+  when total_cost_usd > 0). Zero-activity users show "No activity in
+  the last 30 days" instead of an empty bar. Colours match
+  TeamActivityCharts on the Reports page so a sysadmin scanning both
+  surfaces reads the same signal both places.
 
 WELCOME EMAIL: POST /api/v1/admin/users sends a welcome email to the new
 user immediately after a successful create. auth.build_welcome_email()
@@ -6337,6 +6383,69 @@ per unique speaker.
 
 
 ─────────────────────────────────────────────────────────────────────────────
+PRESENTATION REHEARSAL MODE (May 19 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+A combined script + slide rehearsal overlay that pairs Molly's
+presentation_deck with her presentation_script and renders both side
+by side. Opens from a [Rehearse] button in the script editor's
+header — only renders when document_type is presentation_script.
+
+Backend — GET /api/v1/documents/rehearsal (team_member gated):
+  Reads the requesting user's current (is_current=true)
+  presentation_deck AND presentation_script editor drafts.
+  Returns {
+    deck:   { draft_id, slides[] },
+    script: { draft_id, sections[], total_words, estimated_minutes },
+  }
+  Returns 404 with a clear message when either draft is absent:
+    deck:   "No presentation deck found. Generate your deck first."
+    script: "No presentation script found. Generate your script first."
+  estimated_minutes = max(1, round(total_words / 150)) — the
+  platform-wide 150-wpm convention.
+
+Script section parsing — tools/rehearsal.parse_script_sections(json):
+  Walks the TipTap doc and produces per-slide sections:
+    H2 "Slide N: Title"      → slide_number + title (starts a section)
+    H3 "Speaker: Name"       → speaker (attaches to current section)
+    Blockquote "Transition:" → transition (attaches to current)
+    Paragraph / other prose  → script_text (joined with \n\n)
+  Each section also carries a word_count that drives the 150-wpm
+  minutes estimate the endpoint returns. Fail-open shape contract:
+  malformed input returns []; a draft without H2 headings returns
+  ONE section containing all prose; an H2 that does NOT match the
+  slide pattern is body content of the current section (so a writer's
+  sub-headings don't lose their text).
+
+Frontend — components/editor/RehearsalOverlay.tsx:
+  Two-panel side-by-side layout:
+    Left (40%)  — script panel: bold slide N: title, speaker label,
+                  body prose (scrollable), transition line at the
+                  bottom prefixed →.
+    Right (60%) — slide panel: static canvas render of the deck
+                  slide (reuses PresentationPreview's text positioning
+                  math). Speaker notes strip at the bottom as muted
+                  presenter-only context.
+  Chart elements render as labelled placeholder boxes —
+  "[rolling correlation]" instead of a network call. Rehearsal mode is
+  deliberately content-only; loading real chart PNGs is on the post-
+  deadline backlog (per CLAUDE.md).
+  Header — "Rehearsal Mode", live "~N min remaining" counter (sum of
+  remaining sections' word counts / 150), Exit button (also Esc).
+  Navigation — arrow keys advance both panels together; on-screen ‹ ›
+  buttons mirror the keys.
+  States — loading spinner, 404 modal ("Rehearsal requires both your
+  presentation deck and script. {endpoint detail}"), and a generic
+  error card all render in the same surface area; Close button on
+  each calls onClose().
+
+The [Rehearse] button sits next to [Export Master Script] in the
+script editor header (data-tour="editor-rehearse"). Guide 2 of the
+Submission Guides points presenters to it from the "Rewrite in your
+own voice" step.
+
+
+─────────────────────────────────────────────────────────────────────────────
 CHART LIBRARY — canvas editor server-rendered charts (May 19 2026)
 ─────────────────────────────────────────────────────────────────────────────
 
@@ -6581,7 +6690,12 @@ is maintained separately. The `gh` CLI is authenticated with the
      `alembic upgrade head` runs on Render post-merge, pending the
      develop → main deploy
   ✅ S3 (or equivalent) for screenshot storage — Render persistent
-     disk at /data/test_screenshots; screenshots survive redeploys
+     disk at /data/test_screenshots; screenshots survive redeploys.
+     Files older than 30 days are unlinked by cleanup_old_screenshots()
+     on lifespan startup so the disk never grows unbounded
+     (tools.test_runner.cleanup_old_screenshots + delete_screenshots).
+     Async docgen job bytes are also cleared after the first download —
+     a second download returns 410 Gone with guidance to regenerate.
   ✅ CLAUDE.md + README brought current
 
 ─── IN PROGRESS ───────────────────────────────────────────────────────
@@ -6604,11 +6718,215 @@ is maintained separately. The `gh` CLI is authenticated with the
   □ All — UAT Section 1 test pass
 
 ─── JUNE 3 MILESTONE ───────────────────────────────────────────────────
-  Items that must land for the midpoint check-in:
-  □ Midpoint paper submitted (May 27)
-  □ An Academic Review session run
-  □ Midpoint draft uploaded
-  □ All UAT sections attested via the guided test runner
+
+  Tracks the midpoint check-in (Tuesday June 3, 6pm, Sykes 326). The
+  REMAINING list is the only thing that gates the deliverable —
+  every other build is captured in POST-DEADLINE BACKLOG below.
+
+  COMPLETED (platform features):
+    ✅ Midpoint paper editor (Bob) — TipTap RichTextEditor, [[BOB]]
+       callouts as block panels, [[VERIFY]] inline popups, 30s
+       auto-save, Save Version + Restore
+    ✅ Executive Brief editor (Bob) — same editor surface, brief
+       layout with the three judgement callouts
+    ✅ [[BOB]] callout coverage — Section 2 of the midpoint paper +
+       three judgement callouts on the executive brief (Summary /
+       Limitations / Recommendations), all surfaced in the editor and
+       in the DOCX export
+    ✅ Presentation deck canvas editor (Molly) — free-form Konva
+       canvas, text + chart elements, AI Layout / AI Copy with
+       Apply/Dismiss review, PPTX export with EMU mapping
+    ✅ Presentation script writer (Molly) — generate-from-deck
+       endpoint, script TipTap editor with 150-wpm delivery time
+    ✅ Rehearsal mode (Molly) — combined script + slide overlay with
+       arrow-key navigation and the live "min remaining" counter
+    ✅ Speaker assignment per slide — speaker badge in the deck
+       navigator, presenter label above the canvas, validated by
+       Generate Script
+    ✅ Master + per-speaker DOCX export — one master script plus one
+       per unique speaker, stable per-speaker colours within each file
+    ✅ Academic Review integration (all document types) — every
+       editor draft overlaid onto the review's documents-by-type map
+       so reviews target the current working copy
+    ✅ Script-specific AR rubric — five spoken-delivery sections
+       (coherence / clarity / coverage / speaker differentiation /
+       delivery readiness), Strong / Needs Work / Incomplete scale,
+       citation-formatting criteria explicitly skipped
+    ✅ Async document generation (all three types) — 202+poll pattern,
+       module-level frontend store survives navigation, completion
+       toast announces a job finished off-Reports, bytes cleared
+       after the first download (410 Gone on re-attempt)
+    ✅ Full cost tracking coverage (all interaction types) — every
+       interaction-logging endpoint seeds start_usage_capture,
+       _stream_haiku records usage after the stream completes,
+       sysadmin attribution for auto-triggered runs, Sonnet fallback
+       for null / unrecognised model
+    ✅ Per-user activity breakdown (Settings) — 30-day rolling
+       interaction + session-type counts per user, recharts stacked
+       bar, AI-spend line shown only when > 0, LEFT-JOIN contract
+       (zero-activity users still appear)
+    ✅ Mobile pass (BLOCKING + DEGRADED items) — document editor
+       three-panel overlay treatment below lg, canvas-editor banner
+       on touch devices, InfoIcon touch targets, chart margins,
+       column-header abbreviations, [[VERIFY]] popup viewport clamp,
+       section navigator truncation, Submission Guide bottom sheet,
+       QA methodology accordion, WARN-acknowledge touch target,
+       [[BOB]] panel full-width button
+    ✅ UAT guide updated (Section 4) — canvas editor + script writer +
+       rehearsal mode (4.15) walkthrough rewritten for the May-19 build
+    ✅ Additional chart library (16 charts, 6 categories) — regime,
+       factors, performance, risk, significance, activity. Two
+       renderer families (deck five + tools/chart_renderers extended
+       eleven); single-strategy default REGIME_SWITCHING vs BENCHMARK
+    ✅ WARN acknowledge workflow — Audit findings table carries the
+       acknowledgement note, the audit verdict is unaffected, the
+       audit report renders the acknowledgement alongside the WARN
+    ✅ Audit findings persistence fix — per-row commit + truncation,
+       PDF layer status differentiation, QA parser permissive header
+       matching
+    ✅ QA sysadmin-only gates — every /api/v1/audit/* and the
+       statistical-audit run routes gated to manage_users
+    ✅ Global QA running pill — nav-bar indicator while a Tier 2 /
+       Tier 3 audit is in progress, with concurrent-run protection
+       on every QA endpoint
+    ✅ Commentary Mode full coverage — ExplainableText on every
+       Analytics column header that has a glossary term, every
+       chart title with a Sources line, every QA checklist item with
+       four-section narrative
+    ✅ Glossary reload on council completion — force-reload bypasses
+       the termsLoaded guard so this_session reflects the actual
+       council output, no UI flash during the silent reload
+    ✅ Submission Guide (Bob + Molly) — two-guide right-side drawer
+       on lg+, full-width bottom sheet on mobile, deadline countdown
+       per owner
+    ✅ Testing Mode auto-manage — session-scoped, auto-resets to
+       analytical on next login, amber 🧪 pill in nav while on
+    ✅ File storage cleanup — screenshot directory swept on startup
+       for files older than 30 days, async docgen job bytes cleared
+       after the first download to free the in-process buffer
+
+  REMAINING (team actions):
+    □ Molly — UAT pass (Section 4)
+    □ Bob — UAT pass (Section 3)
+    □ Michael — UAT pass (Section 2)
+    □ All — UAT Section 1
+    □ Bob — midpoint paper submission (May 27)
+    □ Bob — Academic Review session before writing the midpoint draft
+    □ Bob — midpoint draft upload (Settings → Academic Documents)
+    □ Molly — presentation submission (June 3)
+
+
+─── POST-DEADLINE BACKLOG ──────────────────────────────────────────────
+
+  Everything here is explicitly deferred until after June 3 so the
+  team can land the deliverables without scope creep. Each item names
+  the surface and the reason a fix waits — most are quality
+  refinements, not blockers.
+
+  TECHNICAL DEBT:
+    □ Canvas editor mobile experience — the 960×540 Konva Stage is
+      unusable at 380px (auto-scales to ≈0.36×, pixel-precise editing
+      impossible on touch). The May-19 mobile pass added a banner
+      and disables the Transformer + chart picker on touch devices,
+      so a touch user can navigate slides and edit speaker notes —
+      precise canvas editing still needs a responsive layout or a
+      mobile-specific view. See docs/MOBILE_AUDIT.md — component-
+      change class.
+    □ Strategy InfoIcon mobile tap-target inflation — the ⓘ button
+      carries a 44px minimum at the button level, but align-middle
+      only partly mitigates inline placement next to a metric label;
+      the tap surface is still tight when an InfoIcon sits inside a
+      narrow cell. Promote the InfoIcon to its own row on mobile or
+      use a larger hit area extending into the cell padding.
+    □ Rehearsal mode chart loading — chart elements currently render
+      as placeholder boxes with the chart label. The /api/v1/charts/
+      render endpoint already serves the right PNGs; rehearsal mode
+      ships content-only for June 3 so the overlay never blocks on
+      a network call. Wire real chart images post-deadline.
+    □ Per-speaker colour consistency between the script editor
+      display and the exported DOCX — the script editor renders each
+      speaker's sections in a stable palette colour, and the DOCX
+      export does the same, but the palettes are not pinned to
+      identical hex values. Pin them so a presenter scanning the
+      DOCX recognises the same colour they saw in the editor.
+    □ InfoIcon vs ExplainableText final unification decision — the
+      May-17 double-affordance fix suppressed the InfoIcon when
+      ExplainableText is already present on Analytics table headers,
+      but the codebase still has two patterns. On chart titles the
+      InfoIcon still appears alongside ExplainableText on some
+      surfaces. Pick one pattern for the long term and migrate.
+    □ this_session glossary timing — full fix. The May-17 force-
+      reload fix (loadTerms(councilOutput, { force: true })) makes
+      the reload work after every council session, but the
+      termsLoaded guard is still in the code path. The clean fix is
+      to drop the guard entirely for the council-completion code
+      path and rely on a request-id to dedupe in-flight loads — the
+      glossary becomes continuously session-anchored rather than
+      "loaded once + force reloaded on council completion".
+
+  ANALYTICS:
+    □ Additional matplotlib renderers for the remaining Recharts-only
+      Analytics charts — every Recharts chart NOT yet in
+      tools/chart_render.AVAILABLE_CHARTS is canvas-editor-invisible
+      today. Add the missing renderers (e.g. the regime-transition
+      matrix, the sub-period regime timeline) so the chart picker
+      can offer them too.
+    □ Puppeteer / headless-browser option for frontend chart capture
+      — the export package today rasterises off-screen Recharts via
+      html2canvas at 2× (browser-side). A headless browser run from
+      the backend would let the matplotlib renderers be retired in
+      favour of the live frontend charts — alternative to matplotlib
+      for any chart. Bigger lift than its payoff today.
+
+  INFRASTRUCTURE:
+    □ S3 migration if /data disk fills — the persistent Render disk
+      is 1 GB and the project will not approach that ceiling.
+      tools.test_runner.cleanup_old_screenshots sweeps the disk on
+      every startup and drops files older than 30 days, so growth
+      is bounded. If the platform sees broader use the durable next
+      step is an object-store migration (boto3 + bucket-name env
+      var). Not needed for the project deliverable.
+    □ True portfolio turnover in the backtester — the analytics
+      layer surfaces real one-way turnover (sum(|Δw|)/2) per the
+      May-18 audit fix, but the backtester's tier1_gates pipeline
+      still references the legacy turnover proxy in a couple of
+      derived fields. Replace those references with the true measure.
+    □ Option B / C document refinement after Bob and Molly review
+      pass — Bob writes the midpoint paper and exec brief in their
+      final voice; Molly writes the presentation deck and script.
+      After they each run a real review pass, edit the [[BOB]] /
+      [[MOLLY]] callout copy in academic_docx.py to match what they
+      actually asked for.
+
+  PLATFORM:
+    □ Script rehearsal mode refinements post-Molly feedback —
+      timing display tweaks, slide-overlay font sizing, presenter
+      cue ordering, and any UX feedback she surfaces during her
+      rehearsals on the real deck.
+    □ Presentation Preview theme matching PPTX export exactly — the
+      in-app PresentationPreview component renders slides with the
+      canvas dark theme, but the PPTX export uses the academic_deck
+      navy-on-white print theme. The preview should show the
+      print-theme version when "Preview as exported" is toggled, so
+      Molly can confirm a slide reads correctly in the deliverable's
+      colours.
+    □ Academic Review rubric refinements based on Bob and Molly
+      feedback — once Bob and Molly have run reviews against real
+      drafts AND received grades against real submissions, the
+      arbiter prompt and the per-document-type rubric branches
+      (written + script) will need tuning against what graders
+      actually flag.
+    □ Real-device touch behaviour on Konva canvas — iOS Safari
+      pinch / zoom behaviour on the canvas Stage is beyond what a
+      static code review can verify. The May-19 mobile pass disables
+      the Transformer and chart picker on touch devices, so the
+      canvas is now in a documented "view-only on touch" state, but
+      real-device validation is still pending.
+    □ TipTap toolbar pixel density on high-DPI mobile screens — the
+      mobile audit could not assess the TipTap toolbar's pixel
+      density at static review time; an in-browser check on a real
+      device is the only reliable measure. Bump button sizes if the
+      toolbar looks cramped on a Retina iPhone.
 
 
 
