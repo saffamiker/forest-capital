@@ -11,10 +11,24 @@
  *   qa          — keyed by check_id ("D01", …)
  *   charts      — keyed by chart_id ("cpcv_sharpe_distribution", …)
  *
- * Every loader is idempotent: it checks the cache first and returns
- * immediately if the key is present. This is the invariant that makes
- * Commentary mode performant — hovering 50 metrics on the dashboard
- * triggers exactly one /api/explain/terms call per session, not 50.
+ * The terms namespace is continuously re-anchored to the session. The
+ * once-per-session `termsLoaded` guard is gone; `loadTerms()` is now
+ * single-flight + 60-second-debounced from `termsLastLoadedAt`. The
+ * effect:
+ *
+ *   - First page load: empty council context → generic definitions.
+ *   - Every completed council session: councilStore calls loadTerms()
+ *     with the new output — if 60s have elapsed since the last load,
+ *     the glossary refreshes with that session's `this_session` text;
+ *     if not, the call is debounced and the NEXT call (e.g. a hover
+ *     after 60s) refreshes with the now-current council result.
+ *   - Rapid hover spam on a busy dashboard still collapses to one
+ *     request per 60s window (the design that prevented thrashing in
+ *     the old guard).
+ *
+ * loadParameter / loadPersona / loadChart / loadQA stay per-key cached
+ * because their content is keyed by the specific chart / parameter and
+ * doesn't drift when a new council runs.
  *
  * No persistence: glossary content is tied to the current strategy
  * results, so we re-fetch on each session. Persisting it would risk
@@ -31,8 +45,17 @@ import type {
   ChartExplanation,
 } from '../types/glossary'
 
+// 60-second debounce window for the terms namespace. Short enough that
+// each completed council session refreshes the glossary within a minute;
+// long enough that 50 ExplainableText components mounting at once still
+// collapse to a single /api/explain/terms call.
+export const TERMS_DEBOUNCE_MS = 60_000
+
 interface LoadFlags {
-  termsLoaded: boolean
+  /** Timestamp (ms) of the most recent terms fetch, success or failure.
+   *  null until the first attempt. Drives the 60-second debounce. */
+  termsLastLoadedAt: number | null
+  /** Single-flight guard — true while a terms fetch is in flight. */
   termsLoading: boolean
   // Per-key flags for parameters/personas/charts — these are loaded on
   // demand and we don't want to fire duplicate requests while one is
@@ -79,24 +102,27 @@ export const useGlossaryStore = create<GlossaryState>((set, get) => ({
   qa:         {},
   charts:     {},
 
-  termsLoaded:  false,
-  termsLoading: false,
-  inflight:     new Set<string>(),
+  termsLastLoadedAt: null,
+  termsLoading:      false,
+  inflight:          new Set<string>(),
 
-  // ── Terms: loaded once per session by default; force:true bypasses the
-  //    guard for a silent re-anchor after a council session completes.
+  // ── Terms: single-flight + 60-second debounce. force:true bypasses
+  //    both so a test (or a deliberate cache-bust) can run an immediate
+  //    refresh regardless of the debounce window.
   //
-  //    Default path — set termsLoading=true, fetch, set terms+loaded.
-  //    Force path — bypasses both guards (termsLoaded AND termsLoading
-  //      so a still-in-flight initial load doesn't block the reload),
-  //      DOES NOT toggle termsLoading so the UI never flashes a loading
-  //      state during the silent reload, and overwrites terms with the
-  //      fresh response so each term's `this_session` field reflects the
-  //      completed council output.
+  //    Default behaviour for a real caller is just `loadTerms()` — the
+  //    store decides whether to refresh based on how long since the
+  //    last load. Council completion uses this default path.
   loadTerms: async (councilOutput, options) => {
     const force = options?.force ?? false
-    if (!force && (get().termsLoaded || get().termsLoading)) return
-    if (!force) set({ termsLoading: true })
+    // Both guards are conditional on !force, so an explicit force:true
+    // bypasses BOTH the single-flight check and the debounce window.
+    if (!force) {
+      if (get().termsLoading) return
+      const last = get().termsLastLoadedAt
+      if (last !== null && Date.now() - last < TERMS_DEBOUNCE_MS) return
+    }
+    set({ termsLoading: true })
     try {
       // Anchor the glossary in the current session: when the caller does
       // not pass council output explicitly, fall back to the last
@@ -112,14 +138,14 @@ export const useGlossaryStore = create<GlossaryState>((set, get) => ({
       )
       set({
         terms: res.data ?? {},
-        termsLoaded: true,
         termsLoading: false,
+        termsLastLoadedAt: Date.now(),
       })
     } catch {
       // Fail silently — Commentary mode should degrade to no-tooltip-content
-      // rather than break the dashboard. Tooltips fall back to a generic
-      // "Hover for details" hint in the consumer.
-      set({ termsLoading: false, termsLoaded: true })
+      // rather than break the dashboard. Stamp termsLastLoadedAt anyway
+      // so the 60-second debounce protects against retry storms.
+      set({ termsLoading: false, termsLastLoadedAt: Date.now() })
     }
   },
 
@@ -214,6 +240,6 @@ export const useGlossaryStore = create<GlossaryState>((set, get) => ({
 
   clear: () => set({
     terms: {}, parameters: {}, personas: {}, qa: {}, charts: {},
-    termsLoaded: false, termsLoading: false, inflight: new Set(),
+    termsLastLoadedAt: null, termsLoading: false, inflight: new Set(),
   }),
 }))

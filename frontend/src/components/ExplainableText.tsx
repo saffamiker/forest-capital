@@ -41,12 +41,13 @@ export default function ExplainableText({ term, strategy, children }: Props) {
   const entry = useGlossaryStore((s) => s.terms[term])
   const loadTerms = useGlossaryStore((s) => s.loadTerms)
 
-  // Lazy-load the glossary on first Commentary-mode render. The store's
-  // termsLoaded guard short-circuits subsequent calls, so 50 ExplainableText
-  // instances mounting simultaneously still fire exactly one
-  // /api/explain/terms request. Skipped in Analyst/Present mode because
-  // the chrome isn't visible there — no point paying for the explanation
-  // if the user can't see it.
+  // Lazy-load the glossary on first Commentary-mode render. The store
+  // uses single-flight + a 60-second debounce on termsLastLoadedAt, so
+  // 50 ExplainableText instances mounting simultaneously still fire
+  // exactly one /api/explain/terms request — and a completed council
+  // session re-anchors the glossary on the next call after the window.
+  // Skipped in Analyst/Present mode because the chrome isn't visible
+  // there — no point paying for the explanation if the user can't see it.
   useEffect(() => {
     if (mode === 'commentary') {
       void loadTerms()

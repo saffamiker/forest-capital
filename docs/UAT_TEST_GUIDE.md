@@ -5,7 +5,8 @@
 This guide is the user acceptance testing (UAT) record for the Portfolio
 Intelligence System. It serves three purposes:
 
-1. **A UAT record** for quality assurance ahead of the June 3 midpoint and
+1. **A UAT record** for quality assurance ahead of the May 27 midpoint
+   paper, the June 3 cohort presentation, and
    the July 1 final presentation.
 2. **A functional introduction** to the platform for Bob and Molly — working
    through your section is also the fastest way to learn the site.
@@ -634,7 +635,10 @@ browser with the window resized below 1024 px wide.*
 - Verify steps 8-11 are present:
   Step 8 — Assign speakers; Step 9 — Generate script;
   Step 10 — Rewrite in your voice; Step 11 — Export scripts.
-- Verify the deadline countdown shows June 3rd.
+- Verify the deadline countdown shows the July 1st final
+  presentation (June 3rd is a peer-review cohort event, not a
+  submission gate and not shown as a countdown). The panel-note
+  block at the bottom mentions the July 3rd panel.
 
 **Result:** ✅ Pass / ❌ Fail / ⏭ Skip
 

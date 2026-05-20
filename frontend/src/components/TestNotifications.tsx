@@ -212,24 +212,32 @@ export default function TestNotifications() {
           }
         } catch { /* non-sysadmin (403) or no run — no audit notice */ }
 
-        // ── Deliverable deadline countdown — Bob / Molly only ──────────
-        const myDeadline = SUBMISSION_DEADLINES.find(
-          (d) => d.ownerEmail === email)
-        if (myDeadline) {
-          const cd = deadlineCountdown(myDeadline.deadline, myDeadline.noun)
-          if (cd.tone !== 'passed') {
-            built.push({
-              key: `deadline:${myDeadline.deadline}`,
-              kind: 'deadline',
-              title: '📋 Deliverable deadline',
-              body: `${cd.label}. Open the Submission Guide on the Reports `
-                + 'screen for the step-by-step workflow.',
-              actionLabel: 'Open Reports',
-              onAction: () => navigate('/reports'),
-              accentClass: cd.tone === 'red' ? 'text-danger'
-                : cd.tone === 'amber' ? 'text-warning' : 'text-electric',
-            })
-          }
+        // ── Deliverable deadline countdown — Bob / Molly only.
+        //    Bob has TWO deadlines (May 27 midpoint paper + July 1
+        //    executive brief); SUBMISSION_DEADLINES is therefore flat
+        //    with one entry per deliverable. The notification surfaces
+        //    the nearest UNPASSED deadline per owner so a Bob who has
+        //    submitted the midpoint paper next sees the exec-brief
+        //    countdown, not a stuck "deadline passed" notice.
+        const myDeadlines = SUBMISSION_DEADLINES
+          .filter((d) => d.ownerEmail === email)
+          .map((d) => ({ d, cd: deadlineCountdown(d.deadline, d.noun) }))
+          .filter((x) => x.cd.tone !== 'passed')
+          .sort((a, b) => a.d.deadline.localeCompare(b.d.deadline))
+        const nearest = myDeadlines.length > 0 ? myDeadlines[0]! : null
+        if (nearest) {
+          built.push({
+            key: `deadline:${nearest.d.deadline}`,
+            kind: 'deadline',
+            title: '📋 Deliverable deadline',
+            body: `${nearest.d.label}: ${nearest.cd.label.toLowerCase()}. `
+              + 'Open the Submission Guide on the Reports screen for the '
+              + 'step-by-step workflow.',
+            actionLabel: 'Open Reports',
+            onAction: () => navigate('/reports'),
+            accentClass: nearest.cd.tone === 'red' ? 'text-danger'
+              : nearest.cd.tone === 'amber' ? 'text-warning' : 'text-electric',
+          })
         }
 
         const dismissed = new Set(readDismissed())

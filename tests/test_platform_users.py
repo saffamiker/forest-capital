@@ -105,8 +105,9 @@ class TestManageUsersGate:
 
 class TestActivityBreakdownEndpoint:
     """The /api/v1/admin/users/activity-breakdown endpoint — per-user
-    interaction-type and session-type counts over a 30-day rolling
-    window. manage_users-gated like every other /admin/users route."""
+    interaction-type and session-type counts returned for BOTH lifetime
+    and a rolling 30-day window. manage_users-gated like every other
+    /admin/users route."""
 
     ENDPOINT = "/api/v1/admin/users/activity-breakdown"
 
@@ -128,9 +129,10 @@ class TestActivityBreakdownEndpoint:
         resp = client.get(self.ENDPOINT, headers=SYSADMIN_HEADERS)
         assert resp.status_code == 200
         body = resp.json()
-        # Top-level shape — three keys.
-        assert set(body) == {"users", "period_days", "generated_at"}
-        assert body["period_days"] == 30
+        # Top-level shape — the period_days field is renamed
+        # rolling_window_days now that the response carries two windows.
+        assert set(body) == {"users", "rolling_window_days", "generated_at"}
+        assert body["rolling_window_days"] == 30
         assert isinstance(body["users"], list)
         assert isinstance(body["generated_at"], str)
 
@@ -138,11 +140,14 @@ class TestActivityBreakdownEndpoint:
         resp = client.get(self.ENDPOINT, headers=MASTER_HEADERS)
         assert resp.status_code == 200
 
-    def test_user_row_carries_the_full_breakdown_shape(self, monkeypatch):
+    def test_user_row_carries_lifetime_and_rolling_30d_blocks(self, monkeypatch):
         # Patch the data layer so we exercise the JSON-shaping in the
-        # endpoint without a database. Verifies every documented field
-        # appears on each user row and that the merge logic interleaves
-        # the per-email breakdown / session_counts / user rows correctly.
+        # endpoint without a database. The fetchers are now called
+        # FOUR times — twice each (lifetime + rolling) for interactions
+        # and sessions — so the stubs branch on window_days to return
+        # different fixtures per window. Lifetime has the full history
+        # (the headline a sysadmin sees); rolling_30d has only the
+        # subset of activity in the last 30 days.
         from tools import platform_users as pu
 
         async def _stub_users():
@@ -159,25 +164,36 @@ class TestActivityBreakdownEndpoint:
                  "council_queries_used": 0, "council_queries_limit": None},
             ]
 
-        async def _stub_interactions():
+        async def _stub_interactions(window_days=30):
+            if window_days is None:
+                return {
+                    "a@x.com": {
+                        "by_type": {"council": 50, "academic_review": 10,
+                                    "explain": 30, "qa": 5},
+                        "total_interactions": 95,
+                        "total_cost_usd": 2.5,
+                        "first_seen": "2026-01-10T10:00:00+00:00",
+                        "last_seen":  "2026-05-19T17:00:00+00:00",
+                    },
+                }
             return {
                 "a@x.com": {
                     "by_type": {"council": 12, "academic_review": 4,
                                 "explain": 8, "qa": 2},
                     "total_interactions": 26,
                     "total_cost_usd": 0.6886,
-                    "first_seen": "2026-05-01T10:00:00+00:00",
+                    "first_seen": "2026-04-20T10:00:00+00:00",
                     "last_seen":  "2026-05-19T17:00:00+00:00",
                 },
-                # b@x.com is intentionally absent — verifies the LEFT-JOIN
-                # contract: every platform_users row appears even with
-                # zero interactions.
+                # b@x.com is intentionally absent in both windows —
+                # verifies the LEFT-JOIN contract: every platform_users
+                # row appears even with zero interactions.
             }
 
-        async def _stub_sessions():
-            return {
-                "a@x.com": {"analytical": 280, "testing": 45},
-            }
+        async def _stub_sessions(window_days=30):
+            if window_days is None:
+                return {"a@x.com": {"analytical": 1200, "testing": 80}}
+            return {"a@x.com": {"analytical": 280, "testing": 45}}
 
         monkeypatch.setattr(pu, "_fetch_platform_users", _stub_users)
         monkeypatch.setattr(pu, "_fetch_interaction_breakdowns",
@@ -190,28 +206,94 @@ class TestActivityBreakdownEndpoint:
         users = body["users"]
         assert len(users) == 2
 
-        # User A — fully populated breakdown.
+        # User A — fully populated breakdown in BOTH windows.
         a = next(u for u in users if u["email"] == "a@x.com")
-        for key in ("email", "display_name", "role", "breakdown",
-                    "session_breakdown", "total_interactions",
-                    "total_cost_usd", "first_seen", "last_seen"):
+        for key in ("email", "display_name", "role",
+                    "lifetime", "rolling_30d"):
             assert key in a, f"a@x.com row missing {key}"
-        assert a["breakdown"] == {"council": 12, "academic_review": 4,
-                                  "explain": 8, "qa": 2}
-        assert a["session_breakdown"] == {"analytical": 280, "testing": 45}
-        assert a["total_interactions"] == 26
-        assert a["total_cost_usd"] == pytest.approx(0.6886, rel=1e-6)
         assert a["display_name"] == "A User"
         assert a["role"] == "team_member"
 
-        # User B — zero-activity row still appears (LEFT-JOIN contract).
+        lt = a["lifetime"]
+        for key in ("breakdown", "session_breakdown", "total_interactions",
+                    "total_cost_usd", "first_seen", "last_seen"):
+            assert key in lt, f"a@x.com lifetime missing {key}"
+        assert lt["breakdown"] == {"council": 50, "academic_review": 10,
+                                   "explain": 30, "qa": 5}
+        assert lt["session_breakdown"] == {"analytical": 1200, "testing": 80}
+        assert lt["total_interactions"] == 95
+        assert lt["total_cost_usd"] == pytest.approx(2.5, rel=1e-6)
+        assert lt["first_seen"] == "2026-01-10T10:00:00+00:00"
+        assert lt["last_seen"] == "2026-05-19T17:00:00+00:00"
+
+        r = a["rolling_30d"]
+        for key in ("breakdown", "session_breakdown", "total_interactions",
+                    "total_cost_usd"):
+            assert key in r, f"a@x.com rolling_30d missing {key}"
+        assert r["breakdown"] == {"council": 12, "academic_review": 4,
+                                  "explain": 8, "qa": 2}
+        assert r["session_breakdown"] == {"analytical": 280, "testing": 45}
+        assert r["total_interactions"] == 26
+        assert r["total_cost_usd"] == pytest.approx(0.6886, rel=1e-6)
+
+        # User B — zero-activity row appears in BOTH windows (LEFT-JOIN
+        # contract preserved across the lifetime + rolling pair).
         b = next(u for u in users if u["email"] == "b@x.com")
-        assert b["breakdown"] == {}
-        assert b["session_breakdown"] == {}
-        assert b["total_interactions"] == 0
-        assert b["total_cost_usd"] == 0.0
-        assert b["first_seen"] is None
-        assert b["last_seen"] is None
+        assert b["lifetime"]["breakdown"] == {}
+        assert b["lifetime"]["session_breakdown"] == {}
+        assert b["lifetime"]["total_interactions"] == 0
+        assert b["lifetime"]["total_cost_usd"] == 0.0
+        assert b["lifetime"]["first_seen"] is None
+        assert b["lifetime"]["last_seen"] is None
+        assert b["rolling_30d"]["breakdown"] == {}
+        assert b["rolling_30d"]["session_breakdown"] == {}
+        assert b["rolling_30d"]["total_interactions"] == 0
+        assert b["rolling_30d"]["total_cost_usd"] == 0.0
+        # The rolling_30d block deliberately omits first/last_seen — the
+        # pair is semantically lifetime-only (a 30-day window cannot
+        # report a meaningful first_seen). Keys must NOT be present.
+        assert "first_seen" not in b["rolling_30d"]
+        assert "last_seen" not in b["rolling_30d"]
+
+    def test_lifetime_and_rolling_can_differ(self, monkeypatch):
+        # Pins the "the two windows really do reflect different SQL"
+        # contract — a user can have 95 lifetime interactions but only
+        # 26 in the last 30 days, and the response surfaces both.
+        from tools import platform_users as pu
+
+        async def _stub_users():
+            return [
+                {"id": 1, "email": "a@x.com", "display_name": "A User",
+                 "role": "team_member", "permissions": ["team_member"],
+                 "is_active": True, "created_at": None, "created_by": None,
+                 "last_login_at": None, "notes": None,
+                 "council_queries_used": 0, "council_queries_limit": None},
+            ]
+
+        async def _stub_interactions(window_days=30):
+            total = 95 if window_days is None else 26
+            return {"a@x.com": {
+                "by_type": {"council": total},
+                "total_interactions": total,
+                "total_cost_usd": 0.0,
+                "first_seen": None, "last_seen": None,
+            }}
+
+        async def _stub_sessions(window_days=30):
+            return {}
+
+        monkeypatch.setattr(pu, "_fetch_platform_users", _stub_users)
+        monkeypatch.setattr(pu, "_fetch_interaction_breakdowns",
+                            _stub_interactions)
+        monkeypatch.setattr(pu, "_fetch_session_breakdowns", _stub_sessions)
+
+        resp = client.get(self.ENDPOINT, headers=SYSADMIN_HEADERS)
+        assert resp.status_code == 200
+        a = resp.json()["users"][0]
+        assert a["lifetime"]["total_interactions"] == 95
+        assert a["rolling_30d"]["total_interactions"] == 26
+        # The HEADLINE is lifetime (the figure that matters for academic-
+        # integrity tracking); the panel renders rolling_30d as context.
 
     def test_empty_result_when_no_users(self, monkeypatch):
         from tools import platform_users as pu
@@ -219,7 +301,7 @@ class TestActivityBreakdownEndpoint:
         async def _no_users():
             return []
 
-        async def _no_data():
+        async def _no_data(window_days=30):
             return {}
 
         monkeypatch.setattr(pu, "_fetch_platform_users", _no_users)
@@ -230,7 +312,7 @@ class TestActivityBreakdownEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert body["users"] == []
-        assert body["period_days"] == 30
+        assert body["rolling_window_days"] == 30
 
 
 class TestCreateUserValidation:

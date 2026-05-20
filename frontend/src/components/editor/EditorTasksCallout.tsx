@@ -58,7 +58,9 @@ const TASKS: Record<EditorDocumentType, TaskSet> = {
       'Write your speaker notes for every slide',
       'Use Generate Talking Points for a starting point — rewrite in '
         + 'your own voice',
-      'Run Presentation Preview and rehearse before June 3rd',
+      'Run Presentation Preview and rehearse before the July 1st '
+        + 'final presentation. Use Rehearsal Mode again before the '
+        + 'July 3rd panel.',
     ],
   },
   presentation_script: {

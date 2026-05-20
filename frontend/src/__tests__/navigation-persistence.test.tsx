@@ -37,7 +37,7 @@ beforeEach(() => {
   // loadTerms). Stub loadTerms to a no-op so that background reload does
   // not fire its own /api/explain/terms POST and inflate the axios count
   // this test asserts on.
-  useGlossaryStore.setState({ termsLoaded: true, termsLoading: false, loadTerms: vi.fn() })
+  useGlossaryStore.setState({ termsLastLoadedAt: Date.now(), termsLoading: false, loadTerms: vi.fn() })
   mockedAxios.get = vi.fn().mockResolvedValue({ data: { strategies: [] } })
   mockedAxios.post = vi.fn().mockResolvedValue({ data: { messages: [], final_recommendation: '', query: '', consensus_reached: true, checks_passed: 0, checks_warned: 0, checks_failed: 0, items: [], verdict: 'PASS', checks_total: 0 } })
   mockedAxios.isAxiosError = (() => false) as never

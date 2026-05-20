@@ -30,7 +30,13 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-# Deadline the triage agent reasons against — the FNA 670 midpoint.
+# Triage gate the agent reasons against — the June 3 cohort
+# peer-review presentation at McColl, when the platform itself is
+# demonstrated live. Bob's May 27 midpoint paper is the first hard
+# submission deadline but it is a written-only deliverable that does
+# not depend on platform uptime, so the triage cutoff stays at the
+# cohort presentation when the platform must be working in front of
+# the panel.
 _DEADLINE = date(2026, 6, 3)
 
 # A backlog item warrants a GitHub issue when its severity is this high.
@@ -284,15 +290,19 @@ def _build_context(failures: list[dict], feedback: list[dict]) -> str:
 _TRIAGE_SYSTEM_PROMPT = (
     "You are the QA lead reviewing a backlog of feedback and failure "
     "reports from a UAT test pass of an investment analytics platform. "
-    "The platform is being evaluated at the McColl School of Business on "
-    "June 3rd.\n\n"
+    "The platform is demonstrated live at the June 3rd cohort "
+    "peer-review presentation at McColl School of Business; that is "
+    "the triage gate this report reasons against. (Bob's May 27th "
+    "midpoint paper is a written submission that does not depend on "
+    "platform uptime, so it is not the triage cutoff here.)\n\n"
     "Produce a structured triage report with EXACTLY these five markdown "
     "sections, in this order:\n\n"
     "## IMMEDIATE ACTIONS\n"
-    "Items that must be addressed before June 3rd — blocking or major "
-    "severity, or anything that would embarrass the team during the "
-    "presentation. For each: title, the reason it is immediate, a "
-    "recommended fix approach, and an effort estimate.\n\n"
+    "Items that must be addressed before the June 3rd cohort "
+    "presentation — blocking or major severity, or anything that would "
+    "embarrass the team during the live demo. For each: title, the "
+    "reason it is immediate, a recommended fix approach, and an effort "
+    "estimate.\n\n"
     "## QUICK WINS\n"
     "Small-effort items (Trivial/Small) that would noticeably improve the "
     "platform. For each: title, what it improves, and an effort estimate.\n\n"
@@ -300,12 +310,12 @@ _TRIAGE_SYSTEM_PROMPT = (
     "Where multiple items report the same underlying issue, group them and "
     "name the root cause. List the affected items.\n\n"
     "## POST-DEADLINE BACKLOG\n"
-    "Everything else — valid requests for after June 3rd, grouped by "
-    "category.\n\n"
+    "Everything else — valid requests for after the June 3rd cohort "
+    "presentation, grouped by category.\n\n"
     "## SUMMARY\n"
     "Total items reviewed; counts of immediate actions, quick wins, "
     "patterns and post-deadline items; and the recommended focus for the "
-    "days before the deadline.\n\n"
+    "days before the cohort presentation.\n\n"
     "Be direct and specific. Reference item titles and descriptions by "
     "name. Do not pad with generic advice."
 )
@@ -314,8 +324,8 @@ _TRIAGE_SYSTEM_PROMPT = (
 def _triage_user_message(failures: list[dict], feedback: list[dict]) -> str:
     days = max(0, (_DEADLINE - date.today()).days)
     return (
-        f"Today is {date.today().isoformat()}. You have {days} days until "
-        f"the June 3rd deadline.\n\n"
+        f"Today is {date.today().isoformat()}. You have {days} days "
+        f"until the June 3rd cohort peer-review presentation.\n\n"
         f"Here are all {len(failures) + len(feedback)} unaddressed items:\n\n"
         f"{_build_context(failures, feedback)}"
     )

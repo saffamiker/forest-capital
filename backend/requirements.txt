@@ -49,7 +49,7 @@ cvxpy>=1.4.0
 # ── Report generation ─────────────────────────────────────────────────────────
 reportlab>=4.0.0
 matplotlib>=3.8.0
-# python-docx writes the .docx Bob edits for the June 3 midpoint paper.
+# python-docx writes the .docx Bob edits for the May 27 midpoint paper.
 # Sprint 6: also used by the executive brief and analytical appendix
 # generators. Pinned to a major version that's been stable for years.
 python-docx>=1.1.0

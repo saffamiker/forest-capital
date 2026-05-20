@@ -66,20 +66,14 @@ export const useCouncilStore = create<CouncilState>((set, get) => ({
         : get().councilUsage
       set({ result: res.data, loading: false, councilUsage: usage })
       // Re-anchor the Commentary-mode glossary to this completed
-      // session: clear the once-per-session termsLoaded guard and
-      // immediately force-reload terms with the council output, so each
-      // term's `this_session` field reflects the actual results rather
-      // than the empty context of the first mount-time load. force:true
-      // bypasses the loadTerms guards (including termsLoading — so an
-      // initial mount-time load still in flight doesn't block this
-      // re-anchor) and keeps the reload silent — no UI flash. The
-      // termsLoaded flag is also cleared so any unrelated subsequent
-      // non-force loadTerms() call still sees the slot as stale until
-      // this reload completes. Fire-and-forget — runs on success only.
-      useGlossaryStore.setState({ termsLoaded: false })
+      // session. loadTerms() is single-flight + 60-second-debounced
+      // from termsLastLoadedAt — when the debounce window has elapsed,
+      // this call refreshes each term's `this_session` field with the
+      // new council output; when it has not, the call is dropped and
+      // the next loadTerms() (a hover, a page mount) will refresh with
+      // the now-current council result. Fire-and-forget on success.
       void useGlossaryStore.getState().loadTerms(
-        res.data as unknown as Record<string, unknown>,
-        { force: true })
+        res.data as unknown as Record<string, unknown>)
     } catch (err) {
       // A user-initiated cancel is not an error — clear loading, show nothing.
       if (axios.isCancel(err)) {

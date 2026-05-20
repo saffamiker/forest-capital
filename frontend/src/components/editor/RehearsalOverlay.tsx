@@ -8,9 +8,10 @@
  *                       (scrollable), and the transition line at the
  *                       bottom prefixed →.
  *   Right (60% width) — a static canvas render of the same slide,
- *                       reusing the PresentationPreview's text + chart
- *                       placeholder primitives. Speaker notes strip
- *                       at the bottom for presenter-only context.
+ *                       text elements positioned exactly as on canvas,
+ *                       chart elements as REAL chart images from
+ *                       /api/v1/charts/render/{key}. Speaker notes
+ *                       strip at the bottom for presenter-only context.
  *
  * Navigation:
  *   ← / → arrow keys advance both panels together
@@ -20,6 +21,12 @@
  * Header carries the title "Rehearsal Mode", a live "min remaining"
  * counter (sum of remaining sections' word counts / 150) and an
  * Exit button (same affordance as Esc).
+ *
+ * Charts:  every unique chart_key across the deck is fetched ONCE on
+ *          overlay mount and held in component state for the duration
+ *          of the rehearsal session. Navigation never re-fetches.
+ *          A failed fetch degrades to the labelled placeholder box
+ *          (fail-open — a missing chart must never break rehearsal).
  *
  * Data:    GET /api/v1/documents/rehearsal (deck + parsed script
  *          sections, fetched once on mount).
@@ -34,8 +41,23 @@ import {
 import axios from 'axios'
 import { ChevronLeft, ChevronRight, Loader2, X } from 'lucide-react'
 
-import type { CanvasSlide, CanvasTextElement } from '../../types/editor'
+import type {
+  CanvasChartElement, CanvasSlide, CanvasTextElement,
+} from '../../types/editor'
 import { CANVAS_WIDTH, CANVAS_HEIGHT } from './canvasSlide'
+
+// Server-side chart render size — generous enough to stay sharp when the
+// element is scaled up on a large monitor, small enough to keep the
+// upfront-fetch fast. The render endpoint resizes; the browser scales.
+const CHART_RENDER_WIDTH = 1200
+const CHART_RENDER_HEIGHT = 750
+
+type ChartCacheState =
+  | { status: 'loading' }
+  | { status: 'ready'; src: string }
+  | { status: 'failed' }
+
+type ChartCache = Record<string, ChartCacheState>
 
 interface ScriptSection {
   slide_number: number | null
@@ -70,6 +92,10 @@ export default function RehearsalOverlay({ onClose }: Props) {
   const [missing, setMissing] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [index, setIndex] = useState(0)
+  // Chart cache keyed by chart_key — one entry per unique chart across
+  // the whole deck. Pre-fetched on overlay open so slide navigation
+  // never waits on the network.
+  const [charts, setCharts] = useState<ChartCache>({})
 
   // Fetch once on mount. 404 with a clear detail message gets the
   // "Rehearsal requires both…" modal; any other error is a generic
@@ -98,6 +124,56 @@ export default function RehearsalOverlay({ onClose }: Props) {
   const slides = payload?.deck.slides ?? []
   const sections = payload?.script.sections ?? []
   const total = Math.max(slides.length, sections.length)
+
+  // Once the payload has arrived, fetch every unique chart in the deck
+  // up front so slide navigation feels instant. Each chart is fetched
+  // ONCE — the cache survives navigation. A failed fetch is recorded
+  // as 'failed' so the placeholder renders without retrying.
+  useEffect(() => {
+    if (!payload) return
+    const keys = Array.from(new Set(
+      payload.deck.slides.flatMap((s) => s.elements
+        .filter((e): e is CanvasChartElement => e.type === 'chart')
+        .map((e) => e.chartKey)),
+    ))
+    if (keys.length === 0) return
+
+    let cancelled = false
+    const urls: string[] = []
+    // Seed every pending chart as 'loading' so the slide panel can
+    // show a spinner while the fetch is in flight.
+    setCharts((prev) => {
+      const next: ChartCache = { ...prev }
+      for (const k of keys) if (!next[k]) next[k] = { status: 'loading' }
+      return next
+    })
+
+    void Promise.all(keys.map(async (key) => {
+      try {
+        const res = await axios.get(`/api/v1/charts/render/${key}`, {
+          params: { width: CHART_RENDER_WIDTH,
+                    height: CHART_RENDER_HEIGHT, theme: 'light' },
+          responseType: 'blob',
+        })
+        if (cancelled) return
+        const src = URL.createObjectURL(res.data as Blob)
+        urls.push(src)
+        setCharts((prev) => ({ ...prev, [key]: { status: 'ready', src } }))
+      } catch {
+        if (cancelled) return
+        // Fail-open: leave the slide rendering with the labelled
+        // placeholder box instead of breaking rehearsal.
+        setCharts((prev) => ({ ...prev, [key]: { status: 'failed' } }))
+      }
+    }))
+
+    return () => {
+      cancelled = true
+      // Release the object URLs we created so a long-lived browser
+      // session doesn't leak memory.
+      for (const u of urls) URL.revokeObjectURL(u)
+    }
+  }, [payload])
 
   const go = useCallback((delta: number) => {
     setIndex((i) => Math.min(Math.max(i + delta, 0),
@@ -216,7 +292,7 @@ export default function RehearsalOverlay({ onClose }: Props) {
       {/* Two-panel body — left script, right slide */}
       <div className="flex-1 flex min-h-0">
         <ScriptPanel section={section} />
-        <SlidePanel slide={slide} />
+        <SlidePanel slide={slide} charts={charts} />
       </div>
 
       {/* Bottom nav */}
@@ -290,7 +366,9 @@ function ScriptPanel({ section }: { section?: ScriptSection }) {
 
 
 /** Right 60% — static canvas render of the current slide. */
-function SlidePanel({ slide }: { slide?: CanvasSlide }) {
+function SlidePanel(
+  { slide, charts }: { slide?: CanvasSlide; charts: ChartCache },
+) {
   const areaRef = useRef<HTMLDivElement | null>(null)
   const [scale, setScale] = useState(1)
   useLayoutEffect(() => {
@@ -322,8 +400,9 @@ function SlidePanel({ slide }: { slide?: CanvasSlide }) {
             }}>
             {slide.elements.map((el) => (el.type === 'text'
               ? <RehearsalText key={el.id} el={el} scale={scale} />
-              : <RehearsalChartPlaceholder key={el.id}
+              : <RehearsalChart key={el.id}
                   chartKey={el.chartKey}
+                  state={charts[el.chartKey]}
                   x={el.x * scale} y={el.y * scale}
                   w={el.width * scale} h={el.height * scale} />))}
           </div>
@@ -372,23 +451,46 @@ function RehearsalText(
 
 
 /**
- * Chart placeholder — rehearsal mode is deliberately content-only.
- * Showing a labelled box where each chart sits keeps the rehearsal
- * fast (no network) and the presenter focused on flow, not visuals.
- * Loading real chart PNGs is a post-deadline backlog item.
+ * Chart element — renders the real chart image from the cache when
+ * ready, a loading spinner while the upfront fetch is in flight, and
+ * the labelled placeholder box on failure (fail-open — a missing
+ * chart must never break rehearsal).
  */
-function RehearsalChartPlaceholder(
-  { chartKey, x, y, w, h }: {
-    chartKey: string; x: number; y: number; w: number; h: number
+function RehearsalChart(
+  { chartKey, state, x, y, w, h }: {
+    chartKey: string
+    state: ChartCacheState | undefined
+    x: number; y: number; w: number; h: number
   },
 ) {
+  const box: React.CSSProperties = {
+    position: 'absolute', left: x, top: y, width: w, height: h,
+  }
+  if (state?.status === 'ready') {
+    return (
+      <div style={box} className="bg-white">
+        <img src={state.src} alt={chartKey}
+             className="w-full h-full object-contain" />
+      </div>
+    )
+  }
+  if (state?.status === 'failed' || state === undefined) {
+    return (
+      <div style={box}
+           className="flex items-center justify-center
+                      border-2 border-dashed border-slate-300 bg-gray-50">
+        <span className="text-2xs font-mono text-slate-500 px-2 text-center">
+          [{chartKey.replace(/_/g, ' ')}]
+        </span>
+      </div>
+    )
+  }
+  // 'loading' — show a small spinner centred in the chart's area.
   return (
-    <div style={{ position: 'absolute', left: x, top: y, width: w, height: h }}
-         className="flex items-center justify-center
-                    border-2 border-dashed border-slate-300 bg-gray-50">
-      <span className="text-2xs font-mono text-slate-500 px-2 text-center">
-        [{chartKey.replace(/_/g, ' ')}]
-      </span>
+    <div style={box}
+         className="flex items-center justify-center bg-gray-50
+                    border border-slate-200">
+      <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
     </div>
   )
 }

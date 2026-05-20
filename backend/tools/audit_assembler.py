@@ -113,11 +113,15 @@ FORMULA_SPECIFICATIONS: dict[str, str] = {
         ">= 12 months) falls back to a three-factor fit."
     ),
     "true_turnover": (
-        "mean over rebalance dates of sum(|w_t - w_{t-1}|) / 2, then "
-        "annualised by dividing by the number of years. NOTE: the "
-        "per-rebalance weight series is not persisted, so true_turnover "
-        "cannot be independently recomputed from stored data — it is "
-        "audited only for direction/consistency, not by recomputation."
+        "sum over rebalance dates of |drifted_t - new_target_t| / 2, "
+        "then annualised by dividing by the number of years. The "
+        "drifted weights compound the previous target through the "
+        "inter-rebalance monthly returns, so a fixed-weight strategy "
+        "shows non-zero turnover (it trades to correct drift). "
+        "true_turnover CAN be independently recomputed from "
+        "weight_schedule + returns_df: weight_schedule is persisted on "
+        "every strategy result. The audit checks direction only "
+        "(dynamic >= static), not the exact value."
     ),
     "rolling_correlation": (
         "12-month rolling Pearson correlation of the monthly return "

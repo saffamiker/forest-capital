@@ -327,61 +327,93 @@ async def email_exists(email: str) -> bool:
 
 async def users_activity_breakdown() -> dict[str, Any]:
     """
-    Per-user activity over the last 30 days, broken down by
-    interaction_type (agent_interactions) and session_type
-    (session_events page-view counts). Joins against platform_users
-    (LEFT JOIN-equivalent) so every active user appears even with zero
-    interactions in the window.
+    Per-user activity broken down by interaction_type (agent_interactions)
+    and session_type (session_events page-view counts), returned for
+    BOTH a lifetime window and a rolling 30-day window so the Settings
+    panel can show life-to-date as the headline (the figure that matters
+    for academic-integrity tracking) and the 30-day count as recent-
+    activity context. Joins against platform_users (LEFT JOIN-equivalent)
+    so every active user appears even with zero interactions.
 
     Returns a JSON-ready dict:
-      { "users": [...], "period_days": 30,
+      { "users": [...], "rolling_window_days": 30,
         "generated_at": "<ISO timestamp>" }
 
-    Each user row:
-      { email, display_name, role, breakdown: {<type>: <count>},
-        session_breakdown: {analytical: n, testing: n},
-        total_interactions, total_cost_usd, first_seen, last_seen }
+    Each user row carries TWO window blocks:
 
-    Three sub-queries, each in its own session with its own try/except —
-    same isolation pattern as list_all_users. A failure in one sub-query
-    drops only that column; the user list itself survives.
+      lifetime    — every interaction ever logged for this user. Fields:
+                    breakdown, session_breakdown, total_interactions,
+                    total_cost_usd, first_seen, last_seen.
+      rolling_30d — interactions in the last 30 days. Fields: breakdown,
+                    session_breakdown, total_interactions,
+                    total_cost_usd. (No first/last_seen — that pair is
+                    semantically lifetime-only.)
+
+    Five sub-queries (four data queries + the user list), each in its
+    own session with its own try/except — same isolation pattern as
+    list_all_users. A failure in one sub-query drops only its column;
+    the rest of the response still lands.
     """
     from datetime import datetime, timezone
 
     users = await _fetch_platform_users()
-    breakdowns = await _fetch_interaction_breakdowns()
-    session_counts = await _fetch_session_breakdowns()
+    lifetime_interactions = await _fetch_interaction_breakdowns(
+        window_days=None)
+    lifetime_sessions = await _fetch_session_breakdowns(window_days=None)
+    rolling_interactions = await _fetch_interaction_breakdowns(
+        window_days=30)
+    rolling_sessions = await _fetch_session_breakdowns(window_days=30)
 
     rows: list[dict[str, Any]] = []
     for u in users:
         email = u.get("email", "")
-        b = breakdowns.get(email, {})
-        s = session_counts.get(email, {})
+        lt = lifetime_interactions.get(email, {})
+        lt_sess = lifetime_sessions.get(email, {})
+        r = rolling_interactions.get(email, {})
+        r_sess = rolling_sessions.get(email, {})
         rows.append({
             "email":              email,
             "display_name":       u.get("display_name"),
             "role":               u.get("role"),
-            "breakdown":          b.get("by_type", {}),
-            "session_breakdown":  s,
-            "total_interactions": b.get("total_interactions", 0),
-            "total_cost_usd":     round(b.get("total_cost_usd", 0.0), 6),
-            "first_seen":         b.get("first_seen"),
-            "last_seen":          b.get("last_seen"),
+            "lifetime": {
+                "breakdown":          lt.get("by_type", {}),
+                "session_breakdown":  lt_sess,
+                "total_interactions": lt.get("total_interactions", 0),
+                "total_cost_usd":     round(lt.get("total_cost_usd", 0.0), 6),
+                "first_seen":         lt.get("first_seen"),
+                "last_seen":          lt.get("last_seen"),
+            },
+            "rolling_30d": {
+                "breakdown":          r.get("by_type", {}),
+                "session_breakdown":  r_sess,
+                "total_interactions": r.get("total_interactions", 0),
+                "total_cost_usd":     round(r.get("total_cost_usd", 0.0), 6),
+            },
         })
 
     return {
-        "users":        rows,
-        "period_days":  30,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "users":               rows,
+        "rolling_window_days": 30,
+        "generated_at":        datetime.now(timezone.utc).isoformat(),
     }
 
 
-async def _fetch_interaction_breakdowns() -> dict[str, dict[str, Any]]:
+async def _fetch_interaction_breakdowns(
+    window_days: int | None = 30,
+) -> dict[str, dict[str, Any]]:
     """
     Per-email interaction-type counts + cost sums + first/last-seen
-    timestamps over the last 30 days. Own session + try/except so a
-    failure here only drops the agent_interactions column from the
-    response; the user list (and session_events counts) still land.
+    timestamps. When window_days is a positive int, the query filters
+    to that rolling window; when None, every row is included (lifetime).
+
+    Own session + try/except so a failure here only drops the
+    agent_interactions column from the response; the user list (and
+    session_events counts) still land.
+
+    The interval clause is built from a hardened int cast — None or a
+    positive int are the only accepted inputs; anything else would
+    raise on int() before reaching the SQL. The cast guarantees no
+    user-controlled string ever enters the SQL fragment.
     """
     out: dict[str, dict[str, Any]] = {}
     try:
@@ -390,6 +422,11 @@ async def _fetch_interaction_breakdowns() -> dict[str, dict[str, Any]]:
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return out
+        where_clause = (
+            ""
+            if window_days is None
+            else f"WHERE timestamp > NOW() - INTERVAL '{int(window_days)} days' "
+        )
         async with AsyncSessionLocal() as session:
             rows = await session.execute(text(
                 "SELECT user_email, interaction_type, "
@@ -398,7 +435,7 @@ async def _fetch_interaction_breakdowns() -> dict[str, dict[str, Any]]:
                 "       MIN(timestamp) AS first_seen, "
                 "       MAX(timestamp) AS last_seen "
                 "FROM agent_interactions "
-                "WHERE timestamp > NOW() - INTERVAL '30 days' "
+                f"{where_clause}"
                 "GROUP BY user_email, interaction_type"
             ))
             for email, itype, n, cost, first_seen, last_seen in rows.fetchall():
@@ -419,13 +456,18 @@ async def _fetch_interaction_breakdowns() -> dict[str, dict[str, Any]]:
                            or ls > bucket["last_seen"]):
                     bucket["last_seen"] = ls
     except Exception as exc:  # noqa: BLE001
-        log.warning("activity_breakdown_interactions_failed", error=str(exc))
+        log.warning("activity_breakdown_interactions_failed",
+                    window_days=window_days, error=str(exc))
     return out
 
 
-async def _fetch_session_breakdowns() -> dict[str, dict[str, int]]:
+async def _fetch_session_breakdowns(
+    window_days: int | None = 30,
+) -> dict[str, dict[str, int]]:
     """
-    Per-email session-type page-view counts over the last 30 days.
+    Per-email session-type page-view counts. window_days follows the
+    same contract as _fetch_interaction_breakdowns — None = lifetime.
+
     page_view is the most informative session event for "how much
     time has this user spent on the platform"; login / export rows
     are noisier and are excluded from this breakdown.
@@ -439,12 +481,17 @@ async def _fetch_session_breakdowns() -> dict[str, dict[str, int]]:
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return out
+        where_window = (
+            ""
+            if window_days is None
+            else f"  AND timestamp > NOW() - INTERVAL '{int(window_days)} days' "
+        )
         async with AsyncSessionLocal() as session:
             rows = await session.execute(text(
                 "SELECT user_email, session_type, COUNT(*) "
                 "FROM session_events "
-                "WHERE timestamp > NOW() - INTERVAL '30 days' "
-                "  AND event_type = 'page_view' "
+                "WHERE event_type = 'page_view' "
+                f"{where_window}"
                 "GROUP BY user_email, session_type"
             ))
             for email, stype, n in rows.fetchall():
@@ -455,7 +502,8 @@ async def _fetch_session_breakdowns() -> dict[str, dict[str, int]]:
                     # Unknown session_type — fold into analytical.
                     bucket["analytical"] += int(n)
     except Exception as exc:  # noqa: BLE001
-        log.warning("activity_breakdown_sessions_failed", error=str(exc))
+        log.warning("activity_breakdown_sessions_failed",
+                    window_days=window_days, error=str(exc))
     return out
 
 

@@ -328,7 +328,7 @@ See `backend/.env.example` for all required variables. Key ones:
 
 ## Roadmap
 
-Work is tracked as a Kanban board (Backlog | In Progress | Done) — the board of record is in `CLAUDE.md`. The near-term focus is the June 3 midpoint: the written submission, an Academic Review session, and the per-member UAT passes through the guided test runner.
+Work is tracked as a Kanban board (Backlog | In Progress | Done) — the board of record is in `CLAUDE.md`. The near-term focus is Bob's May 27 midpoint paper submission, followed by the June 3 cohort peer-review presentation. An Academic Review session and the per-member UAT passes through the guided test runner close the gap.
 
 ## Team
 
@@ -339,5 +339,5 @@ Work is tracked as a Kanban board (Backlog | In Progress | Done) — the board o
 | Molly | Lead Presenter — slide deck, Forest Capital brief, July 1 demo |
 | Dr. Panttser | Professor / Reviewer |
 
-Key dates: Mid-checkpoint June 3 @ 6pm · Final presentation July 1 @ 6pm · McEwen 120
+Key dates: Bob midpoint paper May 27 · Cohort peer-review presentation June 3 (Sykes 326) · Bob exec brief + Molly final presentation July 1 (McEwen 120) · Panel presentation July 3
 

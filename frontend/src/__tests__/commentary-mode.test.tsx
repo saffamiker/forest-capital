@@ -47,7 +47,7 @@ const realLoadTerms = useGlossaryStore.getState().loadTerms
 beforeEach(() => {
   useGlossaryStore.setState({
     terms: {}, parameters: {}, personas: {}, qa: {}, charts: {},
-    termsLoaded: false, termsLoading: false, inflight: new Set<string>(),
+    termsLastLoadedAt: null, termsLoading: false, inflight: new Set<string>(),
     loadTerms: realLoadTerms,
   })
   useProvenanceStore.setState({
@@ -86,7 +86,8 @@ describe('glossaryStore.loadTerms()', () => {
     await act(async () => { await result.current.loadTerms({ significant_strategies: [] }) })
     expect(result.current.terms.sharpe_ratio).toBeDefined()
     expect(result.current.terms.sharpe_ratio.hover).toBe('Return per unit of risk')
-    expect(result.current.termsLoaded).toBe(true)
+    // The 60-second debounce timestamp is stamped on every successful load.
+    expect(result.current.termsLastLoadedAt).not.toBeNull()
   })
 
   it('fails silent and leaves terms empty when the endpoint errors', async () => {
@@ -94,7 +95,9 @@ describe('glossaryStore.loadTerms()', () => {
     const { result } = renderHook(() => useGlossaryStore())
     await act(async () => { await result.current.loadTerms() })
     expect(result.current.terms).toEqual({})
-    expect(result.current.termsLoaded).toBe(true)   // still marked loaded so we don't retry
+    // The timestamp is stamped even on error so we don't retry inside
+    // the 60-second debounce window.
+    expect(result.current.termsLastLoadedAt).not.toBeNull()
   })
 })
 
@@ -129,7 +132,7 @@ describe('ExplainableText mode-conditional rendering', () => {
     // Pre-seed the glossary so the only reason for "no chrome" is the mode.
     useGlossaryStore.setState({
       terms: { sharpe_ratio: { hover: 'h', what: 'w', why: 'w' } },
-      termsLoaded: true, termsLoading: false,
+      termsLastLoadedAt: Date.now(), termsLoading: false,
     })
     renderInMode('analyst', <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>)
     expect(screen.getByText('SHARPE')).toBeInTheDocument()
@@ -140,7 +143,7 @@ describe('ExplainableText mode-conditional rendering', () => {
   it('renders interactive chrome in Commentary mode when glossary entry exists', () => {
     useGlossaryStore.setState({
       terms: { sharpe_ratio: { hover: 'h', what: 'w', why: 'w' } },
-      termsLoaded: true, termsLoading: false,
+      termsLastLoadedAt: Date.now(), termsLoading: false,
     })
     renderInMode('commentary', <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>)
     expect(screen.getByText('SHARPE')).toBeInTheDocument()
@@ -160,7 +163,7 @@ describe('ExplainableText — no inert underlines', () => {
   it('renders no underline while the glossary is still loading', () => {
     // Glossary not loaded and no entry for this term yet.
     useGlossaryStore.setState({
-      terms: {}, termsLoaded: false, loadTerms: vi.fn(),
+      terms: {}, termsLastLoadedAt: null, loadTerms: vi.fn(),
     })
     const { container } = renderInMode(
       'commentary', <ExplainableText term="sharpe_ratio">VALUE</ExplainableText>)
@@ -174,7 +177,7 @@ describe('ExplainableText — no inert underlines', () => {
     // Glossary loaded, but it carries no entry for this term.
     useGlossaryStore.setState({
       terms: { other_term: { hover: 'h', what: 'w', why: 'w' } },
-      termsLoaded: true, loadTerms: vi.fn(),
+      termsLastLoadedAt: Date.now(), loadTerms: vi.fn(),
     })
     const { container } = renderInMode(
       'commentary', <ExplainableText term="missing_term">VALUE</ExplainableText>)
@@ -185,7 +188,7 @@ describe('ExplainableText — no inert underlines', () => {
   it('renders the dotted underline when the glossary is loaded and the entry exists', () => {
     useGlossaryStore.setState({
       terms: { sharpe_ratio: { hover: 'h', what: 'w', why: 'w' } },
-      termsLoaded: true,
+      termsLastLoadedAt: Date.now(),
     })
     const { container } = renderInMode(
       'commentary', <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>)
@@ -200,7 +203,7 @@ describe('ExplainableText — custom hover tooltip', () => {
     useGlossaryStore.setState({
       terms: { sharpe_ratio: {
         hover: 'Return per unit of risk', what: 'w', why: 'w' } },
-      termsLoaded: true,
+      termsLastLoadedAt: Date.now(),
     })
     renderInMode('commentary',
       <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>)
@@ -252,7 +255,7 @@ describe('glossary term contract', () => {
         skewness: { hover: 'h', what: 'w', why: 'y' },
         mkt_rf: { hover: 'h', what: 'w', why: 'y' },
       },
-      termsLoaded: true,
+      termsLastLoadedAt: Date.now(),
     })
     const { container } = renderInMode('commentary', (
       <>
@@ -381,7 +384,7 @@ describe('ExplainableText hover cost optimisation', () => {
     // independently when the component mounts.
     useGlossaryStore.setState({
       terms: { sharpe_ratio: { hover: 'h', what: 'w', why: 'w' } },
-      termsLoaded: false,    // not yet loaded — load() will fire
+      termsLastLoadedAt: null,   // never loaded — load() will fire
       termsLoading: false,
     })
 
@@ -404,13 +407,13 @@ describe('ExplainableText hover cost optimisation', () => {
   })
 
   it('subsequent re-renders of the same ExplainableText do not refire load', async () => {
-    // Once termsLoaded=true, the store's guard short-circuits every
-    // future call. This test catches the regression where someone
-    // accidentally drops the loaded check and re-fetches on every
-    // hover.
+    // Once termsLastLoadedAt is within the 60-second debounce window,
+    // the store short-circuits every future load. This test catches
+    // the regression where someone accidentally drops the debounce
+    // check and re-fetches on every hover.
     useGlossaryStore.setState({
       terms: { sharpe_ratio: { hover: 'h', what: 'w', why: 'w' } },
-      termsLoaded: true,     // pre-marked loaded → load() should be a no-op
+      termsLastLoadedAt: Date.now(),  // just loaded → load() is debounced
       termsLoading: false,
     })
 
@@ -437,7 +440,7 @@ describe('ExplainableText hover cost optimisation', () => {
   it('ExplainableText does not fire load in Analyst mode (no chrome rendered)', async () => {
     // Cost guardrail: don't pay for explanations the user can't see.
     useGlossaryStore.setState({
-      terms: {}, termsLoaded: false, termsLoading: false,
+      terms: {}, termsLastLoadedAt: null, termsLoading: false,
     })
     renderInMode(
       'analyst',

@@ -1523,9 +1523,10 @@ Your role has two components:
 
 COMPONENT 1 — ACADEMIC GUIDANCE:
 Help the team connect their data findings to the three graded deliverables:
-  Final Presentation (35%) — June 3 midpoint + July 1 final
+  Final Presentation (35%) — July 1 submission; rehearsed at the
+                              June 3 cohort peer-review event
   Analytical Appendix (35%) — rigour, provenance, reproducibility
-  Executive Brief (20%) — Forest Capital recommendation
+  Executive Brief (20%) — Forest Capital recommendation (July 1)
 
 For every finding, answer the SO WHAT question explicitly:
   — What does this mean for the research question?
@@ -1577,7 +1578,8 @@ Citation rules (non-negotiable):
 Grade awareness:
   FNA 670 grading: Presentation 35%, Appendix 35%, Brief 20%, Midpoint 10%
   Prioritise feedback by grade weight.
-  June 3 midpoint: focus on framing, preliminary findings, methodology.
+  May 27 midpoint paper: focus on framing, preliminary findings, methodology.
+  June 3 cohort presentation: peer-review rehearsal — not graded.
   July 1 final: focus on completeness, statistical rigour, implications.
 [GLOBAL AGENT RULE]"
 
@@ -4015,7 +4017,7 @@ Sprint 6 (COMPLETE — May 13-15 2026):
      Sonnet + web_search, verified citations, SO WHAT section
      Hallucination detection via external evidence cross-check
   ✅ Bob's section editor — Analytical Appendix + Executive Brief
-  ✅ Midpoint template .docx — June 3 ready
+  ✅ Midpoint template .docx — May 27 submission ready
   ✅ Storyboard Editor + version control (Molly)
   ✅ Presentation Script Writer (130 wpm, voice-differentiated)
   ✅ Q&A Preparation document generator
@@ -6705,13 +6707,14 @@ is maintained separately. The `gh` CLI is authenticated with the
 
 ─── BACKLOG ────────────────────────────────────────────────────────────
 
-  HIGH — before June 3:
+  HIGH — before the May 27 midpoint paper submission:
   □ Visual pass — document generation panel, test runner, Data Explain
     buttons, strategy InfoIcons, Settings → Users
   □ Bob — run an Academic Review before writing the midpoint draft
   □ Bob — upload the midpoint draft once written (Settings → Academic
     Documents)
   □ Bob — midpoint paper submission (3 pages, due May 27)
+  HIGH — before the June 3 cohort peer-review presentation:
   □ Michael — UAT Section 2 test pass
   □ Bob — UAT Section 3 test pass
   □ Molly — UAT Section 4 test pass + presentation review pass
@@ -6813,7 +6816,11 @@ is maintained separately. The `gh` CLI is authenticated with the
     □ Bob — midpoint paper submission (May 27)
     □ Bob — Academic Review session before writing the midpoint draft
     □ Bob — midpoint draft upload (Settings → Academic Documents)
-    □ Molly — presentation submission (June 3)
+    □ Cohort presentation (June 3, Sykes 326 6-8:45pm) — peer review,
+      no submission gate
+    □ Bob — executive brief submission (July 1)
+    □ Molly — final presentation submission (July 1)
+    □ Panel presentation (July 3) — Michael, Bob, Molly all present
 
 
 ─── POST-DEADLINE BACKLOG ──────────────────────────────────────────────
@@ -6838,11 +6845,14 @@ is maintained separately. The `gh` CLI is authenticated with the
       the tap surface is still tight when an InfoIcon sits inside a
       narrow cell. Promote the InfoIcon to its own row on mobile or
       use a larger hit area extending into the cell padding.
-    □ Rehearsal mode chart loading — chart elements currently render
-      as placeholder boxes with the chart label. The /api/v1/charts/
-      render endpoint already serves the right PNGs; rehearsal mode
-      ships content-only for June 3 so the overlay never blocks on
-      a network call. Wire real chart images post-deadline.
+    ✅ Rehearsal mode chart loading — DONE. Every unique chart_key
+      in the deck is fetched ONCE on overlay open from
+      /api/v1/charts/render/{key} and cached in component state for
+      the duration of the session, so slide navigation never waits on
+      a network call. A loading spinner shows while an image is in
+      flight; a failed fetch degrades to the labelled placeholder box
+      (fail-open). The chart_render cache (5-minute TTL) further
+      shortens subsequent rehearsals of the same deck.
     □ Per-speaker colour consistency between the script editor
       display and the exported DOCX — the script editor renders each
       speaker's sections in a stable palette colour, and the DOCX
@@ -6855,14 +6865,15 @@ is maintained separately. The `gh` CLI is authenticated with the
       but the codebase still has two patterns. On chart titles the
       InfoIcon still appears alongside ExplainableText on some
       surfaces. Pick one pattern for the long term and migrate.
-    □ this_session glossary timing — full fix. The May-17 force-
-      reload fix (loadTerms(councilOutput, { force: true })) makes
-      the reload work after every council session, but the
-      termsLoaded guard is still in the code path. The clean fix is
-      to drop the guard entirely for the council-completion code
-      path and rely on a request-id to dedupe in-flight loads — the
-      glossary becomes continuously session-anchored rather than
-      "loaded once + force reloaded on council completion".
+    ✅ this_session glossary timing — DONE. The termsLoaded guard is
+      removed; loadTerms() is now single-flight (the in-flight
+      termsLoading check) plus a 60-second debounce on
+      termsLastLoadedAt. Council completion just calls
+      loadTerms(councilOutput) — within the debounce window the call
+      is dropped, and the next loadTerms() (a hover, a page mount)
+      refreshes with the now-current council result. Multiple council
+      sessions therefore re-anchor the glossary continuously, capped
+      at one refresh per 60 seconds.
 
   ANALYTICS:
     □ Additional matplotlib renderers for the remaining Recharts-only
@@ -6891,12 +6902,17 @@ is maintained separately. The `gh` CLI is authenticated with the
       May-18 audit fix, but the backtester's tier1_gates pipeline
       still references the legacy turnover proxy in a couple of
       derived fields. Replace those references with the true measure.
-    □ Option B / C document refinement after Bob and Molly review
-      pass — Bob writes the midpoint paper and exec brief in their
-      final voice; Molly writes the presentation deck and script.
-      After they each run a real review pass, edit the [[BOB]] /
-      [[MOLLY]] callout copy in academic_docx.py to match what they
-      actually asked for.
+    □ Bob and Molly callout copy refinement after a real review pass
+      — Bob writes the midpoint paper and exec brief in his final
+      voice; Molly writes the presentation deck and script. After
+      they each run a real review pass against a generated draft,
+      tune the [[BOB]] / [[MOLLY]] callout copy in academic_docx.py
+      and academic_deck.py to match the prompts they actually find
+      useful. Pure copy edit — the constants are
+      _ROLES_CALLOUT_*, _NEXT_STEPS_CALLOUT_*, _RESULTS_CALLOUT_*,
+      _BRIEF_SUMMARY_CALLOUT_*, _BRIEF_LIMITATIONS_CALLOUT_*,
+      _BRIEF_RECOMMENDATIONS_CALLOUT_* on the .docx side, and
+      _MOLLY_VERIFY_NOTE / _DECK_TITLE_NOTE on the .pptx side.
 
   PLATFORM:
     □ Script rehearsal mode refinements post-Molly feedback —
@@ -11011,5 +11027,9 @@ Colab vs Local cheatsheet:
 
 Key dates:
   May 11   — Project kickoff. Update config.py with Dr. Panttser's specs.
-  June 3   — Mid-checkpoint @ 6pm IN PERSON. Working demo required.
-  July 1   — Final presentation @ 6pm IN PERSON. Forest Capital + MSFA Board.
+  May 27   — Bob: midpoint paper SUBMISSION (3 pages, end of day).
+  June 3   — Cohort presentation (Sykes 326, 6-8:45pm). PEER REVIEW event,
+             not a submission deadline.
+  July 1   — Bob: executive brief SUBMISSION. Molly: final presentation
+             SUBMISSION. McEwen 120, 6pm. Forest Capital + MSFA Board.
+  July 3   — Panel presentation — Michael, Bob, and Molly all present.

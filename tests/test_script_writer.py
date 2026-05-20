@@ -185,6 +185,49 @@ class TestScriptDocx:
             self._script_draft()["content_json"]) == ["Molly", "Bob"]
 
 
+# ── Shared speaker-colour utility ─────────────────────────────────────────────
+
+class TestSpeakerColourUtility:
+    """The script editor (frontend) and the DOCX builder (backend) must
+    agree on which colour belongs to which speaker. Both consume the
+    same palette and resolver — tools/speaker_colours.py here, mirrored
+    in frontend/src/lib/speakerColours.ts on the frontend."""
+
+    def test_palette_matches_team_colour_spec(self):
+        from tools.speaker_colours import SPEAKER_COLOURS
+        # Five distinct colours per FIX 1: navy / amber / green /
+        # purple / red — must mirror the frontend palette EXACTLY.
+        assert SPEAKER_COLOURS == (
+            "#1B2A4A", "#B45309", "#059669", "#7C3AED", "#DC2626",
+        )
+
+    def test_first_seen_speaker_gets_navy(self):
+        from tools.speaker_colours import get_speaker_colour
+        assert get_speaker_colour(
+            "Molly", ["Molly", "Bob", "Michael"]) == "#1B2A4A"
+
+    def test_per_speaker_assignment_is_stable_across_indices(self):
+        from tools.speaker_colours import get_speaker_colour
+        order = ["Molly", "Bob", "Michael"]
+        assert get_speaker_colour("Molly", order) == "#1B2A4A"
+        assert get_speaker_colour("Bob", order) == "#B45309"
+        assert get_speaker_colour("Michael", order) == "#059669"
+
+    def test_sixth_speaker_cycles_back_to_navy(self):
+        from tools.speaker_colours import get_speaker_colour
+        order = ["A", "B", "C", "D", "E", "F"]
+        # Index 5 % 5 == 0 → first colour again.
+        assert get_speaker_colour("F", order) == "#1B2A4A"
+
+    def test_unknown_speaker_falls_back_to_first_colour(self):
+        # Defensive: a name not in the list maps to Speaker 1 rather
+        # than throwing. Real callers always pass the speaker's own
+        # list, but a typo must not crash the export.
+        from tools.speaker_colours import get_speaker_colour
+        assert get_speaker_colour(
+            "Unknown", ["Molly", "Bob"]) == "#1B2A4A"
+
+
 # ── Endpoint contracts ────────────────────────────────────────────────────────
 
 class TestScriptEndpoints:

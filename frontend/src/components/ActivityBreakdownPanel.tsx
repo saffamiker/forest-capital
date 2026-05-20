@@ -1,24 +1,30 @@
 /**
  * ActivityBreakdownPanel — the Settings → Users → Platform Engagement
  * surface. Sits below the user-management table and shows a per-user
- * breakdown of agent_interactions over the last 30 days, plus a
- * session-type (analytical / testing) page-view split.
+ * LIFETIME breakdown of agent_interactions (the figure that matters
+ * for academic-integrity tracking), with a "Last 30 days: N
+ * interactions" context line beneath the bar so recent activity is
+ * still visible at a glance.
  *
  * Data:        GET /api/v1/admin/users/activity-breakdown
+ *              — returns both `lifetime` and `rolling_30d` blocks per
+ *              user; the panel renders lifetime as the headline and
+ *              30-day as secondary context.
  * Gate:        manage_users (the endpoint refuses anything else)
  * Colours:     consistent with TeamActivityCharts on the Reports page
  *              (council = navy, academic_review = amber, …) so a
  *              sysadmin glancing between the two pages reads the same
  *              signal both places.
  *
- * Each user with any activity renders a horizontal stacked bar
- * (recharts) of their interaction counts by type; below the chart, a
- * two-column summary lists the per-type counts on the left and the
+ * Each user with any lifetime activity renders a horizontal stacked
+ * bar (recharts) of their interaction counts by type; below the chart,
+ * a two-column summary lists the per-type counts on the left and the
  * session-type page-view split on the right. AI spend appears only
- * when the cost is non-zero — a viewer's $0 row stays uncluttered.
+ * when the lifetime cost is non-zero — a viewer's $0 row stays
+ * uncluttered.
  *
- * A user with zero interactions in the 30-day window shows a muted
- * "No activity in the last 30 days" state instead of an empty bar.
+ * A user with zero lifetime interactions shows a muted "No activity
+ * yet" state instead of an empty bar.
  */
 import { useEffect, useState } from 'react'
 import axios from 'axios'
@@ -27,21 +33,26 @@ import {
 } from 'recharts'
 import { AlertCircle, Loader2 } from 'lucide-react'
 
-interface UserBreakdown {
-  email: string
-  display_name: string | null
-  role: string | null
+interface WindowStats {
   breakdown: Record<string, number>
   session_breakdown: { analytical?: number; testing?: number }
   total_interactions: number
   total_cost_usd: number
-  first_seen: string | null
-  last_seen: string | null
+  first_seen?: string | null
+  last_seen?: string | null
+}
+
+interface UserBreakdown {
+  email: string
+  display_name: string | null
+  role: string | null
+  lifetime: WindowStats
+  rolling_30d: WindowStats   // no first/last_seen on this block
 }
 
 interface ApiResponse {
   users: UserBreakdown[]
-  period_days: number
+  rolling_window_days: number
   generated_at: string
 }
 
@@ -93,18 +104,17 @@ function displayName(u: UserBreakdown): string {
 }
 
 /**
- * Horizontal stacked bar for one user. Each segment is one
- * interaction_type; tooltip reveals the per-type label and count.
- * Recharts wants the data as a single row with one key per series.
+ * Horizontal stacked bar for the user's LIFETIME breakdown. Each
+ * segment is one interaction_type; tooltip reveals the per-type label
+ * and count. Recharts wants the data as a single row with one key
+ * per series.
  */
-function UserBar({ user }: { user: UserBreakdown }) {
-  // Data row — one key per interaction_type with a count > 0. Recharts
-  // skips a series whose value is undefined, so this naturally hides
-  // empty segments from the legend.
+function UserBar({ stats }: { stats: WindowStats }) {
+  // Data row — one key per interaction_type with a count > 0.
   const row: Record<string, number | string> = { name: 'total' }
   const present: string[] = []
   for (const t of TYPE_ORDER) {
-    const n = user.breakdown[t]
+    const n = stats.breakdown[t]
     if (n && n > 0) {
       row[t] = n
       present.push(t)
@@ -113,7 +123,7 @@ function UserBar({ user }: { user: UserBreakdown }) {
   // Catch unknown types the backend might add — fold into a single
   // "other" segment so a new interaction_type doesn't silently vanish.
   let otherCount = 0
-  for (const [t, n] of Object.entries(user.breakdown)) {
+  for (const [t, n] of Object.entries(stats.breakdown)) {
     if (!TYPE_ORDER.includes(t) && n > 0) {
       otherCount += n
     }
@@ -148,9 +158,9 @@ function UserBar({ user }: { user: UserBreakdown }) {
   )
 }
 
-/** Per-type list — only types with count > 0 appear. */
-function TypeBreakdownList({ user }: { user: UserBreakdown }) {
-  const entries = Object.entries(user.breakdown)
+/** Per-type list — only types with count > 0 appear. Reads lifetime. */
+function TypeBreakdownList({ stats }: { stats: WindowStats }) {
+  const entries = Object.entries(stats.breakdown)
     .filter(([, n]) => n > 0)
     .sort((a, b) => b[1] - a[1])
   if (entries.length === 0) {
@@ -170,10 +180,10 @@ function TypeBreakdownList({ user }: { user: UserBreakdown }) {
   )
 }
 
-/** Session-type page-view split. */
-function SessionBreakdownList({ user }: { user: UserBreakdown }) {
-  const analytical = user.session_breakdown.analytical ?? 0
-  const testing = user.session_breakdown.testing ?? 0
+/** Session-type page-view split. Reads lifetime. */
+function SessionBreakdownList({ stats }: { stats: WindowStats }) {
+  const analytical = stats.session_breakdown.analytical ?? 0
+  const testing = stats.session_breakdown.testing ?? 0
   if (analytical === 0 && testing === 0) {
     return <div className="text-2xs text-muted italic">No page views</div>
   }
@@ -191,9 +201,13 @@ function SessionBreakdownList({ user }: { user: UserBreakdown }) {
   )
 }
 
-/** One user's full breakdown card — bar + two-column summary + cost. */
+/** One user's full breakdown card — bar + two-column summary + cost.
+ *  Headline numbers are LIFETIME; the 30-day count sits below the bar
+ *  as recent-activity context. */
 function UserBreakdownCard({ user }: { user: UserBreakdown }) {
-  const zero = user.total_interactions === 0
+  const lifetime = user.lifetime
+  const rolling = user.rolling_30d
+  const zero = lifetime.total_interactions === 0
   return (
     <div className="border border-border rounded p-3 space-y-2"
          data-testid={`activity-breakdown-${user.email}`}>
@@ -207,27 +221,36 @@ function UserBreakdownCard({ user }: { user: UserBreakdown }) {
           )}
         </div>
         <div className="text-2xs font-mono text-slate-300 shrink-0">
-          {user.total_interactions} interactions
+          {lifetime.total_interactions} interactions
         </div>
       </div>
 
       {zero ? (
         <div className="text-2xs text-muted py-1.5"
              data-testid={`activity-zero-${user.email}`}>
-          No activity in the last 30 days
+          No activity yet
         </div>
       ) : (
         <>
-          <UserBar user={user} />
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-            <TypeBreakdownList user={user} />
-            <SessionBreakdownList user={user} />
+          <UserBar stats={lifetime} />
+          {/* Recent-activity context line — always present when there
+              is lifetime activity, so a sysadmin can read at a glance
+              whether the user has been active lately or only earlier. */}
+          <div className="text-2xs text-muted -mt-1"
+               data-testid={`activity-rolling-${user.email}`}>
+            Last 30 days: <span className="font-mono text-slate-300">
+              {rolling.total_interactions}
+            </span>{' '}interactions
           </div>
-          {user.total_cost_usd > 0 && (
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+            <TypeBreakdownList stats={lifetime} />
+            <SessionBreakdownList stats={lifetime} />
+          </div>
+          {lifetime.total_cost_usd > 0 && (
             <div className="text-2xs text-muted pt-1 border-t
                             border-border/40">
               AI spend: <span className="font-mono text-slate-200">
-                ${user.total_cost_usd.toFixed(2)}
+                ${lifetime.total_cost_usd.toFixed(2)}
               </span>
             </div>
           )}
@@ -266,7 +289,7 @@ export default function ActivityBreakdownPanel() {
           Platform Engagement
         </h3>
         <p className="text-2xs text-muted mt-0.5">
-          Last 30 days — analytical sessions only
+          Life-to-date analytical activity
         </p>
       </div>
 

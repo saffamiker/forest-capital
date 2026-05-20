@@ -153,6 +153,67 @@ DATA-AVAILABILITY SUMMARY
       per strategy — fast (<200 ms total).
 
 ──────────────────────────────────────────────────────────────────────────
+GROUP 3A AUDIT  (May 19 2026 — Commit 1)
+──────────────────────────────────────────────────────────────────────────
+Cross-reference between the Analytics page (frontend/src/pages/
+AcademicAnalytics.tsx) and AVAILABLE_CHARTS. The page renders four
+Recharts components in this order:
+
+  CumulativeReturnChart        → cumulative_returns       ✓ shipped
+  RollingCorrelationChart      → rolling_correlation      ✓ shipped
+  RollingExcessReturnChart     → NOT IN AVAILABLE_CHARTS  ← gap
+  SensitivityAnalysis          → sensitivity              ✓ shipped
+
+(Tables on the same page — SummaryStatistics, RegimeConditional,
+DrawdownComparison, FactorLoadings, StrategyMethodology — already
+have chart-form counterparts in AVAILABLE_CHARTS where appropriate;
+they are not chart components themselves so not part of this gap.)
+
+THE ONE GAP — rolling_excess_return
+
+  What it shows: 12-month rolling total return of each strategy
+    minus the 100% equity benchmark, plotted per month. Above-zero
+    half-plane shading marks periods of outperformance, below-zero
+    underperformance. A vertical regime-break marker on the first
+    plotted month at or after 2022-01-01 anchors the central project
+    finding to the same chart.
+
+  Data needed: per-strategy 12-month trailing-compound return minus
+    the benchmark's same-window trailing-compound return, by month.
+    Already shaped by analytics.rolling_excess_return(strategy_
+    results, window=12) — returns {strategies, points[{date, ...}],
+    window_months}.
+
+  Data availability: READY TODAY — no upstream change.
+    strategy_results (with monthly_returns lists per strategy) is
+    already in the gather_document_data bundle as data["strategy_
+    results"]. The renderer can call analytics.rolling_excess_return
+    directly. No new endpoint, no cache miss, no run_all_strategies()
+    recompute.
+
+  Render complexity: LOW.
+    Single-axis matplotlib line plot, one line per strategy, two
+    half-plane fills (axhspan above/below zero), a vertical
+    regime-break line at the post-2022 anchor. Same shape family as
+    rolling_sharpe and rolling_correlation (already written).
+    Estimated <80 lines in chart_renderers.py.
+
+  Category: "performance" — alongside cumulative_returns and the
+    rolling-* family.
+
+OTHER PAGES — out of scope for GROUP 3A but noted for completeness:
+  Recharts components also live in components/charts (the
+  Statistical Evidence and Regime Analysis dashboards), Dashboard
+  (cumulative + efficient frontier), TeamActivityCharts, and
+  ActivityBreakdownPanel (Settings → Users). The corresponding
+  canvas charts already exist in AVAILABLE_CHARTS
+  (significance_journey, regime_*, factor_*, p_value_distribution,
+  team_activity, etc.); EfficientFrontier is the Dashboard-only
+  scatter we deliberately don't ship as a canvas chart. Only the
+  Analytics page had a missing chart-component-to-AVAILABLE_CHARTS
+  gap.
+
+──────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
 
@@ -214,6 +275,12 @@ AVAILABLE_CHARTS: list[dict[str, str]] = [
      "label": "Rolling Sharpe",
      "description": "36-month rolling Sharpe ratio for the strategy and "
                     "the benchmark, with a zero reference line.",
+     "category": "performance"},
+    {"key": "rolling_excess_return",
+     "label": "Rolling Excess Return",
+     "description": "12-month rolling total return of each strategy "
+                    "minus the 100% equity benchmark, with the 2022 "
+                    "regime-break marker.",
      "category": "performance"},
     {"key": "return_distribution",
      "label": "Return Distribution",

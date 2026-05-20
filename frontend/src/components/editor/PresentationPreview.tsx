@@ -2,13 +2,18 @@
  * PresentationPreview — a full-screen rehearsal view for a
  * presentation_deck draft.
  *
- * Renders one canvas slide at a time on a clean white board scaled to
- * fit the viewport — text elements and chart elements laid out exactly
- * as positioned in the editor — with the presenter's speaker notes in a
- * greyed bottom strip. Arrow keys or the on-screen ‹ › buttons navigate;
- * Esc exits. No API call beyond the chart PNGs.
+ * Renders one canvas slide at a time scaled to fit the viewport — text
+ * and chart elements laid out exactly as positioned in the editor —
+ * with the presenter's speaker notes in a darker strip below. Arrow
+ * keys or the on-screen ‹ › buttons navigate; Esc exits. No API call
+ * beyond the chart PNGs.
  *
- * This is a rehearsal tool, not the .pptx renderer.
+ * Theme matches the PPTX export (academic_deck.py): navy stage / white
+ * title text / darker-navy speaker notes strip with muted text, so the
+ * preview looks like a rendered version of what the .pptx will show
+ * rather than a plain document view. The slide BODY still honours its
+ * own background (default white, settable per slide) — the deck builder
+ * does the same on export.
  */
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import axios from 'axios'
@@ -58,18 +63,26 @@ export default function PresentationPreview({ slides, onClose }: Props) {
     return () => obs.disconnect()
   }, [])
 
+  // Theme matches the PPTX export — see academic_deck.py.
+  //   Stage / chrome:  #1B2A4A navy
+  //   Title text:      #FFFFFF white
+  //   Body / muted:    #E2E8F0 slate-200
+  //   Accent / data:   #F59E0B amber
+  //   Notes strip:     #0F172A darker navy
+  //   Notes text:      #94A3B8 slate-400
   return (
     <div data-testid="presentation-preview"
-      className="fixed inset-0 z-[80] bg-white flex flex-col">
-      {/* Top bar — counter + exit */}
-      <div className="flex items-center justify-between px-4 py-2
-                      border-b border-gray-200 shrink-0">
-        <span className="text-sm font-mono text-gray-500">
+      className="fixed inset-0 z-[80] flex flex-col"
+      style={{ background: '#1B2A4A' }}>
+      {/* Top bar — counter + exit. Sits on a faint divider, white text. */}
+      <div className="flex items-center justify-between px-4 py-2 shrink-0"
+        style={{ borderBottom: '1px solid rgba(255,255,255,0.10)' }}>
+        <span className="text-sm font-mono" style={{ color: '#FFFFFF' }}>
           {total === 0 ? '0 / 0' : `${index + 1} / ${total}`}
         </span>
         <button type="button" onClick={onClose} aria-label="Exit preview"
-          className="flex items-center gap-1 text-sm text-gray-500
-                     hover:text-gray-900">
+          className="flex items-center gap-1 text-sm"
+          style={{ color: '#E2E8F0' }}>
           <X className="w-4 h-4" /> Exit (Esc)
         </button>
       </div>
@@ -78,14 +91,14 @@ export default function PresentationPreview({ slides, onClose }: Props) {
       <div className="flex-1 flex items-center min-h-0">
         <button type="button" onClick={() => go(-1)} disabled={index === 0}
           aria-label="Previous slide"
-          className="px-4 h-full text-gray-300 hover:text-gray-700
-                     disabled:opacity-30 disabled:hover:text-gray-300">
+          className="px-4 h-full disabled:opacity-30"
+          style={{ color: '#E2E8F0' }}>
           <ChevronLeft className="w-8 h-8" />
         </button>
 
         <div ref={areaRef}
-          className="flex-1 h-full flex items-center justify-center
-                     bg-gray-100 p-6 min-w-0">
+          className="flex-1 h-full flex items-center justify-center p-6 min-w-0"
+          style={{ background: '#1B2A4A' }}>
           {slide ? (
             <div className="shadow-lg relative overflow-hidden"
               style={{
@@ -100,7 +113,7 @@ export default function PresentationPreview({ slides, onClose }: Props) {
                     w={el.width * scale} h={el.height * scale} />))}
             </div>
           ) : (
-            <p className="text-gray-400 text-center">
+            <p className="text-center" style={{ color: '#E2E8F0' }}>
               This deck has no slides.
             </p>
           )}
@@ -109,19 +122,23 @@ export default function PresentationPreview({ slides, onClose }: Props) {
         <button type="button" onClick={() => go(1)}
           disabled={index >= total - 1}
           aria-label="Next slide"
-          className="px-4 h-full text-gray-300 hover:text-gray-700
-                     disabled:opacity-30 disabled:hover:text-gray-300">
+          className="px-4 h-full disabled:opacity-30"
+          style={{ color: '#E2E8F0' }}>
           <ChevronRight className="w-8 h-8" />
         </button>
       </div>
 
-      {/* Speaker notes strip — presenter-only. */}
-      <div className="border-t border-gray-200 bg-gray-50 px-8 py-3 shrink-0
-                      max-h-40 overflow-y-auto">
-        <div className="text-2xs uppercase tracking-wide text-gray-400 mb-1">
+      {/* Speaker notes strip — presenter-only, darker navy beneath the
+          stage so the audience-facing area reads as the slide itself. */}
+      <div className="px-8 py-3 shrink-0 max-h-40 overflow-y-auto"
+        style={{ background: '#0F172A',
+                 borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+        <div className="text-2xs uppercase tracking-wide mb-1"
+          style={{ color: '#94A3B8' }}>
           Your notes (not visible to audience)
         </div>
-        <div className="text-sm text-gray-500 whitespace-pre-wrap">
+        <div className="text-sm whitespace-pre-wrap"
+          style={{ color: '#94A3B8' }}>
           {slide?.speaker_notes?.trim()
             || 'No speaker notes for this slide yet.'}
         </div>
