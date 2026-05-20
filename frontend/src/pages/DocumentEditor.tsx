@@ -12,7 +12,7 @@ import axios from 'axios'
 import {
   ArrowLeft, Loader2, PanelLeftClose, PanelLeftOpen,
   PanelRightClose, PanelRightOpen, MonitorPlay, Download, FileSignature,
-  X,
+  Mic, X,
 } from 'lucide-react'
 
 import RichTextEditor from '../components/editor/RichTextEditor'
@@ -21,6 +21,7 @@ import ChartPicker from '../components/editor/ChartPicker'
 import EditorNavigator from '../components/editor/EditorNavigator'
 import EditorTasksCallout from '../components/editor/EditorTasksCallout'
 import PresentationPreview from '../components/editor/PresentationPreview'
+import RehearsalOverlay from '../components/editor/RehearsalOverlay'
 import type { NavSection } from '../components/editor/EditorNavigator'
 import WritingAssistant from '../components/editor/WritingAssistant'
 import {
@@ -140,6 +141,10 @@ export default function DocumentEditor() {
   const [leftOpen, setLeftOpen] = useState(isDesktop)
   const [rightOpen, setRightOpen] = useState(isDesktop)
   const [previewOpen, setPreviewOpen] = useState(false)
+  // Rehearsal mode — script editor's combined script + slide view.
+  // The overlay fetches GET /api/v1/documents/rehearsal on mount, so
+  // no precondition gate is needed here beyond document_type.
+  const [rehearsalOpen, setRehearsalOpen] = useState(false)
   const [exporting, setExporting] = useState(false)
   // The deck slide shown on the canvas — owned here so the left
   // navigator and the canvas always agree on the active slide.
@@ -514,6 +519,17 @@ export default function DocumentEditor() {
           </span>
           {isScript ? (
             <>
+              {/* Rehearse — opens the combined script + slide overlay.
+                  Fetches /api/v1/documents/rehearsal on mount; a missing
+                  deck or script surfaces a "Rehearsal requires both…"
+                  modal inside the overlay itself. */}
+              <button type="button" onClick={() => setRehearsalOpen(true)}
+                data-tour="editor-rehearse"
+                className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                           border border-electric/40 text-electric
+                           hover:bg-electric/10">
+                <Mic className="w-3.5 h-3.5" /> Rehearse
+              </button>
               <button type="button" onClick={() => void exportScript()}
                 disabled={exporting}
                 className="flex items-center gap-1 text-2xs px-2 py-1 rounded
@@ -763,6 +779,14 @@ export default function DocumentEditor() {
         <PresentationPreview
           slides={(contentJson as CanvasDeck | null)?.slides ?? []}
           onClose={() => setPreviewOpen(false)} />
+      )}
+
+      {/* Rehearsal Mode — combined script + slide overlay for a script.
+          Fetches the deck and script in one call, renders side-by-side
+          with keyboard navigation. The overlay handles its own
+          loading / 404 / error states. */}
+      {rehearsalOpen && isScript && (
+        <RehearsalOverlay onClose={() => setRehearsalOpen(false)} />
       )}
     </div>
   )

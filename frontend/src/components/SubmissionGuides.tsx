@@ -132,6 +132,8 @@ const GUIDES: Guide[] = [
             + 'yours and your team’s.',
           'Use the Writing Assistant panel for help with phrasing.',
           'Watch the delivery time indicator — aim for 18-27 minutes.',
+          'Use [Rehearse] in the script editor to practise with your '
+            + 'slides and script side by side.',
         ],
       },
       {
