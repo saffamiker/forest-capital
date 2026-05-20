@@ -214,7 +214,8 @@ function seedGlossary() {
       GLOSSARY_TERMS.map((t) => [t, { hover: `${t} hover`, what: 'What', why: 'Why' }]),
     ),
     parameters: {}, personas: {}, qa: {}, charts: {},
-    termsLoaded: true, termsLoading: false, inflight: new Set<string>(),
+    termsLastLoadedAt: Date.now(), termsLoading: false,
+    inflight: new Set<string>(),
   })
 }
 
@@ -229,7 +230,7 @@ describe('StrategyCard — ExplainableText metric labels', () => {
     // Reset the store before every test to keep state isolated.
     useGlossaryStore.setState({
       terms: {}, parameters: {}, personas: {}, qa: {}, charts: {},
-      termsLoaded: false, termsLoading: false, inflight: new Set<string>(),
+      termsLastLoadedAt: null, termsLoading: false, inflight: new Set<string>(),
     })
   })
 

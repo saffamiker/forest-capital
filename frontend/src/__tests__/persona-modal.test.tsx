@@ -49,7 +49,7 @@ const PERSONAS_FIXTURE = {
 beforeEach(() => {
   useGlossaryStore.setState({
     terms: {}, parameters: {}, personas: {}, qa: {}, charts: {},
-    termsLoaded: false, termsLoading: false, inflight: new Set<string>(),
+    termsLastLoadedAt: null, termsLoading: false, inflight: new Set<string>(),
   })
   mockedAxios.get  = vi.fn().mockResolvedValue({ data: PERSONAS_FIXTURE })
   mockedAxios.post = vi.fn().mockResolvedValue({

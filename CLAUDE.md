@@ -6858,14 +6858,15 @@ is maintained separately. The `gh` CLI is authenticated with the
       but the codebase still has two patterns. On chart titles the
       InfoIcon still appears alongside ExplainableText on some
       surfaces. Pick one pattern for the long term and migrate.
-    □ this_session glossary timing — full fix. The May-17 force-
-      reload fix (loadTerms(councilOutput, { force: true })) makes
-      the reload work after every council session, but the
-      termsLoaded guard is still in the code path. The clean fix is
-      to drop the guard entirely for the council-completion code
-      path and rely on a request-id to dedupe in-flight loads — the
-      glossary becomes continuously session-anchored rather than
-      "loaded once + force reloaded on council completion".
+    ✅ this_session glossary timing — DONE. The termsLoaded guard is
+      removed; loadTerms() is now single-flight (the in-flight
+      termsLoading check) plus a 60-second debounce on
+      termsLastLoadedAt. Council completion just calls
+      loadTerms(councilOutput) — within the debounce window the call
+      is dropped, and the next loadTerms() (a hover, a page mount)
+      refreshes with the now-current council result. Multiple council
+      sessions therefore re-anchor the glossary continuously, capped
+      at one refresh per 60 seconds.
 
   ANALYTICS:
     □ Additional matplotlib renderers for the remaining Recharts-only
