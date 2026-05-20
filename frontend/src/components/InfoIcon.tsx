@@ -62,7 +62,18 @@ export default function InfoIcon({
   }
 
   return (
-    <span className="relative inline-flex items-center">
+    // While the tooltip is open, the wrapper is elevated to z-[60] so
+    // it creates its own stacking context above the table's strongest
+    // sticky cell (the Strategy column header is z-20 on the Dashboard
+    // strategy table). Without this, the absolute tooltip at z-50
+    // lives inside the thead's z-10 stacking context, and a sibling
+    // <th> at z-20 (the sticky-left Strategy header) renders OVER it
+    // when the w-60 tooltip extends sideways. Click-to-open is at
+    // higher z still (ExplainerPanel uses z-[60]/[61]); the
+    // setHovered(false) on click clears this elevation before the
+    // panel mounts, so the panel correctly covers everything.
+    <span className={`relative inline-flex items-center
+                      ${hovered || panelOpen ? 'z-[60]' : ''}`}>
       <button
         ref={iconRef}
         type="button"
