@@ -219,6 +219,126 @@ class TestFailOpenReads:
         from tools.platform_users import list_all_users
         assert isinstance(asyncio.run(list_all_users()), list)
 
+
+class TestListAllUsersSubQueryIsolation:
+    """
+    list_all_users is split into three sub-queries — _fetch_platform_users,
+    _fetch_activity_counts, _fetch_ai_costs — each in its own session
+    with its own try/except. A failure in one MUST NOT poison the others;
+    in particular, a missing/failing ai_cost query cannot wipe the whole
+    user list (which was the pre-fix behaviour when the monolithic
+    try/except wrapped all three together).
+    """
+
+    def _stub_user(self, email: str) -> dict:
+        return {
+            "id": 1, "email": email, "display_name": email,
+            "role": "team_member", "permissions": ["team_member"],
+            "is_active": True, "created_at": None, "created_by": "x",
+            "last_login_at": None, "notes": None,
+            "council_queries_used": 0, "council_queries_limit": None,
+        }
+
+    def test_ai_costs_failure_does_not_drop_the_user_list(self, monkeypatch):
+        # The original bug — when the cost query failed (e.g. the
+        # estimated_cost_usd column did not exist), the monolithic
+        # try/except swallowed everything and the page rendered empty.
+        from tools import platform_users as pu
+
+        users = [self._stub_user("a@x.com"), self._stub_user("b@x.com")]
+
+        async def _ok_users():
+            return list(users)
+
+        async def _ok_counts():
+            return {"a@x.com": 5, "b@x.com": 3}
+
+        async def _fail_costs():
+            raise RuntimeError("estimated_cost_usd does not exist")
+
+        monkeypatch.setattr(pu, "_fetch_platform_users", _ok_users)
+        monkeypatch.setattr(pu, "_fetch_activity_counts", _ok_counts)
+        # Wrap so the inner raise is swallowed by _fetch_ai_costs' own
+        # try/except, mirroring how the real helper handles a bad DB call.
+        async def _wrapped_costs():
+            try:
+                return await _fail_costs()
+            except Exception:
+                return {}
+        monkeypatch.setattr(pu, "_fetch_ai_costs", _wrapped_costs)
+
+        result = asyncio.run(pu.list_all_users())
+        # The user list survives. Activity counts present, cost defaulted.
+        assert [u["email"] for u in result] == ["a@x.com", "b@x.com"]
+        assert result[0]["activity_count"] == 5
+        assert result[1]["activity_count"] == 3
+        assert result[0]["ai_cost_usd"] == 0.0
+        assert result[1]["ai_cost_usd"] == 0.0
+
+    def test_activity_counts_failure_does_not_drop_the_user_list(
+        self, monkeypatch,
+    ):
+        from tools import platform_users as pu
+
+        async def _ok_users():
+            return [self._stub_user("a@x.com")]
+
+        async def _empty_counts():
+            return {}
+
+        async def _ok_costs():
+            return {"a@x.com": 0.123456}
+
+        monkeypatch.setattr(pu, "_fetch_platform_users", _ok_users)
+        monkeypatch.setattr(pu, "_fetch_activity_counts", _empty_counts)
+        monkeypatch.setattr(pu, "_fetch_ai_costs", _ok_costs)
+
+        result = asyncio.run(pu.list_all_users())
+        assert len(result) == 1
+        assert result[0]["activity_count"] == 0  # defaulted
+        assert result[0]["ai_cost_usd"] == 0.123456  # preserved
+
+    def test_base_user_query_failure_returns_empty_list(self, monkeypatch):
+        # If platform_users itself is unreachable, there are genuinely no
+        # users to display — this is the ONLY failure mode that returns [].
+        from tools import platform_users as pu
+
+        async def _no_users():
+            return []
+
+        async def _should_not_be_called():
+            raise AssertionError("must not be called when users is empty")
+
+        monkeypatch.setattr(pu, "_fetch_platform_users", _no_users)
+        monkeypatch.setattr(pu, "_fetch_activity_counts", _should_not_be_called)
+        monkeypatch.setattr(pu, "_fetch_ai_costs", _should_not_be_called)
+
+        assert asyncio.run(pu.list_all_users()) == []
+
+    def test_all_three_succeed_returns_full_enriched_users(self, monkeypatch):
+        from tools import platform_users as pu
+
+        async def _ok_users():
+            return [self._stub_user("a@x.com"), self._stub_user("b@x.com")]
+
+        async def _ok_counts():
+            return {"a@x.com": 42}
+
+        async def _ok_costs():
+            return {"b@x.com": 1.5}
+
+        monkeypatch.setattr(pu, "_fetch_platform_users", _ok_users)
+        monkeypatch.setattr(pu, "_fetch_activity_counts", _ok_counts)
+        monkeypatch.setattr(pu, "_fetch_ai_costs", _ok_costs)
+
+        result = asyncio.run(pu.list_all_users())
+        # Each user gets both fields; emails missing from a sub-query map
+        # default to 0 — no KeyError, no missing key on the response.
+        assert result[0]["activity_count"] == 42
+        assert result[0]["ai_cost_usd"] == 0.0
+        assert result[1]["activity_count"] == 0
+        assert result[1]["ai_cost_usd"] == 1.5
+
     def test_count_active_sysadmins_returns_a_count(self):
         from tools.platform_users import count_active_sysadmins
         count = asyncio.run(count_active_sysadmins())

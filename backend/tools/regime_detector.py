@@ -491,9 +491,29 @@ def fit_hmm_historical(
         for i in range(n_states)
     }
 
+    # Per-date posterior probabilities — the regime_signals chart shows
+    # P(state=s | observations up to t) over the full history as a stacked
+    # area. score_samples returns the forward-backward smoothed posteriors;
+    # we collapse the raw state index to a label (BULL/TRANSITION/BEAR),
+    # summing any states that share a label (n_states > 3 puts multiple
+    # states into the TRANSITION bucket).
+    _, posteriors = model.score_samples(X)
+    unique_labels = sorted(set(label_map.values()))
+    historical_probs: dict[str, list[float]] = {
+        label: [0.0] * len(posteriors) for label in unique_labels
+    }
+    for i in range(n_states):
+        label = label_map[i]
+        for t in range(len(posteriors)):
+            historical_probs[label][t] += float(posteriors[t, i])
+    dates = [d.isoformat() if hasattr(d, "isoformat") else str(d)
+             for d in clean_ret.index]
+
     return {
         "n_states": n_states,
         "labelled_series": labelled.to_dict(),
+        "historical_probs": historical_probs,
+        "dates": dates,
         "transition_matrix": transition_matrix,
         "converged": bool(model.monitor_.converged),
         "label_map": label_map,

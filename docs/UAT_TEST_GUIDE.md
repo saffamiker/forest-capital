@@ -551,6 +551,7 @@ Send the completed sign-off and any failure notes to **ruurdsm@queens.edu**.
   navigating away loses the result.
 - Script generation takes 30-60 seconds. Do not navigate away from the
   editor while the **[Generate Script]** loading state is shown.
-- The chart picker shows the **five server-renderable charts** only
-  (rolling correlation, cumulative returns, risk vs return, sensitivity,
-  team activity) — not every chart on the Analytics page.
+- The chart picker shows **sixteen server-renderable charts** grouped
+  by category — Regime Analysis, Factors, Performance, Risk,
+  Significance, and Activity. Charts requiring QA or regime data show
+  a placeholder if that data is unavailable.

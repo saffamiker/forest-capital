@@ -173,11 +173,12 @@ async def resolve_user(email: str) -> dict[str, Any]:
     return config_fallback(email)
 
 
-async def list_all_users() -> list[dict[str, Any]]:
+async def _fetch_platform_users() -> list[dict[str, Any]]:
     """
-    Every platform_users row, ordered sysadmin → team_member → viewer
-    then email, each with an activity_count (agent_interactions +
-    session_events for that email). The user-management table.
+    The base user list — every platform_users row, ordered sysadmin →
+    team_member → viewer then email. Its own session + try/except so a
+    failure here is the ONLY one that returns []. If the platform_users
+    table is unreachable, we genuinely have no users to display.
     """
     try:
         from sqlalchemy import text
@@ -191,32 +192,100 @@ async def list_all_users() -> list[dict[str, Any]]:
                 "ORDER BY CASE role WHEN 'sysadmin' THEN 0 "
                 "WHEN 'team_member' THEN 1 ELSE 2 END, email"
             ))
-            users = [_row_to_dict(r) for r in rows.fetchall()]
-            # Activity counts — one grouped query per source, merged.
-            counts: dict[str, int] = {}
+            return [_row_to_dict(r) for r in rows.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("platform_users_fetch_failed", error=str(exc))
+        return []
+
+
+async def _fetch_activity_counts() -> dict[str, int]:
+    """
+    Total activity per user_email — agent_interactions + session_events,
+    merged. Its own session so a failure here ONLY drops the counts,
+    not the user list. Returns {} on any error.
+    """
+    counts: dict[str, int] = {}
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return counts
+        async with AsyncSessionLocal() as session:
             for table in ("agent_interactions", "session_events"):
-                agg = await session.execute(text(
-                    f"SELECT user_email, COUNT(*) FROM {table} "
-                    "GROUP BY user_email"))
-                for email, n in agg.fetchall():
-                    counts[email] = counts.get(email, 0) + int(n)
-            # AI token spend per user — the estimated_cost_usd column on
-            # agent_interactions (NULL for pre-token-logging rows). A
-            # sysadmin reviewing the user table sees what each account
-            # has cost, viewers included.
-            cost_by_email: dict[str, float] = {}
+                # Per-table try/except — agent_interactions and
+                # session_events arrived in different migrations, so a
+                # partially-migrated DB might have one but not the other.
+                # A missing table here only drops that one source.
+                try:
+                    agg = await session.execute(text(
+                        f"SELECT user_email, COUNT(*) FROM {table} "
+                        "GROUP BY user_email"))
+                    for email, n in agg.fetchall():
+                        counts[email] = counts.get(email, 0) + int(n)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("platform_users_activity_count_partial",
+                                table=table, error=str(exc))
+                    # asyncpg taints the session's transaction on the
+                    # first error — rollback so the next table query
+                    # runs on a clean transaction.
+                    try:
+                        await session.rollback()
+                    except Exception:  # noqa: BLE001
+                        pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning("platform_users_activity_counts_failed", error=str(exc))
+    return counts
+
+
+async def _fetch_ai_costs() -> dict[str, float]:
+    """
+    AI token spend per user_email — SUM(estimated_cost_usd) on
+    agent_interactions. Its own session so a failure here (e.g. the
+    estimated_cost_usd column missing on a pre-migration-020 DB) ONLY
+    drops the cost column, not the user list. Returns {} on any error.
+    """
+    cost_by_email: dict[str, float] = {}
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return cost_by_email
+        async with AsyncSessionLocal() as session:
             spend = await session.execute(text(
                 "SELECT user_email, COALESCE(SUM(estimated_cost_usd), 0) "
                 "FROM agent_interactions GROUP BY user_email"))
             for email, total in spend.fetchall():
                 cost_by_email[email] = float(total or 0)
-            for u in users:
-                u["activity_count"] = counts.get(u["email"], 0)
-                u["ai_cost_usd"] = round(cost_by_email.get(u["email"], 0.0), 6)
-            return users
     except Exception as exc:  # noqa: BLE001
-        log.warning("platform_users_list_failed", error=str(exc))
-        return []
+        log.warning("platform_users_ai_costs_failed", error=str(exc))
+    return cost_by_email
+
+
+async def list_all_users() -> list[dict[str, Any]]:
+    """
+    Every platform_users row, ordered sysadmin → team_member → viewer
+    then email, each with an activity_count (agent_interactions +
+    session_events for that email) and an ai_cost_usd (SUM of
+    agent_interactions.estimated_cost_usd). The user-management table.
+
+    Three sub-queries, each in its own session and its own try/except.
+    A failure in one does not poison the others — if the cost query
+    fails (e.g. the estimated_cost_usd column is missing on a partially-
+    migrated DB), the users still render with activity counts, just no
+    cost column populated. The old monolithic try/except wrapped all
+    three together: any single failure wiped the whole user list.
+    """
+    users = await _fetch_platform_users()
+    if not users:
+        return users
+    counts = await _fetch_activity_counts()
+    cost_by_email = await _fetch_ai_costs()
+    for u in users:
+        u["activity_count"] = counts.get(u["email"], 0)
+        u["ai_cost_usd"] = round(cost_by_email.get(u["email"], 0.0), 6)
+    return users
 
 
 async def get_user_by_id(user_id: int) -> dict[str, Any] | None:

@@ -587,6 +587,11 @@ export default function DocumentEditor() {
               speakerSuggestions={isDeck ? speakerSuggestions : undefined}
               metricLine={scriptMetricLine}
               metricTone={scriptMetricTone}
+              footnote={isScript
+                ? 'To rehearse with slides: open your presentation '
+                  + 'deck in a second tab and use Presentation Preview '
+                  + 'alongside this script.'
+                : undefined}
             />
           </aside>
         )}
@@ -617,7 +622,8 @@ export default function DocumentEditor() {
                 onClose={() => setRightPanelMode('assistant')} />
             ) : (
               <WritingAssistant draftId={id} unresolvedMarkers={unresolved}
-                prefill={assistantPrefill} />
+                prefill={assistantPrefill}
+                documentType={draft.document_type} />
             )}
           </aside>
         )}

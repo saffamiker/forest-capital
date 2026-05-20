@@ -282,11 +282,14 @@ TOKEN_COSTS_USD = {
 
 def calculate_cost(model, input_tokens, output_tokens):
     """
-    Estimated USD cost of one AI call. Returns None for an unknown model
-    or non-numeric token counts — the caller stores null rather than a
-    wrong figure. The model string is matched leniently: a provider may
-    return "claude-sonnet-4-6-20260514", so a prefix match against the
-    TOKEN_COSTS_USD keys is tried before giving up.
+    Estimated USD cost of one AI call. Returns None only when token counts
+    are missing or non-numeric. The model string is matched leniently: a
+    provider may return "claude-sonnet-4-6-20260514", so a prefix match
+    against the TOKEN_COSTS_USD keys is tried before falling through.
+
+    Null or unrecognised model falls back to claude-sonnet-4-6 pricing so
+    the cost is still tracked rather than dropped — approximate, but
+    better than silently writing null.
     """
     if input_tokens is None or output_tokens is None:
         return None
@@ -297,7 +300,7 @@ def calculate_cost(model, input_tokens, output_tokens):
                 rates = val
                 break
     if rates is None:
-        return None
+        rates = TOKEN_COSTS_USD["claude-sonnet-4-6"]
     try:
         return (int(input_tokens) * rates["input"]
                 + int(output_tokens) * rates["output"])

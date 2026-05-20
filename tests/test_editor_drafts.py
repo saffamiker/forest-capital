@@ -103,8 +103,9 @@ class TestEditorContentBuilders:
         # Four H1 section headings.
         headings = [n for n in cj["content"] if n.get("type") == "heading"]
         assert len(headings) == 4
-        # The Roles and Next Steps [[BOB]] callouts are embedded.
-        assert ct.count("[[BOB:") == 2
+        # Three [[BOB]] callouts — Preliminary Results, Roles, Next Steps.
+        assert ct.count("[[BOB:") == 3
+        assert "BOB — YOUR INTERPRETATION REQUIRED" in ct  # Section 2
 
     def test_deck_to_editor_builds_sixteen_canvas_slides(self):
         from tools.editor_content import deck_to_editor
@@ -152,9 +153,13 @@ class TestEditorContentBuilders:
         # Eight H1 section headings.
         headings = [n for n in cj["content"] if n.get("type") == "heading"]
         assert len(headings) == 8
-        # The brief carries no [[BOB]] callouts.
-        assert "[[BOB:" not in ct
         assert "Executive Summary" in ct
+        # Three [[BOB]] callouts — the judgement sections: the framing,
+        # the limitations, and the recommendation.
+        assert ct.count("[[BOB:") == 3
+        assert "BOB — YOUR FRAMING" in ct
+        assert "BOB — YOUR JUDGEMENT" in ct
+        assert "BOB — YOUR RECOMMENDATION" in ct
 
 
 # ── CRUD round-trips — skip without a live database ───────────────────────────
@@ -230,17 +235,19 @@ class TestEditorCRUD:
 
 
 class TestDraftOnGeneration:
+    # Generation is async — the endpoint returns 202 and a background
+    # task creates the draft. The generation helper is exercised directly
+    # (it creates the editor draft and returns its id).
     def test_midpoint_generation_creates_a_draft(self, clean_editor_drafts):
         if not _db_ready():
             pytest.skip("no live database")
-        resp = client.post("/api/v1/export/midpoint-paper", headers=TEAM)
-        assert resp.status_code == 200
-        # The generated content is loaded into an editor draft; its id
-        # rides back in the X-Draft-Id header.
-        draft_id = resp.headers.get("x-draft-id")
+        import main
+        _bytes, _fn, _media, draft_id = _run(
+            main._generate_midpoint_document("thaob@queens.edu"))
         assert draft_id is not None
         got = client.get(f"{DRAFTS}/{draft_id}", headers=TEAM)
         assert got.status_code == 200
+        assert got.json()["document_type"] == "midpoint_paper"
         assert got.json()["created_from"] == "generated"
 
     def test_executive_brief_generation_creates_a_draft(
@@ -248,11 +255,9 @@ class TestDraftOnGeneration:
     ):
         if not _db_ready():
             pytest.skip("no live database")
-        resp = client.post("/api/v1/export/executive-brief", headers=TEAM)
-        assert resp.status_code == 200
-        # The brief now loads its content into an editor draft too — the
-        # draft_id rides back in the X-Draft-Id header.
-        draft_id = resp.headers.get("x-draft-id")
+        import main
+        _bytes, _fn, _media, draft_id = _run(
+            main._generate_brief_document("thaob@queens.edu"))
         assert draft_id is not None
         got = client.get(f"{DRAFTS}/{draft_id}", headers=TEAM)
         assert got.status_code == 200

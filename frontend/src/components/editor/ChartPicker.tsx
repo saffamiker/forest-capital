@@ -6,6 +6,10 @@
  * grouped by category, each shown as a live thumbnail rendered by the
  * GET /api/v1/charts/render endpoint. Clicking a chart adds it to the
  * current slide and closes the picker.
+ *
+ * The category strings on the API response are short kebab-style keys
+ * ("regime", "performance", ...). The picker maps them to human display
+ * labels in CATEGORY_LABELS — the API field stays compact for routing.
  */
 import { useEffect, useState } from 'react'
 import axios from 'axios'
@@ -21,6 +25,22 @@ interface AvailableChart {
 interface Props {
   onSelect: (chartKey: string) => void
   onClose: () => void
+}
+
+// Display labels for the AVAILABLE_CHARTS category keys. An unknown
+// category falls through to the raw value uppercased — the categories on
+// the API are the source of truth; this map is purely cosmetic.
+const CATEGORY_LABELS: Record<string, string> = {
+  regime:       'Regime Analysis',
+  factors:      'Factors',
+  performance:  'Performance',
+  risk:         'Risk',
+  significance: 'Significance',
+  activity:     'Activity',
+}
+
+function categoryLabel(key: string): string {
+  return CATEGORY_LABELS[key] ?? key.toUpperCase()
 }
 
 export default function ChartPicker({ onSelect, onClose }: Props) {
@@ -73,13 +93,16 @@ export default function ChartPicker({ onSelect, onClose }: Props) {
       )}
 
       {phase === 'ready' && groups.map((g) => (
-        <div key={g.category} className="mb-4">
-          <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
-            {g.category}
+        <div key={g.category} className="mb-5"
+             data-testid={`chart-picker-group-${g.category}`}>
+          <div className="text-2xs text-electric uppercase tracking-wider
+                          mb-1.5 pb-1 border-b border-border/60 font-semibold">
+            {categoryLabel(g.category)}
           </div>
           <div className="space-y-2">
             {g.items.map((c) => (
               <button key={c.key} type="button" onClick={() => onSelect(c.key)}
+                data-testid={`chart-picker-item-${c.key}`}
                 className="w-full text-left card p-2 hover:border-electric/50
                            border border-border transition-colors">
                 <ChartThumb chartKey={c.key} label={c.label} />

@@ -39,12 +39,15 @@ interface Props {
   metricLine?: string | undefined
   /** Tone for metricLine — 'ok' green, 'warn' amber, otherwise muted. */
   metricTone?: 'ok' | 'warn' | undefined
+  /** Optional muted note rendered below the metric line — e.g. the
+   *  script's rehearsal-with-slides reminder. */
+  footnote?: string | undefined
 }
 
 export default function EditorNavigator({
   title, wordCount, wordTarget, lastSavedLabel, saveState, sections,
   versions, onJumpToSection, onSaveVersion, onRestoreVersion,
-  onAssignSpeaker, speakerSuggestions, metricLine, metricTone,
+  onAssignSpeaker, speakerSuggestions, metricLine, metricTone, footnote,
 }: Props) {
   const [showSave, setShowSave] = useState(false)
   const [label, setLabel] = useState('')
@@ -81,6 +84,11 @@ export default function EditorNavigator({
             <span className="font-mono text-slate-300">{wordCount}</span>
             {' '}/ ~{wordTarget} target
           </div>
+        )}
+        {footnote && (
+          <p className="text-2xs text-muted mt-1.5 leading-relaxed">
+            {footnote}
+          </p>
         )}
       </div>
 

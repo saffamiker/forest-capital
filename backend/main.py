@@ -17,7 +17,7 @@ from fastapi import (
     WebSocketDisconnect, UploadFile, File, Form,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -85,6 +85,31 @@ async def lifespan(app: FastAPI):
                 log.info("Startup reap: no stale audit runs found")
         except Exception as exc:  # noqa: BLE001
             log.warning("audit_startup_reap_failed", error=str(exc))
+        # One-time baseline log — counts the historical rows that landed
+        # before the cost-tracking deploy (pre-migration 020 token columns
+        # are null). Sets a clear line in the Render logs: everything from
+        # this deploy forward carries cost data; rows older than this can
+        # never be backfilled.
+        try:
+            from datetime import date
+            from sqlalchemy import text
+            from database import AsyncSessionLocal
+            async with AsyncSessionLocal() as ses:  # type: ignore[union-attr]
+                result = await ses.execute(text(
+                    "SELECT COUNT(*) FROM agent_interactions "
+                    "WHERE estimated_cost_usd IS NULL"))
+                n_null = int(result.scalar() or 0)
+            today = date.today().isoformat()
+            log.info(
+                "cost_tracking_baseline",
+                active_from=today,
+                n_historical_null=n_null,
+                message=(f"cost tracking active from {today}. "
+                         f"{n_null} historical interactions have no cost "
+                         "data (pre-migration 020)."),
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cost_tracking_baseline_failed", error=str(exc))
         try:
             from tools.academic_context import refresh_academic_context
             await refresh_academic_context()
@@ -1911,6 +1936,12 @@ async def council_explain(
     current_value = body.get("current_value")
 
     from agents.explainer_agent import stream_metric_explanation
+    from agents.usage import start_usage_capture
+
+    # Seed the usage bucket before the Haiku stream starts; _stream_haiku
+    # copies the request context into its worker thread so record_usage
+    # after the stream completes lands here.
+    start_usage_capture()
 
     async def gen():
         collected: list[str] = []
@@ -1957,6 +1988,11 @@ async def council_explain_data(
     context = body.get("context")
 
     from agents.explainer_agent import stream_data_explanation
+    from agents.usage import start_usage_capture
+
+    # Same pattern as /api/council/explain — seed before the stream worker
+    # thread starts so its copied context inherits this bucket.
+    start_usage_capture()
 
     async def gen():
         collected: list[str] = []
@@ -2278,6 +2314,11 @@ async def testing_quality_check(
     actual_result = body.get("actual_result")
 
     from tools.test_runner import quality_check
+    from agents.usage import start_usage_capture
+
+    # quality_check is a Sonnet call wrapped in asyncio.to_thread, which DOES
+    # propagate the contextvars — so seeding the bucket here captures it.
+    start_usage_capture()
     verdict = await asyncio.to_thread(
         quality_check, submission_type, step_context, description,
         str(actual_result) if actual_result else None)
@@ -3168,10 +3209,14 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
                 from tools.data_fetcher import get_full_history
                 from tools.backtester import run_all_strategies
                 from agents.qa_agent import QAAgent
+                from agents.usage import start_usage_capture
 
                 history = get_full_history()
                 strategy_results = run_all_strategies(history)
 
+                # Seed the per-request usage bucket before the QA agent's
+                # call_claude invocations so their token usage is captured.
+                start_usage_capture()
                 qa = QAAgent()
                 audit = qa.run_audit(strategy_results, run_full_checklist=True)
                 # Team Activity — record the audit run (non-blocking).
@@ -3419,6 +3464,7 @@ async def qa_run(request: Request, session: dict = Depends(require_sysadmin)):
         from tools.cache import set_qa_cache
         from tools.backtester import run_all_strategies
         from tools.data_fetcher import get_full_history
+        from agents.usage import start_usage_capture
 
         strategy_hash, cached = await _current_strategy_hash()
         if cached:
@@ -3426,7 +3472,11 @@ async def qa_run(request: Request, session: dict = Depends(require_sysadmin)):
         else:
             results_dict = run_all_strategies(get_full_history())
 
-        # Tier 1 — synchronous, deterministic, free.
+        # Tier 1 — synchronous, deterministic, free. Tier 2 runs on a
+        # background executor that does NOT inherit this context, so its
+        # cost is not captured here; Tier 1 is sync and free of AI calls
+        # today but the seed is here for forward-compatibility.
+        start_usage_capture()
         t1 = run_tier1_checks(results_dict)
         await set_qa_cache(strategy_hash, t1, tier=1)
 
@@ -3626,6 +3676,13 @@ async def export_package(
     import io
     import zipfile
     from datetime import date
+
+    # Seeded for consistency with every other interaction-logging endpoint.
+    # No AI work runs in this handler today (descriptions are curated and
+    # deterministic), so this is a no-op for cost — but a future change that
+    # adds an AI-generated README or chart caption would be captured for free.
+    from agents.usage import start_usage_capture
+    start_usage_capture()
 
     try:
         # A malformed metadata string must not break the export — the ZIP
@@ -3949,6 +4006,83 @@ async def _editor_export(editor_draft_id: int) -> Response:
         headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
+# ── Async document generation — job system ────────────────────────────────────
+# The three generation endpoints take 30-90s. Each creates a job, spawns
+# generation as a background task, and returns 202 immediately; the
+# frontend polls GET /api/v1/jobs/{id}. See tools/generation_jobs.py.
+_generation_bg_tasks: set = set()
+
+
+def _start_generation_job(
+    document_type: str, session: dict, request: Request,
+) -> JSONResponse:
+    """Creates a job, spawns generation on the event loop, returns 202.
+
+    Seeds the per-request usage bucket BEFORE the task spawns so the
+    Academic Writer harness calls inside _generate_async (which run on
+    the same loop, inheriting this context) populate it. The task ends
+    by calling _log_interaction_bg which reads collect_usage().
+    """
+    import asyncio
+
+    from tools.generation_jobs import create_job, update_job
+    from agents.usage import start_usage_capture
+
+    start_usage_capture()
+    job = create_job(document_type, session["email"])
+    task = asyncio.create_task(
+        _generate_async(job["job_id"], document_type, session, request))
+    update_job(job["job_id"], _task=task)
+    _generation_bg_tasks.add(task)
+    task.add_done_callback(_generation_bg_tasks.discard)
+    return JSONResponse(
+        status_code=202,
+        content={"job_id": job["job_id"], "status": "pending"})
+
+
+async def _generate_async(
+    job_id: str, document_type: str, session: dict, request: Request,
+) -> None:
+    """Runs document generation for a job and records the outcome on it.
+    A cancelled job's status is set by the DELETE handler, so a
+    CancelledError propagates untouched."""
+    import asyncio
+    from datetime import datetime, timezone
+
+    from tools.generation_jobs import update_job
+
+    update_job(job_id, status="running")
+    try:
+        if document_type == "midpoint_paper":
+            file_bytes, filename, media, draft_id = \
+                await _generate_midpoint_document(session["email"])
+        elif document_type == "executive_brief":
+            file_bytes, filename, media, draft_id = \
+                await _generate_brief_document(session["email"])
+        else:
+            file_bytes, filename, media, draft_id = \
+                await _generate_deck_document(session["email"])
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("generation_job_failed", job_id=job_id,
+                  document_type=document_type, ref=ref, error=str(exc))
+        update_job(job_id, status="failed",
+                   error=f"Generation failed (ref: {ref})",
+                   completed_at=datetime.now(timezone.utc))
+        return
+
+    update_job(job_id, status="complete", draft_id=draft_id,
+               download_url=f"/api/v1/jobs/{job_id}/download",
+               completed_at=datetime.now(timezone.utc),
+               _file_bytes=file_bytes, _filename=filename, _media_type=media)
+    _log_interaction_bg(
+        request, session, "export", agents_involved=["academic_writer"],
+        response_summary=f"{document_type} generated",
+        metadata={"deliverable": document_type, "draft_id": draft_id})
+
+
 @app.post("/api/v1/export/midpoint-paper")
 @limiter.limit("6/minute")
 async def export_midpoint_paper(
@@ -3957,19 +4091,32 @@ async def export_midpoint_paper(
     session: dict = Depends(require_permission("generate_documents")),
 ):
     """
-    Generates the three-page midpoint submission as a .docx download.
+    Starts midpoint-paper generation.
+
+    With an editor_draft_id in the body the .docx is built synchronously
+    from that draft's current content (the in-editor Export path).
+    Otherwise generation — the four Academic Writer sections, 30-60s —
+    runs as a background job and the endpoint returns 202 with a job_id;
+    poll GET /api/v1/jobs/{id}.
+    """
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
+    return _start_generation_job("midpoint_paper", session, request)
+
+
+async def _generate_midpoint_document(
+    email: str,
+) -> tuple[bytes, str, str, int | None]:
+    """
+    Generates the three-page midpoint submission. Returns (file bytes,
+    filename, media type, editor draft id). Raises on failure — the job
+    wrapper records it.
 
     Four sections per the FNA 670 brief — Data & Methodology, Preliminary
     Results (with the summary-statistics and regime-conditional tables
     embedded), Roles & Division of Labor (from real Team Activity counts),
-    and Next Steps (from the last Academic Review verdict). Double-spaced,
-    12 pt Times New Roman, 1-inch margins, page numbers. The four narrative
-    sections are written by the Academic Writer agent through the harness;
-    the call can take 30-60 seconds.
-
-    When the body carries an editor_draft_id, the .docx is built directly
-    from that editor draft's current content (the in-editor Export path)
-    instead of regenerating from scratch.
+    and Next Steps (from the last Academic Review verdict).
     """
     import asyncio
     from datetime import date
@@ -3978,10 +4125,6 @@ async def export_midpoint_paper(
     from tools.academic_export import (
         DATA_PENDING, gather_document_data, gather_roles_activity,
     )
-
-    editor_draft_id = (body or {}).get("editor_draft_id")
-    if editor_draft_id:
-        return await _editor_export(int(editor_draft_id))
 
     try:
         data = await gather_document_data()
@@ -4107,7 +4250,7 @@ async def export_midpoint_paper(
             from tools.editor_drafts import create_draft
             content_json, content_text = midpoint_to_editor(narratives)
             draft = await create_draft(
-                "midpoint_paper", session["email"],
+                "midpoint_paper", email,
                 f"Midpoint Paper — {date.today().isoformat()}",
                 content_json, content_text, created_from="generated")
             if draft is not None:
@@ -4115,26 +4258,11 @@ async def export_midpoint_paper(
         except Exception as exc:  # noqa: BLE001
             log.warning("midpoint_draft_create_failed", error=str(exc))
 
-        _log_interaction_bg(
-            request, session, "export", agents_involved=["academic_writer"],
-            response_summary="Midpoint paper generated",
-            metadata={"deliverable": "midpoint_paper",
-                      "data_available": data["available"],
-                      "draft_id": draft_id})
-
         filename = f"forest-capital-midpoint-paper-{date.today().isoformat()}.docx"
-        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-        if draft_id is not None:
-            headers["X-Draft-Id"] = str(draft_id)
-            headers["Access-Control-Expose-Headers"] = "X-Draft-Id"
-        return Response(content=docx_bytes, media_type=_DOCX_MEDIA,
-                        headers=headers)
+        return docx_bytes, filename, _DOCX_MEDIA, draft_id
     except Exception as exc:  # noqa: BLE001
-        ref = uuid.uuid4().hex[:8]
-        log.error("midpoint_paper_export_error", ref=ref, error=str(exc))
-        raise HTTPException(
-            status_code=500,
-            detail=f"Midpoint paper generation failed (ref: {ref})")
+        log.error("midpoint_paper_generation_error", error=str(exc))
+        raise
 
 
 @app.post("/api/v1/export/executive-brief")
@@ -4145,28 +4273,38 @@ async def export_executive_brief(
     session: dict = Depends(require_permission("generate_documents")),
 ):
     """
-    Generates the five-page executive brief as a .docx download.
+    Starts executive-brief generation.
+
+    With an editor_draft_id in the body the .docx is built synchronously
+    from that draft (the in-editor Export path). Otherwise generation —
+    the eight Academic Writer sections, 45-90s — runs as a background
+    job and the endpoint returns 202 with a job_id; poll
+    GET /api/v1/jobs/{id}.
+    """
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
+    return _start_generation_job("executive_brief", session, request)
+
+
+async def _generate_brief_document(
+    email: str,
+) -> tuple[bytes, str, str, int | None]:
+    """
+    Generates the five-page executive brief. Returns (file bytes,
+    filename, media type, editor draft id). Raises on failure — the job
+    wrapper records it.
 
     A title page, then Executive Summary, Methodology Overview, four Key
-    Findings (the 2022 correlation break, static results, dynamic results,
-    factor analysis — with the regime-conditional, summary-statistics,
-    drawdown and factor-loadings tables embedded), Limitations and Risks,
-    and Final Recommendations. Senior-investment-audience tone. The eight
-    narrative sections run through the Academic Writer harness and the
-    call can take 45-90 seconds.
-
-    When the body carries an editor_draft_id, the .docx is built from
-    that editor draft's current content (the in-editor Export path).
+    Findings (with the regime-conditional, summary-statistics, drawdown
+    and factor-loadings tables embedded), Limitations and Risks, and
+    Final Recommendations.
     """
     import asyncio
     from datetime import date
 
     from tools.academic_docx import build_executive_brief
     from tools.academic_export import DATA_PENDING, gather_document_data
-
-    editor_draft_id = (body or {}).get("editor_draft_id")
-    if editor_draft_id:
-        return await _editor_export(int(editor_draft_id))
 
     try:
         data = await gather_document_data()
@@ -4269,7 +4407,7 @@ async def export_executive_brief(
             from tools.editor_drafts import create_draft
             content_json, content_text = executive_brief_to_editor(narratives)
             draft = await create_draft(
-                "executive_brief", session["email"],
+                "executive_brief", email,
                 f"Executive Brief — {date.today().isoformat()}",
                 content_json, content_text, created_from="generated")
             if draft is not None:
@@ -4277,26 +4415,11 @@ async def export_executive_brief(
         except Exception as exc:  # noqa: BLE001
             log.warning("executive_brief_draft_create_failed", error=str(exc))
 
-        _log_interaction_bg(
-            request, session, "export", agents_involved=["academic_writer"],
-            response_summary="Executive brief generated",
-            metadata={"deliverable": "executive_brief",
-                      "data_available": data["available"],
-                      "draft_id": draft_id})
-
         filename = f"forest-capital-executive-brief-{date.today().isoformat()}.docx"
-        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-        if draft_id is not None:
-            headers["X-Draft-Id"] = str(draft_id)
-            headers["Access-Control-Expose-Headers"] = "X-Draft-Id"
-        return Response(content=docx_bytes, media_type=_DOCX_MEDIA,
-                        headers=headers)
+        return docx_bytes, filename, _DOCX_MEDIA, draft_id
     except Exception as exc:  # noqa: BLE001
-        ref = uuid.uuid4().hex[:8]
-        log.error("executive_brief_export_error", ref=ref, error=str(exc))
-        raise HTTPException(
-            status_code=500,
-            detail=f"Executive brief generation failed (ref: {ref})")
+        log.error("executive_brief_generation_error", error=str(exc))
+        raise
 
 
 @app.post("/api/v1/export/presentation-deck")
@@ -4307,31 +4430,39 @@ async def export_presentation_deck(
     session: dict = Depends(require_permission("generate_documents")),
 ):
     """
-    Generates the 16-slide final presentation deck as a .pptx download.
+    Starts presentation-deck generation.
+
+    With an editor_draft_id in the body the .pptx is built synchronously
+    from that draft's current slides (the in-editor Export path).
+    Otherwise generation — Academic Writer prose, server-side charts,
+    45-90s — runs as a background job and the endpoint returns 202 with
+    a job_id; poll GET /api/v1/jobs/{id}.
+    """
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
+    return _start_generation_job("presentation_deck", session, request)
+
+
+async def _generate_deck_document(
+    email: str,
+) -> tuple[bytes, str, str, int | None]:
+    """
+    Generates the 16-slide final presentation deck. Returns (file bytes,
+    filename, media type, editor draft id). Raises on failure — the job
+    wrapper records it.
 
     A professional navy/white theme — deliberately not the platform's
     dark UI. Charts are rendered server-side as light-mode PNGs with
-    matplotlib (no browser is available to rasterise the recharts
-    charts); a chart whose data or matplotlib is unavailable degrades to
-    a [DATA PENDING] note. The conclusions, recommendations, thesis and
-    AI-leverage prose run through the Academic Writer harness. The call
-    can take 45-90 seconds; the first run also warms the sensitivity
-    memo.
-
-    When the body carries an editor_draft_id, the .pptx is built from
-    that editor draft's current slides — including the presenter's
-    speaker notes — instead of regenerating the template (the in-editor
-    Export path).
+    matplotlib; a chart whose data or matplotlib is unavailable degrades
+    to a [DATA PENDING] note. The conclusions, recommendations, thesis
+    and AI-leverage prose run through the Academic Writer harness.
     """
     import asyncio
     from datetime import date
 
     from tools.academic_deck import build_presentation_deck, render_deck_charts
     from tools.academic_export import DATA_PENDING, gather_document_data
-
-    editor_draft_id = (body or {}).get("editor_draft_id")
-    if editor_draft_id:
-        return await _editor_export(int(editor_draft_id))
 
     try:
         data = await gather_document_data()
@@ -4405,7 +4536,7 @@ async def export_presentation_deck(
             from tools.editor_drafts import create_draft
             content_json, content_text = deck_to_editor(narratives)
             draft = await create_draft(
-                "presentation_deck", session["email"],
+                "presentation_deck", email,
                 f"Presentation Deck — {date.today().isoformat()}",
                 content_json, content_text, created_from="generated")
             if draft is not None:
@@ -4413,27 +4544,76 @@ async def export_presentation_deck(
         except Exception as exc:  # noqa: BLE001
             log.warning("deck_draft_create_failed", error=str(exc))
 
-        _log_interaction_bg(
-            request, session, "export", agents_involved=["academic_writer"],
-            response_summary="Presentation deck generated",
-            metadata={"deliverable": "presentation_deck",
-                      "data_available": data["available"],
-                      "charts_rendered": sum(1 for v in charts.values() if v),
-                      "draft_id": draft_id})
-
         filename = f"forest-capital-presentation-deck-{date.today().isoformat()}.pptx"
-        headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
-        if draft_id is not None:
-            headers["X-Draft-Id"] = str(draft_id)
-            headers["Access-Control-Expose-Headers"] = "X-Draft-Id"
-        return Response(content=pptx_bytes, media_type=_PPTX_MEDIA,
-                        headers=headers)
+        return pptx_bytes, filename, _PPTX_MEDIA, draft_id
     except Exception as exc:  # noqa: BLE001
-        ref = uuid.uuid4().hex[:8]
-        log.error("presentation_deck_export_error", ref=ref, error=str(exc))
-        raise HTTPException(
-            status_code=500,
-            detail=f"Presentation deck generation failed (ref: {ref})")
+        log.error("presentation_deck_generation_error", error=str(exc))
+        raise
+
+
+# ── Async document generation — job status / download / cancel ────────────────
+
+@app.get("/api/v1/jobs/{job_id}")
+async def get_generation_job(
+    job_id: str, session: dict = Depends(require_auth),
+):
+    """The current state of a generation job. Owner-only; 404 when the
+    job is unknown or has expired (the two-hour TTL)."""
+    from tools.generation_jobs import get_job, public_view
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["owner_email"] != session.get("email"):
+        raise HTTPException(status_code=403, detail="This is not your job.")
+    return public_view(job)
+
+
+@app.get("/api/v1/jobs")
+async def list_generation_jobs(session: dict = Depends(require_auth)):
+    """The caller's last 10 generation jobs, most recent first."""
+    from tools.generation_jobs import list_jobs, public_view
+    return {"jobs": [public_view(j)
+                     for j in list_jobs(session.get("email", ""))]}
+
+
+@app.get("/api/v1/jobs/{job_id}/download")
+async def download_generation_job(
+    job_id: str, session: dict = Depends(require_auth),
+):
+    """Downloads a completed job's rendered file. Owner-only."""
+    from tools.generation_jobs import get_job
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["owner_email"] != session.get("email"):
+        raise HTTPException(status_code=403, detail="This is not your job.")
+    if job["status"] != "complete" or job["_file_bytes"] is None:
+        raise HTTPException(status_code=409,
+                            detail="The job has no downloadable file yet.")
+    fname = job["_filename"] or "forest-capital-document"
+    return Response(
+        content=job["_file_bytes"], media_type=job["_media_type"],
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@app.delete("/api/v1/jobs/{job_id}")
+async def cancel_generation_job(
+    job_id: str, session: dict = Depends(require_auth),
+):
+    """Cancels a generation job — sets it to cancelled and cancels the
+    background task if it is still in flight. Owner-only."""
+    from tools.generation_jobs import get_job, public_view, update_job
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job["owner_email"] != session.get("email"):
+        raise HTTPException(status_code=403, detail="This is not your job.")
+    if job["status"] in ("pending", "running"):
+        update_job(job_id, status="cancelled")
+        task = job.get("_task")
+        if task is not None and not task.done():
+            task.cancel()
+    return public_view(job)
 
 
 # Sprint 6 Priority 1 — midpoint paper for June 3 deadline.

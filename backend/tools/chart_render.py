@@ -12,6 +12,147 @@ PNG is resized to the requested dimensions with Pillow, and `theme=dark`
 falls back to the light render (the matplotlib renderers are light-only).
 A 5-minute per-(chart_key, theme, width, height) cache keeps repeated
 requests — thumbnails, re-fetches — off the render path.
+
+──────────────────────────────────────────────────────────────────────────
+CHART LIBRARY INVENTORY  (audit completed May 19 2026 — Commit 1)
+──────────────────────────────────────────────────────────────────────────
+
+SHIPPED — server-renderable today (5 charts):
+  rolling_correlation     regime      from data["rolling_correlation"]
+  cumulative_returns      performance from data["cumulative_returns"]
+  risk_return             performance from data["strategy_results"]
+  sensitivity             robustness  via compute_sensitivity() (heavy)
+  team_activity           process     from data["team_summary"]
+
+PROPOSED — Commit 2 (regime + factors):
+  regime_signals               regime
+    Data: HMM posterior probabilities per date.
+    Source: classify_hmm_regime() exposes historical_labels (label per
+            date) but NOT full per-date posteriors. Two paths:
+      A) Render a discrete colored regime band from historical_labels
+         (BULL/TRANSITION/BEAR bands) — works today with no detector
+         change. Falls short of "stacked area" but is the same signal.
+      B) Extend classify_hmm_regime to also return historical_probs
+         (posteriors[:] indexed by date) — small addition (~5 lines)
+         since posteriors are already computed internally.
+    Recommendation: A (band) for Commit 2 — adequate for the canvas
+    editor's grid; B can ship later if a true stacked-area is wanted.
+
+  regime_conditional_returns   regime
+    Data: regime label per month × monthly returns.
+    Source: historical_labels from classify_hmm_regime + monthly returns
+            from get_monthly_returns() OR per-strategy monthly_returns
+            from get_latest_strategy_cache(). Group returns by regime
+            label, render bar of mean monthly return per regime
+            (optionally per asset or top-strategies).
+    Ready today.
+
+  factor_loadings              factors
+    Data: Carhart betas with 95% confidence intervals.
+    Source: analytics.factor_loadings() returns betas + significance
+            flags but NOT CIs. statsmodels exposes model.conf_int(0.05)
+            for lower/upper bounds. Small extension to factor_loadings
+            (or compute in the renderer from the same regression).
+    Recommendation: extend analytics.factor_loadings to expose conf_int
+    lower/upper per coefficient (preserves a single source of truth).
+
+  factor_returns_attribution   factors
+    Data: Carhart factor returns × portfolio betas, summed per year.
+    Source: ff_factors_monthly (get_ff_factors) for factor returns;
+            per-strategy betas from analytics.factor_loadings; multiply
+            monthly to get per-factor monthly contribution, sum per
+            calendar year. Default strategy: BENCHMARK.
+    Ready today (pure compute in the renderer).
+
+PROPOSED — Commit 3 (performance + risk):
+  drawdown_periods             risk
+    Data: cumulative returns → running peak → underwater %.
+    Source: data["cumulative_returns"]["points"] already contains
+            growth-of-$1 per strategy. Pure derived compute.
+    Ready today.
+
+  monthly_returns_heatmap      performance
+    Data: monthly returns indexed by (year, month).
+    Source: a strategy's monthly_returns list — default BENCHMARK from
+            get_latest_strategy_cache(), or an asset series from
+            get_monthly_returns(). Pivot into a year × month grid.
+    Ready today.
+
+  rolling_sharpe               performance
+    Data: monthly returns + risk-free rate, 36-month rolling.
+    Source: get_monthly_returns() (asset rf) or a strategy's monthly
+            returns. rolling mean(excess) / rolling std(excess) × √12.
+    Ready today.
+
+  return_distribution          performance
+    Data: monthly returns series + normal overlay (mean, std).
+    Source: any strategy's monthly_returns. Default BENCHMARK.
+    Ready today.
+
+PROPOSED — Commit 4 (significance):
+  significance_journey         significance
+    Data: per-strategy Tier 1 gate results.
+    Source: get_latest_strategy_cache() — each strategy result already
+            carries p_value_ttest, p_value_corrected, dsr_p_value,
+            oos_significant, cv_stability_score, tier1_gates_passed.
+            Compose a row-per-gate × column-per-strategy matrix.
+    Ready today. Independent of qa_results_cache (which stores the
+    QA Agent's verdict, not the per-gate per-strategy data).
+
+  oos_performance              significance
+    Data: in-sample vs out-of-sample cumulative returns per strategy.
+    Source: PARTIAL — strategies carry oos_sharpe / oos_cagr (aggregate
+            stats) and walk_forward_test in backtester yields
+            oos_sharpe_mean/std/min/max across folds — but NEITHER
+            produces a per-date IS/OOS-split cumulative series. Two
+            paths:
+      A) Split data["cumulative_returns"] at a fixed cutoff (e.g. 80%
+         of the date range or the train_end constant from config) and
+         color the two halves IS vs OOS. Same data we already have,
+         renders today.
+      B) Run a fresh walk-forward and assemble a stitched OOS path.
+         Heavy — would need to be cached. Not worth Commit 4.
+    Recommendation: A for Commit 4. Add the IS/OOS cutoff as a
+    constant inside the renderer.
+
+  p_value_distribution         significance
+    Data: per-strategy p_value_corrected (FDR-corrected).
+    Source: get_latest_strategy_cache() — every strategy result has
+            p_value_corrected. Bar chart, bars colored pass/fail at
+            the 0.005 FDR threshold, dashed line at 0.005.
+    Ready today.
+
+──────────────────────────────────────────────────────────────────────────
+DATA-AVAILABILITY SUMMARY
+──────────────────────────────────────────────────────────────────────────
+  Ready today (no upstream change): 9 of 11 new charts
+  Needs a small upstream addition: 2 of 11 —
+    * regime_signals — expose HMM per-date posteriors (small detector
+      change) for the true stacked-area; the colored-band fallback
+      works today without any change
+    * factor_loadings — expose statsmodels conf_int() in
+      analytics.factor_loadings (single-source-of-truth principle)
+
+  Charts requiring the QA cache: NONE.
+    The significance charts read per-strategy fields from the strategy
+    results cache (the backtester output), not from qa_results_cache
+    (which stores the QA Agent's checklist verdict).
+
+  Charts requiring regime_signals_cache: NONE for time-series renders.
+    regime_signals_cache stores only the current/latest regime reading
+    (a single row, 15-minute TTL) — never a historical series. Charts
+    that need regime-over-time read from classify_hmm_regime's
+    historical_labels (run on the full monthly series) instead.
+
+  Heaviest compute paths to guard:
+    sensitivity (existing): already on its own opt-in path
+    regime_signals + regime_conditional_returns: classify_hmm_regime
+      fits a Baum-Welch HMM (~200 iters). Has an in-process cache; the
+      first render after a cold start takes ~1-2 s, then cached.
+    factor_loadings + factor_returns_attribution: a statsmodels OLS
+      per strategy — fast (<200 ms total).
+
+──────────────────────────────────────────────────────────────────────────
 """
 from __future__ import annotations
 
@@ -23,35 +164,113 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-# The charts academic_deck.render_deck_charts() can produce server-side.
-# `key` must match a key of that function's return dict.
+# Server-renderable canvas charts. Two backing renderer families:
+#   - The "deck" five (academic_deck.render_deck_charts) — the same ones
+#     the .pptx export ships.
+#   - The "extended" set (chart_renderers.render_extended_charts) — canvas-
+#     only, added by the chart-library expansion (commits 2-4 of that build).
+#
+# Order — and the `category` field — is the canvas chart picker's display
+# grouping (canvas editor Commit 5/7). The picker reads first-seen order
+# from this list and renders one section per category. rolling_correlation
+# is grouped with the time-series performance charts the user navigates to
+# from the central finding; risk_return and sensitivity are grouped under
+# "risk" because that is how a faculty panel reads them.
 AVAILABLE_CHARTS: list[dict[str, str]] = [
+    # ── Regime Analysis ───────────────────────────────────────────────────
+    {"key": "regime_signals",
+     "label": "Regime Probability Over Time",
+     "description": "HMM posterior probability of BULL / TRANSITION / "
+                    "BEAR regime over the full monthly history.",
+     "category": "regime"},
+    {"key": "regime_conditional_returns",
+     "label": "Returns by Regime",
+     "description": "Mean annualised return per asset class, split by "
+                    "HMM regime state.",
+     "category": "regime"},
+    # ── Factors ───────────────────────────────────────────────────────────
+    {"key": "factor_loadings",
+     "label": "Carhart Factor Loadings",
+     "description": "Four-factor betas (MKT-RF, SMB, HML, MOM) with "
+                    "95% confidence intervals, BENCHMARK portfolio.",
+     "category": "factors"},
+    {"key": "factor_returns_attribution",
+     "label": "Factor Return Attribution",
+     "description": "Stacked yearly breakdown of factor contributions "
+                    "to the portfolio's annual return.",
+     "category": "factors"},
+    # ── Performance ───────────────────────────────────────────────────────
     {"key": "rolling_correlation",
      "label": "Rolling Correlation",
      "description": "Equity-bond rolling correlation with the 2022 "
                     "regime-break marker — the project's central finding.",
-     "category": "regime"},
+     "category": "performance"},
     {"key": "cumulative_returns",
      "label": "Cumulative Returns",
      "description": "Growth of $1 across every strategy and the "
                     "benchmark over the full study period.",
      "category": "performance"},
+    {"key": "rolling_sharpe",
+     "label": "Rolling Sharpe",
+     "description": "36-month rolling Sharpe ratio for the strategy and "
+                    "the benchmark, with a zero reference line.",
+     "category": "performance"},
+    {"key": "return_distribution",
+     "label": "Return Distribution",
+     "description": "Histogram of monthly returns with a normal-curve "
+                    "overlay — strategy vs benchmark.",
+     "category": "performance"},
+    {"key": "monthly_returns_heatmap",
+     "label": "Monthly Returns Heatmap",
+     "description": "Calendar heatmap of monthly returns — strategy on "
+                    "top, benchmark below, shared diverging colour scale.",
+     "category": "performance"},
+    # ── Risk ──────────────────────────────────────────────────────────────
+    {"key": "drawdown_periods",
+     "label": "Drawdown",
+     "description": "Underwater equity curve — % below the running "
+                    "peak — for the strategy and the benchmark.",
+     "category": "risk"},
     {"key": "risk_return",
      "label": "Risk vs Return",
      "description": "Each strategy plotted by annualised return against "
                     "volatility.",
-     "category": "performance"},
+     "category": "risk"},
     {"key": "sensitivity",
      "label": "Sensitivity Analysis",
      "description": "How the headline results hold up when key "
                     "parameters are varied — a robustness check.",
-     "category": "robustness"},
+     "category": "risk"},
+    # ── Significance ──────────────────────────────────────────────────────
+    {"key": "significance_journey",
+     "label": "Significance Journey",
+     "description": "Row per Tier 1 gate, column per strategy — green "
+                    "PASS / red FAIL for each of the five gates.",
+     "category": "significance"},
+    {"key": "oos_performance",
+     "label": "In-Sample vs Out-of-Sample",
+     "description": "Cumulative growth-of-$1 for the strategy with the "
+                    "last 60 months coloured as the OOS window.",
+     "category": "significance"},
+    {"key": "p_value_distribution",
+     "label": "p-value Distribution",
+     "description": "FDR-corrected p-value per strategy with the "
+                    "0.005 Tier 1 threshold marked.",
+     "category": "significance"},
+    # ── Activity ──────────────────────────────────────────────────────────
     {"key": "team_activity",
      "label": "Team Activity",
      "description": "The project build timeline — commits, council runs "
                     "and reviews per team member.",
-     "category": "process"},
+     "category": "activity"},
 ]
+
+# Charts backed by the deck renderer (academic_deck.render_deck_charts).
+# Every other key on AVAILABLE_CHARTS is routed to the extended renderer.
+_DECK_KEYS = frozenset({
+    "rolling_correlation", "cumulative_returns", "risk_return",
+    "sensitivity", "team_activity",
+})
 
 _CHART_KEYS = frozenset(c["key"] for c in AVAILABLE_CHARTS)
 _CACHE_TTL_SECONDS = 300  # 5 minutes
@@ -104,27 +323,100 @@ def _resize(png: bytes, width: int, height: int) -> bytes:
 
 
 async def _render_raw(chart_key: str) -> bytes | None:
-    """The raw chart PNG from render_deck_charts, or None when its
-    source data is unavailable (cold caches / the test environment)."""
+    """The raw chart PNG from whichever renderer family backs this key,
+    or None when its source data is unavailable (cold caches / the test
+    environment). Dispatches between the deck renderer (the five charts
+    the .pptx export ships) and the extended renderer (canvas-only)."""
     import asyncio
 
-    from tools.academic_deck import render_deck_charts
     from tools.academic_export import gather_document_data
 
     data = await gather_document_data()
-    sensitivity: dict[str, Any] | None = None
-    if chart_key == "sensitivity":
-        # Sensitivity is a heavier compute — only paid for its own chart.
-        try:
-            from tools.data_fetcher import get_full_history
-            from tools.sensitivity import compute_sensitivity
-            sensitivity = await asyncio.to_thread(
-                lambda: compute_sensitivity(get_full_history()))
-        except Exception as exc:  # noqa: BLE001
-            log.warning("chart_render_sensitivity_unavailable", error=str(exc))
 
-    charts = await asyncio.to_thread(render_deck_charts, data, sensitivity)
+    if chart_key in _DECK_KEYS:
+        from tools.academic_deck import render_deck_charts
+        sensitivity: dict[str, Any] | None = None
+        if chart_key == "sensitivity":
+            # Sensitivity is a heavier compute — only paid for its own chart.
+            try:
+                from tools.data_fetcher import get_full_history
+                from tools.sensitivity import compute_sensitivity
+                sensitivity = await asyncio.to_thread(
+                    lambda: compute_sensitivity(get_full_history()))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("chart_render_sensitivity_unavailable", error=str(exc))
+        charts = await asyncio.to_thread(render_deck_charts, data, sensitivity)
+        return charts.get(chart_key)
+
+    # Extended renderers — gather the per-chart extras (HMM history, raw
+    # monthly returns, ff_factors) before crossing into the thread.
+    from tools.chart_renderers import render_extended_charts
+    extras = await _gather_extended_extras(chart_key)
+    charts = await asyncio.to_thread(
+        render_extended_charts, chart_key, data, extras)
     return charts.get(chart_key)
+
+
+async def _gather_extended_extras(chart_key: str) -> dict[str, Any]:
+    """Per-chart extras the extended renderers need beyond the data
+    bundle. Each branch is fail-open — a missing extra produces a None
+    PNG, which the caller turns into the placeholder.
+
+    Heavy work — the HMM fit and the FF read — is paid only for the
+    charts that consume it, not on every extended-chart render.
+    """
+    import asyncio
+
+    extras: dict[str, Any] = {}
+
+    if chart_key in {"regime_signals", "regime_conditional_returns"}:
+        # HMM on the monthly equity series. The detector has its own
+        # in-process cache keyed by series fingerprint — a second chart
+        # request in the same trading day hits that cache and skips the
+        # Baum-Welch fit.
+        try:
+            from tools.cache import get_monthly_returns
+            monthly = await get_monthly_returns()
+            extras["monthly"] = monthly
+            if monthly:
+                import pandas as pd
+                from tools.regime_detector import fit_hmm_historical
+                idx = pd.to_datetime(monthly["dates"])
+                equity = pd.Series(monthly["equity"], index=idx)
+                extras["hmm"] = await asyncio.to_thread(
+                    fit_hmm_historical, equity)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chart_render_hmm_unavailable",
+                        chart_key=chart_key, error=str(exc))
+
+    if chart_key == "factor_returns_attribution":
+        try:
+            from tools.cache import get_ff_factors
+            extras["ff_factors"] = await get_ff_factors()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chart_render_ff_unavailable",
+                        chart_key=chart_key, error=str(exc))
+
+    if chart_key == "rolling_sharpe":
+        # Excess-return Sharpe needs the monthly DTB3 risk-free rate
+        # alongside each series. The raw values live in get_monthly_returns
+        # under the "rf" key; we surface them as a [[iso_date, value]]
+        # list so the renderer can _pairs_to_indexed_series them like
+        # every other monthly series.
+        try:
+            from tools.cache import get_monthly_returns
+            monthly = await get_monthly_returns()
+            if monthly:
+                dates = monthly.get("dates") or []
+                rf = monthly.get("rf") or []
+                extras["monthly_rf"] = [
+                    [d, v] for d, v in zip(dates, rf) if v is not None
+                ]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chart_render_rf_unavailable",
+                        chart_key=chart_key, error=str(exc))
+
+    return extras
 
 
 async def render_chart_png(

@@ -16,6 +16,7 @@ import QAStatusBadge from '../components/QAStatusBadge'
 import LearnModeToggle from '../components/LearnModeToggle'
 import AdvisorPanel from '../components/AdvisorPanel'
 import WhatsNewModal from '../components/WhatsNewModal'
+import GenerationToast from '../components/GenerationToast'
 import SiteTour from '../components/SiteTour'
 import TestRunner from '../components/TestRunner'
 import TestNotifications from '../components/TestNotifications'
@@ -514,6 +515,10 @@ export default function MainLayout() {
       {/* What's New — opens once after login if the changelog has
           entries this user has not seen; self-dismissing. */}
       <WhatsNewModal />
+
+      {/* Document-generation toast — announces a generation job that
+          finished while the user was away from the Reports page. */}
+      <GenerationToast />
 
       {/* Guided platform walkthrough — controlled Joyride that spans
           every route. Auto-starts once per login session when a tour
