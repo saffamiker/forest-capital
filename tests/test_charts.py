@@ -208,6 +208,8 @@ class TestChartRenderUnit:
             "risk_return":                 "risk",
             "sensitivity":                 "risk",
             "team_activity":               "activity",
+            # GROUP 3A — the missing-chart gap on Analytics
+            "rolling_excess_return":       "performance",
         }
         for key, category in expected.items():
             assert is_known_chart(key), f"{key} not in _CHART_KEYS"
@@ -215,6 +217,60 @@ class TestChartRenderUnit:
             assert registry[key]["category"] == category
             png = asyncio.run(render_chart_png(key, "light", 240, 160))
             assert png.startswith(_PNG_MAGIC), f"{key} did not render a PNG"
+
+    def test_rolling_excess_return_renders_a_real_png_with_data(self):
+        # The cold-cache path is covered by the suite above (placeholder
+        # PNG via fail-open). This test exercises the SUCCESS path by
+        # passing a synthetic strategy_results bundle directly to
+        # render_extended_charts — the same shape gather_document_data
+        # supplies in production. A real PNG must come back (not the
+        # Pillow placeholder fallback inside _render_raw).
+        # matplotlib is an optional CI dependency on Windows + Python
+        # 3.14, the same skip pattern the broader renderer suite uses
+        # implicitly (the placeholder PNG path covers those envs).
+        pytest.importorskip("matplotlib")
+        from tools.chart_renderers import render_extended_charts
+        # Three years of monthly returns each, alternating sign so the
+        # rolling-12 trailing-product crosses zero at least once and the
+        # chart actually has both half-planes to fill.
+        def _months(start_year: int, n: int) -> list[list]:
+            out: list[list] = []
+            for i in range(n):
+                yr = start_year + i // 12
+                mo = (i % 12) + 1
+                date = f"{yr}-{mo:02d}-{28:02d}"
+                r = 0.010 if i % 2 == 0 else -0.005
+                out.append([date, r])
+            return out
+        bundle = {
+            "strategy_results": {
+                "BENCHMARK": {
+                    "strategy_name": "BENCHMARK",
+                    "monthly_returns": _months(2020, 36),
+                },
+                "VOL_TARGETING": {
+                    "strategy_name": "VOL_TARGETING",
+                    # Offset returns so excess vs benchmark is non-zero.
+                    "monthly_returns": [
+                        [d, v + 0.003] for d, v in _months(2020, 36)
+                    ],
+                },
+            },
+        }
+        out = render_extended_charts("rolling_excess_return", bundle, {})
+        png = out.get("rolling_excess_return")
+        assert isinstance(png, (bytes, bytearray)), (
+            "rolling_excess_return success path must return PNG bytes — "
+            f"got {type(png).__name__}")
+        assert bytes(png).startswith(_PNG_MAGIC)
+
+    def test_rolling_excess_return_fail_open_with_empty_bundle(self):
+        # No strategy_results in the bundle → the renderer returns None,
+        # the dispatcher records None for the key (the caller turns it
+        # into the placeholder). Pins the fail-open contract.
+        from tools.chart_renderers import render_extended_charts
+        out = render_extended_charts("rolling_excess_return", {}, {})
+        assert out == {"rolling_excess_return": None}
 
 
 # ── Migration 022 — slide-card ↔ canvas conversion ────────────────────────────

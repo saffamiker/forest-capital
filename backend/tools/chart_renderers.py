@@ -77,6 +77,10 @@ _DEFAULT_STRATEGY = "REGIME_SWITCHING"
 # Rolling Sharpe window — 36 months matches the platform convention.
 _ROLLING_SHARPE_WINDOW = 36
 
+# Rolling excess return window — 12 months, the same default the
+# Recharts chart on AcademicAnalytics uses.
+_ROLLING_EXCESS_WINDOW = 12
+
 # Monthly-returns histogram bin count.
 _DISTRIBUTION_BINS = 30
 
@@ -102,6 +106,7 @@ EXTENDED_KEYS: frozenset[str] = frozenset({
     "drawdown_periods",
     "monthly_returns_heatmap",
     "rolling_sharpe",
+    "rolling_excess_return",
     "return_distribution",
     "significance_journey",
     "oos_performance",
@@ -673,6 +678,100 @@ def _render_rolling_sharpe(
     return _finish(fig, plt)
 
 
+# ── rolling_excess_return — strategy minus benchmark, 12-month trailing ───────
+
+def _render_rolling_excess_return(
+    data: dict[str, Any], extras: dict[str, Any], plt,
+) -> bytes | None:
+    """
+    12-month rolling total return of each strategy minus the 100%
+    equity benchmark, plotted per month. Above-zero is outperformance,
+    below-zero underperformance. A vertical regime-break marker at the
+    first plotted month on or after 2022-01-01 anchors the central
+    project finding to the same chart.
+
+    The compute is shared with the Analytics page via
+    analytics.rolling_excess_return(strategy_results, window=12), so
+    this renderer is a thin presentation layer on top of that single
+    source of truth — no recompute, no upstream change.
+    """
+    import pandas as pd
+    from tools.analytics import REGIME_BREAK, rolling_excess_return
+
+    strategies = data.get("strategy_results") or {}
+    if not strategies:
+        return None
+    bundle = rolling_excess_return(strategies, window=_ROLLING_EXCESS_WINDOW)
+    names = bundle.get("strategies") or []
+    points = bundle.get("points") or []
+    if not names or not points:
+        return None
+
+    # Pivot the {date, strat_a, strat_b, …} rows into per-strategy
+    # value lists. None values are preserved so a strategy whose
+    # history starts later still plots a contiguous line (matplotlib
+    # gaps over None) and never gets misaligned to the wrong dates.
+    idx = pd.to_datetime([p.get("date") for p in points])
+    series: dict[str, list[float | None]] = {n: [] for n in names}
+    for p in points:
+        for n in names:
+            v = p.get(n)
+            series[n].append(None if v is None else float(v))
+
+    # The regime-break vertical — snap to the first plotted month at
+    # or after 2022-01-01, same anchor the Recharts chart uses.
+    break_x = next((d for d in idx if d >= REGIME_BREAK), None)
+
+    fig, ax = plt.subplots(figsize=(8, 4.2))
+
+    # Faint above/below-zero half-plane shading — outperformance green,
+    # underperformance red. Alpha kept low so the shading reads as
+    # background, not as a competing series.
+    all_values = [v for vs in series.values() for v in vs if v is not None]
+    if all_values:
+        ymax = max(0.0, max(all_values))
+        ymin = min(0.0, min(all_values))
+        if ymax > 0:
+            ax.axhspan(0, ymax, color=_MPL_GREEN, alpha=0.05, zorder=0)
+        if ymin < 0:
+            ax.axhspan(ymin, 0, color=_MPL_RED, alpha=0.05, zorder=0)
+
+    # Per-strategy line palette — distinct from rolling_sharpe's pair
+    # palette because this chart can have up to ten lines. Cycles when
+    # the strategy list exceeds the palette length.
+    palette = [
+        _MPL_ACCENT, _MPL_AMBER, _MPL_GREEN, "#7C3AED", _MPL_RED,
+        _MPL_NAVY, "#0D9488", "#F97316", "#475569", _MPL_GREY,
+    ]
+    for i, name in enumerate(names):
+        ax.plot(idx, series[name], color=palette[i % len(palette)],
+                linewidth=1.3, label=name)
+
+    # Zero reference line — separates outperformance from underperformance.
+    ax.axhline(0, color=_MPL_GREY, linewidth=1.0)
+
+    if break_x is not None:
+        # Dashed vertical at the regime break. Text label sits at the
+        # top of the axes (matplotlib data coordinates) so it never
+        # overlaps the legend at the bottom.
+        ax.axvline(break_x, color=_MPL_RED, linewidth=1.0,
+                   linestyle="--", alpha=0.8)
+        ax.text(break_x, ax.get_ylim()[1], "  Correlation Regime Break",
+                color=_MPL_RED, fontsize=8, va="top", ha="left")
+
+    ax.yaxis.set_major_formatter(
+        plt.FuncFormatter(lambda v, _: f"{v * 100:.0f}%"))
+    ax.set_title(
+        f"{_ROLLING_EXCESS_WINDOW}-Month Rolling Excess Return "
+        "vs Benchmark", fontsize=11)
+    ax.set_ylabel("Excess return")
+    # Up to ten strategy lines — multi-column legend keeps it shallow.
+    ax.legend(fontsize=7, frameon=False, loc="lower left",
+              ncol=min(5, max(1, (len(names) + 1) // 2)))
+    _style(ax)
+    return _finish(fig, plt)
+
+
 # ── return_distribution — histogram with normal overlay, strategy vs benchmark
 
 def _render_return_distribution(
@@ -936,6 +1035,7 @@ _DISPATCH: dict[str, Any] = {
     "drawdown_periods":            _render_drawdown_periods,
     "monthly_returns_heatmap":     _render_monthly_returns_heatmap,
     "rolling_sharpe":              _render_rolling_sharpe,
+    "rolling_excess_return":       _render_rolling_excess_return,
     "return_distribution":         _render_return_distribution,
     "significance_journey":        _render_significance_journey,
     "oos_performance":             _render_oos_performance,

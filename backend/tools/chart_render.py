@@ -276,6 +276,12 @@ AVAILABLE_CHARTS: list[dict[str, str]] = [
      "description": "36-month rolling Sharpe ratio for the strategy and "
                     "the benchmark, with a zero reference line.",
      "category": "performance"},
+    {"key": "rolling_excess_return",
+     "label": "Rolling Excess Return",
+     "description": "12-month rolling total return of each strategy "
+                    "minus the 100% equity benchmark, with the 2022 "
+                    "regime-break marker.",
+     "category": "performance"},
     {"key": "return_distribution",
      "label": "Return Distribution",
      "description": "Histogram of monthly returns with a normal-curve "
