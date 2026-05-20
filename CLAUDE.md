@@ -6838,11 +6838,14 @@ is maintained separately. The `gh` CLI is authenticated with the
       the tap surface is still tight when an InfoIcon sits inside a
       narrow cell. Promote the InfoIcon to its own row on mobile or
       use a larger hit area extending into the cell padding.
-    □ Rehearsal mode chart loading — chart elements currently render
-      as placeholder boxes with the chart label. The /api/v1/charts/
-      render endpoint already serves the right PNGs; rehearsal mode
-      ships content-only for June 3 so the overlay never blocks on
-      a network call. Wire real chart images post-deadline.
+    ✅ Rehearsal mode chart loading — DONE. Every unique chart_key
+      in the deck is fetched ONCE on overlay open from
+      /api/v1/charts/render/{key} and cached in component state for
+      the duration of the session, so slide navigation never waits on
+      a network call. A loading spinner shows while an image is in
+      flight; a failed fetch degrades to the labelled placeholder box
+      (fail-open). The chart_render cache (5-minute TTL) further
+      shortens subsequent rehearsals of the same deck.
     □ Per-speaker colour consistency between the script editor
       display and the exported DOCX — the script editor renders each
       speaker's sections in a stable palette colour, and the DOCX

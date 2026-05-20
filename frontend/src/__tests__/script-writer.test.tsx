@@ -416,6 +416,120 @@ describe('Rehearsal Mode', () => {
         .toBeInTheDocument()
     })
 
+  it('pre-fetches every unique chart in the deck on overlay open',
+    async () => {
+      // The slide carries a single chart element. Opening the overlay
+      // must trigger one GET to /api/v1/charts/render/rolling_correlation
+      // — pre-fetch, not on-demand. A chart used on multiple slides is
+      // fetched ONCE; not exercised here, but the cache key is the
+      // chart_key alone.
+      mockedAxios.isAxiosError = ((() => true) as unknown) as typeof axios.isAxiosError
+      mockedAxios.get.mockImplementation((url: string) => {
+        if (url.endsWith('/documents/rehearsal')) {
+          return Promise.resolve({
+            data: {
+              deck: { draft_id: 1, slides: [{
+                id: 1, title: 'Correlation Break', background: '#FFFFFF',
+                speaker_notes: '', speaker: 'Molly',
+                elements: [{
+                  id: 'el_001', type: 'chart', x: 100, y: 100,
+                  width: 760, height: 340,
+                  chartKey: 'rolling_correlation', verified: false,
+                }],
+              }] },
+              script: { draft_id: 2, total_words: 150,
+                estimated_minutes: 1, sections: [{
+                  slide_number: 1, title: 'Correlation Break',
+                  speaker: 'Molly', script_text: 'The 2022 break…',
+                  transition: '', word_count: 150,
+                }] },
+            },
+          })
+        }
+        if (url.startsWith('/api/v1/charts/render/')) {
+          return Promise.resolve({ data: new Blob() })
+        }
+        if (url.endsWith('/versions')) {
+          return Promise.resolve({ data: { versions: [] } })
+        }
+        if (url.includes('/documents/drafts/')) {
+          return Promise.resolve({ data: scriptDraft() })
+        }
+        return Promise.resolve({ data: new Blob() })
+      })
+      render(
+        <MemoryRouter initialEntries={['/editor/7']}>
+          <Routes>
+            <Route path="/editor/:draftId" element={<DocumentEditor />} />
+          </Routes>
+        </MemoryRouter>)
+      fireEvent.click(await screen.findByRole(
+        'button', { name: /^Rehearse$/i }))
+      // Wait for the overlay AND the chart fetch.
+      await screen.findByTestId('rehearsal-overlay')
+      // The chart-render endpoint is called with the chart's key.
+      await new Promise((r) => setTimeout(r, 0))
+      const calls = mockedAxios.get.mock.calls.map(([u]) => u as string)
+      expect(calls.some((u) =>
+        u.startsWith('/api/v1/charts/render/rolling_correlation'),
+      )).toBe(true)
+      // Real chart image renders — <img> with alt naming the chart key.
+      const img = await screen.findByAltText('rolling_correlation')
+      expect(img).toBeInTheDocument()
+    })
+
+  it('falls back to the placeholder box when the chart fetch fails',
+    async () => {
+      // A failed /api/v1/charts/render call must not break rehearsal —
+      // the labelled placeholder box renders in the chart's position.
+      mockedAxios.isAxiosError = ((() => true) as unknown) as typeof axios.isAxiosError
+      mockedAxios.get.mockImplementation((url: string) => {
+        if (url.endsWith('/documents/rehearsal')) {
+          return Promise.resolve({
+            data: {
+              deck: { draft_id: 1, slides: [{
+                id: 1, title: 'Slide', background: '#FFFFFF',
+                speaker_notes: '', speaker: 'Molly',
+                elements: [{
+                  id: 'el_001', type: 'chart', x: 100, y: 100,
+                  width: 760, height: 340,
+                  chartKey: 'cumulative_returns', verified: false,
+                }],
+              }] },
+              script: { draft_id: 2, total_words: 100,
+                estimated_minutes: 1, sections: [{
+                  slide_number: 1, title: 'Slide', speaker: 'Molly',
+                  script_text: '', transition: '', word_count: 100,
+                }] },
+            },
+          })
+        }
+        if (url.startsWith('/api/v1/charts/render/')) {
+          return Promise.reject(new Error('render failed'))
+        }
+        if (url.endsWith('/versions')) {
+          return Promise.resolve({ data: { versions: [] } })
+        }
+        if (url.includes('/documents/drafts/')) {
+          return Promise.resolve({ data: scriptDraft() })
+        }
+        return Promise.resolve({ data: new Blob() })
+      })
+      render(
+        <MemoryRouter initialEntries={['/editor/7']}>
+          <Routes>
+            <Route path="/editor/:draftId" element={<DocumentEditor />} />
+          </Routes>
+        </MemoryRouter>)
+      fireEvent.click(await screen.findByRole(
+        'button', { name: /^Rehearse$/i }))
+      await screen.findByTestId('rehearsal-overlay')
+      // The placeholder still renders with the chart_key label —
+      // underscores converted to spaces.
+      expect(await screen.findByText('[cumulative returns]'))
+        .toBeInTheDocument()
+    })
+
   it('shows the missing-data modal when the rehearsal endpoint 404s',
     async () => {
       mockedAxios.isAxiosError = ((() => true) as unknown) as typeof axios.isAxiosError
