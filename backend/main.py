@@ -4754,7 +4754,8 @@ async def cancel_generation_job(
     return public_view(job)
 
 
-# Sprint 6 Priority 1 — midpoint paper for June 3 deadline.
+# Sprint 6 Priority 1 — midpoint paper for the May 27 submission
+# deadline (the June 3 cohort meetup is a peer-review event, not a gate).
 # Academic Writer composes the prose; tools/docx_generator assembles the
 # .docx around it. Every page carries the AI DRAFT banner so Bob can never
 # accidentally submit a template-generated draft verbatim.
@@ -5492,7 +5493,10 @@ async def reports_manifest(request: Request, session: dict = Depends(require_aut
                 "method": "POST",
                 "format": "docx",
                 "status": "available",
-                "deadline": "June 3, 2026",
+                # The MIDPOINT PAPER is due May 27. The June 3 cohort
+                # peer-review meetup is a presentation event, not a
+                # submission deadline.
+                "deadline": "May 27, 2026",
             },
             {
                 "id": "executive_brief",

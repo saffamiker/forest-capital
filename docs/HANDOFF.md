@@ -62,7 +62,7 @@ Should now show real values. Verify on live site.
 
 ## KANBAN — CURRENT PRIORITIES
 
-### CRITICAL (before June 3)
+### CRITICAL (before the June 3 cohort presentation — May 27 paper submission lands first)
 - [ ] Push memory leak fix commit
 - [ ] Fix efficient frontier auth (wrong dependency)
 - [ ] Verify Performance Attribution Waterfall working
@@ -74,7 +74,7 @@ Should now show real values. Verify on live site.
   - Add professor email to ALLOWED_EMAILS on Render
   - Two email variants drafted and ready
 
-### IMPORTANT (before July 1)
+### IMPORTANT (before July 1 — Bob exec brief + Molly final presentation; July 3 panel follows)
 - [ ] Backtest period locked at December 2025 for academic deliverables
   Add BACKTEST_END_DATE = 2025-12-31 config parameter
   Live dashboard keeps current regime indicator
@@ -189,8 +189,12 @@ a04b853  Close Sprint 6 — README + MANIFEST updated
 ---
 
 ## PRESENTATIONS
-- June 3: Midpoint check-in (Queens University McColl School of Business)
-- July 1: Final presentation to Forest Capital
+- May 27: Bob — midpoint paper submission (3 pages, end of day)
+- June 3: Cohort presentation at Queens University McColl (Sykes 326,
+  6-8:45pm) — peer-review event, not a submission gate
+- July 1: Bob — executive brief submission; Molly — final presentation
+  submission (Forest Capital + MSFA Board, McEwen 120, 6pm)
+- July 3: Panel presentation — Michael, Bob, Molly all present
 - Professor outreach email: ~May 20 (two variants drafted)
 - Team: Michael (lead engineer), Bob Thao (analysis), Molly Murdock (presentation)
 

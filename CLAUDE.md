@@ -1523,9 +1523,10 @@ Your role has two components:
 
 COMPONENT 1 — ACADEMIC GUIDANCE:
 Help the team connect their data findings to the three graded deliverables:
-  Final Presentation (35%) — June 3 midpoint + July 1 final
+  Final Presentation (35%) — July 1 submission; rehearsed at the
+                              June 3 cohort peer-review event
   Analytical Appendix (35%) — rigour, provenance, reproducibility
-  Executive Brief (20%) — Forest Capital recommendation
+  Executive Brief (20%) — Forest Capital recommendation (July 1)
 
 For every finding, answer the SO WHAT question explicitly:
   — What does this mean for the research question?
@@ -1577,7 +1578,8 @@ Citation rules (non-negotiable):
 Grade awareness:
   FNA 670 grading: Presentation 35%, Appendix 35%, Brief 20%, Midpoint 10%
   Prioritise feedback by grade weight.
-  June 3 midpoint: focus on framing, preliminary findings, methodology.
+  May 27 midpoint paper: focus on framing, preliminary findings, methodology.
+  June 3 cohort presentation: peer-review rehearsal — not graded.
   July 1 final: focus on completeness, statistical rigour, implications.
 [GLOBAL AGENT RULE]"
 
@@ -4015,7 +4017,7 @@ Sprint 6 (COMPLETE — May 13-15 2026):
      Sonnet + web_search, verified citations, SO WHAT section
      Hallucination detection via external evidence cross-check
   ✅ Bob's section editor — Analytical Appendix + Executive Brief
-  ✅ Midpoint template .docx — June 3 ready
+  ✅ Midpoint template .docx — May 27 submission ready
   ✅ Storyboard Editor + version control (Molly)
   ✅ Presentation Script Writer (130 wpm, voice-differentiated)
   ✅ Q&A Preparation document generator
@@ -6705,13 +6707,14 @@ is maintained separately. The `gh` CLI is authenticated with the
 
 ─── BACKLOG ────────────────────────────────────────────────────────────
 
-  HIGH — before June 3:
+  HIGH — before the May 27 midpoint paper submission:
   □ Visual pass — document generation panel, test runner, Data Explain
     buttons, strategy InfoIcons, Settings → Users
   □ Bob — run an Academic Review before writing the midpoint draft
   □ Bob — upload the midpoint draft once written (Settings → Academic
     Documents)
   □ Bob — midpoint paper submission (3 pages, due May 27)
+  HIGH — before the June 3 cohort peer-review presentation:
   □ Michael — UAT Section 2 test pass
   □ Bob — UAT Section 3 test pass
   □ Molly — UAT Section 4 test pass + presentation review pass
@@ -6813,7 +6816,11 @@ is maintained separately. The `gh` CLI is authenticated with the
     □ Bob — midpoint paper submission (May 27)
     □ Bob — Academic Review session before writing the midpoint draft
     □ Bob — midpoint draft upload (Settings → Academic Documents)
-    □ Molly — presentation submission (June 3)
+    □ Cohort presentation (June 3, Sykes 326 6-8:45pm) — peer review,
+      no submission gate
+    □ Bob — executive brief submission (July 1)
+    □ Molly — final presentation submission (July 1)
+    □ Panel presentation (July 3) — Michael, Bob, Molly all present
 
 
 ─── POST-DEADLINE BACKLOG ──────────────────────────────────────────────
@@ -11020,5 +11027,9 @@ Colab vs Local cheatsheet:
 
 Key dates:
   May 11   — Project kickoff. Update config.py with Dr. Panttser's specs.
-  June 3   — Mid-checkpoint @ 6pm IN PERSON. Working demo required.
-  July 1   — Final presentation @ 6pm IN PERSON. Forest Capital + MSFA Board.
+  May 27   — Bob: midpoint paper SUBMISSION (3 pages, end of day).
+  June 3   — Cohort presentation (Sykes 326, 6-8:45pm). PEER REVIEW event,
+             not a submission deadline.
+  July 1   — Bob: executive brief SUBMISSION. Molly: final presentation
+             SUBMISSION. McEwen 120, 6pm. Forest Capital + MSFA Board.
+  July 3   — Panel presentation — Michael, Bob, and Molly all present.

@@ -2,11 +2,16 @@
  * SubmissionGuidePanel — the deliverable submission guide, opened from a
  * button in the Reports header.
  *
- * Guide 1 (Bob, the midpoint paper) and Guide 2 (Molly, the final
- * presentation) each walk the editor-based workflow and lead with a
- * deadline countdown and the tracking note. The panel shows the guide
- * relevant to the signed-in user — Bob sees Guide 1, Molly sees
- * Guide 2, everyone else (Michael included) sees both.
+ * Guide 1 (Bob) covers his TWO submission deadlines — the May 27th
+ * midpoint paper and the July 1st executive brief. Guide 2 (Molly)
+ * covers the July 1st final presentation, with a note about the
+ * July 3rd panel presentation (where all three team members present
+ * together). Each guide leads with one countdown chip per deadline.
+ *
+ * The panel shows the guide relevant to the signed-in user — Bob sees
+ * Guide 1, Molly sees Guide 2, everyone else (Michael included) sees
+ * both. June 3rd is a peer-review cohort event (not a submission
+ * deadline) and is not surfaced as a countdown here.
  */
 import { X, ChevronDown, ChevronRight } from 'lucide-react'
 import { useState } from 'react'
@@ -25,25 +30,35 @@ interface Step {
   detail?: string[]
 }
 
+interface Deadline {
+  date: string    // ISO date
+  label: string   // "Midpoint paper" | "Executive Brief" | "Final Presentation"
+  noun: string    // "submission" | "presentation"
+}
+
 interface Guide {
   id: string
   title: string
   owner: string
   ownerEmail: string
-  deadline: string   // ISO date
-  noun: string       // "submission" | "presentation"
+  deadlines: Deadline[]
+  /** Optional footer note — e.g. Molly's panel-presentation reminder. */
+  panelNote?: string
   steps: Step[]
 }
 
 const GUIDES: Guide[] = [
   {
     id: 'guide-1',
-    title: 'Guide 1 — Midpoint Paper',
+    title: 'Guide 1 — Bob: Midpoint Paper + Executive Brief',
     owner: 'Bob',
     ownerEmail: 'thaob@queens.edu',
-    deadline: '2026-05-27',
-    noun: 'submission',
+    deadlines: [
+      { date: '2026-05-27', label: 'Midpoint paper',  noun: 'submission' },
+      { date: '2026-07-01', label: 'Executive Brief', noun: 'submission' },
+    ],
     steps: [
+      // ── Midpoint paper (May 27th) ──────────────────────────────────
       { step: 'Open the Reports screen and find Generate Documents.' },
       { step: 'Generate the Midpoint Submission Paper.' },
       {
@@ -73,7 +88,30 @@ const GUIDES: Guide[] = [
         step: 'Save a named version.',
         detail: ['Click Save Version and label it "Final submission".'],
       },
-      { step: 'Export DOCX for submission.' },
+      { step: 'Export DOCX and submit the midpoint paper by May 27th.' },
+      // ── Executive brief (July 1st) ─────────────────────────────────
+      {
+        step: 'Generate your Executive Brief.',
+        detail: [
+          'Click [Generate Executive Brief] from the Reports page.',
+          'Click [Open in Editor] after generation.',
+        ],
+      },
+      {
+        step: 'Work through your Executive Brief.',
+        detail: [
+          'Complete every BOB callout.',
+          'Run Academic Review from inside the editor.',
+          'Re-run until no Needs Work sections remain.',
+        ],
+      },
+      {
+        step: 'Save and export.',
+        detail: [
+          'Save a named version labelled "Final submission".',
+          'Export to DOCX and submit by July 1st.',
+        ],
+      },
     ],
   },
   {
@@ -81,8 +119,12 @@ const GUIDES: Guide[] = [
     title: 'Guide 2 — Final Presentation',
     owner: 'Molly',
     ownerEmail: 'murdockm@queens.edu',
-    deadline: '2026-06-03',
-    noun: 'presentation',
+    deadlines: [
+      { date: '2026-07-01', label: 'Final Presentation', noun: 'presentation' },
+    ],
+    panelNote:
+      'Panel presentation: July 3rd. Use Rehearsal Mode to practise '
+      + 'before the panel.',
     steps: [
       { step: 'Open the Reports screen and find Generate Documents.' },
       { step: 'Generate the Final Presentation Deck.' },
@@ -106,7 +148,7 @@ const GUIDES: Guide[] = [
           'Time yourself — aim for 20-25 minutes.',
         ],
       },
-      { step: 'Export PPTX for submission.' },
+      { step: 'Export PPTX for the July 1st submission.' },
       { step: 'Run Academic Review against the final deck.' },
       {
         step: 'Assign speakers to slides.',
@@ -147,12 +189,15 @@ const GUIDES: Guide[] = [
   },
 ]
 
-/** Per-owner deadline data — the login-notification countdown reads this. */
-export const SUBMISSION_DEADLINES = GUIDES.map((g) => ({
+/** Per-owner deadline data — the login-notification countdown reads this.
+ *  Flattened across guides: a guide with two deadlines emits two entries,
+ *  so the consumer can pick the nearest unpassed one per owner. */
+export const SUBMISSION_DEADLINES = GUIDES.flatMap((g) => g.deadlines.map((d) => ({
   ownerEmail: g.ownerEmail,
-  deadline: g.deadline,
-  noun: g.noun,
-}))
+  deadline: d.date,
+  noun: d.noun,
+  label: d.label,
+})))
 
 
 /** Whole days from today (local midnight) to a deadline date. */
@@ -181,6 +226,20 @@ export function deadlineCountdown(deadlineISO: string, noun: string,
   return { label, tone: 'normal' }
 }
 
+/** Compact "<Label>: <n> days" — used when a guide carries more than one
+ *  deadline so each chip names which deliverable it is counting down to. */
+export function compactCountdown(deadlineISO: string, label: string,
+                                 now: Date = new Date()):
+  { label: string; tone: 'normal' | 'amber' | 'red' | 'passed' } {
+  const days = daysUntil(deadlineISO, now)
+  if (days < 0) return { label: `${label}: passed`, tone: 'passed' }
+  if (days === 0) return { label: `${label}: today`, tone: 'red' }
+  const dayText = `${days} day${days === 1 ? '' : 's'}`
+  const tone: 'normal' | 'amber' | 'red' =
+    days <= 2 ? 'red' : days <= 5 ? 'amber' : 'normal'
+  return { label: `${label}: ${dayText}`, tone }
+}
+
 const TONE_CLASS: Record<string, string> = {
   normal: 'bg-electric/10 text-electric border-electric/30',
   amber: 'bg-warning/10 text-warning border-warning/40',
@@ -190,7 +249,15 @@ const TONE_CLASS: Record<string, string> = {
 
 function GuideCard({ guide }: { guide: Guide }) {
   const [open, setOpen] = useState(true)
-  const countdown = deadlineCountdown(guide.deadline, guide.noun)
+  // One chip per deadline. A guide with one deadline renders the
+  // legacy "N days until submission" copy; a guide with two or more
+  // uses the compact "<Label>: N days" so the chip identifies which.
+  const chips = guide.deadlines.map((d) => {
+    const cd = guide.deadlines.length > 1
+      ? compactCountdown(d.date, d.label)
+      : deadlineCountdown(d.date, d.noun)
+    return { key: d.date, ...cd }
+  })
   return (
     <div className="card p-4">
       <button type="button" onClick={() => setOpen((v) => !v)}
@@ -200,10 +267,15 @@ function GuideCard({ guide }: { guide: Guide }) {
           : <ChevronRight className="w-4 h-4 text-muted" />}
       </button>
 
-      {/* Deadline countdown */}
-      <div className={`mt-2 text-2xs font-semibold rounded border px-2 py-1
-                       inline-block ${TONE_CLASS[countdown.tone]}`}>
-        {countdown.label}
+      {/* Deadline countdown — one chip per deadline. */}
+      <div className="mt-2 flex flex-wrap gap-1.5">
+        {chips.map((c) => (
+          <div key={c.key}
+               className={`text-2xs font-semibold rounded border px-2 py-1
+                           ${TONE_CLASS[c.tone]}`}>
+            {c.label}
+          </div>
+        ))}
       </div>
 
       {open && (
@@ -224,6 +296,12 @@ function GuideCard({ guide }: { guide: Guide }) {
               </li>
             ))}
           </ol>
+          {guide.panelNote && (
+            <div className="rounded border border-electric/30 bg-electric/10
+                            px-3 py-2 text-xs text-electric">
+              {guide.panelNote}
+            </div>
+          )}
         </div>
       )}
     </div>

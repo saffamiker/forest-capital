@@ -8,7 +8,7 @@ a single module means changing the AI DRAFT banner style, the page
 margins, or the APA table format requires editing exactly one place.
 
 Three deliverables share the same builder:
-  - Midpoint paper (Sprint 6 Priority 1 — June 3 deadline)
+  - Midpoint paper (Sprint 6 Priority 1 — May 27 submission deadline)
   - Executive brief (Sprint 6 Priority 2)
   - Analytical appendix (Sprint 6 Priority 2)
 
