@@ -135,3 +135,107 @@ def test_stream_emits_peer_responses_before_arbiter_chunks():
 
 def test_academic_review_requires_auth():
     assert client.post("/api/council/academic-review").status_code == 401
+
+
+# ── Script rubric — applied per document_type ────────────────────────────────
+
+class TestScriptRubric:
+    """The Academic Review arbiter applies a script-specific rubric when
+    the request carries ?document_type=presentation_script. Other
+    document types use the default written-submission rubric. The two
+    rubrics differ in BOTH evaluation categories (coherence / clarity /
+    coverage / speaker differentiation vs data sufficiency / requirements
+    / quality / etc.) AND the rating scale (Strong / Needs Work /
+    Incomplete vs Strong / Developing / Needs Work)."""
+
+    def test_default_rubric_used_when_document_type_absent(self):
+        from agents.academic_review import (
+            build_arbiter_user_message, peer_agent_ids,
+        )
+        peer_responses = {aid: "ok" for aid in peer_agent_ids()}
+        msg = build_arbiter_user_message("CTX", peer_responses)
+        # Default rubric — sections 1-5 from the written-submission set.
+        assert "Data Sufficiency and Methodology" in msg
+        assert "Requirements and Rubric Alignment" in msg
+        assert "Overall Academic Readiness" in msg
+        # Script-specific section headings do NOT appear.
+        assert "Argument Coherence Across Slides" not in msg
+        assert "Speaker Differentiation" not in msg
+        # Default rating scale — "Developing" is present.
+        assert "Developing" in msg
+
+    def test_script_rubric_used_when_script_review_true(self):
+        from agents.academic_review import (
+            build_arbiter_user_message, peer_agent_ids,
+        )
+        peer_responses = {aid: "ok" for aid in peer_agent_ids()}
+        msg = build_arbiter_user_message(
+            "CTX", peer_responses, script_review=True)
+        # Script rubric — the five script-specific section headings.
+        assert "Argument Coherence Across Slides" in msg
+        assert "Clarity for a Mixed Faculty / Investor Audience" in msg
+        assert "Coverage of Key Findings" in msg
+        assert "Speaker Differentiation and Voice" in msg
+        assert "Overall Delivery Readiness" in msg
+        # Written-submission sections do NOT appear.
+        assert "Data Sufficiency and Methodology" not in msg
+        assert "Requirements and Rubric Alignment" not in msg
+        # Script rating scale — Incomplete replaces Developing.
+        assert "Strong | Needs Work | Incomplete" in msg
+        # Exclusion list is explicit — citation formatting etc. is
+        # called out as "DOES NOT evaluate" so the model doesn't
+        # accidentally score it.
+        assert "Citation formatting" in msg
+
+    def test_script_review_ignores_multi_user_section_6(self):
+        # The division-of-labour section is only relevant to the
+        # written deliverables. A script verdict stays focused on
+        # delivery readiness.
+        from agents.academic_review import (
+            build_arbiter_user_message, peer_agent_ids,
+        )
+        peer_responses = {aid: "ok" for aid in peer_agent_ids()}
+        msg = build_arbiter_user_message(
+            "CTX", peer_responses, multi_user=True, script_review=True)
+        # Section 6 (Team Engagement and Division of Labour) must NOT
+        # appear in a script verdict, even when multi_user is true.
+        assert "Team Engagement and Division of Labour" not in msg
+
+    def test_endpoint_routes_script_query_param_to_arbiter(self, monkeypatch):
+        # Verify the query param threads through to run_arbiter_with_harness
+        # with script_review=True. Intercept the call and assert the kwargs.
+        from agents import academic_review
+
+        captured: dict[str, object] = {}
+
+        def _fake_arbiter(context_block, peer_responses, multi_user,
+                          script_review):
+            captured["multi_user"] = multi_user
+            captured["script_review"] = script_review
+            return "stub verdict"
+
+        monkeypatch.setattr(
+            academic_review, "run_arbiter_with_harness", _fake_arbiter)
+
+        # presentation_script → script_review=True
+        r = client.post(
+            "/api/council/academic-review"
+            "?document_type=presentation_script",
+            headers=SESSION_HEADERS)
+        assert r.status_code == 200
+        assert captured.get("script_review") is True
+
+        # absent → script_review=False
+        captured.clear()
+        r = client.post("/api/council/academic-review",
+                         headers=SESSION_HEADERS)
+        assert r.status_code == 200
+        assert captured.get("script_review") is False
+
+        # midpoint_paper or any other type → script_review=False
+        captured.clear()
+        r = client.post("/api/council/academic-review"
+                         "?document_type=midpoint_paper",
+                         headers=SESSION_HEADERS)
+        assert r.status_code == 200
+        assert captured.get("script_review") is False

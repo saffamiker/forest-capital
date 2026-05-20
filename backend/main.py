@@ -1923,6 +1923,11 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
     the generator-evaluator harness. The arbiter is generated IN FULL and
     harness-evaluated before any chunk is streamed — a failed attempt is
     never shown, only the accepted verdict.
+
+    document_type query param — when "presentation_script", the arbiter
+    runs the SCRIPT-SPECIFIC rubric (coherence, audience clarity, slide
+    coverage, speaker differentiation; skips citation formatting and
+    paragraph structure). Default rubric otherwise.
     """
     import asyncio
     from agents.academic_review import (
@@ -1931,6 +1936,12 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
     )
     from agents.harness import start_harness_capture, collect_harness_metrics
     from agents.usage import start_usage_capture
+
+    # Rubric switch — read once at the top of the handler so a future
+    # gather_review_context refactor can also consume it. Only the literal
+    # string "presentation_script" enables the script rubric.
+    script_review = (
+        request.query_params.get("document_type") == "presentation_script")
 
     async def event_stream():
         try:
@@ -1954,6 +1965,7 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                 risk_free_rate=ctx["analytics"].get("risk_free_rate"),
                 document_types_present=ctx["document_types_present"],
                 document_types_missing=ctx["document_types_missing"],
+                script_review=script_review,
             )
             yield _sse("peer_responses", data=peer_responses)
 
@@ -1962,7 +1974,7 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             # The loading state on the frontend covers the evaluation wait.
             arbiter_text = await asyncio.to_thread(
                 run_arbiter_with_harness, context_block, peer_responses,
-                multi_user)
+                multi_user, script_review)
             for chunk in chunk_arbiter_text(arbiter_text):
                 yield _sse("arbiter_chunk", text=chunk)
             log.info("academic_review_arbiter_complete",

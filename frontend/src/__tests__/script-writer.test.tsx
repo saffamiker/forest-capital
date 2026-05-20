@@ -26,6 +26,7 @@ const mockedAxios = axios as unknown as {
   get: ReturnType<typeof vi.fn>
   post: ReturnType<typeof vi.fn>
   patch: ReturnType<typeof vi.fn>
+  isAxiosError: typeof axios.isAxiosError
 }
 
 beforeEach(() => {
@@ -223,12 +224,13 @@ describe('DocumentEditor — script export', () => {
 
   it('shows the Academic Review script note in the writing assistant',
     async () => {
-      // FIX 3 — the note appears below the Run Academic Review button
-      // only when the draft is a presentation_script. Reminds the
-      // presenter that the arbiter rubric is tuned for written work.
+      // The note appears below the Run Academic Review button only
+      // when the draft is a presentation_script. The wording shifted
+      // when the rubric was tuned for scripts (May 19) — it now names
+      // what the rubric DOES evaluate rather than what to disregard.
       mountEditor(scriptDraft())
       expect(await screen.findByText(
-        /Academic Review is optimised for written submissions/))
+        /Academic Review for presentation scripts evaluates/))
         .toBeInTheDocument()
     })
 
@@ -238,7 +240,7 @@ describe('DocumentEditor — script export', () => {
       // The button is anchored by data-tour; the note must be absent.
       await screen.findByRole('button', { name: /Run Academic Review/ })
       expect(screen.queryByText(
-        /Academic Review is optimised for written submissions/))
+        /Academic Review for presentation scripts evaluates/))
         .toBeNull()
     })
 

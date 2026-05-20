@@ -67,7 +67,14 @@ export default function WritingAssistant({
     abortRef.current = controller
     try {
       const token = localStorage.getItem('fc_session_token') ?? ''
-      const res = await fetch('/api/council/academic-review', {
+      // For a presentation_script draft, signal to the endpoint that
+      // the SCRIPT-SPECIFIC rubric should be applied — coherence /
+      // clarity / coverage / speaker differentiation, skipping the
+      // written-submission criteria (citation formatting, paragraph
+      // structure). Other document types use the default rubric.
+      const qs = documentType === 'presentation_script'
+        ? '?document_type=presentation_script' : ''
+      const res = await fetch(`/api/council/academic-review${qs}`, {
         method: 'POST',
         headers: { 'X-API-Key': token },
         signal: controller.signal,
@@ -156,14 +163,13 @@ export default function WritingAssistant({
             : <><GraduationCap className="w-3.5 h-3.5" /> Run Academic Review</>}
         </button>
         {documentType === 'presentation_script' && (
-          // Script-specific framing — the arbiter rubric is tuned for
-          // written deliverables (citation density, paragraph structure).
-          // Surface the caveat so a presenter focuses on the verdicts
-          // that DO apply rather than worrying about formatting scores.
+          // Script-specific framing — the arbiter now applies a rubric
+          // tuned for spoken delivery. Surface what it DOES evaluate
+          // so the presenter reads the verdict correctly.
           <p className="text-2xs text-muted mt-1.5 leading-relaxed">
-            Academic Review is optimised for written submissions. For
-            a presentation script, focus on coherence and argument
-            structure verdicts and disregard formatting scores.
+            Academic Review for presentation scripts evaluates argument
+            coherence, audience clarity, and slide coverage. Formatting
+            scores do not apply.
           </p>
         )}
         {reviewPhase === 'error' && (
