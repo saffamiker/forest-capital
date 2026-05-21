@@ -173,3 +173,54 @@ async def fetch_recent_commits(
 
         rows = await asyncio.gather(*[_detail(it) for it in listing])
     return list(rows)
+
+
+async def fetch_pr_commits(
+    repo: str, token: str, pr_number: int,
+) -> list[dict]:
+    """
+    Fetches the list of commits on one PR for the Suggested Resolutions
+    scanner (PR-driven workflow, Commit 2/7). Returns a list of
+    {sha, commit_message} dicts — the scanner only needs SHAs + messages.
+
+    Fail-open: any HTTP / auth / parse error returns []. The body-only
+    scan still surfaces references, so a fetch failure degrades
+    gracefully — a PR that follows the CLAUDE.md "Resolves failure #N"
+    convention in its body works whether or not commit-message coverage
+    is available.
+
+    Missing-token returns [] silently rather than raising — the webhook
+    handler should never 500 because the operator hasn't configured
+    GITHUB_TOKEN for the optional commit-scan layer.
+    """
+    if not token:
+        log.info("pr_commits_no_token",
+                 note="commit-message scan skipped; body-only scan proceeds")
+        return []
+    import httpx
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0, headers=headers) as client:
+            resp = await client.get(
+                f"{_GITHUB_API}/repos/{repo}/pulls/{int(pr_number)}/commits",
+                params={"per_page": 100},
+            )
+            if resp.status_code != 200:
+                log.warning("pr_commits_fetch_failed",
+                            status=resp.status_code, pr_number=pr_number)
+                return []
+            listing = resp.json() or []
+            return [{
+                "sha": item.get("sha"),
+                "commit_message":
+                    (item.get("commit") or {}).get("message", ""),
+            } for item in listing]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pr_commits_fetch_exception",
+                    pr_number=pr_number, error=str(exc))
+        return []

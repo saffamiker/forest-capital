@@ -2428,6 +2428,160 @@ async def testing_issue_tracker(
     return {"issues": await get_issue_tracker_rows()}
 
 
+# ── PR-driven Suggested Resolutions — Commit 3/7 ─────────────────────────────
+# The webhook populates pr_suggestions; these three endpoints are the
+# consumer side. Sysadmin-only (require_sysadmin = require_permission
+# "manage_users") — same gate other sysadmin actions use.
+
+@app.get("/api/v1/testing/suggestions")
+async def testing_list_suggestions(
+    session: dict = Depends(require_sysadmin),
+):
+    """
+    Returns every pending_review suggestion joined to its failure row.
+    Backs the Suggested Resolutions banner + review modal on Failure
+    Reports. Sysadmin only.
+
+    The response carries the failure context (script_id, step_id,
+    user_email, severity, etc.) so the review modal renders the
+    "Failure half" + "PR half" + resolution fields without a second
+    round-trip. step_title and feature are derived on the frontend
+    via the existing TEST_SCRIPTS / ROUTE_TO_FEATURE helpers.
+    """
+    from tools.pr_suggestions import list_pending_suggestions
+    return {"suggestions": await list_pending_suggestions()}
+
+
+@app.get("/api/v1/testing/suggestions/by-failure")
+async def testing_suggestions_by_failure(
+    session: dict = Depends(require_sysadmin),
+):
+    """
+    Returns {failure_id: pending_count} for every failure that has at
+    least one pending suggestion. Powers the "[Fix available — review]"
+    row badge on Failure Reports (Commit 5/7) — the frontend fetches
+    this once on load and joins it onto the failure list to render
+    the badges in one shot. Sysadmin only.
+    """
+    from tools.pr_suggestions import pending_count_by_failure
+    return {"by_failure": await pending_count_by_failure()}
+
+
+@app.post("/api/v1/testing/suggestions/{suggestion_id}/approve")
+async def testing_approve_suggestion(
+    suggestion_id: int, body: dict,
+    session: dict = Depends(require_sysadmin),
+):
+    """
+    Converts a pending_review suggestion into a real resolution on
+    its failure row.
+
+    Body (required):
+      root_cause        — written into resolution_note. Universal across
+                          all resolution types.
+      remediation_note  — written into the resolution row. Required
+                          because this endpoint always applies
+                          resolution_type='code_fix_deployed' (the
+                          modal pre-selects it; a reviewer who wants
+                          a different type uses the manual modal on
+                          the Failure Reports row instead).
+
+    Side effects:
+      1. resolve_failure writes the structured resolution onto the
+         failure row with fix_reference="#{pr_number}".
+      2. The step is "reset to pending" by virtue of the resolved_at
+         column being set (the existing get_unseen carve-out — see
+         migration 025's UPSERT change).
+      3. get_notifications surfaces the resolved_failures pill to the
+         original tester on their next login (notification is
+         DERIVED, not pushed).
+      4. Sibling pending suggestions for the same failure id are
+         auto-dismissed (decision point 4 — cleaner queue).
+
+    404 — suggestion id not found, OR the suggestion's failure row
+          has gone away (a stale request after the failure was
+          cleaned up).
+    409 — suggestion exists but is no longer in pending_review
+          (already approved or dismissed). The frontend treats 409 as
+          a "queue out of date — refresh" signal.
+    422 — body validation: missing root_cause OR missing
+          remediation_note.
+    """
+    root_cause = str(body.get("root_cause") or "").strip()
+    remediation_note = str(body.get("remediation_note") or "").strip()
+    if not root_cause:
+        raise HTTPException(
+            status_code=422, detail="root_cause is required.")
+    if not remediation_note:
+        raise HTTPException(
+            status_code=422, detail="remediation_note is required.")
+
+    from tools.pr_suggestions import approve_suggestion, get_suggestion
+
+    # Pre-flight read so 404 vs 409 are distinguishable. The
+    # alternative is to surface a single 4xx for both, but the
+    # frontend benefits from "this is stale, refresh the queue" vs
+    # "this never existed" guidance.
+    existing = await get_suggestion(suggestion_id)
+    if not existing:
+        raise HTTPException(
+            status_code=404, detail=f"Suggestion {suggestion_id} not found.")
+    if existing["state"] != "pending_review":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Suggestion {suggestion_id} is already "
+                   f"{existing['state']}. Refresh the queue.")
+
+    result = await approve_suggestion(
+        suggestion_id,
+        reviewed_by=session.get("email", ""),
+        root_cause=root_cause,
+        remediation_note=remediation_note,
+    )
+    if result is None:
+        # The pre-flight passed but the approve flow couldn't land
+        # the resolution — most likely the failure row was deleted
+        # between read and write. Return 404 with a clear message.
+        raise HTTPException(
+            status_code=404,
+            detail="Suggestion approved but the failure row could not "
+                   "be updated. Reload the queue.")
+    return {"approved": True, **result}
+
+
+@app.post("/api/v1/testing/suggestions/{suggestion_id}/dismiss")
+async def testing_dismiss_suggestion(
+    suggestion_id: int, body: dict | None = None,
+    session: dict = Depends(require_sysadmin),
+):
+    """
+    Marks a suggestion dismissed. The failure stays Open — no
+    resolution is recorded. Body: {dismiss_reason?: str}.
+
+    404 — suggestion not found OR already in a terminal state. The
+          UPDATE's `WHERE state='pending_review'` clause is what
+          gates this; the helper returns False on a no-op and the
+          endpoint maps that to 404.
+    """
+    from tools.pr_suggestions import dismiss_suggestion as _dismiss
+
+    body = body or {}
+    dismiss_reason = (
+        str(body.get("dismiss_reason") or "").strip() or None
+    )
+    ok = await _dismiss(
+        suggestion_id,
+        reviewed_by=session.get("email", ""),
+        dismiss_reason=dismiss_reason,
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Suggestion {suggestion_id} not found or already "
+                   "in a terminal state.")
+    return {"dismissed": True}
+
+
 @app.post("/api/v1/testing/failures/{failure_id}/resolve")
 async def testing_resolve_failure(
     failure_id: int, body: dict,
@@ -3298,14 +3452,23 @@ async def activity_events(
 @app.post("/api/v1/activity/commits/webhook")
 async def activity_commits_webhook(request: Request):
     """
-    GitHub push-event webhook receiver. Validates the X-Hub-Signature-256
-    HMAC against GITHUB_WEBHOOK_SECRET, parses the push payload, and
-    upserts every commit into commit_activity.
+    GitHub webhook receiver — handles both push and pull_request events
+    against the same registration. Validates the X-Hub-Signature-256
+    HMAC against GITHUB_WEBHOOK_SECRET (any invalid/missing signature
+    is a 401).
 
-    Non-push events (notably the `ping` GitHub sends at registration)
-    are acknowledged and ignored. An invalid or missing signature is a
-    401. GITHUB_WEBHOOK_SECRET must be set on the server before the
-    endpoint will accept any event.
+    Push events       → upsert commits into commit_activity.
+    pull_request events with action=closed and merged=true →
+                        scan the body + commit messages for "Resolves
+                        failure #N" references and queue
+                        pr_suggestions rows (Suggested Resolutions
+                        Commit 2/7).
+
+    Other events (the `ping` GitHub sends at registration, draft PR
+    state changes, etc.) are acknowledged and ignored. Operationally
+    this means ONE webhook registration on the repo covers both the
+    Team Activity commit sync AND the Suggested Resolutions workflow —
+    one secret to manage, one URL to point GitHub at.
     """
     from config import GITHUB_WEBHOOK_SECRET
     from tools.github_sync import verify_signature, parse_push_payload
@@ -3315,22 +3478,69 @@ async def activity_commits_webhook(request: Request):
     if not verify_signature(GITHUB_WEBHOOK_SECRET, raw, sig):
         raise HTTPException(status_code=401, detail="Invalid webhook signature.")
 
-    if request.headers.get("x-github-event") != "push":
-        return {"status": "ignored", "reason": "not a push event"}
+    event_type = request.headers.get("x-github-event")
+    if event_type not in ("push", "pull_request"):
+        return {"status": "ignored",
+                "reason": f"event '{event_type}' is not handled"}
 
     try:
         payload = json.loads(raw.decode("utf-8"))
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="Malformed JSON payload.")
 
-    commits = parse_push_payload(payload)
-    if not commits:
-        return {"status": "ok", "synced": 0}
+    if event_type == "push":
+        commits = parse_push_payload(payload)
+        if not commits:
+            return {"status": "ok", "synced": 0}
+        from tools.activity_log import upsert_commits
+        written = await upsert_commits(commits)
+        log.info("activity_webhook_push",
+                 commits=len(commits), upserted=written)
+        return {"status": "ok", "synced": written}
 
-    from tools.activity_log import upsert_commits
-    written = await upsert_commits(commits)
-    log.info("activity_webhook_push", commits=len(commits), upserted=written)
-    return {"status": "ok", "synced": written}
+    # pull_request event — Suggested Resolutions Commit 2/7.
+    from config import GITHUB_REPO, GITHUB_TOKEN
+    from tools.github_sync import fetch_pr_commits
+    from tools.pr_suggestion_scanner import (
+        parse_pr_payload, record_pr_suggestions,
+    )
+
+    # Pre-parse to extract the PR number (cheap, no network), then
+    # enrich with commit messages via the REST API so the scanner can
+    # find references in commit messages too. The fetch is fail-open
+    # — a missing GITHUB_TOKEN or API error degrades to body-only.
+    pre = parse_pr_payload(payload)
+    if pre is None:
+        # Not a closed+merged PR — silently ack.
+        return {"status": "ok", "reason": "not a merged PR"}
+
+    commits = await fetch_pr_commits(
+        GITHUB_REPO, GITHUB_TOKEN, pre["pr_number"])
+    # Re-parse with the enriched commits so the scanner can match
+    # references in commit messages alongside the PR body.
+    enriched_payload = dict(payload)
+    enriched_payload["__commits"] = commits
+    parsed = parse_pr_payload(enriched_payload)
+    if parsed is None:
+        return {"status": "ok", "reason": "not a merged PR"}
+
+    summary = await record_pr_suggestions(parsed)
+    log.info("activity_webhook_pull_request",
+             pr_number=parsed["pr_number"],
+             references_found=len(parsed["matches"]),
+             created=summary["created"],
+             skipped_missing=summary["skipped_missing"],
+             skipped_resolved=summary["skipped_resolved"],
+             skipped_duplicate=summary["skipped_duplicate"])
+    return {
+        "status": "ok",
+        "pr_number": parsed["pr_number"],
+        "references_found": len(parsed["matches"]),
+        "suggestions_created": len(summary["created"]),
+        "skipped_missing": len(summary["skipped_missing"]),
+        "skipped_resolved": len(summary["skipped_resolved"]),
+        "skipped_duplicate": len(summary["skipped_duplicate"]),
+    }
 
 
 @app.get("/api/v1/activity/commits/sync")
