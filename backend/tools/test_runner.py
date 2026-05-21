@@ -222,9 +222,26 @@ async def record_result(
                     session_type = EXCLUDED.session_type,
                     attested_at = now(),
                     overridden = true,
-                    resolved_at = NULL,
-                    resolved_by = NULL,
-                    resolution_note = NULL
+                    -- Resolution-field carry-over for the Issue Tracker's
+                    -- "Passed" terminal state. Re-attesting as PASS after
+                    -- a resolution preserves the resolution evidence so the
+                    -- tracker can render the row as Passed (with the
+                    -- resolution metadata still on it). Re-attesting as
+                    -- FAIL — a regression — clears the prior resolution
+                    -- so the row appears as a fresh Open failure.
+                    -- See compute_issue_status() for the consumer logic.
+                    resolved_at = CASE WHEN EXCLUDED.result = 'fail'
+                        THEN NULL ELSE test_results.resolved_at END,
+                    resolved_by = CASE WHEN EXCLUDED.result = 'fail'
+                        THEN NULL ELSE test_results.resolved_by END,
+                    resolution_note = CASE WHEN EXCLUDED.result = 'fail'
+                        THEN NULL ELSE test_results.resolution_note END,
+                    resolution_type = CASE WHEN EXCLUDED.result = 'fail'
+                        THEN NULL ELSE test_results.resolution_type END,
+                    fix_reference = CASE WHEN EXCLUDED.result = 'fail'
+                        THEN NULL ELSE test_results.fix_reference END,
+                    remediation_note = CASE WHEN EXCLUDED.result = 'fail'
+                        THEN NULL ELSE test_results.remediation_note END
                 RETURNING id, result, severity, attested_at, overridden
             """), {
                 "user_email": user_email, "script_id": script_id,
@@ -404,6 +421,94 @@ async def get_all_failures() -> list[dict[str, Any]]:
 RESOLUTION_TYPES: tuple[str, ...] = (
     "no_bug_detected", "code_fix_deployed", "wont_fix",
 )
+
+
+# Issue Tracker status vocabulary (Prompt B Part 6). Computed from the
+# row's current state; no separate column — the four states are a
+# function of (result, resolved_at, resolution_type). See
+# compute_issue_status() below.
+ISSUE_STATUS = ("open", "pending_retest", "passed", "closed")
+
+
+def compute_issue_status(row: dict[str, Any]) -> str:
+    """
+    Maps a test_results row to one of the four Issue Tracker statuses.
+
+      open           — failure reported, no resolution recorded yet
+      pending_retest — resolved with type ∈ (no_bug_detected,
+                       code_fix_deployed) and the tester has not yet
+                       re-attested. Step is in the tester's re-test queue.
+      passed         — tester re-attested as PASS after a resolution.
+                       record_result preserves the resolution fields on
+                       a fail → pass transition (see the UPSERT comment),
+                       which is what makes this state observable.
+      closed         — resolution_type = 'wont_fix'. The step stays at
+                       its current attested state; no re-test prompt.
+
+    The mapping is order-sensitive: the `open` guard runs first because
+    a row with resolved_at IS NULL can never have a resolution_type;
+    the `closed` check beats the `passed` check because a wont_fix
+    that was somehow re-attested as pass should still read as closed.
+    """
+    if row.get("resolved_at") is None:
+        return "open"
+    if row.get("resolution_type") == "wont_fix":
+        return "closed"
+    if row.get("result") == "pass":
+        return "passed"
+    return "pending_retest"
+
+
+async def get_issue_tracker_rows() -> list[dict[str, Any]]:
+    """
+    Every row that has ever failed — the Issue Tracker scope.
+    Includes the currently-failing rows (Open / Pending re-test /
+    Closed) AND the rows that previously failed but have been
+    re-attested as Pass (the Passed terminal state). A row that has
+    only ever passed is NOT included; the tracker is about issues,
+    not the full attestation history.
+
+    Each row carries every column the tracker UI renders plus the
+    computed `status` from compute_issue_status(). Fail-open → [].
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return []
+        async with AsyncSessionLocal() as session:
+            rows = await session.execute(text("""
+                SELECT id, user_email, script_id, step_id, result,
+                       failure_description, severity, attested_at,
+                       resolved_at, resolved_by, resolution_note,
+                       resolution_type, fix_reference, remediation_note,
+                       github_issue_number, github_issue_url
+                FROM test_results
+                WHERE result = 'fail' OR resolved_at IS NOT NULL
+                ORDER BY attested_at DESC
+            """))
+            out: list[dict[str, Any]] = []
+            for r in rows.fetchall():
+                row = {
+                    "id": r[0], "user_email": r[1], "script_id": r[2],
+                    "step_id": r[3], "result": r[4],
+                    "failure_description": r[5], "severity": r[6],
+                    "attested_at": _iso(r[7]),
+                    "resolved_at": _iso(r[8]), "resolved_by": r[9],
+                    "resolution_note": r[10],
+                    "resolution_type": r[11],
+                    "fix_reference": r[12],
+                    "remediation_note": r[13],
+                    "github_issue_number": r[14],
+                    "github_issue_url": r[15],
+                }
+                row["status"] = compute_issue_status(row)
+                out.append(row)
+            return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("issue_tracker_read_failed", error=str(exc))
+        return []
 
 
 async def resolve_failure(

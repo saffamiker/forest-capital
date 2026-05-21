@@ -2301,6 +2301,25 @@ async def testing_failures(
     return {"failures": await get_all_failures()}
 
 
+@app.get("/api/v1/testing/issue-tracker")
+async def testing_issue_tracker(
+    session: dict = Depends(require_permission("view_admin")),
+):
+    """
+    Issue Tracker view — every row that has ever failed, with a
+    computed status field ∈ {open, pending_retest, passed, closed}
+    per compute_issue_status(). Includes Passed rows (re-attested
+    after a resolution) so the tracker shows the full lifecycle of
+    each issue, not just the currently-failing ones.
+
+    Filtering, sorting and column projection live on the frontend
+    — the endpoint returns the full row set and the UI shapes it.
+    Requires view_admin (the existing Failure Reports access rule).
+    """
+    from tools.test_runner import get_issue_tracker_rows
+    return {"issues": await get_issue_tracker_rows()}
+
+
 @app.post("/api/v1/testing/failures/{failure_id}/resolve")
 async def testing_resolve_failure(
     failure_id: int, body: dict,
