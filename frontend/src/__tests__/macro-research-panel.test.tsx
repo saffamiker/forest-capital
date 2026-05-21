@@ -62,14 +62,24 @@ function sampleDigest(over: Partial<PanelDigest> = {}): PanelDigest {
   }
 }
 
-function renderWith(permissions: string[], lastFetch?: () => unknown) {
+// `axios.get` is typed as (url, config?) => Promise<AxiosResponse<R>>; the
+// helper accepts a fetch fn with that same shape so the assignment doesn't
+// trip the strict-mode tsc check Vercel runs. `unknown` keeps individual
+// tests free to return whatever data shape they need without per-test
+// generic plumbing.
+function renderWith(
+  permissions: string[],
+  lastFetch?: (url: string) => Promise<unknown>,
+) {
   const auth = {
     session: { token: 't', email: 'u@queens.edu', permissions },
     isVerifying: false,
     login: vi.fn(),
     logout: vi.fn(),
   }
-  mockedAxios.get = vi.fn(lastFetch as () => Promise<unknown>)
+  // mockImplementation preserves axios.get's signature; vi.fn(callback)
+  // narrows to the callback's signature, which was the bug Vercel caught.
+  mockedAxios.get = vi.fn().mockImplementation(lastFetch ?? (() => new Promise(() => {})))
   mockedAxios.post = vi.fn().mockResolvedValue({ data: { status: 'running' } })
   return render(
     <MemoryRouter>
