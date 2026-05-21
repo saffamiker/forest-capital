@@ -113,8 +113,13 @@ def test_arbiter_message_contains_every_peer_response():
     for aid, text in peer_responses.items():
         assert text in msg, f"{aid} response missing from arbiter message"
     # The five-section verdict instructions are present.
-    assert "five sections" in msg
+    assert "five rubric sections" in msg
     assert "Overall Academic Readiness" in msg
+    # The PM dual-verdict additions surface in the arbiter prompt too —
+    # the top-level **Academic rigour:** + **Portfolio Manager insight:**
+    # lines must reach the arbiter so the user sees both lenses.
+    assert "**Academic rigour:**" in msg
+    assert "**Portfolio Manager insight:**" in msg
 
 
 # ── 5. Streaming order — peer_responses before arbiter chunks ──────────────────

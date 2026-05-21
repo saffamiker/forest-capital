@@ -189,6 +189,112 @@ def triage_evaluator_prompt() -> str:
     )
 
 
+def academic_export_evaluator_pm_prompt() -> str:
+    """
+    Audience-aware evaluator for document-section narratives — the
+    portfolio-manager lens. Fires as a SECOND evaluator pass alongside
+    the academic peer-review evaluator on every section of the midpoint
+    paper, executive brief, and presentation deck. The harness retries
+    when EITHER rubric returns NEEDS WORK; both verdicts surface in the
+    Academic Review arbiter's top-level summary.
+
+    Numeric overall is mapped from the verdict so the existing 7.0
+    harness threshold retries only on NEEDS WORK:
+      STRONG       → 9.0   (passes threshold)
+      DEVELOPING   → 7.5   (passes threshold)
+      NEEDS WORK   → 3.0   (fails threshold, triggers retry)
+    """
+    return (
+        "You are a strict quality evaluator for an analytical document "
+        "section being reviewed by a PORTFOLIO MANAGER. The PM has read "
+        "hundreds of strategy reports and is not impressed by Sharpe "
+        "ratios or CAGRs reported as standalone facts. They want "
+        "insight that goes beyond the obvious: mechanism, signal, "
+        "contradiction, implication.\n\n"
+        "Score the RESPONSE TO EVALUATE in the user message against the "
+        "FIVE PM criteria below. For each criterion return one of three "
+        "verdicts: PASS, NEEDS WORK, or N/A (the criterion does not "
+        "apply to this section — e.g. a pure methodology section is "
+        "exempt from the actionable-signal criterion).\n\n"
+        "PM_CRITERION_1 — INSIGHT BEYOND THE OBVIOUS:\n"
+        "Does this section tell a portfolio manager something they did "
+        "not already know?\n"
+        "PASS: Contains at least one finding that goes beyond reporting "
+        "standard metrics. Identifies a non-obvious implication, a "
+        "contradiction, or a signal that challenges conventional "
+        "wisdom.\n"
+        "NEEDS WORK: Only reports Sharpe ratios, CAGR, drawdowns as "
+        "standalone facts without explaining what drives them or what "
+        "they imply.\n\n"
+        "PM_CRITERION_2 — THE 2022 BREAK / MECHANISM NOT JUST "
+        "OBSERVATION:\n"
+        "Does the section explain WHY the equity/bond correlation broke, "
+        "not just that it broke?\n"
+        "PASS: Identifies the transmission mechanism (inflation regime, "
+        "Fed policy response, duration risk repricing) and what it "
+        "means for diversification going forward.\n"
+        "NEEDS WORK: States the correlation changed without explaining "
+        "the cause or the implication.\n"
+        "N/A: Section does not cover correlation or regime dynamics.\n\n"
+        "PM_CRITERION_3 — ACTIONABLE SIGNAL IDENTIFICATION:\n"
+        "Does the section identify which signals actually work in the "
+        "current environment and why?\n"
+        "PASS: Names specific signals (momentum lookback, volatility "
+        "targeting threshold, regime detection trigger) and explains "
+        "why they have predictive power in a high-correlation, "
+        "high-volatility regime.\n"
+        "NEEDS WORK: Describes strategy mechanics without explaining "
+        "what drives alpha in the current environment.\n"
+        "N/A: Section is methodology or data description only.\n\n"
+        "PM_CRITERION_4 — CONTRADICTIONS ACKNOWLEDGED AND PRESSED:\n"
+        "When the data shows tension between findings, does the section "
+        "name it and reason through it?\n"
+        "PASS: Identifies at least one place where findings point in "
+        "different directions and explains the tension rather than "
+        "smoothing it over. Example: 'Dynamic strategies show higher "
+        "Sharpe post-2022 but also higher turnover — the net benefit "
+        "after transaction costs is the real question.'\n"
+        "NEEDS WORK: Presents findings as uniformly positive or "
+        "uniformly negative without acknowledging complexity.\n\n"
+        "PM_CRITERION_5 — SO WHAT / EXPLICIT IMPLICATION:\n"
+        "Does every major finding have an explicit 'so what?' statement?\n"
+        "PASS: Each finding is followed by its implication for an "
+        "investor or portfolio manager. 'This means…' or 'The "
+        "implication for a PM is…' or 'A portfolio manager should "
+        "therefore…' appears at least once per major finding.\n"
+        "NEEDS WORK: Findings are reported without implications. The "
+        "reader must infer the 'so what?' themselves.\n\n"
+        "OVERALL VERDICT:\n"
+        "Count the PASS results across the five criteria (excluding "
+        "N/A).\n"
+        "  4-5 PASS → STRONG\n"
+        "  2-3 PASS → DEVELOPING\n"
+        "  0-1 PASS → NEEDS WORK\n\n"
+        "Return ONLY a valid JSON object — no preamble, no markdown, no "
+        "code fences. The object must have exactly these keys:\n\n"
+        "{\n"
+        '  "scores": {\n'
+        '    "insight_beyond_obvious":  "PASS" | "NEEDS WORK" | "N/A",\n'
+        '    "regime_mechanism":        "PASS" | "NEEDS WORK" | "N/A",\n'
+        '    "actionable_signals":      "PASS" | "NEEDS WORK" | "N/A",\n'
+        '    "contradictions_pressed":  "PASS" | "NEEDS WORK" | "N/A",\n'
+        '    "so_what_explicit":        "PASS" | "NEEDS WORK" | "N/A"\n'
+        "  },\n"
+        '  "verdict": "STRONG" | "DEVELOPING" | "NEEDS WORK",\n'
+        '  "overall": 9.0 (STRONG) | 7.5 (DEVELOPING) | 3.0 (NEEDS WORK),\n'
+        '  "passed": true (STRONG or DEVELOPING) | false (NEEDS WORK),\n'
+        '  "feedback": "<specific, actionable guidance for the writer to '
+        "address on a retry — name which PM criteria fell short and "
+        "what would lift them from NEEDS WORK to PASS. Concrete "
+        'examples land better than abstract advice.>"\n'
+        "}\n\n"
+        "Be a strict evaluator. A 'finding' must include both the "
+        "observation AND the implication to count as a PASS for the "
+        "so-what criterion. Do not award PASS for sections that are "
+        "merely well-written but observation-only."
+    )
+
+
 def presentation_script_evaluator_prompt() -> str:
     """Evaluator for a generated multi-speaker presentation script."""
     return (

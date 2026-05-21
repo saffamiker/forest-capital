@@ -298,7 +298,10 @@ def harness_narrative(
     try:
         from agents.academic_writer import _SYSTEM_PROMPT
         from agents.base import SONNET_MODEL, WEB_SEARCH_TOOL, call_claude
-        from agents.evaluator_prompts import academic_review_peer_evaluator_prompt
+        from agents.evaluator_prompts import (
+            academic_export_evaluator_pm_prompt,
+            academic_review_peer_evaluator_prompt,
+        )
         from agents.harness import GeneratorEvaluatorHarness
 
         harness = GeneratorEvaluatorHarness()
@@ -310,6 +313,14 @@ def harness_narrative(
                 SONNET_MODEL, _SYSTEM_PROMPT, prompt, max_tokens=max_tokens,
                 tools=[WEB_SEARCH_TOOL]),
             evaluator_prompt=academic_review_peer_evaluator_prompt("academic writer"),
+            # Audience-aware second pass — every document section
+            # (midpoint paper, executive brief, deck narrative) is also
+            # scored against the PM rubric. The harness retries when
+            # EITHER rubric returns NEEDS WORK. The presentation script
+            # generator does NOT pass a secondary evaluator (spoken
+            # delivery is a different audience); the council and triage
+            # generators also do not.
+            secondary_evaluator_prompt=academic_export_evaluator_pm_prompt(),
             generator_prompt=user_message,
             context=ctx_str,
             agent_id=agent_id,

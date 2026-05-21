@@ -573,8 +573,38 @@ async def run_peer_fan_out(
 
 _ARBITER_INSTRUCTIONS = """=== YOUR TASK — ARBITER VERDICT ===
 You are the arbiter. Integrate and WEIGH the peer review notes above — do
-not restate them. Produce a structured, rubric-mapped verdict with EXACTLY
-five sections, in this exact markdown format so the UI can parse it:
+not restate them. Produce a structured, rubric-mapped verdict that opens
+with a TWO-LINE TOP-LEVEL SUMMARY and is followed by five rubric sections,
+in this exact markdown format so the UI can parse it:
+
+**Academic rigour:** <Strong | Developing | Needs Work>
+**Portfolio Manager insight:** <Strong | Developing | Needs Work>
+
+The two top-level lines summarise the deliverable through two distinct
+lenses:
+
+  ACADEMIC RIGOUR — methodology, citations, data provenance, structural
+  completeness against the FNA 670 rubric. Aggregate this from the five
+  rubric sections below; a deliverable with mostly Strong section
+  ratings should read Strong here.
+
+  PORTFOLIO MANAGER INSIGHT — does the document tell a PM something
+  they did not already know? Score against these five PM criteria
+  (PASS / NEEDS WORK / N/A per criterion) and aggregate:
+    1. Insight beyond the obvious — non-obvious finding, contradiction,
+       or signal that challenges conventional wisdom.
+    2. The 2022 break — mechanism (inflation, Fed policy, duration
+       repricing), not just observation. N/A if not covered.
+    3. Actionable signal identification — names specific signals and
+       why they have predictive power in the current regime. N/A if
+       methodology-only.
+    4. Contradictions acknowledged and pressed — tensions between
+       findings explained, not smoothed over.
+    5. So what / explicit implication — every major finding followed
+       by what a PM should do, conclude, or watch for.
+  4-5 PASS → Strong; 2-3 PASS → Developing; 0-1 PASS → Needs Work.
+
+After the two top-level lines, produce the five rubric sections:
 
 ### 1. Data Sufficiency and Methodology
 **Rating:** <Strong | Developing | Needs Work>

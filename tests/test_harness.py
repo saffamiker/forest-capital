@@ -167,6 +167,160 @@ class TestHarnessUnit:
         assert result.attempts == 1
 
 
+# ── PM secondary evaluator — dual-evaluation behaviour ───────────────────────
+
+def _pm_score(verdict: str, feedback: str = "") -> str:
+    """A valid PM-evaluator JSON payload mapping verdict → numeric overall."""
+    overall = {"STRONG": 9.0, "DEVELOPING": 7.5, "NEEDS WORK": 3.0}[verdict]
+    return json.dumps({
+        "scores": {
+            "insight_beyond_obvious":  "PASS",
+            "regime_mechanism":        "PASS",
+            "actionable_signals":      "N/A",
+            "contradictions_pressed":  "PASS",
+            "so_what_explicit":        "PASS",
+        },
+        "verdict": verdict,
+        "overall": overall,
+        "passed": verdict != "NEEDS WORK",
+        "feedback": feedback,
+    })
+
+
+class TestPMSecondaryEvaluator:
+    """The harness scores against BOTH primary (academic) and secondary
+    (PM) evaluators when secondary_evaluator_prompt is set. Effective
+    score is the WORSE of the two — a retry fires when EITHER rubric
+    returns NEEDS WORK, matching the spec."""
+
+    def test_secondary_runs_alongside_primary(self):
+        # When the harness is configured with both evaluators, each
+        # generation attempt is scored TWICE — once per rubric.
+        from agents.harness import GeneratorEvaluatorHarness
+        call_log: list[str] = []
+
+        def fake_call_claude(model, system_prompt, user_message, **kwargs):
+            call_log.append(system_prompt)
+            return _score(9.0) if "ACADEMIC" in system_prompt \
+                else _pm_score("STRONG")
+
+        harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=2)
+        with patch("agents.harness.call_claude", side_effect=fake_call_claude):
+            result = harness.run(
+                lambda p: "the response",
+                evaluator_prompt="ACADEMIC RUBRIC",
+                generator_prompt="TASK", context="ctx",
+                agent_id="test_agent",
+                secondary_evaluator_prompt="PM RUBRIC",
+            )
+        # Both evaluators were consulted on the single attempt.
+        assert len(call_log) == 2
+        assert any("ACADEMIC" in c for c in call_log)
+        assert any("PM" in c for c in call_log)
+        # Both scores surface on the result.
+        assert result.primary_score == 9.0
+        assert result.secondary_score == 9.0
+        assert result.final_score == 9.0   # min(9, 9) = 9 — passes
+
+    def test_pm_needs_work_triggers_retry(self):
+        # The academic rubric scores PASS (9.0) but the PM rubric
+        # returns NEEDS WORK (3.0). The harness retries because the
+        # EFFECTIVE score (min) is below threshold.
+        from agents.harness import GeneratorEvaluatorHarness
+        attempts: list[str] = []
+
+        def fake_call_claude(model, system_prompt, user_message, **kwargs):
+            return _score(9.0) if "ACADEMIC" in system_prompt \
+                else _pm_score("NEEDS WORK", "MISSING SO-WHAT STATEMENTS")
+
+        harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=2)
+        with patch("agents.harness.call_claude", side_effect=fake_call_claude):
+            result = harness.run(
+                lambda p: (attempts.append(p), "the response")[1],
+                evaluator_prompt="ACADEMIC RUBRIC",
+                generator_prompt="TASK", context="ctx",
+                agent_id="test_agent",
+                secondary_evaluator_prompt="PM RUBRIC",
+            )
+        # Three generation attempts — initial + 2 retries — because PM
+        # NEEDS WORK never lifts.
+        assert result.attempts == 3
+        # The combined feedback injected on retry must name BOTH rubrics
+        # so the writer addresses each lens explicitly.
+        assert "PORTFOLIO MANAGER RUBRIC" in attempts[1]
+        assert "MISSING SO-WHAT STATEMENTS" in attempts[1]
+
+    def test_pm_developing_passes_threshold(self):
+        # DEVELOPING maps to 7.5 — above the 7.0 threshold. The harness
+        # accepts on the first attempt; only NEEDS WORK triggers retry.
+        from agents.harness import GeneratorEvaluatorHarness
+
+        def fake_call_claude(model, system_prompt, user_message, **kwargs):
+            return _score(9.0) if "ACADEMIC" in system_prompt \
+                else _pm_score("DEVELOPING")
+
+        harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=2)
+        with patch("agents.harness.call_claude", side_effect=fake_call_claude):
+            result = harness.run(
+                lambda p: "the response",
+                evaluator_prompt="ACADEMIC RUBRIC",
+                generator_prompt="TASK", context="ctx",
+                agent_id="test_agent",
+                secondary_evaluator_prompt="PM RUBRIC",
+            )
+        assert result.attempts == 1
+        assert result.primary_score == 9.0
+        assert result.secondary_score == 7.5
+        # Effective = min(9.0, 7.5) = 7.5 — above threshold, no retry.
+        assert result.final_score == 7.5
+
+    def test_academic_needs_work_also_triggers_retry(self):
+        # Symmetric — primary NEEDS WORK with PM STRONG also retries.
+        # Confirms the OR-of-failures contract works both directions.
+        from agents.harness import GeneratorEvaluatorHarness
+
+        def fake_call_claude(model, system_prompt, user_message, **kwargs):
+            return _score(3.0, "NOT EVIDENCE-BASED") \
+                if "ACADEMIC" in system_prompt else _pm_score("STRONG")
+
+        harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=2)
+        with patch("agents.harness.call_claude", side_effect=fake_call_claude):
+            result = harness.run(
+                lambda p: "the response",
+                evaluator_prompt="ACADEMIC RUBRIC",
+                generator_prompt="TASK", context="ctx",
+                agent_id="test_agent",
+                secondary_evaluator_prompt="PM RUBRIC",
+            )
+        assert result.attempts == 3   # primary kept failing
+        assert result.final_score == 3.0
+
+    def test_secondary_none_keeps_existing_single_evaluator_behaviour(self):
+        # Backward compatibility — no secondary evaluator means the
+        # harness behaves exactly as before this change. Council
+        # specialists, the AR arbiter, the AR peers, the triage agent
+        # and the presentation script writer all rely on this path.
+        from agents.harness import GeneratorEvaluatorHarness
+        call_log: list[str] = []
+
+        def fake_call_claude(model, system_prompt, user_message, **kwargs):
+            call_log.append(system_prompt)
+            return _score(9.0)
+
+        harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=2)
+        with patch("agents.harness.call_claude", side_effect=fake_call_claude):
+            result = harness.run(
+                lambda p: "the response",
+                evaluator_prompt="ACADEMIC RUBRIC",
+                generator_prompt="TASK", context="ctx",
+                agent_id="test_agent",
+                # No secondary_evaluator_prompt.
+            )
+        assert len(call_log) == 1                 # only ONE evaluator call
+        assert result.primary_score == 9.0
+        assert result.secondary_score is None     # confirms not invoked
+
+
 # ── Harness metrics capture ───────────────────────────────────────────────────
 
 class TestHarnessMetrics:
