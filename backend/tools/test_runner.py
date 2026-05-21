@@ -345,7 +345,12 @@ async def get_unseen(user_email: str) -> dict[str, Any]:
 
 
 async def get_all_failures() -> list[dict[str, Any]]:
-    """Every failed step across all testers — admin failure-reports view."""
+    """Every failed step across all testers — admin failure-reports view.
+
+    Returns the three new migration-023 columns (github_issue_number,
+    github_issue_url, triaged_at) alongside the existing ones so the
+    triage engine's _gather_unaddressed can filter by triaged_at and
+    the frontend can display the GitHub linkage."""
     try:
         from sqlalchemy import text
 
@@ -357,7 +362,8 @@ async def get_all_failures() -> list[dict[str, Any]]:
                 SELECT id, user_email, script_id, step_id, failure_description,
                        expected_result, actual_result, severity, browser_info,
                        screenshot_paths, low_quality, attested_at,
-                       resolved_at, resolved_by, resolution_note
+                       resolved_at, resolved_by, resolution_note,
+                       github_issue_number, github_issue_url, triaged_at
                 FROM test_results WHERE result = 'fail'
                 ORDER BY
                     CASE severity WHEN 'blocking' THEN 0 WHEN 'major' THEN 1
@@ -373,6 +379,9 @@ async def get_all_failures() -> list[dict[str, Any]]:
                 "low_quality": r[10], "attested_at": _iso(r[11]),
                 "resolved_at": _iso(r[12]), "resolved_by": r[13],
                 "resolution_note": r[14],
+                "github_issue_number": r[15],
+                "github_issue_url": r[16],
+                "triaged_at": _iso(r[17]),
             } for r in rows.fetchall()]
     except Exception as exc:  # noqa: BLE001
         log.warning("test_failures_read_failed", error=str(exc))

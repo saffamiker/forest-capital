@@ -2462,6 +2462,83 @@ async def testing_get_latest_triage_report(
     return {"report": await get_latest_triage_report()}
 
 
+# ── Triage report items — sysadmin only ───────────────────────────────────────
+# Item-level resolution endpoints (migration 023 + triage Commit 2). The
+# items table normalises the verdict prose into addressable rows; these
+# three endpoints back the Settings → Triage Reports per-item UI.
+
+@app.get("/api/v1/testing/triage/items")
+async def testing_get_triage_items(
+    report_id: int | None = None,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Every triage_report_items row with full resolution status.
+    Optionally filtered to a specific report_id. Sysadmin only.
+    """
+    from tools.triage_engine import get_all_triage_items
+    return {"items": await get_all_triage_items(report_id=report_id)}
+
+
+@app.patch("/api/v1/testing/triage/items/{item_id}/resolve")
+async def testing_resolve_triage_item(
+    item_id: int,
+    body: dict,
+    request: Request,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Marks a triage item resolved. Body: {resolution_note, fix_commit?,
+    requires_retest?}.
+
+    When requires_retest=true the row's retest_requested_at is stamped
+    to now() — frontend TestNotifications then surfaces a "Fix ready
+    for retest" pill to the original reporter (Commit 3 wires that
+    notification path through the existing get_notifications surface).
+    Sysadmin only.
+    """
+    from tools.triage_engine import resolve_triage_item
+
+    resolution_note = str(body.get("resolution_note") or "").strip()
+    if not resolution_note:
+        raise HTTPException(
+            status_code=422,
+            detail="resolution_note is required.")
+    fix_commit_raw = body.get("fix_commit")
+    fix_commit = (str(fix_commit_raw).strip() or None) if fix_commit_raw else None
+    requires_retest = bool(body.get("requires_retest", False))
+
+    result = await resolve_triage_item(
+        item_id,
+        resolved_by=session.get("email", ""),
+        resolution_note=resolution_note,
+        fix_commit=fix_commit,
+        requires_retest=requires_retest,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=404, detail=f"Triage item {item_id} not found.")
+    return {"status": "resolved", "item": result}
+
+
+@app.patch("/api/v1/testing/triage/items/{item_id}/unresolve")
+async def testing_unresolve_triage_item(
+    item_id: int,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Clears the resolution fields on a triage item — sysadmin recovery
+    for an item resolved in error. Sysadmin only.
+    """
+    from tools.triage_engine import unresolve_triage_item
+
+    ok = await unresolve_triage_item(item_id)
+    if not ok:
+        raise HTTPException(
+            status_code=404, detail=f"Triage item {item_id} not found.")
+    return {"status": "unresolved"}
+
+
 # ── Statistical audit — sysadmin only ─────────────────────────────────────────
 
 @app.post("/api/v1/audit/run")
