@@ -1,0 +1,308 @@
+"""
+tests/test_research_engine.py — coverage for tools/research_engine.py and
+the three /api/v1/research/* endpoints.
+
+The engine's database helpers all fail open without a DB, so the
+freshness-gate logic, the mock-digest path, and the endpoint gating
+exercise without Postgres. The orchestrator's end-to-end path
+(run_research) is exercised through the test-environment mock digest
+that the engine substitutes when ENVIRONMENT=test.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import sys
+from datetime import datetime, timedelta, timezone
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
+os.environ.setdefault("ENVIRONMENT", "test")
+os.environ.setdefault("SECRET_KEY", "test-secret-key-at-least-32-characters-long")
+os.environ.setdefault("MASTER_API_KEY", "test_master_key")
+os.environ.setdefault(
+    "ALLOWED_EMAILS",
+    "ruurdsm@queens.edu,thaob@queens.edu,murdockm@queens.edu,panttserk@queens.edu",
+)
+
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from main import app  # noqa: E402
+from auth import generate_session_token  # noqa: E402
+from tools import research_engine  # noqa: E402
+
+client = TestClient(app)
+
+SYSADMIN = {"X-API-Key": generate_session_token("ruurdsm@queens.edu")}
+TEAM = {"X-API-Key": generate_session_token("thaob@queens.edu")}
+VIEWER = {"X-API-Key": generate_session_token("panttserk@queens.edu")}
+
+
+# ── No-DB fail-open ──────────────────────────────────────────────────────────
+
+class TestFailOpenWithoutDatabase:
+    """Every database accessor must return a safe default rather than
+    raise. Test env points at a no-DB state — these are the read paths
+    the FastAPI handlers exercise."""
+
+    def test_is_research_running_returns_false_without_db(self):
+        assert asyncio.run(research_engine.is_research_running()) is False
+
+    def test_last_research_run_at_returns_none_without_db(self):
+        assert asyncio.run(research_engine.last_research_run_at()) is None
+
+    def test_is_current_returns_false_without_db(self):
+        assert asyncio.run(research_engine._is_current()) is False
+
+    def test_get_latest_digest_returns_none_without_db(self):
+        assert asyncio.run(research_engine.get_latest_digest()) is None
+
+    def test_get_recent_digests_returns_empty_without_db(self):
+        assert asyncio.run(research_engine.get_recent_digests()) == []
+
+
+# ── Freshness gate ──────────────────────────────────────────────────────────
+
+class TestFreshnessGate:
+    """_is_current returns True only when the latest completed run is
+    inside the freshness window. Test by monkeypatching
+    last_research_run_at to return a known time."""
+
+    def test_current_when_under_24_hours(self, monkeypatch):
+        async def _recent():
+            return datetime.now(timezone.utc) - timedelta(hours=12)
+        monkeypatch.setattr(research_engine, "last_research_run_at", _recent)
+        assert asyncio.run(research_engine._is_current()) is True
+
+    def test_stale_when_over_24_hours(self, monkeypatch):
+        async def _old():
+            return datetime.now(timezone.utc) - timedelta(hours=30)
+        monkeypatch.setattr(research_engine, "last_research_run_at", _old)
+        assert asyncio.run(research_engine._is_current()) is False
+
+    def test_stale_when_never_run(self, monkeypatch):
+        async def _none():
+            return None
+        monkeypatch.setattr(research_engine, "last_research_run_at", _none)
+        assert asyncio.run(research_engine._is_current()) is False
+
+    def test_window_hours_overridable(self, monkeypatch):
+        # The freshness window is a parameter; a future tightening to
+        # 12h should propagate without rewriting _is_current's body.
+        async def _ten_hours_ago():
+            return datetime.now(timezone.utc) - timedelta(hours=10)
+        monkeypatch.setattr(research_engine, "last_research_run_at",
+                            _ten_hours_ago)
+        # 24h window → current
+        assert asyncio.run(research_engine._is_current(window_hours=24))
+        # 8h window → stale
+        assert not asyncio.run(research_engine._is_current(window_hours=8))
+
+
+# ── Orchestrator early-return / mock path ───────────────────────────────────
+
+class TestRunResearchSkipPaths:
+    def test_skipped_when_a_run_is_already_in_progress(self, monkeypatch):
+        async def _running():
+            return True
+        monkeypatch.setattr(research_engine, "is_research_running", _running)
+        out = asyncio.run(research_engine.run_research("manual"))
+        assert out == {"status": "skipped", "reason": "already_running"}
+
+    def test_skipped_when_row_create_fails(self, monkeypatch):
+        # No DB → _create_running_row returns None → engine skips with
+        # row_create_failed (the placeholder INSERT is the
+        # concurrency-lock primitive; without it we cannot guarantee a
+        # second concurrent run would not race).
+        out = asyncio.run(research_engine.run_research("manual"))
+        assert out == {"status": "skipped", "reason": "row_create_failed"}
+
+
+class TestRunResearchCompletePath:
+    """End-to-end run with the database helpers stubbed. Exercises:
+      - row_id allocation
+      - mock-digest substitution in the test env
+      - _finalise_row called with the right status + digest
+      - macro_context.refresh_macro_context called after success"""
+
+    def test_complete_path_finalises_with_mock_digest(self, monkeypatch):
+        finalised: dict = {}
+        refreshed: list[int] = []
+
+        async def _running(): return False
+        async def _create(triggered_by): return 42
+        async def _finalise(row_id, *, digest, usage, status):
+            finalised.update({"row_id": row_id, "digest": digest,
+                              "usage": usage, "status": status})
+        async def _refresh():
+            refreshed.append(1)
+
+        monkeypatch.setattr(research_engine, "is_research_running", _running)
+        monkeypatch.setattr(research_engine, "_create_running_row", _create)
+        monkeypatch.setattr(research_engine, "_finalise_row", _finalise)
+        # The post-success refresh imports macro_context lazily, so we
+        # monkeypatch the symbol on the import path the engine takes.
+        from tools import macro_context
+        monkeypatch.setattr(macro_context, "refresh_macro_context", _refresh)
+
+        out = asyncio.run(research_engine.run_research("manual"))
+
+        assert out["status"] == "complete"
+        assert out["row_id"] == 42
+        assert finalised["status"] == "complete"
+        assert finalised["row_id"] == 42
+        # Test env → mock digest with one signal.
+        assert len(finalised["digest"]["key_signals"]) == 1
+        # Post-success refresh fired exactly once.
+        assert refreshed == [1]
+
+    def test_failure_digest_persists_with_failed_status(self, monkeypatch):
+        finalised: dict = {}
+
+        async def _running(): return False
+        async def _create(triggered_by): return 99
+        async def _finalise(row_id, *, digest, usage, status):
+            finalised.update({"status": status, "digest": digest})
+        async def _noop_refresh():
+            return None
+
+        monkeypatch.setattr(research_engine, "is_research_running", _running)
+        monkeypatch.setattr(research_engine, "_create_running_row", _create)
+        monkeypatch.setattr(research_engine, "_finalise_row", _finalise)
+        from tools import macro_context
+        monkeypatch.setattr(macro_context, "refresh_macro_context",
+                            _noop_refresh)
+
+        # Force a failure digest path by monkeypatching the mock to
+        # carry an `error` key — same shape generate_digest would emit
+        # on a real failure.
+        def _fail_mock():
+            return ({
+                "summary_text": "broken",
+                "key_signals": [],
+                "regime_implication": "",
+                "citation_urls": [],
+                "raw_response": "",
+                "error": "stubbed failure",
+            }, {"input_tokens": 0, "output_tokens": 0,
+                "model": "claude-sonnet-4-6", "n_searches": 0, "n_fetches": 0})
+        monkeypatch.setattr(research_engine, "_mock_digest", _fail_mock)
+
+        out = asyncio.run(research_engine.run_research("manual"))
+
+        assert out["status"] == "failed"
+        assert finalised["status"] == "failed"
+        assert finalised["digest"]["error"] == "stubbed failure"
+
+
+# ── Stale-aware variant ─────────────────────────────────────────────────────
+
+class TestRunResearchIfStale:
+    def test_skipped_when_current(self, monkeypatch):
+        async def _current():
+            return True
+        monkeypatch.setattr(research_engine, "_is_current", _current)
+        out = asyncio.run(research_engine.run_research_if_stale())
+        assert out == {"status": "skipped", "reason": "current"}
+
+    def test_runs_when_stale(self, monkeypatch):
+        async def _stale():
+            return False
+        captured: dict = {}
+
+        async def _fake_run(triggered_by):
+            captured["triggered_by"] = triggered_by
+            return {"status": "complete"}
+
+        monkeypatch.setattr(research_engine, "_is_current", _stale)
+        monkeypatch.setattr(research_engine, "run_research", _fake_run)
+        out = asyncio.run(research_engine.run_research_if_stale())
+        assert out["status"] == "complete"
+        assert captured["triggered_by"] == "scheduled"
+
+
+# ── Endpoint gating + shape ─────────────────────────────────────────────────
+
+class TestResearchEndpointGating:
+    def test_latest_admits_any_authenticated_user(self):
+        # The latest digest is dashboard-visible to every authenticated
+        # user — transparency is the point.
+        for headers in (SYSADMIN, TEAM, VIEWER):
+            r = client.get("/api/v1/research/latest", headers=headers)
+            assert r.status_code == 200
+            body = r.json()
+            assert "digest" in body
+            assert "last_completed_at" in body
+
+    def test_latest_rejects_unauthenticated(self):
+        assert client.get("/api/v1/research/latest").status_code == 401
+
+    def test_history_admits_any_authenticated_user(self):
+        for headers in (SYSADMIN, TEAM, VIEWER):
+            r = client.get("/api/v1/research/history", headers=headers)
+            assert r.status_code == 200
+            assert "runs" in r.json()
+
+    def test_history_limit_clamps(self):
+        # limit=0 → 1 (we clamp to >=1); limit=999 → 50 (clamp to max).
+        # Both must respond 200; the gate is "do not 500 on a weird limit".
+        for limit in (0, 1, 50, 999):
+            r = client.get(f"/api/v1/research/history?limit={limit}",
+                           headers=SYSADMIN)
+            assert r.status_code == 200
+
+    def test_run_now_rejects_a_viewer(self):
+        assert client.post(
+            "/api/v1/research/run", headers=VIEWER).status_code == 403
+
+    def test_run_now_rejects_a_team_member(self):
+        # Team membership is not sysadmin — manage_users is the gate.
+        assert client.post(
+            "/api/v1/research/run", headers=TEAM).status_code == 403
+
+    def test_run_now_unauthenticated_is_401(self):
+        assert client.post("/api/v1/research/run").status_code == 401
+
+    def test_run_now_admits_the_sysadmin_and_starts(self, monkeypatch):
+        async def _not_running():
+            return False
+        async def _fake_run(triggered_by):
+            return {"status": "complete"}
+        monkeypatch.setattr(research_engine, "is_research_running",
+                            _not_running)
+        monkeypatch.setattr(research_engine, "run_research", _fake_run)
+        r = client.post("/api/v1/research/run", headers=SYSADMIN)
+        assert r.status_code == 200
+        body = r.json()
+        # Either "running" (we spawned) or "already_running" (a stale
+        # lock somehow exists) — both are acceptable. The 200 is the
+        # contract; the body's status field tells the client what to do.
+        assert body["status"] in ("running", "already_running")
+
+    def test_run_now_refuses_when_a_run_is_already_in_progress(
+        self, monkeypatch,
+    ):
+        async def _running():
+            return True
+        monkeypatch.setattr(research_engine, "is_research_running", _running)
+        r = client.post("/api/v1/research/run", headers=SYSADMIN)
+        assert r.status_code == 200
+        assert r.json()["status"] == "already_running"
+
+
+# ── Mock digest contract — pinned because the engine substitutes it ─────────
+
+class TestMockDigest:
+    def test_carries_every_required_key(self):
+        digest, usage = research_engine._mock_digest()
+        for key in ("summary_text", "key_signals", "regime_implication",
+                    "citation_urls"):
+            assert key in digest
+        for key in ("input_tokens", "output_tokens", "model"):
+            assert key in usage
+
+    def test_signals_have_the_documented_shape(self):
+        digest, _ = research_engine._mock_digest()
+        for sig in digest["key_signals"]:
+            for k in ("category", "signal", "implication", "source_url"):
+                assert k in sig

@@ -93,22 +93,29 @@ def _format_digest_block(digest: dict[str, Any] | None) -> str:
     if summary:
         lines.append(f"Summary: {summary}")
         lines.append("")
-    if signals:
+    # Pre-render the bullet lines so we can emit the "Key signals:"
+    # header ONLY when at least one bullet survived the no-signal-text
+    # guard. Otherwise the agent reads a header with no bullets, which
+    # is both ugly and misleading (it looks like signals were promised
+    # but lost in transit).
+    signal_lines: list[str] = []
+    for sig in signals:
+        if not isinstance(sig, dict):
+            continue
+        cat = str(sig.get("category") or "other")
+        stext = str(sig.get("signal") or "").strip()
+        imp = str(sig.get("implication") or "").strip()
+        url = str(sig.get("source_url") or "").strip()
+        if not stext:
+            continue
+        signal_lines.append(f"  - [{cat}] {stext}")
+        if imp:
+            signal_lines.append(f"      Implication: {imp}")
+        if url:
+            signal_lines.append(f"      Source: {url}")
+    if signal_lines:
         lines.append("Key signals:")
-        for sig in signals:
-            if not isinstance(sig, dict):
-                continue
-            cat = str(sig.get("category") or "other")
-            stext = str(sig.get("signal") or "").strip()
-            imp = str(sig.get("implication") or "").strip()
-            url = str(sig.get("source_url") or "").strip()
-            if not stext:
-                continue
-            lines.append(f"  - [{cat}] {stext}")
-            if imp:
-                lines.append(f"      Implication: {imp}")
-            if url:
-                lines.append(f"      Source: {url}")
+        lines.extend(signal_lines)
         lines.append("")
     if regime:
         lines.append(f"Regime read: {regime}")

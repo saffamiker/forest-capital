@@ -5751,6 +5751,188 @@ keeps the backlog converging toward zero rather than oscillating.
 
 
 ─────────────────────────────────────────────────────────────────────────────
+MACRO MARKET RESEARCH AGENT (migration 024, May 21 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The historical backtest covers 2002-2025. Without a research layer
+the council reasons only against history. The macro market research
+agent (FEATURE 2) bridges the gap: it runs on a daily cadence,
+identifies the last 7 days of macroeconomic events affecting equity /
+IG / HY markets, and produces a structured digest that the council
+and academic_review prompts inject as a CURRENT MACRO CONDITIONS
+block. The dashboard surfaces the same digest so the team sees what
+the agents are reasoning against — and so the FNA 670 panel can
+click through every cited source URL and verify it.
+
+THREE LAYERS — agent, engine, injection — plus the frontend widget.
+
+LAYER 1 — agents/research_agent.py (Sonnet + web_search + web_fetch).
+  generate_digest() returns (digest, usage). Synchronous wrapper
+  around the Anthropic SDK with the server-side web_search_20250305
+  tool (max 5 uses) and web_fetch_20250910 (max 4 uses). The system
+  prompt covers eight categories (monetary_policy, inflation,
+  growth, rates, credit, volatility, geopolitical, other) over the
+  last 7 days only, with 0-2 signals per category — "never invent
+  a signal to fill a slot."
+
+  CITATION INTEGRITY GATE.
+  _filter_to_verified_signals strips every signal whose source_url
+  is NOT in the set web_search returned during the call. A
+  fabricated citation cannot survive — the model can write any URL
+  it wants in its JSON output, but the filter requires that URL
+  came from a real search result. A signal without a verified URL
+  is unfalsifiable and dropped entirely, with a
+  research_signal_dropped_unverified_url log line.
+
+  FAIL-OPEN. Any failure path (web_search outage, SDK error, empty
+  parse, unparseable JSON) returns a defaulted shape carrying an
+  `error` key. The engine layer maps `error` truthy onto
+  status='failed' on the persisted row.
+
+LAYER 2 — tools/research_engine.py (orchestration + persistence).
+  Mirrors triage_engine / audit_engine conventions —
+  is_research_running() concurrency lock, _create_running_row +
+  _finalise_row persistence helpers, run_research(triggered_by)
+  end-to-end orchestrator, trigger_research_async(reason) for
+  fire-and-forget loop-or-thread spawn.
+
+  TIME-BASED FRESHNESS (NOT data-hash). _is_current(window_hours=24)
+  is the freshness gate. Unlike the chart snapshots and audit engine
+  which are data-hash-gated, today's macro news is independent of
+  the historical data hash. The default window is 24 hours;
+  run_research_if_stale skips when current. Manual sysadmin runs
+  bypass the gate via the /research/run endpoint.
+
+  TEST ENV substitutes a deterministic mock digest
+  (research_engine._mock_digest) so pytest never hits Anthropic.
+
+  POST-SUCCESS CACHE REFRESH. run_research calls
+  macro_context.refresh_macro_context at the end so a fresh digest
+  flows into agent prompts within one tick of land.
+
+LAYER 3 — tools/macro_context.py (read-and-inject).
+  Mirrors tools/academic_context structure exactly:
+    get_macro_context()       sync, returns the cached block (empty
+                              until refresh has run)
+    inject_macro_context(p)   appends the block to a system prompt;
+                              a no-op on an empty cache so every
+                              agent can call it unconditionally
+    refresh_macro_context()   async — re-reads from the engine and
+                              updates the in-memory cache. Called
+                              from the lifespan startup hook AND
+                              after every successful research run.
+
+  Context block shape — what an agent sees:
+    === CURRENT MACRO CONDITIONS (last 7 days as of <timestamp>) ===
+    Summary: <2-3 sentence overview>
+
+    Key signals:
+      - [monetary_policy] Fed minutes signalled patience on cuts.
+          Implication: less near-term IG duration tailwind.
+          Source: https://federalreserve.gov/...
+      - [inflation]       CPI print 3.1% vs 3.2% expected.
+          Implication: dovish for both equity and IG.
+          Source: https://bls.gov/...
+      ...
+
+    Regime read: <single paragraph regime read>
+
+    Reason from these signals when relevant. Do NOT invent macro
+    conditions absent from this block — historical reasoning is
+    your default for anything not captured here.
+
+  HEADER GUARD. The "Key signals:" header emits ONLY when at least
+  one bullet survived the no-signal-text filter (a degenerate
+  signal entry like {category: "rates", signal: ""} is dropped and
+  must NOT produce an orphaned section header).
+
+INJECTION POINTS:
+  agents/base.py call_claude — system prompt wrapped as
+    _with_macro_context(_with_academic_context(system_prompt)).
+    Order is intentional: academic rubric is project-stable and
+    appears first; macro context is volatile and appears closer to
+    the user message so the model frames against latest conditions.
+    Every Anthropic agent (equity / FI / risk / quant / CIO / QA /
+    academic writer) sees both blocks.
+  agents/academic_advisor.py — manual injection alongside the
+    existing academic-context call. The advisor builds its own
+    web_search SDK call so does not go through call_claude.
+  agents/contrarian_analyst.py (Grok) — _academic_ctx helper
+    extended to inject BOTH context blocks, each fail-open
+    independently so one failure never silences the other.
+  agents/independent_analyst.py (Gemini) — manual injection in
+    deliberate(), chained after the existing academic injection.
+  DELIBERATELY NOT WIRED — agents/explainer_agent.py. Its outputs
+  are definitional (what is a Sharpe ratio, what is FDR correction)
+  and should be stable across days; macro context would drift
+  glossary-class explanations toward "given today's environment..."
+  which would confuse users hovering an InfoIcon.
+
+EVALUATOR GUARD. The harness's _evaluate() inside agents/harness.py
+calls call_claude without the visual_context kwarg (the FEATURE 1
+chart-vision guard); the macro context flows through call_claude's
+`system` parameter so EVALUATORS DO SEE IT. That is intentional —
+the evaluator is scoring whether the response is grounded against
+the data the agent reasoned from. Hiding the macro block from the
+evaluator would let an agent invent macro context and score well.
+
+MIGRATION 024 — macro_research_digests schema:
+  id, generated_at, triggered_by (startup | scheduled | manual),
+  status (running | complete | failed), summary_text,
+  regime_implication, key_signals JSONB, citation_urls JSONB,
+  model, raw_response (for audit), error, metadata JSONB. Single
+  index on generated_at desc. Changelog entry 43.
+
+ENDPOINTS (main.py):
+  GET  /api/v1/research/latest   — latest COMPLETED digest plus
+       last_completed_at. require_auth — every authenticated user
+       reads (transparency).
+  GET  /api/v1/research/history?limit=N — N most recent runs across
+       every status. require_auth.
+  POST /api/v1/research/run      — manage_users gated. Forces a
+       fresh run bypassing the 24h freshness gate. Returns
+       immediately with status: 'running'; the frontend polls
+       /research/latest to pick up the new digest. A concurrent
+       run returns status: 'already_running'.
+
+LIFESPAN STARTUP HOOK in main.py:
+  1. trigger_research_async("startup") fires the engine in the
+     background — produces a fresh digest in minutes if none is
+     current.
+  2. refresh_macro_context() warm-reads whatever digest already
+     exists in the DB into the cache so the FIRST agent call
+     after restart sees the previous deploy's digest. The fresh
+     one from step 1 lands later, and run_research's post-success
+     refresh updates the cache then.
+  Both hooks fail-open — a research failure on startup never
+  blocks the rest of the boot sequence.
+
+FRONTEND — frontend/src/components/MacroResearchPanel.tsx.
+  Slot above the summary tiles on the dashboard. Renders summary +
+  signals (categorised pill + signal text + implication + source
+  link with an ExternalLink icon) + regime read + generated-at
+  timestamp. A "(stale)" warning appears when the digest is more
+  than 24h old. Run-now button gated to manage_users via TeamGate
+  with showDisabled=false (viewers see the digest but not the
+  trigger). Polling: a Run-now click polls /research/latest three
+  times at 30s intervals because a real run takes 30-90s.
+
+  Four states (every test pinned):
+    loading                  spinner, "Loading current macro conditions..."
+    empty (no digest yet)    "first research run produces one within
+                             a few minutes" — the cold-deploy path
+    failed fetch             error message, the panel's prior data
+                             stays intact (no flash of blank)
+    normal                   the full digest renders
+
+COST PROFILE. A research run consumes roughly 5 web_search uses + 4
+web_fetch uses + ~3000-5000 Sonnet output tokens. Estimate ~$0.20
+per run; one run per day → ~$6/month. The 24h freshness gate plus
+the startup-only auto-trigger keeps this bounded. Manual runs from
+the dashboard burn the same budget but are sysadmin-only.
+
+
+─────────────────────────────────────────────────────────────────────────────
 STATISTICAL AUDIT SYSTEM (migration 017, May 17 2026)
 ─────────────────────────────────────────────────────────────────────────────
 

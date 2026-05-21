@@ -180,7 +180,7 @@ export default function MacroResearchPanel() {
             }`}
           />
         </button>
-        <TeamGate permission="manage_users" block={false}>
+        <TeamGate permission="manage_users" showDisabled={false}>
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); void runNow() }}
