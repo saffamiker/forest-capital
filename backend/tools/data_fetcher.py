@@ -1683,6 +1683,12 @@ def extend_market_data(audit_reason: str = "data_ingestion") -> dict:
             trigger_audit_async(audit_reason)
         except Exception as exc:  # noqa: BLE001
             log.warning("extend_audit_trigger_failed", error=str(exc))
+        # Chart snapshots — re-render so the agents see the new month.
+        try:
+            from tools.chart_snapshots import trigger_chart_snapshot_async
+            trigger_chart_snapshot_async()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("extend_chart_snapshot_failed", error=str(exc))
     else:
         # No new month — no data change, so no audit is triggered. Logged
         # for Render-log visibility that a redeploy fired no Opus call.
@@ -2285,6 +2291,12 @@ def _compute_full_history() -> dict:
                 trigger_audit_async("data_ingestion")
             except Exception as exc:  # noqa: BLE001
                 log.warning("auto_audit_hook_failed", error=str(exc))
+            # Chart snapshots — same rationale as the post-persist hook.
+            try:
+                from tools.chart_snapshots import trigger_chart_snapshot_async
+                trigger_chart_snapshot_async()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("chart_snapshot_hook_failed", error=str(exc))
         result = _read_history_from_db()
         log.info("get_full_history_complete", monthly_rows=row_count, source="db_cache")
         return result
@@ -2401,6 +2413,16 @@ def _persist_to_db(
             trigger_audit_async("data_ingestion")
         except Exception as exc:  # noqa: BLE001
             log.warning("auto_audit_hook_failed", error=str(exc))
+
+        # Chart snapshots — re-render every AVAILABLE_CHARTS PNG so the
+        # agents that reason visually (council, academic writer,
+        # academic-review arbiter) always see the current data. Same
+        # background-task + fail-open contract as the audit hook above.
+        try:
+            from tools.chart_snapshots import trigger_chart_snapshot_async
+            trigger_chart_snapshot_async()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("chart_snapshot_hook_failed", error=str(exc))
 
 
 async def _async_persist_all(
