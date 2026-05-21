@@ -43,7 +43,21 @@ from tools.chart_vision import (
 PEER_MODEL = SONNET_MODEL      # claude-sonnet-4-6
 ARBITER_MODEL = OPUS_MODEL     # claude-opus-4-7  (Opus for the arbiter step only)
 PEER_MAX_TOKENS = 800          # ~400-word cap with headroom
-ARBITER_MAX_TOKENS = 2000
+# 4000 token cap so the arbiter has room for ALL five rubric sections
+# plus the two top-level summary lines plus the prefatory framing.
+# The previous 2000-token cap was tight: the verbose Academic Rigour /
+# PM Insight framing burned ~600 tokens before Section 1, leaving
+# ~1400 for the five sections + 4 callouts (visual evidence, central
+# finding, unresolved markers, external citations). Truncation
+# routinely lopped off Section 5 — UAT #128 / #125 reported "Overall
+# Readiness Assessment absent" and "only 4 sections returned"; both
+# were the same truncation symptom. The bigger budget plus the
+# tightened evaluator scoring (all_sections_present rubric in
+# evaluator_prompts.py — missing sections now score below threshold
+# so the harness retries) and the post-generation Section 5 fallback
+# (assemble_section_5_fallback below) together guarantee the verdict
+# always carries a Section 5 by the time it streams.
+ARBITER_MAX_TOKENS = 4000
 
 
 def _academic_review_visual_context() -> list[dict] | None:
@@ -892,6 +906,81 @@ def chunk_arbiter_text(text: str) -> list[str]:
     return [" ".join(words[i:i + 12]) + " " for i in range(0, len(words), 12)]
 
 
+def _verdict_has_section_5(text: str, script_review: bool) -> bool:
+    """
+    True when the verdict carries the Section 5 heading the active rubric
+    requires. Both rubrics end with a Section 5 — the written rubric
+    calls it "Overall Academic Readiness" and the script rubric "Overall
+    Delivery Readiness". We check the heading number AND the rubric-
+    specific title so a verdict that fakes a Section 5 with an
+    off-rubric title still trips the fallback.
+    """
+    if "### 5." not in text:
+        return False
+    expected_title = ("Overall Delivery Readiness" if script_review
+                      else "Overall Academic Readiness")
+    return expected_title.lower() in text.lower()
+
+
+def _assemble_section_5_fallback(
+    text: str, peer_responses: dict[str, str], script_review: bool,
+) -> str:
+    """
+    Defence-in-depth: when the harness returned a verdict without
+    Section 5, append a substantive fallback so the rendered output
+    always carries it. The fallback aggregates the four other section
+    ratings into a balanced overall paragraph rather than emitting a
+    placeholder — UAT #128/#125 root cause was Section 5 truncation;
+    the fallback guarantees Section 5 always renders even if the model
+    fails to write one.
+
+    The fallback rating is derived from the present sections:
+      - Any "Needs Work" → "Needs Work"
+      - Otherwise any "Developing" → "Developing"  (or "Needs Work"
+        for the script-review rating scale which uses Incomplete)
+      - Otherwise "Strong"
+    """
+    import re
+    # Collect every "**Rating:** X" line that DOES appear.
+    ratings = re.findall(
+        r"\*\*Rating:\*\*\s*(Strong|Developing|Needs Work|Incomplete)",
+        text, re.IGNORECASE)
+    norm = [r.strip().title() for r in ratings]
+    if script_review:
+        # Script rubric uses Strong / Needs Work / Incomplete.
+        if any(r == "Incomplete" for r in norm):
+            rating = "Incomplete"
+        elif any(r == "Needs Work" for r in norm):
+            rating = "Needs Work"
+        else:
+            rating = "Strong"
+    else:
+        if any(r == "Needs Work" for r in norm):
+            rating = "Needs Work"
+        elif any(r == "Developing" for r in norm):
+            rating = "Developing"
+        else:
+            rating = "Strong"
+
+    title = ("Overall Delivery Readiness" if script_review
+             else "Overall Academic Readiness")
+    n_peers = len(peer_responses)
+    return (
+        f"{text.rstrip()}\n\n"
+        f"### 5. {title}\n"
+        f"**Rating:** {rating}\n"
+        f"This overall rating is aggregated from the four section "
+        f"verdicts above (a generated paragraph was not returned and "
+        f"this fallback was assembled). The submission was reviewed "
+        f"by {n_peers} peer agents whose detailed notes are available "
+        f"under the Peer Responses accordion below; the section "
+        f"ratings reflect the consensus of those reviews. Address the "
+        f"Priority Areas in section 4 in order of impact, and revisit "
+        f"every section marked below Strong before the next "
+        f"submission.\n"
+    )
+
+
 def run_arbiter_with_harness(
     context_block: str,
     peer_responses: dict[str, str],
@@ -946,6 +1035,19 @@ def run_arbiter_with_harness(
             context=context_block[:6000],
             agent_id="academic_advisor",
         )
+        # Defence-in-depth: even after the tightened evaluator + the
+        # 4000-token budget, if Section 5 is somehow still missing,
+        # append a fallback assembled from the four present section
+        # ratings. The user sees five sections every time; UAT
+        # #128/#125 cannot reappear.
+        if not _verdict_has_section_5(result.response, script_review):
+            log.warning(
+                "academic_review_section_5_fallback_applied",
+                arbiter_chars=len(result.response),
+                attempts=result.attempts,
+            )
+            return _assemble_section_5_fallback(
+                result.response, peer_responses, script_review)
         return result.response
     except Exception as exc:  # noqa: BLE001
         log.error("academic_review_arbiter_failed", error=str(exc))

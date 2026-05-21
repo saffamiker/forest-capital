@@ -244,3 +244,139 @@ class TestScriptRubric:
                          headers=SESSION_HEADERS)
         assert r.status_code == 200
         assert captured.get("script_review") is False
+
+
+# ── Section 5 fallback (UAT #128 / #125) ─────────────────────────────────────
+
+
+class TestSectionFiveFallback:
+    """UAT #128 reported "Overall Readiness Assessment section absent",
+    UAT #125 reported "Only 4 sections returned" — both were the same
+    truncation symptom: the arbiter's 2000-token cap (now 4000) clipped
+    Section 5, and the evaluator's lenient scoring (8/10 for 4 sections)
+    cleared the 7.0 threshold so the harness never retried. This block
+    pins the three defences:
+      1. Detection — _verdict_has_section_5 spots both the missing
+         heading and an off-rubric title.
+      2. Fallback — _assemble_section_5_fallback aggregates a rating
+         from the present section verdicts so the rendered output
+         always carries a Section 5 with substantive content.
+      3. Evaluator scoring — the tightened all_sections_present rubric
+         pushes a 4-section verdict below 7.0 so the harness retries
+         instead of accepting it."""
+
+    def test_detector_catches_completely_missing_section_5(self):
+        from agents.academic_review import _verdict_has_section_5
+        # Verdict with sections 1-4 only — the canonical UAT #128 shape.
+        verdict = (
+            "### 1. Data Sufficiency and Methodology\n**Rating:** Strong\n…\n"
+            "### 2. Requirements and Rubric Alignment\n**Rating:** Strong\n…\n"
+            "### 3. Deliverable Quality\n**Rating:** Developing\n…\n"
+            "### 4. Priority Areas for Further Investigation\n"
+            "**Rating:** Developing\n…\n"
+        )
+        assert _verdict_has_section_5(verdict, script_review=False) is False
+
+    def test_detector_catches_off_rubric_section_5(self):
+        # A fake Section 5 with the wrong title (the model hallucinated
+        # a different heading) — still flagged as missing.
+        from agents.academic_review import _verdict_has_section_5
+        verdict = (
+            "### 1. Data Sufficiency and Methodology\n**Rating:** Strong\n"
+            "### 5. Some Other Heading\n**Rating:** Developing\n"
+        )
+        assert _verdict_has_section_5(verdict, script_review=False) is False
+
+    def test_detector_accepts_a_well_formed_section_5(self):
+        from agents.academic_review import _verdict_has_section_5
+        verdict = (
+            "### 1. Data Sufficiency and Methodology\n**Rating:** Strong\n"
+            "### 5. Overall Academic Readiness\n**Rating:** Strong\n"
+        )
+        assert _verdict_has_section_5(verdict, script_review=False) is True
+
+    def test_detector_uses_script_rubric_title_when_script_review(self):
+        from agents.academic_review import _verdict_has_section_5
+        # Script rubric expects "Overall Delivery Readiness".
+        delivery = "### 5. Overall Delivery Readiness\n**Rating:** Strong\n"
+        academic = "### 5. Overall Academic Readiness\n**Rating:** Strong\n"
+        assert _verdict_has_section_5(delivery, script_review=True) is True
+        # An "Academic Readiness" Section 5 on a script review is the
+        # wrong title for that rubric — detector trips the fallback.
+        assert _verdict_has_section_5(academic, script_review=True) is False
+
+    def test_fallback_appends_section_5_with_aggregated_rating(self):
+        from agents.academic_review import _assemble_section_5_fallback
+        # 4-section verdict with a Needs Work in section 3.
+        verdict = (
+            "### 1. Data Sufficiency and Methodology\n**Rating:** Strong\n"
+            "### 2. Requirements and Rubric Alignment\n**Rating:** Developing\n"
+            "### 3. Deliverable Quality\n**Rating:** Needs Work\n"
+            "### 4. Priority Areas for Further Investigation\n"
+            "**Rating:** Developing\n"
+        )
+        peers = {"equity_analyst": "x", "fixed_income_analyst": "x"}
+        out = _assemble_section_5_fallback(
+            verdict, peers, script_review=False)
+        # Section 5 added.
+        assert "### 5. Overall Academic Readiness" in out
+        # Aggregated rating reflects the worst — Needs Work present.
+        assert "**Rating:** Needs Work" in out
+        # Peer count surfaces in the body so the fallback reads
+        # substantive, not placeholder.
+        assert "2 peer agents" in out
+
+    def test_fallback_aggregates_developing_when_no_needs_work(self):
+        from agents.academic_review import _assemble_section_5_fallback
+        verdict = (
+            "### 1. Data Sufficiency and Methodology\n**Rating:** Strong\n"
+            "### 2. Requirements and Rubric Alignment\n**Rating:** Developing\n"
+            "### 3. Deliverable Quality\n**Rating:** Strong\n"
+            "### 4. Priority Areas for Further Investigation\n"
+            "**Rating:** Strong\n"
+        )
+        out = _assemble_section_5_fallback(verdict, {}, script_review=False)
+        # Any Developing present → aggregate Developing (not Strong).
+        assert "### 5. Overall Academic Readiness" in out
+        # The fallback paragraph carries the aggregated rating.
+        section_5_start = out.index("### 5.")
+        assert "**Rating:** Developing" in out[section_5_start:]
+
+    def test_fallback_uses_script_rubric_rating_scale(self):
+        from agents.academic_review import _assemble_section_5_fallback
+        verdict = (
+            "### 1. Argument Coherence Across Slides\n**Rating:** Strong\n"
+            "### 2. Clarity for a Mixed Faculty\n**Rating:** Needs Work\n"
+            "### 3. Coverage of Key Findings\n**Rating:** Strong\n"
+            "### 4. Speaker Differentiation and Voice\n**Rating:** Strong\n"
+        )
+        out = _assemble_section_5_fallback(verdict, {}, script_review=True)
+        # Script rubric uses Overall Delivery Readiness.
+        assert "### 5. Overall Delivery Readiness" in out
+        section_5_start = out.index("### 5.")
+        # Any Needs Work present → aggregate Needs Work (no
+        # Incomplete here so it doesn't escalate further).
+        assert "**Rating:** Needs Work" in out[section_5_start:]
+
+    def test_evaluator_prompt_penalises_missing_sections_strictly(self):
+        # The user-visible fix to the lenient evaluator. The previous
+        # rubric scored 4 sections at 8/10; the tightened rubric scores
+        # 4 sections at 3/10 and 3-or-fewer at 0/10. Verify the prompt
+        # carries the new scale so a future edit does not regress it.
+        from agents.evaluator_prompts import (
+            academic_review_arbiter_evaluator_prompt,
+        )
+        prompt = academic_review_arbiter_evaluator_prompt()
+        # The new scale wording is present.
+        assert "5 sections present scores 10" in prompt
+        assert "4 sections scores 3" in prompt
+        assert "3 or fewer scores 0" in prompt
+        # The fix references UAT #128/#125 so a future maintainer who
+        # tries to relax the rubric reads the historical context first.
+        assert "#128" in prompt and "#125" in prompt
+
+    def test_arbiter_max_tokens_increased_for_full_five_sections(self):
+        # The previous 2000-token cap was the truncation root cause.
+        # 4000 gives the verdict comfortable headroom.
+        from agents.academic_review import ARBITER_MAX_TOKENS
+        assert ARBITER_MAX_TOKENS >= 4000
