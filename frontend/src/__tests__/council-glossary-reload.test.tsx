@@ -11,6 +11,12 @@
  * cancellation — which this file pins down with a spy stub on
  * useGlossaryStore.loadTerms. A separate section exercises the REAL
  * loadTerms to cover the debounce + force semantics directly.
+ *
+ * The council store consumes a Server-Sent Events stream (the
+ * synchronous JSON path was retired in May 2026 to fix Render gateway
+ * 502s — see councilStore.ts header). These tests mock global.fetch
+ * with a fake SSE Response so the runQuery path runs end-to-end
+ * without an axios stub.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import axios from 'axios'
@@ -28,14 +34,50 @@ const mockedAxios = axios as unknown as {
 // test replaces it with a spy.
 const realLoadTerms = useGlossaryStore.getState().loadTerms
 
-function councilResponse(query: string) {
-  return {
-    data: {
-      query, messages: [], final_recommendation: 'rec',
-      consensus_reached: true,
-      significant_strategies: ['REGIME_SWITCHING'],
+/**
+ * Builds a fake Response with a ReadableStream body that emits one or
+ * more SSE frames separated by `\n\n`. Mirrors the wire format the
+ * backend _sse helper writes — `data: {json}\n\n` per frame, with a
+ * `data: [DONE]\n\n` sentinel at the end.
+ *
+ * Used to mock global.fetch so runQuery exercises the SSE reader
+ * branch end-to-end without spinning up a real server.
+ */
+function sseResponse(frames: Array<Record<string, unknown> | '[DONE]'>): Response {
+  const encoder = new TextEncoder()
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const frame of frames) {
+        const payload = frame === '[DONE]' ? '[DONE]' : JSON.stringify(frame)
+        controller.enqueue(encoder.encode(`data: ${payload}\n\n`))
+      }
+      controller.close()
     },
-  }
+  })
+  return new Response(body, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  })
+}
+
+/** A complete, well-formed SSE event sequence for a successful council
+ *  run that carries `query` in the council_complete payload. */
+function successfulSseFrames(query: string): Array<Record<string, unknown> | '[DONE]'> {
+  return [
+    { type: 'council_started', query },
+    {
+      type: 'council_complete',
+      result: {
+        query,
+        messages: [],
+        final_recommendation: 'rec',
+        consensus_reached: true,
+        mode: 'live',
+        significant_strategies: ['REGIME_SWITCHING'],
+      },
+    },
+    '[DONE]',
+  ]
 }
 
 function loadTermsSpy() {
@@ -65,7 +107,8 @@ afterEach(() => {
 describe('council completion → glossary reload', () => {
   it('calls loadTerms with the completed council output on success',
     async () => {
-      mockedAxios.post = vi.fn().mockResolvedValue(councilResponse('q1'))
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+        sseResponse(successfulSseFrames('q1'))))
       await useCouncilStore.getState().runQuery('q1')
       const loadTerms = loadTermsSpy()
       expect(loadTerms).toHaveBeenCalledTimes(1)
@@ -80,25 +123,32 @@ describe('council completion → glossary reload', () => {
       // the store's guards. It just calls loadTerms() with the new
       // output and the store's debounce takes over. A test exercising
       // multiple rapid council completions cannot rely on a force flag.
-      mockedAxios.post = vi.fn().mockResolvedValue(councilResponse('q1'))
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+        sseResponse(successfulSseFrames('q1'))))
       await useCouncilStore.getState().runQuery('q1')
       const loadTerms = loadTermsSpy()
       // The second argument should be undefined (no options object).
       expect(loadTerms.mock.calls[0][1]).toBeUndefined()
     })
 
-  it('does not reload the glossary on a council error', async () => {
-    mockedAxios.isAxiosError = () => true
-    mockedAxios.post = vi.fn().mockRejectedValue(
-      Object.assign(new Error('500'),
-        { response: { status: 500, data: {} } }))
+  it('does not reload the glossary on a council_error frame', async () => {
+    // The SSE error path yields a council_error frame instead of
+    // council_complete. The store must NOT call loadTerms in that case.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(sseResponse([
+      { type: 'council_started', query: 'q1' },
+      { type: 'council_error', message: 'Council query failed.' },
+      '[DONE]',
+    ])))
     await useCouncilStore.getState().runQuery('q1')
     expect(loadTermsSpy()).not.toHaveBeenCalled()
   })
 
   it('does not reload the glossary on a cancelled council query', async () => {
-    mockedAxios.isCancel = () => true
-    mockedAxios.post = vi.fn().mockRejectedValue(new Error('canceled'))
+    // An AbortError surfaces when the user clicks Cancel. The fetch
+    // throws before council_complete fires, so loadTerms is never
+    // called.
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(
+      new DOMException('aborted', 'AbortError')))
     await useCouncilStore.getState().runQuery('q1')
     expect(loadTermsSpy()).not.toHaveBeenCalled()
   })
@@ -108,9 +158,9 @@ describe('council completion → glossary reload', () => {
       // Note: each call goes through the spy stub here, so both fire
       // unconditionally. The REAL loadTerms (tested below) would
       // debounce a second call inside the 60-second window.
-      mockedAxios.post = vi.fn()
-        .mockResolvedValueOnce(councilResponse('q1'))
-        .mockResolvedValueOnce(councilResponse('q2'))
+      vi.stubGlobal('fetch', vi.fn()
+        .mockResolvedValueOnce(sseResponse(successfulSseFrames('q1')))
+        .mockResolvedValueOnce(sseResponse(successfulSseFrames('q2'))))
       await useCouncilStore.getState().runQuery('q1')
       await useCouncilStore.getState().runQuery('q2')
       const loadTerms = loadTermsSpy()
