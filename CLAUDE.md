@@ -5933,6 +5933,163 @@ the dashboard burn the same budget but are sysadmin-only.
 
 
 ─────────────────────────────────────────────────────────────────────────────
+FAILURE RESOLUTION WORKFLOW (migration 026, May 22 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+Closes the loop between a code fix and the failure report it
+addresses. When a PR with a `Resolves failure #N` reference merges,
+a GitHub webhook queues a `pr_suggestions` row keyed to that
+failure. The sysadmin sees a banner on Settings → Test
+Administration → Failure Reports, opens the review modal, fills in
+the root cause + remediation, and approves — the approval writes
+the structured resolution onto the failure row via
+`resolve_failure` and fires the tester's retest notification.
+
+WHY:
+
+The resolution gate (migration 025) already lets a sysadmin attach
+a fix reference to a failure manually via the Mark Resolved modal.
+That manual step is fine for a back-fill but fails the loop
+otherwise: a fix lands, the PR merges, and the failure stays Open
+until someone remembers to open the modal and type the reference.
+The PR-driven workflow removes the "remember to" step.
+
+THE CONVENTION (this is the contract testers and PR authors share):
+
+When opening a PR that addresses one or more failure reports
+visible in Settings → Failure Reports, include the failure IDs in
+the PR body using one of these formats (case-insensitive):
+
+    Resolves failure #N
+    Fixes failure #N
+    Addresses failure #N
+    Closes failure #N
+    failure #N
+
+Each `#N` is the failure-report ID from the ID column in the
+Failure Reports table. Multiple references in one PR are fine —
+the webhook handles every match. References in commit messages are
+ALSO scanned (the webhook fetches the PR's commits via the GitHub
+API), so a commit with "Fixes failure #42" in its message
+qualifies even if the PR body forgot.
+
+Without one of these references the failure stays Open even after
+the fix lands — there's nothing tying the merged PR to the report.
+
+THE WEBHOOK:
+
+  Endpoint: `POST /api/v1/activity/commits/webhook`
+  Events:   Pushes + Pull requests
+  Secret:   `GITHUB_WEBHOOK_SECRET` (already in `.env.example` and
+            in production)
+  Content:  application/json
+
+The same endpoint serves both the Team Activity commit sync (push
+events) and the Suggested Resolutions workflow (pull_request
+events) so the repo only needs one webhook registration. To register
+in GitHub:
+
+  Repo → Settings → Webhooks → Add webhook
+    Payload URL:  https://forest-capital.onrender.com/api/v1/activity/commits/webhook
+    Content type: application/json
+    Secret:       <value from GITHUB_WEBHOOK_SECRET>
+    Events:       "Let me select individual events" → check
+                  "Pushes" AND "Pull requests"
+
+Without the registration, no suggestions fire automatically; the
+Mark Resolved modal still works manually.
+
+REFERENCE-PARSE SEMANTICS (tools/pr_suggestion_scanner.py):
+
+  - The five formats are case-insensitive. "RESOLVES Failure #42"
+    works; "resolved a failure" doesn't (that's not the convention).
+  - Each unique failure id matched on the PR (across body + commit
+    messages) gets one pr_suggestions row.
+  - The matched_on field captures the exact line that triggered
+    the match — surfaced verbatim in the review modal under
+    "Matched on: …" so the reviewer sees why the link was made.
+  - Webhook idempotency — UNIQUE constraint on (failure_report_id,
+    pr_number) + `ON CONFLICT DO NOTHING`. GitHub re-delivers
+    events on transient failures; a redelivery is a silent no-op.
+  - A reference to a non-existent failure id (typo, future-tense
+    reference, ID from another project) is skipped silently with a
+    `pr_suggestion_skipped_missing_failure` log line.
+  - A reference to an already-resolved failure is skipped with
+    `pr_suggestion_skipped_already_resolved`. No duplicate
+    resolutions, no overwrite of an existing resolution.
+
+REVIEW MODAL — TWO ENTRY POINTS:
+
+  1. Banner Review Now → full queue (every pending suggestion).
+     Cards paginated with Prev / Next; "1 of N" indicator in the
+     header.
+  2. Row badge "Fix available — review" → modal scoped to that
+     failure's suggestion(s) only.
+
+Each card pre-populates:
+  resolution_type  = code_fix_deployed   (changeable)
+  fix_reference    = #{pr_number}        (editable; reviewer can
+                                          paste a different SHA/PR
+                                          if the convention's
+                                          inference is wrong)
+  root_cause       = ''  (REQUIRED — modal blocks Confirm until filled)
+  remediation_note = ''  (REQUIRED when type is code_fix_deployed)
+
+Confirm Resolution → POST `/api/v1/testing/suggestions/{id}/approve`.
+The approve flow:
+
+  1. Calls `resolve_failure` with the structured resolution
+     metadata (type, root_cause as resolution_note,
+     #{pr_number} as fix_reference, remediation_note). Same code
+     path the manual Mark Resolved modal uses.
+  2. The step "resets to pending" by virtue of `resolved_at` being
+     set (the existing `get_unseen` carve-out from migration 025 —
+     wont_fix is the only resolution type that keeps the step
+     attested; this flow uses code_fix_deployed so the tester is
+     prompted to re-test).
+  3. Tester's "🔁 Fix ready" pill fires on next login via the
+     derived `resolved_failures` notification.
+  4. Auto-dismisses any OTHER pending suggestions for the same
+     failure_id (decision: cleaner queue; the audit trail of the
+     cascade is captured in dismiss_reason on each cascaded row).
+
+Dismiss Suggestion → POST `/suggestions/{id}/dismiss`. Marks the
+suggestion dismissed; the failure stays Open. Optional
+`dismiss_reason` field captures why.
+
+ALL ENDPOINTS sysadmin-gated via `require_sysadmin` (=
+`require_permission("manage_users")`). Viewers and team members
+never see the banner or the badges; the GET endpoints return 403.
+
+THE BACK-FILL SCRIPT — backend/scripts/backfill_council_resolutions.py:
+
+A one-off operator script ships the structured resolution onto
+existing failure rows that PR #65 fixed BEFORE this workflow shipped.
+Same code path as the approve flow (calls `resolve_failure`
+directly); used because no webhook event exists for a PR that
+already merged. Future fixes use the webhook path, not the script.
+
+The script template can be re-used for any future "we fixed it
+before the convention existed" back-fill — duplicate the file,
+swap the step_ids + resolution payload, run on the Render shell.
+
+WHERE THE EVIDENCE LIVES AFTER APPROVAL:
+
+  - test_results.resolution_type / fix_reference / remediation_note
+    — the durable record. Surfaced in Failure Reports row expand,
+    Issue Tracker rows, retest notifications.
+  - pr_suggestions row — state=approved, reviewed_by + reviewed_at
+    stamped. Stays in the table for audit but invisible to the UI
+    (which only renders pending_review).
+
+If a suggestion is dismissed in error (or auto-dismissed by a
+sibling approve incorrectly), there's no "un-dismiss" button —
+the workflow assumes terminal states stick. To re-create a
+suggestion: have the PR author re-trigger the webhook (close +
+reopen the PR works), OR back-fill via the script template.
+
+
+─────────────────────────────────────────────────────────────────────────────
 STATISTICAL AUDIT SYSTEM (migration 017, May 17 2026)
 ─────────────────────────────────────────────────────────────────────────────
 
