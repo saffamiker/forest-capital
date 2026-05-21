@@ -83,11 +83,42 @@ def _manifest_path() -> str:
     return os.path.join(CHART_SNAPSHOT_DIR, "manifest.json")
 
 
+def _load_manifest() -> dict[str, Any] | None:
+    """Reads the on-disk manifest if it exists, else None. Used by the
+    hash-equality guard to short-circuit when the data hash has not
+    changed since the last render."""
+    path = _manifest_path()
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("chart_snapshot_manifest_read_failed", error=str(exc))
+        return None
+
+
 async def render_all_chart_snapshots() -> dict[str, Any]:
     """
     Render every key in AVAILABLE_CHARTS to CHART_SNAPSHOT_DIR and
     write the manifest. Returns a small summary dict (n_rendered,
-    n_failed, hash_prefix) primarily for the log line and the tests.
+    n_failed, hash_prefix, skipped) primarily for the log line and
+    the tests.
+
+    HASH-EQUALITY SHORT-CIRCUIT: before rendering, the function loads
+    the previous manifest.json (if present) and compares its "hash"
+    field to the current data hash. When the hashes match AND every
+    key in the CURRENT AVAILABLE_CHARTS has a PNG file on disk, the
+    render loop is skipped entirely — no matplotlib calls, no
+    re-encodes, no manifest re-write. This prevents the
+    re-render-on-redeploy storm where a Render redeploy re-runs the
+    full pipeline against bit-identical data and the persistent disk's
+    snapshots are already current.
+
+    The AVAILABLE_CHARTS coverage check (not just the stored manifest
+    list) means a code deploy that ADDS a new chart key correctly
+    invalidates the skip — the new chart has no PNG yet, so the guard
+    fails and the renderer runs to produce it.
 
     Each chart is rendered through the same render_chart_png() path
     the canvas editor uses, so the PNG bytes here are exactly what
@@ -100,11 +131,13 @@ async def render_all_chart_snapshots() -> dict[str, Any]:
 
     if not _ensure_snapshot_dir():
         return {"n_rendered": 0, "n_failed": 0, "hash_prefix": None,
-                "rendered": []}
+                "rendered": [], "skipped": False}
 
-    # Best-effort hash for the manifest + log line. Falls back to an
-    # empty string when the audit assembler is unavailable — the
-    # snapshots still render either way.
+    # Best-effort hash. Falls back to an empty string when the audit
+    # assembler is unavailable — the renderer still proceeds, just
+    # without the skip optimisation (an empty hash cannot match the
+    # manifest's stored hash unless that was also empty, which would
+    # mean both runs lacked the assembler — fine to re-render then).
     hash_value = ""
     try:
         from tools.audit_assembler import current_data_hash
@@ -112,6 +145,32 @@ async def render_all_chart_snapshots() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         log.warning("chart_snapshot_hash_unavailable", error=str(exc))
     hash_prefix = (hash_value[:8] or "unknown") if hash_value else "unknown"
+
+    # ── Skip-guard — hash matches AND all expected PNGs are on disk ──
+    # Two conditions, both must hold. The PNG-coverage condition
+    # naturally handles "a new chart key was added in a code deploy"
+    # — the new key has no file, so the guard fails and we render.
+    previous_manifest = _load_manifest()
+    if (
+        hash_value
+        and previous_manifest is not None
+        and previous_manifest.get("hash") == hash_value
+    ):
+        all_present = all(
+            os.path.isfile(_path_for(c["key"])) for c in AVAILABLE_CHARTS
+        )
+        if all_present:
+            log.info(
+                "chart_snapshot_skipped_no_change",
+                hash_prefix=hash_prefix,
+                note="manifest hash matches and every PNG is on disk",
+            )
+            return {
+                "n_rendered": 0, "n_failed": 0,
+                "hash_prefix": hash_prefix,
+                "rendered": [],
+                "skipped": True,
+            }
 
     rendered: list[dict[str, Any]] = []
     n_failed = 0
@@ -168,6 +227,7 @@ async def render_all_chart_snapshots() -> dict[str, Any]:
         "n_failed": n_failed,
         "hash_prefix": hash_prefix,
         "rendered": rendered,
+        "skipped": False,
     }
 
 
