@@ -5613,6 +5613,144 @@ immediate / quick-win item, and an accurate SUMMARY.
 
 
 ─────────────────────────────────────────────────────────────────────────────
+TRIAGE RESOLUTION WORKFLOW (migration 023, May 21 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The triage system (migration 016) generates the agent's verdict as
+unstructured markdown. That is fine for human reading, but the rest
+of the workflow — per-item resolution, retest notifications, agent
+awareness of what is already fixed — needs first-class records.
+Migration 023 lifts the markdown bullets into a normalised
+triage_report_items table so the verdict and the actionable items
+share one source of truth.
+
+NEW TABLE — triage_report_items (migration 023):
+  id, report_id (FK triage_reports ON DELETE CASCADE), item_type
+  (immediate | quick_win | pattern | backlog), item_title (varchar
+  500), item_body (text, nullable), github_issue_number,
+  github_issue_url, source_item_type (failure | feedback | null —
+  null for pattern / backlog items), source_item_id, resolved_at,
+  resolved_by, resolution_note, fix_commit, requires_retest (bool,
+  default false), retest_requested_at, retest_completed_at,
+  created_at. Indexed on (report_id, item_type) for the per-report
+  view, on (resolved_at) for the resolved-items context query, and
+  on (retest_requested_at, retest_completed_at) for the notification
+  feed. Migration 023 also adds github_issue_number / github_issue_url
+  / triaged_at to test_results, and github_issue_number /
+  github_issue_url to test_feedback — the back-pointers the parser
+  populates so the source row links to its GitHub issue.
+
+PARSING — tools/triage_engine._split_report_into_section_blocks and
+_parse_item_block lift the agent's markdown into rows. The parser
+is deliberately permissive:
+  - section headers are matched by exact "## SECTION" string (the
+    four canonical sections; SUMMARY is skipped — it carries
+    aggregate counts, not items);
+  - bullets accept "- ", "* ", "1. ", "1) " markers
+    (_BULLET_RE = r"^(?:[-*]|\d+[.\)])\s+(.+)$");
+  - continuation lines indented under a bullet attach to it. The
+    check inspects raw_line — NOT raw_line.strip() — because strip()
+    removes the leading whitespace that signals continuation.
+    Originally written against the stripped line; the bug made the
+    branch unreachable and indented detail was silently dropped.
+    Fix landed with Commit 6 alongside the new test coverage.
+  - source references [failure #N] / [feedback #N] are matched by
+    _SOURCE_REF_RE and pin source_item_type / source_item_id; the
+    parser additionally attaches github_issue_number / github_issue_url
+    when the engine opened an issue for the same source row.
+A run that parses no items still completes — _store_triage_items
+returns [] without an INSERT, so the verdict's markdown body remains
+the human-readable record even when the structured layer is empty.
+Fail-open per row: a database error during INSERT logs and skips,
+the rest of the items still land.
+
+BACK-POPULATION — _back_populate_source_rows updates test_results
+and test_feedback with the github_issue_number + github_issue_url for
+every source row the engine opened an issue against, AND stamps
+triaged_at on every assessed failure (the feedback equivalent is the
+status='triaged' transition already handled by _mark_feedback_triaged).
+The frontend Test Failures view reads these columns so a tester
+sees the GitHub issue link inline. Failures with triaged_at set are
+filtered OUT of the next triage run's backlog — items are assessed
+once and never re-raised on cadence.
+
+RESOLVED-ITEM CONTEXT (Commit 4) — triage runs do NOT re-raise items
+that are already fixed. _recent_resolved_items(window_days=14) reads
+triage_report_items WHERE resolved_at > now() - interval, and
+_format_resolved_items_block formats them as a structured prompt
+block (item type, title, resolution note, 8-char short SHA, retest
+state — pending / complete / not_required). The block threads through
+_triage_user_message ahead of the unaddressed items, with a system-
+prompt instruction telling the QA-lead "do not re-raise these unless
+you have evidence the fix did not work. Items marked requires_retest
+are awaiting reporter verification — note them, do not act on them."
+metadata.resolved_in_context records the count for the audit trail.
+Empty list → empty string → section omitted entirely (a brand-new
+deployment reads cleanly).
+
+CLAUDE-CODE-DRIVEN RESOLUTION (Commit 3) —
+tools/triage_resolver.resolve_triage_items(item_ids, *,
+resolution_note, fix_commit, requires_retest=True) is the helper
+Claude Code calls at the end of every fix prompt that addresses
+triage items. It calls triage_engine.resolve_triage_item per id (the
+same DB update the /resolve endpoint runs), stamps resolved_by =
+"claude_code" — distinguishing AI-applied fixes from sysadmin-applied
+fixes for the team-activity narrative — and returns a summary
+{resolved, failed, notified_reporters, item_titles}. Reporter lookup
+(_reporter_for_source) reads user_email off the source UAT row;
+patterns and backlog items return None and no notification fires.
+Fail-open per item — a missing item or DB error on one row logs and
+the rest still attempt.
+
+RETEST NOTIFICATIONS (Commit 3) — the surface is NOT a separate
+table. test_runner.get_notifications already derives resolved_failures
+and responded_feedback from existing state; Commit 3 extends it with
+a retest_requested kind via a JOIN from triage_report_items to
+test_results / test_feedback, gated on requires_retest = true AND
+retest_completed_at IS NULL AND the source row's user_email matches
+the requesting user AND the request is within the last 21 days.
+TestNotifications surfaces a "🔁 Fix ready — please retest" pill
+that deep-links into the test runner at the originating step when
+the source is a failure (script_id + step_id are joined in for that)
+or to /settings#test-results when the source is feedback.
+
+ENDPOINTS (manage_users-gated — sysadmin only):
+  GET    /api/v1/testing/triage/items?report_id=N  — every triage
+         item, newest report first, immediate → quick_win → pattern
+         → backlog → id ordering; optionally filtered to one report
+  PATCH  /api/v1/testing/triage/items/{id}/resolve  — body
+         {resolution_note (required), fix_commit?, requires_retest?}
+         — resolved_by is the calling sysadmin's email
+  PATCH  /api/v1/testing/triage/items/{id}/unresolve  — clears every
+         resolution field (sysadmin recovery)
+
+FRONTEND — Settings → Test Administration → Triage Reports renders
+the latest report's markdown body AND a TriageItemsBlock below it.
+Summary line: "X of Y resolved · Z awaiting retest". Each item is a
+TriageItemRow with type badge, resolved / retest-pending / retest-
+complete badges, GitHub issue link badge, collapsible body, and a
+Mark Resolved inline form (textarea + fix_commit + requires_retest
+checkbox). The requires_retest default is derived from the item type
+via defaultRetestForType — true for immediate / quick_win, false for
+pattern / backlog — but the sysadmin can override per item. After a
+successful PATCH the row's local state updates without a panel
+re-fetch.
+
+WORKFLOW — three integration paths converge on triage_report_items:
+  1. Agent verdict lands → _store_triage_items parses → items rows
+     are the first-class actionable record (Commit 2).
+  2. Claude Code applies a fix → calls resolve_triage_items at the
+     end of the prompt → items marked resolved by "claude_code" →
+     reporter sees "🔁 Fix ready" on next login (Commit 3).
+  3. Sysadmin applies a fix → clicks Mark Resolved in the panel →
+     items marked resolved by sysadmin's email → same reporter
+     notification path (Commit 5).
+The next triage run reads the recently-resolved items into the agent
+prompt (Commit 4); the agent does not re-raise fixed work; the cycle
+keeps the backlog converging toward zero rather than oscillating.
+
+
+─────────────────────────────────────────────────────────────────────────────
 STATISTICAL AUDIT SYSTEM (migration 017, May 17 2026)
 ─────────────────────────────────────────────────────────────────────────────
 

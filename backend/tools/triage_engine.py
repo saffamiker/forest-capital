@@ -585,9 +585,13 @@ def _split_report_into_section_blocks(
             # Start of a new item — flush whatever was in the buffer.
             _flush()
             multiline_buf.append(bullet_match.group(1).strip())
-        elif multiline_buf and raw_line.strip().startswith(("  ", "\t")):
+        elif multiline_buf and raw_line.startswith(("  ", "\t")):
             # Continuation line for the in-progress bullet (the agent
-            # often indents follow-up detail). Append to current item.
+            # often indents follow-up detail). Inspect the raw line —
+            # `.strip()` removes leading whitespace, so the check has
+            # to run against raw_line before any normalisation, or
+            # this branch is dead code and continuation lines are
+            # silently dropped.
             multiline_buf.append(raw_line.strip())
         elif multiline_buf and raw_line.strip() == "":
             # Blank line ends the current bullet.
