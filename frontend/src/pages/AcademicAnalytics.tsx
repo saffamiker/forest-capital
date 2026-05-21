@@ -446,12 +446,25 @@ export function RollingExcessReturnChart(
       exportButton={<TableExportButton tableId="rolling_excess_return" headers={headers} rows={exportRows} />}
     >
       <ResponsiveContainer width="100%" height={320}>
-        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 12 }}>
+        {/* Axis labels use the same pattern as the Sensitivity chart:
+            Y at insideLeft / angle -90 / textAnchor middle so it reads
+            vertically along the axis; X at insideBottom / offset -5 so
+            it sits below the year ticks. Margins bumped (bottom 4→32,
+            left 12→24) to clear the tick text without crowding the
+            plot area. */}
+        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 32, left: 24 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
-          <XAxis dataKey="date" tick={theme.axisTick} minTickGap={56} />
+          <XAxis dataKey="date" tick={theme.axisTick} minTickGap={56}
+                 label={{ value: 'Date', position: 'insideBottom',
+                          offset: -5, fill: theme.axisTick.fill,
+                          fontSize: 11 }} />
           <YAxis
             tick={theme.axisTick}
             tickFormatter={(v: number) => `${(v * 100).toFixed(0)}%`}
+            label={{ value: 'Excess Return', angle: -90,
+                     position: 'insideLeft',
+                     style: { textAnchor: 'middle' },
+                     fill: theme.axisTick.fill, fontSize: 11 }}
           />
           <Tooltip
             contentStyle={theme.tooltipContentStyle}
@@ -504,11 +517,18 @@ export function RollingCorrelationChart(
         + `${data.window_months}-month window; regime break ${data.regime_break}.` }}
     >
       <ResponsiveContainer width="100%" height={300}>
-        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 12 }}>
+        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 32, left: 24 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
           <XAxis dataKey="date" tick={theme.axisTick}
-                 minTickGap={48} />
-          <YAxis domain={[-1, 1]} tick={theme.axisTick} />
+                 minTickGap={48}
+                 label={{ value: 'Date', position: 'insideBottom',
+                          offset: -5, fill: theme.axisTick.fill,
+                          fontSize: 11 }} />
+          <YAxis domain={[-1, 1]} tick={theme.axisTick}
+                 label={{ value: 'Correlation', angle: -90,
+                          position: 'insideLeft',
+                          style: { textAnchor: 'middle' },
+                          fill: theme.axisTick.fill, fontSize: 11 }} />
           <Tooltip
             contentStyle={theme.tooltipContentStyle}
             labelStyle={theme.tooltipLabelStyle}
@@ -828,15 +848,22 @@ export function CumulativeReturnChart(
       }
     >
       <ResponsiveContainer width="100%" height={340}>
-        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 4, left: 12 }}>
+        <LineChart data={data.points} margin={{ top: 8, right: 16, bottom: 32, left: 24 }}>
           <CartesianGrid strokeDasharray="3 3" stroke={theme.gridStroke} />
-          <XAxis dataKey="date" tick={theme.axisTick} minTickGap={56} />
+          <XAxis dataKey="date" tick={theme.axisTick} minTickGap={56}
+                 label={{ value: 'Date', position: 'insideBottom',
+                          offset: -5, fill: theme.axisTick.fill,
+                          fontSize: 11 }} />
           <YAxis
             scale={logScale ? 'log' : 'linear'}
             domain={logScale ? ['auto', 'auto'] : [0, 'auto']}
             allowDataOverflow
             tick={theme.axisTick}
             tickFormatter={(v: number) => `${v.toFixed(1)}x`}
+            label={{ value: 'Growth of $1', angle: -90,
+                     position: 'insideLeft',
+                     style: { textAnchor: 'middle' },
+                     fill: theme.axisTick.fill, fontSize: 11 }}
           />
           <Tooltip
             contentStyle={theme.tooltipContentStyle}
