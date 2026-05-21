@@ -163,6 +163,18 @@ async def lifespan(app: FastAPI):
             trigger_research_async("startup")
         except Exception as exc:  # noqa: BLE001
             log.warning("research_startup_trigger_failed", error=str(exc))
+        # Macro context cache warm — read whatever digest already
+        # exists in the DB into the agent-prompt injection cache so
+        # the FIRST agent call after restart sees the previous
+        # deploy's digest. The startup trigger above produces a fresh
+        # one in the background; this warm-read is the in-flight
+        # fallback that prevents an empty cache for the few seconds
+        # it takes the agent to land. Fail-open.
+        try:
+            from tools.macro_context import refresh_macro_context
+            await refresh_macro_context()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("macro_context_warm_failed", error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 

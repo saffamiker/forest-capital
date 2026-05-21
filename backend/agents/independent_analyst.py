@@ -84,6 +84,14 @@ class IndependentAnalyst:
                 system_instruction = inject_academic_context(_SYSTEM_PROMPT)
             except Exception as exc:  # noqa: BLE001
                 log.warning("academic_context_inject_failed", error=str(exc))
+            # FEATURE 2 — macro context so the dissenter's challenge
+            # reflects today's environment. Fail-open independently of
+            # the academic injection above.
+            try:
+                from tools.macro_context import inject_macro_context
+                system_instruction = inject_macro_context(system_instruction)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("macro_context_inject_failed", error=str(exc))
 
             evidence = self._build_evidence(council_summary, strategy_results)
             prompt = (

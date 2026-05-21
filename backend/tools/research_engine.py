@@ -335,6 +335,17 @@ async def run_research(triggered_by: str = "manual") -> dict[str, Any]:
 
     status = "failed" if digest.get("error") else "complete"
     await _finalise_row(row_id, digest=digest, usage=usage, status=status)
+    # Refresh the macro-context cache (Commit 3) so the fresh digest
+    # flows into agent prompts within one tick of land. A failed run
+    # ALSO refreshes — the cache returns to whatever the latest
+    # successful digest is via get_latest_digest's WHERE clause. The
+    # cache layer is fail-open so a refresh problem never raises into
+    # this orchestrator.
+    try:
+        from tools.macro_context import refresh_macro_context
+        await refresh_macro_context()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("research_post_refresh_failed", error=str(exc))
     log.info("research_run_complete",
              row_id=row_id, status=status,
              n_signals=len(digest.get("key_signals") or []),

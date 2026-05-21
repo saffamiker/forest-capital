@@ -34,14 +34,23 @@ log = structlog.get_logger(__name__)
 
 
 def _academic_ctx(system_prompt: str) -> str:
-    """Append uploaded academic-context documents to the Grok system
-    prompt so the contrarian sees the evaluation criteria. Fail-open."""
+    """Append uploaded academic-context documents AND the FEATURE 2
+    macro digest to the Grok system prompt so the contrarian sees the
+    evaluation criteria AND the current macro conditions when
+    stress-testing the council's recommendation. Fail-open on each
+    injection independently — one source failing never silences the
+    other."""
     try:
         from tools.academic_context import inject_academic_context
-        return inject_academic_context(system_prompt)
+        system_prompt = inject_academic_context(system_prompt)
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_context_inject_failed", error=str(exc))
-        return system_prompt
+    try:
+        from tools.macro_context import inject_macro_context
+        system_prompt = inject_macro_context(system_prompt)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("macro_context_inject_failed", error=str(exc))
+    return system_prompt
 
 # XAI_API_URL is kept as a backwards-compatible export — older tests that
 # import it for assertion purposes still resolve, but the runtime path

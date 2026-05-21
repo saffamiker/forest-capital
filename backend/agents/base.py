@@ -231,7 +231,7 @@ def call_claude(
     kwargs: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": _with_academic_context(system_prompt),
+        "system": _with_macro_context(_with_academic_context(system_prompt)),
         "messages": [{"role": "user", "content": content}],
     }
     if tools:
@@ -281,6 +281,33 @@ def _with_academic_context(system_prompt: str) -> str:
         # Fail-open, but log so a persistently broken academic-context
         # cache is visible rather than silently dropping agent context.
         log.warning("academic_context_inject_failed", error=str(exc))
+        return system_prompt
+
+
+def _with_macro_context(system_prompt: str) -> str:
+    """
+    Appends the current macro-conditions digest (FEATURE 2) to a system
+    prompt. Chained after _with_academic_context inside call_claude so
+    every Anthropic agent sees: base system prompt + academic context
+    + macro context. The order matters: academic context (rubrics) is
+    project-stable; macro context (today's news) is volatile and
+    appears closer to the user message so the model frames its read
+    against the latest conditions.
+
+    No-op when the macro cache is empty (cold deploy, no digest yet,
+    or a digest that produced no signals) — the agent runs text-only,
+    bitwise identical to the pre-FEATURE-2 path. Non-Anthropic agents
+    (Gemini, Grok, academic_advisor with web tools) call
+    inject_macro_context() at their own call sites.
+
+    Fail-open: any error returns the prompt unchanged so a persistently
+    broken macro cache is logged but never blocks an agent response.
+    """
+    try:
+        from tools.macro_context import inject_macro_context
+        return inject_macro_context(system_prompt)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("macro_context_inject_failed", error=str(exc))
         return system_prompt
 
 
