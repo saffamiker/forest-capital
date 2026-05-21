@@ -326,6 +326,12 @@ _TRIAGE_SYSTEM_PROMPT = (
     "the triage gate this report reasons against. (Bob's May 27th "
     "midpoint paper is a written submission that does not depend on "
     "platform uptime, so it is not the triage cutoff here.)\n\n"
+    "Previously resolved items are provided for context. Do not re-raise "
+    "these unless you have evidence the fix did not work. Items marked "
+    "requires_retest=True are awaiting reporter verification — they are "
+    "expected to clear when the reporter re-attests the test step. Do "
+    "not list awaiting-retest items as IMMEDIATE ACTIONS; they belong "
+    "to the verification flow, not the triage flow.\n\n"
     "Produce a structured triage report with EXACTLY these five markdown "
     "sections, in this order:\n\n"
     "## IMMEDIATE ACTIONS\n"
@@ -352,14 +358,96 @@ _TRIAGE_SYSTEM_PROMPT = (
 )
 
 
-def _triage_user_message(failures: list[dict], feedback: list[dict]) -> str:
+async def _recent_resolved_items(window_days: int = 14) -> list[dict[str, Any]]:
+    """
+    Triage items resolved in the last `window_days` — injected into
+    the agent prompt so the QA-lead does not re-raise fixed issues.
+    Includes items still awaiting reporter retest so the agent knows
+    those are in flight, not pending fresh action.
+
+    Fail-open: a missing migration-023 table returns []. The agent
+    then runs without resolved-item context (the same behaviour as
+    before this commit) — never blocks the triage run.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return []
+        async with AsyncSessionLocal() as session:
+            # SQL injection-safe: window_days is cast to int so the
+            # interval literal never accepts caller-supplied SQL.
+            window = int(window_days)
+            rows = await session.execute(text(
+                "SELECT id, item_type, item_title, resolution_note, "
+                " fix_commit, requires_retest, retest_completed_at "
+                "FROM triage_report_items "
+                "WHERE resolved_at IS NOT NULL "
+                f" AND resolved_at > now() - interval '{window} days' "
+                "ORDER BY resolved_at DESC"
+            ))
+            return [{
+                "id": int(r[0]), "item_type": r[1], "item_title": r[2],
+                "resolution_note": r[3], "fix_commit": r[4],
+                "requires_retest": bool(r[5]),
+                "retest_completed_at": _iso(r[6]),
+            } for r in rows.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_recent_resolved_failed", error=str(exc))
+        return []
+
+
+def _format_resolved_items_block(items: list[dict[str, Any]]) -> str:
+    """
+    Renders the resolved-item context the agent reasons against.
+    Empty list → empty block; the user message simply omits the
+    section so a brand-new deployment (no resolved items yet) reads
+    cleanly. Each line names the resolved item, its fix commit
+    (short SHA), and the retest state — "Retest: pending" or "Retest:
+    complete" or "Retest: not required".
+    """
+    if not items:
+        return ""
+    lines = ["RECENTLY RESOLVED ITEMS (last 14 days):"]
+    for it in items:
+        commit = (it.get("fix_commit") or "")[:8] or "—"
+        if it.get("retest_completed_at"):
+            retest = "complete"
+        elif it.get("requires_retest"):
+            retest = "pending"
+        else:
+            retest = "not_required"
+        title = (it.get("item_title") or "(untitled)")[:120]
+        note = (it.get("resolution_note") or "—")[:200]
+        lines.append(
+            f"  - [{it.get('item_type')}] {title}\n"
+            f"      Resolved: {note}\n"
+            f"      Commit: {commit}\n"
+            f"      Retest: {retest}"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _triage_user_message(
+    failures: list[dict], feedback: list[dict],
+    resolved_block: str = "",
+) -> str:
     days = max(0, (_DEADLINE - date.today()).days)
-    return (
+    parts = [
         f"Today is {date.today().isoformat()}. You have {days} days "
-        f"until the June 3rd cohort peer-review presentation.\n\n"
-        f"Here are all {len(failures) + len(feedback)} unaddressed items:\n\n"
-        f"{_build_context(failures, feedback)}"
-    )
+        f"until the June 3rd cohort peer-review presentation.",
+    ]
+    if resolved_block:
+        parts.append("")
+        parts.append(resolved_block.rstrip())
+    parts.append("")
+    parts.append(
+        f"Here are all {len(failures) + len(feedback)} unaddressed items:")
+    parts.append("")
+    parts.append(_build_context(failures, feedback))
+    return "\n".join(parts)
 
 
 def _mock_triage_report(failures: list[dict], feedback: list[dict]) -> str:
@@ -392,11 +480,18 @@ def _mock_triage_report(failures: list[dict], feedback: list[dict]) -> str:
     )
 
 
-def _generate_triage_report(failures: list[dict], feedback: list[dict]) -> str:
+def _generate_triage_report(
+    failures: list[dict], feedback: list[dict],
+    resolved_block: str = "",
+) -> str:
     """Runs the triage agent through the generator-evaluator harness.
     Falls back to the deterministic report in the test environment, with
-    no API key, or on any agent error."""
-    user_message = _triage_user_message(failures, feedback)
+    no API key, or on any agent error.
+
+    resolved_block — formatted output of _format_resolved_items_block,
+    injected ABOVE the unaddressed-items context so the agent knows
+    which items are already in flight and does not re-raise them."""
+    user_message = _triage_user_message(failures, feedback, resolved_block)
     if _is_test_env() or not os.getenv("ANTHROPIC_API_KEY"):
         return _mock_triage_report(failures, feedback)
     try:
@@ -812,8 +907,16 @@ async def run_triage(triggered_by: str = "manual") -> dict[str, Any]:
     issues_created: list[dict[str, Any]] = []
     metadata: dict[str, Any] = {"triggered_by": triggered_by}
     try:
-        # Steps 2-3 — context + agent report.
-        report_text = _generate_triage_report(failures, feedback)
+        # Steps 2-3 — context + agent report. Resolved-item context
+        # (Commit 4 of the triage-resolution build) is fetched and
+        # rendered into a block prepended to the unaddressed items.
+        # The agent prompt instructs it not to re-raise items in this
+        # block unless it has evidence the fix didn't work.
+        resolved_recent = await _recent_resolved_items()
+        resolved_block = _format_resolved_items_block(resolved_recent)
+        metadata["resolved_in_context"] = [r["id"] for r in resolved_recent]
+        report_text = _generate_triage_report(
+            failures, feedback, resolved_block=resolved_block)
         # Step 4 — record which sections are present.
         metadata["sections"] = _parse_sections(report_text)
         # Step 5 — GitHub issues for the blocking / major items.
