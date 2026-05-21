@@ -152,6 +152,29 @@ async def lifespan(app: FastAPI):
                 daemon=True, name="monthly-data-extend").start()
         except Exception as exc:  # noqa: BLE001
             log.warning("monthly_extend_startup_failed", error=str(exc))
+        # Macro research digest — fire a research run on startup when
+        # the latest completed digest is stale (> 24h) or absent. The
+        # trigger is loop-aware (we are on the event loop here) and
+        # idempotent — a fresh boot within the freshness window logs
+        # research_run_skipped_current and no model call fires.
+        # Fail-open: a research failure logs and proceeds.
+        try:
+            from tools.research_engine import trigger_research_async
+            trigger_research_async("startup")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("research_startup_trigger_failed", error=str(exc))
+        # Macro context cache warm — read whatever digest already
+        # exists in the DB into the agent-prompt injection cache so
+        # the FIRST agent call after restart sees the previous
+        # deploy's digest. The startup trigger above produces a fresh
+        # one in the background; this warm-read is the in-flight
+        # fallback that prevents an empty cache for the few seconds
+        # it takes the agent to land. Fail-open.
+        try:
+            from tools.macro_context import refresh_macro_context
+            await refresh_macro_context()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("macro_context_warm_failed", error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
@@ -2063,8 +2086,13 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                 reviewer_email=session.get("email"))
             context_block = ctx["context_block"]
             multi_user = ctx.get("multi_user_activity", False)
+            # Threaded into the chart-vision scope sentences so all-
+            # strategy chart captions render the exact count rather
+            # than the count-omitted fallback.
+            n_strategies = ctx["analytics"].get("strategy_count")
 
-            peer_responses = await run_peer_fan_out(context_block, multi_user)
+            peer_responses = await run_peer_fan_out(
+                context_block, multi_user, n_strategies)
             log.info(
                 "academic_review_peers_complete",
                 agents=list(peer_responses.keys()),
@@ -2082,7 +2110,7 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             # The loading state on the frontend covers the evaluation wait.
             arbiter_text = await asyncio.to_thread(
                 run_arbiter_with_harness, context_block, peer_responses,
-                multi_user, script_review)
+                multi_user, script_review, n_strategies)
             for chunk in chunk_arbiter_text(arbiter_text):
                 yield _sse("arbiter_chunk", text=chunk)
             log.info("academic_review_arbiter_complete",
@@ -2568,6 +2596,155 @@ async def testing_get_latest_triage_report(
     """The most recent triage report, or null. Sysadmin only."""
     from tools.triage_engine import get_latest_triage_report
     return {"report": await get_latest_triage_report()}
+
+
+# ── Triage report items — sysadmin only ───────────────────────────────────────
+# Item-level resolution endpoints (migration 023 + triage Commit 2). The
+# items table normalises the verdict prose into addressable rows; these
+# three endpoints back the Settings → Triage Reports per-item UI.
+
+@app.get("/api/v1/testing/triage/items")
+async def testing_get_triage_items(
+    report_id: int | None = None,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Every triage_report_items row with full resolution status.
+    Optionally filtered to a specific report_id. Sysadmin only.
+    """
+    from tools.triage_engine import get_all_triage_items
+    return {"items": await get_all_triage_items(report_id=report_id)}
+
+
+@app.patch("/api/v1/testing/triage/items/{item_id}/resolve")
+async def testing_resolve_triage_item(
+    item_id: int,
+    body: dict,
+    request: Request,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Marks a triage item resolved. Body: {resolution_note, fix_commit?,
+    requires_retest?}.
+
+    When requires_retest=true the row's retest_requested_at is stamped
+    to now() — frontend TestNotifications then surfaces a "Fix ready
+    for retest" pill to the original reporter (Commit 3 wires that
+    notification path through the existing get_notifications surface).
+    Sysadmin only.
+    """
+    from tools.triage_engine import resolve_triage_item
+
+    resolution_note = str(body.get("resolution_note") or "").strip()
+    if not resolution_note:
+        raise HTTPException(
+            status_code=422,
+            detail="resolution_note is required.")
+    fix_commit_raw = body.get("fix_commit")
+    fix_commit = (str(fix_commit_raw).strip() or None) if fix_commit_raw else None
+    requires_retest = bool(body.get("requires_retest", False))
+
+    result = await resolve_triage_item(
+        item_id,
+        resolved_by=session.get("email", ""),
+        resolution_note=resolution_note,
+        fix_commit=fix_commit,
+        requires_retest=requires_retest,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=404, detail=f"Triage item {item_id} not found.")
+    return {"status": "resolved", "item": result}
+
+
+@app.patch("/api/v1/testing/triage/items/{item_id}/unresolve")
+async def testing_unresolve_triage_item(
+    item_id: int,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """
+    Clears the resolution fields on a triage item — sysadmin recovery
+    for an item resolved in error. Sysadmin only.
+    """
+    from tools.triage_engine import unresolve_triage_item
+
+    ok = await unresolve_triage_item(item_id)
+    if not ok:
+        raise HTTPException(
+            status_code=404, detail=f"Triage item {item_id} not found.")
+    return {"status": "unresolved"}
+
+
+# ── Macro market research (FEATURE 2) ────────────────────────────────────────
+# The daily-scheduled macro digest the council + academic_review prompts
+# inject as a CURRENT MACRO CONDITIONS block. Read endpoints are open to
+# any authenticated user (the dashboard widget renders the latest digest
+# for the whole team); the manual run trigger is sysadmin only because
+# it bypasses the 24h freshness gate and burns the Sonnet + web_search
+# budget on demand.
+
+@app.get("/api/v1/research/latest")
+async def research_get_latest_digest(
+    session: dict = Depends(require_auth),
+):
+    """The most recent COMPLETED digest, or null when no completed
+    digest exists yet. Powers the dashboard widget; the widget renders
+    a "preparing first digest" empty state on null."""
+    from tools.research_engine import get_latest_digest, last_research_run_at
+    digest = await get_latest_digest()
+    last_run = await last_research_run_at()
+    return {
+        "digest":              digest,
+        "last_completed_at":   last_run.isoformat() if last_run else None,
+    }
+
+
+@app.get("/api/v1/research/history")
+async def research_get_history(
+    limit: int = 10,
+    session: dict = Depends(require_auth),
+):
+    """The N most recent runs across every status (running / complete /
+    failed). Used by the sysadmin run-history accordion below the
+    widget so the team can see when failed runs happened. Open to any
+    authenticated user — visibility into failures is a transparency
+    feature, not a privileged one."""
+    from tools.research_engine import get_recent_digests
+    return {"runs": await get_recent_digests(limit=max(1, min(int(limit), 50)))}
+
+
+@app.post("/api/v1/research/run")
+async def research_run_now(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Forces a fresh research run — bypasses the 24h freshness gate.
+    Returns immediately with status: 'running'; the dashboard widget
+    polls /research/latest to pick up the digest once it lands.
+    Sysadmin only — manual runs burn the Sonnet + web_search budget."""
+    from tools.research_engine import (
+        _research_bg_tasks, is_research_running, run_research,
+    )
+    if await is_research_running():
+        return {"status": "already_running",
+                "message": "A research run is already in progress."}
+
+    # Direct manual run — bypass the stale gate. Spawn the run on the
+    # event loop (we are on it here) so a long Sonnet + web_search
+    # call returns the 200 to the user immediately; the digest lands
+    # via the post-run cache refresh.
+    import asyncio
+    try:
+        task = asyncio.create_task(run_research("manual"))
+        # Strong ref so the task is not GC'd mid-run.
+        _research_bg_tasks.add(task)
+        task.add_done_callback(_research_bg_tasks.discard)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("research_manual_spawn_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Failed to spawn research run.")
+    return {"status": "running",
+            "message": "Research run started. Poll /api/v1/research/latest "
+                       "for the result."}
 
 
 # ── Statistical audit — sysadmin only ─────────────────────────────────────────
@@ -4153,7 +4330,9 @@ _MIDPOINT_S2_KEY_FINDINGS = (
 )
 
 
-async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
+async def _generate_narratives(
+    specs: list[dict], *, n_strategies: int | None = None,
+) -> dict[str, str]:
     """
     Generates a set of narrative sections concurrently.
 
@@ -4163,6 +4342,11 @@ async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
     in worker threads (the harness is synchronous) and complete in
     parallel — the same asyncio.to_thread fan-out the Academic Review
     peer agents use.
+
+    n_strategies — uniform across every section of a single document
+    (it counts the cache, not the section). Threaded through to
+    harness_narrative once per spec so the chart-vision scope sentences
+    render the precise count instead of the count-omitted fallback.
     """
     import asyncio
 
@@ -4176,7 +4360,8 @@ async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
                 "pending", f"{DATA_PENDING} — source data unavailable.")
             continue
         jobs.append((spec["key"], asyncio.to_thread(
-            harness_narrative, spec["agent_id"], spec["task"], spec["context"])))
+            harness_narrative, spec["agent_id"], spec["task"], spec["context"],
+            n_strategies=n_strategies)))
     if jobs:
         results = await asyncio.gather(*[j for _, j in jobs],
                                        return_exceptions=True)
@@ -4470,7 +4655,9 @@ async def _generate_midpoint_document(
              "context": {"academic_review_verdict":
                          (data["last_review_text"] or "")[:4000]}},
         ]
-        narratives = await _generate_narratives(_apply_draft_caveats(specs))
+        narratives = await _generate_narratives(
+            _apply_draft_caveats(specs),
+            n_strategies=len(data.get("strategy_results") or {}))
         docx_bytes = await asyncio.to_thread(build_midpoint_paper, data, narratives)
 
         # Load the generated content into an editor draft so the frontend
@@ -4625,7 +4812,9 @@ async def _generate_brief_document(
              "context": {"regime_conditional": data["regime_conditional"],
                          "summary_statistics": data["summary_statistics"]}},
         ]
-        narratives = await _generate_narratives(_apply_draft_caveats(specs))
+        narratives = await _generate_narratives(
+            _apply_draft_caveats(specs),
+            n_strategies=len(data.get("strategy_results") or {}))
         docx_bytes = await asyncio.to_thread(
             build_executive_brief, data, narratives)
 
@@ -4755,7 +4944,8 @@ async def _generate_deck_document(
                  "can."),
              "context": {"team_summary": data["team_summary"]}},
         ]
-        narratives = await _generate_narratives(specs)
+        narratives = await _generate_narratives(
+            specs, n_strategies=len(data.get("strategy_results") or {}))
         charts = await asyncio.to_thread(render_deck_charts, data, sensitivity)
         pptx_bytes = await asyncio.to_thread(
             build_presentation_deck, data, narratives, charts)

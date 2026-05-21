@@ -345,7 +345,12 @@ async def get_unseen(user_email: str) -> dict[str, Any]:
 
 
 async def get_all_failures() -> list[dict[str, Any]]:
-    """Every failed step across all testers — admin failure-reports view."""
+    """Every failed step across all testers — admin failure-reports view.
+
+    Returns the three new migration-023 columns (github_issue_number,
+    github_issue_url, triaged_at) alongside the existing ones so the
+    triage engine's _gather_unaddressed can filter by triaged_at and
+    the frontend can display the GitHub linkage."""
     try:
         from sqlalchemy import text
 
@@ -357,7 +362,8 @@ async def get_all_failures() -> list[dict[str, Any]]:
                 SELECT id, user_email, script_id, step_id, failure_description,
                        expected_result, actual_result, severity, browser_info,
                        screenshot_paths, low_quality, attested_at,
-                       resolved_at, resolved_by, resolution_note
+                       resolved_at, resolved_by, resolution_note,
+                       github_issue_number, github_issue_url, triaged_at
                 FROM test_results WHERE result = 'fail'
                 ORDER BY
                     CASE severity WHEN 'blocking' THEN 0 WHEN 'major' THEN 1
@@ -373,6 +379,9 @@ async def get_all_failures() -> list[dict[str, Any]]:
                 "low_quality": r[10], "attested_at": _iso(r[11]),
                 "resolved_at": _iso(r[12]), "resolved_by": r[13],
                 "resolution_note": r[14],
+                "github_issue_number": r[15],
+                "github_issue_url": r[16],
+                "triaged_at": _iso(r[17]),
             } for r in rows.fetchall()]
     except Exception as exc:  # noqa: BLE001
         log.warning("test_failures_read_failed", error=str(exc))
@@ -572,11 +581,22 @@ async def get_notifications(user_email: str) -> dict[str, Any]:
         upsert clears resolved_at, so these self-clear).
       responded_feedback — the tester's feedback an admin has moved off
         'new'. Bounded to the last 21 days so it does not nag forever.
+      retest_requested — triage_report_items resolved with
+        requires_retest=true whose source UAT row (test_results or
+        test_feedback) is owned by this user. Surfaces as "Fix ready
+        for retest" in TestNotifications (Item 3 Commit 5). Joins on
+        the source_item_type/source_item_id back-pointer migration 023
+        added to triage_report_items; the JOIN clears entries once
+        retest_completed_at lands. Bounded to the last 21 days like
+        responded_feedback so a stale fix stops nagging.
 
     The "new tests available" notification is computed on the frontend by
     diffing testScripts.ts against /api/v1/testing/unseen.
     """
-    empty: dict[str, Any] = {"resolved_failures": [], "responded_feedback": []}
+    empty: dict[str, Any] = {
+        "resolved_failures": [], "responded_feedback": [],
+        "retest_requested": [],
+    }
     try:
         from sqlalchemy import text
 
@@ -599,6 +619,27 @@ async def get_notifications(user_email: str) -> dict[str, Any]:
                   AND resolved_at > now() - interval '21 days'
                 ORDER BY resolved_at DESC
             """), {"e": user_email})
+            # Triage items awaiting retest, joined to whichever UAT
+            # source row owns user_email. Returns the script_id/step_id
+            # for failure-sourced items so the frontend can deep-link
+            # the tester back into the test runner.
+            retest = await session.execute(text("""
+                SELECT i.id, i.item_title, i.resolution_note,
+                       i.fix_commit, i.retest_requested_at,
+                       i.source_item_type, i.source_item_id,
+                       tr.script_id, tr.step_id
+                FROM triage_report_items i
+                LEFT JOIN test_results tr ON i.source_item_type = 'failure'
+                  AND i.source_item_id = tr.id
+                LEFT JOIN test_feedback tf ON i.source_item_type = 'feedback'
+                  AND i.source_item_id = tf.id
+                WHERE i.requires_retest = true
+                  AND i.retest_completed_at IS NULL
+                  AND i.retest_requested_at IS NOT NULL
+                  AND i.retest_requested_at > now() - interval '21 days'
+                  AND (tr.user_email = :e OR tf.user_email = :e)
+                ORDER BY i.retest_requested_at DESC
+            """), {"e": user_email})
             return {
                 "resolved_failures": [{
                     "script_id": r[0], "step_id": r[1],
@@ -608,6 +649,13 @@ async def get_notifications(user_email: str) -> dict[str, Any]:
                     "id": r[0], "title": r[1], "status": r[2],
                     "resolution_note": r[3],
                 } for r in feedback.fetchall()],
+                "retest_requested": [{
+                    "item_id": r[0], "item_title": r[1],
+                    "resolution_note": r[2], "fix_commit": r[3],
+                    "retest_requested_at": _iso(r[4]),
+                    "source_item_type": r[5], "source_item_id": r[6],
+                    "script_id": r[7], "step_id": r[8],
+                } for r in retest.fetchall()],
             }
     except Exception as exc:  # noqa: BLE001
         log.warning("test_notifications_read_failed", error=str(exc))

@@ -21,6 +21,7 @@ import LearnModeBanner from './LearnModeBanner'
 import DataCurrencyBar from './DataCurrencyBar'
 import ChartExportButton from './ChartExportButton'
 import TableExportButton from './TableExportButton'
+import MacroResearchPanel from './MacroResearchPanel'
 // Canonical strategy-colour map — one source of truth shared with every
 // chart component (was duplicated locally in this file).
 import { STRATEGY_COLORS } from '../lib/strategyColors'
@@ -398,6 +399,13 @@ export default function Dashboard() {
         {/* Commentary-mode banner — renders only when mode === 'commentary'.
             Renders nothing in Analyst/Present, so adding it here is free. */}
         <LearnModeBanner />
+
+        {/* FEATURE 2 — macro research digest (the same digest the
+            council and academic_review prompts inject as a CURRENT
+            MACRO CONDITIONS block). Sits above the summary tiles so
+            the user reads "today's context" before scanning the
+            strategy rankings. Sysadmin-only "Run now" trigger inside. */}
+        <MacroResearchPanel />
 
         {/* Summary tiles */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">

@@ -271,6 +271,7 @@ def harness_narrative(
     context: Any,
     *,
     max_tokens: int = 900,
+    n_strategies: int | None = None,
 ) -> str:
     """
     Generates one section of academic prose through the Academic Writer
@@ -280,6 +281,12 @@ def harness_narrative(
     criteria and retries below threshold — the spec requires every
     academic_writer call to run through it. Synchronous (the harness and
     call_claude are both synchronous); callers run it in asyncio.to_thread.
+
+    n_strategies — the count of strategies in the cache. Threaded into the
+    chart-vision scope sentences so the all-strategy chart captions render
+    "Showing all N strategies" rather than the count-omitting fallback.
+    Caller is _generate_narratives in main.py, which has the count from
+    gather_document_data()["strategy_results"].
 
     Fail-open: in the test environment, or on any generation error, a
     [DATA PENDING] marker is returned so the surrounding document still
@@ -298,8 +305,34 @@ def harness_narrative(
     try:
         from agents.academic_writer import _SYSTEM_PROMPT
         from agents.base import SONNET_MODEL, WEB_SEARCH_TOOL, call_claude
-        from agents.evaluator_prompts import academic_review_peer_evaluator_prompt
+        from agents.evaluator_prompts import (
+            academic_export_evaluator_pm_prompt,
+            academic_review_peer_evaluator_prompt,
+        )
         from agents.harness import GeneratorEvaluatorHarness
+        from tools.chart_vision import (
+            DOCUMENT_GENERATION_CHARTS, get_charts_for_context,
+            snapshots_dir_exists,
+        )
+
+        # DOCUMENT_GENERATION_CHARTS snapshots — the academic writer
+        # reasons about regime + factor + drawdown visuals when drafting
+        # the analytical section. Built once and captured in the
+        # generator-fn closure so a harness retry reuses them. Evaluators
+        # MUST NOT see this — harness._evaluate omits the kwarg.
+        visual_context: list[dict] | None = None
+        if snapshots_dir_exists():
+            blocks = get_charts_for_context(
+                DOCUMENT_GENERATION_CHARTS, n_strategies=n_strategies)
+            visual_context = blocks if blocks else None
+            if not blocks:
+                log.info("academic_writer_no_snapshots_available",
+                         agent_id=agent_id,
+                         note="proceeding without visual context")
+        else:
+            log.info("academic_writer_no_snapshots_dir",
+                     agent_id=agent_id,
+                     note="proceeding without visual context")
 
         harness = GeneratorEvaluatorHarness()
         result = harness.run(
@@ -308,8 +341,17 @@ def harness_narrative(
             # CITATIONS in the academic writer's system prompt).
             generator_fn=lambda prompt: call_claude(
                 SONNET_MODEL, _SYSTEM_PROMPT, prompt, max_tokens=max_tokens,
-                tools=[WEB_SEARCH_TOOL]),
+                tools=[WEB_SEARCH_TOOL],
+                visual_context=visual_context),
             evaluator_prompt=academic_review_peer_evaluator_prompt("academic writer"),
+            # Audience-aware second pass — every document section
+            # (midpoint paper, executive brief, deck narrative) is also
+            # scored against the PM rubric. The harness retries when
+            # EITHER rubric returns NEEDS WORK. The presentation script
+            # generator does NOT pass a secondary evaluator (spoken
+            # delivery is a different audience); the council and triage
+            # generators also do not.
+            secondary_evaluator_prompt=academic_export_evaluator_pm_prompt(),
             generator_prompt=user_message,
             context=ctx_str,
             agent_id=agent_id,

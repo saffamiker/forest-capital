@@ -7,6 +7,8 @@
  *
  *   🧪 New tests available  — un-attested test steps exist.
  *   ✅ Failure resolved      — a failure you reported was resolved; re-test.
+ *   🔁 Fix ready             — a triage item you sourced was resolved and
+ *                              flagged requires_retest=true.
  *   💬 Feedback responded    — your feedback was reviewed.
  *   🔍 Triage report ready   — a new triage report (sysadmin only).
  *   ⚠️ Audit found issues    — a statistical audit flagged discrepancies
@@ -22,7 +24,7 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FlaskConical, CheckCircle, MessageSquare, Search, ShieldAlert, X,
-  CalendarClock,
+  CalendarClock, RotateCw,
 } from 'lucide-react'
 import { TEST_SCRIPTS, scriptForEmail, getTestScript } from '../constants/testScripts'
 import { startTestRun } from '../lib/testRunnerBus'
@@ -41,6 +43,17 @@ interface NotificationsResponse {
   }>
   responded_feedback: Array<{
     id: number; title: string; status: string; resolution_note: string | null
+  }>
+  retest_requested?: Array<{
+    item_id: number
+    item_title: string
+    resolution_note: string | null
+    fix_commit: string | null
+    retest_requested_at: string | null
+    source_item_type: 'failure' | 'feedback'
+    source_item_id: number
+    script_id: string | null
+    step_id: string | null
   }>
 }
 interface TriageLatestResponse {
@@ -65,7 +78,7 @@ interface AuditLatestResponse {
 interface Notice {
   key: string
   kind: 'new_tests' | 'failure_resolved' | 'feedback_responded'
-    | 'triage_ready' | 'audit_failed' | 'deadline'
+    | 'retest_requested' | 'triage_ready' | 'audit_failed' | 'deadline'
   title: string
   body: string
   actionLabel: string
@@ -141,6 +154,36 @@ export default function TestNotifications() {
             onAction: () => {
               setTestingMode(true)
               startTestRun({ scriptId: f.script_id, stepId: f.step_id })
+            },
+          })
+        }
+
+        // ── Fix ready (triage item resolved with requires_retest=true) ─
+        // Sourced from a failure → deep-link the tester into the test
+        // runner at that step (same UX as failure_resolved). Sourced
+        // from feedback → send them to the Test Results settings view,
+        // where the feedback thread + resolution note are visible.
+        for (const r of notifRes.data.retest_requested ?? []) {
+          const noteSuffix = r.resolution_note ? ` — ${r.resolution_note}` : ''
+          const fromFailure = r.source_item_type === 'failure'
+            && r.script_id && r.step_id
+          built.push({
+            key: `retest:${r.item_id}`,
+            kind: 'retest_requested',
+            title: '🔁 Fix ready — please retest',
+            body: `"${r.item_title}" has been resolved and is awaiting `
+              + `your verification.${noteSuffix}`,
+            actionLabel: fromFailure ? 'Re-test Now' : 'View in Settings',
+            onAction: () => {
+              if (fromFailure) {
+                setTestingMode(true)
+                startTestRun({
+                  scriptId: r.script_id as string,
+                  stepId: r.step_id as string,
+                })
+              } else {
+                navigate('/settings#test-results')
+              }
             },
           })
         }
@@ -266,12 +309,14 @@ export default function TestNotifications() {
 
   const Icon = current.kind === 'new_tests' ? FlaskConical
     : current.kind === 'failure_resolved' ? CheckCircle
-      : current.kind === 'triage_ready' ? Search
-        : current.kind === 'audit_failed' ? ShieldAlert
-          : current.kind === 'deadline' ? CalendarClock : MessageSquare
+      : current.kind === 'retest_requested' ? RotateCw
+        : current.kind === 'triage_ready' ? Search
+          : current.kind === 'audit_failed' ? ShieldAlert
+            : current.kind === 'deadline' ? CalendarClock : MessageSquare
   const accent = current.accentClass
     ?? (current.kind === 'failure_resolved' ? 'text-success'
-      : current.kind === 'audit_failed' ? 'text-warning' : 'text-electric')
+      : current.kind === 'retest_requested' ? 'text-success'
+        : current.kind === 'audit_failed' ? 'text-warning' : 'text-electric')
 
   return (
     <div className="fixed inset-0 z-[82] flex items-center justify-center

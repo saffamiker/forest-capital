@@ -20,12 +20,16 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
     build_agent_response,
     call_claude,
 )
 from agents.harness import GeneratorEvaluatorHarness
 from agents.evaluator_prompts import council_evaluator_prompt
+from tools.chart_vision import (
+    COUNCIL_CHARTS, get_charts_for_context, snapshots_dir_exists,
+)
 from config import TRANSACTION_COST_BPS, WALK_FORWARD_TRAIN, WALK_FORWARD_TEST
 
 # The analyst's task, phrased as a question — the harness evaluator scores
@@ -58,6 +62,19 @@ synthesises the council — your job is to provide complete domain expertise, no
 brief verdict. Your analysis must contain domain-specific analysis of the question \
 asked, quantitative references to the actual strategy metrics in the data provided, \
 and a clear position with its supporting reasoning.
+
+VISUAL CONTEXT — you may receive chart snapshots alongside the prompt: \
+rolling_correlation, cumulative_returns, regime_signals, \
+regime_conditional_returns, factor_loadings, rolling_excess_return. The \
+cumulative_returns chart shows the full equity curve of every strategy — \
+flat sections, sharp drawdowns, and the relative slope of each strategy's \
+post-2022 recovery are the visible signature of robustness. \
+rolling_excess_return is the most useful for your role: a strategy whose \
+in-sample excess return decays sharply at the OOS boundary is exhibiting \
+visual overfitting. Describe what you can see on the chart and tie it to \
+the OOS degradation percentages in the DATA block.
+
+{VISUAL_REASONING_RULES}
 
 {GLOBAL_AGENT_RULE}
 
@@ -103,6 +120,11 @@ class QuantBacktester:
 
         log.info("quant_backtester_called", n_strategies=len(strategy_results))
 
+        # COUNCIL_CHARTS snapshots — built once, captured in the generator
+        # closure. Evaluators MUST NOT see them (harness._evaluate omits
+        # the kwarg).
+        visual_context = self._build_visual_context(len(strategy_results))
+
         try:
             # Routed through the generator-evaluator harness — see
             # equity_analyst for the rationale.
@@ -110,7 +132,8 @@ class QuantBacktester:
             result = harness.run(
                 generator_fn=lambda p: call_claude(
                     SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500,
-                    tools=[WEB_SEARCH_TOOL]),
+                    tools=[WEB_SEARCH_TOOL],
+                    visual_context=visual_context),
                 evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
                 generator_prompt=user_message,
                 context=str(context)[:4000],
@@ -121,6 +144,22 @@ class QuantBacktester:
         except Exception as exc:
             log.error("quant_backtester_error", error=str(exc))
             return self._fallback_response(strategy_results, quant_summary)
+
+    def _build_visual_context(
+        self, n_strategies: int | None = None,
+    ) -> list[dict] | None:
+        """COUNCIL_CHARTS snapshots as content blocks, or None when no
+        snapshots are on disk (cold deploy, first run). See EquityAnalyst._build_visual_context."""
+        if not snapshots_dir_exists():
+            log.info("quant_backtester_no_snapshots_dir",
+                     note="proceeding without visual context")
+            return None
+        blocks = get_charts_for_context(COUNCIL_CHARTS, n_strategies=n_strategies)
+        if not blocks:
+            log.info("quant_backtester_no_snapshots_available",
+                     note="proceeding without visual context")
+            return None
+        return blocks
 
     def _compute_quant_summary(
         self, strategy_results: dict[str, Any]

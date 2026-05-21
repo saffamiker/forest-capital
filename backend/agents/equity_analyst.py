@@ -19,12 +19,16 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
     build_agent_response,
     call_claude,
 )
 from agents.harness import GeneratorEvaluatorHarness
 from agents.evaluator_prompts import council_evaluator_prompt
+from tools.chart_vision import (
+    COUNCIL_CHARTS, get_charts_for_context, snapshots_dir_exists,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -60,6 +64,18 @@ synthesises the council — your job is to provide complete domain expertise, no
 brief verdict. Your analysis must contain domain-specific analysis of the question \
 asked, quantitative references to the actual strategy metrics in the data provided, \
 and a clear position with its supporting reasoning.
+
+VISUAL CONTEXT — you may receive chart snapshots alongside the prompt: \
+rolling_correlation, cumulative_returns, regime_signals, \
+regime_conditional_returns, factor_loadings, rolling_excess_return. Use the \
+cumulative_returns and rolling_excess_return charts to ground claims about \
+relative equity performance over time, regime_conditional_returns to compare \
+equity weights across regimes, and factor_loadings to substantiate any factor \
+exposure claim. Describe what you see — the inflection points, the regime \
+transitions, the magnitude of the divergences — and tie those visual features \
+to the strategy metrics in the DATA block.
+
+{VISUAL_REASONING_RULES}
 
 {GLOBAL_AGENT_RULE}
 
@@ -106,6 +122,13 @@ class EquityAnalyst:
 
         log.info("equity_analyst_called", n_strategies=len(strategy_results))
 
+        # Visual context — COUNCIL_CHARTS snapshots if rendered, else None.
+        # Built once and captured in the generator-fn closure so the harness
+        # can retry without re-reading the snapshots from disk. Evaluators
+        # MUST NOT see this (harness._evaluate omits the kwarg).
+        # n_strategies is rendered into the all-strategy chart captions.
+        visual_context = self._build_visual_context(len(strategy_results))
+
         try:
             # The call_claude generation is routed through the
             # generator-evaluator harness — a low-scoring response is
@@ -115,7 +138,8 @@ class EquityAnalyst:
             result = harness.run(
                 generator_fn=lambda p: call_claude(
                     SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500,
-                    tools=[WEB_SEARCH_TOOL]),
+                    tools=[WEB_SEARCH_TOOL],
+                    visual_context=visual_context),
                 evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
                 generator_prompt=user_message,
                 context=str(context)[:4000],
@@ -125,6 +149,31 @@ class EquityAnalyst:
         except Exception as exc:
             log.error("equity_analyst_error", error=str(exc))
             return self._fallback_response(strategy_results)
+
+    def _build_visual_context(
+        self, n_strategies: int | None = None,
+    ) -> list[dict] | None:
+        """
+        Loads the COUNCIL_CHARTS snapshots and returns them as Anthropic
+        content blocks; returns None when no snapshots are on disk yet
+        (cold deploy, first run) or none of the requested keys have a
+        rendered PNG. The call still proceeds — call_claude with
+        visual_context=None is bitwise identical to the pre-vision path.
+
+        n_strategies is passed through to get_charts_for_context so the
+        all-strategy captions render the exact count (the analyst knows
+        it from len(strategy_results)).
+        """
+        if not snapshots_dir_exists():
+            log.info("equity_analyst_no_snapshots_dir",
+                     note="proceeding without visual context")
+            return None
+        blocks = get_charts_for_context(COUNCIL_CHARTS, n_strategies=n_strategies)
+        if not blocks:
+            log.info("equity_analyst_no_snapshots_available",
+                     note="proceeding without visual context")
+            return None
+        return blocks
 
     def _build_context(
         self,

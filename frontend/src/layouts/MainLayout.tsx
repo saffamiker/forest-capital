@@ -466,11 +466,26 @@ export default function MainLayout() {
             <HelpCircle className="w-3.5 h-3.5" />
           </a>
 
-          {/* Settings — full page at /settings. */}
+          {/* Settings — full page at /settings.
+              UAT issue #49 reported the gear icon producing no response.
+              The most reliable fix is to attach an explicit imperative
+              handler alongside NavLink's anchor navigation — if
+              anything (a tour overlay catching the click, a stale
+              modal still in the DOM, a parent click-handler swallowing
+              the default) prevents the anchor's navigation, the
+              onClick fires navigate() explicitly. Belt-and-braces;
+              the isActive styling stays intact. */}
           <NavLink
             to="/settings"
             aria-label="Settings"
             title="Settings"
+            onClick={(e) => {
+              // Guard: do not double-navigate on a meta/ctrl click
+              // (those legitimately open in a new tab via the anchor).
+              if (e.metaKey || e.ctrlKey || e.shiftKey) return
+              e.preventDefault()
+              navigate('/settings')
+            }}
             className={({ isActive }) =>
               `flex items-center justify-center w-11 h-11 lg:w-auto lg:h-auto
                lg:p-1 rounded border transition-colors ${

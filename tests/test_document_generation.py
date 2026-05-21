@@ -203,6 +203,174 @@ def _db_ready() -> bool:
     return _db_ready_cache
 
 
+class TestPMAudienceEvaluator:
+    """The PM audience evaluator fires as a SECOND evaluator pass on
+    every document-section narrative — midpoint paper, executive brief,
+    deck narrative blocks all flow through harness_narrative(). The
+    presentation script writer, council specialists, and triage agent
+    do NOT use the PM evaluator (different audiences). This class pins
+    the prompt content and the wiring contract."""
+
+    def test_pm_evaluator_prompt_contains_all_five_criteria(self):
+        # The five PM criteria must all be named in the prompt — a
+        # missing criterion would let the evaluator silently drop a
+        # whole dimension of the rubric.
+        from agents.evaluator_prompts import academic_export_evaluator_pm_prompt
+        prompt = academic_export_evaluator_pm_prompt()
+        for marker in (
+            "PM_CRITERION_1", "PM_CRITERION_2", "PM_CRITERION_3",
+            "PM_CRITERION_4", "PM_CRITERION_5",
+            "INSIGHT BEYOND THE OBVIOUS",
+            "MECHANISM NOT JUST OBSERVATION",
+            "ACTIONABLE SIGNAL IDENTIFICATION",
+            "CONTRADICTIONS ACKNOWLEDGED AND PRESSED",
+            "SO WHAT / EXPLICIT IMPLICATION",
+        ):
+            assert marker in prompt, f"missing PM criterion marker: {marker}"
+
+    def test_pm_evaluator_prompt_emits_verdict_to_overall_mapping(self):
+        # The harness reads `overall` as a number; the PM verdict must
+        # map STRONG → 9.0, DEVELOPING → 7.5, NEEDS WORK → 3.0 so the
+        # 7.0 threshold retries only on NEEDS WORK.
+        from agents.evaluator_prompts import academic_export_evaluator_pm_prompt
+        prompt = academic_export_evaluator_pm_prompt()
+        assert "9.0 (STRONG)" in prompt
+        assert "7.5 (DEVELOPING)" in prompt
+        assert "3.0 (NEEDS WORK)" in prompt
+
+    def test_harness_narrative_passes_pm_evaluator_as_secondary(self):
+        # Wiring contract — harness_narrative supplies the PM evaluator
+        # as the secondary so every document section is dual-evaluated.
+        # We patch the harness class to capture how it was called.
+        from unittest.mock import MagicMock, patch
+        from tools import academic_export
+        from agents.harness import HarnessResult
+
+        captured: dict = {}
+
+        class _FakeHarness:
+            def __init__(self):
+                pass
+
+            def run(self, *args, **kwargs):
+                captured["kwargs"] = kwargs
+                return HarnessResult(
+                    response="ok", final_score=9.0, attempts=1,
+                    improved=False, feedback_applied="", initial_score=9.0,
+                )
+
+        # The function early-exits in the test environment; bypass that
+        # guard so the harness path actually runs.
+        with patch.object(academic_export, "ENVIRONMENT", "production"), \
+             patch("agents.harness.GeneratorEvaluatorHarness", _FakeHarness):
+            academic_export.harness_narrative(
+                "midpoint_paper_intro", "draft this section", {"x": 1})
+
+        # The secondary evaluator must be the PM prompt — same string
+        # the prompt builder returns. Comparing equality rather than
+        # 'contains' so a regression that swaps the prompt is caught.
+        from agents.evaluator_prompts import academic_export_evaluator_pm_prompt
+        assert captured["kwargs"].get("secondary_evaluator_prompt") \
+            == academic_export_evaluator_pm_prompt()
+
+    def test_presentation_script_does_NOT_pass_pm_evaluator(self):
+        # The script generator passes only the presentation_script
+        # evaluator — no secondary. Spoken delivery is a different
+        # audience; the PM rubric doesn't apply to a 16-slide oral
+        # script the way it applies to a written analytical document.
+        from unittest.mock import patch
+        from tools import script_generation
+        from agents.harness import HarnessResult
+
+        captured: dict = {}
+
+        class _FakeHarness:
+            def __init__(self):
+                pass
+
+            def run(self, *args, **kwargs):
+                captured["kwargs"] = kwargs
+                return HarnessResult(
+                    response="script body", final_score=9.0, attempts=1,
+                    improved=False, feedback_applied="", initial_score=9.0,
+                )
+
+        with patch("agents.harness.GeneratorEvaluatorHarness", _FakeHarness):
+            script_generation._run_harness(
+                slides=[{"slide_number": 1, "title": "T", "speaker": "Molly",
+                         "content_text": "x"}],
+                exec_brief_text=None, midpoint_text=None)
+
+        # Either the kwarg is absent OR it is explicitly None.
+        secondary = captured["kwargs"].get("secondary_evaluator_prompt")
+        assert secondary is None
+
+
+class TestAcademicWriterAudiencePrompt:
+    """The Academic Writer system prompt sets the audience expectation —
+    primary reader is a portfolio manager who wants insight beyond
+    standard metrics. Pins the audience guidance + the so-what
+    instruction so a future prompt edit doesn't silently drop them."""
+
+    def test_writer_prompt_names_portfolio_manager_audience(self):
+        from agents.academic_writer import _SYSTEM_PROMPT
+        assert "PORTFOLIO MANAGER" in _SYSTEM_PROMPT
+        assert "primary reader" in _SYSTEM_PROMPT.lower()
+
+    def test_writer_prompt_requires_explicit_so_what(self):
+        from agents.academic_writer import _SYSTEM_PROMPT
+        # "so what?" + "implication" are the load-bearing phrases.
+        assert "so what" in _SYSTEM_PROMPT.lower()
+        assert "implication" in _SYSTEM_PROMPT.lower()
+
+    def test_writer_prompt_names_the_2022_break_and_contradictions(self):
+        from agents.academic_writer import _SYSTEM_PROMPT
+        assert "2022" in _SYSTEM_PROMPT
+        assert "contradict" in _SYSTEM_PROMPT.lower()
+
+
+class TestArbiterDualVerdict:
+    """The Academic Review arbiter verdict opens with TWO top-level
+    summary lines (Academic rigour + Portfolio Manager insight) so the
+    user sees both lenses at a glance. The five rubric sections still
+    follow."""
+
+    def test_arbiter_prompt_requires_two_top_level_verdict_lines(self):
+        from agents.academic_review import _ARBITER_INSTRUCTIONS
+        # Both lenses are named in the instructions block.
+        assert "**Academic rigour:**" in _ARBITER_INSTRUCTIONS
+        assert "**Portfolio Manager insight:**" in _ARBITER_INSTRUCTIONS
+
+    def test_arbiter_prompt_lists_pm_criteria(self):
+        # The arbiter must apply the same five PM criteria the harness
+        # uses on document sections, so its PM verdict is consistent
+        # with the writer's dual-evaluator feedback.
+        from agents.academic_review import _ARBITER_INSTRUCTIONS
+        for marker in (
+            "Insight beyond the obvious",
+            "The 2022 break",
+            "Actionable signal identification",
+            "Contradictions acknowledged and pressed",
+            "So what / explicit implication",
+        ):
+            assert marker in _ARBITER_INSTRUCTIONS, (
+                f"arbiter prompt missing PM criterion: {marker}")
+
+    def test_arbiter_prompt_still_lists_five_rubric_sections(self):
+        # The new top-level lines are additive — the five rubric
+        # sections must still be specified so the verdict shape the UI
+        # parses is unchanged.
+        from agents.academic_review import _ARBITER_INSTRUCTIONS
+        for marker in (
+            "### 1. Data Sufficiency and Methodology",
+            "### 2. Requirements and Rubric Alignment",
+            "### 3. Deliverable Quality",
+            "### 4. Priority Areas for Further Investigation",
+            "### 5. Overall Academic Readiness",
+        ):
+            assert marker in _ARBITER_INSTRUCTIONS
+
+
 class TestDocumentGenerationLogging:
     def test_document_generation_logged_and_team_gated(self):
         """Document generation records a run via log_agent_interaction with

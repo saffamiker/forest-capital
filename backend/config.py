@@ -109,6 +109,19 @@ SCREENSHOT_DIR = (
     else os.path.join(os.path.dirname(__file__), "data", "test_screenshots")
 )
 
+# ── CHART SNAPSHOT STORAGE ────────────────────────────────────────────────────
+# Server-side chart PNGs rendered on every data-hash change and consumed by
+# agents that reason visually about the analysis (council specialists, the
+# academic writer, the academic-review evaluator — see tools/chart_vision.py
+# and tools/chart_snapshots.py). Same on-disk pattern as SCREENSHOT_DIR:
+# /data/chart_snapshots when the Render persistent disk is present, else a
+# repo-local fallback so local development still works.
+CHART_SNAPSHOT_DIR = (
+    "/data/chart_snapshots"
+    if os.path.exists("/data")
+    else os.path.join(os.path.dirname(__file__), "data", "chart_snapshots")
+)
+
 # ── MACRO DATA (FRED) ─────────────────────────────────────────────────────────
 # 60-second timeout guards against FRED gateway stalls that previously caused
 # 3-minute dashboard load times — regime cache (15-min TTL) absorbs most hits.

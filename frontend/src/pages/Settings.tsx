@@ -476,7 +476,7 @@ export default function Settings() {
 
       <SettingsSection
         id="organisation"
-        title="Organisation"
+        title="Organization"
         description="Select the reporting context for this session."
       >
         <OrganisationSection />

@@ -23,6 +23,7 @@ is skipped via the running-row lock.
 from __future__ import annotations
 
 import os
+import re
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -217,8 +218,7 @@ async def _read_reports(*, latest_only: bool) -> list[dict[str, Any]]:
 
 async def _mark_feedback_triaged(feedback_ids: list[int]) -> None:
     """Moves the assessed feedback rows from 'new' to 'triaged' so a later
-    run does not re-assess them. Failures carry no status column — the
-    threshold trigger time-scopes them instead. Fail-open."""
+    run does not re-assess them. Fail-open."""
     if not feedback_ids:
         return
     try:
@@ -237,15 +237,46 @@ async def _mark_feedback_triaged(feedback_ids: list[int]) -> None:
         log.warning("triage_mark_triaged_failed", error=str(exc))
 
 
+async def _mark_failures_triaged(failure_ids: list[int]) -> None:
+    """Stamps test_results.triaged_at on every assessed failure so the
+    next triage's _gather_unaddressed skips them. Migration 023 added
+    the column. Fail-open."""
+    if not failure_ids:
+        return
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return
+        async with AsyncSessionLocal() as session:
+            await session.execute(text(
+                "UPDATE test_results SET triaged_at = now() "
+                "WHERE id = ANY(:ids) AND triaged_at IS NULL"
+            ), {"ids": failure_ids})
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_mark_failures_triaged_failed", error=str(exc))
+
+
 # ── Step 1 — gather unaddressed items ─────────────────────────────────────────
 
 async def _gather_unaddressed() -> tuple[list[dict], list[dict]]:
     """The current open backlog — unresolved failures and new feedback.
-    Reuses the test_runner read layer (both fail-open to [])."""
+    Reuses the test_runner read layer (both fail-open to []).
+
+    Migration 023 added test_results.triaged_at — a failure that a
+    previous triage run already assessed (and which is still unresolved
+    waiting on a fix) is no longer re-flagged in every subsequent run.
+    The agent context stays focused on the genuinely new backlog plus
+    items that have been resolved-and-await-retest (Commit 4 of this
+    workflow injects the resolved-item context separately so the agent
+    does not re-raise fixes already in flight)."""
     from tools.test_runner import get_all_failures, get_all_feedback
 
     failures = [f for f in await get_all_failures()
-                if not f.get("resolved_at")]
+                if not f.get("resolved_at")
+                and not f.get("triaged_at")]
     feedback = [f for f in await get_all_feedback({})
                 if f.get("status") == "new"]
     return failures, feedback
@@ -295,6 +326,12 @@ _TRIAGE_SYSTEM_PROMPT = (
     "the triage gate this report reasons against. (Bob's May 27th "
     "midpoint paper is a written submission that does not depend on "
     "platform uptime, so it is not the triage cutoff here.)\n\n"
+    "Previously resolved items are provided for context. Do not re-raise "
+    "these unless you have evidence the fix did not work. Items marked "
+    "requires_retest=True are awaiting reporter verification — they are "
+    "expected to clear when the reporter re-attests the test step. Do "
+    "not list awaiting-retest items as IMMEDIATE ACTIONS; they belong "
+    "to the verification flow, not the triage flow.\n\n"
     "Produce a structured triage report with EXACTLY these five markdown "
     "sections, in this order:\n\n"
     "## IMMEDIATE ACTIONS\n"
@@ -321,14 +358,96 @@ _TRIAGE_SYSTEM_PROMPT = (
 )
 
 
-def _triage_user_message(failures: list[dict], feedback: list[dict]) -> str:
+async def _recent_resolved_items(window_days: int = 14) -> list[dict[str, Any]]:
+    """
+    Triage items resolved in the last `window_days` — injected into
+    the agent prompt so the QA-lead does not re-raise fixed issues.
+    Includes items still awaiting reporter retest so the agent knows
+    those are in flight, not pending fresh action.
+
+    Fail-open: a missing migration-023 table returns []. The agent
+    then runs without resolved-item context (the same behaviour as
+    before this commit) — never blocks the triage run.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return []
+        async with AsyncSessionLocal() as session:
+            # SQL injection-safe: window_days is cast to int so the
+            # interval literal never accepts caller-supplied SQL.
+            window = int(window_days)
+            rows = await session.execute(text(
+                "SELECT id, item_type, item_title, resolution_note, "
+                " fix_commit, requires_retest, retest_completed_at "
+                "FROM triage_report_items "
+                "WHERE resolved_at IS NOT NULL "
+                f" AND resolved_at > now() - interval '{window} days' "
+                "ORDER BY resolved_at DESC"
+            ))
+            return [{
+                "id": int(r[0]), "item_type": r[1], "item_title": r[2],
+                "resolution_note": r[3], "fix_commit": r[4],
+                "requires_retest": bool(r[5]),
+                "retest_completed_at": _iso(r[6]),
+            } for r in rows.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_recent_resolved_failed", error=str(exc))
+        return []
+
+
+def _format_resolved_items_block(items: list[dict[str, Any]]) -> str:
+    """
+    Renders the resolved-item context the agent reasons against.
+    Empty list → empty block; the user message simply omits the
+    section so a brand-new deployment (no resolved items yet) reads
+    cleanly. Each line names the resolved item, its fix commit
+    (short SHA), and the retest state — "Retest: pending" or "Retest:
+    complete" or "Retest: not required".
+    """
+    if not items:
+        return ""
+    lines = ["RECENTLY RESOLVED ITEMS (last 14 days):"]
+    for it in items:
+        commit = (it.get("fix_commit") or "")[:8] or "—"
+        if it.get("retest_completed_at"):
+            retest = "complete"
+        elif it.get("requires_retest"):
+            retest = "pending"
+        else:
+            retest = "not_required"
+        title = (it.get("item_title") or "(untitled)")[:120]
+        note = (it.get("resolution_note") or "—")[:200]
+        lines.append(
+            f"  - [{it.get('item_type')}] {title}\n"
+            f"      Resolved: {note}\n"
+            f"      Commit: {commit}\n"
+            f"      Retest: {retest}"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _triage_user_message(
+    failures: list[dict], feedback: list[dict],
+    resolved_block: str = "",
+) -> str:
     days = max(0, (_DEADLINE - date.today()).days)
-    return (
+    parts = [
         f"Today is {date.today().isoformat()}. You have {days} days "
-        f"until the June 3rd cohort peer-review presentation.\n\n"
-        f"Here are all {len(failures) + len(feedback)} unaddressed items:\n\n"
-        f"{_build_context(failures, feedback)}"
-    )
+        f"until the June 3rd cohort peer-review presentation.",
+    ]
+    if resolved_block:
+        parts.append("")
+        parts.append(resolved_block.rstrip())
+    parts.append("")
+    parts.append(
+        f"Here are all {len(failures) + len(feedback)} unaddressed items:")
+    parts.append("")
+    parts.append(_build_context(failures, feedback))
+    return "\n".join(parts)
 
 
 def _mock_triage_report(failures: list[dict], feedback: list[dict]) -> str:
@@ -361,11 +480,18 @@ def _mock_triage_report(failures: list[dict], feedback: list[dict]) -> str:
     )
 
 
-def _generate_triage_report(failures: list[dict], feedback: list[dict]) -> str:
+def _generate_triage_report(
+    failures: list[dict], feedback: list[dict],
+    resolved_block: str = "",
+) -> str:
     """Runs the triage agent through the generator-evaluator harness.
     Falls back to the deterministic report in the test environment, with
-    no API key, or on any agent error."""
-    user_message = _triage_user_message(failures, feedback)
+    no API key, or on any agent error.
+
+    resolved_block — formatted output of _format_resolved_items_block,
+    injected ABOVE the unaddressed-items context so the agent knows
+    which items are already in flight and does not re-raise them."""
+    user_message = _triage_user_message(failures, feedback, resolved_block)
     if _is_test_env() or not os.getenv("ANTHROPIC_API_KEY"):
         return _mock_triage_report(failures, feedback)
     try:
@@ -398,6 +524,245 @@ def _parse_sections(report_text: str) -> dict[str, bool]:
     stored in metadata for display and the evaluator's benefit."""
     return {s.lstrip("# ").strip(): (s in report_text)
             for s in _REQUIRED_SECTIONS}
+
+
+# Maps the agent's section heading to the item_type column value the
+# triage_report_items.item_type CHECK accepts.
+_SECTION_TO_ITEM_TYPE = {
+    "IMMEDIATE ACTIONS": "immediate",
+    "QUICK WINS": "quick_win",
+    "PATTERNS AND THEMES": "pattern",
+    "POST-DEADLINE BACKLOG": "backlog",
+}
+
+# Matches an item-reference like "[failure #62]" or "[feedback #4]" so
+# the parser can back-link parsed items to their UAT source rows.
+_SOURCE_REF_RE = re.compile(
+    r"\[(failure|feedback)\s*#(\d+)\]", re.IGNORECASE)
+
+# Matches a bullet line — agent output uses "- ", "* ", or "1. " /
+# "1) " for numbered items.
+_BULLET_RE = re.compile(r"^(?:[-*]|\d+[.\)])\s+(.+)$")
+
+
+def _split_report_into_section_blocks(
+    report_text: str,
+) -> dict[str, list[str]]:
+    """
+    Walks the agent's verdict and groups raw bullet lines by section.
+    Returns {item_type: [bullet_lines]} keyed by the canonical
+    item_type strings (immediate / quick_win / pattern / backlog). The
+    SUMMARY section is skipped — it carries aggregate counts, not
+    individual items.
+
+    Permissive parser: tolerates the agent omitting a section, using
+    different bullet markers, or interleaving prose between bullets.
+    The parser only collects lines that look like list items, leaving
+    framing prose out of the parsed item list.
+    """
+    blocks: dict[str, list[str]] = {v: [] for v in _SECTION_TO_ITEM_TYPE.values()}
+    current: str | None = None
+    multiline_buf: list[str] = []
+
+    def _flush() -> None:
+        if current and multiline_buf:
+            blocks[current].append("\n".join(multiline_buf).strip())
+        multiline_buf.clear()
+
+    for raw_line in (report_text or "").splitlines():
+        # Section header (## SECTION_NAME) — switch the current bucket.
+        if raw_line.startswith("## "):
+            _flush()
+            header = raw_line[3:].strip().upper()
+            current = _SECTION_TO_ITEM_TYPE.get(header)
+            continue
+
+        if current is None:
+            continue
+
+        bullet_match = _BULLET_RE.match(raw_line.rstrip())
+        if bullet_match:
+            # Start of a new item — flush whatever was in the buffer.
+            _flush()
+            multiline_buf.append(bullet_match.group(1).strip())
+        elif multiline_buf and raw_line.startswith(("  ", "\t")):
+            # Continuation line for the in-progress bullet (the agent
+            # often indents follow-up detail). Inspect the raw line —
+            # `.strip()` removes leading whitespace, so the check has
+            # to run against raw_line before any normalisation, or
+            # this branch is dead code and continuation lines are
+            # silently dropped.
+            multiline_buf.append(raw_line.strip())
+        elif multiline_buf and raw_line.strip() == "":
+            # Blank line ends the current bullet.
+            _flush()
+        # Otherwise: prose line in the section — ignored.
+
+    _flush()
+    return blocks
+
+
+def _parse_item_block(
+    block: str, issues_by_source: dict[tuple[str, int], dict[str, Any]],
+) -> dict[str, Any]:
+    """
+    Turns one raw bullet block into the triage_report_items row payload.
+
+    Title heuristic: the first line of the block, capped at 500 chars
+    (the column limit). Body: the remainder.
+
+    Source linkage: if the block carries a "[failure #N]" or
+    "[feedback #N]" reference, source_item_type + source_item_id pin
+    the back-pointer. The issues_by_source map (built from
+    issues_created) attaches github_issue_number + github_issue_url
+    when an issue was opened for the same source row.
+    """
+    lines = block.splitlines()
+    title = (lines[0].strip() if lines else "(untitled item)")[:500]
+    body = "\n".join(lines[1:]).strip() or None
+
+    source_type: str | None = None
+    source_id: int | None = None
+    gh_number: int | None = None
+    gh_url: str | None = None
+    match = _SOURCE_REF_RE.search(block)
+    if match:
+        source_type = match.group(1).lower()
+        try:
+            source_id = int(match.group(2))
+        except (TypeError, ValueError):
+            source_id = None
+        if source_id is not None:
+            issue = issues_by_source.get((source_type, source_id))
+            if issue:
+                gh_number = issue.get("number")
+                gh_url = issue.get("url")
+
+    return {
+        "item_title": title, "item_body": body,
+        "github_issue_number": gh_number, "github_issue_url": gh_url,
+        "source_item_type": source_type, "source_item_id": source_id,
+    }
+
+
+async def _store_triage_items(
+    report_id: int, report_text: str,
+    issues_created: list[dict[str, Any]],
+) -> list[int]:
+    """
+    Parses report_text into normalised triage_report_items rows and
+    INSERTs them. Returns the list of new row ids in insertion order.
+
+    Fail-open: any database error logs and returns []. The triage run
+    still completes — the items are an additive layer over the
+    existing report_text blob, not a substitute.
+    """
+    if not report_text:
+        return []
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return []
+
+        # Index the GitHub issues by source so the parser can attach
+        # the issue number/url whenever a parsed item references the
+        # same source row the engine already issued.
+        issues_by_source: dict[tuple[str, int], dict[str, Any]] = {}
+        for issue in issues_created:
+            src_type = issue.get("item_type")
+            src_id = issue.get("item_id")
+            if isinstance(src_id, int) and src_type:
+                issues_by_source[(str(src_type), src_id)] = issue
+
+        # Parse → list of (item_type, payload).
+        blocks = _split_report_into_section_blocks(report_text)
+        rows_to_insert: list[dict[str, Any]] = []
+        for item_type, item_blocks in blocks.items():
+            for block in item_blocks:
+                payload = _parse_item_block(block, issues_by_source)
+                rows_to_insert.append({
+                    "report_id": report_id,
+                    "item_type": item_type,
+                    **payload,
+                })
+
+        if not rows_to_insert:
+            return []
+
+        new_ids: list[int] = []
+        async with AsyncSessionLocal() as session:
+            for row in rows_to_insert:
+                result = await session.execute(text(
+                    "INSERT INTO triage_report_items "
+                    "(report_id, item_type, item_title, item_body, "
+                    " github_issue_number, github_issue_url, "
+                    " source_item_type, source_item_id) "
+                    "VALUES (:report_id, :item_type, :item_title, "
+                    " :item_body, :github_issue_number, "
+                    " :github_issue_url, :source_item_type, "
+                    " :source_item_id) RETURNING id"
+                ), row)
+                new_id = result.scalar()
+                if new_id is not None:
+                    new_ids.append(int(new_id))
+            await session.commit()
+        log.info("triage_items_stored", report_id=report_id,
+                 n_items=len(new_ids))
+        return new_ids
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_items_store_failed",
+                    report_id=report_id, error=str(exc))
+        return []
+
+
+async def _back_populate_source_rows(
+    issues_created: list[dict[str, Any]],
+    failure_ids: list[int],
+) -> None:
+    """
+    Updates test_results and test_feedback with github_issue_number /
+    github_issue_url for every source row the triage engine just
+    opened a GitHub issue against. Also stamps triaged_at on every
+    assessed failure (the feedback equivalent is the status='triaged'
+    transition handled elsewhere). Fail-open per UPDATE so one bad
+    row never blocks the rest."""
+    if not issues_created and not failure_ids:
+        return
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return
+        async with AsyncSessionLocal() as session:
+            for issue in issues_created:
+                src_type = issue.get("item_type")
+                src_id = issue.get("item_id")
+                num = issue.get("number")
+                url = issue.get("url")
+                if not isinstance(src_id, int) or num is None:
+                    continue
+                table = ("test_results" if src_type == "failure"
+                          else "test_feedback" if src_type == "feedback"
+                          else None)
+                if table is None:
+                    continue
+                await session.execute(text(
+                    f"UPDATE {table} SET github_issue_number = :n, "
+                    f"github_issue_url = :u WHERE id = :id"
+                ), {"n": int(num), "u": str(url or ""), "id": src_id})
+            # Stamp triaged_at on every assessed failure so the next
+            # run skips them in _gather_unaddressed.
+            if failure_ids:
+                await session.execute(text(
+                    "UPDATE test_results SET triaged_at = now() "
+                    "WHERE id = ANY(:ids) AND triaged_at IS NULL"
+                ), {"ids": failure_ids})
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_back_populate_failed", error=str(exc))
 
 
 # ── Step 5 — GitHub issues ────────────────────────────────────────────────────
@@ -546,8 +911,16 @@ async def run_triage(triggered_by: str = "manual") -> dict[str, Any]:
     issues_created: list[dict[str, Any]] = []
     metadata: dict[str, Any] = {"triggered_by": triggered_by}
     try:
-        # Steps 2-3 — context + agent report.
-        report_text = _generate_triage_report(failures, feedback)
+        # Steps 2-3 — context + agent report. Resolved-item context
+        # (Commit 4 of the triage-resolution build) is fetched and
+        # rendered into a block prepended to the unaddressed items.
+        # The agent prompt instructs it not to re-raise items in this
+        # block unless it has evidence the fix didn't work.
+        resolved_recent = await _recent_resolved_items()
+        resolved_block = _format_resolved_items_block(resolved_recent)
+        metadata["resolved_in_context"] = [r["id"] for r in resolved_recent]
+        report_text = _generate_triage_report(
+            failures, feedback, resolved_block=resolved_block)
         # Step 4 — record which sections are present.
         metadata["sections"] = _parse_sections(report_text)
         # Step 5 — GitHub issues for the blocking / major items.
@@ -560,8 +933,20 @@ async def run_triage(triggered_by: str = "manual") -> dict[str, Any]:
             log.warning("triage_github_step_failed", error=str(exc))
             status = "partial"
         metadata["github_issues"] = issues_created
-        # Step 6 — mark the assessed feedback triaged.
+        # Step 6 — mark the assessed feedback triaged + (new) the
+        # failures triaged. test_feedback uses the status column;
+        # test_results uses migration-023's triaged_at column.
         await _mark_feedback_triaged([f["id"] for f in feedback])
+        # Step 6b (new) — parse the verdict into triage_report_items
+        # rows and back-populate the github_issue columns on the
+        # source UAT rows. Per-item resolution is the workflow these
+        # rows unlock — Commit 3 of the triage-resolution build adds
+        # resolve_triage_items() that updates them by id.
+        new_item_ids = await _store_triage_items(
+            report_id, report_text, issues_created)
+        metadata["item_ids"] = new_item_ids
+        await _back_populate_source_rows(
+            issues_created, [f["id"] for f in failures])
     except Exception as exc:  # noqa: BLE001
         log.warning("triage_run_failed", report_id=report_id, error=str(exc))
         status = "failed"
@@ -580,3 +965,168 @@ async def run_triage(triggered_by: str = "manual") -> dict[str, Any]:
         "status": status, "report_id": report_id, "items_assessed": total,
         "github_issues_created": len(issues_created),
     }
+
+
+# ── triage_report_items — read + resolve workflow (Commit 2 of 6) ─────────────
+
+async def get_all_triage_items(
+    report_id: int | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Every triage_report_items row, newest report first, then by
+    item_type (immediate → quick_win → pattern → backlog), then by id.
+    When report_id is given, restricts to that one report.
+
+    Fail-open: a missing migration-023 table returns [] so the
+    sysadmin Settings panel renders an empty list rather than 500ing.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return []
+        params: dict[str, Any] = {}
+        where = ""
+        if report_id is not None:
+            where = "WHERE report_id = :rid"
+            params["rid"] = report_id
+        async with AsyncSessionLocal() as session:
+            rows = await session.execute(text(
+                "SELECT id, report_id, item_type, item_title, item_body, "
+                " github_issue_number, github_issue_url, "
+                " source_item_type, source_item_id, "
+                " resolved_at, resolved_by, resolution_note, fix_commit, "
+                " requires_retest, retest_requested_at, "
+                " retest_completed_at, created_at "
+                f"FROM triage_report_items {where} "
+                "ORDER BY report_id DESC, "
+                " CASE item_type "
+                "  WHEN 'immediate' THEN 0 WHEN 'quick_win' THEN 1 "
+                "  WHEN 'pattern' THEN 2 ELSE 3 END, id"
+            ), params)
+            return [{
+                "id": r[0], "report_id": r[1], "item_type": r[2],
+                "item_title": r[3], "item_body": r[4],
+                "github_issue_number": r[5], "github_issue_url": r[6],
+                "source_item_type": r[7], "source_item_id": r[8],
+                "resolved_at": _iso(r[9]), "resolved_by": r[10],
+                "resolution_note": r[11], "fix_commit": r[12],
+                "requires_retest": bool(r[13]),
+                "retest_requested_at": _iso(r[14]),
+                "retest_completed_at": _iso(r[15]),
+                "created_at": _iso(r[16]),
+            } for r in rows.fetchall()]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_items_read_failed", error=str(exc))
+        return []
+
+
+async def resolve_triage_item(
+    item_id: int, *, resolved_by: str, resolution_note: str,
+    fix_commit: str | None = None, requires_retest: bool = False,
+) -> dict[str, Any] | None:
+    """
+    Marks a triage_report_items row resolved. Used by the
+    /api/v1/testing/triage/items/{id}/resolve endpoint AND the
+    tools.triage_resolver helper Claude Code calls after applying a
+    fix. Returns the updated row's source_item_type / source_item_id /
+    reporter so the caller can dispatch the retest notification
+    (Commit 3 wires that path).
+
+    requires_retest=True stamps retest_requested_at to now() — the
+    frontend's TestNotifications surfaces a "Fix ready for retest"
+    pill to the reporter on next login. Fail-open: a missing row or
+    a database error returns None and the caller skips notification.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(text(
+                "UPDATE triage_report_items SET "
+                " resolved_at = now(), resolved_by = :by, "
+                " resolution_note = :note, fix_commit = :commit, "
+                " requires_retest = :retest, "
+                " retest_requested_at = CASE WHEN :retest "
+                "   THEN now() ELSE retest_requested_at END "
+                "WHERE id = :id "
+                "RETURNING id, source_item_type, source_item_id, "
+                " item_title, requires_retest"
+            ), {"id": item_id, "by": resolved_by,
+                "note": resolution_note, "commit": fix_commit,
+                "retest": bool(requires_retest)})
+            found = row.fetchone()
+            await session.commit()
+            if found is None:
+                return None
+            return {
+                "id": int(found[0]),
+                "source_item_type": found[1],
+                "source_item_id": found[2],
+                "item_title": found[3],
+                "requires_retest": bool(found[4]),
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_resolve_item_failed",
+                    item_id=item_id, error=str(exc))
+        return None
+
+
+async def unresolve_triage_item(item_id: int) -> bool:
+    """
+    Clears every resolution field on a triage_report_items row.
+    Backs the PATCH /unresolve endpoint — sysadmin recovery when an
+    item was marked resolved in error. Returns True on success.
+    Fail-open returns False.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return False
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(text(
+                "UPDATE triage_report_items SET "
+                " resolved_at = NULL, resolved_by = NULL, "
+                " resolution_note = NULL, fix_commit = NULL, "
+                " requires_retest = false, retest_requested_at = NULL, "
+                " retest_completed_at = NULL "
+                "WHERE id = :id"
+            ), {"id": item_id})
+            await session.commit()
+            return (result.rowcount or 0) > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_unresolve_item_failed",
+                    item_id=item_id, error=str(exc))
+        return False
+
+
+async def mark_retest_complete(item_id: int) -> bool:
+    """
+    Stamps retest_completed_at to now() — called when the reporter
+    re-attests the test step the item resolved. Closes the loop on
+    the resolve → notify → reporter retests workflow. Fail-open.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return False
+        async with AsyncSessionLocal() as session:
+            result = await session.execute(text(
+                "UPDATE triage_report_items SET retest_completed_at = now() "
+                "WHERE id = :id AND retest_requested_at IS NOT NULL "
+                " AND retest_completed_at IS NULL"
+            ), {"id": item_id})
+            await session.commit()
+            return (result.rowcount or 0) > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning("triage_retest_complete_failed",
+                    item_id=item_id, error=str(exc))
+        return False

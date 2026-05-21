@@ -28,6 +28,7 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     OPUS_MODEL,
     SCOPE_ENFORCEMENT,
+    VISUAL_REASONING_RULES,
     build_agent_response,
     call_claude,
 )
@@ -37,6 +38,9 @@ from agents.fixed_income_analyst import FixedIncomeAnalyst
 from agents.independent_analyst import IndependentAnalyst
 from agents.quant_backtester import QuantBacktester
 from agents.risk_manager import RiskManager
+from tools.chart_vision import (
+    COUNCIL_CHARTS, get_charts_for_context, snapshots_dir_exists,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -90,6 +94,19 @@ You have received detailed analyses from four specialists (equity, fixed income,
 risk, quantitative backtesting). Synthesise their findings into a final \
 recommendation — do not repeat their analysis, reference it and build on it.
 
+VISUAL CONTEXT — you may receive chart snapshots alongside the prompt: \
+rolling_correlation, cumulative_returns, regime_signals, \
+regime_conditional_returns, factor_loadings, rolling_excess_return. Use \
+them as cross-checks on the specialist narratives — if a specialist claims \
+the 2022 break drove a strategy's underperformance, look at \
+rolling_correlation and cumulative_returns and confirm the visual evidence \
+matches. When you write the final recommendation paragraph, name at most \
+two visual landmarks (e.g. 'the rolling_correlation chart shows the \
+inversion in mid-2022') so the recommendation reads as grounded in the \
+evidence rather than abstract synthesis.
+
+{VISUAL_REASONING_RULES}
+
 {GLOBAL_AGENT_RULE}
 
 {SCOPE_ENFORCEMENT}"""
@@ -114,6 +131,29 @@ class CIO:
         self._quant = QuantBacktester()
         self._gemini = IndependentAnalyst()
         self._grok = ContrarianAnalyst()
+
+    @staticmethod
+    def _build_visual_context(
+        n_strategies: int | None = None,
+    ) -> list[dict] | None:
+        """COUNCIL_CHARTS snapshots as content blocks. Used by the CIO's
+        draft-consensus and synthesis calls (both are direct call_claude
+        — neither runs through the harness). Returns None when no
+        snapshots are on disk (cold deploy, first run). See
+        EquityAnalyst._build_visual_context for the rationale.
+
+        n_strategies is passed through so the all-strategy captions
+        render the count both callers know from len(strategy_results)."""
+        if not snapshots_dir_exists():
+            log.info("cio_no_snapshots_dir",
+                     note="proceeding without visual context")
+            return None
+        blocks = get_charts_for_context(COUNCIL_CHARTS, n_strategies=n_strategies)
+        if not blocks:
+            log.info("cio_no_snapshots_available",
+                     note="proceeding without visual context")
+            return None
+        return blocks
 
     def deliberate(
         self,
@@ -425,7 +465,9 @@ class CIO:
         )
 
         try:
-            return call_claude(OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000)
+            return call_claude(
+                OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000,
+                visual_context=self._build_visual_context())
         except Exception as exc:
             log.error("cio_draft_error", error=str(exc))
             # Fallback draft from specialist summaries
@@ -506,7 +548,8 @@ class CIO:
 
         try:
             synthesis_text = call_claude(
-                OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000
+                OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000,
+                visual_context=self._build_visual_context(),
             )
         except Exception as exc:
             log.error("cio_synthesis_error", error=str(exc))

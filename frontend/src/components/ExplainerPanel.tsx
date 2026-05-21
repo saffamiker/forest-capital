@@ -149,7 +149,14 @@ export default function ExplainerPanel({
           </button>
         </header>
 
-        <div className="flex-1 overflow-y-auto px-4 py-3 text-sm leading-relaxed">
+        {/* break-words + overflow-wrap-anywhere stop long unbroken
+            strings (URLs, identifiers) from pushing the panel content
+            past its width — UAT feedback #3 flagged horizontal
+            scrolling on the drawer. overflow-x-hidden caps any
+            residual overflow that escapes the wrap rules. */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3
+                        text-sm leading-relaxed break-words
+                        [overflow-wrap:anywhere]">
           {streaming && text === '' && !error && (
             <div className="flex items-center gap-2 text-muted text-xs animate-pulse">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />

@@ -5613,6 +5613,326 @@ immediate / quick-win item, and an accurate SUMMARY.
 
 
 ─────────────────────────────────────────────────────────────────────────────
+TRIAGE RESOLUTION WORKFLOW (migration 023, May 21 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The triage system (migration 016) generates the agent's verdict as
+unstructured markdown. That is fine for human reading, but the rest
+of the workflow — per-item resolution, retest notifications, agent
+awareness of what is already fixed — needs first-class records.
+Migration 023 lifts the markdown bullets into a normalised
+triage_report_items table so the verdict and the actionable items
+share one source of truth.
+
+NEW TABLE — triage_report_items (migration 023):
+  id, report_id (FK triage_reports ON DELETE CASCADE), item_type
+  (immediate | quick_win | pattern | backlog), item_title (varchar
+  500), item_body (text, nullable), github_issue_number,
+  github_issue_url, source_item_type (failure | feedback | null —
+  null for pattern / backlog items), source_item_id, resolved_at,
+  resolved_by, resolution_note, fix_commit, requires_retest (bool,
+  default false), retest_requested_at, retest_completed_at,
+  created_at. Indexed on (report_id, item_type) for the per-report
+  view, on (resolved_at) for the resolved-items context query, and
+  on (retest_requested_at, retest_completed_at) for the notification
+  feed. Migration 023 also adds github_issue_number / github_issue_url
+  / triaged_at to test_results, and github_issue_number /
+  github_issue_url to test_feedback — the back-pointers the parser
+  populates so the source row links to its GitHub issue.
+
+PARSING — tools/triage_engine._split_report_into_section_blocks and
+_parse_item_block lift the agent's markdown into rows. The parser
+is deliberately permissive:
+  - section headers are matched by exact "## SECTION" string (the
+    four canonical sections; SUMMARY is skipped — it carries
+    aggregate counts, not items);
+  - bullets accept "- ", "* ", "1. ", "1) " markers
+    (_BULLET_RE = r"^(?:[-*]|\d+[.\)])\s+(.+)$");
+  - continuation lines indented under a bullet attach to it. The
+    check inspects raw_line — NOT raw_line.strip() — because strip()
+    removes the leading whitespace that signals continuation.
+    Originally written against the stripped line; the bug made the
+    branch unreachable and indented detail was silently dropped.
+    Fix landed with Commit 6 alongside the new test coverage.
+  - source references [failure #N] / [feedback #N] are matched by
+    _SOURCE_REF_RE and pin source_item_type / source_item_id; the
+    parser additionally attaches github_issue_number / github_issue_url
+    when the engine opened an issue for the same source row.
+A run that parses no items still completes — _store_triage_items
+returns [] without an INSERT, so the verdict's markdown body remains
+the human-readable record even when the structured layer is empty.
+Fail-open per row: a database error during INSERT logs and skips,
+the rest of the items still land.
+
+BACK-POPULATION — _back_populate_source_rows updates test_results
+and test_feedback with the github_issue_number + github_issue_url for
+every source row the engine opened an issue against, AND stamps
+triaged_at on every assessed failure (the feedback equivalent is the
+status='triaged' transition already handled by _mark_feedback_triaged).
+The frontend Test Failures view reads these columns so a tester
+sees the GitHub issue link inline. Failures with triaged_at set are
+filtered OUT of the next triage run's backlog — items are assessed
+once and never re-raised on cadence.
+
+RESOLVED-ITEM CONTEXT (Commit 4) — triage runs do NOT re-raise items
+that are already fixed. _recent_resolved_items(window_days=14) reads
+triage_report_items WHERE resolved_at > now() - interval, and
+_format_resolved_items_block formats them as a structured prompt
+block (item type, title, resolution note, 8-char short SHA, retest
+state — pending / complete / not_required). The block threads through
+_triage_user_message ahead of the unaddressed items, with a system-
+prompt instruction telling the QA-lead "do not re-raise these unless
+you have evidence the fix did not work. Items marked requires_retest
+are awaiting reporter verification — note them, do not act on them."
+metadata.resolved_in_context records the count for the audit trail.
+Empty list → empty string → section omitted entirely (a brand-new
+deployment reads cleanly).
+
+CLAUDE-CODE-DRIVEN RESOLUTION (Commit 3) —
+tools/triage_resolver.resolve_triage_items(item_ids, *,
+resolution_note, fix_commit, requires_retest=True) is the helper
+Claude Code calls at the end of every fix prompt that addresses
+triage items. It calls triage_engine.resolve_triage_item per id (the
+same DB update the /resolve endpoint runs), stamps resolved_by =
+"claude_code" — distinguishing AI-applied fixes from sysadmin-applied
+fixes for the team-activity narrative — and returns a summary
+{resolved, failed, notified_reporters, item_titles}. Reporter lookup
+(_reporter_for_source) reads user_email off the source UAT row;
+patterns and backlog items return None and no notification fires.
+Fail-open per item — a missing item or DB error on one row logs and
+the rest still attempt.
+
+RETEST NOTIFICATIONS (Commit 3) — the surface is NOT a separate
+table. test_runner.get_notifications already derives resolved_failures
+and responded_feedback from existing state; Commit 3 extends it with
+a retest_requested kind via a JOIN from triage_report_items to
+test_results / test_feedback, gated on requires_retest = true AND
+retest_completed_at IS NULL AND the source row's user_email matches
+the requesting user AND the request is within the last 21 days.
+TestNotifications surfaces a "🔁 Fix ready — please retest" pill
+that deep-links into the test runner at the originating step when
+the source is a failure (script_id + step_id are joined in for that)
+or to /settings#test-results when the source is feedback.
+
+ENDPOINTS (manage_users-gated — sysadmin only):
+  GET    /api/v1/testing/triage/items?report_id=N  — every triage
+         item, newest report first, immediate → quick_win → pattern
+         → backlog → id ordering; optionally filtered to one report
+  PATCH  /api/v1/testing/triage/items/{id}/resolve  — body
+         {resolution_note (required), fix_commit?, requires_retest?}
+         — resolved_by is the calling sysadmin's email
+  PATCH  /api/v1/testing/triage/items/{id}/unresolve  — clears every
+         resolution field (sysadmin recovery)
+
+FRONTEND — Settings → Test Administration → Triage Reports renders
+the latest report's markdown body AND a TriageItemsBlock below it.
+Summary line: "X of Y resolved · Z awaiting retest". Each item is a
+TriageItemRow with type badge, resolved / retest-pending / retest-
+complete badges, GitHub issue link badge, collapsible body, and a
+Mark Resolved inline form (textarea + fix_commit + requires_retest
+checkbox). The requires_retest default is derived from the item type
+via defaultRetestForType — true for immediate / quick_win, false for
+pattern / backlog — but the sysadmin can override per item. After a
+successful PATCH the row's local state updates without a panel
+re-fetch.
+
+WORKFLOW — three integration paths converge on triage_report_items:
+  1. Agent verdict lands → _store_triage_items parses → items rows
+     are the first-class actionable record (Commit 2).
+  2. Claude Code applies a fix → calls resolve_triage_items at the
+     end of the prompt → items marked resolved by "claude_code" →
+     reporter sees "🔁 Fix ready" on next login (Commit 3).
+  3. Sysadmin applies a fix → clicks Mark Resolved in the panel →
+     items marked resolved by sysadmin's email → same reporter
+     notification path (Commit 5).
+The next triage run reads the recently-resolved items into the agent
+prompt (Commit 4); the agent does not re-raise fixed work; the cycle
+keeps the backlog converging toward zero rather than oscillating.
+
+
+─────────────────────────────────────────────────────────────────────────────
+MACRO MARKET RESEARCH AGENT (migration 024, May 21 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The historical backtest covers 2002-2025. Without a research layer
+the council reasons only against history. The macro market research
+agent (FEATURE 2) bridges the gap: it runs on a daily cadence,
+identifies the last 7 days of macroeconomic events affecting equity /
+IG / HY markets, and produces a structured digest that the council
+and academic_review prompts inject as a CURRENT MACRO CONDITIONS
+block. The dashboard surfaces the same digest so the team sees what
+the agents are reasoning against — and so the FNA 670 panel can
+click through every cited source URL and verify it.
+
+THREE LAYERS — agent, engine, injection — plus the frontend widget.
+
+LAYER 1 — agents/research_agent.py (Sonnet + web_search + web_fetch).
+  generate_digest() returns (digest, usage). Synchronous wrapper
+  around the Anthropic SDK with the server-side web_search_20250305
+  tool (max 5 uses) and web_fetch_20250910 (max 4 uses). The system
+  prompt covers eight categories (monetary_policy, inflation,
+  growth, rates, credit, volatility, geopolitical, other) over the
+  last 7 days only, with 0-2 signals per category — "never invent
+  a signal to fill a slot."
+
+  CITATION INTEGRITY GATE.
+  _filter_to_verified_signals strips every signal whose source_url
+  is NOT in the set web_search returned during the call. A
+  fabricated citation cannot survive — the model can write any URL
+  it wants in its JSON output, but the filter requires that URL
+  came from a real search result. A signal without a verified URL
+  is unfalsifiable and dropped entirely, with a
+  research_signal_dropped_unverified_url log line.
+
+  FAIL-OPEN. Any failure path (web_search outage, SDK error, empty
+  parse, unparseable JSON) returns a defaulted shape carrying an
+  `error` key. The engine layer maps `error` truthy onto
+  status='failed' on the persisted row.
+
+LAYER 2 — tools/research_engine.py (orchestration + persistence).
+  Mirrors triage_engine / audit_engine conventions —
+  is_research_running() concurrency lock, _create_running_row +
+  _finalise_row persistence helpers, run_research(triggered_by)
+  end-to-end orchestrator, trigger_research_async(reason) for
+  fire-and-forget loop-or-thread spawn.
+
+  TIME-BASED FRESHNESS (NOT data-hash). _is_current(window_hours=24)
+  is the freshness gate. Unlike the chart snapshots and audit engine
+  which are data-hash-gated, today's macro news is independent of
+  the historical data hash. The default window is 24 hours;
+  run_research_if_stale skips when current. Manual sysadmin runs
+  bypass the gate via the /research/run endpoint.
+
+  TEST ENV substitutes a deterministic mock digest
+  (research_engine._mock_digest) so pytest never hits Anthropic.
+
+  POST-SUCCESS CACHE REFRESH. run_research calls
+  macro_context.refresh_macro_context at the end so a fresh digest
+  flows into agent prompts within one tick of land.
+
+LAYER 3 — tools/macro_context.py (read-and-inject).
+  Mirrors tools/academic_context structure exactly:
+    get_macro_context()       sync, returns the cached block (empty
+                              until refresh has run)
+    inject_macro_context(p)   appends the block to a system prompt;
+                              a no-op on an empty cache so every
+                              agent can call it unconditionally
+    refresh_macro_context()   async — re-reads from the engine and
+                              updates the in-memory cache. Called
+                              from the lifespan startup hook AND
+                              after every successful research run.
+
+  Context block shape — what an agent sees:
+    === CURRENT MACRO CONDITIONS (last 7 days as of <timestamp>) ===
+    Summary: <2-3 sentence overview>
+
+    Key signals:
+      - [monetary_policy] Fed minutes signalled patience on cuts.
+          Implication: less near-term IG duration tailwind.
+          Source: https://federalreserve.gov/...
+      - [inflation]       CPI print 3.1% vs 3.2% expected.
+          Implication: dovish for both equity and IG.
+          Source: https://bls.gov/...
+      ...
+
+    Regime read: <single paragraph regime read>
+
+    Reason from these signals when relevant. Do NOT invent macro
+    conditions absent from this block — historical reasoning is
+    your default for anything not captured here.
+
+  HEADER GUARD. The "Key signals:" header emits ONLY when at least
+  one bullet survived the no-signal-text filter (a degenerate
+  signal entry like {category: "rates", signal: ""} is dropped and
+  must NOT produce an orphaned section header).
+
+INJECTION POINTS:
+  agents/base.py call_claude — system prompt wrapped as
+    _with_macro_context(_with_academic_context(system_prompt)).
+    Order is intentional: academic rubric is project-stable and
+    appears first; macro context is volatile and appears closer to
+    the user message so the model frames against latest conditions.
+    Every Anthropic agent (equity / FI / risk / quant / CIO / QA /
+    academic writer) sees both blocks.
+  agents/academic_advisor.py — manual injection alongside the
+    existing academic-context call. The advisor builds its own
+    web_search SDK call so does not go through call_claude.
+  agents/contrarian_analyst.py (Grok) — _academic_ctx helper
+    extended to inject BOTH context blocks, each fail-open
+    independently so one failure never silences the other.
+  agents/independent_analyst.py (Gemini) — manual injection in
+    deliberate(), chained after the existing academic injection.
+  DELIBERATELY NOT WIRED — agents/explainer_agent.py. Its outputs
+  are definitional (what is a Sharpe ratio, what is FDR correction)
+  and should be stable across days; macro context would drift
+  glossary-class explanations toward "given today's environment..."
+  which would confuse users hovering an InfoIcon.
+
+EVALUATOR GUARD. The harness's _evaluate() inside agents/harness.py
+calls call_claude without the visual_context kwarg (the FEATURE 1
+chart-vision guard); the macro context flows through call_claude's
+`system` parameter so EVALUATORS DO SEE IT. That is intentional —
+the evaluator is scoring whether the response is grounded against
+the data the agent reasoned from. Hiding the macro block from the
+evaluator would let an agent invent macro context and score well.
+
+MIGRATION 024 — macro_research_digests schema:
+  id, generated_at, triggered_by (startup | scheduled | manual),
+  status (running | complete | failed), summary_text,
+  regime_implication, key_signals JSONB, citation_urls JSONB,
+  model, raw_response (for audit), error, metadata JSONB. Single
+  index on generated_at desc. Changelog entry 43.
+
+ENDPOINTS (main.py):
+  GET  /api/v1/research/latest   — latest COMPLETED digest plus
+       last_completed_at. require_auth — every authenticated user
+       reads (transparency).
+  GET  /api/v1/research/history?limit=N — N most recent runs across
+       every status. require_auth.
+  POST /api/v1/research/run      — manage_users gated. Forces a
+       fresh run bypassing the 24h freshness gate. Returns
+       immediately with status: 'running'; the frontend polls
+       /research/latest to pick up the new digest. A concurrent
+       run returns status: 'already_running'.
+
+LIFESPAN STARTUP HOOK in main.py:
+  1. trigger_research_async("startup") fires the engine in the
+     background — produces a fresh digest in minutes if none is
+     current.
+  2. refresh_macro_context() warm-reads whatever digest already
+     exists in the DB into the cache so the FIRST agent call
+     after restart sees the previous deploy's digest. The fresh
+     one from step 1 lands later, and run_research's post-success
+     refresh updates the cache then.
+  Both hooks fail-open — a research failure on startup never
+  blocks the rest of the boot sequence.
+
+FRONTEND — frontend/src/components/MacroResearchPanel.tsx.
+  Slot above the summary tiles on the dashboard. Renders summary +
+  signals (categorised pill + signal text + implication + source
+  link with an ExternalLink icon) + regime read + generated-at
+  timestamp. A "(stale)" warning appears when the digest is more
+  than 24h old. Run-now button gated to manage_users via TeamGate
+  with showDisabled=false (viewers see the digest but not the
+  trigger). Polling: a Run-now click polls /research/latest three
+  times at 30s intervals because a real run takes 30-90s.
+
+  Four states (every test pinned):
+    loading                  spinner, "Loading current macro conditions..."
+    empty (no digest yet)    "first research run produces one within
+                             a few minutes" — the cold-deploy path
+    failed fetch             error message, the panel's prior data
+                             stays intact (no flash of blank)
+    normal                   the full digest renders
+
+COST PROFILE. A research run consumes roughly 5 web_search uses + 4
+web_fetch uses + ~3000-5000 Sonnet output tokens. Estimate ~$0.20
+per run; one run per day → ~$6/month. The 24h freshness gate plus
+the startup-only auto-trigger keeps this bounded. Manual runs from
+the dashboard burn the same budget but are sysadmin-only.
+
+
+─────────────────────────────────────────────────────────────────────────────
 STATISTICAL AUDIT SYSTEM (migration 017, May 17 2026)
 ─────────────────────────────────────────────────────────────────────────────
 
@@ -6581,6 +6901,174 @@ group div carries data-testid="chart-picker-group-<category>" and each
 card data-testid="chart-picker-item-<key>" for the grouped-layout
 tests.
 
+
+─────────────────────────────────────────────────────────────────────────────
+CHART VISION FOR AGENTS (May 21 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The council specialists, the Academic Review peers + arbiter, and the
+Academic Writer now reason VISUALLY about the project's central charts.
+On every data-hash change the chart-snapshot renderer drops fresh PNGs
+to disk; on every agent generation call the vision layer reads those
+PNGs back, base64-encodes them as Anthropic image blocks, and threads
+them into the multimodal user message — alongside the existing
+quantitative DATA block, never replacing it.
+
+WHY VISION HELPS. Two of the project's three central findings are
+intrinsically visual — the 2022 equity-bond correlation regime break is
+a slope inversion on a rolling-correlation line, and the cumulative
+return divergence between dynamic strategies and the benchmark is a
+shape, not a number. A text-only agent describes them in the abstract;
+a vision-enabled agent names what is visible. Numbers remain
+authoritative — when a number and a chart appear to disagree, the
+agents are instructed to prefer the number and flag the discrepancy.
+
+THREE COMPONENTS:
+
+  tools/chart_snapshots.py — render_all_chart_snapshots() iterates
+    tools.chart_render.AVAILABLE_CHARTS and writes one PNG per chart_key
+    plus a manifest.json carrying the data-hash they reflect. Atomic
+    .tmp + os.replace per file so a partial render is never read.
+    HASH-EQUALITY SKIP: if the stored manifest hash matches the current
+    data hash AND every AVAILABLE_CHARTS key has a PNG on disk, the
+    render loop is skipped entirely — no matplotlib, no encodes. The
+    PNG-coverage half of the guard handles "a code deploy adds a new
+    chart key" correctly: the new key has no file, the guard fails,
+    the renderer runs. trigger_chart_snapshot_async() fires the render
+    in the background from the SAME three hooks that fire
+    trigger_audit_async (_persist_to_db, check_and_run_incremental_
+    update, extend_market_data) — all three wrapped in try/except so a
+    chart-render failure degrades to a log warning, never a 500.
+
+  tools/chart_vision.py — get_charts_for_context(chart_keys,
+    n_strategies=None) is the read-side. Returns an interleaved list
+    of Anthropic content blocks — one image block + one caption text
+    block per chart, in order. Missing snapshots are skipped silently
+    with a log line; an empty list result is the cold-deploy fail-open
+    path (returns []; the caller treats it as None and the call
+    proceeds text-only, bitwise identical to the pre-vision wire
+    format). Three predefined chart sets, deliberately small so the
+    per-call token budget stays predictable:
+      COUNCIL_CHARTS (6) — rolling_correlation, cumulative_returns,
+        regime_signals, regime_conditional_returns, factor_loadings,
+        rolling_excess_return. Used by every council specialist + CIO.
+      ACADEMIC_REVIEW_CHARTS (7) — adds drawdown_periods,
+        significance_journey, oos_performance to verify document
+        claims about strategy robustness and OOS validity.
+      DOCUMENT_GENERATION_CHARTS (7) — adds rolling_sharpe to support
+        risk-adjusted-performance narrative arcs in the midpoint paper
+        / exec brief / deck.
+
+    CAPTION SCOPE SENTENCE. Each caption is a "Chart: {key} — {desc}"
+    header followed (where applicable) by a scope sentence naming the
+    exact data subset the renderer chose, so the agent knows what is
+    in the image without inferring it from pixels. Three buckets:
+      single-strategy (drawdown_periods, monthly_returns_heatmap,
+        rolling_sharpe, return_distribution, oos_performance) →
+        "Showing REGIME_SWITCHING strategy vs BENCHMARK. Full study
+        period." matching tools/chart_renderers._DEFAULT_STRATEGY.
+      factor (factor_loadings, factor_returns_attribution) →
+        "Showing market factor exposures. BENCHMARK series only."
+      all-strategy (cumulative_returns, rolling_excess_return,
+        risk_return, significance_journey, p_value_distribution) →
+        "Showing all N strategies. Full study period, linear scale."
+        — N is the caller-supplied n_strategies (omitted from the
+        sentence when None, never rendered as "all 0").
+    Charts in no bucket (rolling_correlation, regime_signals,
+    regime_conditional_returns, team_activity) carry the description
+    alone — AVAILABLE_CHARTS already names what they show.
+
+    n_strategies THREADING. Every generator that has the strategy
+    count in scope passes it through so the all-strategy caption
+    renders the precise number:
+      council specialists → len(strategy_results) → _build_visual_context
+      cio → len(strategy_results) → _build_visual_context (staticmethod)
+      academic_review endpoint →
+        ctx["analytics"]["strategy_count"] → run_peer_fan_out +
+        run_arbiter_with_harness → _academic_review_visual_context
+      document generation endpoints →
+        len(data["strategy_results"]) → _generate_narratives →
+        harness_narrative → get_charts_for_context.
+    The kwarg defaults to None throughout so a pre-vision caller (or
+    a cold deploy where strategy_results is unavailable) still works
+    — the sentence simply reads "Showing all strategies." instead of
+    naming a count.
+
+  agents/base.py call_claude — gains an optional keyword-only
+    `visual_context: list[dict] | None = None` parameter. When None
+    (the default), content stays as a plain string — the legacy wire
+    format every existing call site has used since day one. When
+    provided, content becomes a multi-block list:
+    `[*visual_context, {"type": "text", "text": user_message}]`. The
+    text user_message is always the LAST block so the prompt appears
+    after the visual context the model is asked about.
+
+EVALUATOR GUARD. The harness's _evaluate() at agents/harness.py:267
+calls call_claude WITHOUT the visual_context kwarg — its default None
+preserves the text-only path. Adding the charts to the evaluator's
+input would muddle the text-quality signal the evaluator scores against;
+the guard is enforced by OMISSION at the evaluator's only call site
+(no flag, no conditional — the call simply doesn't pass the kwarg).
+
+WIRING. Six generator call paths inject visual_context:
+  - the four council specialists (equity / FI / risk / quant) — each
+    has a private _build_visual_context() method that returns
+    get_charts_for_context(COUNCIL_CHARTS) or None on cold deploy.
+    Built once before the harness call and captured in the
+    generator-fn closure so a harness retry reuses the same visual
+    context without re-reading the snapshots from disk.
+  - cio.CIO._compile_draft_consensus and _synthesise — direct
+    call_claude paths (not through the harness), both call the
+    shared _build_visual_context staticmethod.
+  - academic_review.run_peer_agent — Claude peers only; Gemini and
+    Grok don't use Anthropic content blocks and fall back to the
+    text-only path naturally. _academic_review_visual_context()
+    returns ACADEMIC_REVIEW_CHARTS or None.
+  - academic_review.run_arbiter_with_harness — the arbiter sees the
+    same chart set as the peers it weighs.
+  - tools/academic_export.harness_narrative — the Academic Writer
+    generation behind every midpoint paper / exec brief / deck
+    section. DOCUMENT_GENERATION_CHARTS via a local builder block.
+
+PROMPT GUIDANCE. agents/base.py exports VISUAL_REASONING_RULES — the
+cross-cutting rule block embedded in every vision-enabled prompt. It
+names: the fail-open contract (no charts → don't cite charts; citing
+an unattached chart is a hallucination the QA audit catches), the
+no-invention rule (describe what's visible, never recall a typical
+pattern from training), and the chart-key naming convention (every
+caption opens with the chart's key, so a reader knows which image is
+being discussed). Each agent's system prompt adds a tailored VISUAL
+CONTEXT block listing the specific chart-set keys and the focus area
+that agent should attend to most closely (e.g. the FI analyst singles
+out rolling_correlation as direct visual evidence of the 2022 break;
+the quant_backtester targets rolling_excess_return for OOS
+overfitting; the academic writer is instructed to name a visual
+feature in academic prose alongside any quantitative claim).
+
+FAIL-OPEN END TO END. A cold deploy (no snapshots yet rendered, or
+the snapshots directory missing entirely) produces the pre-vision
+text-only behaviour — visual_context resolves to None, the wire
+format is a plain string, and the agents are instructed not to refer
+to charts. The first hash-triggered render seeds the directory; from
+then on the agents reason visually.
+
+TOKEN COST. Two image blocks at 800×500 resolution each add roughly
+1,500-2,000 input tokens per chart in the multimodal encoding. A
+council pass with 6 COUNCIL_CHARTS attached per specialist adds
+roughly 9,000-12,000 tokens per agent — acceptable for the
+council's analytical depth, deliberately bounded by the small chart
+set rather than letting all 17 AVAILABLE_CHARTS flow through.
+
+TESTS — four files cover the feature:
+  test_chart_snapshots.py (6) — hash-skip guard
+  test_chart_vision.py (15) — reader fail-open contract
+  test_chart_vision_wiring.py (8) — generators inject, evaluator omits
+  test_visual_reasoning_prompts.py (12) — prompt-text contract
+  test_chart_vision_e2e.py (7) — render → read → API call shape,
+    cold-deploy fall-through, data-fetcher hook wiring
+Total 48 tests for the feature.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -6687,6 +7175,34 @@ is maintained separately. The `gh` CLI is authenticated with the
      ✅ Master / per-speaker DOCX export (POST /documents/drafts/{id}/
         export), stable per-speaker colour
      ✅ Submission Guide 2 updated; tests (backend 20, frontend 11)
+  ✅ Chart vision for agents stream (5 commits, no migration):
+     ✅ tools/chart_snapshots.py — hash-gated render of every
+        AVAILABLE_CHARTS key to PNG + manifest.json; fired from the
+        same three data_fetcher hooks that fire trigger_audit_async
+     ✅ Hash-skip guard — manifest hash + AVAILABLE_CHARTS coverage
+        check, so a Render redeploy against unchanged data never
+        re-renders
+     ✅ tools/chart_vision.py — get_charts_for_context reads the
+        PNGs back as Anthropic image+caption blocks; three predefined
+        chart sets (COUNCIL_CHARTS / ACADEMIC_REVIEW_CHARTS /
+        DOCUMENT_GENERATION_CHARTS)
+     ✅ agents/base.py call_claude — keyword-only
+        visual_context: list | None = None; backward compatible —
+        None preserves the legacy string-content wire format
+     ✅ Generators wired (six call paths): council specialists, CIO,
+        academic_review peers + arbiter, harness_narrative for the
+        Academic Writer. Gemini and Grok dissenters fall through to
+        the text-only path naturally
+     ✅ EVALUATOR GUARD enforced by omission at harness._evaluate —
+        evaluators always see string content, chart blocks would
+        muddle the text-quality signal
+     ✅ VISUAL_REASONING_RULES — cross-cutting prompt block (no
+        invention, fail-open, chart-key naming) embedded in every
+        vision-enabled prompt; per-agent VISUAL CONTEXT blocks name
+        the chart set and the agent's focus area
+     ✅ Tests (5 files, 48 total): hash-skip guard, reader fail-open,
+        wiring contract, prompt contract, end-to-end render→read→API
+        chain
   ◐ alembic upgrade head on Render — in-flight: migrations through 022
      are ready locally; migrations 019–022 are NOT yet on production.
      `alembic upgrade head` runs on Render post-merge, pending the

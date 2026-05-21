@@ -107,11 +107,17 @@ def _record_harness_run(
 class HarnessResult:
     """The outcome of one harness run."""
     response: str            # the best-scoring response across all attempts
-    final_score: float       # that response's evaluator score
+    final_score: float       # that response's effective score (min of primary + secondary)
     attempts: int            # number of generation attempts made (1-3)
     improved: bool           # did a retry beat the first attempt's score
     feedback_applied: str    # the evaluator feedback injected on the last retry
-    initial_score: float = 0.0   # the first attempt's score
+    initial_score: float = 0.0   # the first attempt's effective score
+    # When a secondary evaluator is supplied (e.g. the PM audience
+    # evaluator on document narratives), the harness scores against
+    # both and surfaces the SECOND score here so callers can display
+    # the two verdicts independently. None when no secondary ran.
+    primary_score: float | None = None
+    secondary_score: float | None = None
 
 
 class GeneratorEvaluatorHarness:
@@ -134,6 +140,8 @@ class GeneratorEvaluatorHarness:
         generator_prompt: str,
         context: str,
         agent_id: str,
+        *,
+        secondary_evaluator_prompt: str | None = None,
     ) -> HarnessResult:
         """
         Generate, evaluate, and retry until the score clears the
@@ -148,10 +156,22 @@ class GeneratorEvaluatorHarness:
                           to it on each retry.
         context:          reference material passed to the evaluator.
         agent_id:         identifier for the harness metric log line.
+        secondary_evaluator_prompt: OPTIONAL second evaluator (the PM
+                          audience lens on document narratives). When
+                          set, the harness scores every attempt against
+                          BOTH evaluators, treats the WORSE score as
+                          the effective threshold check, and combines
+                          both feedback strings on retry. The retry
+                          therefore fires when EITHER rubric returns
+                          NEEDS WORK, exactly as the spec requires.
+                          When None (the default), behaviour is
+                          unchanged from the single-evaluator path.
         """
         best_response = ""
-        best_score = 0.0
-        initial_score = 0.0
+        best_effective = 0.0
+        best_primary: float | None = None
+        best_secondary: float | None = None
+        initial_effective = 0.0
         feedback_applied = ""
         attempts = 0
         prompt = generator_prompt
@@ -176,37 +196,70 @@ class GeneratorEvaluatorHarness:
             if not response:
                 break
 
-            score, feedback = self._evaluate(response, evaluator_prompt, context)
-            if attempt == 1:
-                initial_score = score
-            if score > best_score:
-                best_score = score
-                best_response = response
+            primary_score, primary_feedback = self._evaluate(
+                response, evaluator_prompt, context)
 
-            if score >= self.threshold:
+            # Secondary evaluator — independent LLM call against the
+            # PM rubric. Returns the passthrough score on any failure
+            # so a flaky secondary evaluator never blocks the primary.
+            if secondary_evaluator_prompt is None:
+                secondary_score: float | None = None
+                secondary_feedback = ""
+            else:
+                secondary_score, secondary_feedback = self._evaluate(
+                    response, secondary_evaluator_prompt, context)
+
+            # Effective score is the WORSE of the two — retry fires if
+            # either evaluator returns NEEDS WORK.
+            effective_score = (
+                primary_score if secondary_score is None
+                else min(primary_score, secondary_score)
+            )
+            # Combined feedback the retry sees. Both feedback strings
+            # are surfaced because each evaluator targets a different
+            # weakness (academic rigour vs. PM insight).
+            combined_feedback = _combine_feedback(
+                primary_feedback, secondary_feedback)
+
+            if attempt == 1:
+                initial_effective = effective_score
+            if effective_score > best_effective:
+                best_effective = effective_score
+                best_response = response
+                best_primary = primary_score
+                best_secondary = secondary_score
+
+            if effective_score >= self.threshold:
                 break
             if attempt <= self.max_retries:
-                prompt = self._inject_feedback(generator_prompt, feedback, attempt)
-                feedback_applied = feedback
+                prompt = self._inject_feedback(
+                    generator_prompt, combined_feedback, attempt)
+                feedback_applied = combined_feedback
 
-        improved = best_score > initial_score
+        improved = best_effective > initial_effective
         log.info(
             "harness_result",
             agent_id=agent_id,
-            initial_score=round(initial_score, 2),
-            final_score=round(best_score, 2),
+            initial_score=round(initial_effective, 2),
+            final_score=round(best_effective, 2),
+            primary_score=(
+                round(best_primary, 2) if best_primary is not None else None),
+            secondary_score=(
+                round(best_secondary, 2) if best_secondary is not None else None),
             attempts=attempts,
             improved=improved,
         )
-        _record_harness_run(agent_id, initial_score, best_score,
+        _record_harness_run(agent_id, initial_effective, best_effective,
                             attempts, improved)
         return HarnessResult(
             response=best_response,
-            final_score=best_score,
+            final_score=best_effective,
             attempts=attempts,
             improved=improved,
             feedback_applied=feedback_applied,
-            initial_score=initial_score,
+            initial_score=initial_effective,
+            primary_score=best_primary,
+            secondary_score=best_secondary,
         )
 
     # ── internals ─────────────────────────────────────────────────────────────
@@ -250,6 +303,21 @@ class GeneratorEvaluatorHarness:
             f"Please revise your response addressing each issue "
             f"specifically. Your original task was:\n\n{original_prompt}"
         )
+
+
+def _combine_feedback(primary: str, secondary: str) -> str:
+    """
+    Combines the primary and secondary evaluators' feedback strings.
+    Each is prefixed with its rubric name so the generator's retry
+    addresses both lenses (academic + PM) explicitly. Empty strings
+    on either side are skipped.
+    """
+    blocks: list[str] = []
+    if primary.strip():
+        blocks.append(f"ACADEMIC RUBRIC:\n{primary.strip()}")
+    if secondary.strip():
+        blocks.append(f"PORTFOLIO MANAGER RUBRIC:\n{secondary.strip()}")
+    return "\n\n".join(blocks)
 
 
 def _strip_fences(text: str) -> str:

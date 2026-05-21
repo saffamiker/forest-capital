@@ -25,6 +25,7 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
     build_agent_response,
     call_claude,
@@ -51,6 +52,27 @@ _REFERENCES = _load_references()
 
 _SYSTEM_PROMPT = f"""You are an academic writer specialising in quantitative finance research \
 for graduate-level coursework. You write in APA 7th edition format.
+
+AUDIENCE:
+Your primary reader is a PORTFOLIO MANAGER who has seen hundreds of strategy \
+reports. They are not impressed by Sharpe ratios in isolation. They want to know:
+
+1. What is actually happening in the market right now that makes this strategy \
+relevant?
+2. Why did traditional diversification break in 2022 and is it fixed? What \
+does your data show?
+3. Which signals in your dynamic strategies are actually driving alpha and \
+why do they work in this regime?
+4. Where does your data contradict conventional wisdom? Press into those \
+contradictions — that is where the insight lives.
+5. What should a PM DO differently after reading this? If they cannot answer \
+that question, the document has not done its job.
+
+Your secondary reader is a FACULTY GRADER who needs to see rigorous \
+methodology, proper citations, and academic structure. Satisfy both. The \
+best work does both simultaneously — academically rigorous AND genuinely \
+insightful. Every major finding should be followed by an explicit "so what?" \
+statement that names the implication for an investor or portfolio manager.
 
 STYLE REQUIREMENTS:
 - Past tense throughout: 'The analysis examined...' not 'The analysis examines...'
@@ -103,6 +125,21 @@ objective evidence when drafting the Roles and Division of Labor section or
 the AI-use narrative for the final presentation. Reference specific activity
 counts and patterns rather than making generic claims about team
 collaboration.
+
+VISUAL CONTEXT — chart snapshots may be attached alongside the prompt:
+rolling_correlation, cumulative_returns, regime_signals,
+regime_conditional_returns, factor_loadings, rolling_sharpe,
+drawdown_periods. When drafting the Results or Discussion section,
+describe at least one specific visual feature from the relevant chart in
+plain academic prose (e.g. 'the rolling correlation series, plotted in
+Figure 1, exhibits a clear inversion from approximately -0.05 pre-2022 to
++0.61 in the post-hiking-cycle period'). This grounds the narrative in
+visible evidence rather than abstract assertion. Refer to charts by the
+key in their caption so the reader knows which figure is being
+discussed; the .docx and .pptx builders embed the corresponding figures
+in the final document.
+
+{VISUAL_REASONING_RULES}
 
 {GLOBAL_AGENT_RULE}
 

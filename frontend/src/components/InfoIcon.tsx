@@ -14,6 +14,7 @@
  * icon fails silent rather than showing an empty tooltip.
  */
 import { useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Info } from 'lucide-react'
 import { getTooltip } from '../constants/explainerTooltips'
 import ExplainerPanel from './ExplainerPanel'
@@ -38,8 +39,14 @@ export default function InfoIcon({
   const tooltip = getTooltip(tooltipKey)
   const [hovered, setHovered] = useState(false)
   const [panelOpen, setPanelOpen] = useState(false)
-  // Tooltip flips above the icon when it sits low in the viewport.
-  const [above, setAbove] = useState(false)
+  // Viewport-coordinate position computed on hover-open so the tooltip
+  // can be rendered through a portal at document.body — escaping any
+  // ancestor with overflow:hidden (the Dashboard strategy table is the
+  // canonical offender; UAT feedback #2/#6 flagged columns P(FDR)
+  // through Tier 1 clipping). Includes a flip-above signal when there
+  // isn't room below the icon.
+  const [pos, setPos] = useState<{ top: number; left: number;
+                                    above: boolean } | null>(null)
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const iconRef = useRef<HTMLButtonElement>(null)
 
@@ -51,18 +58,44 @@ export default function InfoIcon({
   const onEnter = () => {
     hoverTimer.current = setTimeout(() => {
       const rect = iconRef.current?.getBoundingClientRect()
+      if (!rect) return
       // Flip above when there isn't ~96px of room below the icon.
-      setAbove(!!rect && rect.bottom + 96 > window.innerHeight)
+      const above = rect.bottom + 96 > window.innerHeight
+      // Tooltip width = w-60 (240px). Centre horizontally on the icon,
+      // but clamp to a 12px margin so a tooltip near the viewport edge
+      // doesn't extend past it.
+      const iconCentre = rect.left + rect.width / 2
+      const tipWidth = 240
+      const margin = 12
+      const minLeft = margin
+      const maxLeft = window.innerWidth - tipWidth - margin
+      const desiredLeft = iconCentre - tipWidth / 2
+      const left = Math.max(minLeft, Math.min(maxLeft, desiredLeft))
+      // Vertical: anchor to top of icon (for above flip) or bottom.
+      const top = above ? rect.top - 6 : rect.bottom + 6
+      setPos({ top, left, above })
       setHovered(true)
     }, HOVER_DELAY_MS)
   }
   const onLeave = () => {
     if (hoverTimer.current) clearTimeout(hoverTimer.current)
     setHovered(false)
+    setPos(null)
   }
 
   return (
-    <span className="relative inline-flex items-center">
+    // While the tooltip is open, the wrapper is elevated to z-[60] so
+    // it creates its own stacking context above the table's strongest
+    // sticky cell (the Strategy column header is z-20 on the Dashboard
+    // strategy table). Without this, the absolute tooltip at z-50
+    // lives inside the thead's z-10 stacking context, and a sibling
+    // <th> at z-20 (the sticky-left Strategy header) renders OVER it
+    // when the w-60 tooltip extends sideways. Click-to-open is at
+    // higher z still (ExplainerPanel uses z-[60]/[61]); the
+    // setHovered(false) on click clears this elevation before the
+    // panel mounts, so the panel correctly covers everything.
+    <span className={`relative inline-flex items-center
+                      ${hovered || panelOpen ? 'z-[60]' : ''}`}>
       <button
         ref={iconRef}
         type="button"
@@ -80,17 +113,32 @@ export default function InfoIcon({
         <Info className={dim} />
       </button>
 
-      {/* Lightweight hover tooltip — static content, no API call. */}
-      {hovered && (
+      {/* Lightweight hover tooltip — static content, no API call.
+          Rendered through a portal at document.body with fixed
+          positioning so the tooltip is not subject to ANY ancestor
+          overflow:hidden (the Dashboard strategy table card and its
+          overflow-x-auto inner wrapper both used to clip tooltips on
+          the right-hand metric columns). The pos calculation in
+          onEnter handles flip-above and edge clamping. */}
+      {hovered && pos && createPortal(
         <span
           role="tooltip"
-          className={`absolute z-50 left-1/2 -translate-x-1/2 w-60
-                      card px-3 py-2
+          style={{
+            position: 'fixed',
+            top: pos.above ? undefined : pos.top,
+            bottom: pos.above
+              ? window.innerHeight - pos.top : undefined,
+            left: pos.left,
+            width: 240,
+          }}
+          className="z-[80] card px-3 py-2
                       text-2xs leading-relaxed text-slate-200 shadow-card
-                      ${above ? 'bottom-full mb-1.5' : 'top-full mt-1.5'}`}
+                      break-words [overflow-wrap:anywhere]
+                      whitespace-normal"
         >
           {tooltip}
-        </span>
+        </span>,
+        document.body,
       )}
 
       {/* Click — the live, streamed explainer drawer. currentValue is

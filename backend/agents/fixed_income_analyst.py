@@ -20,12 +20,16 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
     build_agent_response,
     call_claude,
 )
 from agents.harness import GeneratorEvaluatorHarness
 from agents.evaluator_prompts import council_evaluator_prompt
+from tools.chart_vision import (
+    COUNCIL_CHARTS, get_charts_for_context, snapshots_dir_exists,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -62,6 +66,19 @@ synthesises the council — your job is to provide complete domain expertise, no
 brief verdict. Your analysis must contain domain-specific analysis of the question \
 asked, quantitative references to the actual strategy metrics in the data provided, \
 and a clear position with its supporting reasoning.
+
+VISUAL CONTEXT — you may receive chart snapshots alongside the prompt: \
+rolling_correlation, cumulative_returns, regime_signals, \
+regime_conditional_returns, factor_loadings, rolling_excess_return. The \
+rolling_correlation chart is the most important for your role — it is the \
+direct visual evidence of the 2022 equity-bond regime break. Describe the \
+pre-2022 baseline, the 2022 inversion, and the post-2022 level you can see \
+on the chart, and tie those visual landmarks to the pre/post correlation \
+values in the DATA block. Use cumulative_returns and \
+regime_conditional_returns to show how strategies with different bond \
+weights diverged through the break.
+
+{VISUAL_REASONING_RULES}
 
 {GLOBAL_AGENT_RULE}
 
@@ -111,6 +128,12 @@ class FixedIncomeAnalyst:
 
         log.info("fi_analyst_called", has_history=history is not None)
 
+        # COUNCIL_CHARTS snapshots — built once, captured in the generator
+        # closure. Evaluators MUST NOT see them (harness._evaluate omits
+        # the kwarg). rolling_correlation is in COUNCIL_CHARTS, so the FI
+        # analyst sees the 2022 break visually as well as numerically.
+        visual_context = self._build_visual_context(len(strategy_results))
+
         try:
             # Routed through the generator-evaluator harness — see
             # equity_analyst for the rationale.
@@ -118,7 +141,8 @@ class FixedIncomeAnalyst:
             result = harness.run(
                 generator_fn=lambda p: call_claude(
                     SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500,
-                    tools=[WEB_SEARCH_TOOL]),
+                    tools=[WEB_SEARCH_TOOL],
+                    visual_context=visual_context),
                 evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
                 generator_prompt=user_message,
                 context=str(context)[:4000],
@@ -129,6 +153,22 @@ class FixedIncomeAnalyst:
         except Exception as exc:
             log.error("fi_analyst_error", error=str(exc))
             return self._fallback_response(strategy_results, correlation_data)
+
+    def _build_visual_context(
+        self, n_strategies: int | None = None,
+    ) -> list[dict] | None:
+        """COUNCIL_CHARTS snapshots as content blocks, or None when no
+        snapshots are on disk (cold deploy, first run). See EquityAnalyst._build_visual_context."""
+        if not snapshots_dir_exists():
+            log.info("fi_analyst_no_snapshots_dir",
+                     note="proceeding without visual context")
+            return None
+        blocks = get_charts_for_context(COUNCIL_CHARTS, n_strategies=n_strategies)
+        if not blocks:
+            log.info("fi_analyst_no_snapshots_available",
+                     note="proceeding without visual context")
+            return None
+        return blocks
 
     def _compute_correlation_summary(
         self, history: dict[str, Any] | None

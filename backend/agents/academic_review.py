@@ -36,11 +36,54 @@ except ImportError:  # pragma: no cover
     log = logging.getLogger(__name__)  # type: ignore[assignment]
 
 from agents.base import SONNET_MODEL, OPUS_MODEL, GEMINI_MODEL, call_claude
+from tools.chart_vision import (
+    ACADEMIC_REVIEW_CHARTS, get_charts_for_context, snapshots_dir_exists,
+)
 
 PEER_MODEL = SONNET_MODEL      # claude-sonnet-4-6
 ARBITER_MODEL = OPUS_MODEL     # claude-opus-4-7  (Opus for the arbiter step only)
 PEER_MAX_TOKENS = 800          # ~400-word cap with headroom
-ARBITER_MAX_TOKENS = 2000
+# 4000 token cap so the arbiter has room for ALL five rubric sections
+# plus the two top-level summary lines plus the prefatory framing.
+# The previous 2000-token cap was tight: the verbose Academic Rigour /
+# PM Insight framing burned ~600 tokens before Section 1, leaving
+# ~1400 for the five sections + 4 callouts (visual evidence, central
+# finding, unresolved markers, external citations). Truncation
+# routinely lopped off Section 5 — UAT #128 / #125 reported "Overall
+# Readiness Assessment absent" and "only 4 sections returned"; both
+# were the same truncation symptom. The bigger budget plus the
+# tightened evaluator scoring (all_sections_present rubric in
+# evaluator_prompts.py — missing sections now score below threshold
+# so the harness retries) and the post-generation Section 5 fallback
+# (assemble_section_5_fallback below) together guarantee the verdict
+# always carries a Section 5 by the time it streams.
+ARBITER_MAX_TOKENS = 4000
+
+
+def _academic_review_visual_context(
+    n_strategies: int | None = None,
+) -> list[dict] | None:
+    """ACADEMIC_REVIEW_CHARTS snapshots as content blocks, or None when
+    no snapshots are on disk (cold deploy, first run). Used by every
+    Claude-based peer and the arbiter. The Gemini and Grok peers route
+    through their own SDKs and do not consume Anthropic image blocks —
+    they fall back to the text-only path naturally.
+
+    n_strategies — threaded through to the chart-vision scope sentences
+    so the all-strategy captions render the exact count. The endpoint
+    reads it from gather_review_context()["analytics"]["strategy_count"]
+    and passes it through the fan-out and arbiter call chain."""
+    if not snapshots_dir_exists():
+        log.info("academic_review_no_snapshots_dir",
+                 note="proceeding without visual context")
+        return None
+    blocks = get_charts_for_context(
+        ACADEMIC_REVIEW_CHARTS, n_strategies=n_strategies)
+    if not blocks:
+        log.info("academic_review_no_snapshots_available",
+                 note="proceeding without visual context")
+        return None
+    return blocks
 
 # ── Peer agent registry ───────────────────────────────────────────────────────
 # Every council agent EXCEPT the academic advisor (the arbiter). Mirrors
@@ -446,6 +489,16 @@ def _peer_question(multi_user: bool) -> str:
 
 
 def _peer_system_prompt(meta: dict[str, str]) -> str:
+    # The Claude-based peers (everyone except the Gemini and Grok dissenters)
+    # receive ACADEMIC_REVIEW_CHARTS snapshots alongside the prompt:
+    # rolling_correlation, cumulative_returns, regime_signals, factor_loadings,
+    # drawdown_periods, significance_journey, oos_performance.
+    # Verify the document's claims against the visual evidence — a chart
+    # contradicting a written claim is a flagworthy methodological concern
+    # under Requirements and Rubric Alignment. The Gemini and Grok peers
+    # do not consume Anthropic content blocks; they fall back to the
+    # text-only path naturally.
+    from agents.base import VISUAL_REASONING_RULES
     return (
         f"You are the {meta['name']} on a quantitative investment council "
         f"advising a graduate practicum team (course FNA 670, McColl School "
@@ -453,7 +506,16 @@ def _peer_system_prompt(meta: dict[str, str]) -> str:
         f"GRADED academic submission for the Forest Capital portfolio-analysis "
         f"project. Review the project through your expert lens — {meta['lens']}. "
         f"Be direct, specific and actionable: the team needs to know what to "
-        f"fix before a graded deadline, not generic encouragement."
+        f"fix before a graded deadline, not generic encouragement.\n\n"
+        f"VISUAL CONTEXT — chart snapshots may be attached: "
+        f"rolling_correlation, cumulative_returns, regime_signals, "
+        f"factor_loadings, drawdown_periods, significance_journey, "
+        f"oos_performance. Verify the document's quantitative claims against "
+        f"the visual evidence. drawdown_periods and significance_journey "
+        f"directly support claims about strategy robustness; oos_performance "
+        f"directly supports claims about out-of-sample validity. A chart "
+        f"that contradicts the document's claim is a flagworthy issue.\n\n"
+        f"{VISUAL_REASONING_RULES}"
     )
 
 
@@ -509,12 +571,15 @@ def _call_grok_peer(system_prompt: str, user_message: str) -> str:
 
 def run_peer_agent(
     agent_id: str, context_block: str, multi_user: bool = False,
+    n_strategies: int | None = None,
 ) -> tuple[str, str]:
     """
     Runs one peer agent's review. Synchronous — designed to be wrapped in
     asyncio.to_thread() for the parallel fan-out. Returns (agent_id, text);
     never raises — a failed agent degrades to a mock review so the council
     always returns a full set of peer responses.
+
+    n_strategies — threaded through to the chart-vision scope sentences.
     """
     meta = _PEER_AGENTS[agent_id]
     # Test environment has no API keys — short-circuit to a deterministic
@@ -525,6 +590,13 @@ def run_peer_agent(
     system_prompt = _peer_system_prompt(meta)
     user_message = _peer_user_message(context_block, multi_user)
 
+    # ACADEMIC_REVIEW_CHARTS snapshots — built once per peer call and
+    # threaded through the Claude generator. Gemini and Grok do not use
+    # Anthropic content blocks, so the visual_context kwarg is reserved
+    # for the call_claude path only. Evaluators MUST NOT see this — the
+    # harness's _evaluate omits the kwarg.
+    visual_context = _academic_review_visual_context(n_strategies)
+
     # The agent call is routed through the generator-evaluator harness.
     # _generate dispatches on the agent kind; the harness retries it with
     # evaluator feedback when the response scores below threshold. This
@@ -533,7 +605,8 @@ def run_peer_agent(
     def _generate(prompt: str) -> str:
         if meta["kind"] == "claude":
             return call_claude(PEER_MODEL, system_prompt, prompt,
-                               max_tokens=PEER_MAX_TOKENS)
+                               max_tokens=PEER_MAX_TOKENS,
+                               visual_context=visual_context)
         if meta["kind"] == "gemini":
             return _call_gemini_peer(system_prompt, prompt)
         if meta["kind"] == "grok":
@@ -559,11 +632,17 @@ def run_peer_agent(
 
 async def run_peer_fan_out(
     context_block: str, multi_user: bool = False,
+    n_strategies: int | None = None,
 ) -> dict[str, str]:
-    """Fans the review question out to every peer agent in parallel."""
+    """Fans the review question out to every peer agent in parallel.
+
+    n_strategies — threaded through to every peer's chart-vision scope
+    sentences. Read by the endpoint from
+    gather_review_context()["analytics"]["strategy_count"]."""
     ids = peer_agent_ids()
     results = await asyncio.gather(
-        *[asyncio.to_thread(run_peer_agent, aid, context_block, multi_user)
+        *[asyncio.to_thread(
+            run_peer_agent, aid, context_block, multi_user, n_strategies)
           for aid in ids]
     )
     return {aid: text for aid, text in results}
@@ -573,8 +652,38 @@ async def run_peer_fan_out(
 
 _ARBITER_INSTRUCTIONS = """=== YOUR TASK — ARBITER VERDICT ===
 You are the arbiter. Integrate and WEIGH the peer review notes above — do
-not restate them. Produce a structured, rubric-mapped verdict with EXACTLY
-five sections, in this exact markdown format so the UI can parse it:
+not restate them. Produce a structured, rubric-mapped verdict that opens
+with a TWO-LINE TOP-LEVEL SUMMARY and is followed by five rubric sections,
+in this exact markdown format so the UI can parse it:
+
+**Academic rigour:** <Strong | Developing | Needs Work>
+**Portfolio Manager insight:** <Strong | Developing | Needs Work>
+
+The two top-level lines summarise the deliverable through two distinct
+lenses:
+
+  ACADEMIC RIGOUR — methodology, citations, data provenance, structural
+  completeness against the FNA 670 rubric. Aggregate this from the five
+  rubric sections below; a deliverable with mostly Strong section
+  ratings should read Strong here.
+
+  PORTFOLIO MANAGER INSIGHT — does the document tell a PM something
+  they did not already know? Score against these five PM criteria
+  (PASS / NEEDS WORK / N/A per criterion) and aggregate:
+    1. Insight beyond the obvious — non-obvious finding, contradiction,
+       or signal that challenges conventional wisdom.
+    2. The 2022 break — mechanism (inflation, Fed policy, duration
+       repricing), not just observation. N/A if not covered.
+    3. Actionable signal identification — names specific signals and
+       why they have predictive power in the current regime. N/A if
+       methodology-only.
+    4. Contradictions acknowledged and pressed — tensions between
+       findings explained, not smoothed over.
+    5. So what / explicit implication — every major finding followed
+       by what a PM should do, conclude, or watch for.
+  4-5 PASS → Strong; 2-3 PASS → Developing; 0-1 PASS → Needs Work.
+
+After the two top-level lines, produce the five rubric sections:
 
 ### 1. Data Sufficiency and Methodology
 **Rating:** <Strong | Developing | Needs Work>
@@ -595,6 +704,16 @@ five sections, in this exact markdown format so the UI can parse it:
 ### 5. Overall Academic Readiness
 **Rating:** <Strong | Developing | Needs Work>
 <one paragraph>
+
+VISUAL EVIDENCE — chart snapshots may be attached to your prompt:
+rolling_correlation, cumulative_returns, regime_signals, factor_loadings,
+drawdown_periods, significance_journey, oos_performance. The peer notes
+above may reference what they saw on these charts. When you assess the
+document under Data Sufficiency and Methodology, cross-check the
+document's quantitative claims against the visual evidence — a claim
+that disagrees with what is plainly visible on the chart is a serious
+methodological concern. When no charts are attached (cold deploy), do
+not refer to chart features; reason from the peer notes alone.
 
 THE CENTRAL FINDING — the most important analytical finding in this
 project is the 2022 equity-bond correlation regime break. A submission
@@ -804,11 +923,87 @@ def chunk_arbiter_text(text: str) -> list[str]:
     return [" ".join(words[i:i + 12]) + " " for i in range(0, len(words), 12)]
 
 
+def _verdict_has_section_5(text: str, script_review: bool) -> bool:
+    """
+    True when the verdict carries the Section 5 heading the active rubric
+    requires. Both rubrics end with a Section 5 — the written rubric
+    calls it "Overall Academic Readiness" and the script rubric "Overall
+    Delivery Readiness". We check the heading number AND the rubric-
+    specific title so a verdict that fakes a Section 5 with an
+    off-rubric title still trips the fallback.
+    """
+    if "### 5." not in text:
+        return False
+    expected_title = ("Overall Delivery Readiness" if script_review
+                      else "Overall Academic Readiness")
+    return expected_title.lower() in text.lower()
+
+
+def _assemble_section_5_fallback(
+    text: str, peer_responses: dict[str, str], script_review: bool,
+) -> str:
+    """
+    Defence-in-depth: when the harness returned a verdict without
+    Section 5, append a substantive fallback so the rendered output
+    always carries it. The fallback aggregates the four other section
+    ratings into a balanced overall paragraph rather than emitting a
+    placeholder — UAT #128/#125 root cause was Section 5 truncation;
+    the fallback guarantees Section 5 always renders even if the model
+    fails to write one.
+
+    The fallback rating is derived from the present sections:
+      - Any "Needs Work" → "Needs Work"
+      - Otherwise any "Developing" → "Developing"  (or "Needs Work"
+        for the script-review rating scale which uses Incomplete)
+      - Otherwise "Strong"
+    """
+    import re
+    # Collect every "**Rating:** X" line that DOES appear.
+    ratings = re.findall(
+        r"\*\*Rating:\*\*\s*(Strong|Developing|Needs Work|Incomplete)",
+        text, re.IGNORECASE)
+    norm = [r.strip().title() for r in ratings]
+    if script_review:
+        # Script rubric uses Strong / Needs Work / Incomplete.
+        if any(r == "Incomplete" for r in norm):
+            rating = "Incomplete"
+        elif any(r == "Needs Work" for r in norm):
+            rating = "Needs Work"
+        else:
+            rating = "Strong"
+    else:
+        if any(r == "Needs Work" for r in norm):
+            rating = "Needs Work"
+        elif any(r == "Developing" for r in norm):
+            rating = "Developing"
+        else:
+            rating = "Strong"
+
+    title = ("Overall Delivery Readiness" if script_review
+             else "Overall Academic Readiness")
+    n_peers = len(peer_responses)
+    return (
+        f"{text.rstrip()}\n\n"
+        f"### 5. {title}\n"
+        f"**Rating:** {rating}\n"
+        f"This overall rating is aggregated from the four section "
+        f"verdicts above (a generated paragraph was not returned and "
+        f"this fallback was assembled). The submission was reviewed "
+        f"by {n_peers} peer agents whose detailed notes are available "
+        f"under the Peer Responses accordion below; the section "
+        f"ratings reflect the consensus of those reviews. Address the "
+        f"Priority Areas in section 4 in order of impact, and revisit "
+        f"every section marked below Strong before the next "
+        f"submission.\n"
+    )
+
+
 def run_arbiter_with_harness(
     context_block: str,
     peer_responses: dict[str, str],
     multi_user: bool = False,
     script_review: bool = False,
+    n_strategies: int | None = None,
 ) -> str:
     """
     Generates the arbiter verdict IN FULL and runs it through the
@@ -838,9 +1033,16 @@ def run_arbiter_with_harness(
     from agents.harness import GeneratorEvaluatorHarness
     from agents.evaluator_prompts import academic_review_arbiter_evaluator_prompt
 
+    # ACADEMIC_REVIEW_CHARTS snapshots for the arbiter's synthesis.
+    # Captured in the generator closure so a harness retry reuses the
+    # same visual context. Evaluators MUST NOT see this — the harness's
+    # _evaluate omits the kwarg.
+    visual_context = _academic_review_visual_context(n_strategies)
+
     def _generate(prompt: str) -> str:
         return call_claude(ARBITER_MODEL, advisor_prompt, prompt,
-                           max_tokens=ARBITER_MAX_TOKENS)
+                           max_tokens=ARBITER_MAX_TOKENS,
+                           visual_context=visual_context)
 
     try:
         harness = GeneratorEvaluatorHarness()
@@ -851,6 +1053,19 @@ def run_arbiter_with_harness(
             context=context_block[:6000],
             agent_id="academic_advisor",
         )
+        # Defence-in-depth: even after the tightened evaluator + the
+        # 4000-token budget, if Section 5 is somehow still missing,
+        # append a fallback assembled from the four present section
+        # ratings. The user sees five sections every time; UAT
+        # #128/#125 cannot reappear.
+        if not _verdict_has_section_5(result.response, script_review):
+            log.warning(
+                "academic_review_section_5_fallback_applied",
+                arbiter_chars=len(result.response),
+                attempts=result.attempts,
+            )
+            return _assemble_section_5_fallback(
+                result.response, peer_responses, script_review)
         return result.response
     except Exception as exc:  # noqa: BLE001
         log.error("academic_review_arbiter_failed", error=str(exc))

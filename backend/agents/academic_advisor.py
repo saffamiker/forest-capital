@@ -286,6 +286,14 @@ def _call_advisor_with_web_tools(
         system_prompt = inject_academic_context(_SYSTEM_PROMPT)
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_context_inject_failed", error=str(exc))
+    # FEATURE 2 — macro context. Chained after the academic block so
+    # the advisor's grade-aware feedback frames against today's
+    # conditions when relevant. Fail-open.
+    try:
+        from tools.macro_context import inject_macro_context
+        system_prompt = inject_macro_context(system_prompt)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("macro_context_inject_failed", error=str(exc))
 
     response = client.messages.create(
         model=SONNET_MODEL,

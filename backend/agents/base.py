@@ -40,6 +40,38 @@ SCOPE_ENFORCEMENT = (
     "off-topic content in any way."
 )
 
+# Cross-cutting visual-reasoning rules. Embedded in every prompt of an
+# agent that may receive chart snapshots (the council specialists, the
+# CIO, the Academic Review peers/arbiter, and the Academic Writer).
+# Two non-negotiables:
+#   1. The visual context is OPTIONAL — on a cold deploy or first run
+#      no snapshots are on disk, the call ships text-only, and citing
+#      a chart in that scenario would be a hallucination.
+#   2. Visual features ALSO must not be invented when they are present.
+#      Reference what is visible on the actual image, never recall a
+#      typical-looking pattern from training.
+VISUAL_REASONING_RULES = (
+    "VISUAL REASONING RULES — when chart snapshots are attached to this "
+    "prompt:\n"
+    "- Each chart is captioned with its key (e.g. 'Chart: "
+    "rolling_correlation — …'). Refer to a chart by its key when "
+    "discussing it so a reader knows exactly which image you mean.\n"
+    "- Cite a chart only when you can describe a SPECIFIC visual feature "
+    "it shows (the slope of the line, a level crossing, the magnitude of "
+    "the peak, the shape of the distribution). Generic references like "
+    "'the chart shows the data' add nothing.\n"
+    "- Never invent a visual feature. If you cannot see a feature on the "
+    "actual image, do not describe it — even if it would typically appear "
+    "on this kind of chart.\n"
+    "- When no charts are attached (a cold-deploy run, or the snapshot "
+    "directory is empty), do not mention charts at all and reason from "
+    "the numeric context only. Citing a chart that was not attached is a "
+    "hallucination and the QA audit will catch it.\n"
+    "- Combine visual and numeric evidence. The numbers in the DATA "
+    "block remain authoritative — when a number and a chart appear to "
+    "disagree, prefer the number and flag the discrepancy."
+)
+
 # Model-name constants — the single source of truth for every model
 # string. Sonnet for specialist analysts; Opus for CIO and QA; Haiku for
 # the Explainer. GEMINI_MODEL is the non-Claude dissenter model — kept
@@ -140,6 +172,8 @@ def call_claude(
     user_message: str,
     max_tokens: int = MAX_OUTPUT_TOKENS,
     tools: list[dict] | None = None,
+    *,
+    visual_context: list[dict] | None = None,
 ) -> str:
     """
     Thin wrapper around the Anthropic messages API.
@@ -154,6 +188,24 @@ def call_claude(
     returns a single response; _extract_text joins the text blocks out
     of the mixed block list.
 
+    visual_context — keyword-only OPTIONAL list of Anthropic content
+    blocks (typically image + caption pairs produced by
+    tools.chart_vision.get_charts_for_context) inserted BEFORE the
+    text user_message. When None (the default) the call sends string
+    content and is bitwise-identical to the pre-vision code path —
+    every existing caller that does not opt in keeps its previous
+    behaviour.
+
+    EVALUATOR GUARD. The harness's _evaluate() (agents/harness.py)
+    MUST NOT pass visual_context — evaluators score text quality, and
+    adding visuals would muddle the scoring signal. The harness's
+    _evaluate path calls call_claude WITHOUT the visual_context kwarg
+    so its default None is used; the guard is enforced by the absence
+    of the kwarg at the call site. The same applies to the Explainer
+    agent, the document-assistant chat, the QA agent's checklist
+    pass, and the academic-advisor — none of these are visual-
+    reasoning surfaces.
+
     Error-handling note: call_claude deliberately does NOT catch Anthropic
     API errors — it lets them propagate. This is asymmetric with the Gemini
     (independent_analyst) and Grok (contrarian_analyst) helpers, which catch
@@ -164,11 +216,23 @@ def call_claude(
     outer handlers first.
     """
     client = get_anthropic_client()
+    # When visual_context is supplied, the user-message becomes a
+    # multi-block content array: [*image-and-caption blocks, text].
+    # When None, we keep the legacy string-content shape — same wire
+    # format the Anthropic SDK has accepted since day one — so no
+    # caller that omits the kwarg sees any behaviour change.
+    if visual_context:
+        content: Any = [
+            *visual_context,
+            {"type": "text", "text": user_message},
+        ]
+    else:
+        content = user_message
     kwargs: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": _with_academic_context(system_prompt),
-        "messages": [{"role": "user", "content": user_message}],
+        "system": _with_macro_context(_with_academic_context(system_prompt)),
+        "messages": [{"role": "user", "content": content}],
     }
     if tools:
         kwargs["tools"] = tools
@@ -217,6 +281,33 @@ def _with_academic_context(system_prompt: str) -> str:
         # Fail-open, but log so a persistently broken academic-context
         # cache is visible rather than silently dropping agent context.
         log.warning("academic_context_inject_failed", error=str(exc))
+        return system_prompt
+
+
+def _with_macro_context(system_prompt: str) -> str:
+    """
+    Appends the current macro-conditions digest (FEATURE 2) to a system
+    prompt. Chained after _with_academic_context inside call_claude so
+    every Anthropic agent sees: base system prompt + academic context
+    + macro context. The order matters: academic context (rubrics) is
+    project-stable; macro context (today's news) is volatile and
+    appears closer to the user message so the model frames its read
+    against the latest conditions.
+
+    No-op when the macro cache is empty (cold deploy, no digest yet,
+    or a digest that produced no signals) — the agent runs text-only,
+    bitwise identical to the pre-FEATURE-2 path. Non-Anthropic agents
+    (Gemini, Grok, academic_advisor with web tools) call
+    inject_macro_context() at their own call sites.
+
+    Fail-open: any error returns the prompt unchanged so a persistently
+    broken macro cache is logged but never blocks an agent response.
+    """
+    try:
+        from tools.macro_context import inject_macro_context
+        return inject_macro_context(system_prompt)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("macro_context_inject_failed", error=str(exc))
         return system_prompt
 
 
