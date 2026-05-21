@@ -27,6 +27,7 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     OPUS_MODEL,
     SCOPE_ENFORCEMENT,
+    VISUAL_REASONING_RULES,
     build_agent_response,
     call_claude,
 )
@@ -91,6 +92,19 @@ strategy based on in-sample results alone.
 You have received detailed analyses from four specialists (equity, fixed income, \
 risk, quantitative backtesting). Synthesise their findings into a final \
 recommendation — do not repeat their analysis, reference it and build on it.
+
+VISUAL CONTEXT — you may receive chart snapshots alongside the prompt: \
+rolling_correlation, cumulative_returns, regime_signals, \
+regime_conditional_returns, factor_loadings, rolling_excess_return. Use \
+them as cross-checks on the specialist narratives — if a specialist claims \
+the 2022 break drove a strategy's underperformance, look at \
+rolling_correlation and cumulative_returns and confirm the visual evidence \
+matches. When you write the final recommendation paragraph, name at most \
+two visual landmarks (e.g. 'the rolling_correlation chart shows the \
+inversion in mid-2022') so the recommendation reads as grounded in the \
+evidence rather than abstract synthesis.
+
+{VISUAL_REASONING_RULES}
 
 {GLOBAL_AGENT_RULE}
 

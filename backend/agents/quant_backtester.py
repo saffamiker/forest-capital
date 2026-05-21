@@ -20,6 +20,7 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
     build_agent_response,
     call_claude,
@@ -61,6 +62,19 @@ synthesises the council — your job is to provide complete domain expertise, no
 brief verdict. Your analysis must contain domain-specific analysis of the question \
 asked, quantitative references to the actual strategy metrics in the data provided, \
 and a clear position with its supporting reasoning.
+
+VISUAL CONTEXT — you may receive chart snapshots alongside the prompt: \
+rolling_correlation, cumulative_returns, regime_signals, \
+regime_conditional_returns, factor_loadings, rolling_excess_return. The \
+cumulative_returns chart shows the full equity curve of every strategy — \
+flat sections, sharp drawdowns, and the relative slope of each strategy's \
+post-2022 recovery are the visible signature of robustness. \
+rolling_excess_return is the most useful for your role: a strategy whose \
+in-sample excess return decays sharply at the OOS boundary is exhibiting \
+visual overfitting. Describe what you can see on the chart and tie it to \
+the OOS degradation percentages in the DATA block.
+
+{VISUAL_REASONING_RULES}
 
 {GLOBAL_AGENT_RULE}
 

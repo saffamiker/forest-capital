@@ -467,6 +467,16 @@ def _peer_question(multi_user: bool) -> str:
 
 
 def _peer_system_prompt(meta: dict[str, str]) -> str:
+    # The Claude-based peers (everyone except the Gemini and Grok dissenters)
+    # receive ACADEMIC_REVIEW_CHARTS snapshots alongside the prompt:
+    # rolling_correlation, cumulative_returns, regime_signals, factor_loadings,
+    # drawdown_periods, significance_journey, oos_performance.
+    # Verify the document's claims against the visual evidence — a chart
+    # contradicting a written claim is a flagworthy methodological concern
+    # under Requirements and Rubric Alignment. The Gemini and Grok peers
+    # do not consume Anthropic content blocks; they fall back to the
+    # text-only path naturally.
+    from agents.base import VISUAL_REASONING_RULES
     return (
         f"You are the {meta['name']} on a quantitative investment council "
         f"advising a graduate practicum team (course FNA 670, McColl School "
@@ -474,7 +484,16 @@ def _peer_system_prompt(meta: dict[str, str]) -> str:
         f"GRADED academic submission for the Forest Capital portfolio-analysis "
         f"project. Review the project through your expert lens — {meta['lens']}. "
         f"Be direct, specific and actionable: the team needs to know what to "
-        f"fix before a graded deadline, not generic encouragement."
+        f"fix before a graded deadline, not generic encouragement.\n\n"
+        f"VISUAL CONTEXT — chart snapshots may be attached: "
+        f"rolling_correlation, cumulative_returns, regime_signals, "
+        f"factor_loadings, drawdown_periods, significance_journey, "
+        f"oos_performance. Verify the document's quantitative claims against "
+        f"the visual evidence. drawdown_periods and significance_journey "
+        f"directly support claims about strategy robustness; oos_performance "
+        f"directly supports claims about out-of-sample validity. A chart "
+        f"that contradicts the document's claim is a flagworthy issue.\n\n"
+        f"{VISUAL_REASONING_RULES}"
     )
 
 
@@ -654,6 +673,16 @@ After the two top-level lines, produce the five rubric sections:
 ### 5. Overall Academic Readiness
 **Rating:** <Strong | Developing | Needs Work>
 <one paragraph>
+
+VISUAL EVIDENCE — chart snapshots may be attached to your prompt:
+rolling_correlation, cumulative_returns, regime_signals, factor_loadings,
+drawdown_periods, significance_journey, oos_performance. The peer notes
+above may reference what they saw on these charts. When you assess the
+document under Data Sufficiency and Methodology, cross-check the
+document's quantitative claims against the visual evidence — a claim
+that disagrees with what is plainly visible on the chart is a serious
+methodological concern. When no charts are attached (cold deploy), do
+not refer to chart features; reason from the peer notes alone.
 
 THE CENTRAL FINDING — the most important analytical finding in this
 project is the 2022 equity-bond correlation regime break. A submission

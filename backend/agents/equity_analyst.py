@@ -19,6 +19,7 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
     build_agent_response,
     call_claude,
@@ -63,6 +64,18 @@ synthesises the council — your job is to provide complete domain expertise, no
 brief verdict. Your analysis must contain domain-specific analysis of the question \
 asked, quantitative references to the actual strategy metrics in the data provided, \
 and a clear position with its supporting reasoning.
+
+VISUAL CONTEXT — you may receive chart snapshots alongside the prompt: \
+rolling_correlation, cumulative_returns, regime_signals, \
+regime_conditional_returns, factor_loadings, rolling_excess_return. Use the \
+cumulative_returns and rolling_excess_return charts to ground claims about \
+relative equity performance over time, regime_conditional_returns to compare \
+equity weights across regimes, and factor_loadings to substantiate any factor \
+exposure claim. Describe what you see — the inflection points, the regime \
+transitions, the magnitude of the divergences — and tie those visual features \
+to the strategy metrics in the DATA block.
+
+{VISUAL_REASONING_RULES}
 
 {GLOBAL_AGENT_RULE}
 

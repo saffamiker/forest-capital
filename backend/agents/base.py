@@ -40,6 +40,38 @@ SCOPE_ENFORCEMENT = (
     "off-topic content in any way."
 )
 
+# Cross-cutting visual-reasoning rules. Embedded in every prompt of an
+# agent that may receive chart snapshots (the council specialists, the
+# CIO, the Academic Review peers/arbiter, and the Academic Writer).
+# Two non-negotiables:
+#   1. The visual context is OPTIONAL — on a cold deploy or first run
+#      no snapshots are on disk, the call ships text-only, and citing
+#      a chart in that scenario would be a hallucination.
+#   2. Visual features ALSO must not be invented when they are present.
+#      Reference what is visible on the actual image, never recall a
+#      typical-looking pattern from training.
+VISUAL_REASONING_RULES = (
+    "VISUAL REASONING RULES — when chart snapshots are attached to this "
+    "prompt:\n"
+    "- Each chart is captioned with its key (e.g. 'Chart: "
+    "rolling_correlation — …'). Refer to a chart by its key when "
+    "discussing it so a reader knows exactly which image you mean.\n"
+    "- Cite a chart only when you can describe a SPECIFIC visual feature "
+    "it shows (the slope of the line, a level crossing, the magnitude of "
+    "the peak, the shape of the distribution). Generic references like "
+    "'the chart shows the data' add nothing.\n"
+    "- Never invent a visual feature. If you cannot see a feature on the "
+    "actual image, do not describe it — even if it would typically appear "
+    "on this kind of chart.\n"
+    "- When no charts are attached (a cold-deploy run, or the snapshot "
+    "directory is empty), do not mention charts at all and reason from "
+    "the numeric context only. Citing a chart that was not attached is a "
+    "hallucination and the QA audit will catch it.\n"
+    "- Combine visual and numeric evidence. The numbers in the DATA "
+    "block remain authoritative — when a number and a chart appear to "
+    "disagree, prefer the number and flag the discrepancy."
+)
+
 # Model-name constants — the single source of truth for every model
 # string. Sonnet for specialist analysts; Opus for CIO and QA; Haiku for
 # the Explainer. GEMINI_MODEL is the non-Claude dissenter model — kept
