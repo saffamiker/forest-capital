@@ -2567,6 +2567,78 @@ async def testing_unresolve_triage_item(
     return {"status": "unresolved"}
 
 
+# ── Macro market research (FEATURE 2) ────────────────────────────────────────
+# The daily-scheduled macro digest the council + academic_review prompts
+# inject as a CURRENT MACRO CONDITIONS block. Read endpoints are open to
+# any authenticated user (the dashboard widget renders the latest digest
+# for the whole team); the manual run trigger is sysadmin only because
+# it bypasses the 24h freshness gate and burns the Sonnet + web_search
+# budget on demand.
+
+@app.get("/api/v1/research/latest")
+async def research_get_latest_digest(
+    session: dict = Depends(require_auth),
+):
+    """The most recent COMPLETED digest, or null when no completed
+    digest exists yet. Powers the dashboard widget; the widget renders
+    a "preparing first digest" empty state on null."""
+    from tools.research_engine import get_latest_digest, last_research_run_at
+    digest = await get_latest_digest()
+    last_run = await last_research_run_at()
+    return {
+        "digest":              digest,
+        "last_completed_at":   last_run.isoformat() if last_run else None,
+    }
+
+
+@app.get("/api/v1/research/history")
+async def research_get_history(
+    limit: int = 10,
+    session: dict = Depends(require_auth),
+):
+    """The N most recent runs across every status (running / complete /
+    failed). Used by the sysadmin run-history accordion below the
+    widget so the team can see when failed runs happened. Open to any
+    authenticated user — visibility into failures is a transparency
+    feature, not a privileged one."""
+    from tools.research_engine import get_recent_digests
+    return {"runs": await get_recent_digests(limit=max(1, min(int(limit), 50)))}
+
+
+@app.post("/api/v1/research/run")
+async def research_run_now(
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Forces a fresh research run — bypasses the 24h freshness gate.
+    Returns immediately with status: 'running'; the dashboard widget
+    polls /research/latest to pick up the digest once it lands.
+    Sysadmin only — manual runs burn the Sonnet + web_search budget."""
+    from tools.research_engine import (
+        _research_bg_tasks, is_research_running, run_research,
+    )
+    if await is_research_running():
+        return {"status": "already_running",
+                "message": "A research run is already in progress."}
+
+    # Direct manual run — bypass the stale gate. Spawn the run on the
+    # event loop (we are on it here) so a long Sonnet + web_search
+    # call returns the 200 to the user immediately; the digest lands
+    # via the post-run cache refresh.
+    import asyncio
+    try:
+        task = asyncio.create_task(run_research("manual"))
+        # Strong ref so the task is not GC'd mid-run.
+        _research_bg_tasks.add(task)
+        task.add_done_callback(_research_bg_tasks.discard)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("research_manual_spawn_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Failed to spawn research run.")
+    return {"status": "running",
+            "message": "Research run started. Poll /api/v1/research/latest "
+                       "for the result."}
+
+
 # ── Statistical audit — sysadmin only ─────────────────────────────────────────
 
 @app.post("/api/v1/audit/run")

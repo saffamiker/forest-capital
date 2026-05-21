@@ -7,6 +7,7 @@ import type { StrategyResult } from '../types/strategies'
 import { useStrategiesStore } from '../stores/strategiesStore'
 import { useRegimeStore } from '../stores/regimeStore'
 import { UIProvider } from '../context/UIContext'
+import { AuthContext } from '../App'
 
 vi.mock('axios')
 const mockedAxios = vi.mocked(axios, true)
@@ -101,11 +102,21 @@ const MOCK_FRONTIER = {
 function renderDashboard() {
   // UIProvider is needed because Dashboard renders LearnModeBanner, which
   // reads `mode` from useUI() to decide whether to show itself.
+  // AuthContext is needed because Dashboard renders MacroResearchPanel
+  // (FEATURE 2), which contains a TeamGate that reads useAuth().
+  const authValue = {
+    session: { token: 't', email: 'viewer@queens.edu', permissions: [] },
+    isVerifying: false,
+    login: vi.fn(),
+    logout: vi.fn(),
+  }
   return render(
     <MemoryRouter>
-      <UIProvider>
-        <Dashboard />
-      </UIProvider>
+      <AuthContext.Provider value={authValue}>
+        <UIProvider>
+          <Dashboard />
+        </UIProvider>
+      </AuthContext.Provider>
     </MemoryRouter>
   )
 }
@@ -121,6 +132,12 @@ describe('Dashboard', () => {
       .mockImplementation((url: string) => {
         if (url === '/api/backtest/compare') return Promise.resolve({ data: { strategies: MOCK_STRATEGIES } })
         if (url === '/api/regime/current') return Promise.resolve({ data: MOCK_REGIME })
+        // FEATURE 2 — MacroResearchPanel polls /api/v1/research/latest
+        // on mount. Return an empty "no digest yet" payload so the panel
+        // renders its empty state instead of throwing to the catch arm.
+        if (url === '/api/v1/research/latest') {
+          return Promise.resolve({ data: { digest: null, last_completed_at: null } })
+        }
         return Promise.reject(new Error(`Unexpected GET: ${url}`))
       })
     mockedAxios.post = vi.fn().mockResolvedValue({ data: { efficient_frontier: MOCK_FRONTIER } })
