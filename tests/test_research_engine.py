@@ -42,8 +42,19 @@ VIEWER = {"X-API-Key": generate_session_token("panttserk@queens.edu")}
 
 class TestFailOpenWithoutDatabase:
     """Every database accessor must return a safe default rather than
-    raise. Test env points at a no-DB state — these are the read paths
-    the FastAPI handlers exercise."""
+    raise. Forced no-DB by monkeypatching AsyncSessionLocal to None so
+    the tests pass regardless of whether the developer has a live
+    local Postgres up. (An earlier version assumed an implicitly
+    unreachable DB and broke once migrations were applied locally.)"""
+
+    @pytest.fixture(autouse=True)
+    def _force_no_db(self, monkeypatch):
+        from database import AsyncSessionLocal as _real_session
+        # Patch the module symbol so each accessor's `if
+        # AsyncSessionLocal is None` guard fires.
+        import database as db_mod
+        monkeypatch.setattr(db_mod, "AsyncSessionLocal", None)
+        yield _real_session
 
     def test_is_research_running_returns_false_without_db(self):
         assert asyncio.run(research_engine.is_research_running()) is False
@@ -110,10 +121,20 @@ class TestRunResearchSkipPaths:
         assert out == {"status": "skipped", "reason": "already_running"}
 
     def test_skipped_when_row_create_fails(self, monkeypatch):
-        # No DB → _create_running_row returns None → engine skips with
-        # row_create_failed (the placeholder INSERT is the
-        # concurrency-lock primitive; without it we cannot guarantee a
-        # second concurrent run would not race).
+        # _create_running_row returning None is the no-DB / DB-error
+        # fail-open path. Monkeypatch it explicitly so the test
+        # exercises the engine's skip semantics regardless of whether
+        # a live Postgres is available — relying on the implicit
+        # no-DB state was DB-state-dependent and broke whenever
+        # ENVIRONMENT=test was run against a real local DB.
+        async def _not_running():
+            return False
+        async def _create_fails(triggered_by):
+            return None
+        monkeypatch.setattr(research_engine, "is_research_running",
+                            _not_running)
+        monkeypatch.setattr(research_engine, "_create_running_row",
+                            _create_fails)
         out = asyncio.run(research_engine.run_research("manual"))
         assert out == {"status": "skipped", "reason": "row_create_failed"}
 

@@ -373,16 +373,73 @@ class TestTestRunnerPersistence:
                 before = await get_unseen(TEAM)
                 assert "x" in before["scripts"].get(sid, {}).get(
                     "attested_step_ids", [])
-                # Resolve it.
+                # Resolve it. Migration 025 — resolution_type is required
+                # and code_fix_deployed additionally requires fix_reference
+                # + remediation_note. The endpoint validates these too;
+                # this test exercises the direct DB write.
                 resolved = await resolve_failure(
-                    mine[0]["id"], ADMIN, "fixed in commit abc")
+                    mine[0]["id"], ADMIN, "Root cause: race condition.",
+                    resolution_type="code_fix_deployed",
+                    fix_reference="abc1234",
+                    remediation_note="Added a lock around the contended path.",
+                )
                 assert resolved is not None
                 assert resolved["user_email"] == TEAM
+                assert resolved["resolution_type"] == "code_fix_deployed"
                 # After resolving, the step is pending re-test — no longer
-                # counted as attested.
+                # counted as attested. (wont_fix would keep it attested;
+                # see TestResolutionStepReset below.)
                 after = await get_unseen(TEAM)
                 assert "x" not in after["scripts"].get(sid, {}).get(
                     "attested_step_ids", [])
+            finally:
+                await _cleanup(sid)
+
+        _run(scenario())
+
+    def test_wont_fix_resolution_does_not_reset_the_step(self):
+        """Migration 025 — Part 4 of the resolution-gate spec:
+        wont_fix closes the item but the step stays at its current
+        attested state (it does NOT appear as pending re-test in
+        get_unseen). no_bug_detected and code_fix_deployed DO reset
+        the step; only wont_fix is special."""
+        if not _db_ready():
+            pytest.skip("no live database")
+        from tools.test_runner import (
+            record_result, get_all_failures, resolve_failure, get_unseen)
+
+        sid = f"sc_{uuid.uuid4().hex[:8]}"
+
+        async def scenario():
+            from database import engine
+            await engine.dispose()
+            try:
+                await record_result(
+                    user_email=TEAM, session_type="testing", script_id=sid,
+                    step_id="y", result="fail",
+                    failure_description="acceptable as designed")
+                failures = await get_all_failures()
+                mine = [f for f in failures if f["script_id"] == sid]
+                assert len(mine) == 1
+                resolved = await resolve_failure(
+                    mine[0]["id"], ADMIN,
+                    "By design — sysadmin-only endpoint.",
+                    resolution_type="wont_fix",
+                )
+                assert resolved is not None
+                assert resolved["resolution_type"] == "wont_fix"
+                # The step STAYS attested — wont_fix does not reset.
+                after = await get_unseen(TEAM)
+                assert "y" in after["scripts"].get(sid, {}).get(
+                    "attested_step_ids", [])
+                # The row is in the resolved set on the admin view —
+                # it's just that the tester doesn't see it as
+                # pending re-test in their queue.
+                after_failures = await get_all_failures()
+                row = next(f for f in after_failures
+                           if f["script_id"] == sid)
+                assert row["resolved_at"] is not None
+                assert row["resolution_type"] == "wont_fix"
             finally:
                 await _cleanup(sid)
 

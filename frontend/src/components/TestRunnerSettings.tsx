@@ -14,7 +14,9 @@
  * derived here by diffing the script step inventory against the stored
  * results — the backend deliberately does not know the scripts.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Fragment, useCallback, useEffect, useMemo, useRef, useState,
+} from 'react'
 import axios from 'axios'
 import {
   Check, X, SkipForward, Circle, RefreshCw, Download, AlertTriangle,
@@ -56,6 +58,34 @@ interface FailureRow {
   resolved_at: string | null
   resolved_by: string | null
   resolution_note: string | null
+  // Migration 025 — resolution-gate metadata. All three optional at
+  // the row level: an Open failure carries no resolution; a resolved
+  // failure carries resolution_type plus root cause; only a
+  // code_fix_deployed row carries fix_reference + remediation_note.
+  resolution_type?: 'no_bug_detected' | 'code_fix_deployed' | 'wont_fix' | null
+  fix_reference?: string | null
+  remediation_note?: string | null
+}
+
+// Resolution-type labels, kept here so every surface that renders a
+// badge (Failure Reports row, expand card, Issue Tracker) reads from
+// one source. Mirrors RESOLUTION_TYPES in tools/test_runner.py.
+export const RESOLUTION_TYPE_LABEL: Record<string, string> = {
+  no_bug_detected:    'No bug detected',
+  code_fix_deployed:  'Code fix deployed',
+  wont_fix:           "Won't fix",
+}
+
+// Fix-reference validators — must stay in sync with backend
+// main._is_valid_fix_reference. A regression on either side
+// breaks the Submit gate.
+const SHA_RE = /^[0-9a-fA-F]{7,40}$/
+const PR_RE = /^#\d{1,6}$/
+const GH_URL_RE = /^https?:\/\/(?:www\.)?github\.com\/[^/]+\/[^/]+\/(?:commit|pull|issues)\/.+$/
+
+export function isValidFixReference(s: string): boolean {
+  const t = s.trim()
+  return SHA_RE.test(t) || PR_RE.test(t) || GH_URL_RE.test(t)
 }
 
 interface FeedbackRow {
@@ -202,11 +232,277 @@ function TestResultsBlock() {
 
 // ── Failure Reports — admin only ──────────────────────────────────────────────
 
+// ── ResolutionCard — the read-only card rendered when a resolved row
+// expands. Same shape is reused by the Issue Tracker tab.
+export function ResolutionCard({ f }: { f: FailureRow }) {
+  const rtype = f.resolution_type ?? null
+  return (
+    <div className="mt-2 rounded border border-border bg-navy-900/60
+                    p-2.5 text-2xs space-y-1.5">
+      {rtype && (
+        <div>
+          <span className="text-muted">Resolution type: </span>
+          <ResolutionBadge type={rtype} />
+        </div>
+      )}
+      {f.resolution_note && (
+        <div>
+          <span className="text-muted">Root cause: </span>
+          <span className="text-slate-200">{f.resolution_note}</span>
+        </div>
+      )}
+      {rtype === 'code_fix_deployed' && f.fix_reference && (
+        <div>
+          <span className="text-muted">Fix reference: </span>
+          <FixReferenceLink reference={f.fix_reference} />
+        </div>
+      )}
+      {rtype === 'code_fix_deployed' && f.remediation_note && (
+        <div>
+          <span className="text-muted">What changed: </span>
+          <span className="text-slate-200">{f.remediation_note}</span>
+        </div>
+      )}
+      {f.resolved_by && f.resolved_at && (
+        <div className="text-muted">
+          Resolved by {f.resolved_by} at{' '}
+          {new Date(f.resolved_at).toLocaleString()}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ── ResolutionBadge — type pill, colour-coded so a scan of the
+// Failure Reports list reads as "what came of each report" at a glance.
+export function ResolutionBadge({ type }: { type: string }) {
+  const colours: Record<string, string> = {
+    no_bug_detected:    'bg-amber-900/40 text-amber-300 border-amber-700/50',
+    code_fix_deployed:  'bg-emerald-900/40 text-emerald-300 border-emerald-700/50',
+    wont_fix:           'bg-slate-700/40 text-slate-300 border-slate-600/50',
+  }
+  const cls = colours[type] ?? 'bg-navy-700 text-muted border-border'
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded border text-2xs
+                      whitespace-nowrap ${cls}`}>
+      {RESOLUTION_TYPE_LABEL[type] ?? type}
+    </span>
+  )
+}
+
+
+// ── FixReferenceLink — renders a commit SHA / #NNN / GH URL as a
+// clickable link to GitHub. SHA & PR shortcuts assume the project
+// repo (saffamiker/forest-capital); a bare URL is used as-is.
+export function FixReferenceLink({ reference }: { reference: string }) {
+  const r = reference.trim()
+  let href: string | null = null
+  let label = r
+  if (SHA_RE.test(r)) {
+    href = `https://github.com/saffamiker/forest-capital/commit/${r}`
+    label = r.slice(0, 8)
+  } else if (PR_RE.test(r)) {
+    href = `https://github.com/saffamiker/forest-capital/pull/${r.slice(1)}`
+  } else if (GH_URL_RE.test(r)) {
+    href = r
+  }
+  if (!href) return <span className="text-slate-200">{r}</span>
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer"
+       className="text-electric hover:underline inline-flex items-center gap-1">
+      <span className="font-mono">{label}</span>
+      <ExternalLink className="w-2.5 h-2.5" />
+    </a>
+  )
+}
+
+
+// ── ResolutionModal — replaces the legacy inline note input.
+// Submit stays disabled until the required fields for the chosen
+// resolution type are populated and the fix-reference shape validates.
+export function ResolutionModal({
+  failure, onClose, onResolved,
+}: {
+  failure: FailureRow
+  onClose: () => void
+  onResolved: () => void
+}) {
+  const [resolutionType, setResolutionType] = useState<
+    'no_bug_detected' | 'code_fix_deployed' | 'wont_fix' | ''
+  >('')
+  const [rootCause, setRootCause] = useState('')
+  const [fixReference, setFixReference] = useState('')
+  const [remediation, setRemediation] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // Submit-disabled gate. Mirrors the backend validator so the button
+  // stays inert until the body would pass server-side validation.
+  const isCodeFix = resolutionType === 'code_fix_deployed'
+  const fixOk = !isCodeFix || isValidFixReference(fixReference)
+  const remedOk = !isCodeFix || remediation.trim().length > 0
+  const canSubmit =
+    resolutionType !== '' && rootCause.trim().length > 0
+    && fixOk && remedOk && !submitting
+
+  const submit = async () => {
+    if (!canSubmit) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      await axios.post(`/api/v1/testing/failures/${failure.id}/resolve`, {
+        resolution_type: resolutionType,
+        resolution_note: rootCause.trim(),
+        fix_reference: isCodeFix ? fixReference.trim() : null,
+        remediation_note: isCodeFix ? remediation.trim() : null,
+      })
+      onResolved()
+    } catch (exc) {
+      const detail = (exc as { response?: { data?: { detail?: string } } })
+        .response?.data?.detail
+      setError(detail ?? 'Could not save the resolution. Please retry.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center
+                    bg-black/60 p-4" role="presentation" onClick={onClose}>
+      <div role="dialog" aria-label="Mark failure resolved"
+           onClick={(e) => e.stopPropagation()}
+           className="w-full max-w-lg rounded-lg border border-border
+                      bg-navy-800 shadow-2xl">
+        <div className="flex items-center justify-between px-4 py-3
+                        border-b border-border">
+          <h2 className="text-sm font-semibold text-white">
+            Mark Resolved — {stepTitle(failure.script_id, failure.step_id)}
+          </h2>
+          <button type="button" onClick={onClose} aria-label="Close"
+                  className="text-muted hover:text-white">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-4 py-3 space-y-3 max-h-[70vh] overflow-y-auto">
+          {/* Resolution type — required radio. */}
+          <div>
+            <label className="text-2xs uppercase tracking-wider text-muted
+                              block mb-1.5">
+              Resolution type
+            </label>
+            <div className="space-y-1.5">
+              {(['no_bug_detected', 'code_fix_deployed', 'wont_fix'] as const)
+                .map((t) => (
+                  <label key={t}
+                         className="flex items-start gap-2 text-xs text-slate-200
+                                    cursor-pointer">
+                    <input type="radio" name="resolution_type" value={t}
+                      checked={resolutionType === t}
+                      onChange={() => setResolutionType(t)}
+                      className="mt-0.5 accent-electric" />
+                    <span>
+                      <span className="font-medium">
+                        {RESOLUTION_TYPE_LABEL[t]}
+                      </span>
+                      <span className="block text-2xs text-muted">
+                        {t === 'no_bug_detected'
+                          && 'User error, env issue, or misread test step.'}
+                        {t === 'code_fix_deployed'
+                          && 'A change has landed that addresses the failure.'}
+                        {t === 'wont_fix'
+                          && "Closed by design or as out of scope; no re-test."}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+            </div>
+          </div>
+
+          {/* Root cause — required for every type. */}
+          <div>
+            <label className="text-2xs uppercase tracking-wider text-muted
+                              block mb-1">
+              What caused this failure?
+            </label>
+            <textarea value={rootCause}
+              onChange={(e) => setRootCause(e.target.value)}
+              rows={3} placeholder="Root cause…"
+              className="w-full rounded border border-border bg-navy-900
+                         px-2 py-1.5 text-xs text-white" />
+          </div>
+
+          {/* Code-fix-only fields. Always present in the DOM so the
+              transition reads cleanly; visibility is gated on the type. */}
+          {isCodeFix && (
+            <>
+              <div>
+                <label className="text-2xs uppercase tracking-wider text-muted
+                                  block mb-1">
+                  Fix reference
+                </label>
+                <input value={fixReference}
+                  onChange={(e) => setFixReference(e.target.value)}
+                  placeholder="Commit SHA, #PR-number, or GitHub URL"
+                  className={`w-full rounded border bg-navy-900 px-2 py-1.5
+                              text-xs text-white font-mono ${
+                                fixReference && !fixOk
+                                  ? 'border-danger/60'
+                                  : 'border-border'}`} />
+                <p className="text-2xs text-muted mt-1">
+                  {fixReference && !fixOk
+                    ? 'Must be 7+ hex characters, #NNN, or a GitHub URL.'
+                    : 'Paste a commit SHA or PR number to confirm a fix has '
+                      + 'landed before notifying the tester.'}
+                </p>
+              </div>
+              <div>
+                <label className="text-2xs uppercase tracking-wider text-muted
+                                  block mb-1">
+                  What was changed and how does it address the failure?
+                </label>
+                <textarea value={remediation}
+                  onChange={(e) => setRemediation(e.target.value)}
+                  rows={3} placeholder="Remediation note…"
+                  className="w-full rounded border border-border bg-navy-900
+                             px-2 py-1.5 text-xs text-white" />
+              </div>
+            </>
+          )}
+
+          {error && (
+            <p className="text-2xs text-danger" role="alert">{error}</p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-4 py-3
+                        border-t border-border">
+          <button type="button" onClick={onClose}
+            className="px-3 py-1.5 text-xs text-muted hover:text-white">
+            Cancel
+          </button>
+          <button type="button"
+            onClick={() => void submit()}
+            disabled={!canSubmit}
+            className="px-4 py-1.5 rounded text-xs font-medium
+                       bg-electric text-white
+                       disabled:bg-navy-700 disabled:text-muted
+                       disabled:cursor-not-allowed">
+            {submitting ? 'Saving…' : 'Submit'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 function FailureReportsBlock() {
   const [failures, setFailures] = useState<FailureRow[]>([])
   const [loading, setLoading] = useState(true)
-  const [resolvingId, setResolvingId] = useState<number | null>(null)
-  const [note, setNote] = useState('')
+  const [resolvingFailure, setResolvingFailure] = useState<FailureRow | null>(null)
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
 
   const load = useCallback(() => {
     setLoading(true)
@@ -217,14 +513,12 @@ function FailureReportsBlock() {
   }, [])
   useEffect(load, [load])
 
-  const resolve = async (id: number) => {
-    try {
-      await axios.post(`/api/v1/testing/failures/${id}/resolve`,
-        { resolution_note: note })
-      setResolvingId(null)
-      setNote('')
-      load()
-    } catch { /* surfaced by the row staying put */ }
+  const toggleExpanded = (id: number) => {
+    setExpanded((s) => {
+      const next = new Set(s)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
   }
 
   if (loading) {
@@ -240,82 +534,95 @@ function FailureReportsBlock() {
       <button type="button"
         onClick={() => download(csvBlob(
           ['Tester', 'Script', 'Step', 'Severity', 'Description',
-            'Expected', 'Actual', 'Attested', 'Resolved'],
+            'Expected', 'Actual', 'Attested', 'Resolved',
+            'Resolution type', 'Fix reference'],
           failures.map((f) => [f.user_email, f.script_id,
             stepTitle(f.script_id, f.step_id), f.severity ?? '',
             f.failure_description ?? '', f.expected_result ?? '',
             f.actual_result ?? '', f.attested_at ?? '',
-            f.resolved_at ?? ''])),
+            f.resolved_at ?? '',
+            f.resolution_type
+              ? (RESOLUTION_TYPE_LABEL[f.resolution_type] ?? '') : '',
+            f.fix_reference ?? ''])),
           'test-failures.csv')}
         className="flex items-center gap-1 text-2xs px-2 py-1 rounded
                    border border-border text-slate-300 hover:bg-navy-700">
         <Download className="w-3 h-3" /> Download All Failures
       </button>
-      {failures.map((f) => (
-        <div key={f.id} className={`rounded border p-2.5 ${
-          f.resolved_at ? 'border-border bg-navy-900 opacity-60'
-            : 'border-danger/30 bg-danger/5'}`}>
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5 flex-wrap text-2xs">
-                <span className="text-white font-medium">
-                  {stepTitle(f.script_id, f.step_id)}
-                </span>
-                <span className="px-1 py-0.5 rounded bg-navy-700 text-muted">
-                  {f.severity ?? 'major'}
-                </span>
-                <span className="text-muted">{f.user_email}</span>
-                {f.low_quality && (
-                  <span className="text-warning" title="Low-quality submission">⚠</span>
+      {failures.map((f) => {
+        const isResolved = !!f.resolved_at
+        const isExpanded = expanded.has(f.id)
+        return (
+          <div key={f.id} className={`rounded border p-2.5 ${
+            isResolved ? 'border-border bg-navy-900 opacity-60'
+              : 'border-danger/30 bg-danger/5'}`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 flex-wrap text-2xs">
+                  <span className="text-white font-medium">
+                    {stepTitle(f.script_id, f.step_id)}
+                  </span>
+                  <span className="px-1 py-0.5 rounded bg-navy-700 text-muted">
+                    {f.severity ?? 'major'}
+                  </span>
+                  <span className="text-muted">{f.user_email}</span>
+                  {f.low_quality && (
+                    <span className="text-warning" title="Low-quality submission">⚠</span>
+                  )}
+                  {isResolved && f.resolution_type && (
+                    <ResolutionBadge type={f.resolution_type} />
+                  )}
+                </div>
+                <p className="text-2xs text-slate-300 mt-1">
+                  {f.failure_description}
+                </p>
+                {f.actual_result && (
+                  <p className="text-2xs text-muted mt-0.5">
+                    Actual: {f.actual_result}
+                  </p>
+                )}
+                {f.screenshot_paths.length > 0 && (
+                  <div className="flex gap-1.5 mt-1.5">
+                    {f.screenshot_paths.map((p) => (
+                      <a key={p} href={`/uploads/${p}`} target="_blank"
+                         rel="noopener noreferrer">
+                        <img src={`/uploads/${p}`} alt="screenshot"
+                             className="h-12 rounded border border-border" />
+                      </a>
+                    ))}
+                  </div>
                 )}
               </div>
-              <p className="text-2xs text-slate-300 mt-1">
-                {f.failure_description}
-              </p>
-              {f.actual_result && (
-                <p className="text-2xs text-muted mt-0.5">
-                  Actual: {f.actual_result}
-                </p>
-              )}
-              {f.screenshot_paths.length > 0 && (
-                <div className="flex gap-1.5 mt-1.5">
-                  {f.screenshot_paths.map((p) => (
-                    <a key={p} href={`/uploads/${p}`} target="_blank"
-                       rel="noopener noreferrer">
-                      <img src={`/uploads/${p}`} alt="screenshot"
-                           className="h-12 rounded border border-border" />
-                    </a>
-                  ))}
-                </div>
-              )}
-              {f.resolved_at && (
-                <p className="text-2xs text-success mt-1">
-                  Resolved{f.resolved_by ? ` by ${f.resolved_by}` : ''}
-                  {f.resolution_note ? ` — ${f.resolution_note}` : ''}
-                </p>
+              {isResolved ? (
+                <button type="button"
+                  onClick={() => toggleExpanded(f.id)}
+                  aria-label={isExpanded ? 'Collapse resolution' : 'Expand resolution'}
+                  className="text-muted hover:text-white shrink-0
+                             min-h-[24px] min-w-[24px] inline-flex
+                             items-center justify-center">
+                  {isExpanded
+                    ? <ChevronDown className="w-3.5 h-3.5" />
+                    : <ChevronRight className="w-3.5 h-3.5" />}
+                </button>
+              ) : (
+                <button type="button"
+                  onClick={() => setResolvingFailure(f)}
+                  className="text-2xs text-electric hover:underline shrink-0">
+                  Mark Resolved
+                </button>
               )}
             </div>
-            {!f.resolved_at && (
-              <button type="button" onClick={() => setResolvingId(f.id)}
-                className="text-2xs text-electric hover:underline shrink-0">
-                Mark Resolved
-              </button>
-            )}
+            {isResolved && isExpanded && <ResolutionCard f={f} />}
           </div>
-          {resolvingId === f.id && (
-            <div className="mt-2 flex gap-2">
-              <input value={note} onChange={(e) => setNote(e.target.value)}
-                placeholder="Resolution note"
-                className="flex-1 rounded border border-border bg-navy-900
-                           px-2 py-1 text-2xs text-white" />
-              <button type="button" onClick={() => void resolve(f.id)}
-                className="text-2xs px-2 py-1 rounded bg-electric text-white">
-                Save
-              </button>
-            </div>
-          )}
-        </div>
-      ))}
+        )
+      })}
+      {resolvingFailure && (
+        <ResolutionModal
+          failure={resolvingFailure}
+          onClose={() => setResolvingFailure(null)}
+          onResolved={() => { setResolvingFailure(null); load() }}
+        />
+      )}
     </div>
   )
 }
@@ -1030,30 +1337,651 @@ function TriageReportsBlock() {
 
 // ── Exported sections ─────────────────────────────────────────────────────────
 
+// ── Issue Tracker (Prompt B) ──────────────────────────────────────────────────
+// Lifecycle view of every test failure ever reported: Open → Pending
+// re-test → Passed | Closed. Sysadmin-only via the view_admin gate on
+// the GET /api/v1/testing/issue-tracker endpoint.
+
+interface IssueRow {
+  id: number
+  user_email: string
+  script_id: string
+  step_id: string
+  result: 'pass' | 'fail' | 'skip'
+  failure_description: string | null
+  severity: string | null
+  attested_at: string | null
+  resolved_at: string | null
+  resolved_by: string | null
+  resolution_note: string | null
+  resolution_type: 'no_bug_detected' | 'code_fix_deployed' | 'wont_fix' | null
+  fix_reference: string | null
+  remediation_note: string | null
+  github_issue_number: number | null
+  github_issue_url: string | null
+  status: 'open' | 'pending_retest' | 'passed' | 'closed'
+}
+
+// Route → Feature label. Every test step in testScripts.ts is anchored
+// to one of five routes; the tracker derives a coarse-grained feature
+// pill from that (Council, Analytics, Reports, Settings, Dashboard).
+// The mapping is intentionally coarse — finer feature taxonomy would
+// require a new field on TestStep we don't have today.
+const ROUTE_TO_FEATURE: Record<string, string> = {
+  '/':          'Dashboard',
+  '/analytics': 'Analytics',
+  '/council':   'Council',
+  '/reports':   'Reports',
+  '/settings':  'Settings',
+}
+
+function featureForStep(scriptId: string, stepId: string): string {
+  const route = getTestScript(scriptId)?.steps
+    .find((s) => s.id === stepId)?.route
+  return route ? (ROUTE_TO_FEATURE[route] ?? route) : '—'
+}
+
+
+// Status badge — colour-coded per Prompt B Part 6.
+const STATUS_LABEL: Record<string, string> = {
+  open:           'Open',
+  pending_retest: 'Pending re-test',
+  passed:         'Passed',
+  closed:         'Closed',
+}
+const STATUS_COLOUR: Record<string, string> = {
+  open:           'bg-danger/20 text-danger border-danger/40',
+  pending_retest: 'bg-amber-900/40 text-amber-300 border-amber-700/50',
+  passed:         'bg-emerald-900/40 text-emerald-300 border-emerald-700/50',
+  closed:         'bg-slate-700/40 text-slate-300 border-slate-600/50',
+}
+function StatusBadge({ status }: { status: string }) {
+  const cls = STATUS_COLOUR[status]
+    ?? 'bg-navy-700 text-muted border-border'
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded border text-2xs
+                      whitespace-nowrap ${cls}`}>
+      {STATUS_LABEL[status] ?? status}
+    </span>
+  )
+}
+
+// Reported-at "3 days ago" relative formatting with full timestamp on
+// hover. Pure to keep the renderer trivial — falsy input renders "—".
+function relativeAge(iso: string | null): string {
+  if (!iso) return '—'
+  const ms = Date.now() - new Date(iso).getTime()
+  if (Number.isNaN(ms)) return iso
+  const days = Math.floor(ms / 86_400_000)
+  if (days < 1) {
+    const hours = Math.floor(ms / 3_600_000)
+    if (hours < 1) return 'just now'
+    return `${hours}h ago`
+  }
+  if (days === 1) return '1 day ago'
+  if (days < 30) return `${days} days ago`
+  if (days < 365) return `${Math.floor(days / 30)}mo ago`
+  return `${Math.floor(days / 365)}y ago`
+}
+
+// Days from reported to resolved (for resolved rows) or open-age (for
+// Open rows). Used for the Age and Resolution age columns.
+function daysBetween(start: string | null, end: string | null): number | null {
+  if (!start) return null
+  const a = new Date(start).getTime()
+  const b = end ? new Date(end).getTime() : Date.now()
+  if (Number.isNaN(a) || Number.isNaN(b)) return null
+  return Math.max(0, Math.floor((b - a) / 86_400_000))
+}
+
+function ownerForIssue(row: IssueRow): string {
+  // Open: ruurdsm@ (Michael — awaiting triage/resolution)
+  // Pending re-test: original tester's email
+  // Passed / Closed: none (the lifecycle is terminal)
+  if (row.status === 'open') return 'ruurdsm@queens.edu'
+  if (row.status === 'pending_retest') return row.user_email
+  return '—'
+}
+
+
+// Sort keys the table supports. Default sort: Status (Open first),
+// then Reported (oldest first) — surfaces the items most needing
+// attention at the top.
+type SortKey =
+  | 'id' | 'feature' | 'step' | 'tester' | 'reported' | 'age'
+  | 'status' | 'resolution_type' | 'owner' | 'resolution_age'
+
+const STATUS_ORDER: Record<string, number> = {
+  open: 0, pending_retest: 1, passed: 2, closed: 3,
+}
+
+
+function IssueTrackerBlock() {
+  const [issues, setIssues] = useState<IssueRow[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
+
+  // Filter state. Status defaults to "all except Closed" so the busy
+  // lifecycle states are visible without history clutter.
+  const [statusFilter, setStatusFilter] = useState<Set<string>>(
+    new Set(['open', 'pending_retest', 'passed']))
+  const [featureFilter, setFeatureFilter] = useState<Set<string>>(new Set())
+  const [testerFilter, setTesterFilter] = useState<Set<string>>(new Set())
+  const [resTypeFilter, setResTypeFilter] = useState<Set<string>>(new Set())
+  const [fromDate, setFromDate] = useState('')
+  const [toDate, setToDate] = useState('')
+
+  const [sortKey, setSortKey] = useState<SortKey>('status')
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc')
+
+  const load = useCallback(() => {
+    setLoading(true)
+    setError(null)
+    axios.get<{ issues: IssueRow[] }>('/api/v1/testing/issue-tracker')
+      .then((res) => setIssues(res.data.issues ?? []))
+      .catch(() => setError('Could not load the Issue Tracker.'))
+      .finally(() => setLoading(false))
+  }, [])
+  useEffect(load, [load])
+
+  // Filter universe — driven by the loaded data so the dropdowns
+  // never list values the dataset doesn't contain.
+  const allFeatures = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of issues) s.add(featureForStep(r.script_id, r.step_id))
+    return Array.from(s).sort()
+  }, [issues])
+  const allTesters = useMemo(() => {
+    const s = new Set<string>()
+    for (const r of issues) s.add(r.user_email)
+    return Array.from(s).sort()
+  }, [issues])
+
+  // Apply filters, then sort. Both pure derivations of `issues` +
+  // filter state so the result is memoised cheaply.
+  const visible = useMemo(() => {
+    let out = issues
+    if (statusFilter.size > 0) {
+      out = out.filter((r) => statusFilter.has(r.status))
+    }
+    if (featureFilter.size > 0) {
+      out = out.filter((r) => featureFilter.has(
+        featureForStep(r.script_id, r.step_id)))
+    }
+    if (testerFilter.size > 0) {
+      out = out.filter((r) => testerFilter.has(r.user_email))
+    }
+    if (resTypeFilter.size > 0) {
+      out = out.filter((r) =>
+        r.resolution_type && resTypeFilter.has(r.resolution_type))
+    }
+    if (fromDate) {
+      out = out.filter((r) =>
+        r.attested_at !== null && r.attested_at >= fromDate)
+    }
+    if (toDate) {
+      // Inclusive: any time on the toDate counts. Add a "Z" sentinel
+      // so '2026-05-22' matches the full day, not just midnight.
+      const endZ = toDate + 'T23:59:59Z'
+      out = out.filter((r) =>
+        r.attested_at !== null && r.attested_at <= endZ)
+    }
+
+    const sorted = [...out].sort((a, b) => {
+      let cmp = 0
+      switch (sortKey) {
+        case 'id': cmp = a.id - b.id; break
+        case 'feature':
+          cmp = featureForStep(a.script_id, a.step_id)
+            .localeCompare(featureForStep(b.script_id, b.step_id))
+          break
+        case 'step':
+          cmp = stepTitle(a.script_id, a.step_id)
+            .localeCompare(stepTitle(b.script_id, b.step_id))
+          break
+        case 'tester': cmp = a.user_email.localeCompare(b.user_email); break
+        case 'reported':
+          // Oldest first when ascending — the items that have been
+          // open longest read at the top by default.
+          cmp = (a.attested_at ?? '').localeCompare(b.attested_at ?? '')
+          break
+        case 'age':
+          cmp = (daysBetween(a.attested_at, a.resolved_at) ?? 0)
+            - (daysBetween(b.attested_at, b.resolved_at) ?? 0)
+          break
+        case 'status':
+          // Status sort is by lifecycle order, not alphabetical —
+          // a string sort would put Closed before Open.
+          cmp = (STATUS_ORDER[a.status] ?? 99)
+            - (STATUS_ORDER[b.status] ?? 99)
+          // Tie-break by reported (oldest first) so default ordering
+          // is predictable.
+          if (cmp === 0) {
+            cmp = (a.attested_at ?? '').localeCompare(b.attested_at ?? '')
+          }
+          break
+        case 'resolution_type':
+          cmp = (a.resolution_type ?? '').localeCompare(
+            b.resolution_type ?? '')
+          break
+        case 'owner':
+          cmp = ownerForIssue(a).localeCompare(ownerForIssue(b))
+          break
+        case 'resolution_age':
+          cmp = (a.resolved_at && daysBetween(a.attested_at, a.resolved_at)
+            ? daysBetween(a.attested_at, a.resolved_at)! : 0)
+            - (b.resolved_at && daysBetween(b.attested_at, b.resolved_at)
+              ? daysBetween(b.attested_at, b.resolved_at)! : 0)
+          break
+      }
+      return sortDir === 'asc' ? cmp : -cmp
+    })
+    return sorted
+  }, [issues, statusFilter, featureFilter, testerFilter, resTypeFilter,
+      fromDate, toDate, sortKey, sortDir])
+
+  const toggleExpanded = (id: number) => {
+    setExpanded((s) => {
+      const next = new Set(s)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  const toggleSort = (k: SortKey) => {
+    if (sortKey === k) {
+      setSortDir((d) => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortKey(k)
+      setSortDir('asc')
+    }
+  }
+
+  const toggleFilter = (
+    setter: React.Dispatch<React.SetStateAction<Set<string>>>,
+    value: string,
+  ) => setter((s) => {
+    const next = new Set(s)
+    if (next.has(value)) next.delete(value); else next.add(value)
+    return next
+  })
+
+  const exportCsv = () => {
+    download(csvBlob(
+      ['ID', 'Feature', 'Step', 'Tester', 'Reported',
+       'Age (days)', 'Status', 'Resolution type', 'Fix reference',
+       'Current owner', 'Resolution age (days)', 'Root cause',
+       'What changed', 'Resolved by'],
+      visible.map((r) => [
+        String(r.id),
+        featureForStep(r.script_id, r.step_id),
+        stepTitle(r.script_id, r.step_id),
+        r.user_email,
+        r.attested_at ?? '',
+        String(daysBetween(r.attested_at, r.resolved_at) ?? ''),
+        STATUS_LABEL[r.status] ?? r.status,
+        r.resolution_type
+          ? (RESOLUTION_TYPE_LABEL[r.resolution_type] ?? '')
+          : '',
+        r.fix_reference ?? '',
+        ownerForIssue(r),
+        r.resolved_at
+          ? String(daysBetween(r.attested_at, r.resolved_at) ?? '')
+          : '',
+        r.resolution_note ?? '',
+        r.remediation_note ?? '',
+        r.resolved_by ?? '',
+      ])),
+      'issue-tracker.csv')
+  }
+
+  if (loading) {
+    return <p className="text-xs text-muted flex items-center gap-1.5">
+      <Loader2 className="w-3 h-3 animate-spin" /> Loading issue tracker…</p>
+  }
+  if (error) {
+    return <p className="text-xs text-danger">{error}</p>
+  }
+  if (issues.length === 0) {
+    return <p className="text-xs text-muted italic">
+      No issues recorded yet.</p>
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Filter bar */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3
+                      p-3 rounded border border-border bg-navy-900">
+        <FilterMultiSelect label="Status"
+          options={(['open', 'pending_retest', 'passed', 'closed'] as const)
+            .map((v) => ({ value: v, label: STATUS_LABEL[v] }))}
+          selected={statusFilter}
+          onToggle={(v) => toggleFilter(setStatusFilter, v)} />
+        <FilterMultiSelect label="Feature"
+          options={allFeatures.map((v) => ({ value: v, label: v }))}
+          selected={featureFilter}
+          onToggle={(v) => toggleFilter(setFeatureFilter, v)} />
+        <FilterMultiSelect label="Tester"
+          options={allTesters.map((v) => ({ value: v, label: v }))}
+          selected={testerFilter}
+          onToggle={(v) => toggleFilter(setTesterFilter, v)} />
+        <FilterMultiSelect label="Resolution type"
+          options={(['no_bug_detected', 'code_fix_deployed', 'wont_fix'] as const)
+            .map((v) => ({ value: v, label: RESOLUTION_TYPE_LABEL[v] }))}
+          selected={resTypeFilter}
+          onToggle={(v) => toggleFilter(setResTypeFilter, v)} />
+        <div className="text-2xs">
+          <label className="block text-muted uppercase tracking-wider mb-1">
+            Reported from
+          </label>
+          <input type="date" value={fromDate}
+            onChange={(e) => setFromDate(e.target.value)}
+            className="w-full rounded border border-border bg-navy-800
+                       px-2 py-1 text-xs text-white" />
+        </div>
+        <div className="text-2xs">
+          <label className="block text-muted uppercase tracking-wider mb-1">
+            Reported to
+          </label>
+          <input type="date" value={toDate}
+            onChange={(e) => setToDate(e.target.value)}
+            className="w-full rounded border border-border bg-navy-800
+                       px-2 py-1 text-xs text-white" />
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between">
+        <p className="text-2xs text-muted">
+          Showing {visible.length} of {issues.length} issues
+        </p>
+        <button type="button" onClick={exportCsv}
+          className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                     border border-border text-slate-300 hover:bg-navy-700">
+          <Download className="w-3 h-3" /> Download Issue Tracker
+        </button>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-2xs">
+          <thead className="text-muted uppercase tracking-wider text-left">
+            <tr className="border-b border-border">
+              <SortHeader k="id" sortKey={sortKey} dir={sortDir}
+                onToggle={toggleSort}>ID</SortHeader>
+              <SortHeader k="feature" sortKey={sortKey} dir={sortDir}
+                onToggle={toggleSort}>Feature</SortHeader>
+              <SortHeader k="step" sortKey={sortKey} dir={sortDir}
+                onToggle={toggleSort}>Step</SortHeader>
+              <SortHeader k="tester" sortKey={sortKey} dir={sortDir}
+                onToggle={toggleSort}>Original tester</SortHeader>
+              <SortHeader k="reported" sortKey={sortKey} dir={sortDir}
+                onToggle={toggleSort}>Reported</SortHeader>
+              <SortHeader k="age" sortKey={sortKey} dir={sortDir}
+                onToggle={toggleSort}>Age</SortHeader>
+              <SortHeader k="status" sortKey={sortKey} dir={sortDir}
+                onToggle={toggleSort}>Status</SortHeader>
+              <SortHeader k="resolution_type" sortKey={sortKey} dir={sortDir}
+                onToggle={toggleSort}>Resolution type</SortHeader>
+              <th className="px-2 py-1.5">Fix reference</th>
+              <SortHeader k="owner" sortKey={sortKey} dir={sortDir}
+                onToggle={toggleSort}>Current owner</SortHeader>
+              <SortHeader k="resolution_age" sortKey={sortKey} dir={sortDir}
+                onToggle={toggleSort}>Resolution age</SortHeader>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((r) => {
+              const isExpanded = expanded.has(r.id)
+              const age = daysBetween(r.attested_at, r.resolved_at)
+              const resAge = r.resolved_at
+                ? daysBetween(r.attested_at, r.resolved_at) : null
+              return (
+                <Fragment key={r.id}>
+                  <tr className="border-b border-border hover:bg-navy-900/50">
+                    <td className="px-2 py-1.5 font-mono text-muted">
+                      {r.id}
+                    </td>
+                    <td className="px-2 py-1.5 text-slate-200">
+                      {featureForStep(r.script_id, r.step_id)}
+                    </td>
+                    <td className="px-2 py-1.5 text-slate-200">
+                      {stepTitle(r.script_id, r.step_id)}
+                    </td>
+                    <td className="px-2 py-1.5 text-muted">{r.user_email}</td>
+                    <td className="px-2 py-1.5 text-muted"
+                        title={r.attested_at ?? ''}>
+                      {relativeAge(r.attested_at)}
+                    </td>
+                    <td className="px-2 py-1.5 text-muted">
+                      {age !== null ? `${age}d` : '—'}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <StatusBadge status={r.status} />
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {r.resolution_type
+                        ? <ResolutionBadge type={r.resolution_type} />
+                        : <span className="text-muted">—</span>}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      {r.fix_reference
+                        ? <FixReferenceLink reference={r.fix_reference} />
+                        : <span className="text-muted">—</span>}
+                    </td>
+                    <td className="px-2 py-1.5 text-muted">
+                      {ownerForIssue(r)}
+                    </td>
+                    <td className="px-2 py-1.5 text-muted">
+                      {resAge !== null ? `${resAge}d` : '—'}
+                    </td>
+                    <td className="px-2 py-1.5">
+                      <button type="button" onClick={() => toggleExpanded(r.id)}
+                        aria-label={isExpanded ? 'Collapse' : 'Expand'}
+                        className="text-muted hover:text-white">
+                        {isExpanded
+                          ? <ChevronDown className="w-3.5 h-3.5" />
+                          : <ChevronRight className="w-3.5 h-3.5" />}
+                      </button>
+                    </td>
+                  </tr>
+                  {isExpanded && (
+                    <tr className="border-b border-border">
+                      <td colSpan={12} className="px-2 py-2 bg-navy-900/30">
+                        <ResolutionCard f={{
+                          // ResolutionCard expects FailureRow shape;
+                          // IssueRow is a superset for the fields the
+                          // card reads, so the cast is safe.
+                          ...r,
+                          expected_result: null,
+                          actual_result: null,
+                          screenshot_paths: [],
+                          low_quality: false,
+                        } as unknown as FailureRow} />
+                      </td>
+                    </tr>
+                  )}
+                </Fragment>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
+}
+
+
+// Reusable sortable-column header. The sort arrow is intentionally
+// subtle — it indicates the active column without competing with the
+// data for visual weight.
+function SortHeader({
+  k, sortKey, dir, onToggle, children,
+}: {
+  k: SortKey
+  sortKey: SortKey
+  dir: 'asc' | 'desc'
+  onToggle: (k: SortKey) => void
+  children: React.ReactNode
+}) {
+  const active = sortKey === k
+  return (
+    <th className="px-2 py-1.5 font-medium">
+      <button type="button" onClick={() => onToggle(k)}
+        className={`inline-flex items-center gap-1 ${
+          active ? 'text-white' : 'hover:text-white'}`}>
+        {children}
+        {active && (
+          <span className="text-electric">
+            {dir === 'asc' ? '↑' : '↓'}
+          </span>
+        )}
+      </button>
+    </th>
+  )
+}
+
+
+// Multi-select dropdown for the filter bar. Compact enough to fit in
+// the grid; expands on click. A pure controlled component so the
+// IssueTrackerBlock owns the selection state.
+function FilterMultiSelect({
+  label, options, selected, onToggle,
+}: {
+  label: string
+  options: Array<{ value: string; label: string }>
+  selected: Set<string>
+  onToggle: (v: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open) return
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handler)
+    return () => document.removeEventListener('mousedown', handler)
+  }, [open])
+
+  const summary = selected.size === 0
+    ? 'All'
+    : selected.size === 1
+      ? (options.find((o) => o.value === Array.from(selected)[0])?.label
+         ?? Array.from(selected)[0])
+      : `${selected.size} selected`
+
+  return (
+    <div className="text-2xs relative" ref={ref}>
+      <label className="block text-muted uppercase tracking-wider mb-1">
+        {label}
+      </label>
+      <button type="button" onClick={() => setOpen((v) => !v)}
+        className="w-full rounded border border-border bg-navy-800
+                   px-2 py-1 text-xs text-white text-left
+                   flex items-center justify-between">
+        <span className={selected.size === 0 ? 'text-muted' : ''}>
+          {summary}
+        </span>
+        <ChevronDown className={`w-3 h-3 text-muted shrink-0
+          transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute z-10 mt-1 left-0 right-0 max-h-60
+                        overflow-y-auto rounded border border-border
+                        bg-navy-900 shadow-lg p-1.5 space-y-1">
+          {options.map((o) => (
+            <label key={o.value}
+              className="flex items-center gap-1.5 px-1 py-0.5 cursor-pointer
+                         hover:bg-navy-800 rounded">
+              <input type="checkbox" checked={selected.has(o.value)}
+                onChange={() => onToggle(o.value)}
+                className="accent-electric" />
+              <span className="text-xs text-slate-200">{o.label}</span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 export function TestResultsSection() {
   return <TestResultsBlock />
 }
 
+
+// ── Three-tab container (Prompt B Part 1) ────────────────────────────────────
+// Failure Reports / Feedback Backlog / Issue Tracker share the same
+// admin audience and are deliberately scoped together here. Each tab
+// content lives in its own component, mounted only when active so a
+// tab switch never refetches the others' data unnecessarily.
+function FailureFeedbackTabs() {
+  type Tab = 'failures' | 'feedback' | 'tracker'
+  const [tab, setTab] = useState<Tab>('failures')
+
+  const tabButton = (key: Tab, label: string, icon: React.ReactNode) => (
+    <button key={key} type="button" onClick={() => setTab(key)}
+      className={`px-3 py-2 text-xs font-medium border-b-2 -mb-px
+                  inline-flex items-center gap-1.5 ${
+        tab === key
+          ? 'border-electric text-white'
+          : 'border-transparent text-muted hover:text-slate-200'
+      }`}>
+      {icon} {label}
+    </button>
+  )
+
+  return (
+    <div>
+      <div className="flex items-center gap-1 border-b border-border">
+        {tabButton('failures', 'Failure Reports',
+          <AlertTriangle className="w-3.5 h-3.5 text-danger" />)}
+        {tabButton('feedback', 'Feedback Backlog', null)}
+        {tabButton('tracker', 'Issue Tracker',
+          <Search className="w-3.5 h-3.5 text-electric" />)}
+      </div>
+      <div className="pt-3">
+        {tab === 'failures' && (
+          <div>
+            <p className="text-2xs text-muted mb-2">
+              Every failed step across all testers — open Mark Resolved
+              to record the resolution.
+            </p>
+            <FailureReportsBlock />
+          </div>
+        )}
+        {tab === 'feedback' && (
+          <div>
+            <p className="text-2xs text-muted mb-2">
+              Tester feedback with AI categorisation — step-linked and
+              free-form.
+            </p>
+            <FeedbackBacklogBlock />
+          </div>
+        )}
+        {tab === 'tracker' && (
+          <div>
+            <p className="text-2xs text-muted mb-2">
+              Lifecycle of every reported failure: Open → Pending re-test
+              → Passed or Closed.
+            </p>
+            <IssueTrackerBlock />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
 export function TestAdminSections() {
   return (
     <div className="space-y-6">
-      <div>
-        <h3 className="text-base font-semibold text-white flex items-center gap-1.5">
-          <AlertTriangle className="w-3.5 h-3.5 text-danger" />
-          Failure Reports
-        </h3>
-        <p className="text-2xs text-muted mt-0.5 mb-2">
-          Every failed step across all testers.
-        </p>
-        <FailureReportsBlock />
-      </div>
-      <div>
-        <h3 className="text-base font-semibold text-white">Feedback Backlog</h3>
-        <p className="text-2xs text-muted mt-0.5 mb-2">
-          Tester feedback with AI categorisation — step-linked and free-form.
-        </p>
-        <FeedbackBacklogBlock />
-      </div>
+      <FailureFeedbackTabs />
       <div>
         <h3 className="text-base font-semibold text-white flex items-center gap-1.5">
           <Search className="w-3.5 h-3.5 text-electric" />
