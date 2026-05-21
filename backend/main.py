@@ -3190,14 +3190,23 @@ async def activity_events(
 @app.post("/api/v1/activity/commits/webhook")
 async def activity_commits_webhook(request: Request):
     """
-    GitHub push-event webhook receiver. Validates the X-Hub-Signature-256
-    HMAC against GITHUB_WEBHOOK_SECRET, parses the push payload, and
-    upserts every commit into commit_activity.
+    GitHub webhook receiver — handles both push and pull_request events
+    against the same registration. Validates the X-Hub-Signature-256
+    HMAC against GITHUB_WEBHOOK_SECRET (any invalid/missing signature
+    is a 401).
 
-    Non-push events (notably the `ping` GitHub sends at registration)
-    are acknowledged and ignored. An invalid or missing signature is a
-    401. GITHUB_WEBHOOK_SECRET must be set on the server before the
-    endpoint will accept any event.
+    Push events       → upsert commits into commit_activity.
+    pull_request events with action=closed and merged=true →
+                        scan the body + commit messages for "Resolves
+                        failure #N" references and queue
+                        pr_suggestions rows (Suggested Resolutions
+                        Commit 2/7).
+
+    Other events (the `ping` GitHub sends at registration, draft PR
+    state changes, etc.) are acknowledged and ignored. Operationally
+    this means ONE webhook registration on the repo covers both the
+    Team Activity commit sync AND the Suggested Resolutions workflow —
+    one secret to manage, one URL to point GitHub at.
     """
     from config import GITHUB_WEBHOOK_SECRET
     from tools.github_sync import verify_signature, parse_push_payload
@@ -3207,22 +3216,69 @@ async def activity_commits_webhook(request: Request):
     if not verify_signature(GITHUB_WEBHOOK_SECRET, raw, sig):
         raise HTTPException(status_code=401, detail="Invalid webhook signature.")
 
-    if request.headers.get("x-github-event") != "push":
-        return {"status": "ignored", "reason": "not a push event"}
+    event_type = request.headers.get("x-github-event")
+    if event_type not in ("push", "pull_request"):
+        return {"status": "ignored",
+                "reason": f"event '{event_type}' is not handled"}
 
     try:
         payload = json.loads(raw.decode("utf-8"))
     except Exception:  # noqa: BLE001
         raise HTTPException(status_code=400, detail="Malformed JSON payload.")
 
-    commits = parse_push_payload(payload)
-    if not commits:
-        return {"status": "ok", "synced": 0}
+    if event_type == "push":
+        commits = parse_push_payload(payload)
+        if not commits:
+            return {"status": "ok", "synced": 0}
+        from tools.activity_log import upsert_commits
+        written = await upsert_commits(commits)
+        log.info("activity_webhook_push",
+                 commits=len(commits), upserted=written)
+        return {"status": "ok", "synced": written}
 
-    from tools.activity_log import upsert_commits
-    written = await upsert_commits(commits)
-    log.info("activity_webhook_push", commits=len(commits), upserted=written)
-    return {"status": "ok", "synced": written}
+    # pull_request event — Suggested Resolutions Commit 2/7.
+    from config import GITHUB_REPO, GITHUB_TOKEN
+    from tools.github_sync import fetch_pr_commits
+    from tools.pr_suggestion_scanner import (
+        parse_pr_payload, record_pr_suggestions,
+    )
+
+    # Pre-parse to extract the PR number (cheap, no network), then
+    # enrich with commit messages via the REST API so the scanner can
+    # find references in commit messages too. The fetch is fail-open
+    # — a missing GITHUB_TOKEN or API error degrades to body-only.
+    pre = parse_pr_payload(payload)
+    if pre is None:
+        # Not a closed+merged PR — silently ack.
+        return {"status": "ok", "reason": "not a merged PR"}
+
+    commits = await fetch_pr_commits(
+        GITHUB_REPO, GITHUB_TOKEN, pre["pr_number"])
+    # Re-parse with the enriched commits so the scanner can match
+    # references in commit messages alongside the PR body.
+    enriched_payload = dict(payload)
+    enriched_payload["__commits"] = commits
+    parsed = parse_pr_payload(enriched_payload)
+    if parsed is None:
+        return {"status": "ok", "reason": "not a merged PR"}
+
+    summary = await record_pr_suggestions(parsed)
+    log.info("activity_webhook_pull_request",
+             pr_number=parsed["pr_number"],
+             references_found=len(parsed["matches"]),
+             created=summary["created"],
+             skipped_missing=summary["skipped_missing"],
+             skipped_resolved=summary["skipped_resolved"],
+             skipped_duplicate=summary["skipped_duplicate"])
+    return {
+        "status": "ok",
+        "pr_number": parsed["pr_number"],
+        "references_found": len(parsed["matches"]),
+        "suggestions_created": len(summary["created"]),
+        "skipped_missing": len(summary["skipped_missing"]),
+        "skipped_resolved": len(summary["skipped_resolved"]),
+        "skipped_duplicate": len(summary["skipped_duplicate"]),
+    }
 
 
 @app.get("/api/v1/activity/commits/sync")
