@@ -26,6 +26,10 @@ import { TEST_SCRIPTS, getTestScript } from '../constants/testScripts'
 import { startTestRun } from '../lib/testRunnerBus'
 import { csvBlob } from '../lib/csv'
 import Markdown from './Markdown'
+import {
+  SuggestionsBanner, SuggestionReviewModal,
+  type PRSuggestion,
+} from './SuggestedResolutions'
 
 type StepResult = 'pass' | 'fail' | 'skip'
 
@@ -504,6 +508,18 @@ function FailureReportsBlock() {
   const [resolvingFailure, setResolvingFailure] = useState<FailureRow | null>(null)
   const [expanded, setExpanded] = useState<Set<number>>(new Set())
 
+  // Suggested Resolutions (Commits 4 + 5). The modal is owned at
+  // this level so it can be opened from the banner (full queue) OR
+  // from the row badge (scoped to one failure_id). refreshKey bumps
+  // every time a card is actioned so the banner re-fetches and the
+  // row badges below refresh.
+  const [reviewingSuggestions, setReviewingSuggestions] =
+    useState<PRSuggestion[] | null>(null)
+  const [scopedFailureId, setScopedFailureId] = useState<number | null>(null)
+  const [suggestionRefreshKey, setSuggestionRefreshKey] = useState(0)
+  const [pendingByFailure, setPendingByFailure] =
+    useState<Record<number, number>>({})
+
   const load = useCallback(() => {
     setLoading(true)
     axios.get<{ failures: FailureRow[] }>('/api/v1/testing/failures')
@@ -513,12 +529,40 @@ function FailureReportsBlock() {
   }, [])
   useEffect(load, [load])
 
+  // Fetch the per-failure pending-suggestion counts so the row badges
+  // know which rows to mark. Re-fetched whenever a card is actioned.
+  const loadSuggestionCounts = useCallback(() => {
+    axios.get<{ by_failure: Record<string, number> }>(
+      '/api/v1/testing/suggestions/by-failure')
+      .then((res) => {
+        const map: Record<number, number> = {}
+        for (const [k, v] of Object.entries(res.data.by_failure ?? {})) {
+          map[parseInt(k, 10)] = v
+        }
+        setPendingByFailure(map)
+      })
+      .catch(() => setPendingByFailure({}))
+  }, [])
+  useEffect(loadSuggestionCounts, [loadSuggestionCounts, suggestionRefreshKey])
+
   const toggleExpanded = (id: number) => {
     setExpanded((s) => {
       const next = new Set(s)
       if (next.has(id)) next.delete(id); else next.add(id)
       return next
     })
+  }
+
+  // Row-badge click: open the modal scoped to this failure's
+  // suggestion(s). Fetches the full list (cheap) and the modal
+  // filters by scopedFailureId.
+  const openSuggestionsForFailure = async (failureId: number) => {
+    try {
+      const r = await axios.get<{ suggestions: PRSuggestion[] }>(
+        '/api/v1/testing/suggestions')
+      setReviewingSuggestions(r.data.suggestions ?? [])
+      setScopedFailureId(failureId)
+    } catch { /* fail-open: silent if the fetch errors */ }
   }
 
   if (loading) {
@@ -531,6 +575,17 @@ function FailureReportsBlock() {
 
   return (
     <div className="space-y-2">
+      {/* Suggested Resolutions banner (Commit 4/7). Hidden when no
+          pending suggestions exist; renders inline at the top of the
+          Failure Reports tab when one or more PRs reference an open
+          failure via the "Resolves failure #N" convention. */}
+      <SuggestionsBanner
+        onReview={(s) => {
+          setReviewingSuggestions(s)
+          setScopedFailureId(null)
+        }}
+        refreshKey={suggestionRefreshKey} />
+
       <button type="button"
         onClick={() => download(csvBlob(
           ['Tester', 'Script', 'Step', 'Severity', 'Description',
@@ -571,6 +626,21 @@ function FailureReportsBlock() {
                   )}
                   {isResolved && f.resolution_type && (
                     <ResolutionBadge type={f.resolution_type} />
+                  )}
+                  {/* Suggested Resolutions row badge (Commit 5/7). Only
+                      surfaces on Open failures that have a pending
+                      suggestion queued by the PR webhook. Clicking
+                      opens the review modal scoped to this failure. */}
+                  {!isResolved && pendingByFailure[f.id] && (
+                    <button type="button"
+                      onClick={() => void openSuggestionsForFailure(f.id)}
+                      className="inline-flex items-center gap-1 px-1.5
+                                 py-0.5 rounded border border-electric/40
+                                 bg-electric/10 text-electric text-2xs
+                                 hover:bg-electric/20"
+                      title="A merged PR may resolve this failure">
+                      Fix available — review
+                    </button>
                   )}
                 </div>
                 <p className="text-2xs text-slate-300 mt-1">
@@ -621,6 +691,26 @@ function FailureReportsBlock() {
           failure={resolvingFailure}
           onClose={() => setResolvingFailure(null)}
           onResolved={() => { setResolvingFailure(null); load() }}
+        />
+      )}
+      {/* Suggested Resolutions review modal (Commits 4 + 5). Opens
+          from the banner (full queue, scopedFailureId=null) OR from
+          a row's "Fix available" badge (single failure, scoped).
+          onActioned bumps suggestionRefreshKey to re-fetch the
+          banner + by-failure counts; failure rows also reload so
+          the just-resolved failure flips to its resolved render. */}
+      {reviewingSuggestions !== null && (
+        <SuggestionReviewModal
+          suggestions={reviewingSuggestions}
+          scopedToFailureId={scopedFailureId}
+          onClose={() => {
+            setReviewingSuggestions(null)
+            setScopedFailureId(null)
+          }}
+          onActioned={() => {
+            setSuggestionRefreshKey((k) => k + 1)
+            load()
+          }}
         />
       )}
     </div>
