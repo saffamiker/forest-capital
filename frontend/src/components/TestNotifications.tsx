@@ -40,6 +40,13 @@ interface UnseenResponse {
 interface NotificationsResponse {
   resolved_failures: Array<{
     script_id: string; step_id: string; resolution_note: string | null
+    // Migration 025 — resolution-gate metadata. resolution_type
+    // drives the three-variant card below. Legacy rows resolved
+    // before the migration carry null; the renderer falls back to
+    // the original "please re-run this step" wording in that case.
+    resolution_type?: 'no_bug_detected' | 'code_fix_deployed' | 'wont_fix' | null
+    fix_reference?: string | null
+    remediation_note?: string | null
   }>
   responded_feedback: Array<{
     id: number; title: string; status: string; resolution_note: string | null
@@ -80,12 +87,124 @@ interface Notice {
   kind: 'new_tests' | 'failure_resolved' | 'feedback_responded'
     | 'retest_requested' | 'triage_ready' | 'audit_failed' | 'deadline'
   title: string
-  body: string
-  actionLabel: string
-  onAction: () => void
+  /** String for the legacy bare-text notices; ReactNode for the
+   *  structured failure_resolved card (Migration 025) which renders
+   *  badge + root cause + fix reference + remediation block. */
+  body: string | import('react').ReactNode
+  /** Optional — omitted for the wont_fix variant of failure_resolved.
+   *  The Won't fix card is informational only with no CTA. */
+  actionLabel?: string
+  onAction?: () => void
   /** Overrides the kind-based accent — used by the deadline notice to
    *  match the guide panel's amber/red urgency colours. */
   accentClass?: string
+}
+
+
+// Resolution-type vocabulary — kept in sync with the TestRunnerSettings
+// RESOLUTION_TYPE_LABEL map (one source of truth would mean a circular
+// import, so this is intentional duplication with a regression test
+// pinning the two in sync).
+const RESOLUTION_TYPE_LABEL: Record<string, string> = {
+  no_bug_detected:    'No bug detected',
+  code_fix_deployed:  'Code fix deployed',
+  wont_fix:           "Won't fix",
+}
+
+
+function ResolutionBadge({ type }: { type: string }) {
+  const colours: Record<string, string> = {
+    no_bug_detected:    'bg-amber-900/40 text-amber-300 border-amber-700/50',
+    code_fix_deployed:  'bg-emerald-900/40 text-emerald-300 border-emerald-700/50',
+    wont_fix:           'bg-slate-700/40 text-slate-300 border-slate-600/50',
+  }
+  const cls = colours[type] ?? 'bg-navy-700 text-muted border-border'
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded border text-2xs
+                      whitespace-nowrap ${cls}`}>
+      {RESOLUTION_TYPE_LABEL[type] ?? type}
+    </span>
+  )
+}
+
+
+// Render a SHA / #PR / GH URL as a clickable link inline. Mirrors the
+// FixReferenceLink in TestRunnerSettings; duplicated here to avoid a
+// cross-component import cycle.
+function FixReferenceLink({ reference }: { reference: string }) {
+  const r = reference.trim()
+  let href: string | null = null
+  let label = r
+  if (/^[0-9a-fA-F]{7,40}$/.test(r)) {
+    href = `https://github.com/saffamiker/forest-capital/commit/${r}`
+    label = r.slice(0, 8)
+  } else if (/^#\d{1,6}$/.test(r)) {
+    href = `https://github.com/saffamiker/forest-capital/pull/${r.slice(1)}`
+  } else if (/^https?:\/\/(?:www\.)?github\.com\//.test(r)) {
+    href = r
+  }
+  if (!href) return <span className="text-slate-200 font-mono">{r}</span>
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer"
+       className="text-electric hover:underline font-mono">
+      {label}
+    </a>
+  )
+}
+
+
+// Three-variant card body for a resolved failure. Mirrors PART 3 of
+// the resolution-gate spec — root cause is universal; what-changed +
+// fix-reference appear only for code_fix_deployed; wont_fix carries
+// no CTA (the parent Notice omits actionLabel for that variant).
+function ResolvedFailureBody({
+  stepName, rootCause, resolutionType, fixReference, remediation,
+}: {
+  stepName: string
+  rootCause: string | null
+  resolutionType: string | null
+  fixReference: string | null
+  remediation: string | null
+}) {
+  const type = resolutionType ?? ''
+  return (
+    <div className="space-y-2 text-2xs text-slate-200">
+      <div className="flex items-start gap-2 flex-wrap">
+        <span className="text-muted">Step: </span>
+        <span className="text-slate-100">"{stepName}"</span>
+        {type && <ResolutionBadge type={type} />}
+      </div>
+      {rootCause && (
+        <div>
+          <span className="text-muted">Root cause: </span>
+          <span>{rootCause}</span>
+        </div>
+      )}
+      {type === 'code_fix_deployed' && remediation && (
+        <div>
+          <span className="text-muted">What changed: </span>
+          <span>{remediation}</span>
+        </div>
+      )}
+      {type === 'code_fix_deployed' && fixReference && (
+        <div>
+          <span className="text-muted">Fix reference: </span>
+          <FixReferenceLink reference={fixReference} />
+        </div>
+      )}
+      {type === 'no_bug_detected' && (
+        <p className="text-muted italic">
+          No code change was required. Please re-run this step — the
+          expected behaviour is described in the test guide.
+        </p>
+      )}
+      {type === 'wont_fix' && (
+        <p className="text-muted italic">
+          No re-test is required. This step has been marked closed.
+        </p>
+      )}
+    </div>
+  )
 }
 
 function readDismissed(): string[] {
@@ -140,21 +259,45 @@ export default function TestNotifications() {
           })
         }
 
-        // ── Failure resolved ───────────────────────────────────────────
+        // ── Failure resolved (Migration 025 — three variants) ──────────
+        // No bug detected / Code fix deployed → re-test CTA. Won't fix →
+        // informational only, no CTA, step stays at its current attested
+        // state. A legacy row with resolution_type == null falls back to
+        // the original "please re-run this step" UX.
         for (const f of notifRes.data.resolved_failures ?? []) {
-          const title = getTestScript(f.script_id)?.steps
+          const stepName = getTestScript(f.script_id)?.steps
             .find((s) => s.id === f.step_id)?.title ?? f.step_id
+          const rtype = f.resolution_type ?? null
+          const isWontFix = rtype === 'wont_fix'
+          const titlePrefix = isWontFix
+            ? '🔒 A failure you reported has been closed'
+            : rtype === 'no_bug_detected'
+              ? '✅ A failure you reported was not a bug'
+              : rtype === 'code_fix_deployed'
+                ? '✅ A failure you reported has been fixed'
+                : '✅ A test failure you reported has been resolved'
           built.push({
             key: `failure:${f.script_id}:${f.step_id}`,
             kind: 'failure_resolved',
-            title: '✅ A test failure you reported has been resolved',
-            body: `"${title}" has been marked resolved. Please re-run this `
-              + `step.${f.resolution_note ? ` — ${f.resolution_note}` : ''}`,
-            actionLabel: 'Re-test Now',
-            onAction: () => {
-              setTestingMode(true)
-              startTestRun({ scriptId: f.script_id, stepId: f.step_id })
-            },
+            title: titlePrefix,
+            body: (
+              <ResolvedFailureBody
+                stepName={stepName}
+                rootCause={f.resolution_note ?? null}
+                resolutionType={rtype}
+                fixReference={f.fix_reference ?? null}
+                remediation={f.remediation_note ?? null}
+              />
+            ),
+            // wont_fix: no CTA — leaving actionLabel undefined keeps
+            // the renderer from showing the action button.
+            ...(isWontFix ? {} : {
+              actionLabel: 'Re-test This Step',
+              onAction: () => {
+                setTestingMode(true)
+                startTestRun({ scriptId: f.script_id, stepId: f.step_id })
+              },
+            }),
           })
         }
 
@@ -337,7 +480,17 @@ export default function TestNotifications() {
           </button>
         </div>
         <div className="px-5 py-4">
-          <p className="text-xs text-slate-300 leading-relaxed">{current.body}</p>
+          {typeof current.body === 'string'
+            ? (
+              <p className="text-xs text-slate-300 leading-relaxed">
+                {current.body}
+              </p>
+            )
+            : (
+              <div className="text-xs text-slate-300 leading-relaxed">
+                {current.body}
+              </div>
+            )}
           {notices && notices.length > 1 && (
             <p className="text-2xs text-muted mt-2">
               {index + 1} of {notices.length}
@@ -348,15 +501,17 @@ export default function TestNotifications() {
                         border-t border-border">
           <button type="button" onClick={dismiss}
             className="px-3 py-1.5 text-xs text-muted hover:text-white">
-            Later
+            {current.actionLabel ? 'Later' : 'Close'}
           </button>
-          <button type="button"
-            onClick={() => { current.onAction(); dismiss() }}
-            className="px-4 py-1.5 rounded text-xs font-medium bg-electric/15
-                       text-electric border border-electric/30
-                       hover:bg-electric/25 transition-colors">
-            {current.actionLabel}
-          </button>
+          {current.actionLabel && current.onAction && (
+            <button type="button"
+              onClick={() => { current.onAction!(); dismiss() }}
+              className="px-4 py-1.5 rounded text-xs font-medium bg-electric/15
+                         text-electric border border-electric/30
+                         hover:bg-electric/25 transition-colors">
+              {current.actionLabel}
+            </button>
+          )}
         </div>
       </div>
     </div>

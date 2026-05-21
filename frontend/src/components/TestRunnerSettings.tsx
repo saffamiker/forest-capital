@@ -56,6 +56,34 @@ interface FailureRow {
   resolved_at: string | null
   resolved_by: string | null
   resolution_note: string | null
+  // Migration 025 — resolution-gate metadata. All three optional at
+  // the row level: an Open failure carries no resolution; a resolved
+  // failure carries resolution_type plus root cause; only a
+  // code_fix_deployed row carries fix_reference + remediation_note.
+  resolution_type?: 'no_bug_detected' | 'code_fix_deployed' | 'wont_fix' | null
+  fix_reference?: string | null
+  remediation_note?: string | null
+}
+
+// Resolution-type labels, kept here so every surface that renders a
+// badge (Failure Reports row, expand card, Issue Tracker) reads from
+// one source. Mirrors RESOLUTION_TYPES in tools/test_runner.py.
+export const RESOLUTION_TYPE_LABEL: Record<string, string> = {
+  no_bug_detected:    'No bug detected',
+  code_fix_deployed:  'Code fix deployed',
+  wont_fix:           "Won't fix",
+}
+
+// Fix-reference validators — must stay in sync with backend
+// main._is_valid_fix_reference. A regression on either side
+// breaks the Submit gate.
+const SHA_RE = /^[0-9a-fA-F]{7,40}$/
+const PR_RE = /^#\d{1,6}$/
+const GH_URL_RE = /^https?:\/\/(?:www\.)?github\.com\/[^/]+\/[^/]+\/(?:commit|pull|issues)\/.+$/
+
+export function isValidFixReference(s: string): boolean {
+  const t = s.trim()
+  return SHA_RE.test(t) || PR_RE.test(t) || GH_URL_RE.test(t)
 }
 
 interface FeedbackRow {
@@ -202,11 +230,277 @@ function TestResultsBlock() {
 
 // ── Failure Reports — admin only ──────────────────────────────────────────────
 
+// ── ResolutionCard — the read-only card rendered when a resolved row
+// expands. Same shape is reused by the Issue Tracker tab.
+export function ResolutionCard({ f }: { f: FailureRow }) {
+  const rtype = f.resolution_type ?? null
+  return (
+    <div className="mt-2 rounded border border-border bg-navy-900/60
+                    p-2.5 text-2xs space-y-1.5">
+      {rtype && (
+        <div>
+          <span className="text-muted">Resolution type: </span>
+          <ResolutionBadge type={rtype} />
+        </div>
+      )}
+      {f.resolution_note && (
+        <div>
+          <span className="text-muted">Root cause: </span>
+          <span className="text-slate-200">{f.resolution_note}</span>
+        </div>
+      )}
+      {rtype === 'code_fix_deployed' && f.fix_reference && (
+        <div>
+          <span className="text-muted">Fix reference: </span>
+          <FixReferenceLink reference={f.fix_reference} />
+        </div>
+      )}
+      {rtype === 'code_fix_deployed' && f.remediation_note && (
+        <div>
+          <span className="text-muted">What changed: </span>
+          <span className="text-slate-200">{f.remediation_note}</span>
+        </div>
+      )}
+      {f.resolved_by && f.resolved_at && (
+        <div className="text-muted">
+          Resolved by {f.resolved_by} at{' '}
+          {new Date(f.resolved_at).toLocaleString()}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ── ResolutionBadge — type pill, colour-coded so a scan of the
+// Failure Reports list reads as "what came of each report" at a glance.
+export function ResolutionBadge({ type }: { type: string }) {
+  const colours: Record<string, string> = {
+    no_bug_detected:    'bg-amber-900/40 text-amber-300 border-amber-700/50',
+    code_fix_deployed:  'bg-emerald-900/40 text-emerald-300 border-emerald-700/50',
+    wont_fix:           'bg-slate-700/40 text-slate-300 border-slate-600/50',
+  }
+  const cls = colours[type] ?? 'bg-navy-700 text-muted border-border'
+  return (
+    <span className={`inline-block px-1.5 py-0.5 rounded border text-2xs
+                      whitespace-nowrap ${cls}`}>
+      {RESOLUTION_TYPE_LABEL[type] ?? type}
+    </span>
+  )
+}
+
+
+// ── FixReferenceLink — renders a commit SHA / #NNN / GH URL as a
+// clickable link to GitHub. SHA & PR shortcuts assume the project
+// repo (saffamiker/forest-capital); a bare URL is used as-is.
+export function FixReferenceLink({ reference }: { reference: string }) {
+  const r = reference.trim()
+  let href: string | null = null
+  let label = r
+  if (SHA_RE.test(r)) {
+    href = `https://github.com/saffamiker/forest-capital/commit/${r}`
+    label = r.slice(0, 8)
+  } else if (PR_RE.test(r)) {
+    href = `https://github.com/saffamiker/forest-capital/pull/${r.slice(1)}`
+  } else if (GH_URL_RE.test(r)) {
+    href = r
+  }
+  if (!href) return <span className="text-slate-200">{r}</span>
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer"
+       className="text-electric hover:underline inline-flex items-center gap-1">
+      <span className="font-mono">{label}</span>
+      <ExternalLink className="w-2.5 h-2.5" />
+    </a>
+  )
+}
+
+
+// ── ResolutionModal — replaces the legacy inline note input.
+// Submit stays disabled until the required fields for the chosen
+// resolution type are populated and the fix-reference shape validates.
+export function ResolutionModal({
+  failure, onClose, onResolved,
+}: {
+  failure: FailureRow
+  onClose: () => void
+  onResolved: () => void
+}) {
+  const [resolutionType, setResolutionType] = useState<
+    'no_bug_detected' | 'code_fix_deployed' | 'wont_fix' | ''
+  >('')
+  const [rootCause, setRootCause] = useState('')
+  const [fixReference, setFixReference] = useState('')
+  const [remediation, setRemediation] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // Submit-disabled gate. Mirrors the backend validator so the button
+  // stays inert until the body would pass server-side validation.
+  const isCodeFix = resolutionType === 'code_fix_deployed'
+  const fixOk = !isCodeFix || isValidFixReference(fixReference)
+  const remedOk = !isCodeFix || remediation.trim().length > 0
+  const canSubmit =
+    resolutionType !== '' && rootCause.trim().length > 0
+    && fixOk && remedOk && !submitting
+
+  const submit = async () => {
+    if (!canSubmit) return
+    setSubmitting(true)
+    setError(null)
+    try {
+      await axios.post(`/api/v1/testing/failures/${failure.id}/resolve`, {
+        resolution_type: resolutionType,
+        resolution_note: rootCause.trim(),
+        fix_reference: isCodeFix ? fixReference.trim() : null,
+        remediation_note: isCodeFix ? remediation.trim() : null,
+      })
+      onResolved()
+    } catch (exc) {
+      const detail = (exc as { response?: { data?: { detail?: string } } })
+        .response?.data?.detail
+      setError(detail ?? 'Could not save the resolution. Please retry.')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] flex items-center justify-center
+                    bg-black/60 p-4" role="presentation" onClick={onClose}>
+      <div role="dialog" aria-label="Mark failure resolved"
+           onClick={(e) => e.stopPropagation()}
+           className="w-full max-w-lg rounded-lg border border-border
+                      bg-navy-800 shadow-2xl">
+        <div className="flex items-center justify-between px-4 py-3
+                        border-b border-border">
+          <h2 className="text-sm font-semibold text-white">
+            Mark Resolved — {stepTitle(failure.script_id, failure.step_id)}
+          </h2>
+          <button type="button" onClick={onClose} aria-label="Close"
+                  className="text-muted hover:text-white">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <div className="px-4 py-3 space-y-3 max-h-[70vh] overflow-y-auto">
+          {/* Resolution type — required radio. */}
+          <div>
+            <label className="text-2xs uppercase tracking-wider text-muted
+                              block mb-1.5">
+              Resolution type
+            </label>
+            <div className="space-y-1.5">
+              {(['no_bug_detected', 'code_fix_deployed', 'wont_fix'] as const)
+                .map((t) => (
+                  <label key={t}
+                         className="flex items-start gap-2 text-xs text-slate-200
+                                    cursor-pointer">
+                    <input type="radio" name="resolution_type" value={t}
+                      checked={resolutionType === t}
+                      onChange={() => setResolutionType(t)}
+                      className="mt-0.5 accent-electric" />
+                    <span>
+                      <span className="font-medium">
+                        {RESOLUTION_TYPE_LABEL[t]}
+                      </span>
+                      <span className="block text-2xs text-muted">
+                        {t === 'no_bug_detected'
+                          && 'User error, env issue, or misread test step.'}
+                        {t === 'code_fix_deployed'
+                          && 'A change has landed that addresses the failure.'}
+                        {t === 'wont_fix'
+                          && "Closed by design or as out of scope; no re-test."}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+            </div>
+          </div>
+
+          {/* Root cause — required for every type. */}
+          <div>
+            <label className="text-2xs uppercase tracking-wider text-muted
+                              block mb-1">
+              What caused this failure?
+            </label>
+            <textarea value={rootCause}
+              onChange={(e) => setRootCause(e.target.value)}
+              rows={3} placeholder="Root cause…"
+              className="w-full rounded border border-border bg-navy-900
+                         px-2 py-1.5 text-xs text-white" />
+          </div>
+
+          {/* Code-fix-only fields. Always present in the DOM so the
+              transition reads cleanly; visibility is gated on the type. */}
+          {isCodeFix && (
+            <>
+              <div>
+                <label className="text-2xs uppercase tracking-wider text-muted
+                                  block mb-1">
+                  Fix reference
+                </label>
+                <input value={fixReference}
+                  onChange={(e) => setFixReference(e.target.value)}
+                  placeholder="Commit SHA, #PR-number, or GitHub URL"
+                  className={`w-full rounded border bg-navy-900 px-2 py-1.5
+                              text-xs text-white font-mono ${
+                                fixReference && !fixOk
+                                  ? 'border-danger/60'
+                                  : 'border-border'}`} />
+                <p className="text-2xs text-muted mt-1">
+                  {fixReference && !fixOk
+                    ? 'Must be 7+ hex characters, #NNN, or a GitHub URL.'
+                    : 'Paste a commit SHA or PR number to confirm a fix has '
+                      + 'landed before notifying the tester.'}
+                </p>
+              </div>
+              <div>
+                <label className="text-2xs uppercase tracking-wider text-muted
+                                  block mb-1">
+                  What was changed and how does it address the failure?
+                </label>
+                <textarea value={remediation}
+                  onChange={(e) => setRemediation(e.target.value)}
+                  rows={3} placeholder="Remediation note…"
+                  className="w-full rounded border border-border bg-navy-900
+                             px-2 py-1.5 text-xs text-white" />
+              </div>
+            </>
+          )}
+
+          {error && (
+            <p className="text-2xs text-danger" role="alert">{error}</p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-2 px-4 py-3
+                        border-t border-border">
+          <button type="button" onClick={onClose}
+            className="px-3 py-1.5 text-xs text-muted hover:text-white">
+            Cancel
+          </button>
+          <button type="button"
+            onClick={() => void submit()}
+            disabled={!canSubmit}
+            className="px-4 py-1.5 rounded text-xs font-medium
+                       bg-electric text-white
+                       disabled:bg-navy-700 disabled:text-muted
+                       disabled:cursor-not-allowed">
+            {submitting ? 'Saving…' : 'Submit'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+
 function FailureReportsBlock() {
   const [failures, setFailures] = useState<FailureRow[]>([])
   const [loading, setLoading] = useState(true)
-  const [resolvingId, setResolvingId] = useState<number | null>(null)
-  const [note, setNote] = useState('')
+  const [resolvingFailure, setResolvingFailure] = useState<FailureRow | null>(null)
+  const [expanded, setExpanded] = useState<Set<number>>(new Set())
 
   const load = useCallback(() => {
     setLoading(true)
@@ -217,14 +511,12 @@ function FailureReportsBlock() {
   }, [])
   useEffect(load, [load])
 
-  const resolve = async (id: number) => {
-    try {
-      await axios.post(`/api/v1/testing/failures/${id}/resolve`,
-        { resolution_note: note })
-      setResolvingId(null)
-      setNote('')
-      load()
-    } catch { /* surfaced by the row staying put */ }
+  const toggleExpanded = (id: number) => {
+    setExpanded((s) => {
+      const next = new Set(s)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
   }
 
   if (loading) {
@@ -240,82 +532,95 @@ function FailureReportsBlock() {
       <button type="button"
         onClick={() => download(csvBlob(
           ['Tester', 'Script', 'Step', 'Severity', 'Description',
-            'Expected', 'Actual', 'Attested', 'Resolved'],
+            'Expected', 'Actual', 'Attested', 'Resolved',
+            'Resolution type', 'Fix reference'],
           failures.map((f) => [f.user_email, f.script_id,
             stepTitle(f.script_id, f.step_id), f.severity ?? '',
             f.failure_description ?? '', f.expected_result ?? '',
             f.actual_result ?? '', f.attested_at ?? '',
-            f.resolved_at ?? ''])),
+            f.resolved_at ?? '',
+            f.resolution_type
+              ? (RESOLUTION_TYPE_LABEL[f.resolution_type] ?? '') : '',
+            f.fix_reference ?? ''])),
           'test-failures.csv')}
         className="flex items-center gap-1 text-2xs px-2 py-1 rounded
                    border border-border text-slate-300 hover:bg-navy-700">
         <Download className="w-3 h-3" /> Download All Failures
       </button>
-      {failures.map((f) => (
-        <div key={f.id} className={`rounded border p-2.5 ${
-          f.resolved_at ? 'border-border bg-navy-900 opacity-60'
-            : 'border-danger/30 bg-danger/5'}`}>
-          <div className="flex items-start justify-between gap-2">
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5 flex-wrap text-2xs">
-                <span className="text-white font-medium">
-                  {stepTitle(f.script_id, f.step_id)}
-                </span>
-                <span className="px-1 py-0.5 rounded bg-navy-700 text-muted">
-                  {f.severity ?? 'major'}
-                </span>
-                <span className="text-muted">{f.user_email}</span>
-                {f.low_quality && (
-                  <span className="text-warning" title="Low-quality submission">⚠</span>
+      {failures.map((f) => {
+        const isResolved = !!f.resolved_at
+        const isExpanded = expanded.has(f.id)
+        return (
+          <div key={f.id} className={`rounded border p-2.5 ${
+            isResolved ? 'border-border bg-navy-900 opacity-60'
+              : 'border-danger/30 bg-danger/5'}`}>
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 flex-wrap text-2xs">
+                  <span className="text-white font-medium">
+                    {stepTitle(f.script_id, f.step_id)}
+                  </span>
+                  <span className="px-1 py-0.5 rounded bg-navy-700 text-muted">
+                    {f.severity ?? 'major'}
+                  </span>
+                  <span className="text-muted">{f.user_email}</span>
+                  {f.low_quality && (
+                    <span className="text-warning" title="Low-quality submission">⚠</span>
+                  )}
+                  {isResolved && f.resolution_type && (
+                    <ResolutionBadge type={f.resolution_type} />
+                  )}
+                </div>
+                <p className="text-2xs text-slate-300 mt-1">
+                  {f.failure_description}
+                </p>
+                {f.actual_result && (
+                  <p className="text-2xs text-muted mt-0.5">
+                    Actual: {f.actual_result}
+                  </p>
+                )}
+                {f.screenshot_paths.length > 0 && (
+                  <div className="flex gap-1.5 mt-1.5">
+                    {f.screenshot_paths.map((p) => (
+                      <a key={p} href={`/uploads/${p}`} target="_blank"
+                         rel="noopener noreferrer">
+                        <img src={`/uploads/${p}`} alt="screenshot"
+                             className="h-12 rounded border border-border" />
+                      </a>
+                    ))}
+                  </div>
                 )}
               </div>
-              <p className="text-2xs text-slate-300 mt-1">
-                {f.failure_description}
-              </p>
-              {f.actual_result && (
-                <p className="text-2xs text-muted mt-0.5">
-                  Actual: {f.actual_result}
-                </p>
-              )}
-              {f.screenshot_paths.length > 0 && (
-                <div className="flex gap-1.5 mt-1.5">
-                  {f.screenshot_paths.map((p) => (
-                    <a key={p} href={`/uploads/${p}`} target="_blank"
-                       rel="noopener noreferrer">
-                      <img src={`/uploads/${p}`} alt="screenshot"
-                           className="h-12 rounded border border-border" />
-                    </a>
-                  ))}
-                </div>
-              )}
-              {f.resolved_at && (
-                <p className="text-2xs text-success mt-1">
-                  Resolved{f.resolved_by ? ` by ${f.resolved_by}` : ''}
-                  {f.resolution_note ? ` — ${f.resolution_note}` : ''}
-                </p>
+              {isResolved ? (
+                <button type="button"
+                  onClick={() => toggleExpanded(f.id)}
+                  aria-label={isExpanded ? 'Collapse resolution' : 'Expand resolution'}
+                  className="text-muted hover:text-white shrink-0
+                             min-h-[24px] min-w-[24px] inline-flex
+                             items-center justify-center">
+                  {isExpanded
+                    ? <ChevronDown className="w-3.5 h-3.5" />
+                    : <ChevronRight className="w-3.5 h-3.5" />}
+                </button>
+              ) : (
+                <button type="button"
+                  onClick={() => setResolvingFailure(f)}
+                  className="text-2xs text-electric hover:underline shrink-0">
+                  Mark Resolved
+                </button>
               )}
             </div>
-            {!f.resolved_at && (
-              <button type="button" onClick={() => setResolvingId(f.id)}
-                className="text-2xs text-electric hover:underline shrink-0">
-                Mark Resolved
-              </button>
-            )}
+            {isResolved && isExpanded && <ResolutionCard f={f} />}
           </div>
-          {resolvingId === f.id && (
-            <div className="mt-2 flex gap-2">
-              <input value={note} onChange={(e) => setNote(e.target.value)}
-                placeholder="Resolution note"
-                className="flex-1 rounded border border-border bg-navy-900
-                           px-2 py-1 text-2xs text-white" />
-              <button type="button" onClick={() => void resolve(f.id)}
-                className="text-2xs px-2 py-1 rounded bg-electric text-white">
-                Save
-              </button>
-            </div>
-          )}
-        </div>
-      ))}
+        )
+      })}
+      {resolvingFailure && (
+        <ResolutionModal
+          failure={resolvingFailure}
+          onClose={() => setResolvingFailure(null)}
+          onResolved={() => { setResolvingFailure(null); load() }}
+        />
+      )}
     </div>
   )
 }

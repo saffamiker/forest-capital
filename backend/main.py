@@ -2308,16 +2308,86 @@ async def testing_resolve_failure(
 ):
     """
     Marks a failure resolved. The row is kept (the resolution is the audit
-    trail) and the step re-appears as a pending re-test for the tester —
-    which the login-notification check surfaces. Requires view_admin.
+    trail) with the migration-025 metadata block: resolution_type, the
+    root cause in resolution_note, and — for code_fix_deployed only —
+    fix_reference + remediation_note.
+
+    Validation contract:
+      - resolution_type      required, one of RESOLUTION_TYPES
+      - resolution_note      required (the root cause; universal)
+      - fix_reference        required when resolution_type =
+                             'code_fix_deployed'. Accepted formats:
+                             7+ hex chars (SHA), #NNN (PR number),
+                             https://github.com/... URL
+      - remediation_note     required when resolution_type =
+                             'code_fix_deployed'
+
+    Step-reset semantics:
+      no_bug_detected / code_fix_deployed → tester sees the resolved
+        failure as a pending re-test (the login notification carries
+        a Re-test This Step CTA).
+      wont_fix → step is NOT reset; the notification card is
+        informational only, no CTA, no re-attestation prompt.
+
+    Requires view_admin.
     """
-    from tools.test_runner import resolve_failure
+    from tools.test_runner import RESOLUTION_TYPES, resolve_failure
+
+    resolution_type = str(body.get("resolution_type") or "").strip()
+    resolution_note = str(body.get("resolution_note") or "").strip()
+    fix_reference = str(body.get("fix_reference") or "").strip() or None
+    remediation_note = str(body.get("remediation_note") or "").strip() or None
+
+    if resolution_type not in RESOLUTION_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail="resolution_type is required and must be one of "
+                   f"{list(RESOLUTION_TYPES)}.")
+    if not resolution_note:
+        raise HTTPException(
+            status_code=422,
+            detail="resolution_note (root cause) is required.")
+    if resolution_type == "code_fix_deployed":
+        if not fix_reference or not _is_valid_fix_reference(fix_reference):
+            raise HTTPException(
+                status_code=422,
+                detail="fix_reference is required for code_fix_deployed. "
+                       "Accepted formats: 7+ hex characters (commit SHA), "
+                       "#NNN (PR number), or a GitHub URL.")
+        if not remediation_note:
+            raise HTTPException(
+                status_code=422,
+                detail="remediation_note is required for code_fix_deployed.")
+
     resolved = await resolve_failure(
-        failure_id, session.get("email", ""),
-        str(body.get("resolution_note") or ""))
+        failure_id, session.get("email", ""), resolution_note,
+        resolution_type=resolution_type,
+        fix_reference=fix_reference,
+        remediation_note=remediation_note,
+    )
     if resolved is None:
         raise HTTPException(status_code=404, detail="Failure not found.")
     return {"resolved": True, **resolved}
+
+
+# Fix-reference shape: 7+ hex chars (SHA), #NNN (PR number), or a
+# https://github.com/... URL. Kept as a small standalone helper so the
+# resolution-modal frontend and the endpoint validator share one
+# definition (the frontend re-implements the same regex set; if either
+# diverges the test in tests/test_failure_resolution.py catches it).
+_SHA_RE = __import__("re").compile(r"^[0-9a-fA-F]{7,40}$")
+_PR_RE = __import__("re").compile(r"^#\d{1,6}$")
+_GH_URL_RE = __import__("re").compile(
+    r"^https?://(?:www\.)?github\.com/[^/]+/[^/]+/(?:commit|pull|issues)/.+$")
+
+
+def _is_valid_fix_reference(s: str) -> bool:
+    """True when `s` looks like a commit SHA / PR number / GitHub URL.
+    Lax on whitespace; strict on shape. The endpoint applies this guard
+    BEFORE the DB write so a code-fix claim cannot be recorded without
+    a traceable reference."""
+    s = s.strip()
+    return bool(_SHA_RE.match(s) or _PR_RE.match(s) or _GH_URL_RE.match(s))
 
 
 @app.post("/api/v1/testing/feedback")
