@@ -132,17 +132,22 @@ class CIO:
         self._grok = ContrarianAnalyst()
 
     @staticmethod
-    def _build_visual_context() -> list[dict] | None:
+    def _build_visual_context(
+        n_strategies: int | None = None,
+    ) -> list[dict] | None:
         """COUNCIL_CHARTS snapshots as content blocks. Used by the CIO's
         draft-consensus and synthesis calls (both are direct call_claude
         — neither runs through the harness). Returns None when no
         snapshots are on disk (cold deploy, first run). See
-        EquityAnalyst._build_visual_context for the rationale."""
+        EquityAnalyst._build_visual_context for the rationale.
+
+        n_strategies is passed through so the all-strategy captions
+        render the count both callers know from len(strategy_results)."""
         if not snapshots_dir_exists():
             log.info("cio_no_snapshots_dir",
                      note="proceeding without visual context")
             return None
-        blocks = get_charts_for_context(COUNCIL_CHARTS)
+        blocks = get_charts_for_context(COUNCIL_CHARTS, n_strategies=n_strategies)
         if not blocks:
             log.info("cio_no_snapshots_available",
                      note="proceeding without visual context")

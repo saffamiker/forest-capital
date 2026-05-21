@@ -126,7 +126,8 @@ class EquityAnalyst:
         # Built once and captured in the generator-fn closure so the harness
         # can retry without re-reading the snapshots from disk. Evaluators
         # MUST NOT see this (harness._evaluate omits the kwarg).
-        visual_context = self._build_visual_context()
+        # n_strategies is rendered into the all-strategy chart captions.
+        visual_context = self._build_visual_context(len(strategy_results))
 
         try:
             # The call_claude generation is routed through the
@@ -149,19 +150,25 @@ class EquityAnalyst:
             log.error("equity_analyst_error", error=str(exc))
             return self._fallback_response(strategy_results)
 
-    def _build_visual_context(self) -> list[dict] | None:
+    def _build_visual_context(
+        self, n_strategies: int | None = None,
+    ) -> list[dict] | None:
         """
         Loads the COUNCIL_CHARTS snapshots and returns them as Anthropic
         content blocks; returns None when no snapshots are on disk yet
         (cold deploy, first run) or none of the requested keys have a
         rendered PNG. The call still proceeds — call_claude with
         visual_context=None is bitwise identical to the pre-vision path.
+
+        n_strategies is passed through to get_charts_for_context so the
+        all-strategy captions render the exact count (the analyst knows
+        it from len(strategy_results)).
         """
         if not snapshots_dir_exists():
             log.info("equity_analyst_no_snapshots_dir",
                      note="proceeding without visual context")
             return None
-        blocks = get_charts_for_context(COUNCIL_CHARTS)
+        blocks = get_charts_for_context(COUNCIL_CHARTS, n_strategies=n_strategies)
         if not blocks:
             log.info("equity_analyst_no_snapshots_available",
                      note="proceeding without visual context")

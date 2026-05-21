@@ -6719,6 +6719,174 @@ group div carries data-testid="chart-picker-group-<category>" and each
 card data-testid="chart-picker-item-<key>" for the grouped-layout
 tests.
 
+
+─────────────────────────────────────────────────────────────────────────────
+CHART VISION FOR AGENTS (May 21 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+The council specialists, the Academic Review peers + arbiter, and the
+Academic Writer now reason VISUALLY about the project's central charts.
+On every data-hash change the chart-snapshot renderer drops fresh PNGs
+to disk; on every agent generation call the vision layer reads those
+PNGs back, base64-encodes them as Anthropic image blocks, and threads
+them into the multimodal user message — alongside the existing
+quantitative DATA block, never replacing it.
+
+WHY VISION HELPS. Two of the project's three central findings are
+intrinsically visual — the 2022 equity-bond correlation regime break is
+a slope inversion on a rolling-correlation line, and the cumulative
+return divergence between dynamic strategies and the benchmark is a
+shape, not a number. A text-only agent describes them in the abstract;
+a vision-enabled agent names what is visible. Numbers remain
+authoritative — when a number and a chart appear to disagree, the
+agents are instructed to prefer the number and flag the discrepancy.
+
+THREE COMPONENTS:
+
+  tools/chart_snapshots.py — render_all_chart_snapshots() iterates
+    tools.chart_render.AVAILABLE_CHARTS and writes one PNG per chart_key
+    plus a manifest.json carrying the data-hash they reflect. Atomic
+    .tmp + os.replace per file so a partial render is never read.
+    HASH-EQUALITY SKIP: if the stored manifest hash matches the current
+    data hash AND every AVAILABLE_CHARTS key has a PNG on disk, the
+    render loop is skipped entirely — no matplotlib, no encodes. The
+    PNG-coverage half of the guard handles "a code deploy adds a new
+    chart key" correctly: the new key has no file, the guard fails,
+    the renderer runs. trigger_chart_snapshot_async() fires the render
+    in the background from the SAME three hooks that fire
+    trigger_audit_async (_persist_to_db, check_and_run_incremental_
+    update, extend_market_data) — all three wrapped in try/except so a
+    chart-render failure degrades to a log warning, never a 500.
+
+  tools/chart_vision.py — get_charts_for_context(chart_keys,
+    n_strategies=None) is the read-side. Returns an interleaved list
+    of Anthropic content blocks — one image block + one caption text
+    block per chart, in order. Missing snapshots are skipped silently
+    with a log line; an empty list result is the cold-deploy fail-open
+    path (returns []; the caller treats it as None and the call
+    proceeds text-only, bitwise identical to the pre-vision wire
+    format). Three predefined chart sets, deliberately small so the
+    per-call token budget stays predictable:
+      COUNCIL_CHARTS (6) — rolling_correlation, cumulative_returns,
+        regime_signals, regime_conditional_returns, factor_loadings,
+        rolling_excess_return. Used by every council specialist + CIO.
+      ACADEMIC_REVIEW_CHARTS (7) — adds drawdown_periods,
+        significance_journey, oos_performance to verify document
+        claims about strategy robustness and OOS validity.
+      DOCUMENT_GENERATION_CHARTS (7) — adds rolling_sharpe to support
+        risk-adjusted-performance narrative arcs in the midpoint paper
+        / exec brief / deck.
+
+    CAPTION SCOPE SENTENCE. Each caption is a "Chart: {key} — {desc}"
+    header followed (where applicable) by a scope sentence naming the
+    exact data subset the renderer chose, so the agent knows what is
+    in the image without inferring it from pixels. Three buckets:
+      single-strategy (drawdown_periods, monthly_returns_heatmap,
+        rolling_sharpe, return_distribution, oos_performance) →
+        "Showing REGIME_SWITCHING strategy vs BENCHMARK. Full study
+        period." matching tools/chart_renderers._DEFAULT_STRATEGY.
+      factor (factor_loadings, factor_returns_attribution) →
+        "Showing market factor exposures. BENCHMARK series only."
+      all-strategy (cumulative_returns, rolling_excess_return,
+        risk_return, significance_journey, p_value_distribution) →
+        "Showing all N strategies. Full study period, linear scale."
+        — N is the caller-supplied n_strategies (omitted from the
+        sentence when None, never rendered as "all 0").
+    Charts in no bucket (rolling_correlation, regime_signals,
+    regime_conditional_returns, team_activity) carry the description
+    alone — AVAILABLE_CHARTS already names what they show.
+
+    n_strategies THREADING. Every generator that has the strategy
+    count in scope passes it through so the all-strategy caption
+    renders the precise number:
+      council specialists → len(strategy_results) → _build_visual_context
+      cio → len(strategy_results) → _build_visual_context (staticmethod)
+      academic_review endpoint →
+        ctx["analytics"]["strategy_count"] → run_peer_fan_out +
+        run_arbiter_with_harness → _academic_review_visual_context
+      document generation endpoints →
+        len(data["strategy_results"]) → _generate_narratives →
+        harness_narrative → get_charts_for_context.
+    The kwarg defaults to None throughout so a pre-vision caller (or
+    a cold deploy where strategy_results is unavailable) still works
+    — the sentence simply reads "Showing all strategies." instead of
+    naming a count.
+
+  agents/base.py call_claude — gains an optional keyword-only
+    `visual_context: list[dict] | None = None` parameter. When None
+    (the default), content stays as a plain string — the legacy wire
+    format every existing call site has used since day one. When
+    provided, content becomes a multi-block list:
+    `[*visual_context, {"type": "text", "text": user_message}]`. The
+    text user_message is always the LAST block so the prompt appears
+    after the visual context the model is asked about.
+
+EVALUATOR GUARD. The harness's _evaluate() at agents/harness.py:267
+calls call_claude WITHOUT the visual_context kwarg — its default None
+preserves the text-only path. Adding the charts to the evaluator's
+input would muddle the text-quality signal the evaluator scores against;
+the guard is enforced by OMISSION at the evaluator's only call site
+(no flag, no conditional — the call simply doesn't pass the kwarg).
+
+WIRING. Six generator call paths inject visual_context:
+  - the four council specialists (equity / FI / risk / quant) — each
+    has a private _build_visual_context() method that returns
+    get_charts_for_context(COUNCIL_CHARTS) or None on cold deploy.
+    Built once before the harness call and captured in the
+    generator-fn closure so a harness retry reuses the same visual
+    context without re-reading the snapshots from disk.
+  - cio.CIO._compile_draft_consensus and _synthesise — direct
+    call_claude paths (not through the harness), both call the
+    shared _build_visual_context staticmethod.
+  - academic_review.run_peer_agent — Claude peers only; Gemini and
+    Grok don't use Anthropic content blocks and fall back to the
+    text-only path naturally. _academic_review_visual_context()
+    returns ACADEMIC_REVIEW_CHARTS or None.
+  - academic_review.run_arbiter_with_harness — the arbiter sees the
+    same chart set as the peers it weighs.
+  - tools/academic_export.harness_narrative — the Academic Writer
+    generation behind every midpoint paper / exec brief / deck
+    section. DOCUMENT_GENERATION_CHARTS via a local builder block.
+
+PROMPT GUIDANCE. agents/base.py exports VISUAL_REASONING_RULES — the
+cross-cutting rule block embedded in every vision-enabled prompt. It
+names: the fail-open contract (no charts → don't cite charts; citing
+an unattached chart is a hallucination the QA audit catches), the
+no-invention rule (describe what's visible, never recall a typical
+pattern from training), and the chart-key naming convention (every
+caption opens with the chart's key, so a reader knows which image is
+being discussed). Each agent's system prompt adds a tailored VISUAL
+CONTEXT block listing the specific chart-set keys and the focus area
+that agent should attend to most closely (e.g. the FI analyst singles
+out rolling_correlation as direct visual evidence of the 2022 break;
+the quant_backtester targets rolling_excess_return for OOS
+overfitting; the academic writer is instructed to name a visual
+feature in academic prose alongside any quantitative claim).
+
+FAIL-OPEN END TO END. A cold deploy (no snapshots yet rendered, or
+the snapshots directory missing entirely) produces the pre-vision
+text-only behaviour — visual_context resolves to None, the wire
+format is a plain string, and the agents are instructed not to refer
+to charts. The first hash-triggered render seeds the directory; from
+then on the agents reason visually.
+
+TOKEN COST. Two image blocks at 800×500 resolution each add roughly
+1,500-2,000 input tokens per chart in the multimodal encoding. A
+council pass with 6 COUNCIL_CHARTS attached per specialist adds
+roughly 9,000-12,000 tokens per agent — acceptable for the
+council's analytical depth, deliberately bounded by the small chart
+set rather than letting all 17 AVAILABLE_CHARTS flow through.
+
+TESTS — four files cover the feature:
+  test_chart_snapshots.py (6) — hash-skip guard
+  test_chart_vision.py (15) — reader fail-open contract
+  test_chart_vision_wiring.py (8) — generators inject, evaluator omits
+  test_visual_reasoning_prompts.py (12) — prompt-text contract
+  test_chart_vision_e2e.py (7) — render → read → API call shape,
+    cold-deploy fall-through, data-fetcher hook wiring
+Total 48 tests for the feature.
+
+
 Sprint structure is retired. Work is now Kanban with three columns:
 Backlog | In Progress | Done. A June 3 milestone groups the items that
 must land before the midpoint check-in.
@@ -6825,6 +6993,34 @@ is maintained separately. The `gh` CLI is authenticated with the
      ✅ Master / per-speaker DOCX export (POST /documents/drafts/{id}/
         export), stable per-speaker colour
      ✅ Submission Guide 2 updated; tests (backend 20, frontend 11)
+  ✅ Chart vision for agents stream (5 commits, no migration):
+     ✅ tools/chart_snapshots.py — hash-gated render of every
+        AVAILABLE_CHARTS key to PNG + manifest.json; fired from the
+        same three data_fetcher hooks that fire trigger_audit_async
+     ✅ Hash-skip guard — manifest hash + AVAILABLE_CHARTS coverage
+        check, so a Render redeploy against unchanged data never
+        re-renders
+     ✅ tools/chart_vision.py — get_charts_for_context reads the
+        PNGs back as Anthropic image+caption blocks; three predefined
+        chart sets (COUNCIL_CHARTS / ACADEMIC_REVIEW_CHARTS /
+        DOCUMENT_GENERATION_CHARTS)
+     ✅ agents/base.py call_claude — keyword-only
+        visual_context: list | None = None; backward compatible —
+        None preserves the legacy string-content wire format
+     ✅ Generators wired (six call paths): council specialists, CIO,
+        academic_review peers + arbiter, harness_narrative for the
+        Academic Writer. Gemini and Grok dissenters fall through to
+        the text-only path naturally
+     ✅ EVALUATOR GUARD enforced by omission at harness._evaluate —
+        evaluators always see string content, chart blocks would
+        muddle the text-quality signal
+     ✅ VISUAL_REASONING_RULES — cross-cutting prompt block (no
+        invention, fail-open, chart-key naming) embedded in every
+        vision-enabled prompt; per-agent VISUAL CONTEXT blocks name
+        the chart set and the agent's focus area
+     ✅ Tests (5 files, 48 total): hash-skip guard, reader fail-open,
+        wiring contract, prompt contract, end-to-end render→read→API
+        chain
   ◐ alembic upgrade head on Render — in-flight: migrations through 022
      are ready locally; migrations 019–022 are NOT yet on production.
      `alembic upgrade head` runs on Render post-merge, pending the

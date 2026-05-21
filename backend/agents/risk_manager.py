@@ -126,7 +126,7 @@ class RiskManager:
         # COUNCIL_CHARTS snapshots — built once, captured in the generator
         # closure. Evaluators MUST NOT see them (harness._evaluate omits
         # the kwarg).
-        visual_context = self._build_visual_context()
+        visual_context = self._build_visual_context(len(strategy_results))
 
         try:
             # Routed through the generator-evaluator harness — see
@@ -148,14 +148,16 @@ class RiskManager:
             log.error("risk_manager_error", error=str(exc))
             return self._fallback_response(strategy_results, risk_summary)
 
-    def _build_visual_context(self) -> list[dict] | None:
+    def _build_visual_context(
+        self, n_strategies: int | None = None,
+    ) -> list[dict] | None:
         """COUNCIL_CHARTS snapshots as content blocks, or None when no
         snapshots are on disk (cold deploy, first run). See EquityAnalyst._build_visual_context."""
         if not snapshots_dir_exists():
             log.info("risk_manager_no_snapshots_dir",
                      note="proceeding without visual context")
             return None
-        blocks = get_charts_for_context(COUNCIL_CHARTS)
+        blocks = get_charts_for_context(COUNCIL_CHARTS, n_strategies=n_strategies)
         if not blocks:
             log.info("risk_manager_no_snapshots_available",
                      note="proceeding without visual context")

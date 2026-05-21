@@ -60,17 +60,25 @@ PEER_MAX_TOKENS = 800          # ~400-word cap with headroom
 ARBITER_MAX_TOKENS = 4000
 
 
-def _academic_review_visual_context() -> list[dict] | None:
+def _academic_review_visual_context(
+    n_strategies: int | None = None,
+) -> list[dict] | None:
     """ACADEMIC_REVIEW_CHARTS snapshots as content blocks, or None when
     no snapshots are on disk (cold deploy, first run). Used by every
     Claude-based peer and the arbiter. The Gemini and Grok peers route
     through their own SDKs and do not consume Anthropic image blocks —
-    they fall back to the text-only path naturally."""
+    they fall back to the text-only path naturally.
+
+    n_strategies — threaded through to the chart-vision scope sentences
+    so the all-strategy captions render the exact count. The endpoint
+    reads it from gather_review_context()["analytics"]["strategy_count"]
+    and passes it through the fan-out and arbiter call chain."""
     if not snapshots_dir_exists():
         log.info("academic_review_no_snapshots_dir",
                  note="proceeding without visual context")
         return None
-    blocks = get_charts_for_context(ACADEMIC_REVIEW_CHARTS)
+    blocks = get_charts_for_context(
+        ACADEMIC_REVIEW_CHARTS, n_strategies=n_strategies)
     if not blocks:
         log.info("academic_review_no_snapshots_available",
                  note="proceeding without visual context")
@@ -563,12 +571,15 @@ def _call_grok_peer(system_prompt: str, user_message: str) -> str:
 
 def run_peer_agent(
     agent_id: str, context_block: str, multi_user: bool = False,
+    n_strategies: int | None = None,
 ) -> tuple[str, str]:
     """
     Runs one peer agent's review. Synchronous — designed to be wrapped in
     asyncio.to_thread() for the parallel fan-out. Returns (agent_id, text);
     never raises — a failed agent degrades to a mock review so the council
     always returns a full set of peer responses.
+
+    n_strategies — threaded through to the chart-vision scope sentences.
     """
     meta = _PEER_AGENTS[agent_id]
     # Test environment has no API keys — short-circuit to a deterministic
@@ -584,7 +595,7 @@ def run_peer_agent(
     # Anthropic content blocks, so the visual_context kwarg is reserved
     # for the call_claude path only. Evaluators MUST NOT see this — the
     # harness's _evaluate omits the kwarg.
-    visual_context = _academic_review_visual_context()
+    visual_context = _academic_review_visual_context(n_strategies)
 
     # The agent call is routed through the generator-evaluator harness.
     # _generate dispatches on the agent kind; the harness retries it with
@@ -621,11 +632,17 @@ def run_peer_agent(
 
 async def run_peer_fan_out(
     context_block: str, multi_user: bool = False,
+    n_strategies: int | None = None,
 ) -> dict[str, str]:
-    """Fans the review question out to every peer agent in parallel."""
+    """Fans the review question out to every peer agent in parallel.
+
+    n_strategies — threaded through to every peer's chart-vision scope
+    sentences. Read by the endpoint from
+    gather_review_context()["analytics"]["strategy_count"]."""
     ids = peer_agent_ids()
     results = await asyncio.gather(
-        *[asyncio.to_thread(run_peer_agent, aid, context_block, multi_user)
+        *[asyncio.to_thread(
+            run_peer_agent, aid, context_block, multi_user, n_strategies)
           for aid in ids]
     )
     return {aid: text for aid, text in results}
@@ -986,6 +1003,7 @@ def run_arbiter_with_harness(
     peer_responses: dict[str, str],
     multi_user: bool = False,
     script_review: bool = False,
+    n_strategies: int | None = None,
 ) -> str:
     """
     Generates the arbiter verdict IN FULL and runs it through the
@@ -1019,7 +1037,7 @@ def run_arbiter_with_harness(
     # Captured in the generator closure so a harness retry reuses the
     # same visual context. Evaluators MUST NOT see this — the harness's
     # _evaluate omits the kwarg.
-    visual_context = _academic_review_visual_context()
+    visual_context = _academic_review_visual_context(n_strategies)
 
     def _generate(prompt: str) -> str:
         return call_claude(ARBITER_MODEL, advisor_prompt, prompt,

@@ -214,9 +214,10 @@ class TestScriptRubric:
         captured: dict[str, object] = {}
 
         def _fake_arbiter(context_block, peer_responses, multi_user,
-                          script_review):
+                          script_review, n_strategies=None):
             captured["multi_user"] = multi_user
             captured["script_review"] = script_review
+            captured["n_strategies"] = n_strategies
             return "stub verdict"
 
         monkeypatch.setattr(

@@ -271,6 +271,7 @@ def harness_narrative(
     context: Any,
     *,
     max_tokens: int = 900,
+    n_strategies: int | None = None,
 ) -> str:
     """
     Generates one section of academic prose through the Academic Writer
@@ -280,6 +281,12 @@ def harness_narrative(
     criteria and retries below threshold — the spec requires every
     academic_writer call to run through it. Synchronous (the harness and
     call_claude are both synchronous); callers run it in asyncio.to_thread.
+
+    n_strategies — the count of strategies in the cache. Threaded into the
+    chart-vision scope sentences so the all-strategy chart captions render
+    "Showing all N strategies" rather than the count-omitting fallback.
+    Caller is _generate_narratives in main.py, which has the count from
+    gather_document_data()["strategy_results"].
 
     Fail-open: in the test environment, or on any generation error, a
     [DATA PENDING] marker is returned so the surrounding document still
@@ -315,7 +322,8 @@ def harness_narrative(
         # MUST NOT see this — harness._evaluate omits the kwarg.
         visual_context: list[dict] | None = None
         if snapshots_dir_exists():
-            blocks = get_charts_for_context(DOCUMENT_GENERATION_CHARTS)
+            blocks = get_charts_for_context(
+                DOCUMENT_GENERATION_CHARTS, n_strategies=n_strategies)
             visual_context = blocks if blocks else None
             if not blocks:
                 log.info("academic_writer_no_snapshots_available",

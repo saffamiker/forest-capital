@@ -1955,8 +1955,13 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                 reviewer_email=session.get("email"))
             context_block = ctx["context_block"]
             multi_user = ctx.get("multi_user_activity", False)
+            # Threaded into the chart-vision scope sentences so all-
+            # strategy chart captions render the exact count rather
+            # than the count-omitted fallback.
+            n_strategies = ctx["analytics"].get("strategy_count")
 
-            peer_responses = await run_peer_fan_out(context_block, multi_user)
+            peer_responses = await run_peer_fan_out(
+                context_block, multi_user, n_strategies)
             log.info(
                 "academic_review_peers_complete",
                 agents=list(peer_responses.keys()),
@@ -1974,7 +1979,7 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             # The loading state on the frontend covers the evaluation wait.
             arbiter_text = await asyncio.to_thread(
                 run_arbiter_with_harness, context_block, peer_responses,
-                multi_user, script_review)
+                multi_user, script_review, n_strategies)
             for chunk in chunk_arbiter_text(arbiter_text):
                 yield _sse("arbiter_chunk", text=chunk)
             log.info("academic_review_arbiter_complete",
@@ -4122,7 +4127,9 @@ _MIDPOINT_S2_KEY_FINDINGS = (
 )
 
 
-async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
+async def _generate_narratives(
+    specs: list[dict], *, n_strategies: int | None = None,
+) -> dict[str, str]:
     """
     Generates a set of narrative sections concurrently.
 
@@ -4132,6 +4139,11 @@ async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
     in worker threads (the harness is synchronous) and complete in
     parallel — the same asyncio.to_thread fan-out the Academic Review
     peer agents use.
+
+    n_strategies — uniform across every section of a single document
+    (it counts the cache, not the section). Threaded through to
+    harness_narrative once per spec so the chart-vision scope sentences
+    render the precise count instead of the count-omitted fallback.
     """
     import asyncio
 
@@ -4145,7 +4157,8 @@ async def _generate_narratives(specs: list[dict]) -> dict[str, str]:
                 "pending", f"{DATA_PENDING} — source data unavailable.")
             continue
         jobs.append((spec["key"], asyncio.to_thread(
-            harness_narrative, spec["agent_id"], spec["task"], spec["context"])))
+            harness_narrative, spec["agent_id"], spec["task"], spec["context"],
+            n_strategies=n_strategies)))
     if jobs:
         results = await asyncio.gather(*[j for _, j in jobs],
                                        return_exceptions=True)
@@ -4439,7 +4452,9 @@ async def _generate_midpoint_document(
              "context": {"academic_review_verdict":
                          (data["last_review_text"] or "")[:4000]}},
         ]
-        narratives = await _generate_narratives(_apply_draft_caveats(specs))
+        narratives = await _generate_narratives(
+            _apply_draft_caveats(specs),
+            n_strategies=len(data.get("strategy_results") or {}))
         docx_bytes = await asyncio.to_thread(build_midpoint_paper, data, narratives)
 
         # Load the generated content into an editor draft so the frontend
@@ -4594,7 +4609,9 @@ async def _generate_brief_document(
              "context": {"regime_conditional": data["regime_conditional"],
                          "summary_statistics": data["summary_statistics"]}},
         ]
-        narratives = await _generate_narratives(_apply_draft_caveats(specs))
+        narratives = await _generate_narratives(
+            _apply_draft_caveats(specs),
+            n_strategies=len(data.get("strategy_results") or {}))
         docx_bytes = await asyncio.to_thread(
             build_executive_brief, data, narratives)
 
@@ -4724,7 +4741,8 @@ async def _generate_deck_document(
                  "can."),
              "context": {"team_summary": data["team_summary"]}},
         ]
-        narratives = await _generate_narratives(specs)
+        narratives = await _generate_narratives(
+            specs, n_strategies=len(data.get("strategy_results") or {}))
         charts = await asyncio.to_thread(render_deck_charts, data, sensitivity)
         pptx_bytes = await asyncio.to_thread(
             build_presentation_deck, data, narratives, charts)

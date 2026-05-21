@@ -77,6 +77,45 @@ ACADEMIC_REVIEW_CHARTS: tuple[str, ...] = (
     "oos_performance",
 )
 
+# ── Scope categories — drive the per-chart caption sentence ──────────────────
+# Every renderer in tools/chart_renderers.py and tools/academic_deck.py picks
+# a hardcoded data subset (a single strategy, the BENCHMARK only, every
+# strategy in the cache, an asset-class view). The caption tells the agent
+# which subset it is looking at so it does not have to infer the scope from
+# the image alone. Three explicit buckets; charts not in any bucket fall
+# back to the description-only caption.
+
+# Default single strategy + BENCHMARK overlay — REGIME_SWITCHING (the
+# project's highest-Sharpe non-benchmark strategy) with a fallback to the
+# first non-BENCHMARK strategy in the cache. Matches the
+# tools/chart_renderers._DEFAULT_STRATEGY constant.
+_SINGLE_STRATEGY_CHARTS: frozenset[str] = frozenset({
+    "drawdown_periods",
+    "monthly_returns_heatmap",
+    "rolling_sharpe",
+    "return_distribution",
+    "oos_performance",
+})
+
+# BENCHMARK series only — fall back to the first row when BENCHMARK is
+# absent from the cache. Factor loadings render with the same default.
+_FACTOR_CHARTS: frozenset[str] = frozenset({
+    "factor_loadings",
+    "factor_returns_attribution",
+})
+
+# Every strategy in strategy_results_cache, with no user-controllable
+# subsetting — the legend-toggle UI on the Dashboard is frontend-only and
+# has no server-side equivalent.
+_ALL_STRATEGY_CHARTS: frozenset[str] = frozenset({
+    "cumulative_returns",
+    "rolling_excess_return",
+    "risk_return",
+    "significance_journey",
+    "p_value_distribution",
+})
+
+
 # Document generation — the academic writer drafts midpoint paper,
 # executive brief, and deck narrative sections. Same regime + factor
 # core as the council; adds rolling_sharpe and drawdown_periods so the
@@ -145,16 +184,68 @@ def _chart_descriptions() -> dict[str, str]:
 _DESCRIPTIONS_CACHE: dict[str, str] | None = None
 
 
-def get_charts_for_context(chart_keys: list[str] | tuple[str, ...]) -> list[dict[str, Any]]:
+def _scope_sentence(key: str, n_strategies: int | None) -> str:
+    """
+    Returns the per-chart scope sentence appended to the caption.
+
+    The renderers in tools/chart_renderers.py and tools/academic_deck.py
+    each pick a hardcoded data subset; the scope sentence names that
+    subset so the agent knows exactly what is in the image without
+    having to infer it from the picture. Three explicit buckets:
+
+      single-strategy → "Showing REGIME_SWITCHING strategy vs BENCHMARK.
+                         Full study period."
+      factor          → "Showing market factor exposures. BENCHMARK
+                         series only."
+      all-strategy    → "Showing all {n} strategies. Full study period,
+                         linear scale."
+
+    Charts not in any bucket (rolling_correlation, regime_signals,
+    regime_conditional_returns, team_activity) return an empty string —
+    the description from AVAILABLE_CHARTS already names what they show.
+
+    n_strategies is rendered into the all-strategy sentence when
+    supplied. When None, the count is omitted and the sentence reads
+    "Showing all strategies. …" — accurate but less precise.
+    """
+    if key in _SINGLE_STRATEGY_CHARTS:
+        return ("Showing REGIME_SWITCHING strategy vs BENCHMARK. "
+                "Full study period.")
+    if key in _FACTOR_CHARTS:
+        return "Showing market factor exposures. BENCHMARK series only."
+    if key in _ALL_STRATEGY_CHARTS:
+        count = f"all {n_strategies}" if n_strategies else "all"
+        return f"Showing {count} strategies. Full study period, linear scale."
+    return ""
+
+
+def get_charts_for_context(
+    chart_keys: list[str] | tuple[str, ...],
+    n_strategies: int | None = None,
+) -> list[dict[str, Any]]:
     """
     Builds the Anthropic content-block list for a set of chart keys.
 
     For every key whose snapshot exists, the returned list contains
     TWO blocks in order:
       1. An image block carrying the PNG as base64.
-      2. A text block captioning the image with the chart key and the
-         description from AVAILABLE_CHARTS so the model can name the
-         chart back when reasoning about it.
+      2. A text block captioning the image with the chart key, the
+         description from AVAILABLE_CHARTS, and a SCOPE SENTENCE
+         naming the exact data subset the renderer chose (single
+         strategy vs BENCHMARK, BENCHMARK only, all N strategies).
+
+    The scope sentence is the value-add over a simple description —
+    the agent knows which strategies and which date range are in the
+    image rather than inferring from the visual. See _scope_sentence
+    for the per-chart-category rules.
+
+    n_strategies — caller-supplied count to render into the
+    all-strategy scope sentence (e.g. "Showing all 10 strategies").
+    Optional; when None the sentence omits the count. The four
+    council specialists, the CIO, and the academic-export
+    harness_narrative all have strategy_results in scope and pass
+    len(strategy_results); academic_review threads it through from
+    the analytics snapshot.
 
     Missing snapshots are skipped silently — the result simply omits
     them. When NONE of the requested keys have a snapshot the returned
@@ -166,7 +257,7 @@ def get_charts_for_context(chart_keys: list[str] | tuple[str, ...]) -> list[dict
       messages = [{
           "role": "user",
           "content": [
-              *get_charts_for_context(COUNCIL_CHARTS),
+              *get_charts_for_context(COUNCIL_CHARTS, n_strategies=10),
               {"type": "text", "text": existing_prompt},
           ],
       }]
@@ -196,8 +287,15 @@ def get_charts_for_context(chart_keys: list[str] | tuple[str, ...]) -> list[dict
             },
         })
         desc = descriptions.get(key, "").strip()
-        caption = (f"Chart: {key} — {desc}"
-                   if desc else f"Chart: {key}")
+        scope = _scope_sentence(key, n_strategies)
+        # Caption shape: header "Chart: {key} — {desc}" (description
+        # falls back to just "Chart: {key}" when absent), then the
+        # scope sentence appended on the same line so the model reads
+        # both together. A space separator keeps the two parts
+        # visually connected; the scope sentence already ends with a
+        # period.
+        header = f"Chart: {key} — {desc}" if desc else f"Chart: {key}"
+        caption = f"{header} {scope}".rstrip() if scope else header
         blocks.append({"type": "text", "text": caption})
 
     if not blocks:

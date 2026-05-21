@@ -132,7 +132,7 @@ class FixedIncomeAnalyst:
         # closure. Evaluators MUST NOT see them (harness._evaluate omits
         # the kwarg). rolling_correlation is in COUNCIL_CHARTS, so the FI
         # analyst sees the 2022 break visually as well as numerically.
-        visual_context = self._build_visual_context()
+        visual_context = self._build_visual_context(len(strategy_results))
 
         try:
             # Routed through the generator-evaluator harness — see
@@ -154,14 +154,16 @@ class FixedIncomeAnalyst:
             log.error("fi_analyst_error", error=str(exc))
             return self._fallback_response(strategy_results, correlation_data)
 
-    def _build_visual_context(self) -> list[dict] | None:
+    def _build_visual_context(
+        self, n_strategies: int | None = None,
+    ) -> list[dict] | None:
         """COUNCIL_CHARTS snapshots as content blocks, or None when no
         snapshots are on disk (cold deploy, first run). See EquityAnalyst._build_visual_context."""
         if not snapshots_dir_exists():
             log.info("fi_analyst_no_snapshots_dir",
                      note="proceeding without visual context")
             return None
-        blocks = get_charts_for_context(COUNCIL_CHARTS)
+        blocks = get_charts_for_context(COUNCIL_CHARTS, n_strategies=n_strategies)
         if not blocks:
             log.info("fi_analyst_no_snapshots_available",
                      note="proceeding without visual context")

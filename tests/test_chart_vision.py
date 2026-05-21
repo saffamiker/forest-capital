@@ -197,3 +197,104 @@ class TestSnapshotsDirProbe:
         monkeypatch.setattr(chart_vision, "CHART_SNAPSHOT_DIR",
                             str(tmp_path / "does_not_exist"))
         assert chart_vision.snapshots_dir_exists() is False
+
+
+class TestCaptionScope:
+    """Caption shape contract — every caption is a "Chart: {key} — {desc}"
+    header followed (where applicable) by a scope sentence naming the
+    data subset the renderer chose. Three explicit buckets:
+      single-strategy → "Showing REGIME_SWITCHING strategy vs BENCHMARK…"
+      factor          → "Showing market factor exposures. BENCHMARK only."
+      all-strategy    → "Showing all N strategies…"  (N from caller)
+    Charts not in any bucket carry the description only.
+
+    Caption shape regressions land in user-visible places (an agent
+    mis-naming the strategy set it sees); these tests catch them before
+    they reach a prompt."""
+
+    def test_single_strategy_caption_names_regime_switching_vs_benchmark(
+        self, snapshot_dir,
+    ):
+        from tools.chart_vision import get_charts_for_context
+        _write_fake_png(os.path.join(snapshot_dir, "drawdown_periods.png"))
+        blocks = get_charts_for_context(["drawdown_periods"])
+        text = blocks[1]["text"]
+        assert "drawdown_periods" in text
+        assert "REGIME_SWITCHING" in text
+        assert "BENCHMARK" in text
+
+    def test_factor_caption_marks_benchmark_only(self, snapshot_dir):
+        from tools.chart_vision import get_charts_for_context
+        _write_fake_png(os.path.join(snapshot_dir, "factor_loadings.png"))
+        blocks = get_charts_for_context(["factor_loadings"])
+        text = blocks[1]["text"]
+        assert "factor_loadings" in text
+        assert "BENCHMARK" in text
+        # No strategy-set wording, no all-strategy mislabelling.
+        assert "all" not in text.lower() or "strategies" not in text
+
+    def test_all_strategy_caption_renders_count_when_supplied(
+        self, snapshot_dir,
+    ):
+        from tools.chart_vision import get_charts_for_context
+        _write_fake_png(os.path.join(snapshot_dir, "cumulative_returns.png"))
+        blocks = get_charts_for_context(
+            ["cumulative_returns"], n_strategies=10)
+        text = blocks[1]["text"]
+        assert "Showing all 10 strategies" in text
+
+    def test_all_strategy_caption_omits_count_when_none(self, snapshot_dir):
+        # When the caller does not pass n_strategies, the sentence reads
+        # "Showing all strategies." — accurate but less precise. Pin
+        # the wording so a future re-default does not silently break
+        # the no-count code path.
+        from tools.chart_vision import get_charts_for_context
+        _write_fake_png(os.path.join(snapshot_dir, "cumulative_returns.png"))
+        blocks = get_charts_for_context(["cumulative_returns"])
+        text = blocks[1]["text"]
+        assert "Showing all strategies" in text
+        # The count-omitted sentence MUST NOT carry a stray digit.
+        assert "all 0 strategies" not in text
+
+    def test_n_strategies_default_propagates_when_omitted(self, snapshot_dir):
+        # Calling without the kwarg is the legacy wire format every
+        # pre-vision caller used. The function must not require it.
+        from tools.chart_vision import get_charts_for_context
+        _write_fake_png(os.path.join(snapshot_dir, "rolling_correlation.png"))
+        blocks = get_charts_for_context(["rolling_correlation"])
+        # Two blocks rendered without n_strategies — verifies the
+        # default param exists and the signature is backward-compatible.
+        assert len(blocks) == 2
+
+    def test_chart_with_no_scope_sentence_carries_description_only(
+        self, snapshot_dir,
+    ):
+        # rolling_correlation is NOT in _SINGLE_STRATEGY_CHARTS /
+        # _FACTOR_CHARTS / _ALL_STRATEGY_CHARTS — the description from
+        # AVAILABLE_CHARTS already names what it shows. Caption stays
+        # the bare header.
+        from tools.chart_vision import get_charts_for_context
+        _write_fake_png(os.path.join(snapshot_dir, "rolling_correlation.png"))
+        blocks = get_charts_for_context(["rolling_correlation"])
+        text = blocks[1]["text"]
+        assert text.startswith("Chart: rolling_correlation")
+        # No scope-sentence boilerplate snuck in.
+        assert "Showing" not in text
+
+    def test_caption_header_falls_back_to_just_the_key(
+        self, snapshot_dir, monkeypatch,
+    ):
+        # Defence in depth: if AVAILABLE_CHARTS ever loses a chart's
+        # description, the caption must still carry the key so the
+        # model can name the chart back. Empty descriptions cache
+        # exercises the no-description branch.
+        from tools import chart_vision
+        monkeypatch.setattr(
+            chart_vision, "_chart_descriptions", lambda: {})
+        monkeypatch.setattr(chart_vision, "_DESCRIPTIONS_CACHE", None)
+        _write_fake_png(os.path.join(snapshot_dir, "rolling_correlation.png"))
+        blocks = chart_vision.get_charts_for_context(["rolling_correlation"])
+        text = blocks[1]["text"]
+        # Header — no em-dash, no description, just the chart key.
+        assert "Chart: rolling_correlation" in text
+        assert " — " not in text
