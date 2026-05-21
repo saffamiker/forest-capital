@@ -563,6 +563,306 @@ function TriageIssueLinks({ issues }: { issues: TriageIssue[] }) {
   )
 }
 
+// ── Per-item resolution UI ────────────────────────────────────────────────────
+//
+// triage_report_items (migration 023) — one row per finding parsed
+// out of a triage run's verdict. The sysadmin marks items resolved
+// inline; the form stamps resolved_at / resolution_note / fix_commit
+// and (when requires_retest=true) retest_requested_at so the reporter
+// sees a "Fix ready for retest" notification.
+
+interface TriageItem {
+  id: number
+  report_id: number
+  item_type: 'immediate' | 'quick_win' | 'pattern' | 'backlog'
+  item_title: string
+  item_body: string | null
+  github_issue_number: number | null
+  github_issue_url: string | null
+  source_item_type: 'failure' | 'feedback' | null
+  source_item_id: number | null
+  resolved_at: string | null
+  resolved_by: string | null
+  resolution_note: string | null
+  fix_commit: string | null
+  requires_retest: boolean
+  retest_requested_at: string | null
+  retest_completed_at: string | null
+  created_at: string | null
+}
+
+const ITEM_TYPE_LABEL: Record<TriageItem['item_type'], string> = {
+  immediate: 'Immediate', quick_win: 'Quick Win',
+  pattern: 'Pattern', backlog: 'Backlog',
+}
+
+const ITEM_TYPE_COLOUR: Record<TriageItem['item_type'], string> = {
+  immediate: 'bg-danger/15 text-danger border-danger/30',
+  quick_win: 'bg-success/15 text-success border-success/30',
+  pattern: 'bg-warning/15 text-warning border-warning/30',
+  backlog: 'bg-navy-700 text-muted border-border',
+}
+
+/** Defaults: requires_retest ON for immediate / quick_win items
+ *  (those typically change behaviour), OFF for pattern / backlog
+ *  (those typically don't have a single test to re-run). */
+function defaultRetestForType(t: TriageItem['item_type']): boolean {
+  return t === 'immediate' || t === 'quick_win'
+}
+
+function shortSha(commit: string | null): string {
+  if (!commit) return ''
+  return commit.length > 7 ? commit.slice(0, 7) : commit
+}
+
+function TriageItemRow({
+  item, onResolve, onUnresolve,
+}: {
+  item: TriageItem
+  onResolve: (id: number, body: {
+    resolution_note: string
+    fix_commit: string
+    requires_retest: boolean
+  }) => Promise<void>
+  onUnresolve: (id: number) => Promise<void>
+}) {
+  // Resolved items collapsed by default — the resolution summary is
+  // the headline; unresolved items expanded so the action is one click.
+  const [bodyOpen, setBodyOpen] = useState(item.resolved_at === null)
+  const [formOpen, setFormOpen] = useState(false)
+  const [note, setNote] = useState('')
+  const [commit, setCommit] = useState('')
+  const [retest, setRetest] = useState(defaultRetestForType(item.item_type))
+  const [saving, setSaving] = useState(false)
+  const resolved = item.resolved_at !== null
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!note.trim()) return
+    setSaving(true)
+    try {
+      await onResolve(item.id, {
+        resolution_note: note.trim(),
+        fix_commit: commit.trim(),
+        requires_retest: retest,
+      })
+      setFormOpen(false)
+      setNote('')
+      setCommit('')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <div className={`rounded border p-3 ${
+      resolved ? 'border-border/60 bg-navy-900/30'
+                : 'border-border bg-navy-800'}`}>
+      <div className="flex items-start gap-2 flex-wrap">
+        <span className={`text-2xs px-1.5 py-0.5 rounded-full border ${
+          ITEM_TYPE_COLOUR[item.item_type]}`}>
+          {ITEM_TYPE_LABEL[item.item_type]}
+        </span>
+        <span className="text-xs text-white font-medium flex-1 min-w-0">
+          {item.item_title}
+        </span>
+        {resolved && (
+          <span className="text-2xs px-1.5 py-0.5 rounded-full border
+                            bg-success/15 text-success border-success/30">
+            Resolved
+          </span>
+        )}
+        {item.requires_retest && item.retest_completed_at === null
+          && resolved && (
+          <span className="text-2xs px-1.5 py-0.5 rounded-full border
+                            bg-warning/15 text-warning border-warning/30">
+            Retest pending
+          </span>
+        )}
+        {item.requires_retest && item.retest_completed_at !== null && (
+          <span className="text-2xs px-1.5 py-0.5 rounded-full border
+                            bg-success/15 text-success border-success/30">
+            Retest complete
+          </span>
+        )}
+        {item.github_issue_number && item.github_issue_url && (
+          <a href={item.github_issue_url} target="_blank"
+             rel="noopener noreferrer"
+             className="inline-flex items-center gap-1 text-2xs
+                        px-1.5 py-0.5 rounded border border-electric/30
+                        bg-electric/10 text-electric
+                        hover:bg-electric/20 transition-colors">
+            <ExternalLink className="w-2.5 h-2.5" />
+            #{item.github_issue_number}
+          </a>
+        )}
+      </div>
+
+      {/* Resolution summary — visible whenever the item is resolved. */}
+      {resolved && (
+        <div className="mt-1.5 text-2xs text-muted space-y-0.5">
+          <div>
+            <span className="text-slate-300">{item.resolution_note}</span>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            <span>by {item.resolved_by || 'unknown'}</span>
+            {item.fix_commit && (
+              <span className="font-mono">commit {shortSha(item.fix_commit)}</span>
+            )}
+            {/* Unresolve link — sysadmin recovery for an item resolved
+                in error. Tucked to the right so it does not invite
+                accidental clicks. */}
+            <button type="button"
+                    onClick={() => void onUnresolve(item.id)}
+                    className="ml-auto text-muted hover:text-danger
+                               underline underline-offset-2">
+              Undo resolve
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Body — collapsed by default for resolved items. */}
+      {item.item_body && (
+        <div className="mt-1.5">
+          <button type="button"
+                  onClick={() => setBodyOpen((o) => !o)}
+                  className="text-2xs text-electric hover:underline">
+            {bodyOpen ? 'Hide detail' : 'Show detail'}
+          </button>
+          {bodyOpen && (
+            <div className="mt-1 text-2xs text-slate-300 whitespace-pre-wrap
+                            break-words [overflow-wrap:anywhere]">
+              {item.item_body}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Mark Resolved form — unresolved items only. */}
+      {!resolved && !formOpen && (
+        <button type="button"
+                onClick={() => setFormOpen(true)}
+                className="mt-2 text-2xs px-2 py-1 rounded
+                           border border-electric/30 bg-electric/10
+                           text-electric hover:bg-electric/20
+                           transition-colors">
+          Mark Resolved
+        </button>
+      )}
+      {!resolved && formOpen && (
+        <form onSubmit={(e) => void submit(e)}
+              className="mt-2 space-y-1.5">
+          <textarea value={note} onChange={(e) => setNote(e.target.value)}
+                    placeholder="Resolution note — what was fixed"
+                    rows={2} required
+                    className="w-full bg-navy-900 border border-border
+                               rounded px-2 py-1 text-2xs text-slate-200
+                               placeholder-muted focus:outline-none
+                               focus:border-electric" />
+          <input value={commit} onChange={(e) => setCommit(e.target.value)}
+                 placeholder="Fix commit SHA (optional)"
+                 className="w-full bg-navy-900 border border-border
+                            rounded px-2 py-1 text-2xs font-mono
+                            text-slate-200 placeholder-muted
+                            focus:outline-none focus:border-electric" />
+          <label className="flex items-center gap-1.5 text-2xs text-muted">
+            <input type="checkbox" checked={retest}
+                   onChange={(e) => setRetest(e.target.checked)}
+                   className="w-3 h-3" />
+            Requires retest — notify the reporter
+          </label>
+          <div className="flex items-center gap-1.5">
+            <button type="submit" disabled={saving || !note.trim()}
+                    className="text-2xs px-2 py-1 rounded
+                               border border-electric/30 bg-electric/10
+                               text-electric hover:bg-electric/20
+                               disabled:opacity-50 transition-colors">
+              {saving ? 'Saving…' : 'Save'}
+            </button>
+            <button type="button" onClick={() => setFormOpen(false)}
+                    className="text-2xs px-2 py-1 text-muted
+                               hover:text-white">
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
+  )
+}
+
+function TriageItemsBlock({ reportId }: { reportId: number }) {
+  const [items, setItems] = useState<TriageItem[]>([])
+  const [loading, setLoading] = useState(true)
+
+  const reload = useCallback(async () => {
+    try {
+      const res = await axios.get<{ items: TriageItem[] }>(
+        '/api/v1/testing/triage/items', { params: { report_id: reportId } })
+      setItems(res.data.items ?? [])
+    } catch {
+      setItems([])
+    } finally {
+      setLoading(false)
+    }
+  }, [reportId])
+
+  useEffect(() => { void reload() }, [reload])
+
+  const resolve = useCallback(async (id: number, body: {
+    resolution_note: string
+    fix_commit: string
+    requires_retest: boolean
+  }) => {
+    try {
+      await axios.patch(`/api/v1/testing/triage/items/${id}/resolve`, body)
+      await reload()
+    } catch { /* surfaced as the unchanged-state */ }
+  }, [reload])
+
+  const unresolve = useCallback(async (id: number) => {
+    try {
+      await axios.patch(`/api/v1/testing/triage/items/${id}/unresolve`)
+      await reload()
+    } catch { /* same */ }
+  }, [reload])
+
+  if (loading) return (
+    <p className="mt-3 text-2xs text-muted italic flex items-center gap-1.5">
+      <Loader2 className="w-3 h-3 animate-spin" /> Loading items…
+    </p>
+  )
+  if (items.length === 0) return null
+
+  const total = items.length
+  const resolved = items.filter((it) => it.resolved_at !== null).length
+  const awaitingRetest = items.filter(
+    (it) => it.resolved_at !== null
+        && it.requires_retest && it.retest_completed_at === null).length
+
+  return (
+    <div className="mt-3 pt-3 border-t border-border/50">
+      <div className="flex items-center justify-between gap-2 flex-wrap mb-2">
+        <span className="text-2xs text-muted uppercase tracking-wide">
+          Items
+        </span>
+        <span className="text-2xs text-muted">
+          {resolved} of {total} resolved
+          {awaitingRetest > 0 && ` · ${awaitingRetest} awaiting retest`}
+        </span>
+      </div>
+      <div className="space-y-2">
+        {items.map((it) => (
+          <TriageItemRow key={it.id} item={it}
+                          onResolve={resolve} onUnresolve={unresolve} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+
 function TriageReportsBlock() {
   const [reports, setReports] = useState<TriageReport[]>([])
   const [loading, setLoading] = useState(true)
@@ -674,6 +974,11 @@ function TriageReportsBlock() {
                 <Markdown content={latest.report_text} />
               </div>
             )}
+            {/* Per-item resolution UI. Renders below the verdict prose
+                inside the latest report card so the sysadmin can mark
+                items resolved without leaving the report. UAT triage
+                resolution workflow (Item 3 Commit 5). */}
+            <TriageItemsBlock reportId={latest.id} />
           </div>
 
           {/* Previous reports — collapsible history. */}
