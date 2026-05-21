@@ -36,11 +36,32 @@ except ImportError:  # pragma: no cover
     log = logging.getLogger(__name__)  # type: ignore[assignment]
 
 from agents.base import SONNET_MODEL, OPUS_MODEL, GEMINI_MODEL, call_claude
+from tools.chart_vision import (
+    ACADEMIC_REVIEW_CHARTS, get_charts_for_context, snapshots_dir_exists,
+)
 
 PEER_MODEL = SONNET_MODEL      # claude-sonnet-4-6
 ARBITER_MODEL = OPUS_MODEL     # claude-opus-4-7  (Opus for the arbiter step only)
 PEER_MAX_TOKENS = 800          # ~400-word cap with headroom
 ARBITER_MAX_TOKENS = 2000
+
+
+def _academic_review_visual_context() -> list[dict] | None:
+    """ACADEMIC_REVIEW_CHARTS snapshots as content blocks, or None when
+    no snapshots are on disk (cold deploy, first run). Used by every
+    Claude-based peer and the arbiter. The Gemini and Grok peers route
+    through their own SDKs and do not consume Anthropic image blocks —
+    they fall back to the text-only path naturally."""
+    if not snapshots_dir_exists():
+        log.info("academic_review_no_snapshots_dir",
+                 note="proceeding without visual context")
+        return None
+    blocks = get_charts_for_context(ACADEMIC_REVIEW_CHARTS)
+    if not blocks:
+        log.info("academic_review_no_snapshots_available",
+                 note="proceeding without visual context")
+        return None
+    return blocks
 
 # ── Peer agent registry ───────────────────────────────────────────────────────
 # Every council agent EXCEPT the academic advisor (the arbiter). Mirrors
@@ -525,6 +546,13 @@ def run_peer_agent(
     system_prompt = _peer_system_prompt(meta)
     user_message = _peer_user_message(context_block, multi_user)
 
+    # ACADEMIC_REVIEW_CHARTS snapshots — built once per peer call and
+    # threaded through the Claude generator. Gemini and Grok do not use
+    # Anthropic content blocks, so the visual_context kwarg is reserved
+    # for the call_claude path only. Evaluators MUST NOT see this — the
+    # harness's _evaluate omits the kwarg.
+    visual_context = _academic_review_visual_context()
+
     # The agent call is routed through the generator-evaluator harness.
     # _generate dispatches on the agent kind; the harness retries it with
     # evaluator feedback when the response scores below threshold. This
@@ -533,7 +561,8 @@ def run_peer_agent(
     def _generate(prompt: str) -> str:
         if meta["kind"] == "claude":
             return call_claude(PEER_MODEL, system_prompt, prompt,
-                               max_tokens=PEER_MAX_TOKENS)
+                               max_tokens=PEER_MAX_TOKENS,
+                               visual_context=visual_context)
         if meta["kind"] == "gemini":
             return _call_gemini_peer(system_prompt, prompt)
         if meta["kind"] == "grok":
@@ -868,9 +897,16 @@ def run_arbiter_with_harness(
     from agents.harness import GeneratorEvaluatorHarness
     from agents.evaluator_prompts import academic_review_arbiter_evaluator_prompt
 
+    # ACADEMIC_REVIEW_CHARTS snapshots for the arbiter's synthesis.
+    # Captured in the generator closure so a harness retry reuses the
+    # same visual context. Evaluators MUST NOT see this — the harness's
+    # _evaluate omits the kwarg.
+    visual_context = _academic_review_visual_context()
+
     def _generate(prompt: str) -> str:
         return call_claude(ARBITER_MODEL, advisor_prompt, prompt,
-                           max_tokens=ARBITER_MAX_TOKENS)
+                           max_tokens=ARBITER_MAX_TOKENS,
+                           visual_context=visual_context)
 
     try:
         harness = GeneratorEvaluatorHarness()

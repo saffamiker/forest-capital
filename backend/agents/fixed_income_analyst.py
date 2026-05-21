@@ -26,6 +26,9 @@ from agents.base import (
 )
 from agents.harness import GeneratorEvaluatorHarness
 from agents.evaluator_prompts import council_evaluator_prompt
+from tools.chart_vision import (
+    COUNCIL_CHARTS, get_charts_for_context, snapshots_dir_exists,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -111,6 +114,12 @@ class FixedIncomeAnalyst:
 
         log.info("fi_analyst_called", has_history=history is not None)
 
+        # COUNCIL_CHARTS snapshots — built once, captured in the generator
+        # closure. Evaluators MUST NOT see them (harness._evaluate omits
+        # the kwarg). rolling_correlation is in COUNCIL_CHARTS, so the FI
+        # analyst sees the 2022 break visually as well as numerically.
+        visual_context = self._build_visual_context()
+
         try:
             # Routed through the generator-evaluator harness — see
             # equity_analyst for the rationale.
@@ -118,7 +127,8 @@ class FixedIncomeAnalyst:
             result = harness.run(
                 generator_fn=lambda p: call_claude(
                     SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500,
-                    tools=[WEB_SEARCH_TOOL]),
+                    tools=[WEB_SEARCH_TOOL],
+                    visual_context=visual_context),
                 evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
                 generator_prompt=user_message,
                 context=str(context)[:4000],
@@ -129,6 +139,20 @@ class FixedIncomeAnalyst:
         except Exception as exc:
             log.error("fi_analyst_error", error=str(exc))
             return self._fallback_response(strategy_results, correlation_data)
+
+    def _build_visual_context(self) -> list[dict] | None:
+        """COUNCIL_CHARTS snapshots as content blocks, or None when no
+        snapshots are on disk (cold deploy, first run). See EquityAnalyst._build_visual_context."""
+        if not snapshots_dir_exists():
+            log.info("fi_analyst_no_snapshots_dir",
+                     note="proceeding without visual context")
+            return None
+        blocks = get_charts_for_context(COUNCIL_CHARTS)
+        if not blocks:
+            log.info("fi_analyst_no_snapshots_available",
+                     note="proceeding without visual context")
+            return None
+        return blocks
 
     def _compute_correlation_summary(
         self, history: dict[str, Any] | None

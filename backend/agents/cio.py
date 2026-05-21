@@ -36,6 +36,9 @@ from agents.fixed_income_analyst import FixedIncomeAnalyst
 from agents.independent_analyst import IndependentAnalyst
 from agents.quant_backtester import QuantBacktester
 from agents.risk_manager import RiskManager
+from tools.chart_vision import (
+    COUNCIL_CHARTS, get_charts_for_context, snapshots_dir_exists,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -113,6 +116,24 @@ class CIO:
         self._quant = QuantBacktester()
         self._gemini = IndependentAnalyst()
         self._grok = ContrarianAnalyst()
+
+    @staticmethod
+    def _build_visual_context() -> list[dict] | None:
+        """COUNCIL_CHARTS snapshots as content blocks. Used by the CIO's
+        draft-consensus and synthesis calls (both are direct call_claude
+        — neither runs through the harness). Returns None when no
+        snapshots are on disk (cold deploy, first run). See
+        EquityAnalyst._build_visual_context for the rationale."""
+        if not snapshots_dir_exists():
+            log.info("cio_no_snapshots_dir",
+                     note="proceeding without visual context")
+            return None
+        blocks = get_charts_for_context(COUNCIL_CHARTS)
+        if not blocks:
+            log.info("cio_no_snapshots_available",
+                     note="proceeding without visual context")
+            return None
+        return blocks
 
     def deliberate(
         self,
@@ -273,7 +294,9 @@ class CIO:
         )
 
         try:
-            return call_claude(OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000)
+            return call_claude(
+                OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000,
+                visual_context=self._build_visual_context())
         except Exception as exc:
             log.error("cio_draft_error", error=str(exc))
             # Fallback draft from specialist summaries
@@ -354,7 +377,8 @@ class CIO:
 
         try:
             synthesis_text = call_claude(
-                OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000
+                OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000,
+                visual_context=self._build_visual_context(),
             )
         except Exception as exc:
             log.error("cio_synthesis_error", error=str(exc))

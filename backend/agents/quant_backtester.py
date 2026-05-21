@@ -26,6 +26,9 @@ from agents.base import (
 )
 from agents.harness import GeneratorEvaluatorHarness
 from agents.evaluator_prompts import council_evaluator_prompt
+from tools.chart_vision import (
+    COUNCIL_CHARTS, get_charts_for_context, snapshots_dir_exists,
+)
 from config import TRANSACTION_COST_BPS, WALK_FORWARD_TRAIN, WALK_FORWARD_TEST
 
 # The analyst's task, phrased as a question — the harness evaluator scores
@@ -103,6 +106,11 @@ class QuantBacktester:
 
         log.info("quant_backtester_called", n_strategies=len(strategy_results))
 
+        # COUNCIL_CHARTS snapshots — built once, captured in the generator
+        # closure. Evaluators MUST NOT see them (harness._evaluate omits
+        # the kwarg).
+        visual_context = self._build_visual_context()
+
         try:
             # Routed through the generator-evaluator harness — see
             # equity_analyst for the rationale.
@@ -110,7 +118,8 @@ class QuantBacktester:
             result = harness.run(
                 generator_fn=lambda p: call_claude(
                     SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500,
-                    tools=[WEB_SEARCH_TOOL]),
+                    tools=[WEB_SEARCH_TOOL],
+                    visual_context=visual_context),
                 evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
                 generator_prompt=user_message,
                 context=str(context)[:4000],
@@ -121,6 +130,20 @@ class QuantBacktester:
         except Exception as exc:
             log.error("quant_backtester_error", error=str(exc))
             return self._fallback_response(strategy_results, quant_summary)
+
+    def _build_visual_context(self) -> list[dict] | None:
+        """COUNCIL_CHARTS snapshots as content blocks, or None when no
+        snapshots are on disk (cold deploy, first run). See EquityAnalyst._build_visual_context."""
+        if not snapshots_dir_exists():
+            log.info("quant_backtester_no_snapshots_dir",
+                     note="proceeding without visual context")
+            return None
+        blocks = get_charts_for_context(COUNCIL_CHARTS)
+        if not blocks:
+            log.info("quant_backtester_no_snapshots_available",
+                     note="proceeding without visual context")
+            return None
+        return blocks
 
     def _compute_quant_summary(
         self, strategy_results: dict[str, Any]

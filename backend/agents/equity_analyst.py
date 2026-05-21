@@ -25,6 +25,9 @@ from agents.base import (
 )
 from agents.harness import GeneratorEvaluatorHarness
 from agents.evaluator_prompts import council_evaluator_prompt
+from tools.chart_vision import (
+    COUNCIL_CHARTS, get_charts_for_context, snapshots_dir_exists,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -106,6 +109,12 @@ class EquityAnalyst:
 
         log.info("equity_analyst_called", n_strategies=len(strategy_results))
 
+        # Visual context — COUNCIL_CHARTS snapshots if rendered, else None.
+        # Built once and captured in the generator-fn closure so the harness
+        # can retry without re-reading the snapshots from disk. Evaluators
+        # MUST NOT see this (harness._evaluate omits the kwarg).
+        visual_context = self._build_visual_context()
+
         try:
             # The call_claude generation is routed through the
             # generator-evaluator harness — a low-scoring response is
@@ -115,7 +124,8 @@ class EquityAnalyst:
             result = harness.run(
                 generator_fn=lambda p: call_claude(
                     SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500,
-                    tools=[WEB_SEARCH_TOOL]),
+                    tools=[WEB_SEARCH_TOOL],
+                    visual_context=visual_context),
                 evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
                 generator_prompt=user_message,
                 context=str(context)[:4000],
@@ -125,6 +135,25 @@ class EquityAnalyst:
         except Exception as exc:
             log.error("equity_analyst_error", error=str(exc))
             return self._fallback_response(strategy_results)
+
+    def _build_visual_context(self) -> list[dict] | None:
+        """
+        Loads the COUNCIL_CHARTS snapshots and returns them as Anthropic
+        content blocks; returns None when no snapshots are on disk yet
+        (cold deploy, first run) or none of the requested keys have a
+        rendered PNG. The call still proceeds — call_claude with
+        visual_context=None is bitwise identical to the pre-vision path.
+        """
+        if not snapshots_dir_exists():
+            log.info("equity_analyst_no_snapshots_dir",
+                     note="proceeding without visual context")
+            return None
+        blocks = get_charts_for_context(COUNCIL_CHARTS)
+        if not blocks:
+            log.info("equity_analyst_no_snapshots_available",
+                     note="proceeding without visual context")
+            return None
+        return blocks
 
     def _build_context(
         self,

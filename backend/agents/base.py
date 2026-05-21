@@ -140,6 +140,8 @@ def call_claude(
     user_message: str,
     max_tokens: int = MAX_OUTPUT_TOKENS,
     tools: list[dict] | None = None,
+    *,
+    visual_context: list[dict] | None = None,
 ) -> str:
     """
     Thin wrapper around the Anthropic messages API.
@@ -154,6 +156,24 @@ def call_claude(
     returns a single response; _extract_text joins the text blocks out
     of the mixed block list.
 
+    visual_context — keyword-only OPTIONAL list of Anthropic content
+    blocks (typically image + caption pairs produced by
+    tools.chart_vision.get_charts_for_context) inserted BEFORE the
+    text user_message. When None (the default) the call sends string
+    content and is bitwise-identical to the pre-vision code path —
+    every existing caller that does not opt in keeps its previous
+    behaviour.
+
+    EVALUATOR GUARD. The harness's _evaluate() (agents/harness.py)
+    MUST NOT pass visual_context — evaluators score text quality, and
+    adding visuals would muddle the scoring signal. The harness's
+    _evaluate path calls call_claude WITHOUT the visual_context kwarg
+    so its default None is used; the guard is enforced by the absence
+    of the kwarg at the call site. The same applies to the Explainer
+    agent, the document-assistant chat, the QA agent's checklist
+    pass, and the academic-advisor — none of these are visual-
+    reasoning surfaces.
+
     Error-handling note: call_claude deliberately does NOT catch Anthropic
     API errors — it lets them propagate. This is asymmetric with the Gemini
     (independent_analyst) and Grok (contrarian_analyst) helpers, which catch
@@ -164,11 +184,23 @@ def call_claude(
     outer handlers first.
     """
     client = get_anthropic_client()
+    # When visual_context is supplied, the user-message becomes a
+    # multi-block content array: [*image-and-caption blocks, text].
+    # When None, we keep the legacy string-content shape — same wire
+    # format the Anthropic SDK has accepted since day one — so no
+    # caller that omits the kwarg sees any behaviour change.
+    if visual_context:
+        content: Any = [
+            *visual_context,
+            {"type": "text", "text": user_message},
+        ]
+    else:
+        content = user_message
     kwargs: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
         "system": _with_academic_context(system_prompt),
-        "messages": [{"role": "user", "content": user_message}],
+        "messages": [{"role": "user", "content": content}],
     }
     if tools:
         kwargs["tools"] = tools

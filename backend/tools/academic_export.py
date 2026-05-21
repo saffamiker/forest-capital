@@ -303,6 +303,28 @@ def harness_narrative(
             academic_review_peer_evaluator_prompt,
         )
         from agents.harness import GeneratorEvaluatorHarness
+        from tools.chart_vision import (
+            DOCUMENT_GENERATION_CHARTS, get_charts_for_context,
+            snapshots_dir_exists,
+        )
+
+        # DOCUMENT_GENERATION_CHARTS snapshots — the academic writer
+        # reasons about regime + factor + drawdown visuals when drafting
+        # the analytical section. Built once and captured in the
+        # generator-fn closure so a harness retry reuses them. Evaluators
+        # MUST NOT see this — harness._evaluate omits the kwarg.
+        visual_context: list[dict] | None = None
+        if snapshots_dir_exists():
+            blocks = get_charts_for_context(DOCUMENT_GENERATION_CHARTS)
+            visual_context = blocks if blocks else None
+            if not blocks:
+                log.info("academic_writer_no_snapshots_available",
+                         agent_id=agent_id,
+                         note="proceeding without visual context")
+        else:
+            log.info("academic_writer_no_snapshots_dir",
+                     agent_id=agent_id,
+                     note="proceeding without visual context")
 
         harness = GeneratorEvaluatorHarness()
         result = harness.run(
@@ -311,7 +333,8 @@ def harness_narrative(
             # CITATIONS in the academic writer's system prompt).
             generator_fn=lambda prompt: call_claude(
                 SONNET_MODEL, _SYSTEM_PROMPT, prompt, max_tokens=max_tokens,
-                tools=[WEB_SEARCH_TOOL]),
+                tools=[WEB_SEARCH_TOOL],
+                visual_context=visual_context),
             evaluator_prompt=academic_review_peer_evaluator_prompt("academic writer"),
             # Audience-aware second pass — every document section
             # (midpoint paper, executive brief, deck narrative) is also
