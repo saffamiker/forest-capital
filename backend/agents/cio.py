@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import contextvars
 import json
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any, Iterator
 
 import structlog
 
@@ -135,7 +136,13 @@ class CIO:
             strategy_results: All 10 strategy results from run_all_strategies().
             history:          Full history dict — enables FI correlation analysis.
         """
-        log.info("council_deliberation_started", query_len=len(query))
+        # Phase timing — every log line carries elapsed= seconds since the
+        # deliberation began. When a council 502s on Render the last
+        # log line tells us which phase ran out of timeout budget; the
+        # streaming endpoint relies on the same instrumentation.
+        deliberation_start = time.time()
+        log.info("council_deliberation_started", query_len=len(query),
+                 elapsed=0.0)
 
         # Step 1-5: Brief the four specialists IN PARALLEL. Each .analyse()
         # is an independent, synchronous, network-bound LLM call; run
@@ -169,6 +176,7 @@ class CIO:
             fi_ok=bool(fi_report),
             risk_ok=bool(risk_report),
             quant_ok=bool(quant_report),
+            elapsed=round(time.time() - deliberation_start, 2),
         )
 
         # The draft/dissent/synthesis steps run in the request context
@@ -186,10 +194,12 @@ class CIO:
         # and can flag concerns raised by both as hard caveats.
         _tag_agent("independent_analyst")
         gemini_report = self._gemini.challenge(draft_consensus, strategy_results)
-        log.info("gemini_challenge_received")
+        log.info("gemini_challenge_received",
+                 elapsed=round(time.time() - deliberation_start, 2))
         _tag_agent("contrarian_analyst")
         grok_report = self._grok.challenge(draft_consensus, strategy_results)
-        log.info("grok_challenge_received")
+        log.info("grok_challenge_received",
+                 elapsed=round(time.time() - deliberation_start, 2))
 
         # Step 9: Synthesise final recommendation — CIO engages with both dissenters
         _tag_agent("cio")
@@ -205,7 +215,8 @@ class CIO:
             strategy_results,
         )
 
-        log.info("council_deliberation_complete")
+        log.info("council_deliberation_complete",
+                 elapsed=round(time.time() - deliberation_start, 2))
 
         return {
             "query": query,
@@ -222,6 +233,147 @@ class CIO:
             "final_recommendation": cio_synthesis.get("recommendation", ""),
             "significant_strategies": self._get_significant(strategy_results),
         }
+
+    def deliberate_streaming(
+        self,
+        query: str,
+        strategy_results: dict[str, Any],
+        history: dict[str, Any] | None = None,
+    ) -> Iterator[tuple[str, Any, ...]]:
+        """
+        Phase-by-phase generator variant of deliberate().
+
+        Yields one tuple per phase boundary so the SSE endpoint can flush
+        events to the client as each phase completes — keeping the
+        Render gateway connection alive past the 30-100s wall time of
+        the full deliberation. The phases mirror deliberate() exactly;
+        callers that need a single completed dict use deliberate()
+        instead.
+
+        Event tuples:
+          ("specialist_complete", agent_id: str, report: dict | None)
+              yielded as EACH specialist finishes (as_completed order,
+              not jobs-list order) so the client sees the council
+              "thinking" rather than a 30s blank wait.
+          ("draft_ready", draft_text: str)
+          ("dissent_complete", "gemini", report: dict)
+          ("dissent_complete", "grok", report: dict)
+          ("cio_synthesis_text", synthesis_text: str)
+              the prose body of the CIO synthesis, for the endpoint to
+              chunk and stream — same pattern as
+              academic_review.chunk_arbiter_text.
+          ("council_complete", full_result_dict: dict)
+              the final cio.deliberate() shape so the endpoint can call
+              _deliberate_to_frontend on it.
+
+        Synchronous generator — the endpoint bridges it to async via
+        asyncio.to_thread(next, gen, sentinel) on each iteration.
+        """
+        deliberation_start = time.time()
+        log.info("council_deliberation_started", query_len=len(query),
+                 elapsed=0.0)
+
+        # Phase 1: parallel specialists with as_completed yielding.
+        # Same ThreadPoolExecutor + context-copy pattern as deliberate(),
+        # but every future yields its result the moment it lands rather
+        # than waiting for the slowest specialist. A specialist exception
+        # is logged and yielded as a None report — the council still
+        # produces a draft from whatever survived (matching the existing
+        # fallback paths each specialist already returns on failure).
+        specialist_jobs = [
+            ("equity_analyst", self._equity.analyse, (strategy_results,)),
+            ("fixed_income_analyst", self._fi.analyse,
+             (strategy_results, history)),
+            ("risk_manager", self._risk.analyse, (strategy_results,)),
+            ("quant_backtester", self._quant.analyse, (strategy_results,)),
+        ]
+        reports: dict[str, Any] = {}
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            future_to_label = {
+                pool.submit(contextvars.copy_context().run,
+                            _run_tagged, label, fn, args): label
+                for label, fn, args in specialist_jobs
+            }
+            for future in as_completed(future_to_label):
+                label = future_to_label[future]
+                try:
+                    report = future.result()
+                except Exception as exc:  # noqa: BLE001
+                    log.error("specialist_failed", agent=label, error=str(exc))
+                    report = None
+                reports[label] = report
+                yield ("specialist_complete", label, report)
+
+        log.info(
+            "specialist_reports_collected",
+            equity_ok=bool(reports.get("equity_analyst")),
+            fi_ok=bool(reports.get("fixed_income_analyst")),
+            risk_ok=bool(reports.get("risk_manager")),
+            quant_ok=bool(reports.get("quant_backtester")),
+            elapsed=round(time.time() - deliberation_start, 2),
+        )
+
+        equity_report = reports.get("equity_analyst") or {}
+        fi_report = reports.get("fixed_income_analyst") or {}
+        risk_report = reports.get("risk_manager") or {}
+        quant_report = reports.get("quant_backtester") or {}
+
+        # Phase 2: draft consensus
+        _tag_agent("cio")
+        draft_consensus = self._compile_draft_consensus(
+            query, equity_report, fi_report, risk_report, quant_report,
+            strategy_results,
+        )
+        yield ("draft_ready", draft_consensus)
+
+        # Phases 3 + 4: dissent (Gemini, then Grok)
+        _tag_agent("independent_analyst")
+        gemini_report = self._gemini.challenge(draft_consensus, strategy_results)
+        log.info("gemini_challenge_received",
+                 elapsed=round(time.time() - deliberation_start, 2))
+        yield ("dissent_complete", "gemini", gemini_report)
+
+        _tag_agent("contrarian_analyst")
+        grok_report = self._grok.challenge(draft_consensus, strategy_results)
+        log.info("grok_challenge_received",
+                 elapsed=round(time.time() - deliberation_start, 2))
+        yield ("dissent_complete", "grok", grok_report)
+
+        # Phase 5: CIO synthesis — generated in full, then chunked by the
+        # endpoint. The prose body (final_synthesis_text) is what the user
+        # sees stream; the structured wrapper rides along in council_complete.
+        _tag_agent("cio")
+        cio_synthesis = self._synthesise(
+            query, draft_consensus, gemini_report, grok_report,
+            equity_report, fi_report, risk_report, quant_report,
+            strategy_results,
+        )
+        synthesis_text = (
+            cio_synthesis.get("technical_findings", {})
+            .get("final_synthesis_text", "")
+            or cio_synthesis.get("summary", "")
+        )
+        yield ("cio_synthesis_text", synthesis_text)
+
+        log.info("council_deliberation_complete",
+                 elapsed=round(time.time() - deliberation_start, 2))
+
+        full_result = {
+            "query": query,
+            "agents": {
+                "equity_analyst": reports.get("equity_analyst"),
+                "fixed_income_analyst": reports.get("fixed_income_analyst"),
+                "risk_manager": reports.get("risk_manager"),
+                "quant_backtester": reports.get("quant_backtester"),
+                "independent_analyst": gemini_report,
+                "contrarian_analyst": grok_report,
+                "cio": cio_synthesis,
+            },
+            "draft_consensus": draft_consensus,
+            "final_recommendation": cio_synthesis.get("recommendation", ""),
+            "significant_strategies": self._get_significant(strategy_results),
+        }
+        yield ("council_complete", full_result)
 
     def _compile_draft_consensus(
         self,
