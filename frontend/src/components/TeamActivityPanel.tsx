@@ -150,6 +150,18 @@ function CostPanel({ cost }: { cost: CostSummary }) {
           No AI spend recorded yet — cost tracking began with the
           token-logging release; earlier interactions carry no cost.
         </p>
+      ) : cost.total_cost_usd === 0 ? (
+        // Historical-only case: interactions exist but every row's
+        // estimated_cost_usd is NULL because the rows landed before
+        // migration 020 added the token columns. Without this branch
+        // the panel showed "$0.0000" with a populated by_type table,
+        // which read as a live-zero spend (misleading). The empty-
+        // state copy clarifies this is a pre-fix historical tail.
+        // UAT FIX A.
+        <p className="text-xs text-muted italic">
+          Cost tracking began May 2026. Earlier interactions carry
+          no cost data.
+        </p>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {/* By interaction type */}

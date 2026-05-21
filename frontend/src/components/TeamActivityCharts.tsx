@@ -140,18 +140,21 @@ export default function TeamActivityCharts({
   }, [summary])
 
   // ── Chart 3 — agent engagement ──────────────────────────────────────────────
+  // UAT FIX B: read from summary.most_active_agents (already
+  // available via props) instead of computing from the paginated
+  // events[] array. The previous events-based computation broke when
+  // the first 100-event page filled with page_view rows and pushed
+  // the council/academic_review interactions off the visible page
+  // — Agent Engagement read empty while Most Active Agents (also
+  // sourced from summary) read accurate counts. By switching to the
+  // same source, the two surfaces agree by construction and the
+  // chart is unaffected by /api/v1/activity/team pagination.
   const agentEngagement = useMemo(() => {
-    const counts = new Map<string, number>()
-    for (const ev of events) {
-      if (ev.kind !== 'council' && ev.kind !== 'academic_review') continue
-      for (const a of ev.agents_involved ?? []) {
-        counts.set(a, (counts.get(a) ?? 0) + 1)
-      }
-    }
-    return [...counts.entries()]
-      .map(([agent, count]) => ({ agent: agentLabel(agent), count }))
+    const rows = summary?.most_active_agents ?? []
+    return rows
+      .map((r) => ({ agent: agentLabel(r.agent), count: r.count }))
       .sort((a, b) => b.count - a.count)
-  }, [events])
+  }, [summary])
 
   // Presentation View scales every chart up for 1920×1080 projector
   // legibility — taller charts, larger axis ticks/legends, thicker marks.

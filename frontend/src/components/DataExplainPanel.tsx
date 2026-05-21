@@ -12,8 +12,9 @@
  * the X button, a backdrop click, or Escape.
  */
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { X, Loader2, Sparkles } from 'lucide-react'
+import { X, Loader2, Sparkles, Users } from 'lucide-react'
 import Markdown from './Markdown'
 
 interface DataExplainPanelProps {
@@ -33,6 +34,25 @@ export default function DataExplainPanel({
   const [streaming, setStreaming] = useState(true)
   const [error, setError] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
+  const navigate = useNavigate()
+
+  // Hand off to the council with the data-explain context pre-filled.
+  // Mirrors the ExplainerPanel.askCouncil flow exactly so every
+  // explainer-style drawer surfaces the same continuation path —
+  // tester feedback #59 flagged this missing from the strategy
+  // explainer panel; consistency across all explainer surfaces is the
+  // fix. The council screen reads the question from route state and
+  // focuses the input WITHOUT auto-submitting, so the user reviews
+  // and convenes when ready.
+  const askCouncil = () => {
+    const valuePart = currentValue ? ` (${currentValue})` : ''
+    const prefillQuestion =
+      `Can you explain the values for ${metric}${valuePart} in the `
+      + 'context of our asset allocation analysis and the 2022 '
+      + 'correlation regime break?'
+    navigate('/council', { state: { prefillQuestion } })
+    onClose()
+  }
 
   // Stream the explanation on mount.
   useEffect(() => {
@@ -142,7 +162,14 @@ export default function DataExplainPanel({
           </button>
         </header>
 
-        <div className="flex-1 overflow-y-auto px-4 py-3 text-sm leading-relaxed">
+        {/* break-words + overflow-wrap-anywhere stop long unbroken
+            strings (URLs, identifiers) from pushing the panel content
+            past its width — UAT feedback #3 flagged horizontal
+            scrolling on the drawer. overflow-x-hidden caps any
+            residual overflow that escapes the wrap rules. */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden px-4 py-3
+                        text-sm leading-relaxed break-words
+                        [overflow-wrap:anywhere]">
           {streaming && text === '' && !error && (
             <div className="flex items-center gap-2 text-muted text-xs animate-pulse">
               <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -164,6 +191,25 @@ export default function DataExplainPanel({
               )}
             </div>
           )}
+        </div>
+
+        {/* Hand-off to the council — same affordance the ExplainerPanel
+            already carries, restored to the Data Explain drawer for
+            parity. UAT issue #59 flagged the omission on the strategy
+            explainer surfaces. */}
+        <div className="border-t border-border px-4 py-3 shrink-0">
+          <button
+            type="button"
+            onClick={askCouncil}
+            className="w-full flex items-center justify-center gap-2
+                       px-3 py-2 rounded-lg text-sm font-medium
+                       border border-electric/30 bg-electric/10
+                       text-electric hover:bg-electric/20
+                       transition-colors"
+          >
+            <Users className="w-4 h-4" />
+            Ask the Council about this
+          </button>
         </div>
       </aside>
     </>
