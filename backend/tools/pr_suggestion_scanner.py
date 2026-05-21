@@ -171,6 +171,24 @@ async def record_pr_suggestions(parsed: dict[str, Any]) -> dict[str, Any]:
     if not parsed.get("matches"):
         return out
 
+    # Coerce pr_merged_at to a datetime — GitHub sends ISO 8601 strings,
+    # but asyncpg's TIMESTAMP WITH TIME ZONE binding requires a real
+    # datetime instance. fromisoformat handles the "Z" suffix in 3.11+
+    # but not earlier versions, so we normalise it explicitly.
+    from datetime import datetime
+    merged_at_raw = (parsed.get("pr_merged_at") or "").strip()
+    merged_at_dt: datetime | None = None
+    if merged_at_raw:
+        try:
+            # Replace Z with +00:00 for fromisoformat compatibility
+            # across the Python versions we support.
+            merged_at_dt = datetime.fromisoformat(
+                merged_at_raw.replace("Z", "+00:00"))
+        except ValueError:
+            log.warning("pr_suggestion_bad_merged_at",
+                        raw=merged_at_raw,
+                        pr_number=parsed.get("pr_number"))
+
     try:
         import json
         from sqlalchemy import text
@@ -222,7 +240,7 @@ async def record_pr_suggestions(parsed: dict[str, Any]) -> dict[str, Any]:
                     "pr_number": parsed["pr_number"],
                     "pr_title": parsed["pr_title"],
                     "pr_url": parsed["pr_url"],
-                    "pr_merged_at": parsed["pr_merged_at"],
+                    "pr_merged_at": merged_at_dt,
                     "pr_author": parsed["pr_author"],
                     "shas": json.dumps(parsed["commit_shas"]),
                     "matched_on": match["matched_on"],

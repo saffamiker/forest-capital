@@ -42,7 +42,7 @@ Schema notes:
 
 Revision ID: 026
 Revises: 025
-Create Date: 2026-05-22
+Create Date: 2026-05-21
 """
 
 from __future__ import annotations
@@ -142,7 +142,7 @@ def upgrade() -> None:
     )
     op.bulk_insert(changelog, [{
         "version": 45,
-        "released_at": datetime(2026, 5, 22, tzinfo=timezone.utc),
+        "released_at": datetime(2026, 5, 21, tzinfo=timezone.utc),
         "title": "PR-driven Suggested Resolutions",
         "description": (
             "When a PR merges with a 'Resolves failure #N' reference "
