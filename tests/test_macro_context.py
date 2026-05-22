@@ -197,3 +197,41 @@ class TestRefresh:
         monkeypatch.setattr(research_engine, "get_latest_digest", _boom)
         asyncio.run(macro_context.refresh_macro_context())
         assert macro_context.get_macro_context() == "kept"
+
+
+class TestCitationInstruction:
+    """May 22 2026 — the context block now carries an instruction for
+    agents to cite macro signals inline with [Macro: <category>].
+    Pin the instruction text so a future prompt edit cannot silently
+    drop the citation pattern the frontend's MacroCitation component
+    depends on."""
+
+    def test_citation_format_instruction_is_in_block(self):
+        digest = {
+            "generated_at": "2026-05-22T12:00:00Z",
+            "summary_text": "Fed paused.",
+            "regime_implication": "Transition to risk-on.",
+            "key_signals": [
+                {"category": "monetary_policy",
+                 "signal": "Fed holds at 5.25-5.50%.",
+                 "implication": "IG duration tailwind.",
+                 "source_url": "https://federalreserve.gov/x"},
+            ],
+        }
+        out = macro_context._format_digest_block(digest)
+        assert "CITATION FORMAT" in out
+        assert "[Macro: <category>]" in out
+        # The instruction must name the specific frontend-compatible
+        # bracketed format (not a paraphrase that a future prompt
+        # edit might keep while breaking the parser).
+        assert "[Macro: monetary_policy]" in out
+        # Don't-cite-everything guardrail must also be present.
+        assert "do NOT cite" in out.lower() or "do not cite" in out.lower()
+
+    def test_citation_instruction_omitted_on_empty_digest(self):
+        # An empty digest returns "" — no instruction injected, no
+        # macro context to cite. The agent's prompt is unaltered.
+        out = macro_context._format_digest_block(None)
+        assert out == ""
+        out2 = macro_context._format_digest_block({})
+        assert out2 == ""

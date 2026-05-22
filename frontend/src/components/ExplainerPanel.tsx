@@ -13,6 +13,11 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import { X, Loader2, Users, Send, MessageCircle } from 'lucide-react'
 import Markdown from './Markdown'
+import {
+  renderWithMacroCitations,
+  extractMacroCategories,
+  MacroAttributionFooter,
+} from './MacroCitation'
 
 interface ExplainerPanelProps {
   /** Metric/chart name — sent to the explainer and shown as the title. */
@@ -333,11 +338,31 @@ export default function ExplainerPanel({
                   </div>
                   <div className="text-xs leading-relaxed
                                   break-words [overflow-wrap:anywhere]">
-                    {ex.content}
+                    {/* CIO messages get inline macro citation badges
+                        when the agent emitted [Macro: <category>] tags.
+                        User messages render as plain text. */}
+                    {ex.role === 'cio'
+                      ? renderWithMacroCitations(ex.content)
+                      : ex.content}
                   </div>
                 </div>
               </div>
             ))}
+            {/* PART 3 — Macro attribution footer. Surfaces when at
+                least one CIO message in the thread carries a
+                [Macro: <category>] citation. The agent's evidence
+                source is named so the reader knows the response is
+                grounded in current macro data, not training memory. */}
+            {(() => {
+              const allCios = thread
+                .filter((e) => e.role === 'cio')
+                .map((e) => e.content)
+                .join('\n')
+              const cats = extractMacroCategories(allCios)
+              return cats.length > 0
+                ? <MacroAttributionFooter categories={cats} />
+                : null
+            })()}
             {followupBusy && (
               <div className="flex items-center gap-2 text-muted text-xs">
                 <Loader2 className="w-3 h-3 animate-spin" />
