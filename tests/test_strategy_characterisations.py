@@ -313,3 +313,53 @@ class TestPersistenceFailOpenWithoutDatabase:
         monkeypatch.setattr("tools.cache.get_latest_strategy_cache", _empty)
         # Should complete without raising.
         asyncio.run(sc.refresh_strategy_characterisations("test_hash"))
+
+
+# ── Endpoint: GET /api/v1/strategies/characterisations ───────────────────────
+
+
+class TestCharacterisationsEndpoint:
+    """The Item 9 Commit 2 endpoint. require_team_member gating, and
+    the test-environment shortcut shape."""
+
+    def _client_and_headers(self):
+        from fastapi.testclient import TestClient
+        from main import app
+        from auth import generate_session_token
+        os.environ.setdefault(
+            "MASTER_API_KEY", "test_master_key")
+        os.environ.setdefault(
+            "ALLOWED_EMAILS",
+            "ruurdsm@queens.edu,thaob@queens.edu,"
+            "murdockm@queens.edu,panttserk@queens.edu")
+        client = TestClient(app)
+        team = {"X-API-Key": generate_session_token("thaob@queens.edu")}
+        viewer = {"X-API-Key": generate_session_token(
+            "panttserk@queens.edu")}
+        return client, team, viewer
+
+    def test_returns_test_env_shape(self):
+        client, team, _viewer = self._client_and_headers()
+        r = client.get("/api/v1/strategies/characterisations", headers=team)
+        assert r.status_code == 200
+        body = r.json()
+        # In ENVIRONMENT=test the endpoint short-circuits to a
+        # documented empty-shape response — same contract every other
+        # analytics endpoint follows so the frontend can render an
+        # empty state in the test harness without crashing.
+        assert body.get("available") is False
+        assert body.get("strategies") == []
+
+    def test_rejects_unauthenticated(self):
+        client, _team, _viewer = self._client_and_headers()
+        r = client.get("/api/v1/strategies/characterisations")
+        assert r.status_code == 401
+
+    def test_rejects_viewer_without_team_membership(self):
+        """The endpoint requires team_member — viewer accounts that can
+        read the dashboard analytics still cannot read the per-strategy
+        editorial context."""
+        client, _team, viewer = self._client_and_headers()
+        r = client.get("/api/v1/strategies/characterisations",
+                       headers=viewer)
+        assert r.status_code == 403

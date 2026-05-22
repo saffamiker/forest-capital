@@ -989,6 +989,59 @@ async def get_analytics_distribution(
     )
 
 
+# ── Strategy characterisations (item 9) ───────────────────────────────────────
+
+
+@app.get("/api/v1/strategies/characterisations")
+@limiter.limit("30/minute")
+async def get_strategy_characterisations(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Item 9 — per-strategy Portfolio Profile data. Returns one row per
+    strategy with the AI-generated construction_summary,
+    behavioural_profile, regime_sensitivity, behavioural_tag, and the
+    deterministic portfolio_characteristics.
+
+    Reads from strategy_characterisations keyed by the current
+    data_hash. Cold-cache fallback returns the most recent
+    characterisation per strategy regardless of hash (DISTINCT ON in
+    the helper) so a fresh deploy that hasn't seen a refresh yet
+    still has something to render.
+
+    Auth: require_team_member. Same gate as the diversification
+    metrics — non-team viewers see the Dashboard rankings but not
+    the per-strategy editorial context.
+    """
+    if ENVIRONMENT == "test":
+        return {"available": False, "strategies": []}
+    try:
+        from tools.cache import get_latest_strategy_hash
+        from tools.strategy_characterisations import (
+            get_all_characterisations,
+        )
+        latest_hash = await get_latest_strategy_hash()
+        rows = await get_all_characterisations(latest_hash)
+        if not rows:
+            return {
+                "available": False,
+                "strategies": [],
+                "note": "Strategy characterisations have not been "
+                        "computed yet. They populate automatically "
+                        "after the first strategy_results_cache write.",
+            }
+        return {
+            "available": True,
+            "data_hash": latest_hash,
+            "strategies": rows,
+        }
+    except Exception as exc:
+        log.warning("strategy_characterisations_endpoint_failed",
+                    error=str(exc))
+        return {"available": False, "strategies": []}
+
+
 _RISK_FREE_SOURCE = "FRED DTB3 (3-month T-bill, mean monthly rate, annualised)"
 
 
