@@ -398,3 +398,48 @@ class TestFailStaleRunningDigests:
         monkeypatch.setattr(db_mod, "AsyncSessionLocal", None)
         out = asyncio.run(research_engine.fail_stale_running_digests())
         assert out == 0
+
+
+class TestDailyScheduler:
+    """The daily research scheduler fires run_research_if_stale once
+    per UTC day at a fixed hour. The 24h freshness gate inside
+    run_research_if_stale makes a duplicate fire (deploy restart +
+    scheduled fire within an hour) a silent no-op."""
+
+    def test_fires_today_when_before_scheduled_hour(self):
+        now = datetime(2026, 5, 22, 14, 30, tzinfo=timezone.utc)
+        out = research_engine._next_daily_fire(now, 21)
+        assert out == datetime(2026, 5, 22, 21, 0, tzinfo=timezone.utc)
+
+    def test_fires_tomorrow_when_at_or_past_scheduled_hour(self):
+        # Exactly AT 21:00 → fires tomorrow.
+        now = datetime(2026, 5, 22, 21, 0, tzinfo=timezone.utc)
+        out = research_engine._next_daily_fire(now, 21)
+        assert out == datetime(2026, 5, 23, 21, 0, tzinfo=timezone.utc)
+
+        now = datetime(2026, 5, 22, 23, 45, tzinfo=timezone.utc)
+        out = research_engine._next_daily_fire(now, 21)
+        assert out == datetime(2026, 5, 23, 21, 0, tzinfo=timezone.utc)
+
+    def test_handles_month_and_year_rollover(self):
+        now = datetime(2026, 12, 31, 21, 0, 1, tzinfo=timezone.utc)
+        out = research_engine._next_daily_fire(now, 21)
+        assert out == datetime(2027, 1, 1, 21, 0, tzinfo=timezone.utc)
+
+    def test_start_daily_scheduler_returns_none_off_loop(self):
+        # No running event loop -> returns None rather than crashing.
+        out = research_engine.start_daily_scheduler()
+        assert out is None
+
+    def test_start_daily_scheduler_returns_task_on_loop(self):
+        async def _run():
+            task = research_engine.start_daily_scheduler()
+            assert task is not None
+            assert not task.done()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(_run())

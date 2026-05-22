@@ -114,29 +114,50 @@ export default function MacroResearchPanel() {
 
   const runNow = useCallback(async () => {
     setTriggering(true)
+    setError(null)
+    // Capture the timestamp BEFORE the trigger so we can detect when
+    // the new run has landed (a fresh timestamp replaces the old).
+    // The previous implementation chained a second axios.get inside
+    // the poll's conditional and compared against `data` which the
+    // earlier refresh() inside the same call had already mutated —
+    // racy and emitted two GETs per poll. The capture-up-front +
+    // single-GET-per-poll pattern below is deterministic.
+    const baselineTs = data?.last_completed_at ?? null
     try {
       await axios.post('/api/v1/research/run')
-      // Poll once after a short delay so the user sees the new digest
-      // without a full page refresh. The model call takes 30-90s so
-      // we poll three times at 30s intervals before giving up the
-      // "fresh result will appear" promise.
-      let attempts = 0
-      const poll = async () => {
-        attempts += 1
-        await refresh()
-        if (attempts < 3 && data?.last_completed_at ===
-            (await axios.get<LatestResponse>('/api/v1/research/latest')
-                .then((r) => r.data.last_completed_at))) {
-          setTimeout(() => void poll(), 30000)
-        }
-      }
-      setTimeout(() => void poll(), 30000)
     } catch (exc) {
       setError('Could not start a research run.')
-    } finally {
       setTriggering(false)
+      return
     }
-  }, [refresh, data?.last_completed_at])
+    setTriggering(false)
+    // Poll for completion. The model call takes 30-90s; we poll five
+    // times at 20s intervals (100s total cap) before giving up the
+    // "fresh result will appear" promise. The first poll fires after
+    // a 20s delay so we are not racing the trigger.
+    let attempts = 0
+    const MAX_ATTEMPTS = 5
+    const POLL_INTERVAL_MS = 20000
+    const poll = async () => {
+      attempts += 1
+      try {
+        const r = await axios.get<LatestResponse>('/api/v1/research/latest')
+        setData(r.data)
+        // A fresh timestamp on the latest digest means the new run
+        // landed — stop polling.
+        if (r.data.last_completed_at
+            && r.data.last_completed_at !== baselineTs) {
+          return
+        }
+      } catch {
+        // Transient fetch failure during polling — keep trying.
+      }
+      if (attempts < MAX_ATTEMPTS) {
+        setTimeout(() => void poll(), POLL_INTERVAL_MS)
+      }
+    }
+    setTimeout(() => void poll(), POLL_INTERVAL_MS)
+  }, [data?.last_completed_at])
 
   if (loading) {
     return (

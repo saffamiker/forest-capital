@@ -160,7 +160,8 @@ async def lifespan(app: FastAPI):
         # surfaced by UAT on May 22 2026.
         try:
             from tools.research_engine import (
-                fail_stale_running_digests, trigger_research_async,
+                fail_stale_running_digests, start_daily_scheduler,
+                trigger_research_async,
             )
             reaped = await fail_stale_running_digests()
             if reaped:
@@ -175,6 +176,14 @@ async def lifespan(app: FastAPI):
             # call fires. Fail-open: a research failure logs and
             # proceeds.
             trigger_research_async("startup")
+            # Daily scheduler — fires run_research_if_stale once per
+            # UTC day at 21:00 (US market close + 1h). The 24h
+            # freshness gate inside run_research_if_stale means a
+            # boot-time fire and a scheduled fire within an hour of
+            # each other still produce only one model call. The
+            # scheduler is a daemon task held on _research_bg_tasks
+            # so the GC does not silently cancel it.
+            start_daily_scheduler()
         except Exception as exc:  # noqa: BLE001
             log.warning("research_startup_trigger_failed", error=str(exc))
         # Macro context cache warm — read whatever digest already

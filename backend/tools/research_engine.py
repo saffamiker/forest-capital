@@ -61,6 +61,93 @@ _RUN_TIMEOUT_MINUTES = 10
 # fire-and-forget tasks alive on the event loop.
 _research_bg_tasks: set[asyncio.Task[Any]] = set()
 
+# Daily scheduler — the macro digest auto-refreshes once per UTC day at
+# this hour. 21:00 UTC is 5pm New York, an hour after US equity market
+# close — late enough for the closing print to be in the news, early
+# enough that the agents reading the digest the next morning have a
+# fresh read. The scheduler is a daemon coroutine that loops:
+# sleep-until-next-fire → run_research_if_stale → loop. The 24h
+# freshness gate (_FRESHNESS_WINDOW_HOURS) prevents duplicate runs
+# when a deploy restart fires the startup trigger within an hour of
+# the schedule. Set the env var DAILY_RESEARCH_HOUR_UTC to override
+# the hour without a code change.
+_DAILY_SCHEDULE_HOUR_UTC = 21
+
+
+def _next_daily_fire(now: datetime, hour_utc: int) -> datetime:
+    """Returns the next UTC datetime at HH:00:00 strictly after `now`.
+
+    If now is BEFORE the scheduled hour today, fire today; otherwise
+    fire tomorrow. Pure function so the scheduler test exercises the
+    boundary without a clock.
+    """
+    target_today = now.replace(
+        hour=hour_utc, minute=0, second=0, microsecond=0)
+    if now < target_today:
+        return target_today
+    return target_today + timedelta(days=1)
+
+
+async def daily_research_loop(hour_utc: int | None = None) -> None:
+    """A daemon coroutine: sleeps until next 21:00 UTC, fires
+    run_research_if_stale, then loops. The 24h freshness gate inside
+    run_research_if_stale prevents duplicate runs if the startup hook
+    already produced today's digest. Fail-open: a research failure or
+    DB error logs and the loop continues to the next day.
+
+    Spawn from the lifespan startup hook with asyncio.create_task; the
+    hook must hold a strong reference so the task is not GC'd. Cancel
+    cleanly via task.cancel() at shutdown — the CancelledError unwinds
+    the sleep and exits the while loop.
+    """
+    import os
+    h_env = os.getenv("DAILY_RESEARCH_HOUR_UTC")
+    h = int(h_env) if h_env and h_env.isdigit() else (
+        hour_utc if hour_utc is not None else _DAILY_SCHEDULE_HOUR_UTC)
+
+    log.info("research_daily_scheduler_started", hour_utc=h)
+    while True:
+        now = datetime.now(timezone.utc)
+        fire_at = _next_daily_fire(now, h)
+        sleep_seconds = (fire_at - now).total_seconds()
+        log.info("research_daily_scheduler_sleeping",
+                 next_fire_at=fire_at.isoformat(),
+                 sleep_seconds=int(sleep_seconds))
+        try:
+            await asyncio.sleep(sleep_seconds)
+        except asyncio.CancelledError:
+            log.info("research_daily_scheduler_cancelled")
+            raise
+        # Fire the scheduled run. run_research_if_stale's 24h gate
+        # makes a duplicate fire (deploy restart firing the startup
+        # trigger right before the scheduled time) a silent no-op.
+        try:
+            result = await run_research_if_stale()
+            log.info("research_daily_scheduler_fired",
+                     status=result.get("status"),
+                     reason=result.get("reason"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("research_daily_scheduler_fire_failed",
+                        error=str(exc))
+
+
+def start_daily_scheduler() -> asyncio.Task[Any] | None:
+    """Spawns the daily scheduler on the running event loop. Returns
+    the task so the caller holds a strong reference (a GC'd task gets
+    cancelled silently). Returns None when no event loop is running —
+    a non-event-loop context simply skips the scheduler rather than
+    crashing the boot."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        log.warning("research_daily_scheduler_no_loop",
+                    note="not started; no running event loop")
+        return None
+    task = loop.create_task(daily_research_loop())
+    _research_bg_tasks.add(task)
+    task.add_done_callback(_research_bg_tasks.discard)
+    return task
+
 
 async def fail_stale_running_digests() -> int:
     """
