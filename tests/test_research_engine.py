@@ -42,16 +42,31 @@ VIEWER = {"X-API-Key": generate_session_token("panttserk@queens.edu")}
 
 class TestFailOpenWithoutDatabase:
     """Every database accessor must return a safe default rather than
-    raise. Forced no-DB by monkeypatching AsyncSessionLocal to None so
-    the tests pass regardless of whether the developer has a live
-    local Postgres up. (An earlier version assumed an implicitly
-    unreachable DB and broke once migrations were applied locally.)"""
+    raise.
+
+    These tests are TOTALLY ISOLATED from any real database state:
+    AsyncSessionLocal is monkeypatched to None, so every helper's
+    `if AsyncSessionLocal is None` guard fires and the helper returns
+    its safe default (False / None / []) without ever opening a
+    session. A real CI database with a stale 'running' row CANNOT
+    affect these assertions — the helpers never see the DB at all.
+
+    (An earlier version of these tests assumed an implicitly
+    unreachable DB and broke once migrations were applied locally.
+    Then a May 22 2026 CI run surfaced renewed flakes when the
+    lifespan-startup trigger wrote a 'running' row before pytest
+    collection. The current shape — explicit AsyncSessionLocal=None
+    monkeypatch — is bulletproof against both.)
+    """
 
     @pytest.fixture(autouse=True)
     def _force_no_db(self, monkeypatch):
         from database import AsyncSessionLocal as _real_session
         # Patch the module symbol so each accessor's `if
-        # AsyncSessionLocal is None` guard fires.
+        # AsyncSessionLocal is None` guard fires. The local re-imports
+        # inside research_engine helpers (`from database import
+        # AsyncSessionLocal`) read the current value of
+        # db_mod.AsyncSessionLocal, which is now None.
         import database as db_mod
         monkeypatch.setattr(db_mod, "AsyncSessionLocal", None)
         yield _real_session
@@ -113,6 +128,57 @@ class TestFreshnessGate:
 # ── Orchestrator early-return / mock path ───────────────────────────────────
 
 class TestRunResearchSkipPaths:
+    """Skip-path tests with self-contained DB isolation.
+
+    Every test in this class monkeypatches is_research_running and
+    _create_running_row directly so the real DB helpers are never
+    called. The autouse `_purge_running` fixture additionally clears
+    any pre-existing 'running' row from the macro_research_digests
+    table before each test — a defence against a lifespan-startup
+    trigger or a previous test leaking a row that would otherwise
+    poison `_finalise_row` in the complete-path test class.
+
+    Without the purge, the May 22 2026 CI run surfaced these three
+    tests as flaky because the lifespan startup's
+    trigger_research_async("startup") had written a 'running' row
+    to the CI database before pytest collected this module. The
+    fix at the lifespan layer (main.py — ENVIRONMENT=test skip) is
+    the primary remedy; this fixture is the secondary one so a
+    future caller that forgets the lifespan guard can't reintroduce
+    the failure.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _purge_running(self):
+        """Best-effort cleanup of any pre-existing 'running' row.
+
+        Runs synchronously inside the test event loop so the cleanup
+        completes before the test's monkeypatches install. A DB
+        error or missing AsyncSessionLocal is swallowed — the
+        monkeypatches in each test method already isolate from DB
+        state, so a failed purge is harmless. Mirrors the audit
+        engine's test-class purge pattern.
+        """
+        async def _purge() -> None:
+            try:
+                from sqlalchemy import text
+                from database import AsyncSessionLocal
+                if AsyncSessionLocal is None:
+                    return
+                async with AsyncSessionLocal() as session:
+                    await session.execute(text(
+                        "UPDATE macro_research_digests SET "
+                        " status = 'failed', "
+                        " error = 'test_purge' "
+                        "WHERE status = 'running'"))
+                    await session.commit()
+            except Exception:  # noqa: BLE001
+                # Best-effort — the monkeypatches in each test already
+                # isolate from DB state. A purge failure is non-fatal.
+                pass
+        asyncio.run(_purge())
+        yield
+
     def test_skipped_when_a_run_is_already_in_progress(self, monkeypatch):
         async def _running():
             return True
@@ -426,12 +492,20 @@ class TestDailyScheduler:
         out = research_engine._next_daily_fire(now, 21)
         assert out == datetime(2027, 1, 1, 21, 0, tzinfo=timezone.utc)
 
-    def test_start_daily_scheduler_returns_none_off_loop(self):
+    def test_start_daily_scheduler_returns_none_off_loop(self, monkeypatch):
         # No running event loop -> returns None rather than crashing.
+        # Force the env guard OFF so this test exercises the loop check,
+        # not the test-env skip (which lands first in test env).
+        monkeypatch.setattr(research_engine, "_is_test_env", lambda: False)
         out = research_engine.start_daily_scheduler()
         assert out is None
 
-    def test_start_daily_scheduler_returns_task_on_loop(self):
+    def test_start_daily_scheduler_returns_task_on_loop(self, monkeypatch):
+        # Force the env guard OFF so the actual spawn path runs.
+        # Without this, the test-env guard short-circuits and returns
+        # None before reaching the get_running_loop() call.
+        monkeypatch.setattr(research_engine, "_is_test_env", lambda: False)
+
         async def _run():
             task = research_engine.start_daily_scheduler()
             assert task is not None
@@ -443,3 +517,24 @@ class TestDailyScheduler:
                 pass
 
         asyncio.run(_run())
+
+    def test_start_daily_scheduler_skipped_in_test_env(self):
+        # Defence-in-depth: even on a running loop, the scheduler
+        # refuses to start when _is_test_env() is True. This pins
+        # the May 22 2026 fix that stopped the daemon from writing
+        # 'running' rows to the test DB.
+        async def _run():
+            assert research_engine._is_test_env() is True
+            task = research_engine.start_daily_scheduler()
+            assert task is None
+
+        asyncio.run(_run())
+
+    def test_trigger_research_async_skipped_in_test_env(self):
+        # The same defence-in-depth for the fire-and-forget trigger.
+        # No task should be added to _research_bg_tasks; no daemon
+        # thread should be spawned.
+        before = len(research_engine._research_bg_tasks)
+        research_engine.trigger_research_async("startup")
+        after = len(research_engine._research_bg_tasks)
+        assert after == before

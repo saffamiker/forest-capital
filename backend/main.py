@@ -158,34 +158,58 @@ async def lifespan(app: FastAPI):
         # the concurrency lock and every Run Now click returns
         # "already_running" with no real run firing — the symptom
         # surfaced by UAT on May 22 2026.
-        try:
-            from tools.research_engine import (
-                fail_stale_running_digests, start_daily_scheduler,
-                trigger_research_async,
-            )
-            reaped = await fail_stale_running_digests()
-            if reaped:
-                log.warning(
-                    f"Startup reap: marked {reaped} stuck research "
-                    f"run(s) as failed", count=reaped)
-            # Then fire a research run on startup when the latest
-            # completed digest is stale (> 24h) or absent. The
-            # trigger is loop-aware (we are on the event loop here)
-            # and idempotent — a fresh boot within the freshness
-            # window logs research_run_skipped_current and no model
-            # call fires. Fail-open: a research failure logs and
-            # proceeds.
-            trigger_research_async("startup")
-            # Daily scheduler — fires run_research_if_stale once per
-            # UTC day at 21:00 (US market close + 1h). The 24h
-            # freshness gate inside run_research_if_stale means a
-            # boot-time fire and a scheduled fire within an hour of
-            # each other still produce only one model call. The
-            # scheduler is a daemon task held on _research_bg_tasks
-            # so the GC does not silently cancel it.
-            start_daily_scheduler()
-        except Exception as exc:  # noqa: BLE001
-            log.warning("research_startup_trigger_failed", error=str(exc))
+        #
+        # TEST-ENV SKIP: in the test environment we do NOT fire the
+        # startup reaper, the startup trigger, or the daily scheduler.
+        # Each of those three side-effects (a SQL UPDATE, a background
+        # task that hits the real DB, and a daemon coroutine that
+        # sleeps until 21:00 UTC) pollutes test isolation: the trigger
+        # writes a 'running' row to the CI database that other tests
+        # in the run then trip over (the
+        # test_is_research_running_returns_false_without_db, the
+        # test_get_recent_digests_returns_empty_without_db, and the
+        # test_skipped_when_row_create_fails failures surfaced May 22
+        # 2026). The engine layer itself substitutes a mock digest in
+        # ENVIRONMENT=test, but the side-effect writes still happen
+        # before the mock substitution. Skip the whole stack at the
+        # lifespan boundary.
+        import os
+        _is_test_env = (
+            os.getenv("ENVIRONMENT", "").lower() == "test"
+            or os.getenv("TESTING", "").lower() == "true"
+        )
+        if not _is_test_env:
+            try:
+                from tools.research_engine import (
+                    fail_stale_running_digests, start_daily_scheduler,
+                    trigger_research_async,
+                )
+                reaped = await fail_stale_running_digests()
+                if reaped:
+                    log.warning(
+                        f"Startup reap: marked {reaped} stuck research "
+                        f"run(s) as failed", count=reaped)
+                # Then fire a research run on startup when the latest
+                # completed digest is stale (> 24h) or absent. The
+                # trigger is loop-aware (we are on the event loop here)
+                # and idempotent — a fresh boot within the freshness
+                # window logs research_run_skipped_current and no model
+                # call fires. Fail-open: a research failure logs and
+                # proceeds.
+                trigger_research_async("startup")
+                # Daily scheduler — fires run_research_if_stale once per
+                # UTC day at 21:00 (US market close + 1h). The 24h
+                # freshness gate inside run_research_if_stale means a
+                # boot-time fire and a scheduled fire within an hour of
+                # each other still produce only one model call. The
+                # scheduler is a daemon task held on _research_bg_tasks
+                # so the GC does not silently cancel it.
+                start_daily_scheduler()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("research_startup_trigger_failed",
+                            error=str(exc))
+        else:
+            log.info("research_startup_skipped_test_env")
         # Macro context cache warm — read whatever digest already
         # exists in the DB into the agent-prompt injection cache so
         # the FIRST agent call after restart sees the previous

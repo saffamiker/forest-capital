@@ -136,7 +136,18 @@ def start_daily_scheduler() -> asyncio.Task[Any] | None:
     the task so the caller holds a strong reference (a GC'd task gets
     cancelled silently). Returns None when no event loop is running —
     a non-event-loop context simply skips the scheduler rather than
-    crashing the boot."""
+    crashing the boot.
+
+    Defensive test-env guard: even though main.py's lifespan hook
+    skips this in ENVIRONMENT=test, the scheduler refuses to start
+    here too so a future caller (or a test that monkeypatches around
+    the main.py guard) can't accidentally launch the daemon. The
+    daemon's sleep-then-fire loop would otherwise pollute the test
+    DB with 'running' rows between assertions.
+    """
+    if _is_test_env():
+        log.info("research_daily_scheduler_skipped_test_env")
+        return None
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -546,7 +557,16 @@ def trigger_research_async(reason: str = "scheduled") -> None:
     A manual sysadmin trigger calls run_research() directly via the
     endpoint, NOT this function — manual runs intentionally skip the
     24h freshness gate.
+
+    Defensive test-env guard: refuses to spawn anything in
+    ENVIRONMENT=test so a background task can't write a 'running' row
+    to the test DB and pollute subsequent assertions. main.py's
+    lifespan hook already skips the trigger in test env; this guard
+    is the belt to that brace.
     """
+    if _is_test_env():
+        log.info("research_trigger_async_skipped_test_env", reason=reason)
+        return
     try:
         try:
             loop = asyncio.get_running_loop()
