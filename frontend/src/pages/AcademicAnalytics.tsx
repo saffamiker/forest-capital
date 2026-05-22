@@ -690,9 +690,17 @@ function FactorLoadingsTable(
     <SectionCard
       title="Carhart Four-Factor Loadings"
       tourId="factor-loadings"
-      // No title-level InfoIcon — every metric column header
-      // (Alpha / MKT-RF / SMB / HML / MOM / R²) is already wrapped in
-      // ExplainableText, so a single affordance per metric is enough.
+      // Title-level InfoIcon restored May 22 2026 (Molly UAT Group 5).
+      // The earlier comment claimed the per-column ExplainableText
+      // wrappers were "enough", but ExplainableText only renders
+      // chrome in Commentary mode — in Analyst and Present mode the
+      // children render bare with no dotted underline, no info icon,
+      // no hover affordance at all. The chart title therefore had NO
+      // explainer entry point in two of three modes. The InfoIcon at
+      // the title level covers the Carhart-four-factor model
+      // explanation in every mode; the per-column ExplainableText
+      // continues to provide per-metric depth in Commentary mode.
+      infoKey="ff_factor_loadings"
       subtitle={
         'OLS regression of each strategy\'s monthly excess return on the '
         + 'Carhart four-factor model (MKT-RF, SMB, HML, MOM). * marks loadings '

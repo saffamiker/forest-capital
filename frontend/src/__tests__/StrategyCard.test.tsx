@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import StrategyCard from '../components/StrategyCard'
 import type { StrategyResult } from '../types/strategies'
 import { UIProvider } from '../context/UIContext'
@@ -82,70 +83,70 @@ const benchmarkStrategy: StrategyResult = {
 
 describe('StrategyCard', () => {
   it('renders without errors', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(document.body).toBeTruthy()
   })
 
   it('renders strategy name', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText('VOL TARGETING')).toBeInTheDocument()
   })
 
   it('renders the strategy type badge', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText('DYNAMIC')).toBeInTheDocument()
   })
 
   it('renders Sharpe ratio', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText('0.83')).toBeInTheDocument()
   })
 
   it('renders the Sharpe 95% CI', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText(/0\.71.*0\.95/)).toBeInTheDocument()
   })
 
   it('renders max drawdown as negative percentage', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText('-15.6%')).toBeInTheDocument()
   })
 
   it('shows SIGNIFICANT badge for significant strategy', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     const badges = screen.getAllByText('SIGNIFICANT')
     expect(badges.length).toBeGreaterThanOrEqual(1)
   })
 
   it('does not show SIGNIFICANT badge for non-significant strategy', () => {
-    render(<UIProvider><StrategyCard strategy={benchmarkStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={benchmarkStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.queryByText('SIGNIFICANT')).not.toBeInTheDocument()
   })
 
   it('renders tier 1 gates count', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText(/5\/5 Tier 1 gates/)).toBeInTheDocument()
   })
 
   it('renders CV stability score', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText('0.81')).toBeInTheDocument()
   })
 
   it('shows "More detail" button initially', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText('More detail')).toBeInTheDocument()
   })
 
   it('expands to show detailed stats on click', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     fireEvent.click(screen.getByText('More detail'))
     expect(screen.getByText('Less detail')).toBeInTheDocument()
     expect(screen.getByText(/Tier 1 Significance Tests/i)).toBeInTheDocument()
   })
 
   it('collapses back to summary view on second click', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     fireEvent.click(screen.getByText('More detail'))
     fireEvent.click(screen.getByText('Less detail'))
     expect(screen.getByText('More detail')).toBeInTheDocument()
@@ -155,7 +156,7 @@ describe('StrategyCard', () => {
     // The detail subscreen's council link calls onAskCouncil — the host
     // (Dashboard) navigates to /council with this string in route state.
     const onAskCouncil = vi.fn()
-    render(<UIProvider><StrategyCard strategy={mockStrategy} onAskCouncil={onAskCouncil} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} onAskCouncil={onAskCouncil} /></UIProvider></MemoryRouter>)
     fireEvent.click(screen.getByText(/Ask the Council about VOL TARGETING/i))
     expect(onAskCouncil).toHaveBeenCalledTimes(1)
     const question = onAskCouncil.mock.calls[0][0] as string
@@ -169,22 +170,22 @@ describe('StrategyCard', () => {
   })
 
   it('renders the Data Explain button on the detail subscreen', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText('Explain this data')).toBeInTheDocument()
   })
 
   it('renders static type badge for static strategy', () => {
-    render(<UIProvider><StrategyCard strategy={benchmarkStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={benchmarkStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText('STATIC')).toBeInTheDocument()
   })
 
   it('renders CAGR', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText('9.5%')).toBeInTheDocument()
   })
 
   it('renders volatility', () => {
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     expect(screen.getByText('11.8%')).toBeInTheDocument()
   })
 })
@@ -222,7 +223,7 @@ function seedGlossary() {
 function renderInCommentary(node: React.ReactNode) {
   sessionStorage.setItem('fc_ui_mode', 'commentary')
   seedGlossary()
-  return render(<UIProvider>{node}</UIProvider>)
+  return render(<MemoryRouter><UIProvider>{node}</UIProvider></MemoryRouter>)
 }
 
 describe('StrategyCard — ExplainableText metric labels', () => {
@@ -268,7 +269,7 @@ describe('StrategyCard — ExplainableText metric labels', () => {
   it('in Analyst mode labels are plain text (no explain button)', () => {
     sessionStorage.setItem('fc_ui_mode', 'analyst')
     seedGlossary()
-    render(<UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider>)
+    render(<MemoryRouter><UIProvider><StrategyCard strategy={mockStrategy} /></UIProvider></MemoryRouter>)
     // Analyst mode → ExplainableText emits children directly, no aria-label.
     expect(screen.queryByLabelText('Explain sharpe_ratio')).toBeNull()
     // Plain label text is still there though.

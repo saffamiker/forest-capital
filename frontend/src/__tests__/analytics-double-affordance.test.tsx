@@ -48,6 +48,22 @@ const SUMMARY_ROW = {
   period_end: '2025-12-31',
 }
 
+const FACTOR_ROW = {
+  strategy: 'BENCHMARK',
+  alpha_annualized: 0.0,
+  mkt_rf: 1.0,
+  smb: 0.02,
+  hml: -0.05,
+  mom: 0.01,
+  r_squared: 0.98,
+  alpha_sig: false,
+  mkt_rf_sig: true,
+  smb_sig: false,
+  hml_sig: false,
+  mom_sig: false,
+  model: 'carhart_4factor',
+}
+
 beforeEach(() => {
   mockedAxios.get.mockReset()
   mockedAxios.get.mockImplementation((url: string) => {
@@ -58,6 +74,7 @@ beforeEach(() => {
           study_period: { start: '2002-07-01', end: '2025-12-31',
                           n_months: 282 },
           summary_statistics: [SUMMARY_ROW],
+          factor_loadings: [FACTOR_ROW],
         },
       })
     }
@@ -126,5 +143,25 @@ describe('AcademicAnalytics — no double affordance on table headers', () => {
       expect(within(vol).getByRole(
         'button', { name: /Explain Annualised Volatility/i }))
         .toBeInTheDocument()
+    })
+
+  // Molly UAT Group 5 — the Carhart Four-Factor Loadings chart title
+  // previously had NO InfoIcon. The per-column ExplainableText wrappers
+  // suppressed the InfoIcons on the metric columns AND the title
+  // carried no icon at all, so in Analyst and Present mode the chart
+  // had no explainer affordance whatsoever. The title-level InfoIcon
+  // (tooltipKey "ff_factor_loadings") covers the Carhart model
+  // explanation in every mode.
+  it('renders the title-level InfoIcon on Carhart Four-Factor Loadings',
+    async () => {
+      renderPage()
+      // The chart title is rendered as an <h2>; the InfoIcon button
+      // sits inside that h2 next to the title text.
+      const title = await screen.findByText('Carhart Four-Factor Loadings')
+      const h2 = title.closest('h2')
+      expect(h2).not.toBeNull()
+      const explain = within(h2!).getByRole(
+        'button', { name: /Explain Carhart Four-Factor Loadings/i })
+      expect(explain).toBeInTheDocument()
     })
 })
