@@ -394,8 +394,16 @@ export default function MainLayout() {
             where the horizontal nav (flex-1) is not rendered. */}
         <div className="flex-1 lg:hidden" />
 
-        {/* Right side: mode selector + user + settings + logout */}
-        <div className="flex items-center gap-2 lg:gap-3 lg:ml-4">
+        {/* Right side: mode selector + user + settings + logout.
+            relative z-[100] keeps these controls clickable while the
+            Site Tour is running — the Joyride overlay sits at z-90
+            and otherwise intercepts every click on this cluster
+            (UAT feedback #1 May 22 2026: account / Settings icon
+            unresponsive during tour autolaunch). Sits below the
+            mobile nav drawer (z-[61]) and hamburger (z-[62]) too,
+            which is fine — those exit the tour by their own click
+            handlers if they need to. */}
+        <div className="relative z-[100] flex items-center gap-2 lg:gap-3 lg:ml-4">
           {/* Three-mode selector — desktop only; on mobile it lives in
               the drawer. (ModeSelector self-hides below lg.) */}
           <ModeSelector />

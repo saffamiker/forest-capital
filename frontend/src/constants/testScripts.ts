@@ -298,7 +298,7 @@ const allTesters: TestScript = {
       id: 'settings_sections', route: '/settings', target: null,
       title: 'Settings sections render',
       instruction: 'Scroll through the Settings page.',
-      expectedResult: 'All sections render: Organisation, Data and Study '
+      expectedResult: 'All sections render: Organization, Data and Study '
         + 'Period, Analytics Configuration, Academic Documents, Account, '
         + 'Release History.',
       allowSkip: true,
@@ -306,7 +306,7 @@ const allTesters: TestScript = {
     {
       id: 'settings_brand', route: '/settings', target: null,
       title: 'Brand switcher works',
-      instruction: 'In Organisation, switch between McColl and Forest '
+      instruction: 'In Organization, switch between McColl and Forest '
         + 'Capital.',
       expectedResult: 'The branding changes across the app.',
       allowSkip: true,
