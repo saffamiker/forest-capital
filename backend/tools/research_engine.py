@@ -47,15 +47,93 @@ log = structlog.get_logger(__name__)
 # auto-trigger skips re-running within the window.
 _FRESHNESS_WINDOW_HOURS = 24
 
+# Stuck-run timeout. A real research run completes in 30-90s; a row
+# stuck in 'running' for more than this many minutes is dead — most
+# likely a Render restart or worker crash that fired the INSERT but
+# never reached the UPDATE-to-complete. Reaping it un-blocks the
+# concurrency lock for the next run. Mirrors audit_engine's
+# _AUDIT_TIMEOUT_MINUTES pattern; the audit timeout is 15 minutes
+# (audits do a lot more work). Research is faster, so 10 minutes is
+# the conservative cap.
+_RUN_TIMEOUT_MINUTES = 10
+
 # Active background-task refs — same pattern audit_engine uses to keep
 # fire-and-forget tasks alive on the event loop.
 _research_bg_tasks: set[asyncio.Task[Any]] = set()
 
 
+async def fail_stale_running_digests() -> int:
+    """
+    Marks every macro_research_digests row stuck in 'running' past
+    _RUN_TIMEOUT_MINUTES as 'failed' so the concurrency lock the row
+    holds is released. Returns the number of rows reaped.
+
+    A research run that crashes mid-flight (Render restart, worker
+    OOM, network timeout on the agent call) leaves its row in
+    'running' forever. Without this reaper, every subsequent run is
+    skipped with reason 'already_running' and the dashboard's Run
+    Now button does nothing — the surface the user reported as the
+    "Run now is not actuating" bug on May 22 2026.
+
+    Called from:
+      - lifespan startup hook (main.py) so a Render redeploy reaps
+        any zombie row from the previous boot before any user request
+      - is_research_running() (so every concurrency-lock check reaps
+        first; a stuck run never holds the lock more than one check
+        past the timeout)
+
+    Fail-open: a database error logs a warning and returns 0 — the
+    caller proceeds as if no rows were reaped.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return 0
+        async with AsyncSessionLocal() as session:
+            # The CAST is required: asyncpg cannot infer the type of a
+            # bind parameter inside make_interval and raises
+            # IndeterminateDatatypeError without it. Mirrors the audit
+            # reaper's pattern.
+            res = await session.execute(text(
+                "UPDATE macro_research_digests SET "
+                " status = 'failed', "
+                " error = :reason "
+                "WHERE status = 'running' "
+                "  AND generated_at < now() "
+                "    - make_interval(mins => CAST(:mins AS integer)) "
+                "RETURNING id, generated_at, triggered_by"
+            ), {
+                "reason": (
+                    f"Auto-reaped: stuck in 'running' state for more "
+                    f"than {_RUN_TIMEOUT_MINUTES} minutes."
+                ),
+                "mins": _RUN_TIMEOUT_MINUTES,
+            })
+            reaped = res.fetchall()
+            await session.commit()
+        for row in reaped:
+            log.warning(
+                "research_run_timed_out",
+                row_id=int(row[0]),
+                generated_at=row[1].isoformat() if row[1] else None,
+                triggered_by=row[2],
+                timeout_minutes=_RUN_TIMEOUT_MINUTES,
+            )
+        return len(reaped)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("research_fail_stale_failed", error=str(exc))
+        return 0
+
+
 async def is_research_running() -> bool:
     """True when a macro_research_digests row is still in 'running'.
-    Fail-open: a database error reports False so a research run is
-    never permanently blocked by a stale read."""
+    Reaps any stuck-past-_RUN_TIMEOUT_MINUTES rows first, so a zombie
+    row never permanently blocks the lock. Fail-open: a database
+    error reports False so a research run is never permanently
+    blocked by a stale read."""
+    await fail_stale_running_digests()
     try:
         from sqlalchemy import text
 
