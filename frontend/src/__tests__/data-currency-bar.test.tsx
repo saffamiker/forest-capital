@@ -12,6 +12,10 @@ import axios from 'axios'
 vi.mock('axios')
 
 import DataCurrencyBar from '../components/DataCurrencyBar'
+// useDataStatus now reads from a Zustand store (F3 fix, May 22 2026).
+// The store is a module singleton, so a previous test's payload leaks
+// into the next test unless reset.
+import { useDataStatusStore } from '../stores/dataStatusStore'
 
 interface Tbl {
   name: string
@@ -38,7 +42,15 @@ const FF_CURRENT: Tbl = {
   display_label: 'April 2026', last_updated: null, staleness: 'green',
 }
 
-beforeEach(() => { vi.clearAllMocks() })
+beforeEach(() => {
+  vi.clearAllMocks()
+  // Reset the data-status store between tests — otherwise the first
+  // test's payload satisfies isStale() for every subsequent test and
+  // the new axios mock never fires.
+  useDataStatusStore.setState({
+    status: null, loading: false, fetchedAt: null,
+  })
+})
 
 describe('DataCurrencyBar', () => {
   it('shows the all-current state when market and factor data agree', async () => {

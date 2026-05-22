@@ -992,6 +992,44 @@ async def get_analytics_distribution(
 _RISK_FREE_SOURCE = "FRED DTB3 (3-month T-bill, mean monthly rate, annualised)"
 
 
+async def _read_cached_metric_or_fallback(
+    metric_kind: str,
+    fallback: "Callable[[], Awaitable[dict]]",
+) -> dict:
+    """Three-tier read for analytics_metrics_cache where the cold-cache
+    fallback isn't the strategy-keyed inline path that
+    _read_div_metric_or_compute assumes. The fallback is an arbitrary
+    async callable that produces the payload from whatever the
+    endpoint's natural inline path is.
+
+    Used by /api/v1/analytics/sensitivity (cold path needs the full
+    pipeline history) and /api/v1/analytics/config (cold path reads
+    market_data_monthly directly). Both pre-existed the cache layer;
+    F1 + F4 fold them in alongside the seven diversification metrics
+    that already use _read_div_metric_or_compute.
+    """
+    try:
+        from tools.cache import get_latest_strategy_hash
+        from tools.precomputed_analytics import (
+            get_metric, get_latest_metric,
+        )
+        latest_hash = await get_latest_strategy_hash()
+        if latest_hash:
+            cached = await get_metric(latest_hash, metric_kind)
+            if cached:
+                log.info("metric_cache_hit", metric=metric_kind)
+                return cached
+            stale = await get_latest_metric(metric_kind)
+            if stale:
+                log.info("metric_cache_stale_hit", metric=metric_kind)
+                return stale
+        log.info("metric_cache_miss_inline", metric=metric_kind)
+        return await fallback()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("metric_read_failed", metric=metric_kind, error=str(exc))
+        return await fallback()
+
+
 @app.get("/api/v1/analytics/config")
 async def get_analytics_config(session: dict = Depends(require_auth)):
     """
@@ -1000,24 +1038,36 @@ async def get_analytics_config(session: dict = Depends(require_auth)):
     ratio and to the efficient frontier — the mean monthly DTB3 rate from
     market_data_monthly, annualised (×12). This is the SAME value the
     /api/optimize/weights frontier and the analytics layer use. Read-only.
+
+    F4 (May 22 2026): cache-first via analytics_metrics_cache. The
+    cold-cache fallback runs the original inline compute so the
+    contract is preserved on a fresh deploy that hasn't seen a
+    strategy_cache write yet.
     """
     if ENVIRONMENT == "test":
         return {"available": False, "risk_free_rate": None,
                 "risk_free_source": _RISK_FREE_SOURCE}
-    try:
-        from tools.cache import get_monthly_returns
-        monthly = await get_monthly_returns()
-        rf_list = (monthly or {}).get("rf") or []
-        rf_annual = (sum(rf_list) / len(rf_list) * 12) if rf_list else None
-        return {
-            "available": rf_annual is not None,
-            "risk_free_rate": round(rf_annual, 4) if rf_annual is not None else None,
-            "risk_free_source": _RISK_FREE_SOURCE,
-        }
-    except Exception as exc:
-        log.warning("analytics_config_failed", error=str(exc))
-        return {"available": False, "risk_free_rate": None,
-                "risk_free_source": _RISK_FREE_SOURCE}
+
+    async def _inline_config() -> dict:
+        try:
+            from tools.cache import get_monthly_returns
+            monthly = await get_monthly_returns()
+            rf_list = (monthly or {}).get("rf") or []
+            rf_annual = (
+                sum(rf_list) / len(rf_list) * 12) if rf_list else None
+            return {
+                "available": rf_annual is not None,
+                "risk_free_rate":
+                    round(rf_annual, 4) if rf_annual is not None else None,
+                "risk_free_source": _RISK_FREE_SOURCE,
+            }
+        except Exception as exc:
+            log.warning("analytics_config_failed", error=str(exc))
+            return {"available": False, "risk_free_rate": None,
+                    "risk_free_source": _RISK_FREE_SOURCE}
+
+    return await _read_cached_metric_or_fallback(
+        "risk_free_rate_config", _inline_config)
 
 
 @app.get("/api/v1/analytics/sensitivity")
@@ -1027,23 +1077,32 @@ async def get_analytics_sensitivity(request: Request, session: dict = Depends(re
     Parameter sensitivity analysis for the four dynamic strategies — the
     Sharpe ratio swept across a range of each strategy's key parameter.
 
-    This is a ~23-backtest computation, so it has its OWN endpoint rather
-    than being bundled into the light /api/v1/analytics/academic payload —
-    bundling would make every analytics page load run 23 backtests. The
-    result is memoised in-process (tools/sensitivity.compute_sensitivity):
-    the first call after a restart pays the cost once, then it is instant.
-    The frontend section shows its own loading state.
+    This is a ~23-backtest computation. F1 (May 22 2026) folded it into
+    analytics_metrics_cache: refresh_sensitivity runs the sweep once
+    when a fresh strategy_results_cache row lands, and this endpoint
+    serves the cached payload on every subsequent request. The cold-
+    cache fallback below preserves the original
+    get_full_history + compute_sensitivity path for a fresh deploy
+    that has not seen a strategy_cache write yet — compute_sensitivity
+    has its own worker-local memo so even the cold path only does
+    full work once per worker per history. The frontend section
+    shows its own loading state regardless.
     """
     if ENVIRONMENT == "test":
         return {"available": False, "strategies": []}
-    try:
-        from tools.data_fetcher import get_full_history
-        from tools.sensitivity import compute_sensitivity
-        result = compute_sensitivity(get_full_history())
-        return {"available": True, **result}
-    except Exception as exc:
-        log.warning("analytics_sensitivity_failed", error=str(exc))
-        return {"available": False, "strategies": []}
+
+    async def _inline_sensitivity() -> dict:
+        try:
+            from tools.data_fetcher import get_full_history
+            from tools.sensitivity import compute_sensitivity
+            result = compute_sensitivity(get_full_history())
+            return {"available": True, **result}
+        except Exception as exc:
+            log.warning("analytics_sensitivity_failed", error=str(exc))
+            return {"available": False, "strategies": []}
+
+    return await _read_cached_metric_or_fallback(
+        "sensitivity", _inline_sensitivity)
 
 
 # ── Admin: data status ────────────────────────────────────────────────────────

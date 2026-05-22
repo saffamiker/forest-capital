@@ -294,6 +294,65 @@ async def refresh_diversification_metrics(data_hash: str) -> None:
         log.warning("diversification_refresh_failed", error=str(exc))
 
 
+async def refresh_sensitivity(data_hash: str) -> None:
+    """Parameter sensitivity (F1, May 22 2026). Runs compute_sensitivity
+    on the FULL pipeline history — the same ~23-backtest computation
+    the endpoint used to do inline on the request thread. By caching
+    the result here, the endpoint becomes a single-row DB read on the
+    hot path (get_full_history + compute_sensitivity never run inside
+    a request handler).
+
+    The compute_sensitivity helper has its own worker-local memo, so
+    a refresh that re-runs on the same history is also cheap. The
+    expensive work is the cold-deploy first call after each data
+    ingestion.
+    """
+    try:
+        from tools.data_fetcher import get_full_history
+        from tools.sensitivity import compute_sensitivity
+
+        history = get_full_history()
+        if not history or not history.get("equity_monthly"):
+            log.info("precomputed_sensitivity_no_history")
+            return
+        result = compute_sensitivity(history)
+        payload = {"available": True, **result}
+        await set_metric(data_hash, "sensitivity", payload,
+                         source="refresh_sensitivity")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("precomputed_sensitivity_failed", error=str(exc))
+
+
+async def refresh_risk_free_rate_config(data_hash: str) -> None:
+    """Risk-free rate config (F4, May 22 2026). The /api/v1/analytics/
+    config endpoint computes the mean monthly DTB3 rate × 12 inline
+    on every request. The value depends solely on the data hash, so
+    cache it alongside the other metrics.
+
+    Single scalar plus its source label; the cached row is tiny but
+    eliminates the per-request 280-row sum + multiply on the
+    request thread.
+    """
+    try:
+        from tools.cache import get_monthly_returns
+
+        monthly = await get_monthly_returns()
+        rf_list = (monthly or {}).get("rf") or []
+        rf_annual = (sum(rf_list) / len(rf_list) * 12) if rf_list else None
+        payload = {
+            "available": rf_annual is not None,
+            "risk_free_rate":
+                round(rf_annual, 4) if rf_annual is not None else None,
+            "risk_free_source": (
+                "FRED DTB3 (3-month T-bill, mean monthly rate, annualised)"),
+        }
+        await set_metric(data_hash, "risk_free_rate_config", payload,
+                         source="refresh_risk_free_rate_config")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("precomputed_risk_free_rate_config_failed",
+                    error=str(exc))
+
+
 async def refresh_all_analytics(data_hash: str) -> None:
     """Top-level dispatch — calls every refresh function. Fires from
     tools/cache.set_strategy_cache after a successful strategy write.
@@ -303,6 +362,12 @@ async def refresh_all_analytics(data_hash: str) -> None:
              data_hash=data_hash[:8] if data_hash else None)
     await refresh_academic_analytics(data_hash)
     await refresh_diversification_metrics(data_hash)
+    # F1 + F4 (May 22 2026) — sensitivity and the risk-free rate
+    # config are the last two endpoints that did inline compute on
+    # the request thread. Both now refresh through this dispatch and
+    # serve from analytics_metrics_cache on the hot path.
+    await refresh_sensitivity(data_hash)
+    await refresh_risk_free_rate_config(data_hash)
     log.info("precomputed_analytics_refresh_complete",
              data_hash=data_hash[:8] if data_hash else None)
 

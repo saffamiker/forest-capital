@@ -14,6 +14,7 @@ import type { EfficientFrontierData } from '../types/api'
 import { useStrategiesStore } from '../stores/strategiesStore'
 import { useRegimeStore } from '../stores/regimeStore'
 import { useGlossaryStore } from '../stores/glossaryStore'
+import { useDataStatus, tableOf } from '../hooks/useDataStatus'
 import ExplainableText from './ExplainableText'
 import InfoIcon from './InfoIcon'
 import ChartCommentStrip from './ChartCommentStrip'
@@ -229,11 +230,19 @@ export default function Dashboard() {
   // tooltips have content on first hover. The store is idempotent — this
   // fires at most once per session.
   const loadTerms = useGlossaryStore((s) => s.loadTerms)
+  // F3 (May 22 2026) — share the data-status fetch with DataCurrencyBar
+  // and the Analytics page via the Zustand store rather than firing
+  // a duplicate /api/v1/admin/data-status request from here.
+  const { status: dataStatus } = useDataStatus()
+  const strategyTable = tableOf(dataStatus, 'strategy_results_cache')
+  const dataFreshness = strategyTable
+    ? {
+        last_updated: strategyTable.last_updated,
+        staleness: (strategyTable.staleness as Staleness),
+      }
+    : null
   const [frontier, setFrontier] = useState<EfficientFrontierData | null>(null)
   const [cumulative, setCumulative] = useState<CumulativeReturns | null>(null)
-  const [dataFreshness, setDataFreshness] = useState<
-    { last_updated: string | null; staleness: Staleness } | null
-  >(null)
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
   // Mobile only — reveals the columns hidden in the reduced phone view.
   const [showAllCols, setShowAllCols] = useState(false)
@@ -273,18 +282,8 @@ export default function Dashboard() {
     }
     void loadCumulative()
 
-    // Strategy-data freshness — reuses the Settings data-status endpoint so
-    // the Dashboard shows the same server-side computed_at + staleness.
-    const loadDataStatus = async () => {
-      try {
-        const res = await axios.get<{
-          tables: { name: string; last_updated: string | null; staleness: Staleness }[]
-        }>('/api/v1/admin/data-status')
-        const t = res.data.tables?.find((x) => x.name === 'strategy_results_cache')
-        if (t) setDataFreshness({ last_updated: t.last_updated, staleness: t.staleness })
-      } catch (_) { /* freshness line is omitted on failure */ }
-    }
-    void loadDataStatus()
+    // Strategy-data freshness — the useDataStatus hook (line above)
+    // pulls it from the shared Zustand store. No fetch here.
   }, [loadStrategies, loadRegime, loadTerms])
 
   const cumulativeData = cumulative?.points ?? []
