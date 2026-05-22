@@ -64,8 +64,19 @@ async def upsert_findings(
     macro_digest_id: int | None,
     strategy_count: int,
     surprise_count: int,
+    ranked_findings: list[dict] | None = None,
+    macro_validated: bool = False,
+    high_strength_count: int = 0,
 ) -> int | None:
-    """Inserts one row per staging run. Returns the new id."""
+    """Inserts one row per staging run. Returns the new id.
+
+    May 22 2026 — extended with ranked_findings + macro_validated +
+    high_strength_count (migration 031). The Academic Writer reads
+    the ranked order so Section 2 leads with whichever finding the
+    data shows is most material; macro_validated gates the macro
+    paragraph; high_strength_count surfaces on the Stage Findings
+    Report Writer status pill.
+    """
     try:
         from sqlalchemy import text
         from database import AsyncSessionLocal
@@ -75,16 +86,21 @@ async def upsert_findings(
             row = await session.execute(text(
                 "INSERT INTO analytical_findings_cache "
                 "(data_hash, findings, findings_md, macro_digest_id, "
-                " strategy_count, surprise_count) "
-                "VALUES (:h, :f, :md, :mid, :sc, :sup) "
+                " strategy_count, surprise_count, ranked_findings, "
+                " macro_validated, high_strength_count) "
+                "VALUES (:h, :f, :md, :mid, :sc, :sup, "
+                "        :rf, :mv, :hc) "
                 "RETURNING id"
             ), {
-                "h": data_hash,
-                "f": json.dumps(findings, default=str),
-                "md": markdown,
+                "h":   data_hash,
+                "f":   json.dumps(findings, default=str),
+                "md":  markdown,
                 "mid": macro_digest_id,
-                "sc": strategy_count,
+                "sc":  strategy_count,
                 "sup": surprise_count,
+                "rf":  json.dumps(ranked_findings or [], default=str),
+                "mv":  bool(macro_validated),
+                "hc":  int(high_strength_count or 0),
             })
             new_id = row.scalar()
             await session.commit()
@@ -95,20 +111,39 @@ async def upsert_findings(
 
 
 async def get_latest_findings() -> dict | None:
-    """Returns the most recent staging run as a dict, or None."""
+    """Returns the most recent staging run as a dict, or None.
+
+    Reads ranked_findings + macro_validated + high_strength_count
+    when present (migration 031 columns). On a pre-031 database the
+    extra SELECT raises and the helper falls back to the legacy
+    projection — fail-open.
+    """
     try:
         from sqlalchemy import text
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return None
         async with AsyncSessionLocal() as session:
-            row = await session.execute(text(
-                "SELECT id, data_hash, findings, findings_md, "
-                " macro_digest_id, computed_at, strategy_count, "
-                " surprise_count "
-                "FROM analytical_findings_cache "
-                "ORDER BY computed_at DESC LIMIT 1"))
-            found = row.fetchone()
+            try:
+                row = await session.execute(text(
+                    "SELECT id, data_hash, findings, findings_md, "
+                    " macro_digest_id, computed_at, strategy_count, "
+                    " surprise_count, ranked_findings, "
+                    " macro_validated, high_strength_count "
+                    "FROM analytical_findings_cache "
+                    "ORDER BY computed_at DESC LIMIT 1"))
+                found = row.fetchone()
+                has_ranked = True
+            except Exception:  # noqa: BLE001
+                # Pre-031 DB — columns don't exist yet.
+                row = await session.execute(text(
+                    "SELECT id, data_hash, findings, findings_md, "
+                    " macro_digest_id, computed_at, strategy_count, "
+                    " surprise_count "
+                    "FROM analytical_findings_cache "
+                    "ORDER BY computed_at DESC LIMIT 1"))
+                found = row.fetchone()
+                has_ranked = False
             if not found:
                 return None
             findings = found[2]
@@ -117,7 +152,7 @@ async def get_latest_findings() -> dict | None:
                     findings = json.loads(findings)
                 except json.JSONDecodeError:
                     findings = []
-            return {
+            out: dict[str, Any] = {
                 "id":              int(found[0]),
                 "data_hash":       found[1],
                 "findings":        findings,
@@ -128,6 +163,21 @@ async def get_latest_findings() -> dict | None:
                 "strategy_count":  found[6],
                 "surprise_count":  found[7],
             }
+            if has_ranked:
+                ranked = found[8]
+                if isinstance(ranked, str):
+                    try:
+                        ranked = json.loads(ranked)
+                    except json.JSONDecodeError:
+                        ranked = []
+                out["ranked_findings"] = ranked or []
+                out["macro_validated"] = bool(found[9])
+                out["high_strength_count"] = int(found[10] or 0)
+            else:
+                out["ranked_findings"] = []
+                out["macro_validated"] = False
+                out["high_strength_count"] = 0
+            return out
     except Exception as exc:  # noqa: BLE001
         log.warning("analytical_findings_read_failed", error=str(exc))
         return None
@@ -1239,6 +1289,16 @@ async def stage_findings(
                  else None)
     n_surprises = sum(1 for f in findings if f.get("surprise"))
     n_strategies = len(payload.get("strategies") or {})
+    n_high = sum(
+        1 for f in findings if f.get("nugget_strength") == "HIGH")
+    # Item 12 — ranked findings + macro_validated alongside the raw
+    # findings so the Academic Writer's Section 2 leads with whatever
+    # the data shows is most material, and the macro paragraph is
+    # only included when the digest summary is clean prose.
+    from tools.template_pipeline import rank_findings, macro_validated
+    ranked = rank_findings(findings)
+    macro_obj = payload.get("macro_digest") or {}
+    mv = macro_validated(macro_obj.get("summary_text"))
     row_id = await upsert_findings(
         data_hash or "",
         findings,
@@ -1246,19 +1306,25 @@ async def stage_findings(
         macro_digest_id=int(macro_id) if isinstance(macro_id, int) else None,
         strategy_count=n_strategies,
         surprise_count=n_surprises,
+        ranked_findings=ranked,
+        macro_validated=mv,
+        high_strength_count=n_high,
     )
     log.info("analytical_findings_staged",
              row_id=row_id, n_surprises=n_surprises,
-             n_strategies=n_strategies, triggered_by=triggered_by)
+             n_strategies=n_strategies, n_high=n_high,
+             macro_validated=mv, triggered_by=triggered_by)
     return {
-        "id":               row_id,
-        "data_hash":        data_hash,
-        "strategy_count":   n_strategies,
-        "surprise_count":   n_surprises,
-        "findings":         findings,
-        "findings_md":      markdown,
-        "n_high_strength":  sum(
-            1 for f in findings if f.get("nugget_strength") == "HIGH"),
+        "id":                  row_id,
+        "data_hash":           data_hash,
+        "strategy_count":      n_strategies,
+        "surprise_count":      n_surprises,
+        "findings":            findings,
+        "ranked_findings":     ranked,
+        "macro_validated":     mv,
+        "high_strength_count": n_high,
+        "findings_md":         markdown,
+        "n_high_strength":     n_high,
     }
 
 

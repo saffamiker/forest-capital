@@ -1125,6 +1125,180 @@ async def get_latest_findings_endpoint(
         return {"available": False}
 
 
+# ── Report writer template pipeline (item 12) ────────────────────────────────
+
+
+@app.get("/api/v1/reports/templates")
+async def list_report_templates(
+    session: dict = Depends(require_team_member),
+):
+    """Active report templates for the report-writer dropdown.
+    Drops system_prompt + section_instructions from the response —
+    those are heavy and only needed at generation time."""
+    if ENVIRONMENT == "test":
+        return {"templates": []}
+    from tools.report_templates import list_active_templates
+    rows = await list_active_templates()
+    return {"templates": [
+        {k: v for k, v in r.items()
+         if k not in ("system_prompt", "section_instructions")}
+        for r in rows
+    ]}
+
+
+@app.post("/api/v1/reports/source-citations")
+@limiter.limit("3/minute")
+async def post_source_citations(
+    request: Request, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """STEP 1B — source citations for a template's concept list.
+
+    Body: {"template_id": "midpoint_check_fna670"}.
+
+    Returns the verified citations object + the quality indicator
+    (green / amber / red). Persists each citation in citations_cache.
+    Rate-limited (3/min) because each call hits the web_search tool
+    up to 10 times.
+    """
+    if ENVIRONMENT == "test":
+        return {
+            "template_id": body.get("template_id"),
+            "citations": {},
+            "quality": "red",
+            "verified_count": 0,
+        }
+    template_id = body.get("template_id")
+    if not template_id:
+        raise HTTPException(
+            status_code=422, detail="template_id is required.")
+    try:
+        from tools.report_templates import get_template
+        from tools.template_pipeline import (
+            source_citations, citation_quality, persist_citations,
+        )
+        tmpl = await get_template(template_id)
+        if not tmpl:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Template '{template_id}' not found.")
+        concepts = tmpl.get("concepts") or []
+        citations = await source_citations(concepts)
+        await persist_citations(citations)
+        verified = sum(
+            1 for c in citations.values()
+            if c.get("verification_status") == "verified")
+        return {
+            "template_id":     template_id,
+            "citations":       citations,
+            "quality":         citation_quality(citations),
+            "verified_count":  verified,
+            "concept_count":   len(concepts),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("source_citations_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Citation sourcing failed — see server logs.")
+
+
+@app.post("/api/v1/reports/team-activity")
+@limiter.limit("30/minute")
+async def post_team_activity(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """STEP 1C — per-member + platform-wide activity counts.
+
+    No body required — the team_emails are pinned in the pipeline
+    helper. Used by the report writer and the Issue Tracker activity
+    view both.
+    """
+    if ENVIRONMENT == "test":
+        return {"activity": {}, "cross_check_flags": []}
+    try:
+        from tools.template_pipeline import (
+            fetch_team_activity, cross_check_team_activity,
+        )
+        activity = await fetch_team_activity()
+        flags = cross_check_team_activity(activity)
+        return {"activity": activity, "cross_check_flags": flags}
+    except Exception as exc:
+        log.warning("team_activity_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Team activity fetch failed — see server logs.")
+
+
+@app.post("/api/v1/reports/validate-thesis")
+@limiter.limit("30/minute")
+async def post_validate_thesis(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """STEP 6 — thesis validation gate. Pulls the latest verified data
+    + ranked findings from the cache and runs the three thesis
+    conditions. Blocks generation when any condition fails."""
+    if ENVIRONMENT == "test":
+        return {
+            "passed":           True,
+            "conditions":       [],
+            "blocker_reasons":  [],
+        }
+    try:
+        from tools.analytical_findings import (
+            gather_payload_from_db, get_latest_findings,
+        )
+        from tools.cache import get_latest_strategy_hash
+        from tools.template_pipeline import (
+            live_from_payload, cross_check, validate_thesis,
+        )
+        data_hash = await get_latest_strategy_hash()
+        payload = await gather_payload_from_db(data_hash)
+        live = live_from_payload(payload)
+        findings_row = await get_latest_findings()
+        staged_md = (findings_row or {}).get("findings_md") or ""
+        verified, _ = cross_check(live, staged_md)
+        ranked = (findings_row or {}).get("ranked_findings") or []
+        result = validate_thesis(verified, ranked)
+        return result
+    except Exception as exc:
+        log.warning("validate_thesis_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Thesis validation failed — see server logs.")
+
+
+@app.post("/api/v1/reports/rank-findings")
+@limiter.limit("30/minute")
+async def post_rank_findings(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """STEP 7 — explicit ranking endpoint. Reads the latest findings,
+    re-ranks them, and returns the ordered list. The stage-findings
+    endpoint already writes ranked_findings; this endpoint is a
+    convenience for the UI to refresh the ranking after a manual
+    findings edit."""
+    if ENVIRONMENT == "test":
+        return {"ranked_findings": []}
+    try:
+        from tools.analytical_findings import get_latest_findings
+        from tools.template_pipeline import rank_findings
+        row = await get_latest_findings()
+        if not row:
+            return {"ranked_findings": []}
+        ranked = rank_findings(row.get("findings") or [])
+        return {"ranked_findings": ranked}
+    except Exception as exc:
+        log.warning("rank_findings_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Rank findings failed — see server logs.")
+
+
 _RISK_FREE_SOURCE = "FRED DTB3 (3-month T-bill, mean monthly rate, annualised)"
 
 
