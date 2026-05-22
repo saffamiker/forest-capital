@@ -120,7 +120,7 @@ export function MacroCitationBadge({ category }: { category: string }) {
  * wrote [Macro:monetary_policy] or [Macro: monetary_policy] both
  * resolve. Used by renderWithMacroCitations below.
  */
-export const MACRO_CITATION_RE = /\[Macro:\s*([A-Za-z0-9_.\-]+)\s*\]/g
+export const MACRO_CITATION_RE = /\[Macro:\s*([A-Za-z0-9_.-]+)\s*\]/g
 
 
 /**
