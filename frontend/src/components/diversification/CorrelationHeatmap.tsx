@@ -124,7 +124,9 @@ export function CorrelationHeatmap() {
   }, [data, period])
 
   const facts = useMemo(() => {
-    if (!data || !matrix) return { lowestPair: null, highestPair: null }
+    if (!data || !matrix || !Array.isArray(data.labels)) {
+      return { lowestPair: null, highestPair: null }
+    }
     return computeInsightFacts(data.labels, matrix)
   }, [data, matrix])
 
@@ -140,7 +142,7 @@ export function CorrelationHeatmap() {
       </div>
     )
   }
-  if (error || !data || data.labels.length === 0) {
+  if (error || !data || !data.labels || data.labels.length === 0) {
     return (
       <div className="card p-5"
            style={{ borderLeft: '3px solid #3b82f6' }}>

@@ -34,6 +34,9 @@ import { CorrelationHeatmap } from '../components/diversification/CorrelationHea
 import { TailRiskTable } from '../components/diversification/TailRiskTable'
 import { CaptureScatter } from '../components/diversification/CaptureScatter'
 import { DrawdownDurationTable } from '../components/diversification/DrawdownDurationTable'
+import { CrisisPerformanceTable } from '../components/diversification/CrisisPerformanceTable'
+import { RiskContributionBar } from '../components/diversification/RiskContributionBar'
+import { DistributionTable } from '../components/diversification/DistributionTable'
 
 // Purple accent — analytics sits alongside the academic-rigour screens.
 const ACCENT = '#7c3aed'
@@ -1216,6 +1219,21 @@ export default function AcademicAnalytics() {
               before seeing the asymmetric capture profile. Item 8
               commit 4. */}
           <CaptureScatter />
+          {/* Crisis performance — historical stress test. Reads naturally
+              after capture: capture is the average asymmetry, crisis
+              performance is the worst-case asymmetry. Item 8 commit 5. */}
+          <CrisisPerformanceTable />
+          {/* Marginal contribution to risk — flips the question from
+              "what is each strategy's risk" to "how does each strategy
+              contribute to the portfolio's risk". The bar chart's visual
+              compactness pairs well with the table-heavy sections above.
+              Item 8 commit 5. */}
+          <RiskContributionBar />
+          {/* Return distribution — distribution moments + normality test.
+              Closes the diversification suite: every section above reads
+              more carefully once the reader knows which strategies pass
+              normality (and which don't). Item 8 commit 5. */}
+          <DistributionTable />
           {data.factor_loadings && data.factor_loadings.length > 0 &&
             <FactorLoadingsTable rows={data.factor_loadings} ffNote={ffNote} />}
           <SensitivityAnalysis />

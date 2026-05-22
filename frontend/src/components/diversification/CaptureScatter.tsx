@@ -97,8 +97,12 @@ export function CaptureScatter() {
   const { data, loading, error } = useCaptureRatios()
   const [period, setPeriod] = useState<PeriodKey>('full')
 
+  // `data.strategies` may be missing entirely on a malformed payload —
+  // hardened against {}-fallback responses seen in tests that render
+  // the parent page without per-endpoint mocks.
   const points = useMemo(
-    () => data ? extractPoints(data.strategies, period) : [],
+    () => data && Array.isArray(data.strategies)
+      ? extractPoints(data.strategies, period) : [],
     [data, period])
 
   if (loading) {
@@ -113,7 +117,7 @@ export function CaptureScatter() {
       </div>
     )
   }
-  if (error || !data || data.strategies.length === 0) {
+  if (error || !data || !data.strategies || data.strategies.length === 0) {
     return (
       <div className="card p-5"
            style={{ borderLeft: '3px solid #3b82f6' }}>
