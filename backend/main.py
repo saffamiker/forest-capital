@@ -713,10 +713,43 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
     if ENVIRONMENT == "test":
         return {"available": False, "note": "analytics unavailable in test environment"}
     try:
-        import pandas as pd
+        # May 22 2026 — first try the pre-computed cache. The
+        # strategy_cache write hook fires refresh_all_analytics
+        # immediately after a fresh strategy ingestion, so the
+        # cache is normally hot. Cold-cache fallback runs the
+        # inline compute below.
         from tools.cache import (
             get_monthly_returns, get_latest_strategy_cache, get_ff_factors,
+            get_latest_strategy_hash,
         )
+        from tools.precomputed_analytics import (
+            get_metric as get_precomputed,
+            get_latest_metric as get_latest_precomputed,
+        )
+
+        latest_hash = await get_latest_strategy_hash()
+        if latest_hash:
+            cached = await get_precomputed(latest_hash, "academic_analytics")
+            if cached:
+                log.info("academic_analytics_cache_hit",
+                         data_hash=latest_hash[:8])
+                return cached
+            # Stale-cache fallback — the latest hash hasn't been
+            # refreshed yet but a previous data ingestion's payload
+            # is still in the table. Better to serve stale than to
+            # block on the inline compute when the refresh hook is
+            # in flight. The response carries _stale=True so the
+            # frontend can decide whether to surface a notice.
+            stale = await get_latest_precomputed("academic_analytics")
+            if stale:
+                log.info("academic_analytics_cache_stale_hit")
+                return stale
+
+        # Cold cache — run the inline compute (same code path the
+        # endpoint used before May 22 2026). The refresh hook will
+        # write the row in the background so future requests hit
+        # the cache.
+        import pandas as pd
         from tools import analytics as an
 
         monthly = await get_monthly_returns()
