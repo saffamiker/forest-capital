@@ -22,7 +22,8 @@
  * do something — there is no inert underline that leads nowhere.
  */
 import { useEffect, useRef, useState } from 'react'
-import { Info, BookOpen } from 'lucide-react'
+import { useNavigate } from 'react-router-dom'
+import { Info, BookOpen, Users } from 'lucide-react'
 import { useUI } from '../context/UIContext'
 import { useGlossaryStore } from '../stores/glossaryStore'
 import LearnMoreSidePanel from './LearnMoreSidePanel'
@@ -58,6 +59,32 @@ export default function ExplainableText({ term, strategy, children }: Props) {
   const [hovered, setHovered] = useState(false)
   const [learnMoreOpen, setLearnMoreOpen] = useState(false)
   const panelRef = useRef<HTMLSpanElement>(null)
+  const navigate = useNavigate()
+
+  // Hand off to the council with the term as a contextual question
+  // pre-filled. Mirrors the askCouncil flow in ExplainerPanel and
+  // DataExplainPanel — the council screen reads the question from
+  // route state, focuses the input, and does NOT auto-submit so the
+  // user reviews and convenes when ready. Added May 22 2026 (Molly
+  // UAT Group 3): the Ask-the-Council affordance lived on both
+  // drawer-style explainers but was missing from the inline term-
+  // explanation panel, breaking the continuation path on every
+  // Commentary-mode click.
+  const askCouncil = () => {
+    if (!entry) return
+    const termLabel = entry.what
+      ? `${term} (${entry.what.split('.')[0]})`
+      : term
+    const strategyPart = strategy
+      ? ` for the ${strategy.replace(/_/g, ' ')} strategy`
+      : ''
+    const prefillQuestion =
+      `Can you explain ${termLabel}${strategyPart} in the context of `
+      + 'our asset allocation analysis and the 2022 correlation regime '
+      + 'break?'
+    navigate('/council', { state: { prefillQuestion } })
+    setOpen(false)
+  }
 
   // Close panel on outside click or Escape — same UX as Settings cog.
   useEffect(() => {
@@ -104,11 +131,26 @@ export default function ExplainableText({ term, strategy, children }: Props) {
       {/* Level 1 — custom hover tooltip. Styled to match the click
           panel; suppressed while the click panel is open so the two
           never stack. pointer-events-none so it never steals the
-          mouse-out that dismisses it. */}
+          mouse-out that dismisses it.
+
+          Width / overflow rules mirror the InfoIcon tooltip — caps at
+          the design width on desktop, shrinks to fit narrow viewports
+          (iPhone SE), wraps long unbreakable strings, scrolls
+          vertically when content exceeds the height cap. UAT feedback
+          flagged column tooltips clipping; the cap makes the wrap +
+          scroll behaviour predictable across viewports. */}
       {hovered && !open && (
         <span
           role="tooltip"
-          className="absolute z-50 left-0 mt-1 w-56 card px-3 py-1.5 text-2xs leading-relaxed text-slate-200 shadow-card pointer-events-none"
+          style={{
+            maxWidth: 'min(224px, calc(100vw - 24px))',
+            maxHeight: 'min(60vh, 320px)',
+            overflowY: 'auto',
+          }}
+          className="absolute z-50 left-0 mt-1 w-56 card px-3 py-1.5
+                     text-2xs leading-relaxed text-slate-200 shadow-card
+                     pointer-events-none
+                     break-words [overflow-wrap:anywhere] whitespace-normal"
         >
           {entry.hover}
         </span>
@@ -116,8 +158,15 @@ export default function ExplainableText({ term, strategy, children }: Props) {
 
       {open && (
         <span
-          className="absolute z-40 left-0 mt-1 w-72 card p-3 shadow-card text-xs leading-relaxed"
-          style={{ borderColor: '#3b82f640' }}
+          className="absolute z-40 left-0 mt-1 w-72 card p-3 shadow-card
+                     text-xs leading-relaxed
+                     break-words [overflow-wrap:anywhere]"
+          style={{
+            borderColor: '#3b82f640',
+            maxWidth: 'min(288px, calc(100vw - 24px))',
+            maxHeight: 'min(70vh, 480px)',
+            overflowY: 'auto',
+          }}
           role="dialog"
         >
           <span className="block">
@@ -136,14 +185,30 @@ export default function ExplainableText({ term, strategy, children }: Props) {
               <span className="block text-white mt-0.5">{entry.this_session}</span>
             </span>
           )}
-          <button
-            type="button"
-            onClick={(e) => { e.stopPropagation(); setLearnMoreOpen(true) }}
-            className="mt-3 inline-flex items-center gap-1.5 text-electric text-2xs hover:text-blue-300"
-          >
-            <BookOpen className="w-3 h-3" />
-            Learn more · academic context
-          </button>
+          <span className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); setLearnMoreOpen(true) }}
+              className="inline-flex items-center gap-1.5 text-electric text-2xs hover:text-blue-300"
+            >
+              <BookOpen className="w-3 h-3" />
+              Learn more · academic context
+            </button>
+            {/* Ask the Council — opens /council with a contextual
+                question pre-filled. Mirrors the affordance the
+                ExplainerPanel and DataExplainPanel drawer surfaces
+                already carry, so every Commentary-mode explainer
+                surface offers the same continuation path. */}
+            <button
+              type="button"
+              onClick={(e) => { e.stopPropagation(); askCouncil() }}
+              data-testid={`explainable-ask-council-${term}`}
+              className="inline-flex items-center gap-1.5 text-electric text-2xs hover:text-blue-300"
+            >
+              <Users className="w-3 h-3" />
+              Ask the Council about this
+            </button>
+          </span>
         </span>
       )}
 

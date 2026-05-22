@@ -14,6 +14,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ReactNode } from 'react'
 import { render, renderHook, screen, act, fireEvent } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import axios from 'axios'
 
 import { useGlossaryStore } from '../stores/glossaryStore'
@@ -26,10 +27,12 @@ import { useStrategiesStore } from '../stores/strategiesStore'
 
 // Render-helper: every Commentary-mode component reads useUI(), so we wrap
 // in UIProvider. The provider reads sessionStorage on init, which is how
-// each test sets the active mode.
+// each test sets the active mode. MemoryRouter is also needed because
+// ExplainableText now calls useNavigate for its Ask-the-Council
+// continuation button (May 22 2026, Molly UAT Group 3).
 function renderInMode(mode: 'analyst' | 'commentary' | 'present', node: ReactNode) {
   sessionStorage.setItem('fc_ui_mode', mode)
-  return render(<UIProvider>{node}</UIProvider>)
+  return render(<MemoryRouter><UIProvider>{node}</UIProvider></MemoryRouter>)
 }
 
 vi.mock('axios')
@@ -422,12 +425,15 @@ describe('ExplainableText hover cost optimisation', () => {
       <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>,
     )
     await act(async () => { await Promise.resolve() })
-    // rerender replaces the entire element including the UIProvider wrapper;
-    // re-supply the provider so the second render still has context.
+    // rerender replaces the entire element including the wrappers; re-
+    // supply MemoryRouter + UIProvider so the second render still has
+    // both contexts (ExplainableText calls useNavigate as of May 22 2026).
     rerender(
-      <UIProvider>
-        <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>
-      </UIProvider>,
+      <MemoryRouter>
+        <UIProvider>
+          <ExplainableText term="sharpe_ratio">SHARPE</ExplainableText>
+        </UIProvider>
+      </MemoryRouter>,
     )
     await act(async () => { await Promise.resolve() })
 

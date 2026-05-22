@@ -101,6 +101,7 @@ class FixedIncomeAnalyst:
         self,
         strategy_results: dict[str, Any],
         history: dict[str, Any] | None = None,
+        query: str = "",
     ) -> dict[str, Any]:
         """
         Correlation arithmetic runs before the LLM call — not inside it.
@@ -113,11 +114,28 @@ class FixedIncomeAnalyst:
             strategy_results: All 10 strategy results from run_all_strategies().
             history:           Full history dict from get_full_history() — used
                                to compute equity-bond correlation if available.
+            query:             The user's question. See equity_analyst.analyse
+                               for the rationale — specialists must frame their
+                               analysis against the user's question, not produce
+                               the same report every run.
         """
         correlation_data = self._compute_correlation_summary(history)
         context = self._build_context(strategy_results, correlation_data)
 
+        query_line = (
+            f"USER QUESTION: {query.strip()}\n\n"
+            "Frame your fixed-income analysis around the user question "
+            "above. Connect the bond and correlation data to what they "
+            "asked. If the question is meta or methodology-oriented "
+            "(peer-reviewer questions, presentation framing, written-"
+            "report scope), answer from your fixed-income perspective: "
+            "which FI findings would the question target, which bond "
+            "numbers ground a good answer, and what FI-specific risks "
+            "or caveats apply. The 2022 correlation breakdown is the "
+            "central FI finding and almost always relevant.\n\n"
+        ) if query and query.strip() else ""
         user_message = (
+            f"{query_line}"
             "Analyse fixed income diversification from these strategy results. "
             "REQUIRED: (1) Explicitly test the 2022 equity-bond correlation breakdown. "
             "(2) Compare bond-inclusive strategies vs 100% equity benchmark. "

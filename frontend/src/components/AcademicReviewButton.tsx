@@ -14,17 +14,16 @@
  * The run can be cancelled mid-stream.
  */
 import { useState, useRef } from 'react'
-import { GraduationCap, Loader2, X, ChevronDown, ChevronRight } from 'lucide-react'
+import { GraduationCap, Loader2, X, ChevronDown, ChevronRight, AlertTriangle } from 'lucide-react'
 import Markdown from './Markdown'
 import { trackFeature } from '../lib/activityLogger'
+import {
+  parseVerdict,
+  extractTopPriority,
+  type OverallRatings,
+} from '../lib/academicVerdict'
 
 type Phase = 'idle' | 'consulting' | 'streaming' | 'done' | 'error'
-
-interface VerdictSection {
-  heading: string
-  rating: string | null
-  body: string
-}
 
 // Peer agent id → display name for the accordion.
 const PEER_NAMES: Record<string, string> = {
@@ -37,35 +36,14 @@ const PEER_NAMES: Record<string, string> = {
   contrarian_analyst: 'Contrarian Analyst (Grok)',
 }
 
-// Qualitative rating → badge styling.
+// Qualitative rating → badge styling. The default rubric uses Strong /
+// Developing / Needs Work; the script rubric substitutes Incomplete for
+// Developing. Unknown ratings fall back to a neutral pill.
 const RATING_STYLE: Record<string, string> = {
   Strong: 'bg-success/15 text-success border-success/30',
   Developing: 'bg-warning/15 text-warning border-warning/30',
   'Needs Work': 'bg-danger/15 text-danger border-danger/30',
-}
-
-/** Split the arbiter markdown into sections by "### " headings,
- *  pulling out the **Rating:** line from each. */
-function parseVerdict(text: string): VerdictSection[] {
-  return text
-    .split(/^### /m)
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((part) => {
-      const lines = part.split('\n')
-      const heading = (lines[0] ?? '').trim()
-      let rating: string | null = null
-      const body: string[] = []
-      for (const ln of lines.slice(1)) {
-        const m = ln.match(/^\*\*Rating:\*\*\s*(.+?)\s*$/)
-        if (m && rating === null) {
-          rating = m[1].trim()
-          continue
-        }
-        body.push(ln)
-      }
-      return { heading, rating, body: body.join('\n').trim() }
-    })
+  Incomplete: 'bg-danger/15 text-danger border-danger/30',
 }
 
 function RatingBadge({ rating }: { rating: string | null }) {
@@ -75,6 +53,60 @@ function RatingBadge({ rating }: { rating: string | null }) {
     <span className={`text-2xs px-2 py-0.5 rounded-full border ${cls}`}>
       {rating}
     </span>
+  )
+}
+
+/** The two top-level summary ratings rendered as a prominent block above
+ *  the five rubric sections. Previously the two `**Academic rigour:**`
+ *  and `**Portfolio Manager insight:**` lines were swept into the section
+ *  parser and rendered as a malformed "Section 0" — literal markdown
+ *  asterisks in a plain h4 with no badge. This block extracts them and
+ *  shows the badges where they belong. */
+function OverallRatingsBlock({ overall }: { overall: OverallRatings }) {
+  return (
+    <div
+      data-testid="academic-overall-ratings"
+      className="flex flex-wrap gap-x-6 gap-y-2 pb-3 mb-4 border-b border-border">
+      {overall.academic && (
+        <div className="flex items-center gap-2">
+          <span className="text-2xs uppercase tracking-wide text-muted">
+            Academic Rigour
+          </span>
+          <RatingBadge rating={overall.academic} />
+        </div>
+      )}
+      {overall.pm && (
+        <div className="flex items-center gap-2">
+          <span className="text-2xs uppercase tracking-wide text-muted">
+            Portfolio Manager Insight
+          </span>
+          <RatingBadge rating={overall.pm} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Top priority callout — surfaces the FIRST numbered item from the
+ *  Priority Areas for Further Investigation section (rubric section 4)
+ *  so the most actionable next step is visible without scrolling. Molly
+ *  UAT Group 4: she could not identify the top priority area because
+ *  it was buried in section 4 of a long verdict. The callout makes the
+ *  number-one priority unmissable. */
+function TopPriorityCallout({ text }: { text: string }) {
+  return (
+    <div
+      data-testid="academic-top-priority"
+      className="rounded border border-warning/40 bg-warning/10 p-3 mb-4">
+      <div className="flex items-center gap-1.5 mb-1">
+        <AlertTriangle className="w-3.5 h-3.5 text-warning" />
+        <span className="text-2xs uppercase tracking-wide text-warning
+                         font-semibold">
+          Top priority for further investigation
+        </span>
+      </div>
+      <Markdown content={text} />
+    </div>
   )
 }
 
@@ -165,7 +197,8 @@ export default function AcademicReviewButton() {
     }
   }
 
-  const sections = parseVerdict(arbiterText)
+  const { overall, sections } = parseVerdict(arbiterText)
+  const topPriority = extractTopPriority(sections)
   const peerEntries = Object.entries(peerResponses)
 
   return (
@@ -232,8 +265,14 @@ export default function AcademicReviewButton() {
         </div>
       )}
 
-      {/* Arbiter verdict — renders section by section as it streams */}
-      {(phase === 'streaming' || phase === 'done') && sections.length > 0 && (
+      {/* Arbiter verdict — overall ratings + top priority callout +
+          rubric sections. The block renders as soon as EITHER the
+          top-level ratings have streamed in or at least one rubric
+          section is parsed; previously it gated on sections.length > 0
+          alone, which left the verdict blank during the first second of
+          streaming. */}
+      {(phase === 'streaming' || phase === 'done')
+        && (sections.length > 0 || overall) && (
         <div className="card p-4" style={{ borderLeft: '3px solid #f59e0b' }}>
           <div className="flex items-center gap-2 mb-3">
             <GraduationCap className="w-4 h-4 text-warning" />
@@ -241,6 +280,10 @@ export default function AcademicReviewButton() {
               Academic Review — Council Verdict
             </h3>
           </div>
+
+          {overall && <OverallRatingsBlock overall={overall} />}
+          {topPriority && <TopPriorityCallout text={topPriority} />}
+
           <div className="space-y-4">
             {sections.map((s, i) => (
               <div key={i}>

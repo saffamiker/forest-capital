@@ -98,6 +98,7 @@ class EquityAnalyst:
         self,
         strategy_results: dict[str, Any],
         regime_data: dict[str, Any] | None = None,
+        query: str = "",
     ) -> dict[str, Any]:
         """
         Entry point for the CIO council flow — called after the backtester
@@ -108,11 +109,34 @@ class EquityAnalyst:
         Args:
             strategy_results: Output of run_all_strategies() — all 10 strategies.
             regime_data:       Current regime classification from the detector.
+            query:             The user's question. Threaded through so the
+                               analyst frames its equity analysis against
+                               what the user actually asked rather than
+                               producing the same stock analysis every run
+                               (the May 22 2026 Molly UAT failure: a meta
+                               question got a strategy answer because the
+                               specialists never saw the question).
 
         Returns a response dict with technical_findings and layman_explanation.
         """
         context = self._build_context(strategy_results, regime_data)
+        # When the user asked a specific question, surface it at the TOP
+        # of the prompt and instruct the analyst to ground its equity
+        # analysis against it. Empty query falls back to the stock task.
+        query_line = (
+            f"USER QUESTION: {query.strip()}\n\n"
+            "Frame your equity analysis around the user question above. "
+            "Connect the equity strategy data to what they asked — do not "
+            "produce a generic equity report when the question is specific. "
+            "If the question is meta or methodology-oriented (e.g. peer "
+            "reviewer questions, presentation framing, written-report "
+            "scope), answer from your equity-analyst perspective: which "
+            "equity findings would the question target, which equity "
+            "numbers ground a good answer, and what equity-specific risks "
+            "or caveats apply.\n\n"
+        ) if query and query.strip() else ""
         user_message = (
+            f"{query_line}"
             f"Analyse the equity strategy performance from these backtester results. "
             f"Focus on: (1) which equity-heavy strategies outperformed on risk-adjusted "
             f"basis, (2) momentum signal effectiveness, (3) factor exposure patterns. "
