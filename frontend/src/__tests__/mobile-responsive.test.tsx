@@ -181,6 +181,27 @@ describe('Mobile navigation drawer', () => {
   })
 })
 
+// ── Tour interaction guard (UAT feedback #1, May 22 2026) ─────────────────────
+
+describe('Nav right-side cluster stays clickable during the site tour', () => {
+  // The Joyride overlay sits at z-90 and otherwise intercepts every
+  // click on the nav header. Raising the right-side controls cluster
+  // to z-100 puts Settings / Sign out / Testing Mode / Help / the
+  // user email above the overlay so a tour-active user can still
+  // reach the account icon. The Joyride config never blocks pointer
+  // events on its own — z-index is what governs the hit-test.
+  it('settings icon container carries z-[100] relative positioning', () => {
+    renderMainLayout()
+    const settings = screen.getByLabelText('Settings')
+    // The right-side cluster is the Settings link's nearest ancestor
+    // div carrying the z-[100] class.
+    const cluster = settings.closest('div.z-\\[100\\]')
+    expect(cluster).not.toBeNull()
+    expect(cluster?.className).toContain('relative')
+    expect(cluster?.className).toContain('z-[100]')
+  })
+})
+
 // ── Dashboard strategy table ──────────────────────────────────────────────────
 
 const SAMPLE_STRATEGY = {

@@ -1,6 +1,6 @@
 /**
  * Settings — a single scrollable page (no tabs) with five sections:
- *   1. Organisation            — reporting-context / brand switcher
+ *   1. Organization            — reporting-context / brand switcher
  *   2. Data and Study Period   — read-only data-table status
  *   3. Analytics Configuration — the risk-free rate assumption
  *   4. Academic Documents      — agent-context document upload
@@ -52,7 +52,7 @@ const Placeholder = ({ children }: { children: React.ReactNode }) => (
   <p className="text-xs text-muted italic">{children}</p>
 )
 
-// ── 1. Organisation ───────────────────────────────────────────────────────────
+// ── 1. Organization ───────────────────────────────────────────────────────────
 
 const BRAND_OPTIONS: { value: BrandMode; label: string; sub: string }[] = [
   { value: BRANDS.MCCOLL, label: 'McColl School of Business',
@@ -61,7 +61,7 @@ const BRAND_OPTIONS: { value: BrandMode; label: string; sub: string }[] = [
     sub: 'Industry-partner reporting context' },
 ]
 
-function OrganisationSection() {
+function OrganizationSection() {
   // Same brand state as before — relocated from the nav gear dropdown,
   // logic unchanged: useBrand()/setBrand drive the header branding.
   // The switcher is a team action — gated for guests.
@@ -479,7 +479,7 @@ export default function Settings() {
         title="Organization"
         description="Select the reporting context for this session."
       >
-        <OrganisationSection />
+        <OrganizationSection />
       </SettingsSection>
 
       <SettingsSection

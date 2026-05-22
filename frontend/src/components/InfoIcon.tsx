@@ -129,7 +129,21 @@ export default function InfoIcon({
             bottom: pos.above
               ? window.innerHeight - pos.top : undefined,
             left: pos.left,
-            width: 240,
+            // Width caps at 240px desktop, shrinks to fit viewports
+            // narrower than 264px (240 + 24 margin) so the tooltip
+            // never extends past the viewport edge on iPhone SE.
+            width: 'min(240px, calc(100vw - 24px))',
+            maxWidth: 'min(240px, calc(100vw - 24px))',
+            // Vertical cap: 60vh on tall viewports, 320px on short
+            // ones. Without this, a long tooltip placed above the
+            // icon (flip-above branch) can extend past the top of
+            // the viewport and clip its first lines. Excess content
+            // scrolls within the tooltip via overflow-y-auto.
+            // UAT feedback flagged P (FDR) → Tier 1 column tooltips
+            // clipping at 375px width; the cap makes the wrap +
+            // scroll behaviour predictable across viewports.
+            maxHeight: 'min(60vh, 320px)',
+            overflowY: 'auto',
           }}
           className="z-[80] card px-3 py-2
                       text-2xs leading-relaxed text-slate-200 shadow-card
