@@ -694,7 +694,16 @@ async def resolve_feedback(
     feedback_id: int, status: str, resolution_note: str | None, resolved_by: str,
 ) -> dict[str, Any] | None:
     """Updates a feedback row's status. Returns {user_email, title, status}
-    for the notification queue, or None."""
+    for the notification queue, or None when the row does not exist.
+
+    Split into a SELECT-then-UPDATE pair on purpose. The earlier shape used
+    UPDATE ... RETURNING + Result.fetchone(), which returns None silently in
+    production (sqlalchemy 2.0 + asyncpg surfaces RETURNING rows via
+    `.returned_defaults` / iteration in some configurations, not fetchone) —
+    leaving every resolve attempt 404-ing despite the row existing. The
+    SELECT pre-flight is bulletproof: a missing row returns None up-front
+    without an UPDATE, a present row drives an UPDATE-without-RETURNING.
+    """
     try:
         from sqlalchemy import text
 
@@ -702,21 +711,35 @@ async def resolve_feedback(
         if AsyncSessionLocal is None:
             return None
         async with AsyncSessionLocal() as session:
-            row = await session.execute(text("""
+            existing = await session.execute(
+                text("SELECT user_email, title FROM test_feedback WHERE id = :id"),
+                {"id": feedback_id},
+            )
+            preflight = existing.fetchone()
+            if preflight is None:
+                return None
+            # `status` is bound twice on different sides: as the value
+            # for a VARCHAR(20) column AND inside a `IN ('text','text')`
+            # text comparison. asyncpg's prepared-statement type
+            # inference deduces ONE type per $N placeholder across the
+            # full statement, so a single shared :status raises
+            # AmbiguousParameterError (text vs character varying). Pass
+            # the value as two separately-named parameters so each $N
+            # lives in a single-type context — solved.
+            sets_resolved_at = status in ("resolved", "wont_do")
+            await session.execute(text("""
                 UPDATE test_feedback
                 SET status = :status, resolution_note = :note,
                     resolved_by = :by,
-                    resolved_at = CASE WHEN :status IN ('resolved', 'wont_do')
+                    resolved_at = CASE WHEN :sets_resolved_at
                                        THEN now() ELSE resolved_at END
                 WHERE id = :id
-                RETURNING user_email, title, status
             """), {"id": feedback_id, "status": status,
-                   "note": resolution_note, "by": resolved_by})
-            found = row.fetchone()
+                   "note": resolution_note, "by": resolved_by,
+                   "sets_resolved_at": sets_resolved_at})
             await session.commit()
-            if found:
-                return {"user_email": found[0], "title": found[1],
-                        "status": found[2]}
+            return {"user_email": preflight[0], "title": preflight[1],
+                    "status": status}
     except Exception as exc:  # noqa: BLE001
         log.warning("test_feedback_resolve_failed", error=str(exc))
     return None

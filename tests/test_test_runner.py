@@ -479,6 +479,74 @@ class TestTestRunnerPersistence:
 
         _run(scenario())
 
+    def test_resolve_feedback_returns_row_metadata_on_existing_id(self):
+        """Pins the SELECT-then-UPDATE contract on resolve_feedback.
+
+        Previously this used UPDATE ... RETURNING + Result.fetchone(),
+        which silently returned None on production sqlalchemy+asyncpg —
+        every resolve attempt 404-ed despite the row existing. The fix
+        is a SELECT pre-flight (existence check + payload grab) plus an
+        UPDATE without RETURNING. The test pins both the happy path
+        (returns the row's user_email/title/status) and the not-found
+        path (returns None for an unknown id) so a future refactor
+        can't reintroduce the silent-None regression.
+        """
+        if not _db_ready():
+            pytest.skip("no live database")
+        from tools.test_runner import (
+            submit_feedback, resolve_feedback, get_all_feedback,
+        )
+
+        sid = f"sc_{uuid.uuid4().hex[:8]}"
+
+        async def scenario():
+            from database import engine
+            await engine.dispose()
+            try:
+                stored = await submit_feedback(
+                    user_email=TEAM, script_id=sid, step_id="a",
+                    source_route=None, feedback_type="observation",
+                    title="Resolve-roundtrip target",
+                    description="Pins the resolve_feedback contract.",
+                    priority=None, screenshot_paths=None, browser_info=None,
+                    low_quality=False, ai={})
+                assert stored is not None
+                # Read the auto-assigned id back from get_all_feedback —
+                # submit_feedback returns the inserted row dict.
+                all_fb = await get_all_feedback({})
+                mine = [f for f in all_fb if f["script_id"] == sid]
+                assert len(mine) == 1
+                feedback_id = mine[0]["id"]
+
+                # Happy path — the row exists, the function returns its
+                # metadata, and the UPDATE lands (status flips to
+                # 'resolved', resolved_by stamped).
+                result = await resolve_feedback(
+                    feedback_id, "resolved",
+                    "code_fix_deployed - verified via test",
+                    "developer@forest-capital",
+                )
+                assert result is not None
+                assert result["user_email"] == TEAM
+                assert result["title"] == "Resolve-roundtrip target"
+                assert result["status"] == "resolved"
+
+                # The UPDATE persisted — a re-read shows the new status.
+                after = await get_all_feedback({})
+                updated = next(f for f in after if f["id"] == feedback_id)
+                assert updated["status"] == "resolved"
+                assert updated["resolved_by"] == "developer@forest-capital"
+                assert updated["resolved_at"] is not None
+
+                # Not-found path — an unknown id returns None, no exception.
+                missing = await resolve_feedback(
+                    9_999_999, "noted", None, "developer@forest-capital")
+                assert missing is None
+            finally:
+                await _cleanup(sid)
+
+        _run(scenario())
+
     def test_free_form_feedback_has_no_script_or_step(self):
         if not _db_ready():
             pytest.skip("no live database")
