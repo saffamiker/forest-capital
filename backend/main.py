@@ -799,6 +799,172 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
         return {"available": False, "note": "analytics computation failed"}
 
 
+# ── Diversification suite endpoints (item 8) ──────────────────────────────────
+# Seven GET endpoints for the diversification context suite. Each
+# reads a single pre-computed row from analytics_metrics_cache (the
+# refresh hook fires on every strategy_cache write). Cold-cache
+# fallback: compute inline from tools.diversification_analytics so
+# the user always gets data even before the refresh hook lands.
+# require_team_member per the spec; rate-limited to protect the
+# DB / inline-compute paths from abuse.
+
+
+async def _read_div_metric_or_compute(
+    metric_kind: str,
+    inline_fn,
+) -> dict[str, Any]:
+    """Three-tier read for diversification metrics: cache hit by
+    current data_hash → stale cache → inline compute. Returns the
+    payload dict, never raises. Logs which path served the request
+    so production logs surface cache hit / miss patterns."""
+    try:
+        from tools.cache import (
+            get_latest_strategy_hash, get_latest_strategy_cache,
+        )
+        from tools.precomputed_analytics import (
+            get_metric, get_latest_metric,
+        )
+        latest_hash = await get_latest_strategy_hash()
+        if latest_hash:
+            cached = await get_metric(latest_hash, metric_kind)
+            if cached:
+                log.info("div_metric_cache_hit", metric=metric_kind)
+                return cached
+            stale = await get_latest_metric(metric_kind)
+            if stale:
+                log.info("div_metric_cache_stale_hit", metric=metric_kind)
+                return stale
+        # Cold cache — inline compute.
+        strategies = await get_latest_strategy_cache()
+        if not strategies:
+            return {"available": False,
+                    "note": "strategy cache not yet populated"}
+        log.info("div_metric_cache_miss_inline", metric=metric_kind)
+        return inline_fn(strategies)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("div_metric_failed", metric=metric_kind, error=str(exc))
+        return {"available": False, "note": "computation failed"}
+
+
+@app.get("/api/v1/analytics/correlation")
+@limiter.limit("30/minute")
+async def get_analytics_correlation(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """11x11 strategy + benchmark correlation matrices (full +
+    pre-2022 + post-2022). Drives the heatmap + insight callout."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "correlation_matrices",
+        lambda s: div.correlation_matrices(s),
+    )
+
+
+@app.get("/api/v1/analytics/tail-risk")
+@limiter.limit("30/minute")
+async def get_analytics_tail_risk(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """VaR + CVaR at 95% / 99%, monthly + annualised, historical
+    simulation. Drives the Downside Risk table."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "tail_risk",
+        lambda s: {"strategies": div.tail_risk(s)},
+    )
+
+
+@app.get("/api/v1/analytics/capture-ratios")
+@limiter.limit("30/minute")
+async def get_analytics_capture_ratios(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """Up / Down capture + capture score per strategy over full +
+    pre-2022 + post-2022 windows. Drives the capture scatter."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "capture_ratios",
+        lambda s: {"strategies": div.capture_ratios(s)},
+    )
+
+
+@app.get("/api/v1/analytics/drawdown-duration")
+@limiter.limit("30/minute")
+async def get_analytics_drawdown_duration(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """Avg / max drawdown duration + recovery + current-in-drawdown
+    state per strategy. Drives the Drawdown Duration table."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "drawdown_duration",
+        lambda s: {"strategies": div.drawdown_duration(s)},
+    )
+
+
+@app.get("/api/v1/analytics/crisis-performance")
+@limiter.limit("30/minute")
+async def get_analytics_crisis_performance(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """CAGR + max DD + Sharpe per strategy over 5 historical crisis
+    windows. Drives the Crisis Performance table."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "crisis_performance",
+        lambda s: div.crisis_performance(s),
+    )
+
+
+@app.get("/api/v1/analytics/risk-contribution")
+@limiter.limit("30/minute")
+async def get_analytics_risk_contribution(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """MCTR + % risk contribution for equal-weight and tangency-weight
+    portfolios. Drives the Risk Contribution stacked bar."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "marginal_contribution_to_risk",
+        lambda s: div.marginal_contribution_to_risk(s),
+    )
+
+
+@app.get("/api/v1/analytics/distribution")
+@limiter.limit("30/minute")
+async def get_analytics_distribution(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """Skewness / excess kurtosis / Jarque-Bera + best/worst months
+    per strategy. Drives the Distribution Summary table."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "return_distribution",
+        lambda s: {"strategies": div.return_distribution(s)},
+    )
+
+
 _RISK_FREE_SOURCE = "FRED DTB3 (3-month T-bill, mean monthly rate, annualised)"
 
 

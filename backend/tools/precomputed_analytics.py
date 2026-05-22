@@ -234,22 +234,75 @@ async def refresh_academic_analytics(data_hash: str) -> None:
                     error=str(exc))
 
 
+async def refresh_diversification_metrics(data_hash: str) -> None:
+    """Item 8 — the seven diversification suite metrics. Pure NumPy /
+    pandas / scipy; same data sources as refresh_academic_analytics.
+    Each metric is its own metric_kind row in analytics_metrics_cache
+    so the corresponding endpoint reads exactly one indexed row.
+
+    Fail-open per metric — one bad compute does not block the others.
+    """
+    try:
+        from tools.cache import get_latest_strategy_cache
+        from tools import diversification_analytics as div
+
+        strategies = await get_latest_strategy_cache()
+        if not strategies:
+            return
+
+        # Each metric is independently try/except'd so one failure
+        # doesn't sink the rest. The cache row is left absent on a
+        # failure; the endpoint falls back to inline compute.
+        computations = [
+            ("correlation_matrices",
+             lambda: div.correlation_matrices(strategies)),
+            ("tail_risk",
+             lambda: {"strategies": div.tail_risk(strategies)}),
+            ("capture_ratios",
+             lambda: {"strategies": div.capture_ratios(strategies)}),
+            ("drawdown_duration",
+             lambda: {"strategies": div.drawdown_duration(strategies)}),
+            ("crisis_performance",
+             lambda: div.crisis_performance(strategies)),
+            ("marginal_contribution_to_risk",
+             lambda: div.marginal_contribution_to_risk(
+                 strategies, tangency_weights=None)),
+            ("return_distribution",
+             lambda: {"strategies": div.return_distribution(strategies)}),
+        ]
+        for metric_kind, fn in computations:
+            try:
+                payload = fn()
+                await set_metric(
+                    data_hash, metric_kind, payload,
+                    source="refresh_diversification_metrics")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("diversification_metric_failed",
+                            metric_kind=metric_kind, error=str(exc))
+        # After all metric rows land, refresh the agent-context cache
+        # so the council / academic_review / explainer prompts see
+        # the new diversification numbers on the next agent call.
+        try:
+            from tools.diversification_context import (
+                refresh_diversification_context,
+            )
+            await refresh_diversification_context()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("diversification_context_refresh_failed",
+                        error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("diversification_refresh_failed", error=str(exc))
+
+
 async def refresh_all_analytics(data_hash: str) -> None:
     """Top-level dispatch — calls every refresh function. Fires from
     tools/cache.set_strategy_cache after a successful strategy write.
     Fail-open per-metric so one bad compute does not block the others.
-
-    Adding a new metric_kind: implement its compute function above
-    and call it here. The order is non-significant; the writes are
-    independent.
     """
     log.info("precomputed_analytics_refresh_started",
              data_hash=data_hash[:8] if data_hash else None)
     await refresh_academic_analytics(data_hash)
-    # Item 8 (diversification suite) will add additional refresh
-    # calls here for correlation_matrix / tail_risk /
-    # capture_ratios / drawdown_duration / crisis_performance /
-    # risk_contribution / distribution.
+    await refresh_diversification_metrics(data_hash)
     log.info("precomputed_analytics_refresh_complete",
              data_hash=data_hash[:8] if data_hash else None)
 
