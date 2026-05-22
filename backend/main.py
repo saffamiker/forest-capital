@@ -4195,6 +4195,237 @@ async def qa_full_review(request: Request, session: dict = Depends(require_sysad
         end_methodology()
 
 
+# ── QA findings — Flag for Fix + Mark as Intentional ─────────────────────────
+#
+# May 22 2026 — companion endpoints to the QA Action Required UI
+# (f96d897). The Flag for Fix button creates a triage_report_items
+# row directly from the QA finding, routing the QA-driven issue into
+# the same fix workflow used for UAT-derived items. The Mark as
+# Intentional button writes an upsert into qa_intentional_overrides
+# (migration 027), recording the team's judgement that the WARN is
+# intentional methodology, not a defect — the override outlives the
+# audit run that surfaced it.
+#
+# Both endpoints are team_member-gated (consistent with the May 2026
+# QA endpoint regating that opened audit operations to the whole
+# project team). Sysadmin status is recorded as the `marked_by`
+# value on the intentional override so the audit trail attributes
+# the decision to a specific user.
+
+
+class QAFlagForFixRequest(__import__("pydantic").BaseModel):
+    """POST body for the Flag for Fix endpoint."""
+    check_title: str
+    finding: str | None = None
+    implication: str | None = None
+    remediation: str | None = None
+    severity: str | None = None  # WARN → 'major' / FAIL → 'blocking'
+
+
+class QAMarkIntentionalRequest(__import__("pydantic").BaseModel):
+    """POST body for the Mark as Intentional endpoint."""
+    note: str | None = None
+    audit_run_hash: str | None = None
+
+
+@app.post("/api/v1/qa/findings/{check_id}/flag-for-fix")
+@limiter.limit("30/minute")
+async def qa_flag_for_fix(
+    request: Request,
+    check_id: str,
+    body: QAFlagForFixRequest,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Creates a triage_report_items row for the named QA check so the
+    finding enters the normal fix workflow. The triage row is
+    attached to a fresh triage_reports stub (triggered_by='qa_audit')
+    so the existing report-items query layer ignores no rows.
+
+    Returns the new triage_report_items id so the frontend can show
+    a "Flagged · #N" badge alongside the QA card going forward.
+    """
+    if not check_id or len(check_id) > 20:
+        raise HTTPException(status_code=422,
+                            detail="check_id must be 1-20 chars")
+    try:
+        from sqlalchemy import text as _text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            raise HTTPException(status_code=503,
+                                detail="Database unavailable")
+        # Compose the item body so the triage view shows the full
+        # finding without a join back to the QA audit.
+        body_parts = []
+        if body.finding:
+            body_parts.append(f"FINDING: {body.finding}")
+        if body.implication:
+            body_parts.append(f"IMPLICATION: {body.implication}")
+        if body.remediation:
+            body_parts.append(f"REMEDIATION: {body.remediation}")
+        item_body = "\n\n".join(body_parts) or None
+        item_title = f"QA {check_id} — {body.check_title}"
+
+        async with AsyncSessionLocal() as conn:
+            # Synthesise a one-off triage_reports row for this flag so
+            # the items query layer sees a parent report row. The
+            # report_text is the same item_body for traceability.
+            r = await conn.execute(_text(
+                "INSERT INTO triage_reports "
+                "(triggered_by, status, report_text) "
+                "VALUES ('qa_audit', 'complete', :rep) "
+                "RETURNING id"
+            ), {"rep": (item_body or item_title)})
+            report_id = r.scalar()
+
+            # The QA check is the source. source_item_type='qa_check'
+            # is a new value alongside the existing 'failure' /
+            # 'feedback' — the schema is permissive (a String(20) with
+            # no CHECK constraint), and the items query layer treats
+            # an unknown source as 'no back-pointer' which is the
+            # honest signal here. source_item_id stays NULL because a
+            # QA check is keyed by check_id (a string), not by an
+            # integer row id.
+            r2 = await conn.execute(_text(
+                "INSERT INTO triage_report_items "
+                "(report_id, item_type, item_title, item_body, "
+                " source_item_type, source_item_id) "
+                "VALUES (:rid, 'immediate', :title, :body, "
+                " 'qa_check', NULL) "
+                "RETURNING id"
+            ), {"rid": report_id, "title": item_title, "body": item_body})
+            item_id = r2.scalar()
+            await conn.commit()
+
+        log.info("qa_flag_for_fix_recorded",
+                 check_id=check_id, triage_item_id=int(item_id) if item_id else None,
+                 by=session.get("email"),
+                 severity=body.severity)
+        return {
+            "ok": True,
+            "check_id": check_id,
+            "triage_item_id": int(item_id) if item_id else None,
+            "triage_report_id": int(report_id) if report_id else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("qa_flag_for_fix_failed", ref=ref, error=str(exc))
+        raise HTTPException(status_code=500,
+                            detail=f"Flag for fix failed (ref: {ref})")
+
+
+@app.post("/api/v1/qa/findings/{check_id}/mark-intentional")
+@limiter.limit("30/minute")
+async def qa_mark_intentional(
+    request: Request,
+    check_id: str,
+    body: QAMarkIntentionalRequest,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Records (or updates) an entry in qa_intentional_overrides so the
+    QA panel renders "Confirmed intentional — recorded {date}" on
+    every subsequent audit instead of the WARN action card. The
+    override outlives the audit run that surfaced it.
+
+    Idempotent — a second click on the same check_id UPDATEs the
+    existing row (the unique constraint enforces one override per
+    check_id).
+    """
+    if not check_id or len(check_id) > 20:
+        raise HTTPException(status_code=422,
+                            detail="check_id must be 1-20 chars")
+    email = session.get("email") or "unknown"
+    try:
+        from sqlalchemy import text as _text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            raise HTTPException(status_code=503,
+                                detail="Database unavailable")
+        async with AsyncSessionLocal() as conn:
+            # Upsert — ON CONFLICT (check_id) DO UPDATE so a second
+            # Mark Intentional refreshes the note + timestamp rather
+            # than producing a duplicate row.
+            r = await conn.execute(_text(
+                "INSERT INTO qa_intentional_overrides "
+                "(check_id, marked_by, note, audit_run_hash) "
+                "VALUES (:cid, :by, :note, :hash) "
+                "ON CONFLICT (check_id) DO UPDATE SET "
+                " marked_at = now(), "
+                " marked_by = EXCLUDED.marked_by, "
+                " note = EXCLUDED.note, "
+                " audit_run_hash = EXCLUDED.audit_run_hash "
+                "RETURNING id, marked_at"
+            ), {
+                "cid": check_id, "by": email,
+                "note": body.note, "hash": body.audit_run_hash,
+            })
+            row = r.fetchone()
+            await conn.commit()
+
+        log.info("qa_mark_intentional_recorded",
+                 check_id=check_id, by=email,
+                 override_id=int(row[0]) if row else None)
+        return {
+            "ok": True,
+            "check_id": check_id,
+            "marked_by": email,
+            "marked_at": row[1].isoformat() if row and row[1] else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("qa_mark_intentional_failed", ref=ref, error=str(exc))
+        raise HTTPException(status_code=500,
+                            detail=f"Mark intentional failed (ref: {ref})")
+
+
+@app.get("/api/v1/qa/intentional-overrides")
+@limiter.limit("60/minute")
+async def qa_intentional_overrides_list(
+    request: Request,
+    session: dict = Depends(require_auth),
+):
+    """
+    Returns every recorded intentional override keyed by check_id.
+    The QA panel reads this on mount and renders a "Confirmed
+    intentional — recorded {date}" badge in place of the Action
+    Required card for any check_id present here.
+
+    Auth: any authenticated user — the audit trail is a project
+    record visible to viewers, not a sysadmin-private surface.
+    """
+    try:
+        from sqlalchemy import text as _text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return {"overrides": {}}
+        async with AsyncSessionLocal() as conn:
+            r = await conn.execute(_text(
+                "SELECT check_id, marked_at, marked_by, note, "
+                "       audit_run_hash "
+                "FROM qa_intentional_overrides "
+                "ORDER BY marked_at DESC"
+            ))
+            rows = r.fetchall()
+        overrides = {
+            row[0]: {
+                "marked_at": row[1].isoformat() if row[1] else None,
+                "marked_by": row[2],
+                "note": row[3],
+                "audit_run_hash": row[4],
+            }
+            for row in rows
+        }
+        return {"overrides": overrides}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("qa_intentional_overrides_read_failed", error=str(exc))
+        return {"overrides": {}}
+
+
 # ── Report ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/report/export")

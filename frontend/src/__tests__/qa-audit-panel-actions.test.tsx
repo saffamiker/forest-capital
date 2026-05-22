@@ -22,11 +22,18 @@
  * is exercised.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
+import axios from 'axios'
 import { useQAStore } from '../stores/qaStore'
 import { useGlossaryStore } from '../stores/glossaryStore'
 import type { QAAuditResult, QACheck } from '../types/agents'
 import QAAuditPanel from '../components/QAAuditPanel'
+
+vi.mock('axios')
+const mockedAxios = axios as unknown as {
+  get: ReturnType<typeof vi.fn>
+  post: ReturnType<typeof vi.fn>
+}
 
 const PASSING_CHECK: QACheck = {
   check_id: 'D01',
@@ -122,6 +129,13 @@ beforeEach(() => {
   // Glossary store — explanations are not exercised in these tests.
   useGlossaryStore.setState({
     qa: {}, loadQA: vi.fn() as unknown as AnyAsync,
+  })
+  // Default axios mocks. Override per-test for endpoint specifics.
+  mockedAxios.get = vi.fn().mockResolvedValue({
+    data: { overrides: {} },
+  })
+  mockedAxios.post = vi.fn().mockResolvedValue({
+    data: { ok: true, triage_item_id: 42 },
   })
 })
 
@@ -253,7 +267,7 @@ describe('QAAuditPanel — Action Required card variants', () => {
     ).toBeNull()
   })
 
-  it('Flag for Fix shows the TODO toast (endpoint stubbed in this commit)', () => {
+  it('Flag for Fix POSTs to the flag-for-fix endpoint with check context', async () => {
     useQAStore.setState({
       result: buildAudit([METHODOLOGY_CHECK]),
       loading: false,
@@ -261,15 +275,48 @@ describe('QAAuditPanel — Action Required card variants', () => {
     render(<QAAuditPanel />)
     fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
     fireEvent.click(screen.getByTestId(`qa-flag-${METHODOLOGY_CHECK.check_id}`))
-    // The toast naming the endpoint surfaces the placement so the
-    // tester knows the affordance is wired even before the backend
-    // endpoint lands.
-    expect(
-      screen.getByText(/flag-for-fix endpoint not yet wired/i),
-    ).toBeInTheDocument()
+
+    await waitFor(() => {
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        `/api/v1/qa/findings/${METHODOLOGY_CHECK.check_id}/flag-for-fix`,
+        expect.objectContaining({
+          check_title: METHODOLOGY_CHECK.check,
+          finding: METHODOLOGY_CHECK.finding,
+          implication: METHODOLOGY_CHECK.implication,
+          remediation: METHODOLOGY_CHECK.remediation,
+          // WARN status maps to 'major' severity per the backend
+          // contract (FAIL would map to 'blocking').
+          severity: 'major',
+        }),
+      )
+    })
+    // The success toast confirms the flag landed.
+    await waitFor(() => {
+      expect(
+        screen.getByText(/Flagged P03 for fix/i),
+      ).toBeInTheDocument()
+    })
   })
 
-  it('Mark as Intentional shows the TODO toast (endpoint stubbed)', () => {
+  it('FAIL status flags as severity blocking', async () => {
+    const failCheck: QACheck = { ...METHODOLOGY_CHECK, status: 'FAIL' }
+    useQAStore.setState({
+      result: buildAudit([failCheck]),
+      loading: false,
+    })
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(failCheck.description))
+    fireEvent.click(screen.getByTestId(`qa-flag-${failCheck.check_id}`))
+
+    await waitFor(() => {
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        expect.stringContaining('/flag-for-fix'),
+        expect.objectContaining({ severity: 'blocking' }),
+      )
+    })
+  })
+
+  it('Mark as Intentional POSTs to the mark-intentional endpoint', async () => {
     useQAStore.setState({
       result: buildAudit([METHODOLOGY_CHECK]),
       loading: false,
@@ -278,8 +325,58 @@ describe('QAAuditPanel — Action Required card variants', () => {
     fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
     fireEvent.click(
       screen.getByTestId(`qa-intentional-${METHODOLOGY_CHECK.check_id}`))
+
+    await waitFor(() => {
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        `/api/v1/qa/findings/${METHODOLOGY_CHECK.check_id}/mark-intentional`,
+        expect.objectContaining({ note: METHODOLOGY_CHECK.finding }),
+      )
+    })
+    await waitFor(() => {
+      expect(
+        screen.getByText(/marked as intentional/i),
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('renders the Confirmed Intentional badge when an override exists', async () => {
+    mockedAxios.get = vi.fn().mockResolvedValue({
+      data: {
+        overrides: {
+          [METHODOLOGY_CHECK.check_id]: {
+            marked_at: '2026-05-22T12:00:00Z',
+            marked_by: 'ruurdsm@queens.edu',
+            note: 'The double-sided cost capture is intentional.',
+            audit_run_hash: null,
+          },
+        },
+      },
+    })
+    useQAStore.setState({
+      result: buildAudit([METHODOLOGY_CHECK]),
+      loading: false,
+    })
+    render(<QAAuditPanel />)
+    // The overrides fetch is async — wait for the badge to land.
+    await waitFor(() => {
+      // Expand the row first.
+      fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+      expect(
+        screen.getByTestId(`qa-intentional-badge-${METHODOLOGY_CHECK.check_id}`),
+      ).toBeInTheDocument()
+    })
+    // The badge surfaces the reviewer's email + the team note.
+    expect(screen.getByText(/Confirmed Intentional/i)).toBeInTheDocument()
+    expect(screen.getByText(/ruurdsm@queens\.edu/)).toBeInTheDocument()
     expect(
-      screen.getByText(/mark-as-intentional not yet wired/i),
+      screen.getByText(/The double-sided cost capture is intentional/),
     ).toBeInTheDocument()
+    // The Action Required buttons must NOT render — the badge replaces them.
+    expect(
+      screen.queryByTestId(`qa-flag-${METHODOLOGY_CHECK.check_id}`),
+    ).toBeNull()
+    expect(
+      screen.queryByTestId(`qa-intentional-${METHODOLOGY_CHECK.check_id}`),
+    ).toBeNull()
   })
 })

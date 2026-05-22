@@ -1,7 +1,8 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
+import axios from 'axios'
 import {
   CheckCircle, XCircle, AlertTriangle, ChevronDown, ChevronUp, RefreshCw,
-  HelpCircle, Flag, ShieldCheck, Clipboard, ClipboardCheck,
+  HelpCircle, Flag, ShieldCheck, Clipboard, ClipboardCheck, Lock,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { Verdict, QACheck, QAActionType } from '../types/agents'
@@ -80,12 +81,25 @@ const ACTION_BLURB: Record<QAActionType, string> = {
  * shows a TODO toast naming the action so a tester reviewing the UI
  * card layout sees the affordance and the placement.
  */
+// Server payload from /api/v1/qa/intentional-overrides — keyed by
+// check_id. When a row exists for a check, the Action Required card
+// is replaced with a "Confirmed intentional" badge so the team's
+// methodology judgement persists across audit runs.
+interface IntentionalOverride {
+  marked_at: string | null
+  marked_by: string
+  note: string | null
+  audit_run_hash: string | null
+}
+
 function ActionCard({
-  check, onReRun, isReRunning,
+  check, onReRun, isReRunning, override, onIntentionalMarked,
 }: {
   check: QACheck
   onReRun: () => void
   isReRunning: boolean
+  override?: IntentionalOverride
+  onIntentionalMarked?: () => void
 }) {
   const action = check.action_type
   const hasStructured = !!(
@@ -93,6 +107,66 @@ function ActionCard({
     || check.disclosure_text || action
   )
   if (!hasStructured) return null
+
+  // The team previously confirmed this check is intentional — render
+  // a permanent badge in place of the Action Required block. The
+  // finding / implication still render above so the audit trail of
+  // what was reviewed stays visible.
+  if (override) {
+    const dateLabel = override.marked_at
+      ? new Date(override.marked_at).toLocaleDateString(undefined,
+          { year: 'numeric', month: 'short', day: 'numeric' })
+      : 'unknown date'
+    return (
+      <div
+        data-testid={`qa-action-card-${check.check_id}`}
+        className="mt-2 rounded border border-border bg-navy-800 px-3 py-2.5
+                   space-y-2.5">
+        {check.finding && (
+          <div>
+            <div className="text-2xs uppercase tracking-wide text-muted mb-0.5">
+              Finding
+            </div>
+            <p className="text-slate-200 text-xs leading-relaxed">
+              {check.finding}
+            </p>
+          </div>
+        )}
+        {check.implication && (
+          <div>
+            <div className="text-2xs uppercase tracking-wide text-muted mb-0.5">
+              Implication
+            </div>
+            <p className="text-slate-300 text-xs leading-relaxed">
+              {check.implication}
+            </p>
+          </div>
+        )}
+        <div
+          data-testid={`qa-intentional-badge-${check.check_id}`}
+          className="flex items-start gap-2 rounded border border-success/30
+                     bg-success/10 px-3 py-2.5">
+          <Lock className="w-3.5 h-3.5 text-success shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <div className="text-2xs uppercase tracking-wide text-success
+                            font-semibold">
+              Confirmed Intentional — recorded {dateLabel}
+            </div>
+            <p className="text-slate-300 text-2xs mt-0.5">
+              Reviewed by {override.marked_by}. The team has confirmed this
+              behaviour is intentional methodology, not a defect. The
+              override persists across audit runs.
+            </p>
+            {override.note && (
+              <p className="text-slate-400 text-2xs mt-1 italic">
+                Note: {override.note}
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -141,6 +215,8 @@ function ActionCard({
             check={check}
             onReRun={onReRun}
             isReRunning={isReRunning}
+            {...(onIntentionalMarked
+              ? { onIntentionalMarked } : {})}
           />
         </div>
       )}
@@ -149,14 +225,20 @@ function ActionCard({
 }
 
 function ActionButtons({
-  check, onReRun, isReRunning,
+  check, onReRun, isReRunning, onIntentionalMarked,
 }: {
   check: QACheck
   onReRun: () => void
   isReRunning: boolean
+  // Parent callback — the QAAuditPanel re-fetches the overrides list
+  // after a successful Mark Intentional so the badge swap is
+  // immediate (no need to wait for the next audit run).
+  onIntentionalMarked?: () => void
 }) {
   const [toast, setToast] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
+  const [flagging, setFlagging] = useState(false)
+  const [marking, setMarking] = useState(false)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   // 2-second auto-dismiss so the toast doesn't linger after the user
@@ -168,22 +250,59 @@ function ActionButtons({
   const showToast = (msg: string) => {
     setToast(msg)
     if (toastTimer.current) clearTimeout(toastTimer.current)
-    toastTimer.current = setTimeout(() => setToast(null), 2500)
+    toastTimer.current = setTimeout(() => setToast(null), 3000)
   }
 
-  // Stubbed for this commit — the POST /api/v1/qa/findings/{check_id}/
-  // flag-for-fix endpoint and the qa_intentional_overrides table land
-  // in subsequent commits. The toasts surface the affordance + placement
-  // so testers can review the card layout now.
-  const onFlagForFix = () => {
-    showToast(
-      `TODO — flag-for-fix endpoint not yet wired. Will create a `
-      + `triage item for ${check.check_id} on the next commit.`)
+  // Real endpoints — wired May 22 2026. The TODO toasts that
+  // previously surfaced the affordance placement now do real work.
+  // Both POSTs are fire-and-forget from the user's POV: the toast
+  // confirms success / failure but the audit display only refreshes
+  // for Mark Intentional (so the "Confirmed intentional" badge
+  // appears immediately).
+  const onFlagForFix = async () => {
+    setFlagging(true)
+    try {
+      const res = await axios.post(
+        `/api/v1/qa/findings/${check.check_id}/flag-for-fix`,
+        {
+          check_title: check.check,
+          finding: check.finding ?? null,
+          implication: check.implication ?? null,
+          remediation: check.remediation ?? null,
+          severity: check.status === 'FAIL' ? 'blocking' : 'major',
+        },
+      )
+      const itemId = res.data?.triage_item_id as number | undefined
+      showToast(
+        `Flagged ${check.check_id} for fix · triage item ${
+          itemId ? `#${itemId}` : 'created'}`)
+    } catch {
+      showToast(`Could not flag ${check.check_id} — please retry.`)
+    } finally {
+      setFlagging(false)
+    }
   }
-  const onMarkIntentional = () => {
-    showToast(
-      `TODO — mark-as-intentional not yet wired. Will record the `
-      + `override in qa_intentional_overrides on the next commit.`)
+
+  const onMarkIntentional = async () => {
+    setMarking(true)
+    try {
+      await axios.post(
+        `/api/v1/qa/findings/${check.check_id}/mark-intentional`,
+        // Note is the check finding so the audit trail captures
+        // what the team reviewed when they confirmed intentional.
+        { note: check.finding ?? null },
+      )
+      showToast(
+        `${check.check_id} marked as intentional · recorded in the `
+        + `audit trail`)
+      // Tell the parent so the panel re-fetches /overrides and the
+      // badge swaps to "Confirmed intentional" without a page reload.
+      onIntentionalMarked?.()
+    } catch {
+      showToast(`Could not mark ${check.check_id} intentional — please retry.`)
+    } finally {
+      setMarking(false)
+    }
   }
 
   // Real clipboard copy — no backend needed. Falls back to a no-op
@@ -210,27 +329,33 @@ function ActionButtons({
         {(action === 'code_fix' || action === 'methodology_decision') && (
           <button
             type="button"
-            onClick={onFlagForFix}
+            onClick={() => void onFlagForFix()}
+            disabled={flagging}
             data-testid={`qa-flag-${check.check_id}`}
             className="inline-flex items-center gap-1.5 px-2.5 py-1
                        rounded border border-warning/30 bg-warning/10
                        text-warning text-2xs font-semibold
-                       hover:bg-warning/20 transition-colors min-h-[28px]">
-            <Flag className="w-3 h-3" />
-            Flag for Fix
+                       hover:bg-warning/20 transition-colors
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       min-h-[28px]">
+            <Flag className={`w-3 h-3 ${flagging ? 'animate-pulse' : ''}`} />
+            {flagging ? 'Flagging…' : 'Flag for Fix'}
           </button>
         )}
         {action === 'methodology_decision' && (
           <button
             type="button"
-            onClick={onMarkIntentional}
+            onClick={() => void onMarkIntentional()}
+            disabled={marking}
             data-testid={`qa-intentional-${check.check_id}`}
             className="inline-flex items-center gap-1.5 px-2.5 py-1
                        rounded border border-success/30 bg-success/10
                        text-success text-2xs font-semibold
-                       hover:bg-success/20 transition-colors min-h-[28px]">
-            <ShieldCheck className="w-3 h-3" />
-            Mark as Intentional
+                       hover:bg-success/20 transition-colors
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       min-h-[28px]">
+            <ShieldCheck className={`w-3 h-3 ${marking ? 'animate-pulse' : ''}`} />
+            {marking ? 'Recording…' : 'Mark as Intentional'}
           </button>
         )}
         {action === 'disclosure_required' && check.disclosure_text && (
@@ -295,9 +420,14 @@ interface CheckRowProps {
   explanation?: QAItemExplanation
   onReRun: () => void
   isReRunning: boolean
+  override?: IntentionalOverride
+  onIntentionalMarked?: () => void
 }
 
-function CheckRow({ check, open, onToggle, explanation, onReRun, isReRunning }: CheckRowProps) {
+function CheckRow({
+  check, open, onToggle, explanation, onReRun, isReRunning,
+  override, onIntentionalMarked,
+}: CheckRowProps) {
   const cfg = VERDICT_CONFIG[check.status]
   const { Icon } = cfg
   return (
@@ -330,11 +460,16 @@ function CheckRow({ check, open, onToggle, explanation, onReRun, isReRunning }: 
           {/* Structured Finding / Implication / Action Required block —
               May 22 2026 contract. Renders only when the check carries
               structured fields (PASS sections and deterministic checks
-              do not have them and the block is suppressed). */}
+              do not have them and the block is suppressed). When an
+              intentional override exists for this check, ActionCard
+              renders the "Confirmed Intentional" badge in place of
+              the Action Required section. */}
           <ActionCard
             check={check}
             onReRun={onReRun}
             isReRunning={isReRunning}
+            {...(override ? { override } : {})}
+            {...(onIntentionalMarked ? { onIntentionalMarked } : {})}
           />
           {explanation && (
             <div className="pt-2 mt-1 border-t border-border/40 space-y-2">
@@ -371,7 +506,7 @@ function CheckRow({ check, open, onToggle, explanation, onReRun, isReRunning }: 
  * open state is local — opening one category does not close another.
  */
 function CategoryAccordion(
-  { category, items, openChecks, onToggleCheck, explanations, onReRun, isReRunning }: {
+  { category, items, openChecks, onToggleCheck, explanations, onReRun, isReRunning, overrides, onIntentionalMarked }: {
     category: string
     items: QACheck[]
     openChecks: Set<string>
@@ -379,6 +514,8 @@ function CategoryAccordion(
     explanations: Record<string, QAItemExplanation>
     onReRun: () => void
     isReRunning: boolean
+    overrides: Record<string, IntentionalOverride>
+    onIntentionalMarked: () => void
   },
 ) {
   const [open, setOpen] = useState(false)
@@ -428,6 +565,9 @@ function CategoryAccordion(
               explanation={explanations[check.check_id]}
               onReRun={onReRun}
               isReRunning={isReRunning}
+              {...(overrides[check.check_id]
+                ? { override: overrides[check.check_id] } : {})}
+              onIntentionalMarked={onIntentionalMarked}
             />
           ))}
         </div>
@@ -449,8 +589,27 @@ export default function QAAuditPanel() {
   const loadQA = useGlossaryStore((s) => s.loadQA)
   const [openChecks, setOpenChecks] = useState<Set<string>>(new Set())
   const [activeCategory, setActiveCategory] = useState('ALL')
+  // Intentional overrides — keyed by check_id. The QA Action Required
+  // card is replaced with a "Confirmed intentional" badge for any
+  // check present here. Refreshed after a successful Mark Intentional
+  // POST so the badge swap is immediate (no audit re-run needed).
+  const [overrides, setOverrides] = useState<Record<string, IntentionalOverride>>({})
+
+  const loadOverrides = useCallback(async () => {
+    try {
+      const res = await axios.get<{
+        overrides: Record<string, IntentionalOverride>
+      }>('/api/v1/qa/intentional-overrides')
+      setOverrides(res.data.overrides || {})
+    } catch {
+      // Fail-open — an unreachable endpoint just means no overrides
+      // are surfaced; the action cards render normally.
+      setOverrides({})
+    }
+  }, [])
 
   useEffect(() => { void load() }, [load])
+  useEffect(() => { void loadOverrides() }, [loadOverrides])
 
   useEffect(() => {
     if (!audit?.items?.length) return
@@ -599,6 +758,9 @@ export default function QAAuditPanel() {
             explanation={qaExplanations[check.check_id]}
             onReRun={() => void reload()}
             isReRunning={loading}
+            {...(overrides[check.check_id]
+              ? { override: overrides[check.check_id] } : {})}
+            onIntentionalMarked={() => void loadOverrides()}
           />
         ))}
       </div>
@@ -622,6 +784,8 @@ export default function QAAuditPanel() {
               explanations={qaExplanations}
               onReRun={() => void reload()}
               isReRunning={loading}
+              overrides={overrides}
+              onIntentionalMarked={() => void loadOverrides()}
             />
           ))}
       </div>
