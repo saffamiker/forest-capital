@@ -8743,14 +8743,27 @@ Frontend: BrandContext.jsx
 
   Default: BRAND_MODES.MCCOLL
   Persisted in: BrandContext (in-memory React state for the session)
-  Toggled via: the Organisation section of the /settings page
+  Toggled via: the Organization section of the /settings page
 
 Toggle UI (since the Settings-page build, May 16 2026):
-  The brand switcher lives in Settings → Organisation as two selectable
+  The brand switcher lives in Settings → Organization as two selectable
   rows (McColl / Forest Capital) with an active check. The nav-ribbon
   gear icon (⚙, top-right) navigates to /settings — it no longer opens
   a dropdown. Changes take effect immediately across all pages, no
   page reload required.
+
+SCOPE — what the brand switcher DOES and does NOT change:
+  Updates: the organization name shown in the top-of-page header,
+           and the brand icon / favicon.
+  Does NOT update: the layout of any page, the colour scheme,
+           typography, navigation structure, or any data shown to
+           the user (analytics, charts, tables).
+  Visual branding beyond name and icon is not in scope for this
+  release. UAT feedback (May 22 2026) surfaced a tester asking
+  whether switching organizations would change layout / colour /
+  nav — the answer is no. This scope note also lives as a JSDoc
+  on frontend/src/context/BrandContext.tsx so the next contributor
+  doesn't have to ask.
 
 PDF report: always uses whichever mode is currently active
             so the exported report matches what's on screen
@@ -11653,6 +11666,66 @@ Required sections:
 
 For section 2, Michael must have Sprint 2 complete by May 18 so Bob
 has real results to write about before the May 27 deadline.
+
+
+─────────────────────────────────────────────────────────────────────────────
+WORKING CONVENTIONS (May 22 2026)
+─────────────────────────────────────────────────────────────────────────────
+
+Shell access
+  Claude Code has full terminal access and should run all commands
+  directly without prompting the operator for manual shell steps.
+  This includes git, npm, python, pytest, and alembic. Never ask
+  the operator to run a command that can be executed directly in
+  the terminal.
+
+  Exceptions — only prompt the operator for:
+    - Render web shell commands (requires production credentials)
+    - GitHub UI actions (merging PRs, registering webhooks)
+    - Decisions that require human judgement before proceeding
+
+Pull requests
+  After pushing to origin/develop, always open a PR to main
+  automatically using the gh CLI. Do not wait for the operator to
+  create the PR manually.
+
+  PR title: a concise description of what the commit or commit set
+  does, matching the commit message style already used in this repo.
+
+  PR body must include:
+    - Summary of what changed and why
+    - List of commits with their hashes and one-line descriptions
+    - Any operator follow-up steps required after merge (migrations,
+      Render shell commands, webhook registrations etc.)
+    - Resolves failure #N lines for any failure reports addressed,
+      so the suggestion engine picks them up automatically
+
+  If main is protected and the PR cannot be auto-merged, leave it
+  open for operator review. Never attempt to bypass branch
+  protection.
+
+Resolves-failure convention
+  When opening a PR that addresses one or more failure reports
+  visible in Settings → Failure Reports, include the failure IDs in
+  the PR body using one of these formats (case-insensitive):
+
+      Resolves failure #N
+      Fixes failure #N
+      Addresses failure #N
+      Closes failure #N
+      failure #N
+
+  Each `#N` is the failure-report ID from the ID column in the
+  Failure Reports table. Multiple references in one PR are fine —
+  the webhook handles every match. References in commit messages
+  are ALSO scanned, so a commit with "Fixes failure #42" in its
+  message qualifies even if the PR body forgot.
+
+  Without one of these references the failure stays Open even
+  after the fix lands — there is nothing tying the merged PR to
+  the report. See the FAILURE RESOLUTION WORKFLOW section above
+  for the full webhook flow.
+
 
 >>>END
 
