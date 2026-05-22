@@ -104,33 +104,43 @@ class TestParseDigestJson:
             "summary_text": "no closing fence"}
 
 
-class TestPlainTextFallbackDigest:
-    def test_no_error_key(self):
-        """The fallback digest must NOT carry an `error` key — that is
-        the engine's signal to record status='failed'. The whole point
-        of the fallback is to record the run as complete."""
-        out = ra._plain_text_fallback_digest("some text", [])
-        assert "error" not in out
+class TestStripToJsonBraces:
+    """The strict brace-only extraction is the canary against the
+    May 22 2026 chain-of-thought leak. Pin its contract."""
 
-    def test_text_becomes_summary(self):
-        out = ra._plain_text_fallback_digest("Fed paused at the May meeting.",
-                                              ["https://fed.gov/example"])
-        assert out["summary_text"] == "Fed paused at the May meeting."
-        assert out["citation_urls"] == ["https://fed.gov/example"]
+    def test_strips_preamble_and_closing(self):
+        text = (
+            "I'll start by running 5 parallel searches.\n\n"
+            '{"summary_text": "x"}\n\n'
+            "Let me know if you need more."
+        )
+        assert ra._strip_to_json_braces(text) == '{"summary_text": "x"}'
 
-    def test_summary_capped_at_2000_chars(self):
-        """The dashboard renders summary_text; an unbounded summary
-        would push every other widget off-screen. Cap at 2000 chars;
-        full text preserved in raw_response."""
-        long_text = "x" * 3000
-        out = ra._plain_text_fallback_digest(long_text, [])
-        assert len(out["summary_text"]) == 2000
-        assert len(out["raw_response"]) == 3000
+    def test_strips_chain_of_thought_only_preamble(self):
+        text = 'Step 1: think.\nStep 2: query.\n\n{"a": 1}'
+        assert ra._strip_to_json_braces(text) == '{"a": 1}'
 
-    def test_empty_collections_for_structured_fields(self):
-        out = ra._plain_text_fallback_digest("text", [])
-        assert out["key_signals"] == []
-        assert out["regime_implication"] == ""
+    def test_strips_closing_remark_only(self):
+        text = '{"a": 1}\n\nThanks for asking — let me know if you have follow-ups.'
+        assert ra._strip_to_json_braces(text) == '{"a": 1}'
+
+    def test_empty_string_when_no_braces(self):
+        assert ra._strip_to_json_braces("Just plain prose, no JSON anywhere.") == ""
+
+    def test_empty_string_on_empty_input(self):
+        assert ra._strip_to_json_braces("") == ""
+        assert ra._strip_to_json_braces(None) == ""  # type: ignore[arg-type]
+
+    def test_handles_nested_braces(self):
+        # The model might emit nested JSON; rfind('}') finds the LAST,
+        # so the full nested structure is preserved.
+        text = (
+            "preamble\n"
+            '{"outer": {"inner": "value"}, "list": [1, 2, 3]}\n'
+            "closing"
+        )
+        out = ra._strip_to_json_braces(text)
+        assert out == '{"outer": {"inner": "value"}, "list": [1, 2, 3]}'
 
 
 # ── Citation integrity ──────────────────────────────────────────────────────
@@ -294,34 +304,35 @@ class TestGenerateDigest:
         assert usage["input_tokens"] == 0
         assert usage["output_tokens"] == 0
 
-    def test_unparseable_response_falls_back_to_plain_text(self):
-        """May 22 2026 contract change: when the model returns text the
-        parser cannot turn into JSON, store the raw text as the digest
-        summary rather than marking the run as failed. A plain-text
-        digest is better than no digest — the model's prose is usually
-        still informative about the macro environment even when the
-        JSON shape is wrong."""
+    def test_unparseable_response_returns_failure_digest(self):
+        """May 22 2026 contract reversal — the earlier plain-text
+        fallback (store raw text as summary on parse failure) was
+        removed because it allowed model chain-of-thought to reach
+        the dashboard tile ("I'll start by running 5 parallel
+        searches…" — the user-reported leak). Failed parses now take
+        the hard-failure path so chain-of-thought is NEVER stored as
+        summary content."""
         client = MagicMock()
         client.messages.create.return_value = _stub_response(
             "Sorry, I can't help with that today.", search_urls=[])
         with patch.object(ra, "get_anthropic_client", return_value=client):
             digest, usage = ra.generate_digest()
-        # Critical: no `error` key — the engine treats this as a
-        # completed run, not a failed one.
-        assert "error" not in digest
-        assert digest["summary_text"] == "Sorry, I can't help with that today."
-        # Structured fields stay empty — the parser found nothing to
-        # populate them with.
+        # Critical: `error` IS present — chain-of-thought never reaches
+        # summary_text.
+        assert digest["error"]
+        assert "no parseable JSON" in digest["error"]
+        # The raw "Sorry, I can't help…" prose must NOT appear in any
+        # user-facing field.
+        assert "Sorry, I can't help" not in digest["summary_text"]
         assert digest["key_signals"] == []
-        assert digest["regime_implication"] == ""
         # Usage still carries the response tokens — the call DID happen.
         assert usage["input_tokens"] == 100
 
     def test_truly_empty_response_returns_failure_digest(self):
-        """Hard-failure path is reserved for responses with NO text at
-        all — there is nothing to fall back to. A response that emitted
-        text the parser cannot interpret takes the plain-text fallback
-        above; only the genuinely empty case is recorded as failed."""
+        """Hard-failure path is also taken when the model returns no
+        text at all. Same hard-failure as the unparseable case above —
+        the dashboard renders its empty state until the next
+        successful run."""
         client = MagicMock()
         client.messages.create.return_value = _stub_response(
             "", search_urls=[])
@@ -330,6 +341,63 @@ class TestGenerateDigest:
         assert digest["error"]
         assert "no parseable JSON" in digest["error"]
         assert digest["key_signals"] == []
+
+    def test_chain_of_thought_with_valid_json_stores_only_parsed_fields(self):
+        """The user-reported leak: model emits chain-of-thought
+        preamble THEN a valid JSON object. The parser must extract the
+        JSON; the chain-of-thought must NEVER reach summary_text,
+        regime_implication, or raw_response. Pin this contract so a
+        future relaxation cannot quietly re-expose the leak surface."""
+        chain_of_thought_then_json = (
+            "I'll start by running 5 parallel searches across the key "
+            "macro categories — monetary policy, inflation, growth, "
+            "rates, and credit.\n\n"
+            "Now I have sufficient sourced data to construct the "
+            "digest. Let me parse the results.\n\n"
+            '{"summary_text": "Fed paused at 5.25-5.50% and CPI cooled.",\n'
+            ' "key_signals": [{"category": "monetary_policy",\n'
+            '   "signal": "Fed holds rates steady.",\n'
+            '   "implication": "IG duration tailwind.",\n'
+            '   "source_url": "https://federalreserve.gov/example"}],\n'
+            ' "regime_implication": "Dovish transition."}\n\n'
+            "Closing remark: I have included the most relevant signals."
+        )
+        client = MagicMock()
+        client.messages.create.return_value = _stub_response(
+            chain_of_thought_then_json,
+            search_urls=["https://federalreserve.gov/example"])
+        with patch.object(ra, "get_anthropic_client", return_value=client):
+            digest, usage = ra.generate_digest()
+
+        # Critical contract: the run completes (parse succeeded) but
+        # the chain-of-thought tokens NEVER appear in any stored field.
+        assert "error" not in digest
+        assert digest["summary_text"] == "Fed paused at 5.25-5.50% and CPI cooled."
+        assert digest["regime_implication"] == "Dovish transition."
+        # The leak-canary strings — none of these must appear in any
+        # stored field.
+        for leak_string in (
+            "I'll start by running",
+            "Now I have sufficient",
+            "Closing remark",
+            "Let me parse the results",
+        ):
+            assert leak_string not in digest["summary_text"]
+            assert leak_string not in digest["regime_implication"]
+            assert leak_string not in digest["raw_response"]
+
+    def test_system_prompt_carries_strict_json_only_instruction(self):
+        """The May 22 2026 prompt change tells the model NOT to emit any
+        prose, reasoning, or commentary around the JSON. Pin the
+        instruction so a future prompt edit cannot silently re-enable
+        the chain-of-thought leak."""
+        prompt = ra._SYSTEM_PROMPT
+        assert "Return ONLY a valid JSON object" in prompt
+        assert "Do not include any text, commentary, reasoning" in prompt
+        assert "chain-of-thought preamble" in prompt
+        # Specific exemplar of the leak the user reported — pin so a
+        # generic re-wording cannot silently drop it.
+        assert "I'll start by running searches" in prompt
 
     def test_concatenates_multiple_text_blocks(self):
         """May 22 2026 fix: web-search-using responses interleave
@@ -391,11 +459,14 @@ class TestGenerateDigest:
         assert len(digest["key_signals"]) == 1
         assert digest["key_signals"][0]["source_url"] == "https://example.com"
 
-    def test_plain_text_fallback_carries_verified_urls(self):
-        """When the parser fails but web_search still surfaced sources,
-        the plain-text fallback retains the verified URLs so the team
-        can trace the model's reasoning even when the JSON shape was
-        wrong."""
+    def test_unparseable_response_does_not_leak_via_citation_urls(self):
+        """The earlier plain-text fallback also kept the verified URLs
+        on a failed digest so the team could trace reasoning. With the
+        fallback removed (chain-of-thought leak fix, May 22 2026), a
+        failed run produces NO summary content at all — citation URLs
+        are part of the failure digest's empty contract because they
+        anchor user-visible explanation that would otherwise be
+        attached to a non-existent summary."""
         client = MagicMock()
         client.messages.create.return_value = _stub_response(
             "I found two articles but cannot summarise them in JSON.",
@@ -405,14 +476,11 @@ class TestGenerateDigest:
         with patch.object(ra, "get_anthropic_client", return_value=client):
             digest, usage = ra.generate_digest()
 
-        assert "error" not in digest
-        assert digest["summary_text"].startswith("I found two articles")
-        # The verified URLs are sorted and de-duplicated; both surface
-        # on the fallback digest's citation list.
-        assert set(digest["citation_urls"]) == {
-            "https://fed.gov/example",
-            "https://bls.gov/example",
-        }
+        # Hard failure — the raw prose never reaches summary_text.
+        assert digest["error"]
+        assert "I found two articles" not in digest["summary_text"]
+        assert digest["citation_urls"] == []
+        assert digest["key_signals"] == []
 
     def test_signals_without_any_verified_urls_yield_empty(self):
         """Every signal in the JSON references an URL web_search did not

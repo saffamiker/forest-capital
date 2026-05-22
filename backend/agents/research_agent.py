@@ -143,7 +143,22 @@ WHAT NOT TO DO:
   - Do not cite anything older than 7 days unless it is the original \
     source of a still-developing story.
 
-RESPONSE FORMAT — return ONLY valid JSON, no preamble:
+RESPONSE FORMAT — JSON-ONLY, NO PROSE AROUND IT:
+
+  Return ONLY a valid JSON object. Do not include any text, \
+commentary, reasoning, plan, status update, or explanation BEFORE or \
+AFTER the JSON. Do not write a chain-of-thought preamble \
+("I'll start by running searches…", "Now I have sufficient data…"). \
+Do not write a closing remark. Do not wrap the JSON in markdown code \
+fences. YOUR ENTIRE RESPONSE MUST BE PARSEABLE AS JSON — every \
+character before the first {{ and after the last }} is a failure.
+
+  The downstream parser stores summary_text and key_signals verbatim \
+on the dashboard tile; any chain-of-thought you emit leaks into the \
+user-facing surface even if the JSON later parses correctly.
+
+The required shape:
+
 {{
   "summary_text": "2-3 sentences naming the dominant theme of the \
 week and what it means for diversified portfolios.",
@@ -227,25 +242,25 @@ def _parse_digest_json(text: str) -> dict[str, Any]:
     """
     Extracts the digest JSON from the model's text. Sonnet routinely
     wraps the JSON in a ```json code fence and adds prose before or
-    after; the parser strips both. On any parse failure it returns an
-    empty dict — generate_digest() then either falls back to the
-    plain-text path (when raw text exists) or hard-fails (when no
-    text at all came back).
+    after; the parser strips both. On any parse failure it returns
+    an empty dict — generate_digest() hard-fails to a failure_digest
+    in that case (the plain-text fallback was removed May 22 2026
+    because it allowed model chain-of-thought to reach the dashboard
+    tile; chain-of-thought must NEVER be stored or displayed).
 
     Order of operations:
       1. Strip markdown code fences (```json … ``` or ``` … ```).
          Handles fences with or without a closing ``` (an unclosed
          fence still yields useful text after the opener).
-      2. Find the outermost {...} span via find('{') / rfind('}').
-         This locates the JSON even when it is embedded in prose.
+      2. _strip_to_json_braces — keep only the outermost {…} substring.
       3. json.loads — return {} on any decode error.
     """
     cleaned = (text or "").strip()
 
     # Strip fences. The May 22 2026 failure mode was the parser
     # exiting after stripping the fence but before locating the JSON
-    # inside. The find/rfind below now handles both fenced and
-    # unfenced inputs uniformly.
+    # inside. The brace-strip below handles fenced and unfenced
+    # inputs uniformly.
     fence_match = re.search(
         r"```(?:json)?\s*\n?(.*?)(?:```|\Z)",
         cleaned,
@@ -254,48 +269,42 @@ def _parse_digest_json(text: str) -> dict[str, Any]:
     if fence_match and "{" in fence_match.group(1):
         cleaned = fence_match.group(1).strip()
 
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-    if start == -1 or end == -1:
+    braces_only = _strip_to_json_braces(cleaned)
+    if not braces_only:
         return {}
     try:
-        parsed = json.loads(cleaned[start: end + 1])
+        parsed = json.loads(braces_only)
     except json.JSONDecodeError as exc:
         log.warning("research_agent_json_parse_failed",
-                    error=str(exc), text_head=cleaned[:200])
+                    error=str(exc), text_head=braces_only[:200])
         return {}
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _plain_text_fallback_digest(
-    text: str, citation_urls: list[str],
-) -> dict[str, Any]:
+def _strip_to_json_braces(text: str) -> str:
     """
-    When the model returns prose the parser cannot turn into JSON,
-    store the raw text as the digest summary rather than marking the
-    run as failed. Added May 22 2026 after the agent failed five
-    consecutive runs with 'model returned no parseable JSON' — the
-    text the model emitted on those runs would have been useful as
-    context even without the JSON structure, but the all-or-nothing
-    parser threw it away.
+    Returns the substring between the first `{` and the last `}` in
+    the raw model response, with everything outside those braces
+    (chain-of-thought preamble, closing remarks, markdown fences)
+    stripped. Returns the empty string when no braces exist.
 
-    Distinct from _failure_digest: this returns a digest with NO
-    `error` key, so the engine layer records the run as status =
-    'complete'. The dashboard renders the raw text as the summary;
-    key_signals is empty (no structured implications to anchor on),
-    and citation_urls carries whatever URLs web_search did return so
-    the team can still trace the model's reasoning.
-
-    The text is capped at 2000 chars for display; the full text is
-    preserved in raw_response for audit.
+    Used by both _parse_digest_json (for json.loads input) and the
+    Anthropic-response storage path so chain-of-thought NEVER reaches
+    storage even if the JSON itself parses correctly. The user-
+    reported leak on May 22 2026 — "I'll start by running 5 parallel
+    searches…" appearing above the digest content — was caused by the
+    earlier plain-text fallback storing the full raw text as
+    summary_text on parse failure. With this helper the storage path
+    is strict: only the {…} substring is ever forwarded, and a
+    response with no braces takes the hard-failure path.
     """
-    return {
-        "summary_text":       text.strip()[:2000],
-        "key_signals":        [],
-        "regime_implication": "",
-        "citation_urls":      citation_urls,
-        "raw_response":       text,
-    }
+    if not text:
+        return ""
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        return ""
+    return text[start: end + 1]
 
 
 def _filter_to_verified_signals(
@@ -385,38 +394,36 @@ def generate_digest(
     if not parsed:
         # Capture the first 500 chars of the raw response at WARNING
         # level so a future parse failure is debuggable from production
-        # logs without re-running the agent. Added May 22 2026 after
-        # five consecutive 'model returned no parseable JSON' failures
-        # with no captured raw response to diagnose against.
+        # logs without re-running the agent.
         log.warning("research_agent_empty_parse",
                     n_searches=len(sources), n_fetches=len(fetched_urls),
                     raw_response_head=(text or "")[:500])
-        # Plain-text fallback. If the model emitted ANY text at all,
-        # store it as the digest summary rather than marking the run
-        # as failed — a plain-text digest is more useful to the team
-        # than nothing. Only the truly empty response (no text blocks
-        # at all) takes the hard-failure path.
-        if text and text.strip():
-            sorted_urls = sorted(verified_urls)
-            log.info("research_agent_plain_text_fallback",
-                     text_length=len(text),
-                     n_verified_urls=len(sorted_urls))
-            return (
-                _plain_text_fallback_digest(text, sorted_urls),
-                _usage_meta(response, sources, fetched_urls),
-            )
+        # Hard-failure path on any parse failure. The earlier
+        # plain-text fallback (which stored the raw response as the
+        # summary so the dashboard had SOMETHING to show) is removed
+        # because it allowed model chain-of-thought ("I'll start by
+        # running 5 parallel searches…") to reach the dashboard tile
+        # — the user-reported leak on May 22 2026. Failed runs now
+        # take the hard-failure path; the dashboard renders the empty
+        # state until the next successful run replaces it.
         return (
             _failure_digest("model returned no parseable JSON"),
             _usage_meta(response, sources, fetched_urls),
         )
 
     signals, citation_urls = _filter_to_verified_signals(parsed, verified_urls)
+    # Strip chain-of-thought from raw_response too — the engine layer
+    # persists raw_response for audit and the brace-only substring
+    # carries every parseable byte without the model's preamble or
+    # closing remarks. A future leak (e.g. a future audit panel
+    # rendering raw_response) is prevented at the source.
+    raw_clean = _strip_to_json_braces(text) or ""
     digest = {
         "summary_text":       str(parsed.get("summary_text") or "").strip(),
         "key_signals":        signals,
         "regime_implication": str(parsed.get("regime_implication") or "").strip(),
         "citation_urls":      citation_urls,
-        "raw_response":       text,
+        "raw_response":       raw_clean,
     }
     log.info("research_digest_generated",
              n_signals=len(signals),
