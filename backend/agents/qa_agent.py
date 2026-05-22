@@ -36,14 +36,28 @@ _SYSTEM_PROMPT = f"""You are the Chief Methodology Officer for a quantitative fi
 project presenting to investment professionals at Forest Capital. Your job is to audit \
 statistical methods, backtesting assumptions, and result claims.
 
-Use a three-tier verdict system:
-  FAIL  — Must be fixed before presenting. A professional quant would catch and criticise this.
-  WARN  — Should be addressed or explicitly disclosed as a limitation.
-  PASS  — Methodology is sound on this dimension.
+Use a FOUR-tier verdict system. INCOMPLETE was added May 22 2026 because a verdict \
+of WARN without evidence of an examination is a false quality signal — it implies a \
+concern was found when in fact no examination took place. The four verdicts:
+
+  PASS       — You have examined the actual data or implementation for this check \
+and verified the condition is correctly handled. A general "this could be more \
+rigorous" is NOT grounds for PASS — be specific about what you verified.
+
+  WARN       — You have examined the actual data or implementation for this check \
+and found a specific, nameable concern that needs attention but does not invalidate \
+the analysis. You MUST name the specific finding. A WARN without a concrete finding \
+is not a WARN — assign INCOMPLETE instead.
+
+  FAIL       — You have examined the actual data or implementation for this check \
+and found a clear violation that invalidates the analysis. State the specific fix.
+
+  INCOMPLETE — You were unable to examine the actual data or implementation for \
+this check (insufficient information, missing context, ambiguous evidence). DO NOT \
+assign WARN or FAIL without evidence. INCOMPLETE is honest; a baseless WARN is not.
 
 The developer is rigorous and detail-oriented. Explain statistical concepts precisely. \
-Do not oversimplify. When you find a FAIL, explain exactly what is wrong and provide \
-the specific fix.
+Do not oversimplify.
 
 PLATFORM IMPLEMENTATION CONTEXT — what this platform actually does. These features \
 are built and verified; do not WARN on them as if missing. Assess each check against \
@@ -96,17 +110,56 @@ is disclosed prominently on the Analytics page — a dedicated rolling-correlati
 chart, a regime-break marker, pre/post-2022 correlation averages, and a \
 regime-conditional performance table. PASS.
 
-WARN DISCLOSURE FORMAT — when, after weighing the context above, you still \
-assess a check as WARN, that check's analysis section MUST be written as an \
-explicit, honest disclosure so a grader sees a clear picture rather than an \
-unexplained WARN. Open the section with the line "KNOWN LIMITATION: <check \
-name>" and then give these four labelled parts:
-  What this checks: one sentence.
-  Current status: what the platform does and does not do on this dimension.
-  Why it WARNs: the specific reason.
-  Remediation: either a concrete fix path, or an explicit statement that this is \
-a known limitation acceptable for the project scope and disclosed in the \
-methodology section.
+STRUCTURED WARN / FAIL FORMAT — May 22 2026:
+Every WARN and FAIL section MUST end with these labelled fields, each on its \
+own line. The downstream parser and the Quality Assurance UI cards read these \
+fields verbatim — a missing field is treated as INCOMPLETE for that check.
+
+  FINDING: <one sentence naming what you found. Specific, evidence-based. NO \
+generic statements like "could be more rigorous". Cite the actual file, function, \
+data field or numeric value that grounds the finding.>
+  IMPLICATION: <one sentence on why it matters for the analysis or the academic \
+submission.>
+  REMEDIATION: <plain-English next step — what would need to change for the WARN \
+to resolve. For methodology_decision items, describe BOTH the "intentional design" \
+and "needs a code fix" interpretations and let the team decide.>
+  ACTION_TYPE: <exactly one of code_fix | methodology_decision | \
+disclosure_required | rerun_required>
+  DISCLOSURE_TEXT: <pre-drafted disclosure sentence the academic writer can paste \
+into the report. REQUIRED when ACTION_TYPE is disclosure_required, OMITTED otherwise. \
+Academic tone, ready to paste — not a description of what the disclosure should say.>
+  Verdict: <PASS | WARN | FAIL | INCOMPLETE>
+
+The four ACTION_TYPE values:
+
+  code_fix              The platform has a defect that should be fixed in code. \
+The remediation describes the change.
+
+  methodology_decision  The finding is ambiguous — it could be an intentional \
+design choice or an accidental error. The remediation describes BOTH \
+interpretations and the team decides which.
+  EXAMPLE — P03 transaction costs: turnover summing |Δw| across all assets \
+captures BOTH the sell leg AND the buy leg of each rebalance. This could be \
+intentional double-sided cost capture (correct) OR an accidental double-count \
+(wrong). Present both and let the team confirm.
+
+  disclosure_required   The condition is acceptable but must be disclosed in the \
+academic report. The remediation describes what to disclose; DISCLOSURE_TEXT \
+provides the exact sentence.
+
+  rerun_required        You were unable to complete this check. The remediation \
+should always read "Re-run the QA audit to generate a full report." This pairs \
+naturally with the INCOMPLETE verdict (a check that cannot be completed cannot \
+have a finding) — but a WARN with rerun_required is also valid if you have \
+partial evidence that a re-run would confirm or refute.
+
+For PASS sections, the FINDING / IMPLICATION / REMEDIATION / ACTION_TYPE / \
+DISCLOSURE_TEXT fields are OPTIONAL — the brief evidence in the section body is \
+sufficient.
+
+For INCOMPLETE sections, the FINDING / IMPLICATION / REMEDIATION / ACTION_TYPE \
+fields are OPTIONAL — INCOMPLETE means you could not examine the check, so a \
+substantive finding cannot exist.
 
 {GLOBAL_AGENT_RULE}
 
@@ -248,10 +301,51 @@ _CHECK_IDS: set[str] = {item["check_id"] for item in _CHECKLIST_ITEMS}
 _CHECK_HEADER_RE = re.compile(
     r"^[\s#>*_.\-–—]*([A-Za-z]{1,3})"
     r"(?:[.:\-–—]\s*)?0*(\d{1,2})\b")
-_VERDICT_TOKEN_RE = re.compile(r"\b(PASS|WARNING|WARN|FAIL)\b")
+_VERDICT_TOKEN_RE = re.compile(r"\b(PASS|WARNING|WARN|FAIL|INCOMPLETE)\b")
 _VERDICT_MARKER_RE = re.compile(
-    r"(?:status|verdict)\s*[:=\-—]+\s*\**\s*(PASS|WARNING|WARN|FAIL)",
+    r"(?:status|verdict)\s*[:=\-—]+\s*\**\s*"
+    r"(PASS|WARNING|WARN|FAIL|INCOMPLETE)",
     re.IGNORECASE,
+)
+
+# Action-type values the QA agent may attach to a WARN or FAIL. INCOMPLETE
+# checks default to "rerun_required" since the check itself could not be
+# examined. The set is locked here so a future prompt drift cannot
+# introduce a fifth value the UI does not know how to render.
+_ACTION_TYPES: frozenset[str] = frozenset((
+    "code_fix",
+    "methodology_decision",
+    "disclosure_required",
+    "rerun_required",
+))
+
+# Structured-field regexes — one per labelled field the agent emits at the
+# end of every WARN/FAIL section. The labels are case-insensitive and the
+# value runs to end-of-line for single-line fields, or to the next labelled
+# field for multi-line fields (FINDING/IMPLICATION/REMEDIATION can wrap).
+_FINDING_RE = re.compile(
+    r"^\s*FINDING\s*[:=]\s*(.+?)"
+    r"(?=^\s*(?:IMPLICATION|REMEDIATION|ACTION[_ ]TYPE|DISCLOSURE[_ ]TEXT|Verdict)\s*[:=])",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+_IMPLICATION_RE = re.compile(
+    r"^\s*IMPLICATION\s*[:=]\s*(.+?)"
+    r"(?=^\s*(?:REMEDIATION|ACTION[_ ]TYPE|DISCLOSURE[_ ]TEXT|Verdict)\s*[:=])",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+_REMEDIATION_RE = re.compile(
+    r"^\s*REMEDIATION\s*[:=]\s*(.+?)"
+    r"(?=^\s*(?:ACTION[_ ]TYPE|DISCLOSURE[_ ]TEXT|Verdict)\s*[:=])",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
+)
+_ACTION_TYPE_RE = re.compile(
+    r"^\s*ACTION[_ ]TYPE\s*[:=]\s*\*?\*?\s*([A-Za-z_]+)",
+    re.IGNORECASE | re.MULTILINE,
+)
+_DISCLOSURE_TEXT_RE = re.compile(
+    r"^\s*DISCLOSURE[_ ]TEXT\s*[:=]\s*(.+?)"
+    r"(?=^\s*(?:Verdict)\s*[:=]|\Z)",
+    re.IGNORECASE | re.MULTILINE | re.DOTALL,
 )
 
 
@@ -291,14 +385,16 @@ def _split_raw_analysis(raw: str) -> dict[str, str]:
 
 
 def _verdict_from_section(section: str) -> str | None:
-    """Reads the PASS/WARN/FAIL verdict from a check's analysis section.
+    """Reads the PASS/WARN/FAIL/INCOMPLETE verdict from a check's
+    analysis section.
 
     The QA prompt instructs the agent to end each section with an
-    explicit 'Verdict: PASS|WARN|FAIL' line, so the marker regex is the
-    reliable path. Falls back to a verdict token on the header line, then
-    to the LAST verdict token in the section — a section's conclusion
-    comes last, so last-token tracks the written verdict ("...would FAIL
-    if uncorrected; PASS overall" reads as PASS, not FAIL)."""
+    explicit 'Verdict: PASS|WARN|FAIL|INCOMPLETE' line, so the marker
+    regex is the reliable path. Falls back to a verdict token on the
+    header line, then to the LAST verdict token in the section — a
+    section's conclusion comes last, so last-token tracks the written
+    verdict ("...would FAIL if uncorrected; PASS overall" reads as PASS,
+    not FAIL)."""
     if not section:
         return None
     norm = {"WARNING": "WARN"}
@@ -316,6 +412,51 @@ def _verdict_from_section(section: str) -> str | None:
         v = tokens[-1]
         return norm.get(v, v)
     return None
+
+
+def _structured_fields_from_section(section: str) -> dict[str, str | None]:
+    """Extracts the FINDING / IMPLICATION / REMEDIATION / ACTION_TYPE /
+    DISCLOSURE_TEXT labelled fields from a check's analysis section.
+
+    Returns a dict with each key always present; values are the parsed
+    text (stripped) or None when the agent did not emit that field.
+    PASS sections will typically have every field None — the brief
+    evidence in the section body is the substance there. WARN and FAIL
+    sections are expected to carry every field except DISCLOSURE_TEXT
+    (which is only present when action_type=disclosure_required).
+
+    Mirrors academic_review.parseOverallRatings — the labelled fields
+    are extracted into structured shape so the UI cards can render each
+    one independently (Finding box, Implication box, Action Required
+    section with the four action-type button variants).
+    """
+    if not section:
+        return {
+            "finding": None, "implication": None, "remediation": None,
+            "action_type": None, "disclosure_text": None,
+        }
+
+    def _grab(rx: re.Pattern[str]) -> str | None:
+        m = rx.search(section)
+        if not m:
+            return None
+        return m.group(1).strip().rstrip("*").strip() or None
+
+    action_type_raw = _grab(_ACTION_TYPE_RE)
+    if action_type_raw:
+        action_type = action_type_raw.strip().lower().strip("`*").strip()
+        if action_type not in _ACTION_TYPES:
+            action_type = None
+    else:
+        action_type = None
+
+    return {
+        "finding":         _grab(_FINDING_RE),
+        "implication":     _grab(_IMPLICATION_RE),
+        "remediation":     _grab(_REMEDIATION_RE),
+        "action_type":     action_type,
+        "disclosure_text": _grab(_DISCLOSURE_TEXT_RE),
+    }
 
 
 class QAAgent:
@@ -348,19 +489,21 @@ class QAAgent:
 
         if not run_full_checklist:
             quick_items = self._build_quick_audit(strategy_results)
-            n_pass = sum(1 for i in quick_items if i["status"] == "PASS")
-            n_warn = sum(1 for i in quick_items if i["status"] == "WARN")
-            n_fail = sum(1 for i in quick_items if i["status"] == "FAIL")
+            n_pass       = sum(1 for i in quick_items if i["status"] == "PASS")
+            n_warn       = sum(1 for i in quick_items if i["status"] == "WARN")
+            n_fail       = sum(1 for i in quick_items if i["status"] == "FAIL")
+            n_incomplete = sum(1 for i in quick_items if i["status"] == "INCOMPLETE")
             return {
-                "checks_passed": n_pass,
-                "checks_warned": n_warn,
-                "checks_failed": n_fail,
-                "checks_total": len(quick_items),
-                "items": quick_items,
+                "checks_passed":      n_pass,
+                "checks_warned":      n_warn,
+                "checks_failed":      n_fail,
+                "checks_incomplete":  n_incomplete,
+                "checks_total":       len(quick_items),
+                "items":              quick_items,
                 "verdict": "FAIL" if n_fail > 0 else "WARN" if n_warn > 0 else "PASS",
-                "limitations": self._generate_limitations(strategy_results),
-                "data_caveats": self._generate_data_caveats(strategy_results),
-                "model_assumptions": self._generate_model_assumptions(),
+                "limitations":        self._generate_limitations(strategy_results),
+                "data_caveats":       self._generate_data_caveats(strategy_results),
+                "model_assumptions":  self._generate_model_assumptions(),
             }
 
         context = self._build_audit_context(strategy_results, deterministic_results)
@@ -371,16 +514,28 @@ class QAAgent:
             "section with a bold markdown header on its own line, exactly "
             "of the form '**<CHECK_ID> — <check name>**' (for example "
             "'**D01 — Total returns verified**'). In the section give the "
-            "evidence from the data, and END the section with a line "
-            "exactly of the form 'Verdict: PASS' or 'Verdict: WARN' or "
-            "'Verdict: FAIL'. For any section you conclude WARN, write it "
-            "in the WARN DISCLOSURE FORMAT from your instructions (a "
-            "'KNOWN LIMITATION:' line then the four labelled parts). For a "
-            "FAIL section, state the specific fix required. The Verdict "
-            "line is authoritative — it "
-            "drives the result badge, so it MUST match the conclusion you "
-            "wrote in that section. Be rigorous — a professional quant "
-            "will review this audit.\n\n"
+            "evidence from the data.\n\n"
+            "For every WARN and FAIL section, end with the labelled "
+            "fields documented in your instructions (FINDING / "
+            "IMPLICATION / REMEDIATION / ACTION_TYPE / DISCLOSURE_TEXT "
+            "when applicable), each on its own line, followed by the "
+            "Verdict line:\n"
+            "  FINDING: <one specific evidence-based sentence>\n"
+            "  IMPLICATION: <one sentence on why it matters>\n"
+            "  REMEDIATION: <plain-English next step>\n"
+            "  ACTION_TYPE: <code_fix | methodology_decision | "
+            "disclosure_required | rerun_required>\n"
+            "  DISCLOSURE_TEXT: <required only when ACTION_TYPE is "
+            "disclosure_required; pre-drafted disclosure sentence>\n"
+            "  Verdict: <PASS | WARN | FAIL | INCOMPLETE>\n\n"
+            "For PASS or INCOMPLETE sections, the labelled fields above "
+            "are optional — write the evidence and finish with the "
+            "Verdict line. INCOMPLETE is the correct verdict whenever "
+            "you cannot examine the data or implementation for a check "
+            "— DO NOT assign WARN or FAIL without evidence. The Verdict "
+            "line is authoritative — it drives the result badge, so it "
+            "MUST match the conclusion you wrote in that section.\n\n"
+            "Be rigorous — a professional quant will review this audit.\n\n"
             f"STRATEGY RESULTS SUMMARY:\n{context}\n\n"
             f"CHECKLIST:\n{json.dumps(_CHECKLIST_ITEMS, indent=2)}"
         )
@@ -635,56 +790,94 @@ class QAAgent:
             det = deterministic_results.get(key)
 
             if det:
-                # Deterministic result takes priority over LLM assessment
+                # Deterministic result takes priority over LLM assessment.
+                # Deterministic checks never emit the structured fields
+                # (the arithmetic IS the finding), so action_type stays
+                # None — the UI's action-card row is suppressed for
+                # these and only the evidence line shows.
                 item_results.append({
-                    "check_id": cid,
-                    "category": item["category"],
-                    "check": item["check"],
-                    "description": item["description"],
-                    "status": det["status"],
-                    "evidence": det["evidence"],
-                    "fix": None if det["status"] == "PASS"
-                    else f"Review {key} in strategy results.",
+                    "check_id":        cid,
+                    "category":        item["category"],
+                    "check":           item["check"],
+                    "description":     item["description"],
+                    "status":          det["status"],
+                    "evidence":        det["evidence"],
+                    "fix":             None if det["status"] == "PASS"
+                                       else f"Review {key} in strategy results.",
+                    "finding":         None,
+                    "implication":     None,
+                    "remediation":     None,
+                    "action_type":     None,
+                    "disclosure_text": None,
                 })
             else:
                 # LLM-assessed item. The verdict is parsed FROM this
                 # check's own raw_analysis section so the badge agrees
                 # with the text; the evidence is that section alone, not
-                # the whole analysis blob. A check id absent from the
-                # text falls back to the full text and a conservative
-                # WARN.
+                # the whole analysis blob. The structured fields
+                # (finding / implication / remediation / action_type /
+                # disclosure_text) are read from the section too.
                 section = sections.get(cid)
+                fields: dict[str, str | None] = {
+                    "finding": None, "implication": None,
+                    "remediation": None, "action_type": None,
+                    "disclosure_text": None,
+                }
                 if section:
-                    status = _verdict_from_section(section) or "WARN"
+                    status = _verdict_from_section(section) or "INCOMPLETE"
                     evidence = section
+                    fields = _structured_fields_from_section(section)
                 else:
-                    # No section for this check id — an honest, conservative
-                    # WARN. NEVER fall back to the whole analysis blob: that
-                    # would show every other check's reasoning under this one.
-                    status = "WARN"
-                    evidence = ("The QA agent did not return analysis for "
-                                "this check. Re-run the QA audit to generate "
-                                "a full report.")
+                    # No section for this check id — INCOMPLETE, not WARN.
+                    # The May 22 2026 contract: a WARN without evidence
+                    # of an examination is a false quality signal. If
+                    # the agent did not return analysis for this check,
+                    # the honest signal is "the audit did not finish
+                    # this check", not "this check has a concern".
+                    # NEVER fall back to the whole analysis blob — that
+                    # would show every other check's reasoning under
+                    # this one. The UI renders the empty-state message
+                    # ("Analysis not completed — re-run the QA audit to
+                    # generate a full report.") for any INCOMPLETE
+                    # item; the audit runner counts INCOMPLETE
+                    # separately from WARN / FAIL.
+                    status = "INCOMPLETE"
+                    evidence = ("Analysis not completed — re-run the QA "
+                                "audit to generate a full report.")
+                    # INCOMPLETE → rerun_required is the natural
+                    # action_type pairing so the UI shows the Re-run
+                    # Audit button when the user expands the card.
+                    fields["action_type"] = "rerun_required"
+                    fields["remediation"] = (
+                        "Re-run the QA audit so the agent can examine "
+                        "this check.")
+
                 item_results.append({
-                    "check_id": cid,
-                    "category": item["category"],
-                    "check": item["check"],
-                    "description": item["description"],
-                    "status": status,
-                    "evidence": evidence,
-                    # No separate fix field for LLM-assessed checks — the
-                    # required fix is written inline in the check's own
-                    # analysis section. A "see the section above" cross-
-                    # reference is a meaningless template artifact.
-                    "fix": None,
+                    "check_id":        cid,
+                    "category":        item["category"],
+                    "check":           item["check"],
+                    "description":     item["description"],
+                    "status":          status,
+                    "evidence":        evidence,
+                    # No separate fix field for LLM-assessed checks —
+                    # the required fix is written inline in the
+                    # remediation field below.
+                    "fix":             None,
+                    "finding":         fields["finding"],
+                    "implication":     fields["implication"],
+                    "remediation":     fields["remediation"],
+                    "action_type":     fields["action_type"],
+                    "disclosure_text": fields["disclosure_text"],
                 })
 
-        n_pass = sum(1 for i in item_results if i["status"] == "PASS")
-        n_warn = sum(1 for i in item_results if i["status"] == "WARN")
-        n_fail = sum(1 for i in item_results if i["status"] == "FAIL")
+        n_pass       = sum(1 for i in item_results if i["status"] == "PASS")
+        n_warn       = sum(1 for i in item_results if i["status"] == "WARN")
+        n_fail       = sum(1 for i in item_results if i["status"] == "FAIL")
+        n_incomplete = sum(1 for i in item_results if i["status"] == "INCOMPLETE")
 
         return self._build_report(
-            item_results, n_pass, n_warn, n_fail, response_text, strategy_results
+            item_results, n_pass, n_warn, n_fail, n_incomplete,
+            response_text, strategy_results,
         )
 
     def _build_deterministic_audit(
@@ -693,9 +886,11 @@ class QAAgent:
         strategy_results: dict[str, Any],
     ) -> dict[str, Any]:
         """
-        Audit report using only deterministic checks — LLM unavailable fallback.
-
-        Non-deterministic items default to WARN — conservative but honest.
+        Audit report using only deterministic checks — LLM-unavailable
+        fallback. Non-deterministic items take the INCOMPLETE status
+        (and rerun_required action_type) so the UI surfaces a
+        "Re-run Audit" button rather than a false WARN. INCOMPLETE
+        items do not count against the WARN/FAIL totals.
         """
         item_results = []
         for item in _CHECKLIST_ITEMS:
@@ -704,27 +899,48 @@ class QAAgent:
             if det:
                 status = det["status"]
                 evidence = det["evidence"]
+                action_type: str | None = None
+                remediation: str | None = None
             else:
-                status = "WARN"
-                evidence = "LLM unavailable — cannot verify this item deterministically."
+                # LLM was unavailable — INCOMPLETE, not WARN. The earlier
+                # WARN-default was the same false-quality-signal bug the
+                # May 22 2026 prompt change addresses: a baseless WARN
+                # reads as "this check has a concern" when the truth is
+                # "this check was not examined".
+                status = "INCOMPLETE"
+                evidence = (
+                    "Analysis not completed — the audit ran without the "
+                    "LLM. Re-run the QA audit when the LLM is available "
+                    "to generate a full report.")
+                action_type = "rerun_required"
+                remediation = (
+                    "Re-run the QA audit so the agent can examine this "
+                    "check.")
             item_results.append({
-                "check_id": item["check_id"],
-                "category": item["category"],
-                "check": item["check"],
-                "description": item["description"],
-                "status": status,
-                "evidence": evidence,
-                "fix": None if status == "PASS"
-                else "Review methodology against CLAUDE.md checklist.",
+                "check_id":        item["check_id"],
+                "category":        item["category"],
+                "check":           item["check"],
+                "description":     item["description"],
+                "status":          status,
+                "evidence":        evidence,
+                "fix":             None if status == "PASS"
+                                   else "Review methodology against CLAUDE.md checklist.",
+                "finding":         None,
+                "implication":     None,
+                "remediation":     remediation,
+                "action_type":     action_type,
+                "disclosure_text": None,
             })
 
-        n_pass = sum(1 for i in item_results if i["status"] == "PASS")
-        n_warn = sum(1 for i in item_results if i["status"] == "WARN")
-        n_fail = sum(1 for i in item_results if i["status"] == "FAIL")
+        n_pass       = sum(1 for i in item_results if i["status"] == "PASS")
+        n_warn       = sum(1 for i in item_results if i["status"] == "WARN")
+        n_fail       = sum(1 for i in item_results if i["status"] == "FAIL")
+        n_incomplete = sum(1 for i in item_results if i["status"] == "INCOMPLETE")
 
         return self._build_report(
-            item_results, n_pass, n_warn, n_fail,
-            "LLM analysis unavailable — deterministic checks only.", strategy_results
+            item_results, n_pass, n_warn, n_fail, n_incomplete,
+            "LLM analysis unavailable — deterministic checks only.",
+            strategy_results,
         )
 
     def _build_report(
@@ -733,12 +949,18 @@ class QAAgent:
         n_pass: int,
         n_warn: int,
         n_fail: int,
+        n_incomplete: int,
         raw_analysis: str,
         strategy_results: dict[str, Any],
     ) -> dict[str, Any]:
-        # Overall verdict derives from counts: any FAIL → FAIL, any WARN → WARN,
-        # all PASS → PASS. This prevents the LLM from softening a FAIL verdict
-        # in its summary text — the verdict is arithmetic, not editorial.
+        # Overall verdict derives from counts: any FAIL → FAIL, any WARN
+        # → WARN, all PASS → PASS. INCOMPLETE checks do NOT contribute
+        # to the verdict — they signal "the audit did not finish this
+        # check", not "this check has a concern". The summary line
+        # reports incompletes separately so the user sees the gap
+        # without inflating the WARN total. This prevents the LLM from
+        # softening a FAIL verdict in its summary text — the verdict is
+        # arithmetic, not editorial.
         """Builds the final structured report dict."""
         significant = [
             name for name, r in strategy_results.items()
@@ -747,25 +969,48 @@ class QAAgent:
 
         verdict = "FAIL" if n_fail > 0 else "WARN" if n_warn > 0 else "PASS"
         total = len(item_results)
+        # Defensive — pass+warn+fail+incomplete must equal total. Any
+        # status outside the four-tier set is a parser bug we want to
+        # surface immediately rather than silently miscount.
+        assert n_pass + n_warn + n_fail + n_incomplete == total, (
+            f"QA status counts do not sum to total: "
+            f"pass={n_pass} warn={n_warn} fail={n_fail} "
+            f"incomplete={n_incomplete} total={total}"
+        )
+
+        summary_parts = [
+            f"{n_pass} of {total} checks passed.",
+            f"{n_warn} warnings.",
+            f"{n_fail} failures.",
+        ]
+        if n_incomplete > 0:
+            # Surface INCOMPLETE separately so the user is not misled
+            # that the audit is complete when it is not.
+            summary_parts.append(
+                f"{n_incomplete} check{'s' if n_incomplete != 1 else ''} "
+                f"incomplete — re-run to complete analysis.")
+        if n_fail > 0:
+            summary_parts.append("All FAIL items must be fixed before presenting.")
+        elif n_warn == 0 and n_incomplete == 0:
+            summary_parts.append("Ready for presentation.")
+        elif n_warn > 0:
+            summary_parts.append("Review warnings before presenting.")
 
         return {
-            "sprint": "4",
-            "checks_passed": n_pass,
-            "checks_warned": n_warn,
-            "checks_failed": n_fail,
-            "checks_total": total,
-            "verdict": verdict,
-            "summary": (
-                f"{n_pass} of {total} checks passed. "
-                f"{n_warn} warnings. {n_fail} failures. "
-                f"{'All FAIL items must be fixed before presenting.' if n_fail > 0 else 'Ready for presentation.' if n_warn == 0 else 'Review warnings before presenting.'}"
-            ),
+            "sprint":             "4",
+            "checks_passed":      n_pass,
+            "checks_warned":      n_warn,
+            "checks_failed":      n_fail,
+            "checks_incomplete":  n_incomplete,
+            "checks_total":       total,
+            "verdict":            verdict,
+            "summary":            " ".join(summary_parts),
             "significant_strategies": significant,
-            "items": item_results,
-            "limitations": self._generate_limitations(strategy_results),
-            "data_caveats": self._generate_data_caveats(strategy_results),
-            "model_assumptions": self._generate_model_assumptions(),
-            "raw_analysis": raw_analysis,
+            "items":              item_results,
+            "limitations":        self._generate_limitations(strategy_results),
+            "data_caveats":       self._generate_data_caveats(strategy_results),
+            "model_assumptions":  self._generate_model_assumptions(),
+            "raw_analysis":       raw_analysis,
         }
 
     def _generate_limitations(self, strategy_results: dict[str, Any]) -> list[str]:
