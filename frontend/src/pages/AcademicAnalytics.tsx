@@ -31,6 +31,9 @@ import { DARK_CHART_THEME } from '../lib/exportTheme'
 // /api/v1/analytics/correlation etc. (the analytics_metrics_cache hot
 // path is sub-millisecond, so a per-mount fetch is fine here).
 import { CorrelationHeatmap } from '../components/diversification/CorrelationHeatmap'
+import { TailRiskTable } from '../components/diversification/TailRiskTable'
+import { CaptureScatter } from '../components/diversification/CaptureScatter'
+import { DrawdownDurationTable } from '../components/diversification/DrawdownDurationTable'
 
 // Purple accent — analytics sits alongside the academic-rigour screens.
 const ACCENT = '#7c3aed'
@@ -1199,6 +1202,20 @@ export default function AcademicAnalytics() {
             <RegimeConditionalTable rows={data.regime_conditional} />}
           {data.drawdown_comparison && data.drawdown_comparison.length > 0 &&
             <DrawdownComparisonTable rows={data.drawdown_comparison} />}
+          {/* Drawdown DURATION (the time dimension) sits adjacent to
+              DrawdownComparisonTable (the depth dimension) — same
+              concept, complementary axes. Item 8 commit 4. */}
+          <DrawdownDurationTable />
+          {/* Tail risk (VaR / CVaR) follows the drawdown picture: same
+              "how bad can it get" theme but parametrized at 95% / 99%
+              confidence levels rather than worst observed. Item 8
+              commit 4. */}
+          <TailRiskTable />
+          {/* Up / Down capture — the asymmetry view. Comes after the
+              tail-risk picture so the reader has the worst-case framing
+              before seeing the asymmetric capture profile. Item 8
+              commit 4. */}
+          <CaptureScatter />
           {data.factor_loadings && data.factor_loadings.length > 0 &&
             <FactorLoadingsTable rows={data.factor_loadings} ffNote={ffNote} />}
           <SensitivityAnalysis />
