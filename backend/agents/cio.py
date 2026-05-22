@@ -44,16 +44,21 @@ from tools.chart_vision import (
 log = structlog.get_logger(__name__)
 
 
-def _run_tagged(label: str, fn: Any, args: tuple) -> Any:
+def _run_tagged(
+    label: str, fn: Any, args: tuple, kwargs: dict | None = None,
+) -> Any:
     """
     Runs a specialist call inside a copied context, first tagging that
     context with the agent label so every record_usage() the call emits
     is attributed to the right specialist in the per-agent cost
     breakdown. Tagging must happen INSIDE the copied context — set in the
     parent it would leak across all four threads.
+
+    kwargs is optional so callers that only pass positional args (and the
+    test suite's existing call sites) keep working without modification.
     """
     _tag_agent(label)
-    return fn(*args)
+    return fn(*args, **(kwargs or {}))
 
 
 def _tag_agent(label: str) -> None:
@@ -187,18 +192,32 @@ class CIO:
         # specialist's harness run (the copy shares the list by reference).
         # .result() re-raises a worker exception exactly as the former
         # sequential calls did, so error semantics are unchanged.
+        #
+        # Every specialist receives the query so each can ground its
+        # analysis against what the user actually asked, not produce
+        # the same stock report every run. Added May 22 2026 after a
+        # Molly UAT failure: a meta question ("what would a peer asker
+        # about regime methodology?") returned the previous turn's
+        # strategy answer because the specialists never saw the
+        # question. Passed as a kwarg so a future analyse() signature
+        # change picks the right slot. analyse(query="") falls back to
+        # the stock task — the council's behaviour with an empty query
+        # is bitwise identical to the pre-fix path.
         specialist_jobs = [
-            ("equity_analyst", self._equity.analyse, (strategy_results,)),
+            ("equity_analyst", self._equity.analyse,
+             (strategy_results,), {"query": query}),
             ("fixed_income_analyst", self._fi.analyse,
-             (strategy_results, history)),
-            ("risk_manager", self._risk.analyse, (strategy_results,)),
-            ("quant_backtester", self._quant.analyse, (strategy_results,)),
+             (strategy_results, history), {"query": query}),
+            ("risk_manager", self._risk.analyse,
+             (strategy_results,), {"query": query}),
+            ("quant_backtester", self._quant.analyse,
+             (strategy_results,), {"query": query}),
         ]
         with ThreadPoolExecutor(max_workers=4) as pool:
             futures = [
                 pool.submit(contextvars.copy_context().run,
-                            _run_tagged, label, fn, args)
-                for label, fn, args in specialist_jobs
+                            _run_tagged, label, fn, args, kwargs)
+                for label, fn, args, kwargs in specialist_jobs
             ]
             reports = [f.result() for f in futures]
         equity_report, fi_report, risk_report, quant_report = reports

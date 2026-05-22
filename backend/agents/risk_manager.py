@@ -96,6 +96,7 @@ class RiskManager:
         self,
         strategy_results: dict[str, Any],
         statistical_results: dict[str, Any] | None = None,
+        query: str = "",
     ) -> dict[str, Any]:
         """
         Risk arithmetic (drawdown comparisons, significance tallies, FDR
@@ -106,11 +107,25 @@ class RiskManager:
         Args:
             strategy_results:   All 10 strategy results from the backtester.
             statistical_results: Optional extended stat test outputs (DSR, PSR, SPA).
+            query:              The user's question. See equity_analyst.analyse
+                                for the rationale.
         """
         risk_summary = self._compute_risk_summary(strategy_results)
         context = self._build_context(strategy_results, risk_summary, statistical_results)
 
+        query_line = (
+            f"USER QUESTION: {query.strip()}\n\n"
+            "Frame your risk and statistical-integrity review around the "
+            "user question above. Connect the risk and significance data "
+            "to what they asked. If the question is meta or methodology-"
+            "oriented (peer-reviewer questions, presentation framing, "
+            "written-report scope), answer from your risk-manager "
+            "perspective: which risk findings would the question target, "
+            "which statistical numbers ground a good answer, and what "
+            "tail-risk or significance caveats apply.\n\n"
+        ) if query and query.strip() else ""
         user_message = (
+            f"{query_line}"
             "Perform a risk assessment and statistical integrity review of these "
             "strategy results. Required: (1) Identify strategies that fail any "
             f"Tier 1 gate (p < {P_THRESHOLD_PRIMARY}). "

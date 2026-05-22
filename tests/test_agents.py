@@ -399,12 +399,157 @@ class TestQAAgent:
         assert "all_gates_required" in checks
 
 
+class TestSpecialistQueryThreading:
+    """May 22 2026 — Molly UAT FAILURE GROUP 1.
+
+    The four Claude specialist agents previously did not accept the
+    user's query at all; CIO.deliberate called .analyse(strategy_results)
+    only. Result: any meta question ("what would a peer reviewer ask?",
+    "how should I frame the methodology section?") returned a stock
+    strategy analysis that looked like the council was answering the
+    PREVIOUS question. The fix threads `query` through every specialist's
+    .analyse() signature, and each specialist injects it into the LLM
+    user_message so the prompt names the question explicitly.
+
+    These tests pin the contract — a future refactor that drops the
+    parameter (or stops surfacing it in the prompt) trips here, not in
+    Molly's next UAT pass."""
+
+    @staticmethod
+    def _capture_prompt(monkeypatch, agent_module):
+        """Mocks GeneratorEvaluatorHarness.run on the agent module so the
+        prompt argument is captured rather than running the LLM. Returns
+        a one-element list the test inspects after .analyse()."""
+        captured: list[str] = []
+
+        class _StubResult:
+            response = "stub LLM response"
+
+        def _stub_run(self, **kwargs):  # noqa: ANN001 — kwargs-only signature
+            captured.append(kwargs["generator_prompt"])
+            return _StubResult()
+
+        monkeypatch.setattr(agent_module.GeneratorEvaluatorHarness,
+                            "run", _stub_run)
+        return captured
+
+    def test_equity_analyst_includes_query_in_prompt(self, monkeypatch):
+        from agents import equity_analyst as ea
+        captured = self._capture_prompt(monkeypatch, ea)
+        ea.EquityAnalyst().analyse(
+            MOCK_RESULTS,
+            query="What questions would a peer reviewer ask about regime methodology?",
+        )
+        assert captured, "harness.run was never called"
+        prompt = captured[0]
+        assert "peer reviewer" in prompt
+        assert "regime methodology" in prompt
+        # The USER QUESTION header is the explicit framing — pin it.
+        assert "USER QUESTION:" in prompt
+
+    def test_fixed_income_analyst_includes_query_in_prompt(self, monkeypatch):
+        from agents import fixed_income_analyst as fi
+        captured = self._capture_prompt(monkeypatch, fi)
+        fi.FixedIncomeAnalyst().analyse(
+            MOCK_RESULTS, history=None,
+            query="Explain the bond diversification story to a panellist.",
+        )
+        assert captured
+        assert "bond diversification" in captured[0]
+        assert "panellist" in captured[0]
+
+    def test_risk_manager_includes_query_in_prompt(self, monkeypatch):
+        from agents import risk_manager as rm
+        captured = self._capture_prompt(monkeypatch, rm)
+        rm.RiskManager().analyse(
+            MOCK_RESULTS,
+            query="What tail-risk caveats should be in the brief?",
+        )
+        assert captured
+        assert "tail-risk" in captured[0]
+        assert "brief" in captured[0]
+
+    def test_quant_backtester_includes_query_in_prompt(self, monkeypatch):
+        from agents import quant_backtester as qb
+        captured = self._capture_prompt(monkeypatch, qb)
+        qb.QuantBacktester().analyse(
+            MOCK_RESULTS,
+            query="How robust is REGIME_SWITCHING out-of-sample?",
+        )
+        assert captured
+        assert "REGIME_SWITCHING" in captured[0]
+        assert "out-of-sample" in captured[0]
+
+    def test_empty_query_omits_question_header(self, monkeypatch):
+        """An empty query (the test-suite default and the back-compat
+        path for any caller that doesn't pass one) must NOT prepend the
+        USER QUESTION block — the council's behaviour stays bitwise
+        identical to the pre-fix path when query=""."""
+        from agents import equity_analyst as ea
+        captured = self._capture_prompt(monkeypatch, ea)
+        ea.EquityAnalyst().analyse(MOCK_RESULTS, query="")
+        assert captured
+        assert "USER QUESTION:" not in captured[0]
+
+
 class TestCIO:
     def test_deliberate_returns_dict(self):
         from agents.cio import CIO
         cio = CIO()
         result = cio.deliberate("Which strategies should I use?", MOCK_RESULTS)
         assert isinstance(result, dict)
+
+    def test_deliberate_threads_query_to_all_specialists(self, monkeypatch):
+        """The CIO must pass the query to every specialist. Without this,
+        the four parallel .analyse() workers do not see the question and
+        produce stock analyses regardless of what the user asked — the
+        Molly UAT failure root cause."""
+        from agents import cio as cio_mod
+        seen: dict[str, str] = {}
+
+        def _stub_specialist(name):
+            def _do_analyse(*args, **kwargs):
+                seen[name] = kwargs.get("query", "")
+                return {"summary": f"{name} stub",
+                        "technical_findings": {}, "layman_explanation": {
+                            "what_we_found": "x", "why_it_matters": "y",
+                            "for_our_portfolio": "z", "confidence": "w"}}
+            return _do_analyse
+
+        cio = cio_mod.CIO()
+        monkeypatch.setattr(cio._equity, "analyse", _stub_specialist("equity"))
+        monkeypatch.setattr(cio._fi, "analyse", _stub_specialist("fi"))
+        monkeypatch.setattr(cio._risk, "analyse", _stub_specialist("risk"))
+        monkeypatch.setattr(cio._quant, "analyse", _stub_specialist("quant"))
+        # Stub the downstream calls so the test exits after the
+        # specialist fan-out without hitting Gemini / Grok / Opus.
+        monkeypatch.setattr(cio, "_compile_draft_consensus",
+                            lambda *a, **kw: "draft")
+        monkeypatch.setattr(cio._gemini, "challenge",
+                            lambda *a, **kw: {"technical_findings": {"objections": []},
+                                              "summary": "g", "layman_explanation": {
+                                                  "what_we_found": "x", "why_it_matters": "y",
+                                                  "for_our_portfolio": "z", "confidence": "w"}})
+        monkeypatch.setattr(cio._grok, "challenge",
+                            lambda *a, **kw: {"technical_findings": {"objections": []},
+                                              "summary": "g", "layman_explanation": {
+                                                  "what_we_found": "x", "why_it_matters": "y",
+                                                  "for_our_portfolio": "z", "confidence": "w"}})
+        monkeypatch.setattr(cio, "_synthesise", lambda *a, **kw: {
+            "technical_findings": {}, "summary": "syn",
+            "layman_explanation": {"what_we_found": "x", "why_it_matters": "y",
+                                   "for_our_portfolio": "z", "confidence": "w"}})
+
+        cio.deliberate("CENTRAL FINDING TEST QUERY", MOCK_RESULTS)
+        # All four specialists must have received the exact query the
+        # CIO was called with — no truncation, no rewording, no empty
+        # fall-through.
+        assert seen == {
+            "equity": "CENTRAL FINDING TEST QUERY",
+            "fi": "CENTRAL FINDING TEST QUERY",
+            "risk": "CENTRAL FINDING TEST QUERY",
+            "quant": "CENTRAL FINDING TEST QUERY",
+        }
 
     def test_has_agents_key(self):
         from agents.cio import CIO

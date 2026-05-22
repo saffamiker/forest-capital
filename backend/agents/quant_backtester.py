@@ -95,6 +95,7 @@ class QuantBacktester:
     def analyse(
         self,
         strategy_results: dict[str, Any],
+        query: str = "",
     ) -> dict[str, Any]:
         """
         OOS degradation check and cost arithmetic are computed before the
@@ -104,11 +105,25 @@ class QuantBacktester:
 
         Args:
             strategy_results: All 10 strategy results from run_all_strategies().
+            query:            The user's question. See equity_analyst.analyse
+                              for the rationale.
         """
         quant_summary = self._compute_quant_summary(strategy_results)
         context = self._build_context(strategy_results, quant_summary)
 
+        query_line = (
+            f"USER QUESTION: {query.strip()}\n\n"
+            "Frame your quantitative rigour review around the user "
+            "question above. Connect the IS/OOS, cost-drag and CV data "
+            "to what they asked. If the question is meta or methodology-"
+            "oriented (peer-reviewer questions, presentation framing, "
+            "written-report scope), answer from your quant-backtester "
+            "perspective: which backtest findings would the question "
+            "target, which CV/OOS numbers ground a good answer, and "
+            "what overfitting or out-of-sample caveats apply.\n\n"
+        ) if query and query.strip() else ""
         user_message = (
+            f"{query_line}"
             "Review these backtest results from a quantitative rigour perspective. "
             "Required: (1) Compare in-sample vs out-of-sample Sharpe for significant "
             "strategies. (2) Report transaction cost drag (bps/year). "
