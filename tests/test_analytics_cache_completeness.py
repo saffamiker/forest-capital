@@ -261,16 +261,30 @@ class TestRefreshAllDispatch:
             called.append("sensitivity")
         async def _stub_rf(h):
             called.append("rf_config")
+        async def _stub_chars(h):
+            called.append("strategy_characterisations")
 
         monkeypatch.setattr(pa, "refresh_academic_analytics", _stub_academic)
         monkeypatch.setattr(pa, "refresh_diversification_metrics", _stub_div)
         monkeypatch.setattr(pa, "refresh_sensitivity", _stub_sens)
         monkeypatch.setattr(pa, "refresh_risk_free_rate_config", _stub_rf)
+        # Item 9 (May 22 2026) — strategy_characterisations is imported
+        # lazily inside refresh_all_analytics, so patch the symbol on
+        # the source module the dispatch reaches.
+        monkeypatch.setattr(
+            "tools.strategy_characterisations.refresh_strategy_characterisations",
+            _stub_chars)
 
         asyncio.run(pa.refresh_all_analytics("dispatch_hash"))
 
         # Every refresh fired. Order is deterministic — the dispatch
         # runs them sequentially so a slow refresh upstream cannot
-        # interleave with a downstream one.
+        # interleave with a downstream one. strategy_characterisations
+        # is appended last because it depends on the analytics_metrics_
+        # cache rows the earlier refreshes may have just written
+        # (factor_loadings, regime_conditional) -- though as of today
+        # it pulls them directly from the same upstream sources, not
+        # from the cache.
         assert called == [
-            "academic", "diversification", "sensitivity", "rf_config"]
+            "academic", "diversification", "sensitivity",
+            "rf_config", "strategy_characterisations"]

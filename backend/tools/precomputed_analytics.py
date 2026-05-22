@@ -368,6 +368,18 @@ async def refresh_all_analytics(data_hash: str) -> None:
     # serve from analytics_metrics_cache on the hot path.
     await refresh_sensitivity(data_hash)
     await refresh_risk_free_rate_config(data_hash)
+    # Item 9 (May 22 2026) — strategy_characterisations is its own
+    # table (one row per strategy) rather than another row in
+    # analytics_metrics_cache, but it refreshes on the same data-
+    # hash signal. Fail-open per strategy inside the refresh.
+    try:
+        from tools.strategy_characterisations import (
+            refresh_strategy_characterisations,
+        )
+        await refresh_strategy_characterisations(data_hash)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("strategy_characterisation_dispatch_failed",
+                    error=str(exc))
     log.info("precomputed_analytics_refresh_complete",
              data_hash=data_hash[:8] if data_hash else None)
 
