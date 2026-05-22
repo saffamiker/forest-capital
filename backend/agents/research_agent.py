@@ -53,6 +53,7 @@ with status='failed' so the dashboard never goes blank.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import anthropic
@@ -169,7 +170,7 @@ def _extract_text_sources_and_fetches(
     response: anthropic.types.Message,
 ) -> tuple[str, list[dict[str, Any]], set[str]]:
     """
-    Pulls the final-turn text, the URLs surfaced by web_search, and the
+    Pulls the concatenated text, the URLs surfaced by web_search, and the
     set of URLs successfully fetched by web_fetch.
 
     Mirrors academic_advisor._extract_text_sources_and_fetches — kept as
@@ -177,7 +178,14 @@ def _extract_text_sources_and_fetches(
     the advisor's extraction logic does not silently change the research
     agent's URL-integrity gate.
     """
-    final_text = ""
+    # Concatenate EVERY text block — not just the last. May 22 2026
+    # failure mode: when the model interleaves reasoning with
+    # web_search / web_fetch tool calls, the final JSON sometimes
+    # lands in an earlier text block while a later block carries a
+    # closing remark. Taking only the last block lost the JSON
+    # entirely; concatenating with newline separators lets the
+    # find('{') / rfind('}') parser locate it wherever it sits.
+    text_parts: list[str] = []
     sources: list[dict[str, Any]] = []
     fetched_urls: set[str] = set()
 
@@ -185,9 +193,9 @@ def _extract_text_sources_and_fetches(
         block_type = getattr(block, "type", None)
 
         if block_type == "text":
-            # Last text block wins — earlier text blocks are reasoning
-            # interleaved with tool calls.
-            final_text = block.text
+            piece = getattr(block, "text", "") or ""
+            if piece:
+                text_parts.append(piece)
 
         elif block_type == "web_search_tool_result":
             content = getattr(block, "content", None)
@@ -211,22 +219,40 @@ def _extract_text_sources_and_fetches(
                 if url:
                     fetched_urls.add(url)
 
+    final_text = "\n\n".join(text_parts)
     return final_text, sources, fetched_urls
 
 
 def _parse_digest_json(text: str) -> dict[str, Any]:
     """
-    Extracts the digest JSON from the model's final text block. Sonnet
-    occasionally wraps the JSON in a ```json code fence or surrounding
-    prose; we strip both. On any parse failure we return a defaulted
-    empty digest so the engine layer's `status='failed'` path takes
-    over rather than the call raising.
+    Extracts the digest JSON from the model's text. Sonnet routinely
+    wraps the JSON in a ```json code fence and adds prose before or
+    after; the parser strips both. On any parse failure it returns an
+    empty dict — generate_digest() then either falls back to the
+    plain-text path (when raw text exists) or hard-fails (when no
+    text at all came back).
+
+    Order of operations:
+      1. Strip markdown code fences (```json … ``` or ``` … ```).
+         Handles fences with or without a closing ``` (an unclosed
+         fence still yields useful text after the opener).
+      2. Find the outermost {...} span via find('{') / rfind('}').
+         This locates the JSON even when it is embedded in prose.
+      3. json.loads — return {} on any decode error.
     """
     cleaned = (text or "").strip()
-    if "```json" in cleaned:
-        cleaned = cleaned.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif "```" in cleaned:
-        cleaned = cleaned.split("```", 1)[1].split("```", 1)[0].strip()
+
+    # Strip fences. The May 22 2026 failure mode was the parser
+    # exiting after stripping the fence but before locating the JSON
+    # inside. The find/rfind below now handles both fenced and
+    # unfenced inputs uniformly.
+    fence_match = re.search(
+        r"```(?:json)?\s*\n?(.*?)(?:```|\Z)",
+        cleaned,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    if fence_match and "{" in fence_match.group(1):
+        cleaned = fence_match.group(1).strip()
 
     start = cleaned.find("{")
     end = cleaned.rfind("}")
@@ -239,6 +265,37 @@ def _parse_digest_json(text: str) -> dict[str, Any]:
                     error=str(exc), text_head=cleaned[:200])
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _plain_text_fallback_digest(
+    text: str, citation_urls: list[str],
+) -> dict[str, Any]:
+    """
+    When the model returns prose the parser cannot turn into JSON,
+    store the raw text as the digest summary rather than marking the
+    run as failed. Added May 22 2026 after the agent failed five
+    consecutive runs with 'model returned no parseable JSON' — the
+    text the model emitted on those runs would have been useful as
+    context even without the JSON structure, but the all-or-nothing
+    parser threw it away.
+
+    Distinct from _failure_digest: this returns a digest with NO
+    `error` key, so the engine layer records the run as status =
+    'complete'. The dashboard renders the raw text as the summary;
+    key_signals is empty (no structured implications to anchor on),
+    and citation_urls carries whatever URLs web_search did return so
+    the team can still trace the model's reasoning.
+
+    The text is capped at 2000 chars for display; the full text is
+    preserved in raw_response for audit.
+    """
+    return {
+        "summary_text":       text.strip()[:2000],
+        "key_signals":        [],
+        "regime_implication": "",
+        "citation_urls":      citation_urls,
+        "raw_response":       text,
+    }
 
 
 def _filter_to_verified_signals(
@@ -326,8 +383,28 @@ def generate_digest(
     verified_urls = {s["url"] for s in sources if s.get("url")}
     parsed = _parse_digest_json(text)
     if not parsed:
+        # Capture the first 500 chars of the raw response at WARNING
+        # level so a future parse failure is debuggable from production
+        # logs without re-running the agent. Added May 22 2026 after
+        # five consecutive 'model returned no parseable JSON' failures
+        # with no captured raw response to diagnose against.
         log.warning("research_agent_empty_parse",
-                    n_searches=len(sources), n_fetches=len(fetched_urls))
+                    n_searches=len(sources), n_fetches=len(fetched_urls),
+                    raw_response_head=(text or "")[:500])
+        # Plain-text fallback. If the model emitted ANY text at all,
+        # store it as the digest summary rather than marking the run
+        # as failed — a plain-text digest is more useful to the team
+        # than nothing. Only the truly empty response (no text blocks
+        # at all) takes the hard-failure path.
+        if text and text.strip():
+            sorted_urls = sorted(verified_urls)
+            log.info("research_agent_plain_text_fallback",
+                     text_length=len(text),
+                     n_verified_urls=len(sorted_urls))
+            return (
+                _plain_text_fallback_digest(text, sorted_urls),
+                _usage_meta(response, sources, fetched_urls),
+            )
         return (
             _failure_digest("model returned no parseable JSON"),
             _usage_meta(response, sources, fetched_urls),
