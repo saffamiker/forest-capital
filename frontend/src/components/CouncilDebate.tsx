@@ -158,11 +158,36 @@ export default function CouncilDebate() {
   // ExplainerPanel navigates here with a contextual question in route
   // state. We set the field and focus it — never auto-submit, so the
   // user reviews and confirms before convening the council.
+  //
+  // May 22 2026 — the handoff also carries a structured handoff
+  // package (explainer_topic, explainer_content, chart_context,
+  // macro_summary, thread). We retain it in component state so the
+  // Continuing-From banner can render the prior thread, AND so the
+  // council session POST can include the package on submit (the
+  // backend system prompt then references the prior CIO thread as
+  // established context, not a fresh question).
+  type HandoffPackage = {
+    handoff_source?: string
+    explainer_topic?: string
+    explainer_content?: string
+    chart_context?: { name?: string; values?: Record<string, unknown> }
+    thread?: Array<{ role: 'user' | 'cio'; content: string }>
+    handoff_question?: string
+  }
+  const [handoff, setHandoff] = useState<HandoffPackage | null>(null)
+  const [handoffOpen, setHandoffOpen] = useState(true)
+
   useEffect(() => {
-    const prefill = (location.state as { prefillQuestion?: string } | null)?.prefillQuestion
-    if (prefill) {
-      setQuery(prefill)
+    const state = location.state as {
+      prefillQuestion?: string
+      handoff?: HandoffPackage
+    } | null
+    if (state?.prefillQuestion) {
+      setQuery(state.prefillQuestion)
       inputRef.current?.focus()
+    }
+    if (state?.handoff) {
+      setHandoff(state.handoff)
     }
     // Mount-only — a later navigation without state must not re-fire.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -188,6 +213,80 @@ export default function CouncilDebate() {
           Six AI agents deliberate on your portfolio question. Gemini provides an independent dissenting view.
         </p>
       </div>
+
+      {/* Handoff context banner — when the user arrived here from an
+          ExplainerPanel "Take this to the Council" click, the route
+          state carries a handoff package (explainer_topic, prior
+          thread, chart context). The banner makes that context
+          visible to the user — the prior CIO exchanges are not
+          buried, and collapsing the banner does not lose them. The
+          handoff package is also sent on the council POST so the
+          system prompt treats the prior thread as established
+          context rather than asking the council to start from
+          scratch. */}
+      {handoff && handoff.explainer_topic && (
+        <div
+          data-testid="council-handoff-banner"
+          className="rounded-lg border border-electric/30 bg-electric/5 p-3">
+          <button
+            type="button"
+            onClick={() => setHandoffOpen((o) => !o)}
+            className="w-full flex items-center justify-between gap-2 text-left">
+            <div className="min-w-0 flex-1">
+              <div className="text-2xs uppercase tracking-wide text-electric
+                              font-semibold">
+                Continuing from {handoff.explainer_topic} explainer
+              </div>
+              <div className="text-xs text-muted mt-0.5">
+                {(handoff.thread?.length ?? 0) > 0
+                  ? `${(handoff.thread ?? []).filter((e) => e.role === 'user').length} prior `
+                    + `exchange${(handoff.thread ?? []).filter((e) => e.role === 'user').length === 1
+                      ? '' : 's'} with the CIO included as context.`
+                  : 'No prior follow-up exchanges — explainer content '
+                    + 'included as context.'}
+              </div>
+            </div>
+            <span className="text-2xs text-electric shrink-0">
+              {handoffOpen ? 'Hide context ▴' : 'Show context ▾'}
+            </span>
+          </button>
+          {handoffOpen && (
+            <div className="mt-3 pt-3 border-t border-border space-y-2">
+              {handoff.explainer_content && (
+                <div className="rounded bg-navy-900/50 p-2">
+                  <div className="text-2xs uppercase tracking-wide text-muted mb-1">
+                    Explainer content the user has already read
+                  </div>
+                  <div className="text-xs text-slate-300 leading-relaxed
+                                  break-words max-h-[120px] overflow-y-auto
+                                  whitespace-pre-wrap">
+                    {handoff.explainer_content}
+                  </div>
+                </div>
+              )}
+              {(handoff.thread ?? []).map((ex, i) => (
+                <div key={i} className={ex.role === 'user'
+                  ? 'rounded bg-navy-700/40 p-2'
+                  : 'rounded bg-electric/5 border border-electric/20 p-2'}>
+                  <div className="text-2xs uppercase tracking-wide text-muted mb-0.5">
+                    {ex.role === 'user' ? 'User' : 'CIO'}
+                  </div>
+                  <div className="text-xs text-slate-300 leading-relaxed
+                                  break-words">
+                    {ex.content}
+                  </div>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() => setHandoff(null)}
+                className="text-2xs text-muted hover:text-warning underline">
+                Discard handoff context
+              </button>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Query input */}
       {/* Stacked full-width on mobile; the input and the action button

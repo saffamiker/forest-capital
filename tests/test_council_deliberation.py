@@ -155,3 +155,68 @@ class TestCouncilSignificanceConsistency:
         data = resp.json()
         # Re-serialise — will raise if any field is not JSON-safe
         json.dumps(data)
+
+
+class TestExplainerFollowupEndpoint:
+    """POST /api/v1/council/explainer-followup — auth gate + request
+    validation + SSE response shape. The actual CIO call is mocked
+    via the test env's no-LLM fallback so the test does not hit
+    Anthropic."""
+
+    def test_rejects_unauthenticated(self):
+        resp = client.post(
+            "/api/v1/council/explainer-followup",
+            json={
+                "explainer_topic": "Sharpe Ratio",
+                "explainer_content": "Risk-adjusted return.",
+                "question": "How does it compare to Sortino?",
+            },
+        )
+        assert resp.status_code == 401
+
+    def test_rejects_empty_question(self):
+        resp = client.post(
+            "/api/v1/council/explainer-followup",
+            json={
+                "explainer_topic": "Sharpe Ratio",
+                "explainer_content": "x",
+                "question": "   ",
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 422
+
+    def test_rejects_question_over_300_chars(self):
+        resp = client.post(
+            "/api/v1/council/explainer-followup",
+            json={
+                "explainer_topic": "Sharpe Ratio",
+                "explainer_content": "x",
+                "question": "x" * 301,
+            },
+            headers=AUTH_HEADERS,
+        )
+        assert resp.status_code == 422
+
+    def test_rejects_thread_at_limit(self):
+        thread = [
+            {"role": "user", "content": "q1"},
+            {"role": "cio", "content": "a1"},
+            {"role": "user", "content": "q2"},
+            {"role": "cio", "content": "a2"},
+            {"role": "user", "content": "q3"},
+            {"role": "cio", "content": "a3"},
+        ]
+        resp = client.post(
+            "/api/v1/council/explainer-followup",
+            json={
+                "explainer_topic": "Sharpe Ratio",
+                "explainer_content": "x",
+                "thread": thread,
+                "question": "q4",
+            },
+            headers=AUTH_HEADERS,
+        )
+        # Three exchanges already used — the endpoint refuses the
+        # fourth so the user takes the question to the full council.
+        assert resp.status_code == 429

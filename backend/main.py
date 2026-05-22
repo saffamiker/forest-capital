@@ -2157,6 +2157,195 @@ async def council_explain_data(
     return StreamingResponse(gen(), media_type="text/plain")
 
 
+# ── Explainer CIO follow-up — multi-turn thread inside the panel ──────────────
+#
+# The ExplainerPanel surfaces a 150-word static explanation from Haiku
+# (the /api/council/explain stream above). Once the user has read that,
+# they may want a follow-up — a clarification, a question grounded in
+# the chart, a tie-back to the macro digest. The follow-up endpoint
+# calls the CIO directly (Opus) for higher-quality reasoning, scoped
+# tightly to the explainer context: the topic, the panel content
+# already shown, the optional chart values, the optional macro
+# summary, and the prior thread of user/cio exchanges in this panel
+# session. Capped at three exchanges per session; beyond that the
+# user takes the question to the full council via a handoff package.
+
+
+_FOLLOWUP_MAX_EXCHANGES = 3
+
+
+class ExplainerFollowupExchange(__import__("pydantic").BaseModel):
+    role: str  # "user" or "cio"
+    content: str
+
+
+class ExplainerFollowupRequest(__import__("pydantic").BaseModel):
+    explainer_topic: str
+    explainer_content: str
+    chart_context: dict | None = None
+    macro_summary: str | None = ""
+    thread: list[ExplainerFollowupExchange] = []
+    question: str
+
+
+def _build_followup_system_prompt(
+    topic: str, explainer_content: str,
+    chart_context: dict | None, macro_summary: str | None,
+) -> str:
+    """Builds the CIO follow-up system prompt with the explainer
+    context baked in. Same evidence-discipline rule the other agents
+    use ("only reference numbers a tool has actually returned"), plus
+    the explainer-specific instruction to be concise."""
+    from agents.cio import _SYSTEM_PROMPT as _CIO_SYSTEM_PROMPT
+
+    parts = [
+        _CIO_SYSTEM_PROMPT,
+        "",
+        "=== EXPLAINER FOLLOW-UP CONTEXT ===",
+        f"You are answering a follow-up question from a user looking "
+        f"at the {topic} explainer on the Forest Capital portfolio "
+        f"intelligence platform.",
+        "",
+        "The user has already read the following explainer content:",
+        explainer_content[:2000],
+    ]
+    if chart_context:
+        parts.append("")
+        parts.append("Chart context — values currently on screen:")
+        import json as _json
+        parts.append(_json.dumps(chart_context, indent=2, default=str)[:1000])
+    if macro_summary:
+        parts.append("")
+        parts.append("Current macro conditions summary:")
+        parts.append(macro_summary[:1000])
+        parts.append("When you draw on this macro context in your answer, "
+                     "cite it inline using [Macro: <category>] (e.g. "
+                     "[Macro: monetary_policy]) so the user sees which "
+                     "signals you used.")
+    parts.append("")
+    parts.append(
+        "CONCISENESS — keep your answer to 2-4 sentences for a simple "
+        "clarification, up to 2 short paragraphs for a complex question. "
+        "Do not restate the explainer content; build on it.")
+    parts.append(
+        "WHEN TO ESCALATE — if the question requires "
+        "multi-specialist deliberation (e.g. comparing strategies on "
+        "more than one dimension, weighing the equity vs fixed-income "
+        "view on the same question, deriving a portfolio "
+        "recommendation), conclude your answer with the line "
+        "'[SUGGEST_COUNCIL]' on its own. The frontend strips this "
+        "marker and surfaces a 'Take this to the Council' button. "
+        "Use [SUGGEST_COUNCIL] sparingly — only when the question "
+        "genuinely warrants the full council, not for every "
+        "follow-up.")
+    return "\n".join(parts)
+
+
+@app.post("/api/v1/council/explainer-followup")
+@limiter.limit("15/minute")
+async def council_explainer_followup(
+    request: Request,
+    body: ExplainerFollowupRequest,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Streams a CIO follow-up answer for a question asked inside the
+    ExplainerPanel thread. Up to three exchanges per panel session.
+
+    Response is text/event-stream — three frame types:
+      data: {"type":"chunk","text":"..."}    (streamed chunks)
+      data: {"type":"meta","exchanges_used":N,"suggest_council":bool}
+      data: [DONE]
+
+    The frontend assembles the chunks into the assistant message,
+    reads exchanges_used to update the "X of 3 follow-ups used"
+    counter, and toggles the council handoff prompt when
+    suggest_council is true.
+    """
+    if not body.question.strip():
+        raise HTTPException(status_code=422, detail="question is required")
+    if len(body.question) > 300:
+        raise HTTPException(status_code=422,
+                            detail="question must be 300 chars or fewer")
+    if len(body.thread) >= _FOLLOWUP_MAX_EXCHANGES:
+        raise HTTPException(status_code=429,
+                            detail="Follow-up limit reached. Take the "
+                                   "question to the council.")
+
+    from agents.base import OPUS_MODEL, call_claude
+    from agents.usage import start_usage_capture
+    start_usage_capture()
+
+    system_prompt = _build_followup_system_prompt(
+        body.explainer_topic, body.explainer_content,
+        body.chart_context, body.macro_summary,
+    )
+
+    # Build the multi-turn conversation. Prior exchanges go into the
+    # user_message as a transcript; the new question goes last. We
+    # avoid Anthropic's messages-array conversation API for this
+    # endpoint (it requires alternating user/assistant which is a
+    # heavier conformance surface for a 3-turn cap).
+    transcript_parts: list[str] = []
+    for ex in body.thread:
+        label = "USER" if ex.role.lower() == "user" else "CIO"
+        transcript_parts.append(f"{label}: {ex.content}")
+    transcript = "\n\n".join(transcript_parts)
+    user_message = (
+        f"{transcript}\n\nUSER: {body.question}".strip()
+        if transcript
+        else f"USER: {body.question}")
+
+    exchanges_used = len(body.thread) + 1
+
+    async def gen():
+        full_text = ""
+        suggest_council = False
+        try:
+            # Non-streaming call (call_claude returns the full string).
+            # For the follow-up surface a "stream as one chunk" is
+            # acceptable — the response is short (2-4 sentences typical)
+            # and the user expects a CIO-quality answer rather than a
+            # token-by-token reveal. The SSE framing is preserved so
+            # the frontend's stream reader works uniformly.
+            full_text = call_claude(
+                OPUS_MODEL, system_prompt, user_message, max_tokens=600)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("council_followup_failed", error=str(exc))
+            full_text = ("The CIO follow-up is unavailable right now. "
+                         "Try again in a moment, or take the question to "
+                         "the council.")
+        # Strip the [SUGGEST_COUNCIL] sentinel — the frontend uses
+        # the boolean, not the literal marker in the body text.
+        if "[SUGGEST_COUNCIL]" in full_text:
+            suggest_council = True
+            full_text = full_text.replace("[SUGGEST_COUNCIL]", "").strip()
+
+        # Emit as a single chunk + meta frame.
+        chunk_frame = json.dumps({"type": "chunk", "text": full_text})
+        meta_frame = json.dumps({
+            "type": "meta",
+            "exchanges_used": exchanges_used,
+            "suggest_council": suggest_council,
+        })
+        yield f"data: {chunk_frame}\n\n"
+        yield f"data: {meta_frame}\n\n"
+        yield "data: [DONE]\n\n"
+
+        _log_interaction_bg(
+            request, session, "explainer_followup",
+            question_text=body.question,
+            response_summary=full_text[:500],
+            metadata={
+                "explainer_topic": body.explainer_topic,
+                "exchanges_used": exchanges_used,
+                "suggest_council": suggest_council,
+            },
+        )
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
 # ── Guided UAT test runner ────────────────────────────────────────────────────
 #
 # Records attested test-step results, structured failure reports, and
