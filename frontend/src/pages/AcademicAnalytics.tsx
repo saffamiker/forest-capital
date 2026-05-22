@@ -37,6 +37,8 @@ import { DrawdownDurationTable } from '../components/diversification/DrawdownDur
 import { CrisisPerformanceTable } from '../components/diversification/CrisisPerformanceTable'
 import { RiskContributionBar } from '../components/diversification/RiskContributionBar'
 import { DistributionTable } from '../components/diversification/DistributionTable'
+// Item 9 — per-strategy Portfolio Profile inside the methodology accordion.
+import { PortfolioProfilePanel } from '../components/PortfolioProfilePanel'
 
 // Purple accent — analytics sits alongside the academic-rigour screens.
 const ACCENT = '#7c3aed'
@@ -1040,8 +1042,16 @@ function MetaField({ label, value }: { label: string; value: string }) {
   )
 }
 
+type MethodologyTab = 'methodology' | 'profile'
+
 function StrategyMethodologyPanel({ rows }: { rows: StrategyMeta[] }) {
   const [openId, setOpenId] = useState<string | null>(null)
+  // Item 9 — tab toggle inside the expanded accordion. 'methodology' is
+  // the original signal_logic / economic_intuition / etc. content;
+  // 'profile' is the PortfolioProfilePanel three-card layout. Reset to
+  // 'methodology' when a different strategy is opened so the user
+  // doesn't see the previous strategy's tab on the new one.
+  const [tab, setTab] = useState<MethodologyTab>('methodology')
   const fmtWeights = (w: StrategyMeta['weights']): string =>
     w == null
       ? 'Optimised — weights are solved each rebalance, not fixed'
@@ -1060,7 +1070,13 @@ function StrategyMethodologyPanel({ rows }: { rows: StrategyMeta[] }) {
             <div key={s.id} className="border border-border rounded overflow-hidden">
               <button
                 type="button"
-                onClick={() => setOpenId(open ? null : s.id)}
+                onClick={() => {
+                  // Reset the tab to Methodology whenever a new
+                  // strategy opens so the user doesn't carry the
+                  // previous strategy's tab selection forward.
+                  setTab('methodology')
+                  setOpenId(open ? null : s.id)
+                }}
                 className="w-full flex items-center gap-2 px-3 py-2 min-h-[44px] hover:bg-navy-700 transition-colors"
               >
                 {open
@@ -1076,28 +1092,58 @@ function StrategyMethodologyPanel({ rows }: { rows: StrategyMeta[] }) {
                 </span>
               </button>
               {open && (
-                <div className="px-3 py-2.5 border-t border-border space-y-2">
-                  {s.type === 'dynamic' ? (
-                    <>
-                      {s.signal_logic && <MetaField label="Signal logic" value={s.signal_logic} />}
-                      {s.economic_intuition &&
-                        <MetaField label="Economic intuition" value={s.economic_intuition} />}
-                      <MetaField label="Rebalancing" value={s.rebalancing} />
-                      {s.key_parameter && (
-                        <MetaField
-                          label="Key parameter"
-                          value={`${s.key_parameter} — ${s.parameter_value ?? '—'}`}
-                        />
-                      )}
-                      <MetaField label="Rationale" value={s.rationale} />
-                    </>
-                  ) : (
-                    <>
-                      <MetaField label="Weights" value={fmtWeights(s.weights)} />
-                      <MetaField label="Rebalancing" value={s.rebalancing} />
-                      <MetaField label="Construction rationale" value={s.rationale} />
-                    </>
-                  )}
+                <div className="border-t border-border">
+                  {/* Item 9 — Methodology / Portfolio Profile tab toggle.
+                      Methodology shows the existing signal_logic /
+                      economic_intuition / etc. content; Portfolio
+                      Profile shows the three-card AI-generated
+                      characterisation panel. */}
+                  <div className="flex gap-1 px-3 pt-2"
+                       data-testid={`methodology-tabs-${s.id}`}>
+                    {(['methodology', 'profile'] as MethodologyTab[]).map((t) => (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setTab(t)}
+                        data-testid={`methodology-tab-${t}-${s.id}`}
+                        className={`text-2xs px-2.5 py-1 rounded border transition-colors ${
+                          tab === t
+                            ? 'border-electric bg-electric/10 text-electric'
+                            : 'border-border text-muted hover:text-white hover:border-border/80'
+                        }`}>
+                        {t === 'methodology' ? 'Methodology' : 'Portfolio Profile'}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="px-3 py-2.5 space-y-2">
+                    {tab === 'methodology' ? (
+                      s.type === 'dynamic' ? (
+                        <>
+                          {s.signal_logic && <MetaField label="Signal logic" value={s.signal_logic} />}
+                          {s.economic_intuition &&
+                            <MetaField label="Economic intuition" value={s.economic_intuition} />}
+                          <MetaField label="Rebalancing" value={s.rebalancing} />
+                          {s.key_parameter && (
+                            <MetaField
+                              label="Key parameter"
+                              value={`${s.key_parameter} — ${s.parameter_value ?? '—'}`}
+                            />
+                          )}
+                          <MetaField label="Rationale" value={s.rationale} />
+                        </>
+                      ) : (
+                        <>
+                          <MetaField label="Weights" value={fmtWeights(s.weights)} />
+                          <MetaField label="Rebalancing" value={s.rebalancing} />
+                          <MetaField label="Construction rationale" value={s.rationale} />
+                        </>
+                      )
+                    ) : (
+                      <PortfolioProfilePanel
+                        strategyId={s.id}
+                        strategyName={s.name} />
+                    )}
+                  </div>
                 </div>
               )}
             </div>
