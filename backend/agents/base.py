@@ -231,7 +231,8 @@ def call_claude(
     kwargs: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": _with_macro_context(_with_academic_context(system_prompt)),
+        "system": _with_diversification_context(
+            _with_macro_context(_with_academic_context(system_prompt))),
         "messages": [{"role": "user", "content": content}],
     }
     if tools:
@@ -281,6 +282,31 @@ def _with_academic_context(system_prompt: str) -> str:
         # Fail-open, but log so a persistently broken academic-context
         # cache is visible rather than silently dropping agent context.
         log.warning("academic_context_inject_failed", error=str(exc))
+        return system_prompt
+
+
+def _with_diversification_context(system_prompt: str) -> str:
+    """
+    Appends the pre-computed diversification context (May 22 2026,
+    item 8) to a system prompt — alongside the macro and academic
+    context blocks. The context is built from the diversification
+    suite metric rows (correlation matrices, tail risk, capture
+    ratios, crisis performance, risk contribution) and lets agents
+    reference specific numbers (e.g. "the lowest correlation pair
+    is X / Y at r=0.12") rather than generalities.
+
+    Fail-open — a missing module / read miss / empty cache returns
+    the prompt unaltered so an agent call never breaks on this
+    layer.
+    """
+    try:
+        from tools.diversification_context import (
+            inject_diversification_context,
+        )
+        return inject_diversification_context(system_prompt)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("diversification_context_inject_failed",
+                    error=str(exc))
         return system_prompt
 
 

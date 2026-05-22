@@ -588,10 +588,10 @@ function FailureReportsBlock() {
 
       <button type="button"
         onClick={() => download(csvBlob(
-          ['Tester', 'Script', 'Step', 'Severity', 'Description',
+          ['ID', 'Tester', 'Script', 'Step', 'Severity', 'Description',
             'Expected', 'Actual', 'Attested', 'Resolved',
             'Resolution type', 'Fix reference'],
-          failures.map((f) => [f.user_email, f.script_id,
+          failures.map((f) => [String(f.id), f.user_email, f.script_id,
             stepTitle(f.script_id, f.step_id), f.severity ?? '',
             f.failure_description ?? '', f.expected_result ?? '',
             f.actual_result ?? '', f.attested_at ?? '',
@@ -614,6 +614,17 @@ function FailureReportsBlock() {
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5 flex-wrap text-2xs">
+                  {/* Failure report ID — first column on the card so
+                      it scans like a row identifier. Same style as the
+                      Issue Tracker / Feedback Backlog ID columns:
+                      narrow, monospace, left-aligned. Required for
+                      the "Resolves failure #N" PR-body convention so
+                      the user can reference a failure by id. */}
+                  <span
+                    data-testid={`failure-id-${f.id}`}
+                    className="font-mono text-muted whitespace-nowrap">
+                    #{f.id}
+                  </span>
                   <span className="text-white font-medium">
                     {stepTitle(f.script_id, f.step_id)}
                   </span>
@@ -778,9 +789,9 @@ function FeedbackBacklogBlock() {
         </select>
         <button type="button"
           onClick={() => download(csvBlob(
-            ['Tester', 'Context', 'Type', 'Title', 'Description', 'Category',
+            ['ID', 'Tester', 'Context', 'Type', 'Title', 'Description', 'Category',
               'Severity', 'Effort', 'Tags', 'Status'],
-            shown.map((f) => [f.user_email,
+            shown.map((f) => [String(f.id), f.user_email,
               f.script_id ? `Step: ${stepTitle(f.script_id, f.step_id ?? '')}`
                 : `Route: ${f.source_route ?? '—'}`,
               f.feedback_type, f.title, f.description, f.ai_category ?? '',
@@ -790,6 +801,33 @@ function FeedbackBacklogBlock() {
           className="flex items-center gap-1 px-2 py-0.5 rounded border
                      border-border text-slate-300 hover:bg-navy-700">
           <Download className="w-3 h-3" /> Export Backlog
+        </button>
+        {/* Feedback Report — broader CSV with the full per-item
+            payload including AI summary and resolution context.
+            Same naming convention as the failure-report download but
+            with feedback-specific columns. */}
+        <button type="button"
+          onClick={() => download(csvBlob(
+            ['id', 'tester email', 'script', 'step', 'feedback_type',
+              'title', 'description', 'ai_category', 'ai_severity',
+              'ai_effort', 'ai_summary', 'status', 'resolution_note',
+              'created_at'],
+            shown.map((f) => [
+              String(f.id), f.user_email,
+              f.script_id ?? '', f.step_id ?? '',
+              f.feedback_type, f.title, f.description,
+              f.ai_category ?? '', f.ai_severity ?? '',
+              f.ai_effort_estimate ?? '',
+              (f as { ai_summary?: string }).ai_summary ?? '',
+              f.status,
+              (f as { resolution_note?: string }).resolution_note ?? '',
+              (f as { created_at?: string }).created_at ?? '',
+            ])),
+            'test-feedback-report.csv')}
+          className="flex items-center gap-1 px-2 py-0.5 rounded border
+                     border-electric/40 bg-electric/10 text-electric
+                     hover:bg-electric/20">
+          <Download className="w-3 h-3" /> Download Feedback Report
         </button>
       </div>
 
@@ -802,8 +840,18 @@ function FeedbackBacklogBlock() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {/* Tester said */}
             <div className="min-w-0">
-              <div className="text-2xs uppercase tracking-wide text-muted">
-                Tester said
+              <div className="flex items-baseline gap-1.5
+                              text-2xs uppercase tracking-wide text-muted">
+                {/* Feedback item ID — first element so the sysadmin
+                    can reference a feedback row by id when resolving
+                    via the API or Render shell. Monospace + narrow,
+                    matching the Failure Reports ID column style. */}
+                <span
+                  data-testid={`feedback-id-${f.id}`}
+                  className="font-mono text-muted normal-case">
+                  #{f.id}
+                </span>
+                <span>· Tester said</span>
               </div>
               <div className="text-2xs text-electric mt-0.5">
                 {f.script_id

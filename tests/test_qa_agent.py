@@ -138,9 +138,16 @@ class TestQAAuditStructure:
         assert len(result["items"]) == 39
 
     def test_item_statuses_sum_correctly(self, qa):
+        # May 22 2026 — INCOMPLETE is a fourth status (alongside PASS /
+        # WARN / FAIL). The sum must include it for the total to match.
+        # The _build_report assertion enforces this server-side too.
         result = qa.run_audit(FULL_MOCK_RESULTS, run_full_checklist=True)
-        total = result["checks_passed"] + result["checks_warned"] + result["checks_failed"]
+        total = (result["checks_passed"]
+                 + result["checks_warned"]
+                 + result["checks_failed"]
+                 + result["checks_incomplete"])
         assert total == 39
+        assert result["checks_total"] == 39
 
     def test_verdict_is_fail_if_any_fail(self, qa):
         # Inject a strategy with clearly problematic data
@@ -188,8 +195,13 @@ class TestQAPerCheckFiltering:
         assert "Autocorrelation" not in p03["evidence"]
 
     def test_missing_section_falls_back_to_an_honest_message(self, qa):
-        # Only P03 has a section — every other check must get the
-        # fallback message, never the whole blob.
+        # May 22 2026 — a check with no section is INCOMPLETE, not WARN.
+        # The earlier default (WARN, "The QA agent did not return
+        # analysis…") was a false quality signal — it implied a concern
+        # was found when in fact no examination took place. Now the
+        # signal is "the audit did not finish this check", with status
+        # INCOMPLETE and action_type rerun_required so the UI shows a
+        # Re-run Audit affordance.
         response = (
             "**P03 — Transaction costs**\n"
             "Costs are applied bidirectionally.\nVerdict: PASS\n"
@@ -199,8 +211,12 @@ class TestQAPerCheckFiltering:
         assert missing
         for item in missing:
             assert item["evidence"] == (
-                "The QA agent did not return analysis for this check. "
-                "Re-run the QA audit to generate a full report.")
+                "Analysis not completed — re-run the QA audit to "
+                "generate a full report.")
+            assert item["status"] == "INCOMPLETE"
+            # INCOMPLETE pairs with rerun_required so the UI shows the
+            # Re-run Audit button rather than a Flag-for-Fix.
+            assert item["action_type"] == "rerun_required"
 
     def test_no_item_ever_shows_the_whole_blob(self, qa):
         response = (
@@ -218,6 +234,183 @@ class TestQAPerCheckFiltering:
         for item in result["items"]:
             fix = item.get("fix")
             assert not (fix and "analysis section above" in fix)
+
+
+class TestQAStructuredFields:
+    """May 22 2026 — every WARN and FAIL section emits structured
+    FINDING / IMPLICATION / REMEDIATION / ACTION_TYPE (and
+    DISCLOSURE_TEXT when action_type=disclosure_required) labelled
+    fields. The audit-response parser extracts these into per-item
+    keys so the UI cards render Finding / Implication / Action
+    Required sections separately. Pin the parser contract."""
+
+    def test_extracts_structured_fields_from_a_warn_section(self, qa):
+        from agents.qa_agent import _structured_fields_from_section
+        section = (
+            "**P03 — Transaction costs**\n"
+            "Costs apply on both legs of every rebalance.\n"
+            "FINDING: turnover sums |Δw| across all assets, capturing "
+            "both the sell side and the buy side.\n"
+            "IMPLICATION: could be intentional double-sided capture "
+            "(correct) or accidental double-counting (wrong).\n"
+            "REMEDIATION: confirm the design intent — if intentional, "
+            "mark this as PASS with a methodology note; if accidental, "
+            "halve the cost-drag formula.\n"
+            "ACTION_TYPE: methodology_decision\n"
+            "Verdict: WARN\n"
+        )
+        fields = _structured_fields_from_section(section)
+        assert fields["finding"].startswith("turnover sums")
+        assert "intentional double-sided" in fields["implication"]
+        assert "confirm the design intent" in fields["remediation"]
+        assert fields["action_type"] == "methodology_decision"
+        assert fields["disclosure_text"] is None
+
+    def test_extracts_disclosure_text_when_action_is_disclosure_required(self, qa):
+        from agents.qa_agent import _structured_fields_from_section
+        section = (
+            "**D02 — No survivorship bias**\n"
+            "Index reconstitution introduces minor survivorship effects.\n"
+            "FINDING: the S&P 500 evolves through inclusions and "
+            "deletions; the index has no surviving company that has "
+            "been delisted, contributing a small upward bias.\n"
+            "IMPLICATION: equity returns are marginally overstated.\n"
+            "REMEDIATION: disclose in the methodology section.\n"
+            "ACTION_TYPE: disclosure_required\n"
+            "DISCLOSURE_TEXT: The S&P 500 series used in this analysis "
+            "reflects post-reconstitution constituents and therefore "
+            "carries a small survivorship bias; this is a known limit "
+            "of the dataset and the magnitude is empirically small "
+            "(roughly 0.1-0.2% per annum).\n"
+            "Verdict: WARN\n"
+        )
+        fields = _structured_fields_from_section(section)
+        assert fields["action_type"] == "disclosure_required"
+        assert fields["disclosure_text"].startswith("The S&P 500 series")
+
+    def test_rejects_unknown_action_type(self, qa):
+        # The action_type set is locked. A model that hallucinates a
+        # fifth value (e.g. "compliance_review") must produce None so
+        # the UI does not render a button for an unknown variant.
+        from agents.qa_agent import _structured_fields_from_section
+        section = (
+            "FINDING: something.\nIMPLICATION: matters.\n"
+            "REMEDIATION: fix.\n"
+            "ACTION_TYPE: compliance_review\nVerdict: WARN\n"
+        )
+        fields = _structured_fields_from_section(section)
+        assert fields["action_type"] is None
+
+    def test_empty_section_returns_all_nones(self, qa):
+        from agents.qa_agent import _structured_fields_from_section
+        fields = _structured_fields_from_section("")
+        assert all(v is None for v in fields.values())
+
+    def test_section_without_labelled_fields_returns_all_nones(self, qa):
+        # PASS sections typically have no labelled fields — only the
+        # evidence and the Verdict line. Every structured field must
+        # return None so the UI suppresses the Action Required row.
+        from agents.qa_agent import _structured_fields_from_section
+        section = (
+            "**C01 — Walk-forward**\nRolling and expanding windows both "
+            "run.\nVerdict: PASS\n")
+        fields = _structured_fields_from_section(section)
+        assert all(v is None for v in fields.values())
+
+    def test_parse_audit_response_threads_fields_into_items(self, qa):
+        response = (
+            "**P03 — Transaction costs**\n"
+            "Costs apply on both legs of every rebalance.\n"
+            "FINDING: turnover sums |Δw|, capturing both sides.\n"
+            "IMPLICATION: design ambiguity.\n"
+            "REMEDIATION: confirm intent.\n"
+            "ACTION_TYPE: methodology_decision\n"
+            "Verdict: WARN\n"
+        )
+        result = qa._parse_audit_response(response, FULL_MOCK_RESULTS, {})
+        p03 = next(i for i in result["items"] if i["check_id"] == "P03")
+        # The structured fields land as top-level keys on the item dict
+        # (where the UI cards read them).
+        assert p03["finding"] == "turnover sums |Δw|, capturing both sides."
+        assert p03["implication"] == "design ambiguity."
+        assert p03["remediation"] == "confirm intent."
+        assert p03["action_type"] == "methodology_decision"
+        assert p03["disclosure_text"] is None
+
+
+class TestQAIncompleteStatus:
+    """May 22 2026 contract — INCOMPLETE is a first-class status value
+    alongside PASS / WARN / FAIL. It signals "the audit did not finish
+    this check", NOT "this check has a concern". INCOMPLETE checks do
+    not contribute to the WARN or FAIL totals; the report surfaces
+    them in a separate checks_incomplete counter."""
+
+    def test_incomplete_checks_count_separately(self, qa):
+        # A response with only P03 leaves 38 checks without a section.
+        # Those should all be INCOMPLETE — they do NOT inflate the
+        # WARN total.
+        response = "**P03 — Transaction costs**\nFine.\nVerdict: PASS\n"
+        result = qa._parse_audit_response(response, FULL_MOCK_RESULTS, {})
+        # P03 PASS; the 38 missing checks → INCOMPLETE (minus any
+        # deterministic-check coverage, which override INCOMPLETE).
+        assert result["checks_incomplete"] > 0
+        # Sanity — the four counters sum to total.
+        total = (result["checks_passed"] + result["checks_warned"]
+                 + result["checks_failed"] + result["checks_incomplete"])
+        assert total == result["checks_total"]
+
+    def test_incomplete_does_not_drive_verdict(self, qa):
+        # Even with many INCOMPLETE checks, if no FAIL and no WARN
+        # exists, the verdict stays PASS. INCOMPLETE is not a quality
+        # signal — it is an audit-completeness signal.
+        response = "**P03 — Transaction costs**\nFine.\nVerdict: PASS\n"
+        result = qa._parse_audit_response(response, FULL_MOCK_RESULTS, {})
+        # The remaining checks are INCOMPLETE; no FAIL or WARN was
+        # introduced. The verdict reflects the substance, not the gaps.
+        assert result["checks_failed"] == 0
+        # Note: deterministic checks may produce a WARN of their own
+        # (e.g. AN05 / S08 / S09) — so verdict may be WARN, but it is
+        # never driven by INCOMPLETE.
+        assert result["verdict"] in ("PASS", "WARN")
+
+    def test_explicit_incomplete_verdict_from_model_is_respected(self, qa):
+        # If the model writes Verdict: INCOMPLETE explicitly, the
+        # parser must respect it (not coerce to WARN).
+        response = (
+            "**P03 — Transaction costs**\n"
+            "Insufficient evidence in this run.\n"
+            "Verdict: INCOMPLETE\n"
+        )
+        result = qa._parse_audit_response(response, FULL_MOCK_RESULTS, {})
+        p03 = next(i for i in result["items"] if i["check_id"] == "P03")
+        assert p03["status"] == "INCOMPLETE"
+
+    def test_summary_line_reports_incomplete_count_separately(self, qa):
+        response = "**P03 — Transaction costs**\nFine.\nVerdict: PASS\n"
+        result = qa._parse_audit_response(response, FULL_MOCK_RESULTS, {})
+        if result["checks_incomplete"] > 0:
+            # The summary line surfaces incompletes so the user sees
+            # the gap rather than assuming the audit was complete.
+            assert "incomplete" in result["summary"].lower()
+            assert "re-run" in result["summary"].lower()
+
+    def test_deterministic_audit_marks_non_det_checks_incomplete(self, qa):
+        # When the LLM is unavailable, non-deterministic checks default
+        # to INCOMPLETE (not WARN). This is the May 22 2026 contract
+        # change — a baseless WARN is replaced with an honest
+        # "audit did not run" signal.
+        det = qa._run_deterministic_checks(FULL_MOCK_RESULTS)
+        report = qa._build_deterministic_audit(det, FULL_MOCK_RESULTS)
+        non_det_items = [
+            i for i in report["items"]
+            if i["status"] not in ("PASS",)
+        ]
+        # At least some non-deterministic checks must surface as
+        # INCOMPLETE (with rerun_required action_type for the UI).
+        incomplete = [i for i in non_det_items if i["status"] == "INCOMPLETE"]
+        assert incomplete, "deterministic audit should flag non-det checks as INCOMPLETE"
+        for item in incomplete:
+            assert item["action_type"] == "rerun_required"
 
 
 class TestQALimitationsGeneration:

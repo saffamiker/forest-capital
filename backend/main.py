@@ -160,7 +160,8 @@ async def lifespan(app: FastAPI):
         # surfaced by UAT on May 22 2026.
         try:
             from tools.research_engine import (
-                fail_stale_running_digests, trigger_research_async,
+                fail_stale_running_digests, start_daily_scheduler,
+                trigger_research_async,
             )
             reaped = await fail_stale_running_digests()
             if reaped:
@@ -175,6 +176,14 @@ async def lifespan(app: FastAPI):
             # call fires. Fail-open: a research failure logs and
             # proceeds.
             trigger_research_async("startup")
+            # Daily scheduler — fires run_research_if_stale once per
+            # UTC day at 21:00 (US market close + 1h). The 24h
+            # freshness gate inside run_research_if_stale means a
+            # boot-time fire and a scheduled fire within an hour of
+            # each other still produce only one model call. The
+            # scheduler is a daemon task held on _research_bg_tasks
+            # so the GC does not silently cancel it.
+            start_daily_scheduler()
         except Exception as exc:  # noqa: BLE001
             log.warning("research_startup_trigger_failed", error=str(exc))
         # Macro context cache warm — read whatever digest already
@@ -704,10 +713,43 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
     if ENVIRONMENT == "test":
         return {"available": False, "note": "analytics unavailable in test environment"}
     try:
-        import pandas as pd
+        # May 22 2026 — first try the pre-computed cache. The
+        # strategy_cache write hook fires refresh_all_analytics
+        # immediately after a fresh strategy ingestion, so the
+        # cache is normally hot. Cold-cache fallback runs the
+        # inline compute below.
         from tools.cache import (
             get_monthly_returns, get_latest_strategy_cache, get_ff_factors,
+            get_latest_strategy_hash,
         )
+        from tools.precomputed_analytics import (
+            get_metric as get_precomputed,
+            get_latest_metric as get_latest_precomputed,
+        )
+
+        latest_hash = await get_latest_strategy_hash()
+        if latest_hash:
+            cached = await get_precomputed(latest_hash, "academic_analytics")
+            if cached:
+                log.info("academic_analytics_cache_hit",
+                         data_hash=latest_hash[:8])
+                return cached
+            # Stale-cache fallback — the latest hash hasn't been
+            # refreshed yet but a previous data ingestion's payload
+            # is still in the table. Better to serve stale than to
+            # block on the inline compute when the refresh hook is
+            # in flight. The response carries _stale=True so the
+            # frontend can decide whether to surface a notice.
+            stale = await get_latest_precomputed("academic_analytics")
+            if stale:
+                log.info("academic_analytics_cache_stale_hit")
+                return stale
+
+        # Cold cache — run the inline compute (same code path the
+        # endpoint used before May 22 2026). The refresh hook will
+        # write the row in the background so future requests hit
+        # the cache.
+        import pandas as pd
         from tools import analytics as an
 
         monthly = await get_monthly_returns()
@@ -755,6 +797,172 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
     except Exception as exc:
         log.warning("academic_analytics_failed", error=str(exc))
         return {"available": False, "note": "analytics computation failed"}
+
+
+# ── Diversification suite endpoints (item 8) ──────────────────────────────────
+# Seven GET endpoints for the diversification context suite. Each
+# reads a single pre-computed row from analytics_metrics_cache (the
+# refresh hook fires on every strategy_cache write). Cold-cache
+# fallback: compute inline from tools.diversification_analytics so
+# the user always gets data even before the refresh hook lands.
+# require_team_member per the spec; rate-limited to protect the
+# DB / inline-compute paths from abuse.
+
+
+async def _read_div_metric_or_compute(
+    metric_kind: str,
+    inline_fn,
+) -> dict[str, Any]:
+    """Three-tier read for diversification metrics: cache hit by
+    current data_hash → stale cache → inline compute. Returns the
+    payload dict, never raises. Logs which path served the request
+    so production logs surface cache hit / miss patterns."""
+    try:
+        from tools.cache import (
+            get_latest_strategy_hash, get_latest_strategy_cache,
+        )
+        from tools.precomputed_analytics import (
+            get_metric, get_latest_metric,
+        )
+        latest_hash = await get_latest_strategy_hash()
+        if latest_hash:
+            cached = await get_metric(latest_hash, metric_kind)
+            if cached:
+                log.info("div_metric_cache_hit", metric=metric_kind)
+                return cached
+            stale = await get_latest_metric(metric_kind)
+            if stale:
+                log.info("div_metric_cache_stale_hit", metric=metric_kind)
+                return stale
+        # Cold cache — inline compute.
+        strategies = await get_latest_strategy_cache()
+        if not strategies:
+            return {"available": False,
+                    "note": "strategy cache not yet populated"}
+        log.info("div_metric_cache_miss_inline", metric=metric_kind)
+        return inline_fn(strategies)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("div_metric_failed", metric=metric_kind, error=str(exc))
+        return {"available": False, "note": "computation failed"}
+
+
+@app.get("/api/v1/analytics/correlation")
+@limiter.limit("30/minute")
+async def get_analytics_correlation(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """11x11 strategy + benchmark correlation matrices (full +
+    pre-2022 + post-2022). Drives the heatmap + insight callout."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "correlation_matrices",
+        lambda s: div.correlation_matrices(s),
+    )
+
+
+@app.get("/api/v1/analytics/tail-risk")
+@limiter.limit("30/minute")
+async def get_analytics_tail_risk(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """VaR + CVaR at 95% / 99%, monthly + annualised, historical
+    simulation. Drives the Downside Risk table."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "tail_risk",
+        lambda s: {"strategies": div.tail_risk(s)},
+    )
+
+
+@app.get("/api/v1/analytics/capture-ratios")
+@limiter.limit("30/minute")
+async def get_analytics_capture_ratios(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """Up / Down capture + capture score per strategy over full +
+    pre-2022 + post-2022 windows. Drives the capture scatter."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "capture_ratios",
+        lambda s: {"strategies": div.capture_ratios(s)},
+    )
+
+
+@app.get("/api/v1/analytics/drawdown-duration")
+@limiter.limit("30/minute")
+async def get_analytics_drawdown_duration(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """Avg / max drawdown duration + recovery + current-in-drawdown
+    state per strategy. Drives the Drawdown Duration table."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "drawdown_duration",
+        lambda s: {"strategies": div.drawdown_duration(s)},
+    )
+
+
+@app.get("/api/v1/analytics/crisis-performance")
+@limiter.limit("30/minute")
+async def get_analytics_crisis_performance(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """CAGR + max DD + Sharpe per strategy over 5 historical crisis
+    windows. Drives the Crisis Performance table."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "crisis_performance",
+        lambda s: div.crisis_performance(s),
+    )
+
+
+@app.get("/api/v1/analytics/risk-contribution")
+@limiter.limit("30/minute")
+async def get_analytics_risk_contribution(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """MCTR + % risk contribution for equal-weight and tangency-weight
+    portfolios. Drives the Risk Contribution stacked bar."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "marginal_contribution_to_risk",
+        lambda s: div.marginal_contribution_to_risk(s),
+    )
+
+
+@app.get("/api/v1/analytics/distribution")
+@limiter.limit("30/minute")
+async def get_analytics_distribution(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """Skewness / excess kurtosis / Jarque-Bera + best/worst months
+    per strategy. Drives the Distribution Summary table."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    from tools import diversification_analytics as div
+    return await _read_div_metric_or_compute(
+        "return_distribution",
+        lambda s: {"strategies": div.return_distribution(s)},
+    )
 
 
 _RISK_FREE_SOURCE = "FRED DTB3 (3-month T-bill, mean monthly rate, annualised)"
@@ -2254,6 +2462,195 @@ async def council_explain_data(
         )
 
     return StreamingResponse(gen(), media_type="text/plain")
+
+
+# ── Explainer CIO follow-up — multi-turn thread inside the panel ──────────────
+#
+# The ExplainerPanel surfaces a 150-word static explanation from Haiku
+# (the /api/council/explain stream above). Once the user has read that,
+# they may want a follow-up — a clarification, a question grounded in
+# the chart, a tie-back to the macro digest. The follow-up endpoint
+# calls the CIO directly (Opus) for higher-quality reasoning, scoped
+# tightly to the explainer context: the topic, the panel content
+# already shown, the optional chart values, the optional macro
+# summary, and the prior thread of user/cio exchanges in this panel
+# session. Capped at three exchanges per session; beyond that the
+# user takes the question to the full council via a handoff package.
+
+
+_FOLLOWUP_MAX_EXCHANGES = 3
+
+
+class ExplainerFollowupExchange(__import__("pydantic").BaseModel):
+    role: str  # "user" or "cio"
+    content: str
+
+
+class ExplainerFollowupRequest(__import__("pydantic").BaseModel):
+    explainer_topic: str
+    explainer_content: str
+    chart_context: dict | None = None
+    macro_summary: str | None = ""
+    thread: list[ExplainerFollowupExchange] = []
+    question: str
+
+
+def _build_followup_system_prompt(
+    topic: str, explainer_content: str,
+    chart_context: dict | None, macro_summary: str | None,
+) -> str:
+    """Builds the CIO follow-up system prompt with the explainer
+    context baked in. Same evidence-discipline rule the other agents
+    use ("only reference numbers a tool has actually returned"), plus
+    the explainer-specific instruction to be concise."""
+    from agents.cio import _SYSTEM_PROMPT as _CIO_SYSTEM_PROMPT
+
+    parts = [
+        _CIO_SYSTEM_PROMPT,
+        "",
+        "=== EXPLAINER FOLLOW-UP CONTEXT ===",
+        f"You are answering a follow-up question from a user looking "
+        f"at the {topic} explainer on the Forest Capital portfolio "
+        f"intelligence platform.",
+        "",
+        "The user has already read the following explainer content:",
+        explainer_content[:2000],
+    ]
+    if chart_context:
+        parts.append("")
+        parts.append("Chart context — values currently on screen:")
+        import json as _json
+        parts.append(_json.dumps(chart_context, indent=2, default=str)[:1000])
+    if macro_summary:
+        parts.append("")
+        parts.append("Current macro conditions summary:")
+        parts.append(macro_summary[:1000])
+        parts.append("When you draw on this macro context in your answer, "
+                     "cite it inline using [Macro: <category>] (e.g. "
+                     "[Macro: monetary_policy]) so the user sees which "
+                     "signals you used.")
+    parts.append("")
+    parts.append(
+        "CONCISENESS — keep your answer to 2-4 sentences for a simple "
+        "clarification, up to 2 short paragraphs for a complex question. "
+        "Do not restate the explainer content; build on it.")
+    parts.append(
+        "WHEN TO ESCALATE — if the question requires "
+        "multi-specialist deliberation (e.g. comparing strategies on "
+        "more than one dimension, weighing the equity vs fixed-income "
+        "view on the same question, deriving a portfolio "
+        "recommendation), conclude your answer with the line "
+        "'[SUGGEST_COUNCIL]' on its own. The frontend strips this "
+        "marker and surfaces a 'Take this to the Council' button. "
+        "Use [SUGGEST_COUNCIL] sparingly — only when the question "
+        "genuinely warrants the full council, not for every "
+        "follow-up.")
+    return "\n".join(parts)
+
+
+@app.post("/api/v1/council/explainer-followup")
+@limiter.limit("15/minute")
+async def council_explainer_followup(
+    request: Request,
+    body: ExplainerFollowupRequest,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Streams a CIO follow-up answer for a question asked inside the
+    ExplainerPanel thread. Up to three exchanges per panel session.
+
+    Response is text/event-stream — three frame types:
+      data: {"type":"chunk","text":"..."}    (streamed chunks)
+      data: {"type":"meta","exchanges_used":N,"suggest_council":bool}
+      data: [DONE]
+
+    The frontend assembles the chunks into the assistant message,
+    reads exchanges_used to update the "X of 3 follow-ups used"
+    counter, and toggles the council handoff prompt when
+    suggest_council is true.
+    """
+    if not body.question.strip():
+        raise HTTPException(status_code=422, detail="question is required")
+    if len(body.question) > 300:
+        raise HTTPException(status_code=422,
+                            detail="question must be 300 chars or fewer")
+    if len(body.thread) >= _FOLLOWUP_MAX_EXCHANGES:
+        raise HTTPException(status_code=429,
+                            detail="Follow-up limit reached. Take the "
+                                   "question to the council.")
+
+    from agents.base import OPUS_MODEL, call_claude
+    from agents.usage import start_usage_capture
+    start_usage_capture()
+
+    system_prompt = _build_followup_system_prompt(
+        body.explainer_topic, body.explainer_content,
+        body.chart_context, body.macro_summary,
+    )
+
+    # Build the multi-turn conversation. Prior exchanges go into the
+    # user_message as a transcript; the new question goes last. We
+    # avoid Anthropic's messages-array conversation API for this
+    # endpoint (it requires alternating user/assistant which is a
+    # heavier conformance surface for a 3-turn cap).
+    transcript_parts: list[str] = []
+    for ex in body.thread:
+        label = "USER" if ex.role.lower() == "user" else "CIO"
+        transcript_parts.append(f"{label}: {ex.content}")
+    transcript = "\n\n".join(transcript_parts)
+    user_message = (
+        f"{transcript}\n\nUSER: {body.question}".strip()
+        if transcript
+        else f"USER: {body.question}")
+
+    exchanges_used = len(body.thread) + 1
+
+    async def gen():
+        full_text = ""
+        suggest_council = False
+        try:
+            # Non-streaming call (call_claude returns the full string).
+            # For the follow-up surface a "stream as one chunk" is
+            # acceptable — the response is short (2-4 sentences typical)
+            # and the user expects a CIO-quality answer rather than a
+            # token-by-token reveal. The SSE framing is preserved so
+            # the frontend's stream reader works uniformly.
+            full_text = call_claude(
+                OPUS_MODEL, system_prompt, user_message, max_tokens=600)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("council_followup_failed", error=str(exc))
+            full_text = ("The CIO follow-up is unavailable right now. "
+                         "Try again in a moment, or take the question to "
+                         "the council.")
+        # Strip the [SUGGEST_COUNCIL] sentinel — the frontend uses
+        # the boolean, not the literal marker in the body text.
+        if "[SUGGEST_COUNCIL]" in full_text:
+            suggest_council = True
+            full_text = full_text.replace("[SUGGEST_COUNCIL]", "").strip()
+
+        # Emit as a single chunk + meta frame.
+        chunk_frame = json.dumps({"type": "chunk", "text": full_text})
+        meta_frame = json.dumps({
+            "type": "meta",
+            "exchanges_used": exchanges_used,
+            "suggest_council": suggest_council,
+        })
+        yield f"data: {chunk_frame}\n\n"
+        yield f"data: {meta_frame}\n\n"
+        yield "data: [DONE]\n\n"
+
+        _log_interaction_bg(
+            request, session, "explainer_followup",
+            question_text=body.question,
+            response_summary=full_text[:500],
+            metadata={
+                "explainer_topic": body.explainer_topic,
+                "exchanges_used": exchanges_used,
+                "suggest_council": suggest_council,
+            },
+        )
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 # ── Guided UAT test runner ────────────────────────────────────────────────────
@@ -4292,6 +4689,237 @@ async def qa_full_review(request: Request, session: dict = Depends(require_sysad
         raise HTTPException(status_code=500, detail=f"Full review failed (ref: {ref})")
     finally:
         end_methodology()
+
+
+# ── QA findings — Flag for Fix + Mark as Intentional ─────────────────────────
+#
+# May 22 2026 — companion endpoints to the QA Action Required UI
+# (f96d897). The Flag for Fix button creates a triage_report_items
+# row directly from the QA finding, routing the QA-driven issue into
+# the same fix workflow used for UAT-derived items. The Mark as
+# Intentional button writes an upsert into qa_intentional_overrides
+# (migration 027), recording the team's judgement that the WARN is
+# intentional methodology, not a defect — the override outlives the
+# audit run that surfaced it.
+#
+# Both endpoints are team_member-gated (consistent with the May 2026
+# QA endpoint regating that opened audit operations to the whole
+# project team). Sysadmin status is recorded as the `marked_by`
+# value on the intentional override so the audit trail attributes
+# the decision to a specific user.
+
+
+class QAFlagForFixRequest(__import__("pydantic").BaseModel):
+    """POST body for the Flag for Fix endpoint."""
+    check_title: str
+    finding: str | None = None
+    implication: str | None = None
+    remediation: str | None = None
+    severity: str | None = None  # WARN → 'major' / FAIL → 'blocking'
+
+
+class QAMarkIntentionalRequest(__import__("pydantic").BaseModel):
+    """POST body for the Mark as Intentional endpoint."""
+    note: str | None = None
+    audit_run_hash: str | None = None
+
+
+@app.post("/api/v1/qa/findings/{check_id}/flag-for-fix")
+@limiter.limit("30/minute")
+async def qa_flag_for_fix(
+    request: Request,
+    check_id: str,
+    body: QAFlagForFixRequest,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Creates a triage_report_items row for the named QA check so the
+    finding enters the normal fix workflow. The triage row is
+    attached to a fresh triage_reports stub (triggered_by='qa_audit')
+    so the existing report-items query layer ignores no rows.
+
+    Returns the new triage_report_items id so the frontend can show
+    a "Flagged · #N" badge alongside the QA card going forward.
+    """
+    if not check_id or len(check_id) > 20:
+        raise HTTPException(status_code=422,
+                            detail="check_id must be 1-20 chars")
+    try:
+        from sqlalchemy import text as _text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            raise HTTPException(status_code=503,
+                                detail="Database unavailable")
+        # Compose the item body so the triage view shows the full
+        # finding without a join back to the QA audit.
+        body_parts = []
+        if body.finding:
+            body_parts.append(f"FINDING: {body.finding}")
+        if body.implication:
+            body_parts.append(f"IMPLICATION: {body.implication}")
+        if body.remediation:
+            body_parts.append(f"REMEDIATION: {body.remediation}")
+        item_body = "\n\n".join(body_parts) or None
+        item_title = f"QA {check_id} — {body.check_title}"
+
+        async with AsyncSessionLocal() as conn:
+            # Synthesise a one-off triage_reports row for this flag so
+            # the items query layer sees a parent report row. The
+            # report_text is the same item_body for traceability.
+            r = await conn.execute(_text(
+                "INSERT INTO triage_reports "
+                "(triggered_by, status, report_text) "
+                "VALUES ('qa_audit', 'complete', :rep) "
+                "RETURNING id"
+            ), {"rep": (item_body or item_title)})
+            report_id = r.scalar()
+
+            # The QA check is the source. source_item_type='qa_check'
+            # is a new value alongside the existing 'failure' /
+            # 'feedback' — the schema is permissive (a String(20) with
+            # no CHECK constraint), and the items query layer treats
+            # an unknown source as 'no back-pointer' which is the
+            # honest signal here. source_item_id stays NULL because a
+            # QA check is keyed by check_id (a string), not by an
+            # integer row id.
+            r2 = await conn.execute(_text(
+                "INSERT INTO triage_report_items "
+                "(report_id, item_type, item_title, item_body, "
+                " source_item_type, source_item_id) "
+                "VALUES (:rid, 'immediate', :title, :body, "
+                " 'qa_check', NULL) "
+                "RETURNING id"
+            ), {"rid": report_id, "title": item_title, "body": item_body})
+            item_id = r2.scalar()
+            await conn.commit()
+
+        log.info("qa_flag_for_fix_recorded",
+                 check_id=check_id, triage_item_id=int(item_id) if item_id else None,
+                 by=session.get("email"),
+                 severity=body.severity)
+        return {
+            "ok": True,
+            "check_id": check_id,
+            "triage_item_id": int(item_id) if item_id else None,
+            "triage_report_id": int(report_id) if report_id else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("qa_flag_for_fix_failed", ref=ref, error=str(exc))
+        raise HTTPException(status_code=500,
+                            detail=f"Flag for fix failed (ref: {ref})")
+
+
+@app.post("/api/v1/qa/findings/{check_id}/mark-intentional")
+@limiter.limit("30/minute")
+async def qa_mark_intentional(
+    request: Request,
+    check_id: str,
+    body: QAMarkIntentionalRequest,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Records (or updates) an entry in qa_intentional_overrides so the
+    QA panel renders "Confirmed intentional — recorded {date}" on
+    every subsequent audit instead of the WARN action card. The
+    override outlives the audit run that surfaced it.
+
+    Idempotent — a second click on the same check_id UPDATEs the
+    existing row (the unique constraint enforces one override per
+    check_id).
+    """
+    if not check_id or len(check_id) > 20:
+        raise HTTPException(status_code=422,
+                            detail="check_id must be 1-20 chars")
+    email = session.get("email") or "unknown"
+    try:
+        from sqlalchemy import text as _text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            raise HTTPException(status_code=503,
+                                detail="Database unavailable")
+        async with AsyncSessionLocal() as conn:
+            # Upsert — ON CONFLICT (check_id) DO UPDATE so a second
+            # Mark Intentional refreshes the note + timestamp rather
+            # than producing a duplicate row.
+            r = await conn.execute(_text(
+                "INSERT INTO qa_intentional_overrides "
+                "(check_id, marked_by, note, audit_run_hash) "
+                "VALUES (:cid, :by, :note, :hash) "
+                "ON CONFLICT (check_id) DO UPDATE SET "
+                " marked_at = now(), "
+                " marked_by = EXCLUDED.marked_by, "
+                " note = EXCLUDED.note, "
+                " audit_run_hash = EXCLUDED.audit_run_hash "
+                "RETURNING id, marked_at"
+            ), {
+                "cid": check_id, "by": email,
+                "note": body.note, "hash": body.audit_run_hash,
+            })
+            row = r.fetchone()
+            await conn.commit()
+
+        log.info("qa_mark_intentional_recorded",
+                 check_id=check_id, by=email,
+                 override_id=int(row[0]) if row else None)
+        return {
+            "ok": True,
+            "check_id": check_id,
+            "marked_by": email,
+            "marked_at": row[1].isoformat() if row and row[1] else None,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("qa_mark_intentional_failed", ref=ref, error=str(exc))
+        raise HTTPException(status_code=500,
+                            detail=f"Mark intentional failed (ref: {ref})")
+
+
+@app.get("/api/v1/qa/intentional-overrides")
+@limiter.limit("60/minute")
+async def qa_intentional_overrides_list(
+    request: Request,
+    session: dict = Depends(require_auth),
+):
+    """
+    Returns every recorded intentional override keyed by check_id.
+    The QA panel reads this on mount and renders a "Confirmed
+    intentional — recorded {date}" badge in place of the Action
+    Required card for any check_id present here.
+
+    Auth: any authenticated user — the audit trail is a project
+    record visible to viewers, not a sysadmin-private surface.
+    """
+    try:
+        from sqlalchemy import text as _text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return {"overrides": {}}
+        async with AsyncSessionLocal() as conn:
+            r = await conn.execute(_text(
+                "SELECT check_id, marked_at, marked_by, note, "
+                "       audit_run_hash "
+                "FROM qa_intentional_overrides "
+                "ORDER BY marked_at DESC"
+            ))
+            rows = r.fetchall()
+        overrides = {
+            row[0]: {
+                "marked_at": row[1].isoformat() if row[1] else None,
+                "marked_by": row[2],
+                "note": row[3],
+                "audit_run_hash": row[4],
+            }
+            for row in rows
+        }
+        return {"overrides": overrides}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("qa_intentional_overrides_read_failed", error=str(exc))
+        return {"overrides": {}}
 
 
 # ── Report ────────────────────────────────────────────────────────────────────

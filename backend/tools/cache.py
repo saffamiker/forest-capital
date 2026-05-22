@@ -394,6 +394,18 @@ async def set_strategy_cache(
             )
             await session.commit()
             log.info("strategy_cache_written", strategy_hash=strategy_hash, n_strategies=len(results))
+        # Item 7 (May 22 2026) — fire the pre-computed analytics
+        # refresh so the next /api/v1/analytics/academic request
+        # reads a single cached row instead of recomputing 7 NumPy
+        # reductions inline. Fire-and-forget: the strategy cache
+        # write returns immediately; the analytics row appears
+        # within a second or two. Item 8 (diversification suite)
+        # adds more metric_kinds to the same refresh.
+        try:
+            from tools.precomputed_analytics import trigger_refresh_async
+            trigger_refresh_async(strategy_hash)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("analytics_refresh_spawn_failed", error=str(exc))
     except Exception as exc:
         log.warning("strategy_cache_write_error", error=str(exc))
 

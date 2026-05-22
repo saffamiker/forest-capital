@@ -22,6 +22,10 @@ import {
   extractTopPriority,
   type OverallRatings,
 } from '../lib/academicVerdict'
+import {
+  extractMacroCategories,
+  MacroAttributionFooter,
+} from './MacroCitation'
 
 type Phase = 'idle' | 'consulting' | 'streaming' | 'done' | 'error'
 
@@ -295,6 +299,20 @@ export default function AcademicReviewButton() {
               </div>
             ))}
           </div>
+
+          {/* PART 4 — Macro citations summary. When the arbiter
+              referenced any signal from the current digest with a
+              [Macro: <category>] tag, surface the source at the
+              bottom of the verdict panel so a reader knows the
+              evidence basis. Categories are deduplicated and
+              order-preserving (the arbiter's first reference wins
+              for ordering). */}
+          {(() => {
+            const cats = extractMacroCategories(arbiterText)
+            return cats.length > 0
+              ? <MacroAttributionFooter categories={cats} />
+              : null
+          })()}
         </div>
       )}
 

@@ -335,10 +335,18 @@ class TestQAAgent:
         assert "checks_failed" in result
 
     def test_passes_plus_warned_plus_failed_equals_total(self):
+        # May 22 2026 — INCOMPLETE is a fourth status alongside PASS /
+        # WARN / FAIL. The sum must include it for the total to match.
+        # The QAAgent._build_report assertion enforces this server-side
+        # so a parser bug surfaces immediately; this assertion mirrors
+        # it on the client side.
         from agents.qa_agent import QAAgent
         agent = QAAgent()
         result = agent.run_audit(MOCK_RESULTS, run_full_checklist=True)
-        total = result["checks_passed"] + result["checks_warned"] + result["checks_failed"]
+        total = (result["checks_passed"]
+                 + result["checks_warned"]
+                 + result["checks_failed"]
+                 + result.get("checks_incomplete", 0))
         assert total == 39
 
     def test_has_limitations_list(self):
@@ -375,6 +383,10 @@ class TestQAAgent:
         assert len(result.get("items", [])) == 39
 
     def test_each_item_has_required_keys(self):
+        # May 22 2026 — INCOMPLETE is a fourth first-class status value
+        # alongside PASS / WARN / FAIL. A check the agent could not
+        # examine surfaces as INCOMPLETE, NOT a baseless WARN (which
+        # was the prior false-quality-signal bug fixed in ace4150).
         from agents.qa_agent import QAAgent
         agent = QAAgent()
         result = agent.run_audit(MOCK_RESULTS, run_full_checklist=True)
@@ -383,7 +395,8 @@ class TestQAAgent:
             assert "category" in item
             assert "check" in item
             assert "status" in item
-            assert item["status"] in ("PASS", "WARN", "FAIL")
+            assert item["status"] in (
+                "PASS", "WARN", "FAIL", "INCOMPLETE")
 
     def test_deterministic_checks_override_llm(self):
         """

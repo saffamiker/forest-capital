@@ -125,6 +125,26 @@ def _format_digest_block(digest: dict[str, Any] | None) -> str:
         "macro conditions absent from this block — historical "
         "reasoning is your default for anything not captured here."
     )
+    # May 22 2026 — citation instruction. When an agent draws on a
+    # macro signal in its output, it must cite the signal inline with
+    # a [Macro: <category>] tag using the SAME category labels listed
+    # in the Key signals block above. The frontend parses these tags
+    # into styled badges (a teal/cyan pill distinct from the existing
+    # Strong/Developing/Needs Work verdicts) and surfaces a
+    # "Macro context: Forest Capital Research Digest" footer on any
+    # surface where at least one citation appears. Citations are NOT
+    # required for general financial knowledge — only when the
+    # agent is leaning on something specific from THIS digest.
+    lines.append("")
+    lines.append(
+        "CITATION FORMAT — when you draw on a signal from the block "
+        "above, cite it inline with [Macro: <category>] using the "
+        "same category label (e.g. [Macro: monetary_policy], "
+        "[Macro: inflation], [Macro: rates]). Cite once per signal "
+        "you reference; do NOT cite for general financial knowledge "
+        "or historical reasoning. Example: 'IG duration exposure "
+        "now carries less near-term tailwind [Macro: monetary_policy]'."
+    )
     return "\n".join(lines)
 
 

@@ -258,13 +258,14 @@ export function SuggestionReviewModal({
   // Per-card form state. Keyed by suggestion_id so navigating
   // Prev/Next preserves what the reviewer has typed but not yet
   // submitted.
-  const [forms, setForms] = useState<Record<number, {
+  type FormState = {
     resolution_type: 'no_bug_detected' | 'code_fix_deployed' | 'wont_fix'
     fix_reference: string
     root_cause: string
     remediation_note: string
-  }>>(() => {
-    const out: Record<number, any> = {}
+  }
+  const [forms, setForms] = useState<Record<number, FormState>>(() => {
+    const out: Record<number, FormState> = {}
     for (const s of initial) {
       out[s.suggestion_id] = {
         resolution_type: 'code_fix_deployed',
