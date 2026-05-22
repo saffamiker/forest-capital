@@ -222,6 +222,15 @@ async def lifespan(app: FastAPI):
             await refresh_macro_context()
         except Exception as exc:  # noqa: BLE001
             log.warning("macro_context_warm_failed", error=str(exc))
+        # Analytical staging findings — same warm-read pattern so the
+        # Academic Writer's first call after restart sees the most
+        # recent staged findings. The endpoint refresh() also fires
+        # after every fresh staging.
+        try:
+            from tools.analytical_findings import refresh_findings_context
+            await refresh_findings_context()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("findings_context_warm_failed", error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
@@ -1040,6 +1049,80 @@ async def get_strategy_characterisations(
         log.warning("strategy_characterisations_endpoint_failed",
                     error=str(exc))
         return {"available": False, "strategies": []}
+
+
+# ── Analytical findings staging (May 22 2026) ─────────────────────────────────
+
+
+@app.post("/api/v1/reports/stage-findings")
+@limiter.limit("5/minute")
+async def post_stage_findings(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Runs the analytical staging computation and writes the result to
+    analytical_findings_cache. The Academic Writer picks up the
+    latest row on its next document-generation call via the workflow
+    hook in agents/academic_writer._writer_system_prompt().
+
+    On-demand only — NOT triggered by data-hash change. Findings carry
+    interpretation (a NUGGET STRENGTH per finding and an IMPLICATION
+    paragraph); pre-computing them silently on every ingestion would
+    produce drift the team did not ask for.
+
+    Returns the structured findings + the rendered markdown so the
+    report writer UI can display the staging-summary card and let the
+    user open the full report inline before enabling [Generate Draft].
+
+    Rate-limited (5/minute). Auth: require_team_member.
+    """
+    if ENVIRONMENT == "test":
+        return {
+            "id":              None,
+            "data_hash":       None,
+            "strategy_count":  0,
+            "surprise_count":  0,
+            "n_high_strength": 0,
+            "findings":        [],
+            "findings_md":     "",
+        }
+    try:
+        from tools.analytical_findings import (
+            stage_findings, refresh_findings_context,
+        )
+        result = await stage_findings(triggered_by="api")
+        # Refresh the in-process context cache so the next academic-
+        # writer call picks up the fresh findings without waiting for
+        # a process restart.
+        await refresh_findings_context()
+        return result
+    except Exception as exc:
+        log.warning("stage_findings_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Findings staging failed — see server logs.",
+        )
+
+
+@app.get("/api/v1/reports/latest-findings")
+async def get_latest_findings_endpoint(
+    session: dict = Depends(require_team_member),
+):
+    """Returns the most recent staged-findings row. The report writer
+    UI reads this on mount so the "last staged at" pill renders
+    without firing a fresh compute."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    try:
+        from tools.analytical_findings import get_latest_findings
+        row = await get_latest_findings()
+        if not row:
+            return {"available": False}
+        return {"available": True, **row}
+    except Exception as exc:
+        log.warning("latest_findings_endpoint_failed", error=str(exc))
+        return {"available": False}
 
 
 _RISK_FREE_SOURCE = "FRED DTB3 (3-month T-bill, mean monthly rate, annualised)"
