@@ -81,6 +81,57 @@ class TestParseDigestJson:
         # level is rejected so downstream filters never have to type-check.
         assert ra._parse_digest_json("[1, 2, 3]") == {}
 
+    def test_strips_fence_with_surrounding_prose(self):
+        """Combined worst-case: ```json fence wrapping the JSON AND
+        prose before and after the fence. Both must be handled."""
+        text = (
+            "Here is the digest:\n\n"
+            "```json\n"
+            '{"summary_text": "fenced+surrounded"}\n'
+            "```\n\n"
+            "Let me know if you need anything else."
+        )
+        assert ra._parse_digest_json(text) == {
+            "summary_text": "fenced+surrounded"}
+
+    def test_handles_unclosed_code_fence(self):
+        """If the model opens a ```json fence but never closes it
+        (rarely seen but observed when the response is truncated by
+        max_tokens), the parser should still extract the JSON inside
+        rather than giving up."""
+        text = '```json\n{"summary_text": "no closing fence"}'
+        assert ra._parse_digest_json(text) == {
+            "summary_text": "no closing fence"}
+
+
+class TestPlainTextFallbackDigest:
+    def test_no_error_key(self):
+        """The fallback digest must NOT carry an `error` key — that is
+        the engine's signal to record status='failed'. The whole point
+        of the fallback is to record the run as complete."""
+        out = ra._plain_text_fallback_digest("some text", [])
+        assert "error" not in out
+
+    def test_text_becomes_summary(self):
+        out = ra._plain_text_fallback_digest("Fed paused at the May meeting.",
+                                              ["https://fed.gov/example"])
+        assert out["summary_text"] == "Fed paused at the May meeting."
+        assert out["citation_urls"] == ["https://fed.gov/example"]
+
+    def test_summary_capped_at_2000_chars(self):
+        """The dashboard renders summary_text; an unbounded summary
+        would push every other widget off-screen. Cap at 2000 chars;
+        full text preserved in raw_response."""
+        long_text = "x" * 3000
+        out = ra._plain_text_fallback_digest(long_text, [])
+        assert len(out["summary_text"]) == 2000
+        assert len(out["raw_response"]) == 3000
+
+    def test_empty_collections_for_structured_fields(self):
+        out = ra._plain_text_fallback_digest("text", [])
+        assert out["key_signals"] == []
+        assert out["regime_implication"] == ""
+
 
 # ── Citation integrity ──────────────────────────────────────────────────────
 
@@ -243,17 +294,125 @@ class TestGenerateDigest:
         assert usage["input_tokens"] == 0
         assert usage["output_tokens"] == 0
 
-    def test_unparseable_response_returns_failure_digest(self):
+    def test_unparseable_response_falls_back_to_plain_text(self):
+        """May 22 2026 contract change: when the model returns text the
+        parser cannot turn into JSON, store the raw text as the digest
+        summary rather than marking the run as failed. A plain-text
+        digest is better than no digest — the model's prose is usually
+        still informative about the macro environment even when the
+        JSON shape is wrong."""
         client = MagicMock()
         client.messages.create.return_value = _stub_response(
             "Sorry, I can't help with that today.", search_urls=[])
         with patch.object(ra, "get_anthropic_client", return_value=client):
             digest, usage = ra.generate_digest()
-        assert digest["error"]
+        # Critical: no `error` key — the engine treats this as a
+        # completed run, not a failed one.
+        assert "error" not in digest
+        assert digest["summary_text"] == "Sorry, I can't help with that today."
+        # Structured fields stay empty — the parser found nothing to
+        # populate them with.
         assert digest["key_signals"] == []
-        # Usage still carries the response tokens — the call DID happen,
-        # it just returned no parseable JSON.
+        assert digest["regime_implication"] == ""
+        # Usage still carries the response tokens — the call DID happen.
         assert usage["input_tokens"] == 100
+
+    def test_truly_empty_response_returns_failure_digest(self):
+        """Hard-failure path is reserved for responses with NO text at
+        all — there is nothing to fall back to. A response that emitted
+        text the parser cannot interpret takes the plain-text fallback
+        above; only the genuinely empty case is recorded as failed."""
+        client = MagicMock()
+        client.messages.create.return_value = _stub_response(
+            "", search_urls=[])
+        with patch.object(ra, "get_anthropic_client", return_value=client):
+            digest, usage = ra.generate_digest()
+        assert digest["error"]
+        assert "no parseable JSON" in digest["error"]
+        assert digest["key_signals"] == []
+
+    def test_concatenates_multiple_text_blocks(self):
+        """May 22 2026 fix: web-search-using responses interleave
+        reasoning text with tool calls. The JSON output sometimes
+        lands in an earlier text block while a later block carries a
+        closing remark; the previous parser took ONLY the last block
+        and lost the JSON entirely. Verify the parser now finds JSON
+        in any text block."""
+        json_block = _StubBlock(type="text",
+                                text='{"summary_text": "early block JSON"}')
+        note_block = _StubBlock(type="text",
+                                text="Let me know if you need more.")
+        search_results = [_StubBlock(type="web_search_result", title="t",
+                                     url="https://example.com")]
+        search_block = _StubBlock(type="web_search_tool_result",
+                                  content=search_results)
+        response = SimpleNamespace(
+            content=[search_block, json_block, note_block],
+            usage=SimpleNamespace(input_tokens=100, output_tokens=200))
+
+        client = MagicMock()
+        client.messages.create.return_value = response
+        with patch.object(ra, "get_anthropic_client", return_value=client):
+            digest, usage = ra.generate_digest()
+
+        # The JSON in the FIRST text block (between two non-text
+        # operations) must be located, not lost behind the closing
+        # remark in the last text block.
+        assert "error" not in digest
+        assert digest["summary_text"] == "early block JSON"
+
+    def test_markdown_fenced_json_with_prose_parses(self):
+        """May 22 2026 failure mode: the model wraps the JSON in a
+        ```json fence AND adds prose on either side. The previous
+        parser handled fenced JSON OR embedded JSON but the
+        combination tripped the fence stripper into discarding the
+        prose containing the JSON. Verify both forms now parse."""
+        fenced = (
+            "Here is the macro digest you requested:\n\n"
+            "```json\n"
+            '{"summary_text": "fenced and surrounded",\n'
+            ' "key_signals": [{"category": "rates",\n'
+            '   "signal": "10Y +5bp",\n'
+            '   "implication": "IG duration cost",\n'
+            '   "source_url": "https://example.com"}],\n'
+            ' "regime_implication": "Transition."}\n'
+            "```\n\n"
+            "Let me know if you need a deeper read on any signal."
+        )
+        client = MagicMock()
+        client.messages.create.return_value = _stub_response(
+            fenced, search_urls=["https://example.com"])
+        with patch.object(ra, "get_anthropic_client", return_value=client):
+            digest, usage = ra.generate_digest()
+
+        assert "error" not in digest
+        assert digest["summary_text"] == "fenced and surrounded"
+        assert digest["regime_implication"] == "Transition."
+        assert len(digest["key_signals"]) == 1
+        assert digest["key_signals"][0]["source_url"] == "https://example.com"
+
+    def test_plain_text_fallback_carries_verified_urls(self):
+        """When the parser fails but web_search still surfaced sources,
+        the plain-text fallback retains the verified URLs so the team
+        can trace the model's reasoning even when the JSON shape was
+        wrong."""
+        client = MagicMock()
+        client.messages.create.return_value = _stub_response(
+            "I found two articles but cannot summarise them in JSON.",
+            search_urls=["https://fed.gov/example",
+                         "https://bls.gov/example"],
+        )
+        with patch.object(ra, "get_anthropic_client", return_value=client):
+            digest, usage = ra.generate_digest()
+
+        assert "error" not in digest
+        assert digest["summary_text"].startswith("I found two articles")
+        # The verified URLs are sorted and de-duplicated; both surface
+        # on the fallback digest's citation list.
+        assert set(digest["citation_urls"]) == {
+            "https://fed.gov/example",
+            "https://bls.gov/example",
+        }
 
     def test_signals_without_any_verified_urls_yield_empty(self):
         """Every signal in the JSON references an URL web_search did not

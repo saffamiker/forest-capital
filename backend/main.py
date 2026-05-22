@@ -152,14 +152,28 @@ async def lifespan(app: FastAPI):
                 daemon=True, name="monthly-data-extend").start()
         except Exception as exc:  # noqa: BLE001
             log.warning("monthly_extend_startup_failed", error=str(exc))
-        # Macro research digest — fire a research run on startup when
-        # the latest completed digest is stale (> 24h) or absent. The
-        # trigger is loop-aware (we are on the event loop here) and
-        # idempotent — a fresh boot within the freshness window logs
-        # research_run_skipped_current and no model call fires.
-        # Fail-open: a research failure logs and proceeds.
+        # Macro research digest — reap any 'running' row left by a
+        # crashed run on the previous boot BEFORE firing the new
+        # trigger. Without this, a zombie row indefinitely blocks
+        # the concurrency lock and every Run Now click returns
+        # "already_running" with no real run firing — the symptom
+        # surfaced by UAT on May 22 2026.
         try:
-            from tools.research_engine import trigger_research_async
+            from tools.research_engine import (
+                fail_stale_running_digests, trigger_research_async,
+            )
+            reaped = await fail_stale_running_digests()
+            if reaped:
+                log.warning(
+                    f"Startup reap: marked {reaped} stuck research "
+                    f"run(s) as failed", count=reaped)
+            # Then fire a research run on startup when the latest
+            # completed digest is stale (> 24h) or absent. The
+            # trigger is loop-aware (we are on the event loop here)
+            # and idempotent — a fresh boot within the freshness
+            # window logs research_run_skipped_current and no model
+            # call fires. Fail-open: a research failure logs and
+            # proceeds.
             trigger_research_async("startup")
         except Exception as exc:  # noqa: BLE001
             log.warning("research_startup_trigger_failed", error=str(exc))
