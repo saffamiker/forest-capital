@@ -32,32 +32,27 @@ def _coerce_json(v: Any, fallback: Any) -> Any:
     return v if v is not None else fallback
 
 
-def _row_to_dict(r: "tuple[Any, ...]") -> dict[str, Any]:
-    """SELECT projection mapper. Column order:
-      template_id, display_name, course, format, target_pages,
-      sections, system_prompt, data_pull_fields, citation_slots,
-      requires_staging, active, created_at."""
-    return {
-        "template_id":      r[0],
-        "display_name":     r[1],
-        "course":           r[2],
-        "format":           r[3],
-        "target_pages":     r[4],
-        "sections":         _coerce_json(r[5], []),
-        "system_prompt":    r[6],
-        "data_pull_fields": _coerce_json(r[7], []),
-        "citation_slots":   _coerce_json(r[8], []),
-        "requires_staging": bool(r[9]),
-        "active":           bool(r[10]),
-        "created_at":       (
-            r[11].isoformat() if r[11] is not None else None),
-    }
-
-
 _PROJECTION = (
-    "template_id, display_name, course, format, target_pages, "
-    "sections, system_prompt, data_pull_fields, citation_slots, "
-    "requires_staging, active, created_at")
+    "template_id, display_name, course, format_spec, system_prompt, "
+    "section_instructions, concepts, requires_staging, active, "
+    "created_at")
+
+
+def _row_to_dict(r: "tuple[Any, ...]") -> dict[str, Any]:
+    """Maps the _PROJECTION above to a dict the API surfaces."""
+    return {
+        "template_id":          r[0],
+        "display_name":         r[1],
+        "course":               r[2],
+        "format_spec":          _coerce_json(r[3], {}),
+        "system_prompt":        r[4],
+        "section_instructions": _coerce_json(r[5], []),
+        "concepts":             _coerce_json(r[6], []),
+        "requires_staging":     bool(r[7]),
+        "active":               bool(r[8]),
+        "created_at":           (
+            r[9].isoformat() if r[9] is not None else None),
+    }
 
 
 async def list_active_templates() -> list[dict[str, Any]]:

@@ -1299,6 +1299,467 @@ async def post_rank_findings(
             detail="Rank findings failed — see server logs.")
 
 
+# ── Report writer — generation + editor + download endpoints ────────────────
+#
+# Backs item 12 commit 2. The generate endpoint runs the eight-step
+# pipeline; the editor endpoints (paper-md PATCH, iterate, resolve-bob,
+# final-check) support Bob's iteration loop; the academic-review
+# endpoint scores the draft against the FNA670 rubric; the download
+# endpoints emit the two .docx files. Every endpoint is team_member-
+# gated so a viewer cannot kick off a generation that costs Anthropic
+# tokens. The download endpoints honor a soft gate on
+# academic_readiness=needs_significant_revision — Bob can override
+# with acknowledge_warning=true on the query string.
+
+
+_DOCX_MEDIA = (
+    "application/vnd.openxmlformats-officedocument."
+    "wordprocessingml.document")
+
+
+@app.post("/api/v1/reports/templates/{template_id}/generate")
+@limiter.limit("3/minute")
+async def generate_report_from_template(
+    request: Request, template_id: str,
+    session: dict = Depends(require_team_member),
+):
+    """End-to-end report generation. Runs the full pipeline, persists
+    one report_generations row, returns the full draft payload
+    (paper_md, appendix_md, flags, bob_blocks, verified_data, etc.).
+
+    Failure modes:
+      404 — template_not_found
+      422 — thesis_validation_blocked (returns the failing conditions)
+      500 — unexpected pipeline error
+    """
+    if ENVIRONMENT == "test":
+        return {
+            "id":              None,
+            "template_id":     template_id,
+            "paper_md":        "",
+            "appendix_md":     "",
+            "flag_count":      0,
+            "bob_block_count": 0,
+            "bob_blocks":      [],
+            "flags":           [],
+        }
+    try:
+        from tools.report_generator import generate_paper
+        result = await generate_paper(template_id)
+        if result.get("error") == "template_not_found":
+            raise HTTPException(
+                status_code=404,
+                detail=f"Template '{template_id}' not found.")
+        if result.get("error") == "thesis_validation_blocked":
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "thesis_validation_blocked",
+                    "thesis_validation": result.get("thesis_validation"),
+                })
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("generate_report_failed",
+                    template_id=template_id, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Report generation failed — see server logs.")
+
+
+@app.get("/api/v1/reports/generations/{generation_id}")
+async def get_report_generation(
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Returns the persisted generation row + a fresh post-check on
+    the current paper_md so the editor renders the same flag list the
+    backend will gate on."""
+    if ENVIRONMENT == "test":
+        return {"error": "test_environment_no_generations"}
+    try:
+        from tools.report_generator import (
+            get_generation, _post_check_summary,
+            _load_citations_for_generation,
+        )
+        gen = await get_generation(generation_id)
+        if not gen:
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        citations = await _load_citations_for_generation(generation_id)
+        checks = _post_check_summary(
+            gen.get("paper_md") or "",
+            gen.get("verified_data") or {},
+            citations)
+        return {**gen, **checks, "citations": citations}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("get_generation_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Read generation failed — see server logs.")
+
+
+@app.patch("/api/v1/reports/generations/{generation_id}/paper-md")
+@limiter.limit("60/minute")
+async def patch_generation_paper_md(
+    request: Request, generation_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Inline editor save. Body: {paper_md: str}. Re-runs the post-
+    check, persists the new paper_md + flag_count + word_counts."""
+    if ENVIRONMENT == "test":
+        return {"saved": False, "flag_count": 0}
+    paper_md = body.get("paper_md")
+    if paper_md is None:
+        raise HTTPException(
+            status_code=422, detail="paper_md is required.")
+    try:
+        from tools.report_generator import update_paper_md
+        result = await update_paper_md(int(generation_id), str(paper_md))
+        if result.get("error") == "generation_not_found":
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("patch_paper_md_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Save failed — see server logs.")
+
+
+@app.post("/api/v1/reports/generations/{generation_id}/iterate")
+@limiter.limit("30/minute")
+async def post_iterate_text(
+    request: Request, generation_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """AI iteration toolbar. Body: {action, selection, instruction?}.
+
+    action ∈ {rephrase, tighten, expand, ask}.
+
+    Returns the rewritten text + any new unverified numbers or
+    citations the iteration introduced — the editor warns Bob before
+    accepting changes that would fail the next final check."""
+    if ENVIRONMENT == "test":
+        return {
+            "original":  body.get("selection", ""),
+            "rewritten": body.get("selection", ""),
+            "word_delta": 0,
+            "new_unverified_numbers": [],
+            "new_unverified_citations": [],
+        }
+    action = body.get("action")
+    selection = body.get("selection")
+    if not action or selection is None:
+        raise HTTPException(
+            status_code=422,
+            detail="action and selection are required.")
+    if action not in ("rephrase", "tighten", "expand", "ask"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown action '{action}'")
+    try:
+        from tools.report_generator import iterate_text
+        return await iterate_text(
+            int(generation_id), action, str(selection),
+            instruction=body.get("instruction"))
+    except Exception as exc:
+        log.warning("iterate_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Iteration failed — see server logs.")
+
+
+@app.post("/api/v1/reports/generations/{generation_id}/resolve-bob")
+@limiter.limit("60/minute")
+async def post_resolve_bob_block(
+    request: Request, generation_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Replaces the FIRST occurrence of `marker` in paper_md with
+    `replacement`. Body: {marker: str, replacement: str}."""
+    if ENVIRONMENT == "test":
+        return {"saved": False, "flag_count": 0}
+    marker = body.get("marker")
+    replacement = body.get("replacement")
+    if marker is None or replacement is None:
+        raise HTTPException(
+            status_code=422,
+            detail="marker and replacement are required.")
+    try:
+        from tools.report_generator import resolve_bob_block
+        result = await resolve_bob_block(
+            int(generation_id), str(marker), str(replacement))
+        if result.get("error") == "generation_not_found":
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        if result.get("error") == "marker_not_found":
+            raise HTTPException(
+                status_code=422,
+                detail=f"marker not found in paper_md: {marker}")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("resolve_bob_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Resolve failed — see server logs.")
+
+
+@app.post("/api/v1/reports/generations/{generation_id}/final-check")
+@limiter.limit("60/minute")
+async def post_run_final_check(
+    request: Request, generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Re-runs the post-checks against the current paper_md and
+    updates flag_count on the row so the download endpoints can gate.
+    No body required."""
+    if ENVIRONMENT == "test":
+        return {"passed": True, "flag_count": 0, "flags": []}
+    try:
+        from tools.report_generator import run_final_check
+        result = await run_final_check(int(generation_id))
+        if result.get("error") == "generation_not_found":
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("final_check_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Final check failed — see server logs.")
+
+
+@app.post("/api/v1/reports/generations/{generation_id}/academic-review")
+@limiter.limit("6/minute")
+async def post_run_academic_review(
+    request: Request, generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Step 10 — scores the current paper_md against the active
+    rubric for its template. Persists the review payload + readiness
+    on the row so the download endpoint can soft-gate."""
+    if ENVIRONMENT == "test":
+        return {
+            "per_criterion":     [],
+            "data_gaps":         [],
+            "citation_gaps":     [],
+            "thesis_coherence":  [],
+            "tone_violations":   [],
+            "length_compliance": [],
+            "readiness":         "ready_to_submit",
+            "summary":           "(test environment)",
+        }
+    try:
+        from tools.report_generator import run_academic_review
+        result = await run_academic_review(int(generation_id))
+        if result.get("error") == "generation_not_found":
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        if result.get("error") == "rubric_not_found":
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No rubric uploaded for template "
+                    f"'{result.get('template_id')}'."))
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("academic_review_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Academic review failed — see server logs.")
+
+
+def _download_filename(template_id: str, kind: str, ext: str) -> str:
+    """forest-capital-midpoint-check-paper-2026-05-22.docx"""
+    from datetime import date
+    slug = template_id.replace("_", "-")
+    return (
+        f"forest-capital-{slug}-{kind}-{date.today().isoformat()}.{ext}")
+
+
+def _gate_download(
+    gen: dict, acknowledge_warning: bool,
+) -> None:
+    """Enforces the two-tier download gate.
+
+    Hard gate: flag_count > 0 means BOB blocks or unresolved numbers
+    are still present — refuse with 422.
+    Soft gate: academic_readiness == needs_significant_revision —
+    refuse unless acknowledge_warning is True. The endpoint records
+    the override in the row's audit trail (caller's responsibility
+    via the activity log, not duplicated here)."""
+    if int(gen.get("flag_count") or 0) > 0:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "flags_remaining",
+                "flag_count": int(gen.get("flag_count") or 0),
+                "message": (
+                    "Resolve all [BOB] blocks and unverified numbers "
+                    "before downloading."),
+            })
+    readiness = gen.get("academic_readiness")
+    if (readiness == "needs_significant_revision"
+            and not acknowledge_warning):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "academic_review_significant_revision",
+                "readiness": readiness,
+                "message": (
+                    "Academic review flagged significant gaps. "
+                    "Retry with ?acknowledge_warning=true to "
+                    "download anyway."),
+            })
+
+
+@app.get(
+    "/api/v1/reports/generations/{generation_id}/download-paper")
+async def download_report_paper(
+    generation_id: int,
+    acknowledge_warning: bool = False,
+    session: dict = Depends(require_team_member),
+):
+    """Returns the paper .docx. Soft-gated by academic_readiness."""
+    if ENVIRONMENT == "test":
+        raise HTTPException(
+            status_code=404,
+            detail="No generation available in test environment.")
+    try:
+        from tools.report_generator import (
+            get_generation, render_paper_bytes,
+        )
+        gen = await get_generation(generation_id)
+        if not gen:
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        _gate_download(gen, acknowledge_warning)
+        content = await render_paper_bytes(generation_id)
+        if not content:
+            raise HTTPException(
+                status_code=500,
+                detail="Render failed — see server logs.")
+        filename = _download_filename(
+            gen.get("template_id") or "report", "paper", "docx")
+        return Response(
+            content=content, media_type=_DOCX_MEDIA,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("download_paper_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Download failed.")
+
+
+@app.get(
+    "/api/v1/reports/generations/{generation_id}/download-appendix")
+async def download_report_appendix(
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Returns the appendix .docx. Always available once a generation
+    exists — the appendix is the data record, not the editable
+    submission, so it is NOT gated by flag_count or readiness."""
+    if ENVIRONMENT == "test":
+        raise HTTPException(
+            status_code=404,
+            detail="No generation available in test environment.")
+    try:
+        from tools.report_generator import (
+            get_generation, render_appendix_bytes,
+        )
+        gen = await get_generation(generation_id)
+        if not gen:
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        content = await render_appendix_bytes(generation_id)
+        if not content:
+            raise HTTPException(
+                status_code=500,
+                detail="Render failed — see server logs.")
+        filename = _download_filename(
+            gen.get("template_id") or "report", "appendix", "docx")
+        return Response(
+            content=content, media_type=_DOCX_MEDIA,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("download_appendix_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Download failed.")
+
+
+@app.get("/api/v1/reports/templates/{template_id}/rubric")
+async def get_template_rubric(
+    template_id: str,
+    session: dict = Depends(require_team_member),
+):
+    """Latest active rubric for a template. Drives the report
+    writer's Rubric panel."""
+    if ENVIRONMENT == "test":
+        return {"rubric": None}
+    try:
+        from tools.report_rubrics import get_latest_rubric
+        rubric = await get_latest_rubric(template_id)
+        return {"rubric": rubric}
+    except Exception as exc:
+        log.warning("get_rubric_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Read rubric failed.")
+
+
+@app.post("/api/v1/reports/templates/{template_id}/rubric")
+@limiter.limit("6/minute")
+async def post_upload_rubric(
+    request: Request, template_id: str, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Uploads a new rubric version for a template.
+
+    Body: {rubric_text, criteria, source_filename?}. The PDF/docx
+    text extraction runs client-side (the frontend uses the same
+    pypdf path as the academic_documents flow) so this endpoint
+    accepts already-extracted text + already-parsed criteria.
+    """
+    if ENVIRONMENT == "test":
+        return {"id": None, "version": 1}
+    rubric_text = body.get("rubric_text")
+    criteria = body.get("criteria")
+    if not rubric_text or not isinstance(criteria, list):
+        raise HTTPException(
+            status_code=422,
+            detail="rubric_text and criteria (list) are required.")
+    try:
+        from tools.report_rubrics import upload_rubric, get_latest_rubric
+        await upload_rubric(
+            template_id, str(rubric_text), criteria,
+            uploaded_by=session.get("email"),
+            source_filename=body.get("source_filename"))
+        latest = await get_latest_rubric(template_id)
+        return {"rubric": latest}
+    except Exception as exc:
+        log.warning("upload_rubric_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Upload rubric failed.")
+
+
 _RISK_FREE_SOURCE = "FRED DTB3 (3-month T-bill, mean monthly rate, annualised)"
 
 
