@@ -91,7 +91,13 @@ _WEB_FETCH_TOOL = {
 }
 
 
-_SYSTEM_PROMPT = f"""You are a macro market research analyst for a Forest \
+_SYSTEM_PROMPT = f"""CRITICAL INSTRUCTION: \
+Your ENTIRE response must be a single valid JSON object. Do not write \
+any text, explanation, or reasoning before or after the JSON. Do not \
+use markdown code fences. Do not describe what you are doing. Start \
+your response with {{ and end with }}. Nothing else is acceptable.
+
+You are a macro market research analyst for a Forest \
 Capital portfolio intelligence platform built by graduate students at the \
 McColl School of Business, Queens University Charlotte. The platform \
 analyses equity / investment-grade-bond / high-yield-bond strategies \
@@ -346,8 +352,28 @@ def _filter_to_verified_signals(
     return verified_signals, seen_urls
 
 
+# The research agent issues 3-5 web_search calls + up to 4 web_fetch
+# calls + composes a JSON digest with 5+ signals + a regime_implication
+# paragraph + a summary_text paragraph. The project-wide
+# MAX_OUTPUT_TOKENS (1024) is too low — a complete response runs
+# 2500-3500 tokens and was being truncated mid-JSON, leaving
+# _parse_digest_json no valid object to extract and dropping every
+# run into the failure_digest path.
+#
+# May 23 2026 — initial bump to 4096 was still binding. Production
+# log on row 13 showed the model emitting ~3500 chars of preamble
+# + intermediate "I'll run multiple searches..." text between tool
+# calls before reaching the JSON, leaving < 600 tokens for the
+# JSON itself. JSON truncated mid-key (stop_reason='max_tokens',
+# error 'Expecting "," delimiter: char 3576'). Bumped to 8192 —
+# 3x headroom over the typical full response so the JSON survives
+# even when the model emits an elaborate tool-using preamble. Still
+# well within Sonnet's per-message cap.
+_RESEARCH_MAX_OUTPUT_TOKENS = 8192
+
+
 def generate_digest(
-    *, max_tokens: int = MAX_OUTPUT_TOKENS,
+    *, max_tokens: int = _RESEARCH_MAX_OUTPUT_TOKENS,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Runs the macro research agent once and returns (digest, usage).
@@ -392,11 +418,16 @@ def generate_digest(
     verified_urls = {s["url"] for s in sources if s.get("url")}
     parsed = _parse_digest_json(text)
     if not parsed:
-        # Capture the first 500 chars of the raw response at WARNING
-        # level so a future parse failure is debuggable from production
-        # logs without re-running the agent.
+        # Capture the first 500 chars of the raw response + stop_reason
+        # at WARNING level so a future parse failure is debuggable from
+        # production logs without re-running the agent. stop_reason
+        # 'max_tokens' is the May 23 2026 production failure mode and
+        # the most common parse-failure cause — surfacing it directly
+        # avoids manual response inspection on the next regression.
+        stop_reason = getattr(response, "stop_reason", None)
         log.warning("research_agent_empty_parse",
                     n_searches=len(sources), n_fetches=len(fetched_urls),
+                    stop_reason=stop_reason,
                     raw_response_head=(text or "")[:500])
         # Hard-failure path on any parse failure. The earlier
         # plain-text fallback (which stored the raw response as the

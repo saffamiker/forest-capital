@@ -116,18 +116,21 @@ describe('word count helpers', () => {
 // ── BobBlockBadge ──────────────────────────────────────────────────────────
 
 
-describe('BobBlockBadge', () => {
+describe('BobBlockBadge — non-BOB kinds (legacy collapsed pill)', () => {
+  // DATA REQUIRED / CITATION REQUIRED / DATA MISMATCH / UNVERIFIED
+  // NUMBER / CITATION UNVERIFIED keep the original collapsed-pill
+  // behaviour — they're missing-data flags, not author drafts.
   const block = {
-    marker: '[BOB — write paragraph]',
-    kind: 'BOB' as const,
-    description: 'write paragraph',
+    marker: '[DATA REQUIRED — corr_shift]',
+    kind: 'DATA REQUIRED' as const,
+    description: 'corr_shift',
     position: 0,
   }
 
   it('renders the closed badge with kind label', () => {
     render(<BobBlockBadge block={block} onResolve={vi.fn()} />)
     expect(screen.getByTestId('bob-block-badge')).toBeInTheDocument()
-    expect(screen.getByText('Your input needed')).toBeInTheDocument()
+    expect(screen.getByText('Missing data')).toBeInTheDocument()
   })
 
   it('opens the editor on click', () => {
@@ -142,7 +145,6 @@ describe('BobBlockBadge', () => {
     render(<BobBlockBadge block={block} onResolve={onResolve} />)
     fireEvent.click(screen.getByTestId('bob-block-badge'))
     fireEvent.click(screen.getByTestId('bob-block-done'))
-    // No text → onResolve not called.
     await waitFor(() => {
       expect(onResolve).not.toHaveBeenCalled()
     })
@@ -157,7 +159,7 @@ describe('BobBlockBadge', () => {
     fireEvent.click(screen.getByTestId('bob-block-done'))
     await waitFor(() => {
       expect(onResolve).toHaveBeenCalledWith(
-        '[BOB — write paragraph]', 'My replacement')
+        '[DATA REQUIRED — corr_shift]', 'My replacement')
     })
   })
 })
