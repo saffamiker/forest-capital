@@ -28,6 +28,10 @@
 import { useCallback, useEffect, useState } from 'react'
 import { AlertCircle, CheckCircle, ChevronDown, ChevronRight,
          ExternalLink, Loader2 } from 'lucide-react'
+import {
+  useCitationReviewStore,
+  type Citation, type CitationAlternative,
+} from '../../stores/citationReviewStore'
 
 
 // The four actions the backend accepts. Matches
@@ -39,34 +43,10 @@ type ReviewAction =
   | 'manual_add'
 
 
-export interface CitationAlternative {
-  author?: string | null
-  year?: string | null
-  title?: string | null
-  journal_or_institution?: string | null
-  volume_issue_pages?: string | null
-  url?: string | null
-  pass_source?: string | null
-}
-
-
-export interface Citation {
-  id: number
-  concept_id: string
-  author: string | null
-  year: string | null
-  title: string | null
-  journal_or_institution: string | null
-  volume_issue_pages: string | null
-  url: string | null
-  verification_status: string
-  search_query_used: string | null
-  alternatives: CitationAlternative[]
-  reviewer_email: string | null
-  reviewed_at: string | null
-  review_action: string | null
-  formatted: string | null
-}
+// Re-export the shared types so callers that imported them from the
+// component continue to work — they now live in citationReviewStore
+// so the persistence layer and the component agree on the contract.
+export type { Citation, CitationAlternative }
 
 
 const NEEDS_REVIEW_STATES = new Set([
@@ -89,45 +69,60 @@ export interface CitationReviewPanelProps {
 export default function CitationReviewPanel({
   generationId, onReviewed,
 }: CitationReviewPanelProps) {
-  const [citations, setCitations] = useState<Citation[]>([])
-  const [loading,   setLoading]   = useState(false)
-  const [error,     setError]     = useState<string | null>(null)
-  const [open,      setOpen]      = useState(true)
-  const [busyId,    setBusyId]    = useState<number | null>(null)
+  // The panel-open toggle is local UI state — fine to reset on
+  // remount. The expensive bits (the citation array, per-row
+  // manual-form toggle) live in the Zustand store so they survive
+  // navigation.
+  const [open, setOpen] = useState(true)
+  const [busyId, setBusyId] = useState<number | null>(null)
 
-  const fetchCitations = useCallback(async () => {
-    if (generationId === null || generationId === undefined) return
-    setLoading(true)
-    setError(null)
-    try {
-      const res = await fetch(
-        `/api/v1/citations/${generationId}`,
-        { credentials: 'include' })
-      if (!res.ok) {
-        throw new Error(`Citation fetch returned ${res.status}`)
-      }
-      const data = await res.json() as { citations: Citation[] }
-      setCitations(data.citations ?? [])
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setLoading(false)
-    }
-  }, [generationId])
+  // Citation data + per-citation manual-form toggle read from the
+  // store. The store keys everything by generation_id so a paper
+  // with no citations yet and a paper with reviewed citations
+  // coexist correctly. The cached array rehydrates instantly on
+  // remount — no loading flash, no perceived rerun.
+  const citations = useCitationReviewStore(
+    (s) => (generationId !== null
+              ? s.citationsByGenerationId[generationId] ?? []
+              : []))
+  const lastFetchedAt = useCitationReviewStore(
+    (s) => (generationId !== null
+              ? s.lastFetchedAt[generationId]
+              : undefined))
+  const error = useCitationReviewStore(
+    (s) => (generationId !== null
+              ? s.errorByGenerationId[generationId] ?? null
+              : null))
+  const inFlight = useCitationReviewStore(
+    (s) => (generationId !== null
+              ? Boolean(s.inFlight[generationId])
+              : false))
+  const load = useCitationReviewStore((s) => s.load)
+  const upsertCitation = useCitationReviewStore((s) => s.upsertCitation)
 
+  // Stale-while-revalidate on mount + every generation_id change.
+  // The store's load() does the freshness check itself, so this
+  // useEffect just fires the call — load() short-circuits when
+  // the cached entry is fresh.
   useEffect(() => {
-    if (generationId !== null) {
-      void fetchCitations()
+    if (generationId !== null && generationId !== undefined) {
+      void load(generationId)
     }
-  }, [generationId, fetchCitations])
+  }, [generationId, load])
+
+  // Only show the loading spinner on a TRULY cold cache (no rows
+  // yet for this generation_id). Once we have data, the soft
+  // refetch happens in the background and the user sees the
+  // cached rows without a flash.
+  const loading = inFlight && citations.length === 0 && !lastFetchedAt
 
   const submitReview = useCallback(async (
     citationId: number,
     action: ReviewAction,
     payload: Record<string, unknown> = {},
   ) => {
+    if (generationId === null || generationId === undefined) return
     setBusyId(citationId)
-    setError(null)
     try {
       const res = await fetch(
         `/api/v1/citations/${citationId}/review`,
@@ -142,17 +137,24 @@ export default function CitationReviewPanel({
         throw new Error(body.detail || `Review failed (${res.status})`)
       }
       const data = await res.json() as { citation: Citation }
-      // Optimistic state update — replace the row in place so the
-      // panel doesn't refetch the whole list on every click.
-      setCitations((prev) => prev.map((c) =>
-        c.id === data.citation.id ? data.citation : c))
+      // Optimistic state update through the store — the new row
+      // is visible immediately AND persisted across navigation.
+      upsertCitation(generationId, data.citation)
       onReviewed?.()
     } catch (e) {
-      setError((e as Error).message)
+      // Surface the error via the store so the message persists
+      // across remount too. The store's load() clears it on the
+      // next successful fetch.
+      useCitationReviewStore.setState((s) => ({
+        errorByGenerationId: {
+          ...s.errorByGenerationId,
+          [generationId]: (e as Error).message,
+        },
+      }))
     } finally {
       setBusyId(null)
     }
-  }, [onReviewed])
+  }, [generationId, upsertCitation, onReviewed])
 
   if (generationId === null || generationId === undefined) {
     return null
@@ -292,7 +294,18 @@ interface CitationRowProps {
 
 
 function CitationRow({ citation, busy, onAction }: CitationRowProps) {
-  const [showManual, setShowManual] = useState(false)
+  // Manual-form open state moved to the Zustand store so it
+  // survives unmount/remount. The user reported losing this
+  // toggle on every navigation away from the Report Writer.
+  // Form text fields remain local — they're transient input
+  // state that should not persist across remount (a half-typed
+  // citation reappearing five minutes later is more disruptive
+  // than the toggle state being lost).
+  const showManual = useCitationReviewStore(
+    (s) => Boolean(s.manualOpenByCitationId[citation.id]))
+  const setManualOpen = useCitationReviewStore((s) => s.setManualOpen)
+  const setShowManual = (open: boolean) => setManualOpen(citation.id, open)
+
   const [manualAuthor, setManualAuthor] = useState('')
   const [manualYear,   setManualYear]   = useState('')
   const [manualTitle,  setManualTitle]  = useState('')
