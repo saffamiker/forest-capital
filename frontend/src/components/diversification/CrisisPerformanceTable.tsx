@@ -23,6 +23,8 @@
  * "no data" rather than zero.
  */
 import { Loader2, AlertCircle } from 'lucide-react'
+import InfoIcon from '../InfoIcon'
+import DataExplainButton from '../DataExplainButton'
 import { useCrisisPerformance } from '../../lib/useDiversificationData'
 import type { CrisisCell } from '../../types/diversification'
 
@@ -126,16 +128,29 @@ export function CrisisPerformanceTable() {
     <div className="card p-5"
          style={{ borderLeft: '3px solid #3b82f6' }}
          data-testid="crisis-performance-table">
-      <div className="mb-3">
-        <h2 className="text-base font-semibold text-white">
-          Crisis Performance
-        </h2>
-        <p className="text-xs text-muted mt-0.5">
-          Performance through five named market events. Each cell shows
-          window CAGR, max drawdown (DD), and Sharpe ratio (Sh). Partial
-          windows (where the strategy started after the crisis began) are
-          flagged with a ⚠ indicator.
-        </p>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold text-white
+                         flex items-center min-w-0">
+            <span className="truncate">Crisis Performance</span>
+            <InfoIcon
+              tooltipKey="crisis_performance_table"
+              metricLabel="Crisis Performance"
+              size="md" />
+          </h2>
+          <p className="text-xs text-muted mt-0.5">
+            Performance through five named market events. Each cell shows
+            window CAGR, max drawdown (DD), and Sharpe ratio (Sh). Partial
+            windows (where the strategy started after the crisis began) are
+            flagged with a ⚠ indicator.
+          </p>
+        </div>
+        <div className="shrink-0">
+          <DataExplainButton
+            metric="Crisis Performance"
+            context="academic_project"
+          />
+        </div>
       </div>
 
       <div className="overflow-x-auto" data-testid="crisis-performance-scroll">

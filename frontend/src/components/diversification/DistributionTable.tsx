@@ -20,6 +20,8 @@
  * Backend payload from /api/v1/analytics/distribution (item 8 commit 1).
  */
 import { Loader2, AlertCircle } from 'lucide-react'
+import InfoIcon from '../InfoIcon'
+import DataExplainButton from '../DataExplainButton'
 import { useDistribution } from '../../lib/useDiversificationData'
 
 
@@ -87,9 +89,15 @@ export function DistributionTable() {
     <div className="card p-5"
          style={{ borderLeft: '3px solid #3b82f6' }}
          data-testid="distribution-table">
-      <div className="mb-3">
-        <h2 className="text-base font-semibold text-white">
-          Return Distribution
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+        <h2 className="text-base font-semibold text-white
+                       flex items-center min-w-0">
+          <span className="truncate">Return Distribution</span>
+          <InfoIcon
+            tooltipKey="distribution_table"
+            metricLabel="Return Distribution"
+            size="md" />
         </h2>
         <p className="text-xs text-muted mt-0.5">
           Moments and shape diagnostics of the monthly return distribution.
@@ -106,6 +114,13 @@ export function DistributionTable() {
             do not evaluate them on Sharpe alone.
           </p>
         )}
+        </div>
+        <div className="shrink-0">
+          <DataExplainButton
+            metric="Return Distribution"
+            context="academic_project"
+          />
+        </div>
       </div>
 
       <div className="overflow-x-auto" data-testid="distribution-scroll">
