@@ -505,10 +505,36 @@ async def get_provenance(session: dict = Depends(require_auth)):
         return {"series": [], "last_pipeline_run": None, "cross_validation": {}}
     try:
         data = json.loads(_PROVENANCE_PATH.read_text(encoding="utf-8"))
-        return data
+        # May 23 2026 — defensive sanitisation. A provenance.json
+        # written by an older pipeline build may contain literal NaN /
+        # Infinity tokens (Python json.dumps default behaviour), which
+        # parse into float('nan') / float('inf') here. Starlette /
+        # orjson then refuse to serialise them, returning 500 with
+        # "Out of range float values are not JSON compliant". Replace
+        # them with None at the read site so existing bad files don't
+        # break the endpoint. New writes go through the sanitiser at
+        # the WRITE site (see tools/data_fetcher._sanitise_json_floats).
+        return _sanitise_nan_floats(data)
     except Exception as exc:
         log.warning("provenance_read_error", error=str(exc))
         raise HTTPException(status_code=500, detail="Could not read provenance data.")
+
+
+def _sanitise_nan_floats(obj):
+    """Recursively replaces NaN / Inf float values with None so the
+    response round-trips through strict JSON serialisers (starlette /
+    orjson). The write side has the same guard — this is the second
+    layer for older files written before the fix landed."""
+    import math
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitise_nan_floats(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitise_nan_floats(v) for v in obj]
+    return obj
 
 
 @app.get("/api/v1/provenance/justification")
@@ -1490,6 +1516,42 @@ async def generate_report_from_template(
         raise HTTPException(
             status_code=500,
             detail="Report generation failed — see server logs.")
+
+
+@app.get("/api/v1/reports/generations")
+async def list_report_generations(
+    template_id: str | None = None,
+    limit: int = 20,
+    session: dict = Depends(require_team_member),
+):
+    """Returns the user's most recent draft generations newest first
+    — backs the Draft selector dropdown so Bob can switch between
+    saved drafts instead of starting fresh on every login.
+
+    Query parameters:
+      template_id  Optional — filter to a single template's drafts.
+                   Default: list every template the user has touched.
+      limit        Max number of drafts to return. Default 20, capped
+                   at 100 server-side so a pathological caller cannot
+                   pull every row.
+
+    Auth: team-member only — same scope as the rest of the report
+    writer endpoints (viewers cannot generate, so they cannot list).
+    """
+    if ENVIRONMENT == "test":
+        return {"drafts": []}
+    capped = max(1, min(int(limit or 20), 100))
+    try:
+        from tools.report_generator import list_generations_for_user
+        email = (session.get("email") or "").strip()
+        drafts = await list_generations_for_user(
+            email, limit=capped, template_id=template_id)
+        return {"drafts": drafts}
+    except Exception as exc:
+        log.warning("list_generations_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="List drafts failed — see server logs.")
 
 
 @app.get("/api/v1/reports/generations/{generation_id}")

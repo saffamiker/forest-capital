@@ -120,30 +120,21 @@ def _format_digest_block(digest: dict[str, Any] | None) -> str:
     if regime:
         lines.append(f"Regime read: {regime}")
         lines.append("")
+    # May 23 2026 — the [Macro: <category>] tag instruction was
+    # removed. Nothing in the rendering pipeline parses or resolves
+    # those tags, so they leaked into drafts as raw text (e.g.
+    # "[Macro: monetary_policy]" appearing verbatim in Bob's
+    # midpoint paper). The macro context remains informational
+    # background only; agents weave it into prose naturally without
+    # inline citation markers. If a tag-and-resolve UI ships later,
+    # restore the instruction together with the parser.
     lines.append(
         "Reason from these signals when relevant. Do NOT invent "
         "macro conditions absent from this block — historical "
-        "reasoning is your default for anything not captured here."
-    )
-    # May 22 2026 — citation instruction. When an agent draws on a
-    # macro signal in its output, it must cite the signal inline with
-    # a [Macro: <category>] tag using the SAME category labels listed
-    # in the Key signals block above. The frontend parses these tags
-    # into styled badges (a teal/cyan pill distinct from the existing
-    # Strong/Developing/Needs Work verdicts) and surfaces a
-    # "Macro context: Forest Capital Research Digest" footer on any
-    # surface where at least one citation appears. Citations are NOT
-    # required for general financial knowledge — only when the
-    # agent is leaning on something specific from THIS digest.
-    lines.append("")
-    lines.append(
-        "CITATION FORMAT — when you draw on a signal from the block "
-        "above, cite it inline with [Macro: <category>] using the "
-        "same category label (e.g. [Macro: monetary_policy], "
-        "[Macro: inflation], [Macro: rates]). Cite once per signal "
-        "you reference; do NOT cite for general financial knowledge "
-        "or historical reasoning. Example: 'IG duration exposure "
-        "now carries less near-term tailwind [Macro: monetary_policy]'."
+        "reasoning is your default for anything not captured here. "
+        "Weave the relevant signals into your prose naturally; do "
+        "NOT emit inline tags or markers — the digest above is "
+        "informational context, not citation source material."
     )
     return "\n".join(lines)
 

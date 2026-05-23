@@ -632,7 +632,22 @@ def _staged_field_match(
 ) -> tuple[bool, Any]:
     if not isinstance(live_value, (int, float)):
         return True, None
-    kind = _FIELD_TOLERANCE.get(field, "ratio")
+    # Hotfix May 23 2026: only cross-check fields that are
+    # explicitly in _FIELD_TOLERANCE. Fields without an entry are
+    # metadata (study period length n_months, count fields, ranks)
+    # that the staged findings document do not typically claim a
+    # specific value for — flagging them as DATA MISMATCH against
+    # "not-found" creates noise on every generation. The original
+    # behavior defaulted every unknown field to "ratio" tolerance,
+    # which is what produced the n_months=286 vs "staged=not-found"
+    # flag the user reported.
+    #
+    # The proper findings (sharpes, correlations, CVaRs, drawdowns,
+    # COVID recovery) ARE in the tolerance map and continue to be
+    # cross-checked normally.
+    kind = _FIELD_TOLERANCE.get(field)
+    if kind is None:
+        return True, None
     for s in staged_numbers:
         if _within_tolerance(float(live_value), s, kind):
             return True, None
@@ -1403,8 +1418,14 @@ def substitute_prompt(
     ta_lines = "\n".join(
         f"  - {k}: {v}"
         for k, v in sorted((team_activity or {}).items()))
-    vs_lines = json.dumps(validation_summary or {}, indent=2,
-                           default=str)
+    # May 23 2026 — `json.dumps({})` returns the literal string "{}",
+    # which is truthy, so a `vs_lines or "(no validation run)"` fallback
+    # never fires for an empty dict. The AI then sees `{}` in its prompt
+    # and may echo it into Appendix D. Check the dict directly.
+    if validation_summary:
+        vs_lines = json.dumps(validation_summary, indent=2, default=str)
+    else:
+        vs_lines = ""
 
     prompt = template_prompt
     prompt = prompt.replace("{verified_data}", vd_lines or "(empty)")

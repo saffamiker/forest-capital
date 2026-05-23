@@ -412,6 +412,89 @@ async def get_generation(generation_id: int) -> dict[str, Any] | None:
         return None
 
 
+async def list_generations_for_user(
+    email: str,
+    limit: int = 20,
+    template_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Lists the most recent generations Bob (or any team member) has
+    produced, newest first. Used by the Draft selector dropdown so
+    the user can switch back to a prior draft instead of starting
+    fresh every login.
+
+    May 23 2026. report_generations carries no user_email column —
+    ownership is established by JOINing through report_pipeline_audit
+    (triggered_by). A single generation may have multiple audit rows
+    (a Step 7 re-run); DISTINCT ON dedupes so each draft appears
+    once. Newest by generated_at desc.
+
+    Returns a slim preview shape (id, template_id, flag_count,
+    word_count totals, generated_at, first-200-char preview). The
+    editor fetches the full paper via get_generation when the user
+    actually picks a draft."""
+    if not email:
+        return []
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return []
+        # The template_id filter is optional — passing None lists every
+        # template's drafts together (useful for the "all my drafts"
+        # picker).
+        params: dict[str, Any] = {"e": email, "n": int(limit)}
+        tmpl_clause = ""
+        if template_id:
+            tmpl_clause = " AND g.template_id = :t"
+            params["t"] = template_id
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "SELECT * FROM ("
+                "  SELECT DISTINCT ON (g.id) "
+                "    g.id, g.template_id, g.flag_count, g.word_counts, "
+                "    g.generated_at, SUBSTR(g.paper_md, 1, 200) AS preview "
+                "  FROM report_generations g "
+                "  INNER JOIN report_pipeline_audit a "
+                "    ON a.generation_id = g.id "
+                "  WHERE a.triggered_by = :e" + tmpl_clause + " "
+                "  ORDER BY g.id, a.run_at DESC"
+                ") sub "
+                "ORDER BY generated_at DESC NULLS LAST "
+                "LIMIT :n"
+            ), params)
+            rows = r.fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            wc = _maybe_json(row[3], {})
+            # word_counts shape: {section_key: {count, status}, ...,
+            # total: {count, status}}. Sum every section count as a
+            # belt-and-braces total if "total" isn't named.
+            total = 0
+            if isinstance(wc, dict):
+                tot = wc.get("total")
+                if isinstance(tot, dict) and isinstance(tot.get("count"), int):
+                    total = tot["count"]
+                else:
+                    total = sum(
+                        v.get("count", 0)
+                        for v in wc.values()
+                        if isinstance(v, dict)
+                        and isinstance(v.get("count"), int))
+            out.append({
+                "id":              int(row[0]),
+                "template_id":     row[1],
+                "flag_count":      int(row[2] or 0),
+                "word_count_total": int(total),
+                "generated_at": (
+                    row[4].isoformat() if row[4] is not None else None),
+                "preview": (row[5] or "").strip(),
+            })
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("list_generations_for_user_failed", error=str(exc))
+        return []
+
+
 def _maybe_json(v: Any, fallback: Any) -> Any:
     if isinstance(v, str):
         try:

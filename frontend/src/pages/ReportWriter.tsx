@@ -31,6 +31,7 @@ import RubricPanel from '../components/reportwriter/RubricPanel'
 import type { Rubric } from '../components/reportwriter/RubricPanel'
 import CitationReviewPanel from '../components/reportwriter/CitationReviewPanel'
 import VersionHistoryPanel from '../components/reportwriter/VersionHistoryPanel'
+import DraftSelector from '../components/reportwriter/DraftSelector'
 import PipelineGate, {
   useAutoFireStep5And6,
 } from '../components/reportwriter/PipelineGate'
@@ -118,6 +119,11 @@ export default function ReportWriter() {
   const [downloading, setDownloading] = useState<'paper' | 'appendix' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [auditPosted, setAuditPosted] = useState(false)
+  // Bumps after a successful Generate or Restore so the DraftSelector
+  // re-fetches its list — the new draft appears in the dropdown
+  // without a page reload. Also re-bumped when the user picks a
+  // saved draft so the selector reflects the new selection.
+  const [draftListNonce, setDraftListNonce] = useState(0)
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const stepResultsRef = useRef<StepResults>({})
@@ -425,6 +431,75 @@ export default function ReportWriter() {
   // hook isolates the trigger logic from this component's render loop.
   useAutoFireStep5And6(stepResults, runStep)
 
+  // ── Draft selector — switch between saved drafts ─────────────────────────
+  //
+  // May 23 2026. Picking a saved draft fetches the full generation
+  // and rehydrates the editor. Step results are NOT restored — the
+  // pipeline sidebar reflects the CURRENT session, not the session
+  // in which the picked draft was originally generated. Bob just
+  // wants the editor content and the BOB/VERIFY block context;
+  // Steps 1-6 are only relevant when he wants to re-generate.
+  //
+  // Picking "New draft" (null) clears the editor + audit_id + step
+  // results so a fresh Step 1 cascade can start cleanly.
+  const handleSelectDraft = useCallback(async (draftId: number | null) => {
+    if (draftId === null) {
+      // Clear the editor so the user starts fresh — but keep
+      // templateId, rubric, and templates list intact (they are
+      // template-scoped, not draft-scoped). The auto-cascade on
+      // Step 1 will fire on the next render since stepResults is
+      // empty again.
+      setGeneration(null)
+      setPaperMd('')
+      setStepResults({})
+      setReview(null)
+      setError(null)
+      setAuditId(null)
+      auditIdRef.current = null
+      setPipelineStartedAt(null)
+      setBadge('idle')
+      // Defer the cascade trigger to the next tick so React commits
+      // the clears first. The Step-1 effect (stepResults[1] === idle
+      // or undefined) will then fire normally.
+      return
+    }
+    try {
+      setError(null)
+      const res = await axios.get<GenerationResponse & {
+        citations?: Record<string, unknown>
+      }>(`/api/v1/reports/generations/${draftId}`)
+      const data = res.data
+      setGeneration(data)
+      setPaperMd(data.paper_md || '')
+      // The picked draft's audit row is in the DB but we don't
+      // restore its audit_id — a subsequent step run would race
+      // with the older row. Clear audit_id so the next persistStep
+      // inserts a fresh audit tied to the current session.
+      setAuditId(null)
+      auditIdRef.current = null
+      // Mark Step 7 as complete (informational) — the rest of the
+      // step sidebar shows "—" so the user knows those weren't run
+      // this session. The draft IS loaded though, so iterate /
+      // resolve-bob / download all work immediately.
+      setStepResults({
+        7: {
+          status: 'complete',
+          message: 'Draft loaded · ready to iterate',
+          detail: 'Restored',
+          payload: { generation_id: data.id } as Record<string, unknown>,
+        },
+      })
+      setBadge('complete', 'Draft loaded')
+    } catch (err) {
+      let msg = 'Failed to load draft.'
+      if (axios.isAxiosError(err)) {
+        const detail = err.response?.data?.detail
+        if (typeof detail === 'string') msg = detail
+      }
+      setError(msg)
+    }
+  }, [setAuditId, setBadge, setPipelineStartedAt])
+
   // ── Generation ────────────────────────────────────────────────────────────
   const handleGenerate = async (): Promise<void> => {
     if (generating) return
@@ -464,6 +539,9 @@ export default function ReportWriter() {
         }),
         audit_id: auditIdRef.current,
       }).then(() => setAuditPosted(true))
+      // Tell the DraftSelector to re-fetch — the new draft should
+      // appear in the dropdown immediately without a page reload.
+      setDraftListNonce((n) => n + 1)
     } catch (err) {
       const ms = Math.round(performance.now() - t0)
       let msg = 'Generation failed.'
@@ -777,6 +855,12 @@ export default function ReportWriter() {
               </option>
             ))}
         </select>
+        <DraftSelector
+          templateId={templateId}
+          selectedDraftId={generation?.id ?? null}
+          onSelect={handleSelectDraft}
+          refreshNonce={draftListNonce}
+        />
         {savingPatch ? (
           <span className="text-text-muted text-xs italic">Saving…</span>
         ) : null}

@@ -3150,8 +3150,39 @@ def _write_provenance(
     }
 
     prov_path = Path(__file__).resolve().parent.parent / "data" / "provenance.json"
-    prov_path.write_text(json.dumps(provenance, indent=2, default=str))
+    # May 23 2026 — sanitise NaN / Inf before writing. Python's
+    # json.dumps default is `allow_nan=True`, which emits the literal
+    # tokens `NaN` / `Infinity` (non-standard JSON). The endpoint
+    # then reads them back as `float('nan')` and starlette/orjson
+    # refuses to serialise them, returning a 500 with
+    # "Out of range float values are not JSON compliant". Replace
+    # any NaN / Inf with None at the WRITE site so the file is
+    # spec-compliant JSON downstream, and pass `allow_nan=False`
+    # as a belt-and-braces guard against any value the sanitiser
+    # missed (raises immediately rather than silently writing junk).
+    prov_path.write_text(
+        json.dumps(_sanitise_json_floats(provenance),
+                   indent=2, default=str, allow_nan=False))
     log.info("provenance_written", path=str(prov_path))
+
+
+def _sanitise_json_floats(obj: Any) -> Any:
+    """Recursively replaces NaN / Inf float values with None so the
+    output round-trips through strict JSON. Standard library
+    json.dumps is permissive by default (NaN / Infinity tokens);
+    starlette / orjson on the read side are strict and reject those
+    tokens with ValueError. Replacing at the write site keeps the
+    provenance.json file spec-compliant and the endpoint healthy."""
+    import math
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: _sanitise_json_floats(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitise_json_floats(v) for v in obj]
+    return obj
 
 
 # ── Validation helper (used by backtester.py) ─────────────────────────────────
