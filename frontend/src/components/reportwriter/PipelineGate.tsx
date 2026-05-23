@@ -425,10 +425,9 @@ function Step2Detail({ payload }: { payload: Record<string, unknown> }) {
       <p className="text-2xs text-text-muted italic mt-2">
         {Number(total) - Number(verified)} concept
         {Number(total) - Number(verified) === 1 ? '' : 's'} still
-        need manual citations — extended search and accept/reject
-        actions ship in the next focused commit. For now: click
-        any verified URL to confirm the source, or proceed to
-        generate and add missing citations manually in the editor.
+        need review. The 3-pass search has already captured
+        alternatives where it could; review and apply them via the
+        Citation Review panel on the editor screen.
       </p>
     </div>
   )
@@ -665,10 +664,10 @@ function VerificationBadge({ state }: { state: string }) {
       </span>
     )
   }
-  if (state === 'rejected_no_citation') {
+  if (state === 'rejected_no_citation' || state === 'rejected') {
     return (
       <span className="inline-flex items-center gap-1 text-text-muted">
-        no citation
+        rejected
       </span>
     )
   }

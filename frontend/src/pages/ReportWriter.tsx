@@ -29,6 +29,7 @@ import AcademicReviewPanel from '../components/reportwriter/AcademicReviewPanel'
 import type { AcademicReview } from '../components/reportwriter/AcademicReviewPanel'
 import RubricPanel from '../components/reportwriter/RubricPanel'
 import type { Rubric } from '../components/reportwriter/RubricPanel'
+import CitationReviewPanel from '../components/reportwriter/CitationReviewPanel'
 import PipelineGate, {
   useAutoFireStep5And6,
 } from '../components/reportwriter/PipelineGate'
@@ -736,6 +737,9 @@ export default function ReportWriter() {
             onResolve={handleResolveBob}
             onIterate={handleBobIterate}
             disabled={!generation}
+          />
+          <CitationReviewPanel
+            generationId={generation?.id ?? null}
           />
           <WordCountSidebar counts={sectionCounts} />
         </aside>

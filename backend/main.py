@@ -1206,9 +1206,15 @@ async def post_source_citations(
         concepts = tmpl.get("concepts") or []
         citations = await source_citations(concepts)
         await persist_citations(citations)
+        # CITATION_VERIFIED_STATES covers every state that counts as a
+        # real citation — auto-verified, human-accepted, alternative-
+        # selected, manually-added. Initial counts are all
+        # auto-verified, but the new 3-pass path will also produce
+        # pending_review entries that need reviewer attention.
+        from tools.template_pipeline import CITATION_VERIFIED_STATES
         verified = sum(
             1 for c in citations.values()
-            if c.get("verification_status") == "verified")
+            if c.get("verification_status") in CITATION_VERIFIED_STATES)
         return {
             "template_id":     template_id,
             "citations":       citations,
@@ -1223,6 +1229,81 @@ async def post_source_citations(
         raise HTTPException(
             status_code=500,
             detail="Citation sourcing failed — see server logs.")
+
+
+# ── Citation reviewer workflow (item 1, May 23 2026) ─────────────────────────
+#
+# The midpoint paper's citation pipeline now produces pending_review
+# entries when the trusted-domain search returns nothing — picked up
+# by passes 2 and 3 of source_citations. Bob reviews each pending
+# entry and either accepts the search result, picks an alternative
+# from the captured pass-2/3 hits, enters a citation manually, or
+# rejects the concept entirely. The two endpoints below back the
+# CitationReviewPanel on the report writer screen.
+
+@app.get("/api/v1/citations/{generation_id}")
+async def get_citations_list(
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Return every citation row for a generation_id with its current
+    state, alternatives, and reviewer-action history. Powers the
+    CitationReviewPanel."""
+    from tools.template_pipeline import get_citations_for_generation
+    citations = await get_citations_for_generation(generation_id)
+    return {
+        "generation_id": generation_id,
+        "citations":     citations,
+    }
+
+
+@app.post("/api/v1/citations/{citation_id}/review")
+async def post_citation_review(
+    citation_id: int,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Apply a reviewer action to a citations_cache row.
+
+    Body:
+      action: 'accept_untrusted' | 'select_alternative' |
+              'reject' | 'manual_add'
+      selected_alternative: dict (required when action ==
+                            'select_alternative')
+      manual_citation:      dict (required when action == 'manual_add')
+
+    The action drives the state transition per the 7-state machine
+    (see CITATION_STATES in tools/template_pipeline.py). Reviewer
+    identity and timestamp are recorded on the row.
+    """
+    action = body.get("action")
+    if not action:
+        raise HTTPException(
+            status_code=422, detail="action is required.")
+    from tools.template_pipeline import (
+        CITATION_REVIEW_ACTIONS, apply_citation_review,
+    )
+    if action not in CITATION_REVIEW_ACTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Unknown action '{action}'. Valid actions: "
+                    + ", ".join(sorted(CITATION_REVIEW_ACTIONS))))
+    reviewer_email = session.get("email") or "unknown@reviewer"
+    selected = body.get("selected_alternative")
+    manual = body.get("manual_citation")
+    updated = await apply_citation_review(
+        citation_id, action, reviewer_email,
+        selected_alternative=selected,
+        manual_citation=manual,
+    )
+    if updated is None:
+        raise HTTPException(
+            status_code=404,
+            detail=("Citation not found, or the action payload was "
+                    "invalid. select_alternative requires "
+                    "selected_alternative; manual_add requires "
+                    "manual_citation."))
+    return {"citation": updated}
 
 
 @app.post("/api/v1/reports/team-activity")
