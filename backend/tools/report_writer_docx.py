@@ -417,6 +417,13 @@ def _fmt_value(v: Any) -> str:
         return "Yes" if v else "No"
     if isinstance(v, float):
         return f"{v:.4f}"
+    # May 23 2026 — a dict or list slipped through (e.g. an upstream
+    # snapshot shape drift) used to render as its Python repr — "{}"
+    # or "[]" — leaking into Appendix D table cells. Render the em
+    # dash instead; the upstream caller is responsible for flattening
+    # nested structures before they reach the table.
+    if isinstance(v, (dict, list, tuple, set)):
+        return "—"
     return str(v)
 
 

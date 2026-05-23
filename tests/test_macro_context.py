@@ -200,13 +200,16 @@ class TestRefresh:
 
 
 class TestCitationInstruction:
-    """May 22 2026 — the context block now carries an instruction for
-    agents to cite macro signals inline with [Macro: <category>].
-    Pin the instruction text so a future prompt edit cannot silently
-    drop the citation pattern the frontend's MacroCitation component
-    depends on."""
+    """May 23 2026 — the [Macro: <category>] citation instruction was
+    REMOVED. Nothing in the rendering pipeline parses or resolves
+    those tags (the frontend MacroCitation component never shipped),
+    so they leaked into Bob's draft as raw text. The context block
+    is now informational background only; agents weave the signals
+    into prose naturally without inline tags. These tests pin the
+    inverted contract so a future edit cannot quietly re-introduce
+    the orphan-tag pattern."""
 
-    def test_citation_format_instruction_is_in_block(self):
+    def test_no_macro_tag_instruction_in_block(self):
         digest = {
             "generated_at": "2026-05-22T12:00:00Z",
             "summary_text": "Fed paused.",
@@ -219,14 +222,14 @@ class TestCitationInstruction:
             ],
         }
         out = macro_context._format_digest_block(digest)
-        assert "CITATION FORMAT" in out
-        assert "[Macro: <category>]" in out
-        # The instruction must name the specific frontend-compatible
-        # bracketed format (not a paraphrase that a future prompt
-        # edit might keep while breaking the parser).
-        assert "[Macro: monetary_policy]" in out
-        # Don't-cite-everything guardrail must also be present.
-        assert "do NOT cite" in out.lower() or "do not cite" in out.lower()
+        assert "CITATION FORMAT" not in out
+        assert "[Macro:" not in out
+        # The instruction telling the model NOT to emit inline tags
+        # must be present so the model knows to write prose naturally.
+        assert ("do NOT emit inline tags" in out
+                or "do not emit inline tags" in out.lower()
+                or "do NOT emit inline markers" in out
+                or "do not emit inline markers" in out.lower())
 
     def test_citation_instruction_omitted_on_empty_digest(self):
         # An empty digest returns "" — no instruction injected, no
