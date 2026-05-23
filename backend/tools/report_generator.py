@@ -781,22 +781,72 @@ async def resolve_bob_block(
 
 async def update_paper_md(
     generation_id: int, paper_md: str,
+    *,
+    expected_revision: int | None = None,
+    saved_by_email: str | None = None,
+    source: str = "auto_edit",
+    create_snapshot: bool = True,
 ) -> dict[str, Any]:
     """Inline editor save path. The frontend PATCHes the whole
     paper_md on every keystroke debounce — we re-run the post-check
-    and persist."""
+    and persist.
+
+    Concurrent-edit detection (item 2, May 23 2026):
+      If `expected_revision` is supplied AND the row's current
+      paper_revision does not match, the function returns
+      {"error": "revision_mismatch", "current_revision": <int>,
+       "expected_revision": <int>} so the endpoint can return 409.
+
+    Version snapshots:
+      Every successful save records a snapshot in
+      report_paper_versions and bumps paper_revision. Pass
+      `create_snapshot=False` only when the caller has already
+      taken the snapshot itself (e.g. the restore path).
+    """
     gen = await get_generation(generation_id)
     if not gen:
         return {"error": "generation_not_found"}
+
+    # Optimistic concurrency: compare expected_revision against the
+    # current value when the caller supplies one. The default (no
+    # check) keeps the auto-save loop from blocking on its own
+    # writes; the explicit Save Version action in the editor passes
+    # the value it last saw.
+    if expected_revision is not None:
+        from tools.paper_versions import check_revision
+        current = await check_revision(generation_id)
+        if current is not None and int(current) != int(expected_revision):
+            return {
+                "error":              "revision_mismatch",
+                "current_revision":   current,
+                "expected_revision":  int(expected_revision),
+            }
+
     citations = await _load_citations_for_generation(generation_id)
     checks = _post_check_summary(
         paper_md, gen.get("verified_data") or {}, citations)
     saved = await _update_paper_md(
         generation_id, paper_md,
         checks["flag_count"], checks["word_counts"])
+    new_revision: int | None = None
+    snapshot: dict[str, Any] | None = None
+    if saved:
+        from tools.paper_versions import (
+            bump_paper_revision, save_version,
+        )
+        new_revision = await bump_paper_revision(generation_id)
+        if create_snapshot:
+            snapshot = await save_version(
+                generation_id, paper_md,
+                saved_by_email=saved_by_email,
+                source=source,
+                flag_count=checks["flag_count"],
+                word_counts=checks["word_counts"])
     return {
         "saved":    bool(saved),
         "paper_md": paper_md,
+        "paper_revision": new_revision,
+        "snapshot": snapshot,
         **checks,
     }
 
