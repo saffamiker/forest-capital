@@ -26,6 +26,7 @@
  * unfolds when there is actually work to do.
  */
 import { useCallback, useEffect, useState } from 'react'
+import axios from 'axios'
 import { AlertCircle, CheckCircle, ChevronDown, ChevronRight,
          ExternalLink, Loader2 } from 'lucide-react'
 import {
@@ -124,31 +125,27 @@ export default function CitationReviewPanel({
     if (generationId === null || generationId === undefined) return
     setBusyId(citationId)
     try {
-      const res = await fetch(
+      // Hotfix May 23 2026: axios picks up the X-API-Key header
+      // from axios.defaults.headers.common; raw fetch() did not,
+      // so this endpoint was 401-ing on every action.
+      const res = await axios.post<{ citation: Citation }>(
         `/api/v1/citations/${citationId}/review`,
-        {
-          method:  'POST',
-          credentials: 'include',
-          headers: { 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ action, ...payload }),
-        })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error(body.detail || `Review failed (${res.status})`)
-      }
-      const data = await res.json() as { citation: Citation }
+        { action, ...payload })
       // Optimistic state update through the store — the new row
       // is visible immediately AND persisted across navigation.
-      upsertCitation(generationId, data.citation)
+      upsertCitation(generationId, res.data.citation)
       onReviewed?.()
     } catch (e) {
       // Surface the error via the store so the message persists
       // across remount too. The store's load() clears it on the
       // next successful fetch.
+      const msg = axios.isAxiosError(e)
+        ? (e.response?.data?.detail || e.message)
+        : (e as Error).message
       useCitationReviewStore.setState((s) => ({
         errorByGenerationId: {
           ...s.errorByGenerationId,
-          [generationId]: (e as Error).message,
+          [generationId]: String(msg),
         },
       }))
     } finally {

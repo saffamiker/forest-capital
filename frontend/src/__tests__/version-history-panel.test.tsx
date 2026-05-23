@@ -4,12 +4,26 @@
  * Covers VersionHistoryPanel — the version-control surface on the
  * report writer screen. Item 2 (May 23 2026 — collaborative editing
  * + version control).
+ *
+ * Tests mock axios (the panel switched from raw fetch() to axios
+ * on May 23 2026 so the X-API-Key session token is attached — raw
+ * fetch was hitting 401 on every page load).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import axios from 'axios'
 
 import VersionHistoryPanel from
   '../components/reportwriter/VersionHistoryPanel'
+
+
+vi.mock('axios')
+
+const mockedAxios = axios as unknown as {
+  get: ReturnType<typeof vi.fn>
+  post: ReturnType<typeof vi.fn>
+  isAxiosError: (err: unknown) => boolean
+}
 
 
 function makeVersions() {
@@ -46,19 +60,18 @@ function makeVersions() {
 }
 
 
-let originalFetch: typeof global.fetch
 let originalConfirm: typeof window.confirm
 
 beforeEach(() => {
-  originalFetch = global.fetch
   originalConfirm = window.confirm
-  // Auto-confirm any window.confirm so the restore tests don't get
-  // stuck on the "are you sure?" dialog.
   window.confirm = vi.fn(() => true)
+  mockedAxios.get = vi.fn()
+  mockedAxios.post = vi.fn()
+  mockedAxios.isAxiosError = (err) =>
+    !!(err && (err as { isAxiosError?: boolean }).isAxiosError)
 })
 
 afterEach(() => {
-  global.fetch = originalFetch
   window.confirm = originalConfirm
   vi.clearAllMocks()
 })
@@ -72,12 +85,12 @@ describe('VersionHistoryPanel — empty state', () => {
   })
 
   it('shows the no-versions notice when the list is empty', async () => {
-    global.fetch = vi.fn().mockResolvedValueOnce({
-      ok: true, json: async () => ({
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
         generation_id: 42, paper_revision: 0,
         versions: [], version_count: 0,
-      }),
-    } as Response) as unknown as typeof fetch
+      },
+    })
 
     render(<VersionHistoryPanel generationId={42} />)
     await waitFor(() => {
@@ -89,12 +102,12 @@ describe('VersionHistoryPanel — empty state', () => {
 
 describe('VersionHistoryPanel — fetch + render', () => {
   it('fetches versions on mount and renders newest first', async () => {
-    global.fetch = vi.fn().mockResolvedValueOnce({
-      ok: true, json: async () => ({
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
         generation_id: 42, paper_revision: 7,
         versions: makeVersions(), version_count: 3,
-      }),
-    } as Response) as unknown as typeof fetch
+      },
+    })
 
     render(<VersionHistoryPanel generationId={42} />)
     await waitFor(() => {
@@ -102,38 +115,47 @@ describe('VersionHistoryPanel — fetch + render', () => {
       expect(screen.getByTestId('version-row-2')).toBeTruthy()
       expect(screen.getByTestId('version-row-1')).toBeTruthy()
     })
-    // Header shows the revision.
     expect(screen.getByText(/rev 7/i)).toBeTruthy()
   })
 
+  it('GETs the versions endpoint via axios (auth header attached)', async () => {
+    mockedAxios.get.mockResolvedValueOnce({
+      data: { generation_id: 42, paper_revision: 0,
+              versions: [], version_count: 0 },
+    })
+    render(<VersionHistoryPanel generationId={42} />)
+    await waitFor(() => {
+      expect(mockedAxios.get).toHaveBeenCalledWith(
+        '/api/v1/reports/generations/42/versions')
+    })
+  })
+
   it('shows the saved-by email + label + source decoration', async () => {
-    global.fetch = vi.fn().mockResolvedValueOnce({
-      ok: true, json: async () => ({
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
         generation_id: 42, paper_revision: 3,
         versions: makeVersions(), version_count: 3,
-      }),
-    } as Response) as unknown as typeof fetch
+      },
+    })
 
     render(<VersionHistoryPanel generationId={42} />)
     await waitFor(() => {
-      // Label is rendered.
       expect(screen.getByText(/post AI iterate/i)).toBeTruthy()
-      // Source label maps auto_iterate → "AI iteration".
       expect(screen.getByText(/AI iteration/)).toBeTruthy()
-      // Manual source maps to "Saved manually".
       expect(screen.getByText(/Saved manually/i)).toBeTruthy()
     })
   })
 
   it('surfaces a fetch error', async () => {
-    global.fetch = vi.fn().mockResolvedValueOnce({
-      ok: false, status: 500,
-      json: async () => ({}),
-    } as Response) as unknown as typeof fetch
+    mockedAxios.get.mockRejectedValueOnce({
+      isAxiosError: true,
+      response: { status: 500, data: { detail: 'Server error' }},
+      message: 'Request failed with status code 500',
+    })
 
     render(<VersionHistoryPanel generationId={42} />)
     await waitFor(() => {
-      expect(screen.getByText(/Versions fetch returned 500/i)).toBeTruthy()
+      expect(screen.queryByText(/Server error|status code 500/)).toBeTruthy()
     })
   })
 })
@@ -141,12 +163,12 @@ describe('VersionHistoryPanel — fetch + render', () => {
 
 describe('VersionHistoryPanel — actions', () => {
   it('preview toggle expands and collapses the paper snapshot', async () => {
-    global.fetch = vi.fn().mockResolvedValueOnce({
-      ok: true, json: async () => ({
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
         generation_id: 42, paper_revision: 3,
         versions: makeVersions(), version_count: 3,
-      }),
-    } as Response) as unknown as typeof fetch
+      },
+    })
 
     render(<VersionHistoryPanel generationId={42} />)
     await waitFor(() =>
@@ -160,33 +182,26 @@ describe('VersionHistoryPanel — actions', () => {
   })
 
   it('save snapshot POSTs the label and refetches', async () => {
-    const fetchMock = vi.fn()
-      // initial GET
-      .mockResolvedValueOnce({
-        ok: true, json: async () => ({
-          generation_id: 42, paper_revision: 3,
-          versions: makeVersions(), version_count: 3,
-        }),
-      } as Response)
-      // POST save
-      .mockResolvedValueOnce({
-        ok: true, json: async () => ({
-          snapshot: { id: 4, version_number: 4 },
-        }),
-      } as Response)
-      // re-fetch GET
-      .mockResolvedValueOnce({
-        ok: true, json: async () => ({
-          generation_id: 42, paper_revision: 4,
-          versions: [
-            { ...makeVersions()[0], id: 4, version_number: 4,
-              label: 'before review' },
-            ...makeVersions(),
-          ],
-          version_count: 4,
-        }),
-      } as Response)
-    global.fetch = fetchMock as unknown as typeof fetch
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        generation_id: 42, paper_revision: 3,
+        versions: makeVersions(), version_count: 3,
+      },
+    })
+    mockedAxios.post.mockResolvedValueOnce({
+      data: { snapshot: { id: 4, version_number: 4 }},
+    })
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        generation_id: 42, paper_revision: 4,
+        versions: [
+          { ...makeVersions()[0], id: 4, version_number: 4,
+            label: 'before review' },
+          ...makeVersions(),
+        ],
+        version_count: 4,
+      },
+    })
 
     render(<VersionHistoryPanel generationId={42} />)
     await waitFor(() => screen.getByTestId('version-save-toggle'))
@@ -197,41 +212,29 @@ describe('VersionHistoryPanel — actions', () => {
     fireEvent.click(screen.getByTestId('version-save-submit'))
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenNthCalledWith(2,
+      expect(mockedAxios.post).toHaveBeenCalledWith(
         '/api/v1/reports/generations/42/versions',
-        expect.objectContaining({
-          method: 'POST',
-          body:   JSON.stringify({
-            label:  'before review',
-            source: 'manual',
-          }),
-        }))
+        { label: 'before review', source: 'manual' })
     })
   })
 
   it('restore POSTs to the restore endpoint and fires onRestored', async () => {
     const onRestored = vi.fn()
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({
-        ok: true, json: async () => ({
-          generation_id: 42, paper_revision: 3,
-          versions: makeVersions(), version_count: 3,
-        }),
-      } as Response)
-      // POST restore
-      .mockResolvedValueOnce({
-        ok: true, json: async () => ({
-          snapshot: { id: 4, version_number: 4 },
-        }),
-      } as Response)
-      // re-fetch GET after restore
-      .mockResolvedValueOnce({
-        ok: true, json: async () => ({
-          generation_id: 42, paper_revision: 4,
-          versions: makeVersions(), version_count: 4,
-        }),
-      } as Response)
-    global.fetch = fetchMock as unknown as typeof fetch
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        generation_id: 42, paper_revision: 3,
+        versions: makeVersions(), version_count: 3,
+      },
+    })
+    mockedAxios.post.mockResolvedValueOnce({
+      data: { snapshot: { id: 4, version_number: 4 }},
+    })
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        generation_id: 42, paper_revision: 4,
+        versions: makeVersions(), version_count: 4,
+      },
+    })
 
     render(<VersionHistoryPanel
       generationId={42}
@@ -241,9 +244,8 @@ describe('VersionHistoryPanel — actions', () => {
     fireEvent.click(screen.getByTestId('version-restore-2'))
 
     await waitFor(() => {
-      expect(fetchMock).toHaveBeenNthCalledWith(2,
-        '/api/v1/reports/generations/42/versions/2/restore',
-        expect.objectContaining({ method: 'POST' }))
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        '/api/v1/reports/generations/42/versions/2/restore')
     })
     await waitFor(() => {
       expect(onRestored).toHaveBeenCalledTimes(1)
@@ -253,14 +255,12 @@ describe('VersionHistoryPanel — actions', () => {
   it('confirm cancellation aborts the restore', async () => {
     const onRestored = vi.fn()
     window.confirm = vi.fn(() => false)
-    const fetchMock = vi.fn()
-      .mockResolvedValueOnce({
-        ok: true, json: async () => ({
-          generation_id: 42, paper_revision: 3,
-          versions: makeVersions(), version_count: 3,
-        }),
-      } as Response)
-    global.fetch = fetchMock as unknown as typeof fetch
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        generation_id: 42, paper_revision: 3,
+        versions: makeVersions(), version_count: 3,
+      },
+    })
 
     render(<VersionHistoryPanel
       generationId={42}
@@ -270,7 +270,8 @@ describe('VersionHistoryPanel — actions', () => {
     fireEvent.click(screen.getByTestId('version-restore-2'))
 
     // Only the initial GET was called — no restore POST.
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(mockedAxios.get).toHaveBeenCalledTimes(1)
+    expect(mockedAxios.post).not.toHaveBeenCalled()
     expect(onRestored).not.toHaveBeenCalled()
   })
 })
