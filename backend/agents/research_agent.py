@@ -346,8 +346,22 @@ def _filter_to_verified_signals(
     return verified_signals, seen_urls
 
 
+# The research agent issues 3-5 web_search calls + up to 4 web_fetch
+# calls + composes a JSON digest with 5+ signals + a regime_implication
+# paragraph + a summary_text paragraph. The project-wide
+# MAX_OUTPUT_TOKENS (1024) is too low — a complete response runs
+# 2500-3500 tokens and was being truncated mid-JSON, leaving
+# _parse_digest_json no valid object to extract and dropping every
+# run into the failure_digest path (May 23 2026 production fire:
+# runs 9, 10, 11 all returned the fallback message because the
+# response hit max_tokens and stop_reason='max_tokens'). 4096 is
+# the new floor — gives the model headroom for elaborate signals
+# while staying well within Sonnet's per-message cap.
+_RESEARCH_MAX_OUTPUT_TOKENS = 4096
+
+
 def generate_digest(
-    *, max_tokens: int = MAX_OUTPUT_TOKENS,
+    *, max_tokens: int = _RESEARCH_MAX_OUTPUT_TOKENS,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Runs the macro research agent once and returns (digest, usage).
@@ -392,11 +406,16 @@ def generate_digest(
     verified_urls = {s["url"] for s in sources if s.get("url")}
     parsed = _parse_digest_json(text)
     if not parsed:
-        # Capture the first 500 chars of the raw response at WARNING
-        # level so a future parse failure is debuggable from production
-        # logs without re-running the agent.
+        # Capture the first 500 chars of the raw response + stop_reason
+        # at WARNING level so a future parse failure is debuggable from
+        # production logs without re-running the agent. stop_reason
+        # 'max_tokens' is the May 23 2026 production failure mode and
+        # the most common parse-failure cause — surfacing it directly
+        # avoids manual response inspection on the next regression.
+        stop_reason = getattr(response, "stop_reason", None)
         log.warning("research_agent_empty_parse",
                     n_searches=len(sources), n_fetches=len(fetched_urls),
+                    stop_reason=stop_reason,
                     raw_response_head=(text or "")[:500])
         # Hard-failure path on any parse failure. The earlier
         # plain-text fallback (which stored the raw response as the
