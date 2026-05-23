@@ -290,6 +290,16 @@ async def refresh_diversification_metrics(data_hash: str) -> None:
         except Exception as exc:  # noqa: BLE001
             log.warning("diversification_context_refresh_failed",
                         error=str(exc))
+        # Item 5 (May 23 2026 — analytics narrative context). The
+        # narrative layer rides the same refresh tick as the
+        # structured diversification block so the three context
+        # layers stay in step.
+        try:
+            from tools.analytics_context import refresh_analytics_context
+            await refresh_analytics_context()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("analytics_context_refresh_failed",
+                        error=str(exc))
     except Exception as exc:  # noqa: BLE001
         log.warning("diversification_refresh_failed", error=str(exc))
 

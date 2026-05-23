@@ -231,6 +231,16 @@ async def lifespan(app: FastAPI):
             await refresh_macro_context()
         except Exception as exc:  # noqa: BLE001
             log.warning("macro_context_warm_failed", error=str(exc))
+        # Item 5 (May 23 2026 — analytics narrative). Warm-read the
+        # narrative cache so the first agent call after restart sees
+        # the previous deploy's narrative. The diversification refresh
+        # tick fires the canonical rebuild later; this just covers
+        # the cold-deploy gap.
+        try:
+            from tools.analytics_context import refresh_analytics_context
+            await refresh_analytics_context()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("analytics_context_warm_failed", error=str(exc))
         # Analytical staging findings — same warm-read pattern so the
         # Academic Writer's first call after restart sees the most
         # recent staged findings. The endpoint refresh() also fires
@@ -4576,6 +4586,58 @@ async def testing_unresolve_triage_item(
 # for the whole team); the manual run trigger is sysadmin only because
 # it bypasses the 24h freshness gate and burns the Sonnet + web_search
 # budget on demand.
+
+@app.get("/api/v1/context/freshness")
+async def get_context_freshness(
+    session: dict = Depends(require_auth),
+):
+    """Returns a per-layer freshness map of every agent-context cache.
+    Item 5 (May 23 2026 — analytics context injection, freshness
+    badges). Powers the dashboard freshness badges so the user sees
+    how current the prompts an agent sees are.
+
+    Three layers — keys are stable, values are ISO timestamps or null:
+      macro_context        — last research digest the macro layer is
+                              reflecting (mirrors /research/latest's
+                              last_completed_at)
+      analytics_context    — last refresh of the narrative cache
+                              (rebuilds on every analytics refresh
+                              tick)
+      diversification_context — last refresh of the structured
+                              diversification cache
+
+    Diversification context doesn't carry an explicit timestamp
+    field today; the strategy cache's computed_at is reported as a
+    proxy since the diversification refresh always trails it.
+    """
+    from tools.analytics_context import get_analytics_freshness
+    from tools.research_engine import last_research_run_at
+    macro_at = await last_research_run_at()
+    analytics_at = get_analytics_freshness()
+    # Diversification refresh shadows the strategy cache; report
+    # the strategy cache's latest computed_at as the freshness proxy.
+    diversification_at: str | None = None
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is not None:
+            async with AsyncSessionLocal() as s:
+                r = await s.execute(text(
+                    "SELECT MAX(computed_at) "
+                    "FROM strategy_results_cache"))
+                row = r.fetchone()
+                if row and row[0]:
+                    diversification_at = row[0].isoformat()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("context_freshness_diversification_failed",
+                    error=str(exc))
+    return {
+        "macro_context":           (macro_at.isoformat()
+                                      if macro_at else None),
+        "analytics_context":        analytics_at,
+        "diversification_context":  diversification_at,
+    }
+
 
 @app.get("/api/v1/research/latest")
 async def research_get_latest_digest(

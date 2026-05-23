@@ -624,6 +624,16 @@ async def run_research(triggered_by: str = "manual") -> dict[str, Any]:
         await refresh_macro_context()
     except Exception as exc:  # noqa: BLE001
         log.warning("research_post_refresh_failed", error=str(exc))
+    # Item 5 (May 23 2026 — analytics narrative). The fifth sentence
+    # of the narrative consumes the macro digest. Refresh it after
+    # the macro cache lands so the next agent prompt picks up the
+    # newest framing.
+    try:
+        from tools.analytics_context import refresh_analytics_context
+        await refresh_analytics_context()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("research_post_analytics_refresh_failed",
+                    error=str(exc))
     log.info("research_run_complete",
              row_id=row_id, status=status,
              n_signals=len(digest.get("key_signals") or []),

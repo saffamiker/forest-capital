@@ -26,6 +26,7 @@ import DataCurrencyBar from './DataCurrencyBar'
 import ChartExportButton from './ChartExportButton'
 import TableExportButton from './TableExportButton'
 import MacroResearchPanel from './MacroResearchPanel'
+import ContextFreshnessBadge from './ContextFreshnessBadge'
 // Canonical strategy-colour map — one source of truth shared with every
 // chart component (was duplicated locally in this file).
 import { STRATEGY_COLORS } from '../lib/strategyColors'
@@ -442,6 +443,15 @@ export default function Dashboard() {
         {/* Commentary-mode banner — renders only when mode === 'commentary'.
             Renders nothing in Analyst/Present, so adding it here is free. */}
         <LearnModeBanner />
+
+        {/* Context freshness badge — item 5 (May 23 2026). Surfaces
+            the staleness of the three agent-prompt context caches
+            (macro digest / analytics narrative / diversification
+            metrics) so the user knows how current the prompts the
+            council reads are. Right-aligned above the macro panel. */}
+        <div className="flex justify-end">
+          <ContextFreshnessBadge />
+        </div>
 
         {/* FEATURE 2 — macro research digest (the same digest the
             council and academic_review prompts inject as a CURRENT
