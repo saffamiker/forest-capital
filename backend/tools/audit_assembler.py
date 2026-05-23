@@ -348,8 +348,15 @@ async def assemble_audit_payload() -> dict[str, Any]:
         }
 
         # ── platform_computed — the platform's current analytics output ──
+        # _max_sharpe_point is now async (May 23 2026 hotfix) — it
+        # reads from the precomputed analytics_metrics_cache instead
+        # of running the 10-30s SLSQP sweep inline. Cache miss
+        # returns None and the audit's max_sharpe consistency
+        # checks degrade to "not enough data" rather than blocking
+        # the entire audit on a slow recompute.
         try:
-            ef_max_sharpe = _max_sharpe_point(equity, ig, hy, rf_annual)
+            ef_max_sharpe = await _max_sharpe_point(
+                equity, ig, hy, rf_annual)
         except Exception as exc:  # noqa: BLE001
             log.warning("audit_frontier_failed", error=str(exc))
             ef_max_sharpe = None
@@ -416,27 +423,44 @@ async def assemble_audit_payload() -> dict[str, Any]:
         return {"available": False, "note": "audit payload assembly failed"}
 
 
-def _max_sharpe_point(
+async def _max_sharpe_point(
     equity, ig, hy, rf_annual: float,
 ) -> dict[str, Any] | None:
-    """The frontier's max-Sharpe (tangency) point — σ, μ and weights —
-    computed the same way /api/optimize/weights does."""
-    import pandas as pd
+    """The frontier's max-Sharpe (tangency) point — σ, μ and weights.
 
-    from tools.optimizer import efficient_frontier
+    Hotfix May 23 2026: this function previously called
+    efficient_frontier() inline, running the same 100-point SLSQP
+    sweep that caused the /api/optimize/weights endpoint to time
+    out at 30s. The audit endpoint runs this function as part of
+    assemble_audit_payload — so every audit run inherited the
+    same 10-30s cost, which was eating the audit's time budget
+    and leaving downstream checks INCOMPLETE.
 
-    df = pd.DataFrame({"equity": equity, "ig": ig, "hy": hy}).dropna()
-    if len(df) < 12:
+    Now reads the precomputed frontier from analytics_metrics_cache
+    (the same row /api/optimize/weights serves). On a cache hit
+    the call drops from ~30s to ~50ms. On a cache miss we return
+    None — the audit's max_sharpe consistency checks degrade to
+    "not enough data to audit" rather than blocking the rest of
+    the audit on a slow inline sweep.
+    """
+    try:
+        from tools.precomputed_analytics import (
+            get_latest_metric as get_latest_precomputed,
+        )
+        cached = await get_latest_precomputed("efficient_frontier")
+        if not cached or not cached.get("frontier_points"):
+            log.warning("audit_max_sharpe_cache_miss",
+                        note="frontier cache cold — audit skips this check")
+            return None
+        points = cached["frontier_points"]
+        best = max(points, key=lambda p: p.get("sharpe", float("-inf")))
+        weights = best.get("weights", {}) or {}
+        return {
+            "sigma": round(float(best.get("volatility", 0.0)), 6),
+            "mu": round(float(best.get("return", 0.0)), 6),
+            "sharpe": round(float(best.get("sharpe", 0.0)), 6),
+            "weights": {k: round(float(v), 6) for k, v in weights.items()},
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_max_sharpe_failed", error=str(exc))
         return None
-    points = efficient_frontier(
-        df, periods_per_year=12, risk_free=rf_annual)
-    if not points:
-        return None
-    best = max(points, key=lambda p: p.get("sharpe", float("-inf")))
-    weights = best.get("weights", {}) or {}
-    return {
-        "sigma": round(float(best.get("volatility", 0.0)), 6),
-        "mu": round(float(best.get("return", 0.0)), 6),
-        "sharpe": round(float(best.get("sharpe", 0.0)), 6),
-        "weights": {k: round(float(v), 6) for k, v in weights.items()},
-    }
