@@ -120,7 +120,7 @@ export default function StrategyCard({ strategy, onAskCouncil }: StrategyCardPro
   const displayName = s.strategy_name.replace(/_/g, ' ')
   const ci = `${fmt(s.sharpe_ci_95?.[0])}–${fmt(s.sharpe_ci_95?.[1])}`
   const councilQuestion =
-    `Can you analyse ${displayName} in the context of our asset allocation `
+    `Can you analyze ${displayName} in the context of our asset allocation `
     + `project? Key metrics: Sharpe ${fmt(s.sharpe_ratio)} (${ci} 95% CI), `
     + `CAGR ${pct(s.cagr)}, max drawdown ${pct(s.max_drawdown)}, volatility `
     + `${pct(s.volatility)}, CV score ${fmt(s.cv_stability_score)}, `

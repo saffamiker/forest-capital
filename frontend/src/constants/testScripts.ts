@@ -692,7 +692,7 @@ const bob: TestScript = {
       id: 'bob_explainer', route: '/analytics', target: null,
       title: 'Analytics metric explainer',
       instruction: 'Click an ⓘ on an Analytics metric you do not '
-        + 'recognise.',
+        + 'recognize.',
       expectedResult: 'The explanation makes sense.',
       allowSkip: true,
     },

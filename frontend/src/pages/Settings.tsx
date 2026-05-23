@@ -560,7 +560,7 @@ export default function Settings() {
         <SettingsSection
           id="test-administration"
           title="Test Administration"
-          description="All testers' failure reports and the AI-categorised feedback backlog."
+          description="All testers' failure reports and the AI-categorized feedback backlog."
         >
           <TestAdminSections />
         </SettingsSection>

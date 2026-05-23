@@ -1107,12 +1107,23 @@ async def _stream_haiku(user_message: str, mock_chunks: list[str],
 
     def _worker() -> None:
         try:
-            from agents.base import get_anthropic_client
+            from agents.base import (
+                get_anthropic_client, _with_strategy_context,
+            )
             client = get_anthropic_client()
+            # Item 9 commit 5 — wrap the explainer's system prompt with
+            # strategy context when the orchestrator endpoint has set
+            # the per-request ContextVar (the explain / explain-data
+            # endpoints detect strategy names in the metric / context
+            # body and call set_active_strategies before invoking
+            # stream_*). No-op when the ContextVar is empty — every
+            # other explainer call keeps its previous behaviour.
+            system_with_strategy = _with_strategy_context(
+                _SYSTEM_PROMPT, None)
             with client.messages.stream(
                 model=HAIKU_MODEL,
                 max_tokens=max_tokens,
-                system=_SYSTEM_PROMPT,
+                system=system_with_strategy,
                 messages=[{"role": "user", "content": user_message}],
             ) as stream:
                 for text in stream.text_stream:

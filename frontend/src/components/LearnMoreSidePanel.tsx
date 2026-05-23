@@ -103,7 +103,7 @@ export default function LearnMoreSidePanel({ term, entry, onClose }: Props) {
               <h3 className="text-2xs uppercase tracking-wide text-muted mb-1.5">Further reading</h3>
               <p className="text-white text-xs">{reference.apa}</p>
               <p className="text-muted text-2xs mt-2">
-                Cited in the Forest Capital references catalogue as
+                Cited in the Forest Capital references catalog as
                 <code className="text-electric ml-1">{reference.year} · {reference.author.split(',')[0]}</code>
               </p>
             </section>
@@ -113,7 +113,7 @@ export default function LearnMoreSidePanel({ term, entry, onClose }: Props) {
             <section className="pt-2 border-t border-border">
               <h3 className="text-2xs uppercase tracking-wide text-muted mb-1.5">Further reading</h3>
               <p className="text-muted text-xs italic">
-                No canonical reference catalogued for this term yet.
+                No canonical reference cataloged for this term yet.
               </p>
             </section>
           )}

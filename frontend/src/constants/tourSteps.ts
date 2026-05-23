@@ -223,7 +223,7 @@ export const TOUR_STEPS: TourStep[] = [
     title: 'Team Activity — Your AI Use Narrative',
     body: [
       'Every council interaction, Academic Review session, document '
-      + 'upload, and git commit — logged, attributed, and visualised as a '
+      + 'upload, and git commit — logged, attributed, and visualized as a '
       + 'timeline of the project from day one.',
       'The professor requires the team to discuss how AI was leveraged at '
       + 'the final presentation. This is your objective evidence. Switch to '
@@ -297,7 +297,7 @@ export const TOUR_STEPS: TourStep[] = [
       + 'requirements are uploaded.',
       'Your first step: navigate to the Council screen and run an '
       + 'Academic Review. The verdict will tell you exactly where you '
-      + 'stand against the rubric and what to prioritise before the '
+      + 'stand against the rubric and what to prioritize before the '
       + 'May 27th submission. Every insight this platform gives you has '
       + 'been scored, refined, and evaluated before it reaches you. Use it.',
     ],

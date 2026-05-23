@@ -257,9 +257,12 @@ class TestPaperDocxBuilder:
         assert "282 monthly observations" in text
         assert "Sharpe is 0.52" in text
         assert "Markowitz" in text
-        # Header carries the FNA670 brand line.
-        header = doc.sections[0].header
-        assert any("FNA670" in p.text for p in header.paragraphs)
+        # APA 7th student paper has no running head — only the page
+        # number lives in the header (via a PAGE field, not literal
+        # text). Verify the title page renders the paper title.
+        assert any(
+            "Multi-Strategy Portfolio Diversification" in p.text
+            for p in doc.paragraphs)
 
     def test_paper_handles_empty_markdown(self):
         from tools.report_writer_docx import build_paper_docx
@@ -267,6 +270,78 @@ class TestPaperDocxBuilder:
         # Builds a valid docx with just the title and brand chrome.
         doc = self._read_doc(content)
         assert any("Midpoint" in p.text for p in doc.paragraphs)
+
+    def test_paper_has_apa_title_page(self):
+        """APA 7th student paper opens with the title block —
+        centred title, authors, institution, course, instructor,
+        date. The test verifies each line appears in the document."""
+        from tools.report_writer_docx import build_paper_docx
+        content = build_paper_docx("## 1. Data\n\nBody paragraph.")
+        doc = self._read_doc(content)
+        text = "\n".join(p.text for p in doc.paragraphs)
+        assert "Multi-Strategy Portfolio Diversification" in text
+        assert "Michael Ruurds" in text and "Bob Thao" in text
+        assert "Molly Murdock" in text
+        assert "Queens University" in text
+        assert "FNA670 Industry Practicum" in text
+        assert "Dr. Panttser" in text
+        assert "May 27, 2026" in text
+
+    def test_paper_first_line_indent_applied(self):
+        """APA 7th body paragraphs carry a 0.5-inch first-line
+        indent. Verify against a paragraph that contains the test
+        body text."""
+        from tools.report_writer_docx import build_paper_docx
+        from docx.shared import Inches
+        content = build_paper_docx(
+            "## 1. Section\n\nThis is a body paragraph with content.")
+        doc = self._read_doc(content)
+        # Find the paragraph containing our body content.
+        target = None
+        for p in doc.paragraphs:
+            if "body paragraph" in p.text:
+                target = p
+                break
+        assert target is not None
+        assert target.paragraph_format.first_line_indent == Inches(0.5)
+
+    def test_paper_section_heading_centred_bold(self):
+        """APA 7th Level 1 headings: bold, centred, title case."""
+        from tools.report_writer_docx import build_paper_docx
+        from docx.enum.text import WD_ALIGN_PARAGRAPH
+        content = build_paper_docx(
+            "## 1. Data and Methodology\n\nBody.\n")
+        doc = self._read_doc(content)
+        heading = None
+        for p in doc.paragraphs:
+            if "Data and Methodology" in p.text and not p.text.startswith("Multi-"):
+                heading = p
+                break
+        assert heading is not None
+        # Centred.
+        assert heading.alignment == WD_ALIGN_PARAGRAPH.CENTER
+        # Bold runs.
+        assert any(run.bold for run in heading.runs if run.text.strip())
+
+    def test_references_hanging_indent(self):
+        """APA 7th References entries: hanging 0.5-inch indent
+        (left_indent = 0.5", first_line_indent = -0.5")."""
+        from tools.report_writer_docx import build_paper_docx
+        from docx.shared import Inches
+        content = build_paper_docx(
+            "## 1. Section\n\nBody.",
+            references_md=(
+                "Markowitz, H. (1952). Portfolio selection. "
+                "*Journal of Finance*, 7(1), 77-91."))
+        doc = self._read_doc(content)
+        ref = None
+        for p in doc.paragraphs:
+            if "Markowitz" in p.text:
+                ref = p
+                break
+        assert ref is not None
+        assert ref.paragraph_format.left_indent == Inches(0.5)
+        assert ref.paragraph_format.first_line_indent == Inches(-0.5)
 
     def test_paper_inline_bold_renders(self):
         from tools.report_writer_docx import build_paper_docx
@@ -361,11 +436,15 @@ class TestAppendixDocxBuilder:
         content = build_appendix_docx(self._stub_context())
         doc = Document(io.BytesIO(content))
         text = "\n".join(p.text for p in doc.paragraphs)
-        # All four appendices present.
+        # All four APA appendix labels present (centred bold).
         assert "Appendix A" in text
         assert "Appendix B" in text
         assert "Appendix C" in text
         assert "Appendix D" in text
+        # Each appendix title appears as a separate centred line.
+        assert "Platform Overview" in text
+        assert "Full Analytical Findings" in text
+        assert "Team Activity Log" in text
         # References built from citations_cache.
         assert "References" in text
         # Verified citations rendered.

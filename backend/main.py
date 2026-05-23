@@ -231,6 +231,18 @@ async def lifespan(app: FastAPI):
             await refresh_findings_context()
         except Exception as exc:  # noqa: BLE001
             log.warning("findings_context_warm_failed", error=str(exc))
+        # Item 9 commit 5 — strategy context cache warm-read. Same
+        # warm-read pattern as the other three context blocks: agent
+        # calls in the first seconds after restart see whatever
+        # strategy_characterisations the previous deploy produced. The
+        # next refresh_strategy_characterisations() run refreshes the
+        # cache via tools/strategy_context.refresh_strategy_context_
+        # cache() at the end of its orchestrator. Fail-open.
+        try:
+            from tools.strategy_context import refresh_strategy_context_cache
+            await refresh_strategy_context_cache()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("strategy_context_warm_failed", error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
@@ -287,14 +299,14 @@ async def request_magic_link(body: MagicLinkRequest, request: Request):
     if not await is_login_allowed(email):
         log.warning("magic_link_unauthorized_email", email_hash=hash(email))
         return MagicLinkResponse(
-            message="If that email is authorised, a login link has been sent.",
+            message="If that email is authorized, a login link has been sent.",
             status="pending",
             dev_mode=(ENVIRONMENT == "development"),
         )
     token = generate_magic_token(email)
     await send_magic_link(email, token)
     return MagicLinkResponse(
-        message="If that email is authorised, a login link has been sent.",
+        message="If that email is authorized, a login link has been sent.",
         status="sent",
         dev_mode=(ENVIRONMENT == "development"),
     )
@@ -1723,6 +1735,147 @@ async def get_template_rubric(
         log.warning("get_rubric_failed", error=str(exc))
         raise HTTPException(
             status_code=500, detail="Read rubric failed.")
+
+
+@app.get("/api/v1/reports/pipeline-audit/active")
+async def get_active_pipeline_audit(
+    session: dict = Depends(require_team_member),
+):
+    """Returns the most recent pipeline run started by the caller in
+    the last two hours, or {available: false} when none exists. The
+    report writer reads this on mount to restore step state across
+    navigation."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    try:
+        from tools.pipeline_audit import get_active_run_for_user
+        row = await get_active_run_for_user(session["email"])
+        if not row:
+            return {"available": False}
+        # Attach the persisted paper_md when a generation_id exists,
+        # so the editor restores the draft text on the same fetch.
+        paper_md = ""
+        gen_id = row.get("generation_id")
+        if isinstance(gen_id, int):
+            try:
+                from tools.report_generator import get_generation
+                gen = await get_generation(gen_id)
+                if gen:
+                    paper_md = gen.get("paper_md") or ""
+            except Exception:  # noqa: BLE001
+                paper_md = ""
+        return {"available": True, "audit": row, "paper_md": paper_md}
+    except Exception as exc:
+        log.warning("active_audit_endpoint_failed", error=str(exc))
+        return {"available": False}
+
+
+@app.post("/api/v1/reports/pipeline-audit")
+@limiter.limit("60/minute")
+async def post_pipeline_audit(
+    request: Request, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Records one pipeline audit row. Posted by the report-writer UI
+    after the pipeline reaches step 7 (success) or fails at any
+    earlier step. The body shape is the flat per-step dict the UI
+    builds from its timing state; the writer fills in the
+    triggered_by from the authenticated session.
+
+    Body:
+      generation_id:        int | null
+      template_id:          str (required)
+      total_pipeline_ms:    int | null
+      failure_step:         int | null
+      failure_reason:       str | null
+      steps:                {step_<n>_status, step_<n>_ms,
+                             step_5_mismatch_count?,
+                             step_6_conditions?}
+    """
+    if ENVIRONMENT == "test":
+        return {"id": None}
+    template_id = body.get("template_id")
+    if not template_id:
+        raise HTTPException(
+            status_code=422, detail="template_id is required.")
+    try:
+        from tools.pipeline_audit import (
+            upsert_active_run, update_generation_timings,
+        )
+        steps = body.get("steps") or {}
+        # Item 12 commit B — incremental upsert. The frontend rounds
+        # trip the audit_id so every step completion writes to the
+        # same row. First write (audit_id None) inserts; subsequent
+        # writes update only the fields present in the steps dict.
+        # The terminal write (Step 7 success/failure) still flows
+        # through here — it just happens to be the last upsert.
+        new_id = await upsert_active_run(
+            template_id=str(template_id),
+            triggered_by=session.get("email"),
+            steps=steps,
+            total_pipeline_ms=body.get("total_pipeline_ms"),
+            failure_step=body.get("failure_step"),
+            failure_reason=body.get("failure_reason"),
+            generation_id=body.get("generation_id"),
+            audit_id=body.get("audit_id"),
+        )
+        # When the run produced a generation, also persist the
+        # per-step ms dict on the row so the summary card has a
+        # canonical record. Fail-open.
+        gen_id = body.get("generation_id")
+        if isinstance(gen_id, int):
+            timings = {
+                k.replace("_ms", ""): v
+                for k, v in steps.items() if k.endswith("_ms")
+            }
+            if timings:
+                await update_generation_timings(gen_id, timings)
+        return {"id": new_id, "audit_id": new_id}
+    except Exception as exc:
+        log.warning("pipeline_audit_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Pipeline audit write failed.")
+
+
+@app.get("/api/v1/admin/pipeline-audit")
+async def list_pipeline_audit_runs(
+    limit: int = 100,
+    session: dict = Depends(require_sysadmin),
+):
+    """Newest-first audit runs for the sysadmin Settings panel."""
+    if ENVIRONMENT == "test":
+        return {"runs": []}
+    try:
+        from tools.pipeline_audit import list_audit_runs
+        runs = await list_audit_runs(limit=limit)
+        return {"runs": runs}
+    except Exception as exc:
+        log.warning("pipeline_audit_list_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Read audit runs failed.")
+
+
+@app.get("/api/v1/admin/pipeline-audit/{audit_id}")
+async def get_pipeline_audit_run(
+    audit_id: int,
+    session: dict = Depends(require_sysadmin),
+):
+    """Single audit run by id for the expand-row view."""
+    if ENVIRONMENT == "test":
+        return {"error": "not_found"}
+    try:
+        from tools.pipeline_audit import get_audit_run
+        row = await get_audit_run(audit_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Run not found.")
+        return row
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("pipeline_audit_read_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Read audit run failed.")
 
 
 @app.post("/api/v1/reports/templates/{template_id}/rubric")
@@ -3245,6 +3398,21 @@ async def council_explain(
 
     from agents.explainer_agent import stream_metric_explanation
     from agents.usage import start_usage_capture
+    from tools.strategy_context import (
+        detect_strategies_in_query, set_active_strategies,
+    )
+
+    # Item 9 commit 5 — strategy context. The InfoIcon click on a
+    # strategy-specific metric ("Strategy: REGIME_SWITCHING Sharpe") or
+    # a metric label that names a strategy injects the strategy's
+    # characterisation into the explainer's system prompt via the
+    # per-request ContextVar. _stream_haiku copies the request context
+    # into its worker thread so the var propagates. No-op when no
+    # strategy is named.
+    named = detect_strategies_in_query(
+        f"{metric} {current_value or ''}")
+    if named:
+        set_active_strategies(named)
 
     # Seed the usage bucket before the Haiku stream starts; _stream_haiku
     # copies the request context into its worker thread so record_usage
@@ -3297,6 +3465,21 @@ async def council_explain_data(
 
     from agents.explainer_agent import stream_data_explanation
     from agents.usage import start_usage_capture
+    from tools.strategy_context import (
+        detect_strategies_in_query, set_active_strategies,
+    )
+
+    # Item 9 commit 5 — strategy context. The Data Explain (✨) click
+    # typically carries the strategy name in the metric label and the
+    # full strategy row in the context dict. Scan both for known
+    # strategy ids and set the per-request ContextVar so the explainer
+    # system prompt picks up the characterisation block.
+    haystack = (
+        f"{metric} {current_value or ''} "
+        + (str(context) if context else ''))
+    named = detect_strategies_in_query(haystack)
+    if named:
+        set_active_strategies(named)
 
     # Same pattern as /api/council/explain — seed before the stream worker
     # thread starts so its copied context inherits this bucket.
@@ -8556,7 +8739,7 @@ async def ws_council(websocket: WebSocket):
         try:
             session = verify_session_token(token)
         except HTTPException:
-            await websocket.close(code=4003, reason="Unauthorised")
+            await websocket.close(code=4003, reason="Unauthorized")
             return
 
         log.info("ws_council_connected", user=session["email"])

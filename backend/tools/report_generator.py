@@ -892,14 +892,37 @@ def _appendix_context_to_md(ctx: dict[str, Any]) -> str:
 
 async def render_paper_bytes(generation_id: int) -> bytes | None:
     """Builds the paper docx from the persisted paper_md + the
-    citation cache. Returns None on a missing generation."""
+    citation cache. Returns None on a missing generation.
+
+    Dispatches between the APA paper formatter and the executive
+    brief memo formatter based on the template's format_spec.
+    memo_style flag (set by migration 034 on the executive_brief_
+    fna670 template row). The APA formatter is the default — every
+    template that doesn't opt into memo_style gets the APA layout
+    Bob expects for the midpoint paper."""
     gen = await get_generation(generation_id)
     if not gen:
         return None
-    from tools.report_writer_docx import build_paper_docx
     from tools.template_pipeline import _format_citation  # noqa: F401
     citations = await _load_citations_for_generation(generation_id)
     refs_md = _references_md(citations)
+
+    # Look up the template's format_spec to decide which renderer.
+    memo_style = False
+    try:
+        from tools.report_templates import get_template
+        tmpl = await get_template(gen.get("template_id") or "")
+        if tmpl:
+            fs = tmpl.get("format_spec") or {}
+            memo_style = bool(fs.get("memo_style"))
+    except Exception:  # noqa: BLE001
+        memo_style = False
+
+    if memo_style:
+        from tools.report_writer_docx_brief import build_brief_docx
+        return await asyncio.to_thread(
+            build_brief_docx, gen["paper_md"], references_md=refs_md)
+    from tools.report_writer_docx import build_paper_docx
     return await asyncio.to_thread(
         build_paper_docx, gen["paper_md"], references_md=refs_md)
 

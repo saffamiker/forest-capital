@@ -189,6 +189,56 @@ class CIO:
         log.info("council_deliberation_started", query_len=len(query),
                  elapsed=0.0)
 
+        # Item 9 commit 5 — strategy context injection. Detect which
+        # strategies the query names and set the per-request ContextVar
+        # so every nested call_claude in this deliberation (the four
+        # specialists + draft consensus + synthesis) automatically picks
+        # up the strategy characterisation block from the cache. The
+        # value propagates into the specialist threads via
+        # contextvars.copy_context() in the ThreadPoolExecutor fan-out
+        # below. The finally block at the end clears the var so the
+        # next request starts from a clean slate.
+        from tools.strategy_context import (
+            detect_strategies_in_query, set_active_strategies,
+            clear_active_strategies,
+        )
+        named_strategies = detect_strategies_in_query(query)
+        if named_strategies:
+            set_active_strategies(named_strategies)
+            log.info("council_strategy_context_injected",
+                     strategies=named_strategies)
+
+        try:
+            # deliberation_start is forwarded so every elapsed= log
+            # line inside the inner body measures from the SAME
+            # wall-clock anchor the outer log emitted at elapsed=0.0.
+            # Without forwarding, _deliberate_inner would raise
+            # NameError on the first elapsed=round(time.time() - …)
+            # line (CI catch May 23 2026).
+            return self._deliberate_inner(
+                query, strategy_results, history,
+                deliberation_start=deliberation_start)
+        finally:
+            clear_active_strategies()
+
+    def _deliberate_inner(
+        self,
+        query: str,
+        strategy_results: dict[str, Any],
+        history: dict[str, Any] | None = None,
+        *,
+        deliberation_start: float | None = None,
+    ) -> dict[str, Any]:
+        """The original deliberation body — wrapped by deliberate()
+        so the per-request strategy-context ContextVar is set up
+        once and torn down once around the whole flow.
+
+        deliberation_start — forwarded from deliberate() so the
+        elapsed= phase-timing log lines below reference the same
+        wall-clock anchor the outer wrapper opened with. Defaults
+        to time.time() when called directly (test paths)."""
+        if deliberation_start is None:
+            deliberation_start = time.time()
         # Step 1-5: Brief the four specialists IN PARALLEL. Each .analyse()
         # is an independent, synchronous, network-bound LLM call; run
         # sequentially they take ~120s and Render 502s the council

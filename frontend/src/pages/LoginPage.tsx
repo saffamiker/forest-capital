@@ -57,7 +57,7 @@ export default function LoginPage() {
           <>
             <h1 className="text-xl font-semibold text-white mb-1">Sign in</h1>
             <p className="text-muted text-sm mb-6">
-              Enter your authorised email address. A magic link will be sent to you.
+              Enter your authorized email address. A magic link will be sent to you.
             </p>
 
             {sessionExpired && (
@@ -122,7 +122,7 @@ export default function LoginPage() {
               <>
                 <h2 className="text-white font-semibold text-lg mb-2">Request received</h2>
                 <p className="text-muted text-sm mb-4">
-                  If that email address is authorised, a login link has been sent.
+                  If that email address is authorized, a login link has been sent.
                   Check your inbox and spam folder.
                 </p>
               </>

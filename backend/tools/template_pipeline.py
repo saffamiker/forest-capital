@@ -112,6 +112,29 @@ def live_from_payload(payload: dict) -> dict[str, Any]:
     else:
         out["sharpe_delta"] = None
 
+    # Benchmark Sharpe rank — needed for the thesis validation gate
+    # condition 1 (benchmark_not_first). Computed here against the
+    # full strategies dict so the value lives in verified_data and
+    # validate_thesis doesn't have to scrape it back out of a finding.
+    # Rank 1 = highest Sharpe; rank > 1 means at least one strategy
+    # beats the benchmark on Sharpe (the desired pass condition).
+    bench_sharpe = out["benchmark_sharpe"]
+    if bench_sharpe is not None:
+        better = 0
+        n_ranked = 0
+        for name, result in (strategies or {}).items():
+            s = _safe_float((result or {}).get("sharpe_ratio"))
+            if s is None:
+                continue
+            n_ranked += 1
+            if name != "BENCHMARK" and s > bench_sharpe:
+                better += 1
+        out["benchmark_sharpe_rank"] = better + 1
+        out["n_strategies_ranked"] = n_ranked
+    else:
+        out["benchmark_sharpe_rank"] = None
+        out["n_strategies_ranked"] = 0
+
     pre_avg, post_avg = _equity_ig_corr_split(academic)
     out["equity_ig_corr_pre_2022"] = pre_avg
     out["equity_ig_corr_post_2022"] = post_avg
@@ -531,7 +554,31 @@ def _parse_citation_json(raw: str) -> dict | None:
 
 
 def _format_citation(c: dict) -> str:
-    """APA-ish formatter."""
+    """APA 7th edition reference list formatter.
+
+    Journal article:
+      Author, A. A., & Author, B. B. (year). Title of article in
+      sentence case. Journal Name in Title Case, volume(issue),
+      pages. https://doi.org/xxxxx
+
+    Working paper / report:
+      Author, A. A. (year). Title of paper. Institution Name. URL
+
+    The .docx renderer wraps the result in a hanging-indent
+    paragraph so the visual format matches the APA convention.
+
+    Inputs:
+      author              — 'Surname, A. A.' or
+                            'Surname1, A. A., & Surname2, B. B.'
+      year                — '1994' or '2018'
+      title               — sentence case title of the work
+      journal_or_institution — italics-wrapped at render time
+                            (the .docx renderer can't see asterisks
+                            inside table cells, so we use '*Journal*'
+                            markers that _split_inline interprets)
+      volume_issue_pages  — '15(2), 3-44' or '9(3), 203-228'
+      url                 — DOI URL or institution URL
+    """
     author = (c.get("author") or "").strip()
     year = c.get("year")
     if year is not None:
@@ -539,17 +586,25 @@ def _format_citation(c: dict) -> str:
     title = (c.get("title") or "").strip()
     journal = (c.get("journal_or_institution") or "").strip()
     vol = (c.get("volume_issue_pages") or "").strip()
+    url = (c.get("url") or "").strip()
     parts: list[str] = []
     if author:
-        parts.append(author)
+        # Author block ends with a period only when no year follows.
+        parts.append(author.rstrip(".") + ".")
     if year:
         parts.append(f"({year}).")
     if title:
-        parts.append(f'"{title}".')
+        # APA 7th sentence case: trailing period.
+        parts.append(title.rstrip(".") + ".")
     if journal:
-        parts.append(f"{journal}{',' if vol else '.'}")
-    if vol:
-        parts.append(f"{vol}.")
+        # Journal name is italicised in APA — emit Markdown asterisks
+        # so the docx renderer's _split_inline reads the italics.
+        if vol:
+            parts.append(f"*{journal}*, {vol}.")
+        else:
+            parts.append(f"*{journal}*.")
+    if url:
+        parts.append(url)
     return " ".join(parts).strip()
 
 
@@ -617,7 +672,19 @@ async def source_citations(
         "source is found, return {\"unverified\": true}. NEVER invent "
         "details — only what the search results support.")
 
-    for c in concepts:
+    # Parallelise across concepts. call_claude is synchronous (the
+    # Anthropic SDK's tool-loop runs server-side and returns a single
+    # response), so asyncio.to_thread runs each lookup on a worker;
+    # asyncio.gather fans the workers out concurrently — turning a
+    # ~3s × 10 sequential dispatch into ~3s wall-clock. The bounded
+    # semaphore protects the Anthropic rate limit (10 concurrent
+    # citation requests is well within the published cap, but we keep
+    # the explicit bound so a 25-concept template doesn't suddenly
+    # change the load shape).
+    import asyncio
+    sem = asyncio.Semaphore(10)
+
+    def _one(c: dict) -> tuple[str, dict[str, Any]]:
         cid = c.get("concept_id", "")
         query = c.get("search_query", "")
         entry: dict[str, Any] = {
@@ -642,23 +709,31 @@ async def source_citations(
             parsed = _parse_citation_json(raw)
             if not parsed or parsed.get("unverified"):
                 entry["verification_status"] = "not_found"
-                out[cid] = entry
-                continue
+                return cid, entry
             url = parsed.get("url") or ""
             if not _is_trusted_url(url):
                 entry.update(parsed)
                 entry["verification_status"] = "untrusted_source"
-                out[cid] = entry
-                continue
+                return cid, entry
             entry.update(parsed)
             entry["verification_status"] = "verified"
             entry["formatted"] = _format_citation(entry)
-            out[cid] = entry
+            return cid, entry
         except Exception as exc:  # noqa: BLE001
             log.warning("citation_search_failed",
                         concept_id=cid, error=str(exc))
             entry["verification_status"] = "not_found"
-            out[cid] = entry
+            return cid, entry
+
+    async def _bounded(c: dict) -> tuple[str, dict[str, Any]]:
+        async with sem:
+            return await asyncio.to_thread(_one, c)
+
+    results = await asyncio.gather(
+        *[_bounded(c) for c in concepts],
+        return_exceptions=False)
+    for cid, entry in results:
+        out[cid] = entry
     return out
 
 
@@ -683,21 +758,26 @@ def citation_quality(citations: dict) -> str:
 _THESIS_CONDITIONS = [
     {
         "id": "benchmark_not_first",
-        "description": "Benchmark does NOT rank first on Sharpe.",
+        "description": (
+            "At least one strategy beats the benchmark on Sharpe "
+            "(benchmark rank > 1)."),
         "field": "benchmark_sharpe_rank",
         "test": "gt",
         "threshold": 1,
     },
     {
         "id": "material_corr_shift",
-        "description": "Post-2022 correlation shift is material.",
+        "description": (
+            "Post-2022 equity-IG correlation shift exceeds 0.30."),
         "field": "corr_shift",
         "test": "gt",
         "threshold": 0.30,
     },
     {
         "id": "meaningful_dd_reduction",
-        "description": "Equal-weight blend materially reduces drawdown.",
+        "description": (
+            "Equal-weight blend reduces drawdown by at least "
+            "10 percentage points vs benchmark."),
         "field": "max_dd_reduction_pp_abs",
         "test": "gt",
         "threshold": 0.10,
@@ -717,22 +797,33 @@ def validate_thesis(
     (max_dd_reduction_pp <= 0 when bench DD is worse); we test the
     absolute magnitude.
     """
-    f1 = next(
-        (f for f in (ranked_findings or [])
-         if f.get("title") == "BENCHMARK COMPETITIVENESS"), None)
+    # Source of truth: live_from_payload computes benchmark_sharpe_rank
+    # against the strategies dict and writes it into verified_data, so
+    # the validation never depends on a finding being staged with the
+    # right shape. The finding evidence is a legacy fallback for rows
+    # generated before this fix landed.
     bench_rank = None
-    if f1 and isinstance(f1.get("benchmark_rank"), int):
-        bench_rank = f1["benchmark_rank"]
-    elif f1 and isinstance(f1.get("evidence"), list):
-        # Extract 'BENCHMARK Sharpe rank: N of M' from evidence text.
-        for line in f1["evidence"]:
-            m = re.search(r"BENCHMARK Sharpe rank: (\d+) of", line)
-            if m:
-                try:
-                    bench_rank = int(m.group(1))
-                    break
-                except ValueError:
-                    pass
+    vd_rank = verified_data.get("benchmark_sharpe_rank")
+    if isinstance(vd_rank, int):
+        bench_rank = vd_rank
+    elif isinstance(vd_rank, float) and not (vd_rank != vd_rank):
+        bench_rank = int(vd_rank)
+    else:
+        f1 = next(
+            (f for f in (ranked_findings or [])
+             if f.get("title") == "BENCHMARK COMPETITIVENESS"), None)
+        if f1 and isinstance(f1.get("benchmark_rank"), int):
+            bench_rank = f1["benchmark_rank"]
+        elif f1 and isinstance(f1.get("evidence"), list):
+            # Extract 'BENCHMARK Sharpe rank: N of M' from evidence text.
+            for line in f1["evidence"]:
+                m = re.search(r"BENCHMARK Sharpe rank: (\d+) of", line)
+                if m:
+                    try:
+                        bench_rank = int(m.group(1))
+                        break
+                    except ValueError:
+                        pass
 
     corr_shift = verified_data.get("corr_shift")
     if not isinstance(corr_shift, (int, float)):
