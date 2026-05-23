@@ -173,11 +173,29 @@ export function RiskContributionBar() {
         {rows.map((r) => {
           const pctOfMax = (r.pct / maxPct) * 100
           const weightLineLeft = (r.weight / maxPct) * 100
-          const isConcentrator = r.delta > 0.5
-          const isDiversifier = r.delta < -0.5
+          // Strict threshold (May 23 2026 fix): concentrator iff
+          // contribution > weight, where weight = 1/n in equal scheme
+          // or the tangency-optimised weight otherwise. The earlier
+          // 0.5pp dead band misclassified MOMENTUM_ROTATION (11.6%
+          // vs 11.11% equal-weight reference — delta=+0.49) as
+          // neutral. The reference 1/n is already dynamic in `weight`
+          // (computed from labels.length on every render), so the
+          // threshold updates whenever the visible strategy set
+          // changes. The dead band added no analytical value — it
+          // existed only to give "borderline" entries a third
+          // colour, and the borderline state was visually identical
+          // to a real neutral strategy, which was confusing.
+          const isConcentrator = r.pct > r.weight
+          // Diversifier = everything else (contribution <= weight).
+          // Exact equality (pct === weight) is a floating-point
+          // edge case; classifying it as "diversifier" rather than
+          // "neutral" keeps the legend a clean two-tone scheme that
+          // matches the visible bar colours.
           return (
             <div key={r.label}
                  data-testid={`risk-contribution-row-${r.label}`}
+                 data-classification={
+                   isConcentrator ? 'concentrator' : 'diversifier'}
                  className="grid grid-cols-[160px_1fr_80px] items-center gap-3">
               <div className="text-xs text-slate-300 font-mono truncate">
                 {r.label}
@@ -185,9 +203,7 @@ export function RiskContributionBar() {
               <div className="relative h-5 bg-navy-900/60 rounded overflow-hidden">
                 <div
                   className={`absolute inset-y-0 left-0 ${
-                    isConcentrator
-                      ? 'bg-warning/60'
-                      : isDiversifier ? 'bg-positive/60' : 'bg-electric/60'
+                    isConcentrator ? 'bg-warning/60' : 'bg-electric/60'
                   }`}
                   style={{ width: `${Math.max(0, Math.min(100, pctOfMax))}%` }}
                 />
@@ -199,9 +215,7 @@ export function RiskContributionBar() {
                 />
               </div>
               <div className={`text-right font-mono text-xs ${
-                isConcentrator
-                  ? 'text-warning'
-                  : isDiversifier ? 'text-positive' : 'text-slate-300'
+                isConcentrator ? 'text-warning' : 'text-electric'
               }`}>
                 {fmtPct(r.pct)}
               </div>
@@ -215,9 +229,9 @@ export function RiskContributionBar() {
                           align-middle" />
         risk concentrator (contribution &gt; weight)
         <span className="mx-3">·</span>
-        <span className="inline-block w-2 h-2 rounded-sm bg-positive/60 mr-1
+        <span className="inline-block w-2 h-2 rounded-sm bg-electric/60 mr-1
                           align-middle" />
-        diversifier (contribution &lt; weight)
+        diversifier (contribution ≤ weight)
         <span className="mx-3">·</span>
         thin vertical line = capital weight reference
       </p>
