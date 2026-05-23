@@ -30,6 +30,11 @@ const mockedAxios = axios as unknown as {
 
 
 // Citation fixture covering all the states the panel renders for.
+// Updated May 23 2026 — every entry carries the four evidence
+// fields (migration 039). Primary citations include them so the
+// expanded tile renders extract / rationale / confidence text;
+// alternatives carry them too so the AlternativeCard tests have
+// real per-option evidence to assert against.
 function makeCitations() {
   return [
     {
@@ -44,6 +49,10 @@ function makeCitations() {
       alternatives: [],
       reviewer_email: null, reviewed_at: null, review_action: null,
       formatted: 'Sharpe, W. F. (1994). The Sharpe Ratio.',
+      supporting_extract: 'The Sharpe ratio is the expected return per unit of risk.',
+      selection_rationale: 'Original Sharpe paper on a trusted-domain JSTOR URL.',
+      confidence_score: 0.98,
+      finding_supported: 'The Sharpe ratio is the standard risk-adjusted return metric.',
     },
     {
       id: 2, concept_id: 'cvar_coherent_risk',
@@ -62,10 +71,18 @@ function makeCitations() {
           volume_issue_pages: '2(3), 21-41',
           url: 'https://imf.org/papers/cvar.pdf',
           pass_source: 'pass_2_academic',
+          supporting_extract: 'CVaR is a coherent measure of risk that satisfies the four axioms.',
+          selection_rationale: 'Academic journal on the IMF domain — strong secondary source.',
+          confidence_score: 0.75,
+          finding_supported: 'CVaR is a coherent risk measure for downside risk.',
         },
       ],
       reviewer_email: null, reviewed_at: null, review_action: null,
       formatted: null,
+      supporting_extract: 'CVaR as a coherent risk measure has four axiomatic properties.',
+      selection_rationale: 'University working paper, off-trusted domain.',
+      confidence_score: 0.65,
+      finding_supported: 'CVaR is a coherent risk measure for downside risk.',
     },
     {
       id: 3, concept_id: 'momentum_factor',
@@ -77,6 +94,10 @@ function makeCitations() {
       alternatives: [],
       reviewer_email: null, reviewed_at: null, review_action: null,
       formatted: null,
+      supporting_extract: null,
+      selection_rationale: null,
+      confidence_score: null,
+      finding_supported: null,
     },
   ]
 }
@@ -121,17 +142,19 @@ describe('CitationReviewPanel — fetch and render', () => {
       expect(screen.getByText(/2 need.* review/i)).toBeTruthy()
     })
 
-    // Pending row visible.
+    // Pending row visible in the needs-review section.
     expect(screen.getByTestId('citation-row-cvar_coherent_risk'))
       .toBeTruthy()
     // Not-found row visible.
     expect(screen.getByTestId('citation-row-momentum_factor'))
       .toBeTruthy()
-    // Verified item is in a collapsed details, not as a row.
-    expect(screen.queryByTestId('citation-row-sharpe_ratio'))
-      .toBeNull()
-    // The verified summary IS rendered.
+    // Verified row IS rendered now (as part of the redesign — every
+    // citation is a full tile for transparency), but it lives
+    // inside a closed <details> summary. The verified-bucket
+    // summary line is also shown so the count is visible.
     expect(screen.getByText(/Verified \(1\)/)).toBeTruthy()
+    expect(screen.getByTestId('citation-row-sharpe_ratio'))
+      .toBeTruthy()
   })
 
   it('GETs /api/v1/citations/<gen_id> via axios (auth header attached)', async () => {
@@ -179,6 +202,11 @@ describe('CitationReviewPanel — actions', () => {
     })
 
     render(<CitationReviewPanel generationId={42} />)
+    // Tiles default to collapsed (May 23 2026 redesign) — expand
+    // the pending tile so the action buttons render.
+    await waitFor(() =>
+      screen.getByTestId('citation-toggle-cvar_coherent_risk'))
+    fireEvent.click(screen.getByTestId('citation-toggle-cvar_coherent_risk'))
     await waitFor(() =>
       screen.getByTestId('citation-accept-cvar_coherent_risk'))
 
@@ -212,6 +240,10 @@ describe('CitationReviewPanel — actions', () => {
     })
 
     render(<CitationReviewPanel generationId={42} />)
+    // Expand the not-found tile first.
+    await waitFor(() =>
+      screen.getByTestId('citation-toggle-momentum_factor'))
+    fireEvent.click(screen.getByTestId('citation-toggle-momentum_factor'))
     await waitFor(() =>
       screen.getByTestId('citation-reject-momentum_factor'))
 
@@ -240,10 +272,18 @@ describe('CitationReviewPanel — actions', () => {
     })
 
     render(<CitationReviewPanel generationId={42} />)
+    // Expand the pending tile first so the alternatives render.
     await waitFor(() =>
-      screen.getByTestId('citation-alt-cvar_coherent_risk-0'))
+      screen.getByTestId('citation-toggle-cvar_coherent_risk'))
+    fireEvent.click(screen.getByTestId('citation-toggle-cvar_coherent_risk'))
+    // The "Accept this instead" button on the first alternative
+    // card. The new component renders one AlternativeCard per
+    // entry, each with a `citation-accept-alternative` testid.
+    const alternativeButtons = await waitFor(() =>
+      screen.getAllByTestId('citation-accept-alternative'))
+    expect(alternativeButtons.length).toBeGreaterThan(0)
 
-    fireEvent.click(screen.getByTestId('citation-alt-cvar_coherent_risk-0'))
+    fireEvent.click(alternativeButtons[0]!)
 
     await waitFor(() => {
       const calls = (mockedAxios.post as ReturnType<typeof vi.fn>).mock.calls
@@ -272,6 +312,11 @@ describe('CitationReviewPanel — actions', () => {
     })
 
     render(<CitationReviewPanel generationId={42} />)
+    // Expand the not-found tile first (collapsed by default in the
+    // May 23 2026 redesign).
+    await waitFor(() =>
+      screen.getByTestId('citation-toggle-momentum_factor'))
+    fireEvent.click(screen.getByTestId('citation-toggle-momentum_factor'))
     await waitFor(() =>
       screen.getByTestId('citation-manual-toggle-momentum_factor'))
 

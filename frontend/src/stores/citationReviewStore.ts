@@ -51,6 +51,15 @@ export interface CitationAlternative {
   volume_issue_pages?: string | null
   url?: string | null
   pass_source?: string | null
+  // ── May 23 2026 — evidence fields (migration 039). Every
+  // alternative carries the same four fields the primary citation
+  // does, so the tile can show supporting evidence per option
+  // side-by-side. Legacy alternatives (pre-039) read back null and
+  // the UI shows the graceful-degradation placeholder.
+  supporting_extract?: string | null
+  selection_rationale?: string | null
+  confidence_score?: number | null
+  finding_supported?: string | null
 }
 
 
@@ -70,6 +79,11 @@ export interface Citation {
   reviewed_at: string | null
   review_action: string | null
   formatted: string | null
+  // ── May 23 2026 — evidence fields (migration 039).
+  supporting_extract: string | null
+  selection_rationale: string | null
+  confidence_score: number | null
+  finding_supported: string | null
 }
 
 
@@ -93,6 +107,13 @@ interface CitationReviewState {
   inFlight: Record<number, Promise<void> | undefined>
   /** Per-citation manual-form open toggle. Persists across remounts. */
   manualOpenByCitationId: Record<number, boolean>
+  /** Per-citation tile collapsed/expanded toggle. Drives the May 23
+   *  2026 evidence-card redesign — tiles default to collapsed and
+   *  expand to show the full evidence (extract, rationale,
+   *  alternatives). Persists across remounts so a reviewer who
+   *  expanded a tile, navigated away, and returned sees the same
+   *  expansion state. */
+  expandedByCitationId: Record<number, boolean>
   /** Per-generation error, keyed by generation_id. */
   errorByGenerationId: Record<number, string | null>
 
@@ -109,6 +130,9 @@ interface CitationReviewState {
   /** Per-citation manual-form toggle. */
   setManualOpen: (citationId: number, open: boolean) => void
 
+  /** Per-citation tile expand/collapse toggle. */
+  setExpanded: (citationId: number, expanded: boolean) => void
+
   /** Test-only reset. */
   _reset: () => void
 }
@@ -119,6 +143,7 @@ const _initial = {
   lastFetchedAt:           {} as Record<number, number>,
   inFlight:                {} as Record<number, Promise<void> | undefined>,
   manualOpenByCitationId:  {} as Record<number, boolean>,
+  expandedByCitationId:    {} as Record<number, boolean>,
   errorByGenerationId:     {} as Record<number, string | null>,
 }
 
@@ -217,6 +242,15 @@ export const useCitationReviewStore = create<CitationReviewState>((set, get) => 
       manualOpenByCitationId: {
         ...s.manualOpenByCitationId,
         [citationId]: open,
+      },
+    }))
+  },
+
+  setExpanded: (citationId, expanded) => {
+    set((s) => ({
+      expandedByCitationId: {
+        ...s.expandedByCitationId,
+        [citationId]: expanded,
       },
     }))
   },

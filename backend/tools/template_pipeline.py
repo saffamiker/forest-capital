@@ -967,9 +967,13 @@ async def source_citations(
                 return cid, entry
             # Pass 1 returned a candidate but on an untrusted domain —
             # capture it as the primary pending_review hit AND keep
-            # searching for a better one.
+            # searching for a better one. Off-list candidates carry
+            # a 0.10-dampened confidence score so the alternatives
+            # list reflects reduced trust.
             if primary and primary.get("url"):
                 primary["pass_source"] = "pass_1_off_trusted"
+                primary["confidence_score"] = _compute_confidence(
+                    1, primary.get("url") or "", off_list=True)
                 alternatives.append(primary)
 
             # ── Pass 2 — wider academic ─────────────────────────────────────
@@ -988,6 +992,10 @@ async def source_citations(
                     entry["formatted"] = _format_citation(entry)
                     entry["alternatives"] = alternatives
                     return cid, entry
+                # Off-list pass-2 candidate — keep as an alternative
+                # with dampened confidence.
+                wider["confidence_score"] = _compute_confidence(
+                    2, wider.get("url") or "", off_list=True)
                 alternatives.append(wider)
 
             # ── Pass 3 — widest publishable ─────────────────────────────────
@@ -1006,12 +1014,18 @@ async def source_citations(
                 return cid, entry
             if widest and widest.get("url"):
                 widest["pass_source"] = "pass_3_off_publishable"
+                widest["confidence_score"] = _compute_confidence(
+                    3, widest.get("url") or "", off_list=True)
                 alternatives.append(widest)
 
             # No pass produced a viable primary — but we might have
             # alternatives the reviewer can promote. Promote the
             # first alternative as a pending_review primary if any
             # alternative had a URL; otherwise leave as not_found.
+            # Note: when an off-list candidate becomes the primary
+            # we keep its dampened confidence score (already stamped
+            # on the candidate above) rather than re-computing — the
+            # promotion is a UI affordance, not new evidence.
             if alternatives:
                 first = alternatives.pop(0)
                 entry.update({k: v for k, v in first.items()
@@ -1045,7 +1059,13 @@ async def source_citations(
 
 def _empty_citation_entry(cid: str, query: str) -> dict[str, Any]:
     """A fresh citation entry with every field initialised. Used as
-    the starting point for every search and as the fail-open shape."""
+    the starting point for every search and as the fail-open shape.
+
+    The four evidence fields (supporting_extract, selection_rationale,
+    confidence_score, finding_supported) were added May 23 2026 by
+    migration 039. New citations populate them during the search
+    pass; legacy rows (pre-039) read back as NULL and the frontend
+    renders the graceful-degradation placeholder."""
     return {
         "concept_id":              cid,
         "verification_status":     CITATION_STATE_NOT_FOUND,
@@ -1059,7 +1079,47 @@ def _empty_citation_entry(cid: str, query: str) -> dict[str, Any]:
         "formatted":               None,
         "alternatives":            [],
         "passes_run":              0,
+        # Evidence fields populated by the search pass.
+        "supporting_extract":      None,
+        "selection_rationale":     None,
+        "confidence_score":        None,
+        "finding_supported":       None,
     }
+
+
+# Pass-tier confidence base scores. Tuned so the gap between a
+# trusted-domain hit and a widest-pass hit is visible to the
+# reviewer at a glance: 0.95 for a trusted primary, 0.75 for an
+# academic-domain secondary, 0.55 for a publishable-domain widest.
+# Off-list passes (the candidate landed outside the pass's
+# acceptable set) drop another 0.10 to signal "the pass found
+# SOMETHING but it isn't on the trusted set you'd hope for."
+_CONFIDENCE_BASE: dict[int, float] = {1: 0.95, 2: 0.75, 3: 0.55}
+
+
+def _compute_confidence(pass_index: int, url: str | None,
+                         off_list: bool = False) -> float:
+    """Heuristic confidence score for a citation candidate.
+
+    pass_index   1 / 2 / 3 — which search pass produced this hit.
+    url          the URL of the candidate. Used to detect trusted-
+                 domain bonuses that override the pass tier.
+    off_list     True when the candidate landed OUTSIDE the pass's
+                 acceptable domain set (e.g. pass 2 returned a non-
+                 academic URL). Drops the score by 0.10 to signal
+                 reduced trust without rejecting the candidate.
+
+    The score is clamped to [0.0, 1.0]. A trusted-domain hit gets a
+    +0.03 bonus on top of the pass base, capped at 1.0. The
+    intent is that reviewers see a clear ordering: pass-1 trusted
+    > pass-2 academic > pass-3 widest > off-list candidates.
+    """
+    base = _CONFIDENCE_BASE.get(pass_index, 0.50)
+    if off_list:
+        base -= 0.10
+    if url and _is_trusted_url(url):
+        base += 0.03
+    return max(0.0, min(1.0, round(base, 2)))
 
 
 def _run_citation_pass(
@@ -1115,7 +1175,28 @@ def _run_citation_pass(
         + " Required JSON fields: author, year, title, "
         "journal_or_institution, volume_issue_pages, url. Author in "
         "'Surname, Initials' format; multiple authors joined with "
-        "' and '. If no source is found at all, return "
+        "' and '. "
+        # ── May 23 2026 — evidence fields. Every successful pass
+        # also returns the three fields below so Bob's citation
+        # tile shows full evidence, not just metadata. Each is a
+        # single short sentence (or two for the extract) drawn
+        # DIRECTLY from the search results — the model is instructed
+        # to never invent text. The fields flow through to the DB
+        # via migration 039 (supporting_extract, selection_rationale,
+        # finding_supported). Confidence is computed server-side
+        # from the pass tier + URL trust, so the model never sees
+        # the score and cannot bias it.
+        "Also include three evidence fields: "
+        "'supporting_extract' — 1-2 sentences from the source that "
+        "DIRECTLY support the claim being researched; quote or "
+        "paraphrase closely (do not invent). "
+        "'selection_rationale' — one sentence explaining why THIS "
+        "source is the strongest match for the claim (name the "
+        "source type, the venue's authority, and the closeness of "
+        "the claim alignment). "
+        "'finding_supported' — one sentence describing the specific "
+        "claim this citation backs (derived from the search query). "
+        "If no source is found at all, return "
         "{\"unverified\": true}. NEVER invent details — only what the "
         "search results support.")
 
@@ -1128,7 +1209,9 @@ def _run_citation_pass(
                 f"search query: {query}\n"
                 f"pass: {pass_index}/3\n\n"
                 "Use web_search now. Return ONLY the JSON."),
-            max_tokens=512,
+            # max_tokens raised from 512 to 800 to fit the three
+            # evidence fields without truncating the JSON mid-write.
+            max_tokens=800,
             tools=[web_search_tool],
         )
     except Exception as exc:  # noqa: BLE001
@@ -1150,6 +1233,29 @@ def _run_citation_pass(
         parsed["verification_status"] = CITATION_STATE_VERIFIED
     else:
         parsed["verification_status"] = CITATION_STATE_PENDING_REVIEW
+    # May 23 2026 — stamp the confidence score on the parsed result
+    # based on the pass tier and whether the candidate is on the
+    # pass's acceptable domain set. The CALLER tags off-list cases
+    # via _annotate_off_list_confidence; the default here is the
+    # on-list score (the optimistic reading is fine because the
+    # caller dampens it before storing the candidate as an
+    # alternative).
+    parsed["confidence_score"] = _compute_confidence(pass_index, url)
+    # Normalise evidence field types — guard against the model
+    # returning unexpected shapes (e.g. a list of sentences for the
+    # extract). Frontend expects strings or null.
+    for k in ("supporting_extract", "selection_rationale",
+              "finding_supported"):
+        v = parsed.get(k)
+        if v is None:
+            continue
+        if isinstance(v, str):
+            parsed[k] = v.strip() or None
+        elif isinstance(v, (list, tuple)):
+            joined = " ".join(str(x) for x in v).strip()
+            parsed[k] = joined or None
+        else:
+            parsed[k] = str(v).strip() or None
     return parsed
 
 
@@ -1590,14 +1696,21 @@ async def persist_citations(
         async with AsyncSessionLocal() as s:
             for cid, c in (citations or {}).items():
                 alts = c.get("alternatives") or []
+                # May 23 2026 — write the four new evidence columns
+                # (migration 039). Each alternative in the JSONB
+                # array carries the same four fields per entry; the
+                # array shape doesn't need a schema change because
+                # it's already JSONB.
                 row = await s.execute(text(
                     "INSERT INTO citations_cache "
                     "(generation_id, concept_id, author, year, title, "
                     " journal_or_institution, volume_issue_pages, "
                     " url, verification_status, search_query_used, "
-                    " alternatives) "
+                    " alternatives, supporting_extract, "
+                    " selection_rationale, confidence_score, "
+                    " finding_supported) "
                     "VALUES (:g, :c, :au, :y, :t, :j, :v, :u, :s, :q, "
-                    " CAST(:alts AS JSONB)) "
+                    " CAST(:alts AS JSONB), :ext, :rat, :cs, :fd) "
                     "RETURNING id"
                 ), {
                     "g":    generation_id,
@@ -1611,6 +1724,10 @@ async def persist_citations(
                     "s":    c.get("verification_status"),
                     "q":    c.get("search_query_used"),
                     "alts": json.dumps(alts) if alts else None,
+                    "ext":  c.get("supporting_extract"),
+                    "rat":  c.get("selection_rationale"),
+                    "cs":   c.get("confidence_score"),
+                    "fd":   c.get("finding_supported"),
                 })
                 new_id = row.scalar()
                 if new_id is not None:
@@ -1640,7 +1757,9 @@ async def get_citations_for_generation(
                 " journal_or_institution, volume_issue_pages, url, "
                 " verification_status, search_query_used, "
                 " alternatives, reviewer_email, reviewed_at, "
-                " review_action "
+                " review_action, supporting_extract, "
+                " selection_rationale, confidence_score, "
+                " finding_supported "
                 "FROM citations_cache "
                 "WHERE generation_id = :g "
                 "ORDER BY concept_id"
@@ -1669,6 +1788,15 @@ async def get_citations_for_generation(
                     "reviewed_at":            (r[12].isoformat()
                                                 if r[12] else None),
                     "review_action":          r[13],
+                    # Evidence fields (migration 039). Legacy rows
+                    # without these columns read back NULL — frontend
+                    # renders a placeholder.
+                    "supporting_extract":     r[14],
+                    "selection_rationale":    r[15],
+                    "confidence_score":       (float(r[16])
+                                                if r[16] is not None
+                                                else None),
+                    "finding_supported":      r[17],
                     "formatted":              _format_citation({
                         "author": r[2], "year": r[3], "title": r[4],
                         "journal_or_institution": r[5],
@@ -1716,7 +1844,12 @@ async def apply_citation_review(
         return None
 
     # Decide the new state + which fields to overwrite based on action.
+    # `swap_alternatives` is the new (migration 039) post-swap
+    # alternatives list — set only when the action promotes one of
+    # the alternatives to primary; the previously-primary citation
+    # is demoted into the alternatives so it's still accessible.
     overwrite: dict[str, Any] = {}
+    swap_alternatives: list[dict[str, Any]] | None = None
     if action == "accept_untrusted":
         new_state = CITATION_STATE_HUMAN_VERIFIED
     elif action == "select_alternative":
@@ -1725,6 +1858,9 @@ async def apply_citation_review(
                         citation_id=citation_id)
             return None
         new_state = CITATION_STATE_SEARCH_SELECTED
+        # Swap-in the alternative's metadata AND its evidence fields
+        # so the tile's primary view reflects the chosen citation
+        # end-to-end (extract / rationale / confidence / finding).
         overwrite = {
             "author":                 selected_alternative.get("author"),
             "year":                   selected_alternative.get("year"),
@@ -1734,11 +1870,20 @@ async def apply_citation_review(
             "volume_issue_pages":
                 selected_alternative.get("volume_issue_pages"),
             "url":                    selected_alternative.get("url"),
+            "supporting_extract":
+                selected_alternative.get("supporting_extract"),
+            "selection_rationale":
+                selected_alternative.get("selection_rationale"),
+            "confidence_score":
+                selected_alternative.get("confidence_score"),
+            "finding_supported":
+                selected_alternative.get("finding_supported"),
         }
     elif action == "reject":
         new_state = CITATION_STATE_REJECTED
         # Clear the citation fields — the references list will skip
-        # this concept entirely.
+        # this concept entirely. Evidence fields cleared too so the
+        # rejected tile doesn't render stale extract / rationale.
         overwrite = {
             "author":                 None,
             "year":                   None,
@@ -1746,6 +1891,10 @@ async def apply_citation_review(
             "journal_or_institution": None,
             "volume_issue_pages":     None,
             "url":                    None,
+            "supporting_extract":     None,
+            "selection_rationale":    None,
+            "confidence_score":       None,
+            "finding_supported":      None,
         }
     elif action == "manual_add":
         if not manual_citation:
@@ -1753,6 +1902,10 @@ async def apply_citation_review(
                         citation_id=citation_id)
             return None
         new_state = CITATION_STATE_MANUALLY_ADDED
+        # A manually-entered citation doesn't carry agent-extracted
+        # evidence — the reviewer provides metadata only. Confidence
+        # set to 1.0 because the reviewer is asserting the citation
+        # is correct (human review trumps heuristic scoring).
         overwrite = {
             "author":                 manual_citation.get("author"),
             "year":                   manual_citation.get("year"),
@@ -1762,6 +1915,13 @@ async def apply_citation_review(
             "volume_issue_pages":
                 manual_citation.get("volume_issue_pages"),
             "url":                    manual_citation.get("url"),
+            "supporting_extract":     None,
+            "selection_rationale":
+                manual_citation.get("selection_rationale")
+                or "Manually entered by reviewer.",
+            "confidence_score":       1.0,
+            "finding_supported":
+                manual_citation.get("finding_supported"),
         }
     else:  # pragma: no cover — covered by the membership check above
         return None
@@ -1772,6 +1932,82 @@ async def apply_citation_review(
         if AsyncSessionLocal is None:
             return None
         async with AsyncSessionLocal() as s:
+            # ── Promote / demote when selecting an alternative ──────────────
+            # The user's spec (May 23 2026): "Accepting an alternative
+            # promotes it to primary and demotes the current choice
+            # to the alternatives list." Read the current row to
+            # snapshot the existing primary, then build the new
+            # alternatives list = (old primary as an entry) +
+            # (alternatives minus the one being promoted). This way
+            # no information is lost on a swap — the previous choice
+            # is still inspectable from the tile.
+            if action == "select_alternative":
+                current_rows = await s.execute(text(
+                    "SELECT author, year, title, "
+                    " journal_or_institution, volume_issue_pages, url, "
+                    " alternatives, supporting_extract, "
+                    " selection_rationale, confidence_score, "
+                    " finding_supported "
+                    "FROM citations_cache WHERE id = :id"
+                ), {"id": int(citation_id)})
+                cur = current_rows.fetchone()
+                if cur is not None:
+                    cur_alts = cur[6]
+                    if isinstance(cur_alts, str):
+                        try:
+                            cur_alts = json.loads(cur_alts)
+                        except json.JSONDecodeError:
+                            cur_alts = []
+                    cur_alts = cur_alts or []
+                    # Build the old-primary entry — preserves every
+                    # evidence field so it can be re-promoted later.
+                    demoted = {
+                        "author":                 cur[0],
+                        "year":                   cur[1],
+                        "title":                  cur[2],
+                        "journal_or_institution": cur[3],
+                        "volume_issue_pages":     cur[4],
+                        "url":                    cur[5],
+                        "supporting_extract":     cur[7],
+                        "selection_rationale":    cur[8],
+                        "confidence_score":       (
+                            float(cur[9]) if cur[9] is not None else None),
+                        "finding_supported":      cur[10],
+                        # Marker so the UI can label this entry
+                        # "(was primary)" — distinct from the
+                        # search-pass labels carried by the
+                        # original alternatives.
+                        "pass_source":            "previously_primary",
+                    }
+                    # Drop the entry being promoted from the
+                    # alternatives list. Match by url first (most
+                    # stable), then by (author, year, title) as a
+                    # fallback when the alternative was entered
+                    # without a URL.
+                    promoted_url = (
+                        selected_alternative.get("url") or "")
+                    promoted_key = (
+                        (selected_alternative.get("author") or ""),
+                        (selected_alternative.get("year") or ""),
+                        (selected_alternative.get("title") or ""))
+                    remaining: list[dict[str, Any]] = []
+                    for alt in cur_alts:
+                        if not isinstance(alt, dict):
+                            continue
+                        if promoted_url and \
+                                (alt.get("url") or "") == promoted_url:
+                            continue
+                        alt_key = (
+                            (alt.get("author") or ""),
+                            (alt.get("year") or ""),
+                            (alt.get("title") or ""))
+                        if not promoted_url and alt_key == promoted_key:
+                            continue
+                        remaining.append(alt)
+                    # Old primary lands at the head — most recent
+                    # demotion at the top of the list.
+                    swap_alternatives = [demoted] + remaining
+
             # Build the UPDATE dynamically so we only touch the
             # overwrite columns for the actions that need them.
             set_clauses = [
@@ -1789,6 +2025,11 @@ async def apply_citation_review(
             for col, val in overwrite.items():
                 set_clauses.append(f"{col} = :{col}")
                 params[col] = val
+            # Promotion / demotion — write the recomputed alternatives
+            # JSONB so the previous primary is preserved.
+            if swap_alternatives is not None:
+                set_clauses.append("alternatives = CAST(:alts AS JSONB)")
+                params["alts"] = json.dumps(swap_alternatives)
 
             sql = (
                 "UPDATE citations_cache SET "
@@ -1807,7 +2048,9 @@ async def apply_citation_review(
                 " journal_or_institution, volume_issue_pages, url, "
                 " verification_status, search_query_used, "
                 " alternatives, reviewer_email, reviewed_at, "
-                " review_action, generation_id "
+                " review_action, generation_id, supporting_extract, "
+                " selection_rationale, confidence_score, "
+                " finding_supported "
                 "FROM citations_cache WHERE id = :id"
             ), {"id": int(citation_id)})
             r = rows.fetchone()
@@ -1837,6 +2080,13 @@ async def apply_citation_review(
                 "review_action":          r[13],
                 "generation_id":          (int(r[14])
                                             if r[14] is not None else None),
+                # Evidence fields (migration 039).
+                "supporting_extract":     r[15],
+                "selection_rationale":    r[16],
+                "confidence_score":       (float(r[17])
+                                            if r[17] is not None
+                                            else None),
+                "finding_supported":      r[18],
                 "formatted":              _format_citation({
                     "author": r[2], "year": r[3], "title": r[4],
                     "journal_or_institution": r[5],

@@ -1,34 +1,50 @@
 /**
- * CitationReviewPanel — the review surface for the 7-state citation
+ * CitationReviewPanel — full evidence cards for the 7-state citation
  * machine.
  *
- * Fetches every citation row for the current report generation from
- * GET /api/v1/citations/<generation_id>, groups them by state, and
- * renders action buttons for the ones in a needs-review state
- * (pending_review, untrusted_source, not_found). Each action POSTs
- * to /api/v1/citations/<citation_id>/review which applies the
- * 7-state transition and stamps reviewer_email + reviewed_at on the
- * row.
+ * Originally (May 23 2026, item 1) this panel rendered each citation
+ * as a compact one-line row with accept / reject / select-alternative
+ * buttons. Bob's feedback: every tile should be a complete
+ * EVALUATION CARD — finding supported, supporting extract, selection
+ * rationale, confidence score, alternatives with their own evidence.
+ * Applies to ALL citations (verified included) so a reviewer can see
+ * why a verified citation was accepted without action being required.
  *
- * Actions:
- *   accept_untrusted   pending_review → human_verified
- *                      "the search result is fine — keep it"
- *   select_alternative any → search_selected
- *                      "pick this entry from passes 2/3 instead"
- *   reject             any → rejected
- *                      "no citation for this concept — skip it"
- *   manual_add         any → manually_added
- *                      "I have a citation that wasn't found by search"
+ * Tile interaction model (May 23 2026, item 13):
+ *   Collapsed — concept_id, status badge, primary author/title,
+ *               confidence badge, expand chevron.
+ *   Expanded  — six evidence sections (finding, extract, rationale,
+ *               confidence, alternatives, manual override). The
+ *               alternatives section renders each ranked option as
+ *               its own mini-card with extract / rationale /
+ *               confidence + an "Accept this instead" button.
  *
- * Lives in the right-hand main column of the ReportWriter so the
- * panel is visible alongside the paper text. It is collapsed by
- * default when every citation is verified or rejected — only
- * unfolds when there is actually work to do.
+ * Expand/collapse state persists across navigation via the
+ * citationReviewStore (expandedByCitationId map). Manual-entry form
+ * toggle persists too — the bug originally fixed in PR #103.
+ *
+ * Promote / demote on swap (May 23 2026, item 13):
+ *   When Bob accepts an alternative, the backend promotes the
+ *   alternative to primary AND demotes the previous primary into
+ *   the alternatives list (marked `pass_source: 'previously_primary'`).
+ *   No information is lost — every prior choice is still in the
+ *   alternatives bucket and can be re-promoted.
+ *
+ * Limited-alternatives flag (May 23 2026, item 13):
+ *   When total options (primary + alternatives) < 3, the tile shows
+ *   an amber "Limited alternatives — manual review recommended"
+ *   banner so Bob knows the 3-pass search didn't produce a full set.
+ *
+ * Verified tiles render the same evidence card with action buttons
+ * suppressed — the panel becomes a transparency surface, not just a
+ * review queue.
  */
 import { useCallback, useEffect, useState } from 'react'
 import axios from 'axios'
-import { AlertCircle, CheckCircle, ChevronDown, ChevronRight,
-         ExternalLink, Loader2 } from 'lucide-react'
+import {
+  AlertCircle, CheckCircle, ChevronDown, ChevronRight,
+  ExternalLink, Loader2, Info,
+} from 'lucide-react'
 import {
   useCitationReviewStore,
   type Citation, type CitationAlternative,
@@ -59,6 +75,82 @@ const VERIFIED_STATES = new Set([
 ])
 
 
+// Human-readable label for each search pass. Drives the
+// "Why ranked below" line on every alternative card. Keys mirror
+// the pass_source values written by template_pipeline.source_citations.
+const PASS_SOURCE_LABEL: Record<string, string> = {
+  'pass_1_off_trusted':     'Pass 1 — off-trusted domain',
+  'pass_2_academic':        'Pass 2 — academic',
+  'pass_3_widest':          'Pass 3 — widest publishable',
+  'pass_3_off_publishable': 'Pass 3 — off-publishable',
+  'previously_primary':     'Previously primary (demoted on swap)',
+}
+
+
+// Per-source explanation of why an alternative ranked below the
+// primary. Pure UI copy derived from pass_source — no backend call.
+const PASS_RANK_REASON: Record<string, string> = {
+  'pass_1_off_trusted': (
+    'Found in the first pass but on a domain outside the trusted '
+    + 'set (Journal of Finance, NBER, BIS, Fed, AQR, CFA, SSRN, '
+    + 'JSTOR). Authority is lower than a trusted-domain hit but '
+    + 'the source remains close to the original claim.'),
+  'pass_2_academic': (
+    'Surfaced by the wider academic pass (university press, '
+    + 'regional Fed, SEC, OECD, World Bank). Authority is below '
+    + 'a trusted-domain primary source.'),
+  'pass_3_widest': (
+    'Surfaced by the widest publishable pass — a .org / .gov / '
+    + '.edu / .int domain outside the academic set. Use as '
+    + 'evidence of last resort.'),
+  'pass_3_off_publishable': (
+    'Surfaced by the widest pass but landed off the publishable '
+    + 'domain set. Treat with caution.'),
+  'previously_primary': (
+    'This citation was the primary choice before the current '
+    + 'selection. Demoted when a different alternative was '
+    + 'accepted — still available if the swap is reverted.'),
+}
+
+
+// Status-badge style per verification_status. Tile-level chip on the
+// collapsed view; same colour scheme as the existing review buckets.
+const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
+  verified:         { label: 'Verified',       cls: 'bg-green-500/15 text-green-300' },
+  human_verified:   { label: 'Human verified', cls: 'bg-green-500/15 text-green-300' },
+  search_selected:  { label: 'Selected',       cls: 'bg-green-500/15 text-green-300' },
+  manually_added:   { label: 'Manual',         cls: 'bg-green-500/15 text-green-300' },
+  pending_review:   { label: 'Needs review',   cls: 'bg-amber-500/15 text-amber-300' },
+  untrusted_source: { label: 'Needs review',   cls: 'bg-amber-500/15 text-amber-300' },
+  not_found:        { label: 'Not found',      cls: 'bg-amber-500/15 text-amber-300' },
+  rejected:         { label: 'Rejected',       cls: 'bg-red-500/15 text-red-400' },
+}
+
+
+function _confidenceLabel(score: number | null | undefined): string {
+  if (score === null || score === undefined) return '—'
+  return score.toFixed(2)
+}
+
+
+// Confidence-badge colour. Tuned so the eye reads risk-up at a glance:
+// >= 0.85 green, 0.65-0.85 amber, < 0.65 red. Matches the band breakpoints
+// the backend uses (pass_1 trusted ~0.95, pass_2 academic ~0.75, pass_3
+// widest ~0.55).
+function _confidenceCls(score: number | null | undefined): string {
+  if (score === null || score === undefined) {
+    return 'bg-navy-800 text-text-muted border-navy-700'
+  }
+  if (score >= 0.85) {
+    return 'bg-green-500/15 text-green-300 border-green-500/30'
+  }
+  if (score >= 0.65) {
+    return 'bg-amber-500/15 text-amber-300 border-amber-500/30'
+  }
+  return 'bg-red-500/15 text-red-400 border-red-500/30'
+}
+
+
 export interface CitationReviewPanelProps {
   generationId: number | null
   /** Called whenever an action lands so the parent can refresh
@@ -72,8 +164,8 @@ export default function CitationReviewPanel({
 }: CitationReviewPanelProps) {
   // The panel-open toggle is local UI state — fine to reset on
   // remount. The expensive bits (the citation array, per-row
-  // manual-form toggle) live in the Zustand store so they survive
-  // navigation.
+  // manual-form toggle, per-tile expand toggle) live in the
+  // Zustand store so they survive navigation.
   const [open, setOpen] = useState(true)
   const [busyId, setBusyId] = useState<number | null>(null)
 
@@ -164,11 +256,6 @@ export default function CitationReviewPanel({
   const rejected = citations.filter((c) =>
     c.verification_status === 'rejected')
 
-  // Collapse by default when everything is reviewed (nothing in the
-  // needs-review bucket) — the panel only takes screen space when
-  // there's work for Bob to do.
-  const defaultClosed = needsReview.length === 0
-
   return (
     <section
       data-testid="citation-review-panel"
@@ -180,7 +267,7 @@ export default function CitationReviewPanel({
                      text-text-primary hover:text-electric-blue
                      transition-colors"
           onClick={() => setOpen(!open)}>
-          {(open && !defaultClosed) || (open && needsReview.length > 0)
+          {open
             ? <ChevronDown className="w-4 h-4" />
             : <ChevronRight className="w-4 h-4" />}
           Citation Review
@@ -235,25 +322,29 @@ export default function CitationReviewPanel({
             </div>
           ) : null}
 
+          {/* Verified tiles render the SAME evidence card so a
+              reviewer can see why every verified citation was
+              accepted — Bob's "transparency builds trust"
+              request. Collapsed by default at the bucket level
+              to save space when nothing needs action. */}
           {verified.length > 0 ? (
-            <details className="text-2xs">
+            <details className="text-2xs" data-testid="verified-bucket">
               <summary className="cursor-pointer text-text-muted
-                                   hover:text-text-primary">
-                Verified ({verified.length})
+                                   hover:text-text-primary
+                                   inline-flex items-center gap-1">
+                <CheckCircle className="w-3 h-3 text-green-400" />
+                Verified ({verified.length}) — click to inspect
               </summary>
-              <ul className="mt-1 space-y-0.5 pl-2">
+              <div className="mt-1.5 space-y-1.5">
                 {verified.map((c) => (
-                  <li key={c.id}
-                      className="flex items-center gap-1 text-text-secondary">
-                    <CheckCircle
-                      className="w-3 h-3 text-green-400 shrink-0" />
-                    <span className="font-mono">{c.concept_id}</span>
-                    <span className="text-text-muted truncate">
-                      {c.author ? `— ${c.author}, ${c.year ?? '—'}` : '—'}
-                    </span>
-                  </li>
+                  <CitationRow
+                    key={c.id}
+                    citation={c}
+                    busy={busyId === c.id}
+                    onAction={submitReview}
+                  />
                 ))}
-              </ul>
+              </div>
             </details>
           ) : null}
 
@@ -279,6 +370,9 @@ export default function CitationReviewPanel({
 }
 
 
+// ── CitationRow — single tile with collapsed + expanded modes ───────────────
+
+
 interface CitationRowProps {
   citation: Citation
   busy: boolean
@@ -291,206 +385,417 @@ interface CitationRowProps {
 
 
 function CitationRow({ citation, busy, onAction }: CitationRowProps) {
-  // Manual-form open state moved to the Zustand store so it
-  // survives unmount/remount. The user reported losing this
-  // toggle on every navigation away from the Report Writer.
-  // Form text fields remain local — they're transient input
-  // state that should not persist across remount (a half-typed
-  // citation reappearing five minutes later is more disruptive
-  // than the toggle state being lost).
+  // Expanded-state lives in the store so the tile remembers its
+  // state across navigation. Default = collapsed.
+  const expanded = useCitationReviewStore(
+    (s) => Boolean(s.expandedByCitationId[citation.id]))
+  const setExpanded = useCitationReviewStore((s) => s.setExpanded)
+
+  // Manual-form open state also lives in the store (the bug
+  // originally fixed in PR #103).
   const showManual = useCitationReviewStore(
     (s) => Boolean(s.manualOpenByCitationId[citation.id]))
   const setManualOpen = useCitationReviewStore((s) => s.setManualOpen)
   const setShowManual = (open: boolean) => setManualOpen(citation.id, open)
 
+  // Manual-entry form fields stay local — half-typed values must
+  // NOT reappear after a navigation round-trip.
   const [manualAuthor, setManualAuthor] = useState('')
   const [manualYear,   setManualYear]   = useState('')
   const [manualTitle,  setManualTitle]  = useState('')
   const [manualJournal, setManualJournal] = useState('')
   const [manualUrl,    setManualUrl]    = useState('')
 
+  const isNeedsReview = NEEDS_REVIEW_STATES.has(citation.verification_status)
+  const isVerified = VERIFIED_STATES.has(citation.verification_status)
   const canAcceptUntrusted =
     citation.verification_status === 'pending_review'
     || citation.verification_status === 'untrusted_source'
 
+  // Total options surfaced to the reviewer = primary + every
+  // alternative. The <3 flag fires when the 3-pass search produced
+  // fewer than three distinct candidates.
+  const totalOptions =
+    (citation.url ? 1 : 0) + (citation.alternatives?.length ?? 0)
+  const limitedAlternatives = totalOptions < 3
+
+  const status = STATUS_BADGE[citation.verification_status] ?? {
+    label: citation.verification_status, cls: 'bg-navy-800 text-text-muted',
+  }
+
   return (
     <div data-testid={`citation-row-${citation.concept_id}`}
-         className="border border-navy-700 rounded p-2 space-y-1.5
-                    bg-navy-800/40">
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0 flex-1">
-          <p className="font-mono text-2xs text-electric-blue">
-            {citation.concept_id}
-          </p>
+         className="border border-navy-700 rounded bg-navy-800/40">
+      {/* ── Collapsed header ─────────────────────────────────────────────── */}
+      <button
+        type="button"
+        onClick={() => setExpanded(citation.id, !expanded)}
+        data-testid={`citation-toggle-${citation.concept_id}`}
+        className="w-full p-2 text-left flex items-start gap-2
+                   hover:bg-navy-800/60 transition-colors rounded">
+        <div className="mt-0.5 shrink-0">
+          {expanded
+            ? <ChevronDown className="w-3.5 h-3.5 text-text-muted" />
+            : <ChevronRight className="w-3.5 h-3.5 text-text-muted" />}
+        </div>
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="font-mono text-2xs text-electric-blue">
+              {citation.concept_id}
+            </span>
+            <span className={`text-2xs px-1.5 py-0.5 rounded ${status.cls}`}>
+              {status.label}
+            </span>
+          </div>
           {citation.author ? (
-            <p className="text-text-secondary mt-0.5">
+            <p className="text-text-secondary text-2xs leading-tight">
               {citation.author} ({citation.year ?? '—'}).{' '}
               <em>{citation.title ?? '—'}</em>
             </p>
           ) : (
-            <p className="text-text-muted italic mt-0.5">
-              Search query: {citation.search_query_used ?? '—'}
+            <p className="text-text-muted italic text-2xs">
+              No primary citation yet — alternatives may be available below.
             </p>
           )}
+        </div>
+        <div className="shrink-0 flex items-center gap-1">
+          <span
+            data-testid={`citation-confidence-${citation.concept_id}`}
+            className={`text-2xs px-1.5 py-0.5 rounded border
+                        ${_confidenceCls(citation.confidence_score)}`}
+            title="Confidence score (0.0-1.0) — pass tier plus URL trust">
+            {_confidenceLabel(citation.confidence_score)}
+          </span>
+        </div>
+      </button>
+
+      {/* ── Expanded evidence card ───────────────────────────────────────── */}
+      {expanded ? (
+        <div data-testid={`citation-expanded-${citation.concept_id}`}
+             className="border-t border-navy-700 p-2 space-y-2">
+
+          {limitedAlternatives ? (
+            <div className="flex items-start gap-1.5 text-2xs
+                            text-amber-300 bg-amber-500/10 border
+                            border-amber-500/30 rounded p-1.5">
+              <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />
+              <span>
+                Limited alternatives — the 3-pass search produced
+                fewer than three options for this concept. Manual
+                review recommended.
+              </span>
+            </div>
+          ) : null}
+
+          {/* ── Finding supported ──────────────────────────────────────── */}
+          <EvidenceSection
+            label="Finding supported"
+            empty="Not captured for this citation — re-generate the draft to populate.">
+            {citation.finding_supported}
+          </EvidenceSection>
+
+          {/* ── Supporting extract ─────────────────────────────────────── */}
+          <EvidenceSection
+            label="Supporting extract"
+            empty="Extract not captured for this citation — the source URL is the authoritative reference.">
+            {citation.supporting_extract
+              ? <q className="italic">{citation.supporting_extract}</q>
+              : null}
+          </EvidenceSection>
+
+          {/* ── Selection rationale ────────────────────────────────────── */}
+          <EvidenceSection
+            label="Selection rationale"
+            empty="Rationale not captured — derived from search pass tier (see source URL).">
+            {citation.selection_rationale}
+          </EvidenceSection>
+
+          {/* ── Confidence (already visible on the chip; restate the
+              breakdown for full transparency) ──────────────────────────── */}
+          <EvidenceSection label="Confidence">
+            <span className={`inline-flex items-center gap-1 text-2xs
+                              px-1.5 py-0.5 rounded border
+                              ${_confidenceCls(citation.confidence_score)}`}>
+              <Info className="w-2.5 h-2.5" />
+              {_confidenceLabel(citation.confidence_score)} of 1.00
+            </span>
+            <span className="ml-1.5 text-text-muted">
+              Pass tier + URL trust heuristic. 0.95 = trusted-domain
+              primary; 0.75 = academic; 0.55 = widest publishable.
+            </span>
+          </EvidenceSection>
+
+          {/* ── Primary citation link ──────────────────────────────────── */}
           {citation.url ? (
-            <a href={citation.url}
+            <div>
+              <p className="text-2xs uppercase tracking-wider
+                            text-text-muted mb-0.5">
+                Primary source
+              </p>
+              <a href={citation.url}
+                 target="_blank"
+                 rel="noopener noreferrer"
+                 className="inline-flex items-center gap-1 text-2xs
+                            text-electric-blue hover:underline">
+                <ExternalLink className="w-2.5 h-2.5" />
+                {citation.journal_or_institution ?? citation.url}
+              </a>
+            </div>
+          ) : null}
+
+          {/* ── Alternative citations ──────────────────────────────────── */}
+          {citation.alternatives && citation.alternatives.length > 0 ? (
+            <div className="space-y-1.5">
+              <p className="text-2xs uppercase tracking-wider
+                            text-text-muted">
+                Alternative citations ({citation.alternatives.length})
+              </p>
+              {citation.alternatives.map((alt, i) => (
+                <AlternativeCard
+                  key={`${citation.id}-alt-${i}`}
+                  alt={alt}
+                  rank={i + 2}
+                  busy={busy}
+                  canAct={!isVerified || canAcceptUntrusted}
+                  onAccept={() => onAction(
+                    citation.id, 'select_alternative',
+                    { selected_alternative: alt })}
+                />
+              ))}
+            </div>
+          ) : null}
+
+          {/* ── Review actions (suppressed for verified tiles) ──────────── */}
+          {isNeedsReview ? (
+            <div className="flex flex-wrap items-center gap-1 pt-1
+                            border-t border-navy-700">
+              {canAcceptUntrusted ? (
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => onAction(citation.id, 'accept_untrusted')}
+                  data-testid={`citation-accept-${citation.concept_id}`}
+                  className="text-2xs px-2 py-0.5 rounded
+                             border border-green-500/40 text-green-300
+                             hover:bg-green-500/15 disabled:opacity-50
+                             disabled:cursor-not-allowed">
+                  Accept primary
+                </button>
+              ) : null}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => onAction(citation.id, 'reject')}
+                data-testid={`citation-reject-${citation.concept_id}`}
+                className="text-2xs px-2 py-0.5 rounded
+                           border border-red-500/40 text-red-400
+                           hover:bg-red-500/15 disabled:opacity-50
+                           disabled:cursor-not-allowed">
+                Reject
+              </button>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => setShowManual(!showManual)}
+                data-testid={`citation-manual-toggle-${citation.concept_id}`}
+                className="text-2xs px-2 py-0.5 rounded
+                           border border-navy-600 text-text-secondary
+                           hover:bg-navy-700/40 disabled:opacity-50
+                           disabled:cursor-not-allowed">
+                {showManual ? 'Cancel manual' : 'Manual override'}
+              </button>
+              {busy ? (
+                <Loader2 className="w-3 h-3 animate-spin text-text-muted" />
+              ) : null}
+            </div>
+          ) : null}
+
+          {/* ── Manual override form ───────────────────────────────────── */}
+          {showManual && isNeedsReview ? (
+            <div className="pt-1 border-t border-navy-700 space-y-1">
+              <p className="text-2xs text-text-muted">
+                Paste any citation if none of the options above are
+                suitable.
+              </p>
+              <input
+                type="text" placeholder="Author (Surname, A. A.)"
+                value={manualAuthor}
+                onChange={(e) => setManualAuthor(e.target.value)}
+                data-testid={`citation-manual-author-${citation.concept_id}`}
+                className="w-full text-2xs px-2 py-1 rounded
+                           bg-navy-800 border border-navy-700
+                           text-text-primary placeholder:text-text-muted" />
+              <div className="flex gap-1">
+                <input
+                  type="text" placeholder="Year"
+                  value={manualYear}
+                  onChange={(e) => setManualYear(e.target.value)}
+                  className="w-20 text-2xs px-2 py-1 rounded
+                             bg-navy-800 border border-navy-700
+                             text-text-primary placeholder:text-text-muted" />
+                <input
+                  type="text" placeholder="Title"
+                  value={manualTitle}
+                  onChange={(e) => setManualTitle(e.target.value)}
+                  className="flex-1 text-2xs px-2 py-1 rounded
+                             bg-navy-800 border border-navy-700
+                             text-text-primary placeholder:text-text-muted" />
+              </div>
+              <input
+                type="text" placeholder="Journal / institution"
+                value={manualJournal}
+                onChange={(e) => setManualJournal(e.target.value)}
+                className="w-full text-2xs px-2 py-1 rounded
+                           bg-navy-800 border border-navy-700
+                           text-text-primary placeholder:text-text-muted" />
+              <input
+                type="text" placeholder="URL"
+                value={manualUrl}
+                onChange={(e) => setManualUrl(e.target.value)}
+                className="w-full text-2xs px-2 py-1 rounded
+                           bg-navy-800 border border-navy-700
+                           text-text-primary placeholder:text-text-muted" />
+              <button
+                type="button"
+                disabled={busy || !manualAuthor || !manualYear || !manualTitle}
+                onClick={() => onAction(
+                  citation.id, 'manual_add', {
+                    manual_citation: {
+                      author:                 manualAuthor,
+                      year:                   manualYear,
+                      title:                  manualTitle,
+                      journal_or_institution: manualJournal || null,
+                      volume_issue_pages:     null,
+                      url:                    manualUrl || null,
+                    },
+                  })}
+                data-testid={`citation-manual-submit-${citation.concept_id}`}
+                className="text-2xs px-2 py-1 rounded
+                           bg-electric-blue text-navy-950 font-medium
+                           hover:bg-electric-blue/90 disabled:opacity-50
+                           disabled:cursor-not-allowed">
+                Save manual citation
+              </button>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+
+// ── EvidenceSection — small consistent wrapper for the six fields ───────────
+
+
+interface EvidenceSectionProps {
+  label: string
+  empty?: string
+  children?: React.ReactNode
+}
+
+
+function EvidenceSection({ label, empty, children }: EvidenceSectionProps) {
+  const hasContent = children !== null && children !== undefined
+    && children !== false && children !== '' && children !== 0
+  return (
+    <div>
+      <p className="text-2xs uppercase tracking-wider text-text-muted
+                    mb-0.5">
+        {label}
+      </p>
+      {hasContent ? (
+        <div className="text-2xs text-text-secondary leading-snug">
+          {children}
+        </div>
+      ) : (
+        <p className="text-2xs text-text-muted italic">
+          {empty ?? 'Not available.'}
+        </p>
+      )}
+    </div>
+  )
+}
+
+
+// ── AlternativeCard — one ranked alternative with its own evidence ──────────
+
+
+interface AlternativeCardProps {
+  alt: CitationAlternative
+  rank: number   // 2 for first alternative, 3 for second, etc.
+  busy: boolean
+  canAct: boolean
+  onAccept: () => void
+}
+
+
+function AlternativeCard({
+  alt, rank, busy, canAct, onAccept,
+}: AlternativeCardProps) {
+  const passLabel = alt.pass_source
+    ? PASS_SOURCE_LABEL[alt.pass_source] ?? alt.pass_source
+    : '—'
+  const rankReason = alt.pass_source
+    ? PASS_RANK_REASON[alt.pass_source]
+    : null
+
+  return (
+    <div data-testid="citation-alternative-card"
+         className="border border-navy-700 rounded p-1.5 space-y-1
+                    bg-navy-900/40">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="text-2xs text-text-muted">
+            Alternative #{rank} · {passLabel}
+          </p>
+          <p className="text-2xs text-text-secondary leading-tight">
+            {alt.author ?? '?'} ({alt.year ?? '?'}).{' '}
+            <em>{alt.title ?? alt.url ?? '—'}</em>
+          </p>
+          {alt.url ? (
+            <a href={alt.url}
                target="_blank"
                rel="noopener noreferrer"
                className="inline-flex items-center gap-1 text-2xs
-                          text-electric-blue hover:underline mt-0.5">
+                          text-electric-blue hover:underline">
               <ExternalLink className="w-2.5 h-2.5" />
-              {citation.journal_or_institution ?? citation.url}
+              {alt.journal_or_institution ?? alt.url}
             </a>
           ) : null}
         </div>
+        <span className={`shrink-0 text-2xs px-1.5 py-0.5 rounded border
+                          ${_confidenceCls(alt.confidence_score)}`}
+              title="Confidence score (0.0-1.0)">
+          {_confidenceLabel(alt.confidence_score)}
+        </span>
       </div>
 
-      {/* Action row — primary actions on top, manual entry collapses
-          below to keep the row compact. */}
-      <div className="flex flex-wrap items-center gap-1">
-        {canAcceptUntrusted ? (
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => onAction(citation.id, 'accept_untrusted')}
-            data-testid={`citation-accept-${citation.concept_id}`}
-            className="text-2xs px-2 py-0.5 rounded
-                       border border-green-500/40 text-green-300
-                       hover:bg-green-500/15 disabled:opacity-50
-                       disabled:cursor-not-allowed">
-            Accept
-          </button>
-        ) : null}
-
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => onAction(citation.id, 'reject')}
-          data-testid={`citation-reject-${citation.concept_id}`}
-          className="text-2xs px-2 py-0.5 rounded
-                     border border-red-500/40 text-red-400
-                     hover:bg-red-500/15 disabled:opacity-50
-                     disabled:cursor-not-allowed">
-          Reject
-        </button>
-
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => setShowManual(!showManual)}
-          data-testid={`citation-manual-toggle-${citation.concept_id}`}
-          className="text-2xs px-2 py-0.5 rounded
-                     border border-navy-600 text-text-secondary
-                     hover:bg-navy-700/40 disabled:opacity-50
-                     disabled:cursor-not-allowed">
-          {showManual ? 'Cancel manual' : 'Add manually'}
-        </button>
-
-        {busy ? (
-          <Loader2 className="w-3 h-3 animate-spin text-text-muted" />
-        ) : null}
-      </div>
-
-      {/* Alternatives row — only when search returned any. */}
-      {citation.alternatives && citation.alternatives.length > 0 ? (
-        <div className="pt-1 border-t border-navy-700 space-y-1">
-          <p className="text-2xs text-text-muted">
-            Alternative results found by wider searches:
-          </p>
-          {citation.alternatives.map((alt, i) => (
-            <button
-              key={`${citation.id}-alt-${i}`}
-              type="button"
-              disabled={busy}
-              onClick={() => onAction(
-                citation.id, 'select_alternative',
-                { selected_alternative: alt })}
-              data-testid={`citation-alt-${citation.concept_id}-${i}`}
-              className="block w-full text-left text-2xs p-1 rounded
-                         border border-navy-700 hover:border-electric-blue
-                         hover:bg-navy-800 disabled:opacity-50
-                         disabled:cursor-not-allowed transition-colors">
-              <span className="text-electric-blue">Use this →</span>{' '}
-              {alt.author ?? '?'} ({alt.year ?? '?'}).{' '}
-              <em className="text-text-secondary">
-                {alt.title ?? alt.url ?? '—'}
-              </em>
-              {alt.pass_source ? (
-                <span className="ml-1 text-text-muted">
-                  [{alt.pass_source.replace(/_/g, ' ')}]
-                </span>
-              ) : null}
-            </button>
-          ))}
-        </div>
+      {alt.supporting_extract ? (
+        <p className="text-2xs text-text-secondary italic leading-snug">
+          “{alt.supporting_extract}”
+        </p>
       ) : null}
 
-      {/* Manual entry — only when toggled. */}
-      {showManual ? (
-        <div className="pt-1 border-t border-navy-700 space-y-1">
-          <p className="text-2xs text-text-muted">
-            Enter the citation manually:
-          </p>
-          <input
-            type="text" placeholder="Author (Surname, A. A.)"
-            value={manualAuthor}
-            onChange={(e) => setManualAuthor(e.target.value)}
-            data-testid={`citation-manual-author-${citation.concept_id}`}
-            className="w-full text-2xs px-2 py-1 rounded
-                       bg-navy-800 border border-navy-700
-                       text-text-primary placeholder:text-text-muted" />
-          <div className="flex gap-1">
-            <input
-              type="text" placeholder="Year"
-              value={manualYear}
-              onChange={(e) => setManualYear(e.target.value)}
-              className="w-20 text-2xs px-2 py-1 rounded
-                         bg-navy-800 border border-navy-700
-                         text-text-primary placeholder:text-text-muted" />
-            <input
-              type="text" placeholder="Title"
-              value={manualTitle}
-              onChange={(e) => setManualTitle(e.target.value)}
-              className="flex-1 text-2xs px-2 py-1 rounded
-                         bg-navy-800 border border-navy-700
-                         text-text-primary placeholder:text-text-muted" />
-          </div>
-          <input
-            type="text" placeholder="Journal / institution"
-            value={manualJournal}
-            onChange={(e) => setManualJournal(e.target.value)}
-            className="w-full text-2xs px-2 py-1 rounded
-                       bg-navy-800 border border-navy-700
-                       text-text-primary placeholder:text-text-muted" />
-          <input
-            type="text" placeholder="URL"
-            value={manualUrl}
-            onChange={(e) => setManualUrl(e.target.value)}
-            className="w-full text-2xs px-2 py-1 rounded
-                       bg-navy-800 border border-navy-700
-                       text-text-primary placeholder:text-text-muted" />
-          <button
-            type="button"
-            disabled={busy || !manualAuthor || !manualYear || !manualTitle}
-            onClick={() => onAction(
-              citation.id, 'manual_add', {
-                manual_citation: {
-                  author:                 manualAuthor,
-                  year:                   manualYear,
-                  title:                  manualTitle,
-                  journal_or_institution: manualJournal || null,
-                  volume_issue_pages:     null,
-                  url:                    manualUrl || null,
-                },
-              })}
-            data-testid={`citation-manual-submit-${citation.concept_id}`}
-            className="text-2xs px-2 py-1 rounded
-                       bg-electric-blue text-navy-950 font-medium
-                       hover:bg-electric-blue/90 disabled:opacity-50
-                       disabled:cursor-not-allowed">
-            Save manual citation
-          </button>
-        </div>
+      {rankReason ? (
+        <p className="text-2xs text-text-muted leading-snug">
+          <span className="font-medium">Why ranked below: </span>
+          {rankReason}
+        </p>
+      ) : null}
+
+      {canAct ? (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onAccept}
+          data-testid="citation-accept-alternative"
+          className="text-2xs px-2 py-0.5 rounded
+                     border border-electric-blue/60 text-electric-blue
+                     hover:bg-electric-blue/10 disabled:opacity-50
+                     disabled:cursor-not-allowed">
+          Accept this instead
+        </button>
       ) : null}
     </div>
   )
