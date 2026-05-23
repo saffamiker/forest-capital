@@ -124,6 +124,43 @@ class TestCommitAttribution:
                 "that admits both.")
 
 
+class TestPRMergeAttribution:
+    """Michael's merged-PR count was zero because the query
+    counted pr_suggestions.reviewed_by — that table only carries
+    PRs that reference a failure number (the triage workflow),
+    not every merged PR. The fix counts merge commits in
+    commit_activity matched on Michael's git identities."""
+
+    def test_pr_query_reads_commit_activity_not_pr_suggestions(self):
+        src = inspect.getsource(tp.fetch_team_activity)
+        # The michael_prs_merged section must use commit_activity
+        # with a merge-commit LIKE pattern, NOT pr_suggestions.
+        # Locate the line that assigns to michael_prs_merged and
+        # inspect the next ~6 lines of SQL.
+        pr_section = src.split('out["michael_prs_merged"]')[1]
+        # Inspect ~500 chars of context — well past the SQL block.
+        ctx = pr_section[:500]
+        assert "commit_activity" in ctx, (
+            "michael_prs_merged must query commit_activity for "
+            "merge commits, not pr_suggestions (which only carries "
+            "failure-linked PRs).")
+        assert "Merge pull request" in ctx, (
+            "Merge commits start with 'Merge pull request #N' — "
+            "the LIKE pattern that catches them must be present.")
+
+    def test_pr_query_admits_michael_git_identities(self):
+        src = inspect.getsource(tp.fetch_team_activity)
+        pr_section = src.split('out["michael_prs_merged"]')[1][:500]
+        # Same IN-clause shape the commits query uses — verifies the
+        # author filter is applied to the PR merge count too.
+        assert "LOWER(author) IN" in pr_section \
+            or "author IN" in pr_section, (
+                "michael_prs_merged must match against BOTH of "
+                "Michael's git identities (the same _TEAM_GIT_EMAILS "
+                "list the commit count uses), not just the platform "
+                "email.")
+
+
 # ── Fail-open contracts ──────────────────────────────────────────────────────
 
 

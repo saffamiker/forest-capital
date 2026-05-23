@@ -430,10 +430,34 @@ async def fetch_team_activity() -> dict[str, Any]:
                 f"SELECT COUNT(*) FROM commit_activity "
                 f"WHERE LOWER(author) IN ({placeholders})",
                 params_michael_git)
+            # Merged-PR count — hotfix May 23 2026 (the day-of fix).
+            # The earlier query counted pr_suggestions.reviewed_by =
+            # platform_email, which only counted PRs Bob ever
+            # "reviewed" inside the triage workflow (failure-link
+            # suggestions). Most merged PRs do not reference a
+            # failure and never enter pr_suggestions at all, so the
+            # count was 0 even on days with 8+ merged PRs.
+            #
+            # The durable source is the merge-commit pattern in
+            # commit_activity. GitHub's web-merge produces a commit
+            # whose message starts with 'Merge pull request #N'
+            # under the merger's GIT identity. Counting those by
+            # Michael's git_emails attributes correctly to him
+            # whether he merged from the GitHub UI or via gh pr
+            # merge from the CLI.
+            #
+            # CAVEAT: a "Squash and merge" or "Rebase and merge" UI
+            # choice produces a different message shape. Saffamiker
+            # uses standard merge commits on this repo per the
+            # gh pr merge --merge flag in the working conventions,
+            # so the LIKE pattern catches every merge today. If the
+            # convention changes, add a UNION ALL with the squash
+            # pattern.
             out["michael_prs_merged"] = await _try_count(s,
-                "SELECT COUNT(*) FROM pr_suggestions "
-                "WHERE reviewed_by = :e",
-                {"e": _TEAM_EMAILS["michael"]})
+                f"SELECT COUNT(*) FROM commit_activity "
+                f"WHERE LOWER(author) IN ({placeholders}) "
+                f"  AND message LIKE 'Merge pull request #%'",
+                params_michael_git)
             try:
                 from pathlib import Path
                 mig_dir = (Path(__file__).resolve().parents[1]
