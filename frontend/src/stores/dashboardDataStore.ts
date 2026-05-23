@@ -20,6 +20,13 @@
  * silent catches meant a transient failure persisted as "Unavailable"
  * forever until a hard refresh).
  *
+ * WARMING-RETRY (May 23 2026 iteration 2): backend now returns
+ * `warming: true` + `retry_after_ms` when the precomputed cache is
+ * cold. The store schedules a retry after that delay (capped at 3
+ * retries) so the data appears as soon as the background refresh
+ * completes — no 30s timeouts on a fresh deploy. The Dashboard
+ * renders a "computing..." state while warming.
+ *
  * Macro intentionally stays in MacroResearchPanel's component state
  * — the panel polls /api/v1/research/latest every 30s to pick up
  * mid-session refreshes, and the polling logic is tied to the
@@ -52,11 +59,22 @@ export interface CumulativeReturns {
 export type { EfficientFrontierData } from '../types/api'
 
 
+// Maximum warming retries before giving up. The backend's
+// retry_after_ms is 10s by default; 3 retries = ~30s of waiting,
+// enough for a typical cold-cache warmup to complete (the
+// frontier sweep is 10-30s on Render shared CPU).
+const MAX_WARMING_RETRIES = 3
+
+
 interface DashboardDataStore {
   cumulative: CumulativeReturns | null
   frontier: EfficientFrontierData | null
   cumulativeError: string | null
   frontierError: string | null
+  /** True when at least one of the two endpoints returned
+   *  `warming: true` on the most recent load — the Dashboard
+   *  renders a "computing..." state instead of an error. */
+  warming: boolean
   loaded: boolean
   loading: boolean
 
@@ -76,27 +94,44 @@ export const useDashboardDataStore = create<DashboardDataStore>((set, get) => ({
   frontier: null,
   cumulativeError: null,
   frontierError: null,
+  warming: false,
   loaded: false,
   loading: false,
 
   load: async () => {
     if (get().loaded || get().loading) return
     set({ loading: true })
-    await _fetchAll(set)
+    await _fetchAll(set, 0)
   },
 
   refresh: async () => {
-    set({ loaded: false, loading: true,
+    set({ loaded: false, loading: true, warming: false,
           cumulativeError: null, frontierError: null })
-    await _fetchAll(set)
+    await _fetchAll(set, 0)
   },
 
   _reset: () => set({
     cumulative: null, frontier: null,
     cumulativeError: null, frontierError: null,
+    warming: false,
     loaded: false, loading: false,
   }),
 }))
+
+
+/** Schedule a retry of _fetchAll after `delayMs`. Wrapped so the
+ *  retry path is testable and so a future change can swap to a
+ *  proper exponential backoff if needed. */
+function _scheduleRetry(
+  set: (state: Partial<DashboardDataStore>) => void,
+  delayMs: number,
+  retriesSoFar: number,
+): void {
+  if (typeof window === 'undefined') return
+  window.setTimeout(() => {
+    void _fetchAll(set, retriesSoFar + 1)
+  }, Math.max(1_000, delayMs))
+}
 
 
 // Shared fetch helper — runs cumulative + frontier in parallel.
@@ -105,20 +140,32 @@ export const useDashboardDataStore = create<DashboardDataStore>((set, get) => ({
 // versa). `loaded` flips to true only once both promises have
 // settled (success or surfaced error) so a remount immediately
 // reads whatever is in the store.
+//
+// `retriesSoFar` tracks the warming-retry chain so we stop after
+// MAX_WARMING_RETRIES regardless of how persistently the backend
+// reports `warming: true`. Past the cap we treat the warming flag
+// as a real error and surface it.
 async function _fetchAll(
   set: (state: Partial<DashboardDataStore>) => void,
+  retriesSoFar: number,
 ): Promise<void> {
   // Cumulative — GET /api/v1/analytics/academic; the .cumulative_
   // returns field is what we cache. Server-side cached via the
   // analytics_metrics_cache layer (Item 7) so even repeated calls
   // are fast.
-  const cumulativeP = axios.get<{ cumulative_returns?: CumulativeReturns }>(
+  const cumulativeP = axios.get<{
+    cumulative_returns?: CumulativeReturns
+    warming?: boolean
+    retry_after_ms?: number
+  }>(
     '/api/v1/analytics/academic',
     { timeout: 30000 },
   ).then(
     (res) => ({
       cumulative: res.data.cumulative_returns ?? null,
-      cumulativeError: res.data.cumulative_returns
+      cumulativeWarming: Boolean(res.data.warming),
+      cumulativeRetryMs: Number(res.data.retry_after_ms ?? 10000),
+      cumulativeError: (res.data.cumulative_returns || res.data.warming)
         ? null
         : 'Cumulative return series unavailable in cache — try Refresh',
     }),
@@ -126,7 +173,12 @@ async function _fetchAll(
       const msg = axios.isAxiosError(err)
         ? (err.message || 'request failed')
         : (err as Error)?.message || 'load failed'
-      return { cumulative: null, cumulativeError: `Load failed: ${msg}` }
+      return {
+        cumulative: null,
+        cumulativeWarming: false,
+        cumulativeRetryMs: 0,
+        cumulativeError: `Load failed: ${msg}`,
+      }
     },
   )
 
@@ -134,23 +186,55 @@ async function _fetchAll(
   // MAX_SHARPE method. Frontier failures are surfaced (the
   // previous silent catch on the Dashboard meant users saw an
   // empty chart with no idea why).
-  const frontierP = axios.post<{ efficient_frontier: EfficientFrontierData }>(
+  const frontierP = axios.post<{
+    efficient_frontier?: EfficientFrontierData & { warming?: boolean }
+    warming?: boolean
+    retry_after_ms?: number
+  }>(
     '/api/optimize/weights',
     { method: 'MAX_SHARPE' },
     { timeout: 30000 },
   ).then(
     (res) => ({
       frontier: res.data.efficient_frontier ?? null,
+      frontierWarming: Boolean(res.data.warming
+        || res.data.efficient_frontier?.warming),
+      frontierRetryMs: Number(res.data.retry_after_ms ?? 10000),
       frontierError: null,
     }),
     (err: unknown) => {
       const msg = axios.isAxiosError(err)
         ? (err.message || 'request failed')
         : (err as Error)?.message || 'load failed'
-      return { frontier: null, frontierError: `Load failed: ${msg}` }
+      return {
+        frontier: null,
+        frontierWarming: false,
+        frontierRetryMs: 0,
+        frontierError: `Load failed: ${msg}`,
+      }
     },
   )
 
   const [c, f] = await Promise.all([cumulativeP, frontierP])
-  set({ ...c, ...f, loaded: true, loading: false })
+
+  const stillWarming = c.cumulativeWarming || f.frontierWarming
+  const canRetry = retriesSoFar < MAX_WARMING_RETRIES
+
+  // Strip the warming/retry helper keys before set() so they don't
+  // pollute the public store shape.
+  set({
+    cumulative:      c.cumulative,
+    cumulativeError: c.cumulativeError,
+    frontier:        f.frontier,
+    frontierError:   f.frontierError,
+    warming:         stillWarming,
+    loaded:          true,
+    loading:         stillWarming && canRetry,
+  })
+
+  if (stillWarming && canRetry) {
+    const delay = Math.max(
+      c.cumulativeRetryMs, f.frontierRetryMs, 10000)
+    _scheduleRetry(set, delay, retriesSoFar)
+  }
 }

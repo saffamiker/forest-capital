@@ -846,54 +846,29 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
                 log.info("academic_analytics_cache_stale_hit")
                 return stale
 
-        # Cold cache — run the inline compute (same code path the
-        # endpoint used before May 22 2026). The refresh hook will
-        # write the row in the background so future requests hit
-        # the cache.
-        import pandas as pd
-        from tools import analytics as an
-
-        monthly = await get_monthly_returns()
-        strategies = await get_latest_strategy_cache()
-        ff = await get_ff_factors()
-
-        if not monthly or not strategies:
-            return {
-                "available": False,
-                "note": "market data or strategy cache not yet populated — "
-                        "load the dashboard once to warm the caches",
-            }
-
-        idx = pd.to_datetime(monthly["dates"])
-        equity = pd.Series(monthly["equity"], index=idx)
-        ig = pd.Series(monthly["ig"], index=idx)
-        hy = pd.Series(monthly["hy"], index=idx)
-        rf = pd.Series(monthly["rf"], index=idx)
-
-        benchmark = strategies.get("BENCHMARK", {})
-        bench_series = an._pairs_to_series(benchmark.get("monthly_returns") or [])
-
-        asset_series = {"EQUITY": equity, "IG": ig, "HY": hy}
-        if not bench_series.empty:
-            asset_series["BENCHMARK"] = bench_series
-
-        from strategy_metadata import STRATEGY_METADATA
-
+        # COLD CACHE — never run the inline compute on the request
+        # thread. The inline path runs factor_loadings (OLS per
+        # strategy), regime_conditional_performance, and 5 other
+        # heavy reductions; on Render's shared CPU it can exceed the
+        # frontend's 30s timeout. Hotfix iteration 2 (May 23 2026):
+        # fire the background refresh and return a warming response
+        # immediately. The frontend retries every ~10s until the
+        # cache row lands.
+        log.warning("academic_analytics_cache_cold_warming")
+        try:
+            from tools.precomputed_analytics import (
+                trigger_refresh_async,
+            )
+            if latest_hash:
+                trigger_refresh_async(latest_hash)
+        except Exception:  # noqa: BLE001
+            pass
         return {
-            "available": True,
-            "study_period": {
-                "start": str(idx[0].date()),
-                "end": str(idx[-1].date()),
-                "n_months": len(idx),
-            },
-            "summary_statistics": an.summary_statistics(asset_series, rf),
-            "cumulative_returns": an.cumulative_returns(strategies),
-            "rolling_correlation": an.rolling_correlation(equity, ig, hy, window=12),
-            "rolling_excess_return": an.rolling_excess_return(strategies, window=12),
-            "regime_conditional": an.regime_conditional_performance(strategies, rf),
-            "drawdown_comparison": an.drawdown_comparison(strategies),
-            "factor_loadings": an.factor_loadings(strategies, ff or []),
-            "strategy_metadata": STRATEGY_METADATA,
+            "available": False,
+            "warming": True,
+            "retry_after_ms": 10000,
+            "note": ("Analytics are being computed in the "
+                     "background — refresh in ~10 seconds."),
         }
     except Exception as exc:
         log.warning("academic_analytics_failed", error=str(exc))
@@ -3121,20 +3096,22 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
                             error=str(cache_exc))
 
             if raw_frontier is None:
-                # Cold cache — run the inline sweep. This is the slow
-                # path that caused the 30s timeout; we still keep it
-                # as the fallback so a fresh deploy without a cache
-                # row returns SOMETHING rather than a mock. Future
-                # requests will hit the cache once the background
-                # refresh writes the row.
-                log.warning("optimize_frontier_cache_miss_inline_sweep")
-                raw_frontier = _frontier(
-                    returns, n_points=100,
-                    periods_per_year=12, risk_free=rf_annual,
-                )
-                # Fire the precomputed refresh in the background so
-                # the NEXT request hits the cache (avoids repeated
-                # slow inline sweeps on a sustained cold-cache state).
+                # COLD CACHE — never run the inline sweep on the
+                # request thread. The 100-point SLSQP sweep takes
+                # 10-30s on Render's shared CPU, which exceeds the
+                # frontend's 30s timeout. Hotfix iteration 2 (May
+                # 23 2026): instead of blocking, fire the precompute
+                # refresh in the background and return a warming
+                # response immediately. The frontend retries every
+                # ~10s until the cache row lands.
+                #
+                # The warming response carries an empty frontier
+                # array + a `warming: true` flag the EfficientFrontier
+                # component reads to render a "computing..." state.
+                # portfolio_points still ships so the strategy
+                # scatter is visible during the warmup.
+                log.warning("optimize_frontier_cache_cold_warming",
+                            method=body.method)
                 try:
                     from tools.cache import get_latest_strategy_hash
                     from tools.precomputed_analytics import (
@@ -3145,6 +3122,22 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
                         trigger_refresh_async(h)
                 except Exception:  # noqa: BLE001
                     pass
+
+                portfolio_points = await _strategy_portfolio_points()
+                return {
+                    "method":  body.method,
+                    "weights": result["weights"],
+                    "sum_check": result["sum_check"],
+                    "warming": True,
+                    "retry_after_ms": 10000,
+                    "efficient_frontier": {
+                        "frontier_points":   [],
+                        "portfolio_points":  portfolio_points,
+                        "max_sharpe_point":  None,
+                        "min_variance_point": None,
+                        "warming":           True,
+                    },
+                }
 
             # efficient_frontier() returns a flat list keyed `return`, but
             # the EfficientFrontier component reads `expected_return` off a

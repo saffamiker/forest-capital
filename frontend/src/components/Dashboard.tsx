@@ -287,6 +287,7 @@ export default function Dashboard() {
   const {
     cumulative, frontier,
     cumulativeError, frontierError,
+    warming: dashboardWarming,
     load: loadDashboardData,
   } = useDashboardDataStore()
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
@@ -574,14 +575,29 @@ export default function Dashboard() {
             <div
               data-testid="cumulative-empty-state"
               className="h-[280px] flex flex-col items-center justify-center text-muted text-xs gap-1">
-              <span>Cumulative return series unavailable</span>
-              {cumulativeError ? (
-                <span
-                  data-testid="cumulative-error"
-                  className="text-red-400 text-2xs italic max-w-[60ch] text-center">
-                  {cumulativeError}
-                </span>
-              ) : null}
+              {dashboardWarming ? (
+                <>
+                  <span data-testid="cumulative-warming"
+                        className="text-electric">
+                    Computing cumulative returns…
+                  </span>
+                  <span className="text-2xs italic">
+                    The analytics cache is being built — this view
+                    will refresh automatically within a few seconds.
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span>Cumulative return series unavailable</span>
+                  {cumulativeError ? (
+                    <span
+                      data-testid="cumulative-error"
+                      className="text-red-400 text-2xs italic max-w-[60ch] text-center">
+                      {cumulativeError}
+                    </span>
+                  ) : null}
+                </>
+              )}
             </div>
           )}
         </div>
@@ -725,8 +741,16 @@ export default function Dashboard() {
         )}
 
         {/* Efficient frontier */}
-        {frontier ? (
+        {frontier && (frontier.frontier_points?.length ?? 0) > 0 ? (
           <EfficientFrontier data={frontier} />
+        ) : dashboardWarming ? (
+          <div
+            data-testid="frontier-warming"
+            className="card p-4 text-center text-electric text-xs">
+            Computing efficient frontier… the analytics cache is
+            being built — this view will refresh automatically within
+            a few seconds.
+          </div>
         ) : frontierError ? (
           <div
             data-testid="frontier-error"
