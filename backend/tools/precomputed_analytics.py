@@ -234,6 +234,83 @@ async def refresh_academic_analytics(data_hash: str) -> None:
                     error=str(exc))
 
 
+async def refresh_efficient_frontier(data_hash: str) -> None:
+    """Pre-computes the long-only efficient frontier curve (100-point
+    target-return sweep) once per data_hash and caches it under
+    metric_kind='efficient_frontier'.
+
+    Hotfix (May 23 2026): the /api/optimize/weights endpoint runs
+    `efficient_frontier(returns, n_points=100)` on the request thread
+    — 100 SLSQP solves with maxiter=1000 per solve. On Render's
+    shared CPU this routinely exceeds the frontend's 30s timeout,
+    blanking the Efficient Frontier chart on the dashboard.
+
+    The curve depends ONLY on the equity / IG / HY monthly returns —
+    same input → same output. Cache it here and the endpoint reads
+    it in ~50ms instead of running the full sweep per request. The
+    per-method `weights` are still computed inline (a single solve
+    is fast), but the 100-point curve is shared across every method
+    so the cache hit serves every request.
+
+    Computed once per strategy data_hash; the same hash that gates
+    every other analytics cache row keeps this row in step.
+
+    Cached payload shape:
+      {
+        "frontier_points":  [...],  # 100-ish points
+        "rf_annual":        float,  # mean monthly DTB3 × 12
+        "tickers":          ["EQUITY", "IG", "HY"],
+        "n_obs":            int,
+      }
+    """
+    try:
+        import pandas as pd
+        from tools.cache import get_monthly_returns
+        from tools.optimizer import efficient_frontier as _frontier
+
+        monthly = await get_monthly_returns()
+        if not monthly or len(monthly.get("dates", [])) < 24:
+            log.info("efficient_frontier_refresh_skipped_short")
+            return
+
+        returns = pd.DataFrame(
+            {
+                "EQUITY": monthly["equity"],
+                "IG":     monthly["ig"],
+                "HY":     monthly["hy"],
+            },
+            index=pd.to_datetime(monthly["dates"]),
+        ).dropna()
+
+        rf_monthly = monthly.get("rf") or []
+        rf_annual = (sum(rf_monthly) / len(rf_monthly) * 12) \
+            if rf_monthly else 0.0
+
+        # The slow part — runs ~10-30s on Render shared CPU. By
+        # running it inside this background refresh task instead of
+        # the request thread, the user never sees the cost.
+        raw_frontier = _frontier(
+            returns, n_points=100,
+            periods_per_year=12, risk_free=rf_annual,
+        )
+
+        payload = {
+            "frontier_points": raw_frontier,
+            "rf_annual":       round(float(rf_annual), 6),
+            "tickers":         list(returns.columns),
+            "n_obs":           len(returns),
+        }
+        await set_metric(data_hash, "efficient_frontier", payload,
+                         source="refresh_efficient_frontier")
+        log.info("precomputed_efficient_frontier_complete",
+                 data_hash=data_hash[:8] if data_hash else None,
+                 n_points=len(raw_frontier),
+                 n_obs=len(returns))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("precomputed_efficient_frontier_failed",
+                    error=str(exc))
+
+
 async def refresh_diversification_metrics(data_hash: str) -> None:
     """Item 8 — the seven diversification suite metrics. Pure NumPy /
     pandas / scipy; same data sources as refresh_academic_analytics.
@@ -371,6 +448,11 @@ async def refresh_all_analytics(data_hash: str) -> None:
     log.info("precomputed_analytics_refresh_started",
              data_hash=data_hash[:8] if data_hash else None)
     await refresh_academic_analytics(data_hash)
+    # Hotfix (May 23 2026): the 100-point efficient frontier sweep
+    # now runs once here at ingestion time instead of on every
+    # /api/optimize/weights request. Read precomputed inside the
+    # endpoint; the slow SLSQP path never hits a request thread.
+    await refresh_efficient_frontier(data_hash)
     await refresh_diversification_metrics(data_hash)
     # F1 + F4 (May 22 2026) — sensitivity and the risk-free rate
     # config are the last two endpoints that did inline compute on
