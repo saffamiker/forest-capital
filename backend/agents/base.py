@@ -174,6 +174,7 @@ def call_claude(
     tools: list[dict] | None = None,
     *,
     visual_context: list[dict] | None = None,
+    strategy_ids: list[str] | None = None,
 ) -> str:
     """
     Thin wrapper around the Anthropic messages API.
@@ -231,8 +232,11 @@ def call_claude(
     kwargs: dict[str, Any] = {
         "model": model,
         "max_tokens": max_tokens,
-        "system": _with_diversification_context(
-            _with_macro_context(_with_academic_context(system_prompt))),
+        "system": _with_strategy_context(
+            _with_diversification_context(
+                _with_macro_context(
+                    _with_academic_context(system_prompt))),
+            strategy_ids),
         "messages": [{"role": "user", "content": content}],
     }
     if tools:
@@ -307,6 +311,54 @@ def _with_diversification_context(system_prompt: str) -> str:
     except Exception as exc:  # noqa: BLE001
         log.warning("diversification_context_inject_failed",
                     error=str(exc))
+        return system_prompt
+
+
+def _with_strategy_context(
+    system_prompt: str,
+    strategy_ids: list[str] | None,
+) -> str:
+    """
+    Appends per-strategy characterisation blocks (Item 9 commit 5) to a
+    system prompt when:
+      1. The caller passes a non-empty strategy_ids list (explicit
+         override — e.g. the report writer's iterate endpoint can name
+         the strategy the user has selected), OR
+      2. The per-request ContextVar set by the orchestrator
+         (tools.strategy_context.set_active_strategies) carries a
+         non-empty list, in which case every nested call_claude inside
+         that request automatically sees the strategy context without
+         per-call wiring.
+
+    No-op when both paths are empty — every existing call_claude
+    invocation keeps its previous behaviour bitwise identical. The
+    strategy_context cache is populated by
+    tools/strategy_context.refresh_strategy_context_cache() (lifespan
+    startup + after refresh_strategy_characterisations).
+
+    Order matters in the wrapper chain: the strategy context is the
+    outermost (appended LAST, closest to the user message) because it
+    is the most specific signal — the agent reasons about a NAMED
+    strategy, with the global context (macro / diversification /
+    academic) framing the backdrop. Mirrors macro_context's ordering
+    rationale.
+
+    Fail-open — any error leaves the prompt unchanged so an injection
+    failure never blocks an agent call.
+    """
+    try:
+        from tools.strategy_context import (
+            inject_strategy_context, get_active_strategies,
+        )
+        # Explicit override wins; ContextVar fallback otherwise.
+        effective = (
+            list(strategy_ids) if strategy_ids
+            else get_active_strategies())
+        if not effective:
+            return system_prompt
+        return inject_strategy_context(system_prompt, effective)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("strategy_context_inject_failed", error=str(exc))
         return system_prompt
 
 

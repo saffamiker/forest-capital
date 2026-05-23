@@ -231,6 +231,18 @@ async def lifespan(app: FastAPI):
             await refresh_findings_context()
         except Exception as exc:  # noqa: BLE001
             log.warning("findings_context_warm_failed", error=str(exc))
+        # Item 9 commit 5 — strategy context cache warm-read. Same
+        # warm-read pattern as the other three context blocks: agent
+        # calls in the first seconds after restart see whatever
+        # strategy_characterisations the previous deploy produced. The
+        # next refresh_strategy_characterisations() run refreshes the
+        # cache via tools/strategy_context.refresh_strategy_context_
+        # cache() at the end of its orchestrator. Fail-open.
+        try:
+            from tools.strategy_context import refresh_strategy_context_cache
+            await refresh_strategy_context_cache()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("strategy_context_warm_failed", error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
@@ -3137,6 +3149,21 @@ async def council_explain(
 
     from agents.explainer_agent import stream_metric_explanation
     from agents.usage import start_usage_capture
+    from tools.strategy_context import (
+        detect_strategies_in_query, set_active_strategies,
+    )
+
+    # Item 9 commit 5 — strategy context. The InfoIcon click on a
+    # strategy-specific metric ("Strategy: REGIME_SWITCHING Sharpe") or
+    # a metric label that names a strategy injects the strategy's
+    # characterisation into the explainer's system prompt via the
+    # per-request ContextVar. _stream_haiku copies the request context
+    # into its worker thread so the var propagates. No-op when no
+    # strategy is named.
+    named = detect_strategies_in_query(
+        f"{metric} {current_value or ''}")
+    if named:
+        set_active_strategies(named)
 
     # Seed the usage bucket before the Haiku stream starts; _stream_haiku
     # copies the request context into its worker thread so record_usage
@@ -3189,6 +3216,21 @@ async def council_explain_data(
 
     from agents.explainer_agent import stream_data_explanation
     from agents.usage import start_usage_capture
+    from tools.strategy_context import (
+        detect_strategies_in_query, set_active_strategies,
+    )
+
+    # Item 9 commit 5 — strategy context. The Data Explain (✨) click
+    # typically carries the strategy name in the metric label and the
+    # full strategy row in the context dict. Scan both for known
+    # strategy ids and set the per-request ContextVar so the explainer
+    # system prompt picks up the characterisation block.
+    haystack = (
+        f"{metric} {current_value or ''} "
+        + (str(context) if context else ''))
+    named = detect_strategies_in_query(haystack)
+    if named:
+        set_active_strategies(named)
 
     # Same pattern as /api/council/explain — seed before the stream worker
     # thread starts so its copied context inherits this bucket.

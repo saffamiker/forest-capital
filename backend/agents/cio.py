@@ -182,6 +182,40 @@ class CIO:
         """
         log.info("council_deliberation_started", query_len=len(query))
 
+        # Item 9 commit 5 — strategy context injection. Detect which
+        # strategies the query names and set the per-request ContextVar
+        # so every nested call_claude in this deliberation (the four
+        # specialists + draft consensus + synthesis) automatically picks
+        # up the strategy characterisation block from the cache. The
+        # value propagates into the specialist threads via
+        # contextvars.copy_context() in the ThreadPoolExecutor fan-out
+        # below. The finally block at the end clears the var so the
+        # next request starts from a clean slate.
+        from tools.strategy_context import (
+            detect_strategies_in_query, set_active_strategies,
+            clear_active_strategies,
+        )
+        named_strategies = detect_strategies_in_query(query)
+        if named_strategies:
+            set_active_strategies(named_strategies)
+            log.info("council_strategy_context_injected",
+                     strategies=named_strategies)
+
+        try:
+            return self._deliberate_inner(
+                query, strategy_results, history)
+        finally:
+            clear_active_strategies()
+
+    def _deliberate_inner(
+        self,
+        query: str,
+        strategy_results: dict[str, Any],
+        history: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The original deliberation body — wrapped by deliberate()
+        so the per-request strategy-context ContextVar is set up
+        once and torn down once around the whole flow."""
         # Step 1-5: Brief the four specialists IN PARALLEL. Each .analyse()
         # is an independent, synchronous, network-bound LLM call; run
         # sequentially they take ~120s and Render 502s the council

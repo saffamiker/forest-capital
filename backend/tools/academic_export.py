@@ -302,6 +302,24 @@ def harness_narrative(
         context, indent=2, default=str)
     user_message = f"{task}\n\nDATA (cite only these figures):\n{ctx_str}"
 
+    # Item 9 commit 5 — strategy context. The midpoint paper / brief /
+    # deck sections reference specific strategies (Section 2 leads with
+    # ranked_findings[0], every paragraph carries a verified number).
+    # Detect every strategy id named in the task + context dump and
+    # set the per-request ContextVar so call_claude inside the harness
+    # picks up each strategy's characterisation block. No-op when no
+    # strategy is named — the harness retry path reuses the same
+    # ContextVar value the first attempt set.
+    try:
+        from tools.strategy_context import (
+            detect_strategies_in_query, set_active_strategies,
+        )
+        named = detect_strategies_in_query(f"{task} {ctx_str}")
+        if named:
+            set_active_strategies(named)
+    except Exception:  # noqa: BLE001
+        pass
+
     try:
         from agents.academic_writer import _SYSTEM_PROMPT
         from agents.base import SONNET_MODEL, WEB_SEARCH_TOOL, call_claude

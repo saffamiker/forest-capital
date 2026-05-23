@@ -679,6 +679,15 @@ async def refresh_strategy_characterisations(data_hash: str) -> None:
             except Exception as exc:  # noqa: BLE001
                 log.warning("strategy_characterisation_row_failed",
                             strategy_id=strategy_id, error=str(exc))
+        # Item 9 commit 5 — warm the strategy context cache so the
+        # agent injectors pick up the new characterisations on the
+        # next call_claude. Fail-open: a refresh failure here logs
+        # but does not raise.
+        try:
+            from tools.strategy_context import refresh_strategy_context_cache
+            await refresh_strategy_context_cache()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("strategy_context_warm_failed", error=str(exc))
         log.info("strategy_characterisation_refresh_complete",
                  data_hash=data_hash[:8] if data_hash else None)
     except Exception as exc:  # noqa: BLE001
