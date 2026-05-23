@@ -205,3 +205,48 @@ def test_provenance_api_endpoint_returns_series_key():
     resp = client.get("/api/v1/provenance")
     data = resp.json()
     assert "series" in data
+
+
+def test_provenance_endpoint_does_not_500_on_nan_floats(tmp_path,
+                                                         monkeypatch):
+    """May 23 2026 regression. A provenance.json written by an older
+    pipeline build may contain literal NaN / Infinity tokens (Python
+    json.dumps default behaviour). The endpoint loads them as
+    float('nan') / float('inf'), starlette/orjson then refuses to
+    serialise — 500 with "Out of range float values are not JSON
+    compliant". The fix sanitises at read time (_sanitise_nan_floats
+    in main.py). This test pins the contract: NaN in the file MUST
+    NOT 500 the endpoint; the NaN-bearing field must render as
+    null instead."""
+    from fastapi.testclient import TestClient
+    import importlib
+    import main as main_module
+    # Write a provenance.json with literal NaN tokens — exactly the
+    # shape json.dumps(..., allow_nan=True) emits.
+    bad_file = tmp_path / "provenance.json"
+    bad_file.write_text(
+        '{"series": [],'
+        ' "cross_validation": {'
+        '   "equity": {'
+        '     "max_discrepancy_pct": NaN,'
+        '     "mean_discrepancy_pct": Infinity,'
+        '     "status": "WARN"'
+        '   }'
+        ' },'
+        ' "last_pipeline_run": null}')
+    # Point the endpoint's path constant at the bad file.
+    monkeypatch.setattr(main_module, "_PROVENANCE_PATH", bad_file)
+    importlib.reload(main_module)
+    # importlib.reload re-binds module attributes — re-apply the
+    # path override after reload.
+    monkeypatch.setattr(main_module, "_PROVENANCE_PATH", bad_file)
+    client = TestClient(main_module.app, headers=_provenance_auth())
+    resp = client.get("/api/v1/provenance")
+    # Must be 200, not 500. The NaN field renders as JSON null.
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    eq = data["cross_validation"]["equity"]
+    assert eq["max_discrepancy_pct"] is None
+    assert eq["mean_discrepancy_pct"] is None
+    # Non-NaN fields pass through unchanged.
+    assert eq["status"] == "WARN"
