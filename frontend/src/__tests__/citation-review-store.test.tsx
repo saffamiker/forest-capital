@@ -41,6 +41,10 @@ function makeCitations() {
       alternatives: [],
       reviewer_email: null, reviewed_at: null, review_action: null,
       formatted: 'Sharpe, W. F. (1994). The Sharpe Ratio.',
+      supporting_extract: null,
+      selection_rationale: null,
+      confidence_score: null,
+      finding_supported: null,
     },
     {
       id: 2, concept_id: 'cvar_coherent_risk',
@@ -54,6 +58,10 @@ function makeCitations() {
       alternatives: [],
       reviewer_email: null, reviewed_at: null, review_action: null,
       formatted: null,
+      supporting_extract: null,
+      selection_rationale: null,
+      confidence_score: null,
+      finding_supported: null,
     },
   ]
 }
@@ -137,6 +145,14 @@ describe('CitationReviewPanel — manual form toggle persists', () => {
     })
 
     const { unmount } = render(<CitationReviewPanel generationId={42} />)
+    // Tiles default to collapsed in the May 23 2026 redesign —
+    // expand the pending tile so the manual-toggle button is in
+    // the DOM. The expansion state ALSO persists through the
+    // store, which is what the second-mount assertion exercises.
+    await waitFor(() =>
+      screen.getByTestId('citation-toggle-cvar_coherent_risk'))
+    fireEvent.click(
+      screen.getByTestId('citation-toggle-cvar_coherent_risk'))
     await waitFor(() => screen.getByTestId(
       'citation-manual-toggle-cvar_coherent_risk'))
 
@@ -150,6 +166,9 @@ describe('CitationReviewPanel — manual form toggle persists', () => {
 
     unmount()
     render(<CitationReviewPanel generationId={42} />)
+    // The expansion + manual-form open states are both stored —
+    // both must rehydrate on remount so Bob sees the same UI he
+    // left.
     expect(
       screen.getByTestId(
         'citation-manual-author-cvar_coherent_risk'),
