@@ -26,6 +26,8 @@
  */
 import { useMemo, useState } from 'react'
 import { Loader2 } from 'lucide-react'
+import InfoIcon from '../InfoIcon'
+import DataExplainButton from '../DataExplainButton'
 import {
   ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip,
   ReferenceLine, ResponsiveContainer, Cell,
@@ -143,6 +145,10 @@ export function CaptureScatter() {
         <div className="min-w-0">
           <h2 className="text-base font-semibold text-white">
             Up / Down Capture
+            <InfoIcon
+              tooltipKey="capture_scatter"
+              metricLabel="Up / Down Capture"
+              size="md" />
           </h2>
           <p className="text-xs text-muted mt-0.5">
             Each point is one strategy's up-market vs down-market capture of
@@ -167,6 +173,10 @@ export function CaptureScatter() {
               {PERIOD_LABEL[p]}
             </button>
           ))}
+          <DataExplainButton
+            metric="Up / Down Capture"
+            context="academic_project"
+          />
         </div>
       </div>
 

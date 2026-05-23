@@ -22,6 +22,8 @@
  */
 import { useState, useMemo } from 'react'
 import { Loader2 } from 'lucide-react'
+import InfoIcon from '../InfoIcon'
+import DataExplainButton from '../DataExplainButton'
 
 
 import { useRiskContribution } from '../../lib/useDiversificationData'
@@ -111,8 +113,15 @@ export function RiskContributionBar() {
          data-testid="risk-contribution-bar">
       <div className="flex items-start justify-between mb-3 gap-2 flex-wrap">
         <div className="min-w-0">
-          <h2 className="text-base font-semibold text-white">
-            Marginal Contribution to Risk
+          <h2 className="text-base font-semibold text-white
+                         flex items-center min-w-0">
+            <span className="truncate">
+              Marginal Contribution to Risk
+            </span>
+            <InfoIcon
+              tooltipKey="risk_contribution_bar"
+              metricLabel="Marginal Contribution to Risk"
+              size="md" />
           </h2>
           <p className="text-xs text-muted mt-0.5">
             What percentage of portfolio risk each strategy contributes.
@@ -147,6 +156,10 @@ export function RiskContributionBar() {
               </button>
             )
           })}
+          <DataExplainButton
+            metric="Marginal Contribution to Risk"
+            context="academic_project"
+          />
         </div>
       </div>
 

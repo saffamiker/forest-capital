@@ -74,6 +74,43 @@ export const EXPLAINER_TOOLTIPS: Record<string, string> = {
     'Excess return divided by tracking error. Measures consistency of '
     + 'outperformance — higher means more reliable alpha.',
 
+  // ── Diversification charts (item 4, May 23 2026) ───────────────────────────
+  capture_scatter:
+    'Each strategy plotted by how much of the benchmark\'s upside it '
+    + 'captured (x-axis) vs how much of its downside (y-axis). The '
+    + 'ideal diversifier sits in the upper-left — captures most of '
+    + 'the rallies while sidestepping the drawdowns.',
+  correlation_heatmap:
+    'Pairwise Pearson correlation across the ten strategies and the '
+    + 'benchmark. Blue cells are negatively correlated (good '
+    + 'diversifiers); red cells move together. The 2022 break is '
+    + 'most visible by switching to the Post-2022 period view.',
+  crisis_performance_table:
+    'Per-strategy return during the four named crisis windows '
+    + '(GFC 2008-09, COVID 2020, 2022 rate hikes, dot-com 2000-02). '
+    + 'A strategy that holds up across multiple crises is a stronger '
+    + 'diversifier than one that survived a single regime.',
+  distribution_table:
+    'Distribution shape per strategy — mean monthly return, '
+    + 'volatility, skewness, kurtosis. Negative skew means more '
+    + 'big-loss months than big-gain months; high kurtosis means '
+    + 'fat tails (more extreme months than a normal distribution).',
+  drawdown_duration_table:
+    'Maximum drawdown plus the months spent in drawdown for each '
+    + 'strategy. A strategy with a shallow drawdown that recovers '
+    + 'quickly is preferable to one with the same loss that took '
+    + 'years to recover.',
+  risk_contribution_bar:
+    'Marginal contribution to portfolio risk per asset. Shows where '
+    + 'a portfolio\'s volatility actually comes from — risk parity '
+    + 'aims for equal contributions; concentrated strategies show '
+    + 'one asset dominating.',
+  tail_risk_table:
+    'Tail-risk metrics — historical VaR and CVaR at 95% and 99%. '
+    + 'CVaR (expected loss in the worst N% of months) is the more '
+    + 'honest measure: it captures the depth of bad tails, not just '
+    + 'their threshold.',
+
   // ── Analytics page — tables ────────────────────────────────────────────────
   regime_conditional_table:
     "Each strategy's performance split at the 2022 correlation regime "

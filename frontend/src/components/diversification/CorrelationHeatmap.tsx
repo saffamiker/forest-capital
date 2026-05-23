@@ -22,6 +22,8 @@
  */
 import { useMemo, useState } from 'react'
 import { Loader2 } from 'lucide-react'
+import InfoIcon from '../InfoIcon'
+import DataExplainButton from '../DataExplainButton'
 import { useCorrelationMatrices } from '../../lib/useDiversificationData'
 import type { CorrelationMatrixPayload } from '../../types/diversification'
 
@@ -165,6 +167,10 @@ export function CorrelationHeatmap() {
         <div className="min-w-0">
           <h2 className="text-base font-semibold text-white">
             Strategy Correlations
+            <InfoIcon
+              tooltipKey="correlation_heatmap"
+              metricLabel="Strategy Correlations"
+              size="md" />
           </h2>
           <p className="text-xs text-muted mt-0.5">
             Pairwise Pearson correlation across the ten strategies and the
@@ -190,6 +196,10 @@ export function CorrelationHeatmap() {
               {PERIOD_LABEL[p]}
             </button>
           ))}
+          <DataExplainButton
+            metric="Strategy Correlations"
+            context="academic_project"
+          />
         </div>
       </div>
 

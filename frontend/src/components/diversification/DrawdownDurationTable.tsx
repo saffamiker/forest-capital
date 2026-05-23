@@ -18,6 +18,8 @@
  * commit 1). All months are reported as integers (the backend rounds).
  */
 import { Loader2, AlertCircle } from 'lucide-react'
+import InfoIcon from '../InfoIcon'
+import DataExplainButton from '../DataExplainButton'
 import { useDrawdownDuration } from '../../lib/useDiversificationData'
 
 
@@ -64,23 +66,36 @@ export function DrawdownDurationTable() {
     <div className="card p-5"
          style={{ borderLeft: '3px solid #3b82f6' }}
          data-testid="drawdown-duration-table">
-      <div className="mb-3">
-        <h2 className="text-base font-semibold text-white">
-          Drawdown Duration
-        </h2>
-        <p className="text-xs text-muted mt-0.5">
-          Time spent underwater complements the depth figures elsewhere on
-          this page: a -20% drawdown that recovers in 6 months is a
-          fundamentally different risk profile from one that recovers in 36.
-          Strategies currently in drawdown carry an amber pill.
-        </p>
-        {anyCurrentlyUnderwater && (
-          <p className="text-2xs text-warning mt-2 inline-flex items-center gap-1">
-            <AlertCircle className="w-3 h-3" />
-            One or more strategies are presently underwater — read the
-            current-drawdown column carefully.
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="min-w-0 flex-1">
+          <h2 className="text-base font-semibold text-white
+                         flex items-center min-w-0">
+            <span className="truncate">Drawdown Duration</span>
+            <InfoIcon
+              tooltipKey="drawdown_duration_table"
+              metricLabel="Drawdown Duration"
+              size="md" />
+          </h2>
+          <p className="text-xs text-muted mt-0.5">
+            Time spent underwater complements the depth figures elsewhere on
+            this page: a -20% drawdown that recovers in 6 months is a
+            fundamentally different risk profile from one that recovers in 36.
+            Strategies currently in drawdown carry an amber pill.
           </p>
-        )}
+          {anyCurrentlyUnderwater && (
+            <p className="text-2xs text-warning mt-2 inline-flex items-center gap-1">
+              <AlertCircle className="w-3 h-3" />
+              One or more strategies are presently underwater — read the
+              current-drawdown column carefully.
+            </p>
+          )}
+        </div>
+        <div className="shrink-0">
+          <DataExplainButton
+            metric="Drawdown Duration"
+            context="academic_project"
+          />
+        </div>
       </div>
 
       <div className="overflow-x-auto" data-testid="drawdown-duration-scroll">

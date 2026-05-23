@@ -22,6 +22,8 @@
  */
 import { Loader2 } from 'lucide-react'
 import { useMemo } from 'react'
+import InfoIcon from '../InfoIcon'
+import DataExplainButton from '../DataExplainButton'
 import { useTailRisk } from '../../lib/useDiversificationData'
 import type { TailRiskRow } from '../../types/diversification'
 
@@ -83,15 +85,30 @@ export function TailRiskTable() {
     <div className="card p-5"
          style={{ borderLeft: '3px solid #3b82f6' }}
          data-testid="tail-risk-table">
-      <div className="mb-3">
-        <h2 className="text-base font-semibold text-white">Tail Risk</h2>
-        <p className="text-xs text-muted mt-0.5">
-          Historical-simulation Value-at-Risk and Conditional VaR at the 95% and
-          99% confidence levels, monthly and annualized. CVaR (Expected
-          Shortfall) is the average loss in the tail beyond VaR — the
-          conservative read of a strategy's bear-case month / year. Worst-third
-          on CVaR&nbsp;99% annual is tinted amber.
-        </p>
+      <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <h2 className="text-base font-semibold text-white
+                         flex items-center min-w-0">
+            <span className="truncate">Tail Risk</span>
+            <InfoIcon
+              tooltipKey="tail_risk_table"
+              metricLabel="Tail Risk"
+              size="md" />
+          </h2>
+          <p className="text-xs text-muted mt-0.5">
+            Historical-simulation Value-at-Risk and Conditional VaR at the 95% and
+            99% confidence levels, monthly and annualized. CVaR (Expected
+            Shortfall) is the average loss in the tail beyond VaR — the
+            conservative read of a strategy's bear-case month / year. Worst-third
+            on CVaR&nbsp;99% annual is tinted amber.
+          </p>
+        </div>
+        <div className="shrink-0">
+          <DataExplainButton
+            metric="Tail Risk"
+            context="academic_project"
+          />
+        </div>
       </div>
 
       <div className="overflow-x-auto" data-testid="tail-risk-scroll">
