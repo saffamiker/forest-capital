@@ -59,24 +59,24 @@ export const STRATEGY_METADATA: Record<string, StrategyMeta> = {
     name: 'Risk Parity',
     type: 'static',
     description:
-      'Weights are optimised so equity, IG and HY each contribute an '
+      'Weights are optimized so equity, IG and HY each contribute an '
       + 'equal share of portfolio risk.',
     construction:
-      'Weights optimised so each of equity, IG and HY contributes an '
+      'Weights optimized so each of equity, IG and HY contributes an '
       + 'equal share of total portfolio risk.',
     rationale:
       'Equalising risk contributions stops any single sleeve from '
       + 'dominating drawdowns.',
-    rebalancing: 'Quarterly, to optimised target weights.',
+    rebalancing: 'Quarterly, to optimized target weights.',
   },
   MIN_VARIANCE: {
     name: 'Minimum Variance',
     type: 'static',
     description:
-      'Weights are optimised to minimise portfolio variance over a '
+      'Weights are optimized to minimise portfolio variance over a '
       + 'rolling 36-month window.',
     construction:
-      'Weights optimised to minimise portfolio variance over a rolling '
+      'Weights optimized to minimise portfolio variance over a rolling '
       + '36-month covariance window.',
     rationale:
       'Covariance is estimable with far less error than expected return, '
@@ -149,7 +149,7 @@ export const STRATEGY_METADATA: Record<string, StrategyMeta> = {
     name: 'Black-Litterman',
     type: 'dynamic',
     description:
-      'Weights are optimised from a Black-Litterman posterior — the '
+      'Weights are optimized from a Black-Litterman posterior — the '
       + 'covariance regularisation is the main benefit at this stage.',
     construction:
       'Each quarter, form the Black-Litterman posterior from an '
@@ -166,7 +166,7 @@ export const STRATEGY_METADATA: Record<string, StrategyMeta> = {
     name: 'Max Sharpe Rolling',
     type: 'dynamic',
     description:
-      'Weights are optimised for Sharpe each quarter; the 36-month '
+      'Weights are optimized for Sharpe each quarter; the 36-month '
       + 'window trades estimation error against regime staleness.',
     construction:
       'Each quarter, solve for the maximum-Sharpe portfolio over the '

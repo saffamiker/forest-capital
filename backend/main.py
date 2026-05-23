@@ -299,14 +299,14 @@ async def request_magic_link(body: MagicLinkRequest, request: Request):
     if not await is_login_allowed(email):
         log.warning("magic_link_unauthorized_email", email_hash=hash(email))
         return MagicLinkResponse(
-            message="If that email is authorised, a login link has been sent.",
+            message="If that email is authorized, a login link has been sent.",
             status="pending",
             dev_mode=(ENVIRONMENT == "development"),
         )
     token = generate_magic_token(email)
     await send_magic_link(email, token)
     return MagicLinkResponse(
-        message="If that email is authorised, a login link has been sent.",
+        message="If that email is authorized, a login link has been sent.",
         status="sent",
         dev_mode=(ENVIRONMENT == "development"),
     )
@@ -8631,7 +8631,7 @@ async def ws_council(websocket: WebSocket):
         try:
             session = verify_session_token(token)
         except HTTPException:
-            await websocket.close(code=4003, reason="Unauthorised")
+            await websocket.close(code=4003, reason="Unauthorized")
             return
 
         log.info("ws_council_connected", user=session["email"])

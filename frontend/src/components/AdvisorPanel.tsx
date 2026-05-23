@@ -252,7 +252,7 @@ export default function AdvisorPanel({
                 <p>
                   The Academic Advisor cross-references your findings against
                   external academic sources, verifies every citation via web
-                  search, and prioritises feedback by grade weight.
+                  search, and prioritizes feedback by grade weight.
                 </p>
                 <p className="mt-2">
                   Citations are dropped automatically if the search tool could

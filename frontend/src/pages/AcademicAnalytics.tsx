@@ -1054,7 +1054,7 @@ function StrategyMethodologyPanel({ rows }: { rows: StrategyMeta[] }) {
   const [tab, setTab] = useState<MethodologyTab>('methodology')
   const fmtWeights = (w: StrategyMeta['weights']): string =>
     w == null
-      ? 'Optimised — weights are solved each rebalance, not fixed'
+      ? 'Optimized — weights are solved each rebalance, not fixed'
       : `Equity ${(w.equity * 100).toFixed(0)}% · IG ${(w.ig * 100).toFixed(0)}%`
         + ` · HY ${(w.hy * 100).toFixed(0)}%`
 
