@@ -16,6 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 
 import CitationReviewPanel from '../components/reportwriter/CitationReviewPanel'
+import { useCitationReviewStore } from '../stores/citationReviewStore'
 
 
 // Citation fixture covering all the states the panel renders for.
@@ -75,11 +76,19 @@ let originalFetch: typeof global.fetch
 
 beforeEach(() => {
   originalFetch = global.fetch
+  // Zustand store now backs the panel (May 23 2026 — persistence
+  // fix for the bug where citations + the "Add manually" toggle
+  // reset on navigation). Reset the store between tests so cached
+  // citations from one test do not leak into the next — the
+  // store's stale-while-revalidate logic would otherwise return
+  // stale data before the test's mocked fetch resolves.
+  useCitationReviewStore.getState()._reset()
 })
 
 afterEach(() => {
   global.fetch = originalFetch
   vi.clearAllMocks()
+  useCitationReviewStore.getState()._reset()
 })
 
 
