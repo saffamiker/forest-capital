@@ -91,7 +91,13 @@ _WEB_FETCH_TOOL = {
 }
 
 
-_SYSTEM_PROMPT = f"""You are a macro market research analyst for a Forest \
+_SYSTEM_PROMPT = f"""CRITICAL INSTRUCTION: \
+Your ENTIRE response must be a single valid JSON object. Do not write \
+any text, explanation, or reasoning before or after the JSON. Do not \
+use markdown code fences. Do not describe what you are doing. Start \
+your response with {{ and end with }}. Nothing else is acceptable.
+
+You are a macro market research analyst for a Forest \
 Capital portfolio intelligence platform built by graduate students at the \
 McColl School of Business, Queens University Charlotte. The platform \
 analyses equity / investment-grade-bond / high-yield-bond strategies \
@@ -352,12 +358,18 @@ def _filter_to_verified_signals(
 # MAX_OUTPUT_TOKENS (1024) is too low — a complete response runs
 # 2500-3500 tokens and was being truncated mid-JSON, leaving
 # _parse_digest_json no valid object to extract and dropping every
-# run into the failure_digest path (May 23 2026 production fire:
-# runs 9, 10, 11 all returned the fallback message because the
-# response hit max_tokens and stop_reason='max_tokens'). 4096 is
-# the new floor — gives the model headroom for elaborate signals
-# while staying well within Sonnet's per-message cap.
-_RESEARCH_MAX_OUTPUT_TOKENS = 4096
+# run into the failure_digest path.
+#
+# May 23 2026 — initial bump to 4096 was still binding. Production
+# log on row 13 showed the model emitting ~3500 chars of preamble
+# + intermediate "I'll run multiple searches..." text between tool
+# calls before reaching the JSON, leaving < 600 tokens for the
+# JSON itself. JSON truncated mid-key (stop_reason='max_tokens',
+# error 'Expecting "," delimiter: char 3576'). Bumped to 8192 —
+# 3x headroom over the typical full response so the JSON survives
+# even when the model emits an elaborate tool-using preamble. Still
+# well within Sonnet's per-message cap.
+_RESEARCH_MAX_OUTPUT_TOKENS = 8192
 
 
 def generate_digest(

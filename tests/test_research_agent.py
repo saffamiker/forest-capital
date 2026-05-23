@@ -268,18 +268,18 @@ def _stub_response(text: str, search_urls: list[str] | None = None):
 
 
 class TestGenerateDigest:
-    def test_research_max_output_tokens_default_is_at_least_4096(self):
-        """May 23 2026 production fire: runs 9-11 all returned the
-        failure digest because the response was truncated by the
-        project-wide MAX_OUTPUT_TOKENS=1024. The research agent issues
-        3-5 web_search calls + up to 4 web_fetch calls and composes a
-        JSON digest with 5+ signals — well over 1024 tokens. The cap
-        was bumped to 4096; this test pins the floor so a future
-        config change that lowers it fails loudly."""
-        assert ra._RESEARCH_MAX_OUTPUT_TOKENS >= 4096
+    def test_research_max_output_tokens_default_is_at_least_8192(self):
+        """May 23 2026 production fire: runs 9-11 returned the failure
+        digest because the response was truncated by the project-wide
+        MAX_OUTPUT_TOKENS=1024. First fix bumped to 4096 — still
+        binding because the model emits an elaborate intermediate
+        preamble between tool calls that eats into the JSON budget
+        (row 13 log: 'Expecting "," delimiter: char 3576'). Bumped
+        again to 8192; this test pins the new floor."""
+        assert ra._RESEARCH_MAX_OUTPUT_TOKENS >= 8192
 
     def test_generate_digest_passes_research_cap_to_sdk(self):
-        """The 4096 cap must actually reach the messages.create call;
+        """The 8192 cap must actually reach the messages.create call;
         regressing back to the lower project default would silently
         reintroduce the truncation."""
         client = MagicMock()
@@ -288,7 +288,20 @@ class TestGenerateDigest:
         with patch.object(ra, "get_anthropic_client", return_value=client):
             ra.generate_digest()
         _, kwargs = client.messages.create.call_args
-        assert kwargs["max_tokens"] >= 4096
+        assert kwargs["max_tokens"] >= 8192
+
+    def test_system_prompt_starts_with_critical_instruction(self):
+        """The CRITICAL INSTRUCTION block must lead the system prompt
+        so the model encounters the JSON-only directive before any
+        analyst framing. May 23 2026 row 13 evidence: the previous
+        prompt buried the JSON-only rule under analyst-role framing
+        and the model still emitted a tool-using preamble. Pin the
+        top-of-prompt position so a future refactor doesn't lose it."""
+        prompt_head = ra._SYSTEM_PROMPT[:300]
+        assert "CRITICAL INSTRUCTION" in prompt_head
+        assert "single valid JSON object" in prompt_head
+        assert "Do not use markdown code fences" in prompt_head
+        assert "Start your response with {" in prompt_head
 
     def test_empty_parse_log_includes_stop_reason(self):
         """If max_tokens DID truncate the response, the warning log
