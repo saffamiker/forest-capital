@@ -16,6 +16,7 @@ import Settings from './pages/Settings'
 import StoryboardEditor from './pages/StoryboardEditor'
 import SectionEditor from './pages/SectionEditor'
 import DocumentEditor from './pages/DocumentEditor'
+import ReportWriter from './pages/ReportWriter'
 import { BrandProvider } from './context/BrandContext'
 import { UIProvider } from './context/UIContext'
 import { SessionProvider } from './context/SessionContext'
@@ -229,6 +230,7 @@ export default function App() {
                 <Route path="qa" element={<QAHub />} />
                 <Route path="reports" element={<Reports />} />
                 <Route path="settings" element={<Settings />} />
+                <Route path="reports/writer" element={<ReportWriter />} />
                 <Route path="reports/storyboard" element={<StoryboardEditor />} />
                 <Route path="reports/document/:documentId" element={<SectionEditor />} />
                 <Route path="editor/:draftId" element={<DocumentEditor />} />
