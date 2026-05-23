@@ -1737,6 +1737,107 @@ async def get_template_rubric(
             status_code=500, detail="Read rubric failed.")
 
 
+@app.post("/api/v1/reports/pipeline-audit")
+@limiter.limit("30/minute")
+async def post_pipeline_audit(
+    request: Request, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Records one pipeline audit row. Posted by the report-writer UI
+    after the pipeline reaches step 7 (success) or fails at any
+    earlier step. The body shape is the flat per-step dict the UI
+    builds from its timing state; the writer fills in the
+    triggered_by from the authenticated session.
+
+    Body:
+      generation_id:        int | null
+      template_id:          str (required)
+      total_pipeline_ms:    int | null
+      failure_step:         int | null
+      failure_reason:       str | null
+      steps:                {step_<n>_status, step_<n>_ms,
+                             step_5_mismatch_count?,
+                             step_6_conditions?}
+    """
+    if ENVIRONMENT == "test":
+        return {"id": None}
+    template_id = body.get("template_id")
+    if not template_id:
+        raise HTTPException(
+            status_code=422, detail="template_id is required.")
+    try:
+        from tools.pipeline_audit import (
+            record_audit_run, update_generation_timings,
+        )
+        steps = body.get("steps") or {}
+        new_id = await record_audit_run(
+            generation_id=body.get("generation_id"),
+            template_id=str(template_id),
+            triggered_by=session.get("email"),
+            steps=steps,
+            total_pipeline_ms=body.get("total_pipeline_ms"),
+            failure_step=body.get("failure_step"),
+            failure_reason=body.get("failure_reason"),
+        )
+        # When the run produced a generation, also persist the
+        # per-step ms dict on the row so the summary card has a
+        # canonical record. Fail-open.
+        gen_id = body.get("generation_id")
+        if isinstance(gen_id, int):
+            timings = {
+                k.replace("_ms", ""): v
+                for k, v in steps.items() if k.endswith("_ms")
+            }
+            if timings:
+                await update_generation_timings(gen_id, timings)
+        return {"id": new_id}
+    except Exception as exc:
+        log.warning("pipeline_audit_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Pipeline audit write failed.")
+
+
+@app.get("/api/v1/admin/pipeline-audit")
+async def list_pipeline_audit_runs(
+    limit: int = 100,
+    session: dict = Depends(require_sysadmin),
+):
+    """Newest-first audit runs for the sysadmin Settings panel."""
+    if ENVIRONMENT == "test":
+        return {"runs": []}
+    try:
+        from tools.pipeline_audit import list_audit_runs
+        runs = await list_audit_runs(limit=limit)
+        return {"runs": runs}
+    except Exception as exc:
+        log.warning("pipeline_audit_list_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Read audit runs failed.")
+
+
+@app.get("/api/v1/admin/pipeline-audit/{audit_id}")
+async def get_pipeline_audit_run(
+    audit_id: int,
+    session: dict = Depends(require_sysadmin),
+):
+    """Single audit run by id for the expand-row view."""
+    if ENVIRONMENT == "test":
+        return {"error": "not_found"}
+    try:
+        from tools.pipeline_audit import get_audit_run
+        row = await get_audit_run(audit_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Run not found.")
+        return row
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("pipeline_audit_read_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Read audit run failed.")
+
+
 @app.post("/api/v1/reports/templates/{template_id}/rubric")
 @limiter.limit("6/minute")
 async def post_upload_rubric(
