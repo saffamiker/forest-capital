@@ -14,6 +14,11 @@ import type { EfficientFrontierData } from '../types/api'
 import { useStrategiesStore } from '../stores/strategiesStore'
 import { useRegimeStore } from '../stores/regimeStore'
 import { useGlossaryStore } from '../stores/glossaryStore'
+import { useDataStatus, tableOf } from '../hooks/useDataStatus'
+import {
+  useCharacterisationsStore,
+} from '../stores/strategyCharacterisationsStore'
+import { PortfolioProfileModal } from './PortfolioProfileModal'
 import ExplainableText from './ExplainableText'
 import InfoIcon from './InfoIcon'
 import ChartCommentStrip from './ChartCommentStrip'
@@ -133,15 +138,25 @@ interface StrategyTableRowProps {
   onSelect: (name: string) => void
   /** Drives the mobile column visibility — matches the table header. */
   showAll: boolean
+  /** AI-generated short descriptor from the characterisations store
+   *  (Item 9). Null when not yet loaded or unavailable. */
+  behaviouralTag: string | null
+  /** Opens the Portfolio Profile modal for this strategy. The host
+   *  (Dashboard) owns the modal state; the tag click hands the
+   *  strategy_id up. */
+  onOpenProfile: (strategyId: string, displayName: string) => void
 }
 
-function StrategyTableRow({ s, rank, selected, onSelect, showAll }: StrategyTableRowProps) {
+function StrategyTableRow({
+  s, rank, selected, onSelect, showAll, behaviouralTag, onOpenProfile,
+}: StrategyTableRowProps) {
   const isSignificant = s.is_significant
   const pFmt = (p: number | undefined) => p == null ? '—' : p >= 0.01 ? p.toFixed(3) : p.toFixed(4)
   // Per-column mobile visibility — indexes line up with STRATEGY_TABLE_COLUMNS.
   const c = (i: number) => colVis(STRATEGY_TABLE_COLUMNS[i], showAll)
   // Strategy-rules metadata behind the ⓘ icon on the strategy name.
   const meta = STRATEGY_METADATA[s.strategy_name]
+  const displayName = s.strategy_name.replace(/_/g, ' ')
   return (
     <tr
       className={`border-t border-border cursor-pointer transition-colors ${
@@ -151,29 +166,52 @@ function StrategyTableRow({ s, rank, selected, onSelect, showAll }: StrategyTabl
     >
       <td className={`px-3 py-2 font-mono text-muted text-xs ${c(0)}`}>{rank}</td>
       <td className={`px-3 py-2 ${STICKY_NAME_CELL} ${c(1)}`}>
-        <div className="flex items-center gap-2">
-          <span className="inline-flex items-center">
-            <span className="text-white text-xs font-medium">{s.strategy_name.replace(/_/g, ' ')}</span>
-            {/* ⓘ — hover for the strategy type + one-line description,
-                click for the full rules explanation. Wrapped so the
-                click does not also select the table row. */}
-            <span
-              className="inline-flex"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <InfoIcon
-                tooltipKey={strategyTooltipKey(s.strategy_name)}
-                metricLabel={`${s.strategy_name.replace(/_/g, ' ')} strategy`}
-                {...(meta ? { currentValue: strategyMetaSummary(meta) } : {})}
-              />
+        <div className="flex flex-col gap-0.5">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center">
+              <span className="text-white text-xs font-medium">{displayName}</span>
+              {/* ⓘ — hover for the strategy type + one-line description,
+                  click for the full rules explanation. Wrapped so the
+                  click does not also select the table row. */}
+              <span
+                className="inline-flex"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <InfoIcon
+                  tooltipKey={strategyTooltipKey(s.strategy_name)}
+                  metricLabel={`${displayName} strategy`}
+                  {...(meta ? { currentValue: strategyMetaSummary(meta) } : {})}
+                />
+              </span>
             </span>
-          </span>
-          <span className={`text-2xs px-1 py-0.5 rounded ${
-            s.strategy_type === 'dynamic'
-              ? 'text-electric bg-electric/10 border border-electric/20'
-              : 'text-muted bg-navy-700 border border-border'
-          }`}>{(s.strategy_type ?? 'static').toUpperCase()}</span>
-          {isSignificant && <span className="badge-pass">SIG</span>}
+            <span className={`text-2xs px-1 py-0.5 rounded ${
+              s.strategy_type === 'dynamic'
+                ? 'text-electric bg-electric/10 border border-electric/20'
+                : 'text-muted bg-navy-700 border border-border'
+            }`}>{(s.strategy_type ?? 'static').toUpperCase()}</span>
+            {isSignificant && <span className="badge-pass">SIG</span>}
+          </div>
+          {/* Item 9 Commit 4 — AI-generated behavioural_tag below the
+              name. Clickable: opens the Portfolio Profile modal for
+              this strategy directly. The click stops propagation so
+              the row's onSelect (which opens the inline strategy
+              detail) does not also fire. Falls back to "Open Profile"
+              before the characterisations store has loaded so the
+              affordance is always there. */}
+          <button
+            type="button"
+            data-testid={`behavioural-tag-${s.strategy_name}`}
+            onClick={(e) => {
+              e.stopPropagation()
+              onOpenProfile(s.strategy_name, displayName)
+            }}
+            className="text-2xs text-electric/80 hover:text-electric
+                        text-left max-w-[280px] truncate font-normal
+                        leading-tight"
+            title={behaviouralTag ?? 'Open Portfolio Profile'}
+          >
+            {behaviouralTag ?? 'Open Portfolio Profile →'}
+          </button>
         </div>
       </td>
       <td className={`px-3 py-2 font-mono text-white text-xs ${c(2)}`}>{s.cagr != null ? (s.cagr * 100).toFixed(1) : '—'}%</td>
@@ -229,12 +267,28 @@ export default function Dashboard() {
   // tooltips have content on first hover. The store is idempotent — this
   // fires at most once per session.
   const loadTerms = useGlossaryStore((s) => s.loadTerms)
+  // F3 (May 22 2026) — share the data-status fetch with DataCurrencyBar
+  // and the Analytics page via the Zustand store rather than firing
+  // a duplicate /api/v1/admin/data-status request from here.
+  const { status: dataStatus } = useDataStatus()
+  const strategyTable = tableOf(dataStatus, 'strategy_results_cache')
+  const dataFreshness = strategyTable
+    ? {
+        last_updated: strategyTable.last_updated,
+        staleness: (strategyTable.staleness as Staleness),
+      }
+    : null
   const [frontier, setFrontier] = useState<EfficientFrontierData | null>(null)
   const [cumulative, setCumulative] = useState<CumulativeReturns | null>(null)
-  const [dataFreshness, setDataFreshness] = useState<
-    { last_updated: string | null; staleness: Staleness } | null
-  >(null)
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
+  // Item 9 Commit 4 — Portfolio Profile modal state. The tag below
+  // each strategy name on the table opens this modal. The
+  // characterisations store dedupes its fetch so loading it on Dashboard
+  // mount is free — same store the inline panel reads from on Analytics.
+  const [profileModalFor, setProfileModalFor] = useState<
+    { strategyId: string; displayName: string } | null>(null)
+  const charsById = useCharacterisationsStore((s) => s.byId)
+  const loadCharacterisations = useCharacterisationsStore((s) => s.load)
   // Mobile only — reveals the columns hidden in the reduced phone view.
   const [showAllCols, setShowAllCols] = useState(false)
   const cumulativeChartRef = useRef<HTMLDivElement>(null)
@@ -249,6 +303,10 @@ export default function Dashboard() {
     void loadStrategies()
     void loadRegime()
     void loadTerms()
+    // Item 9 — fetch per-strategy characterisations so the behavioural_tag
+    // below each strategy name renders the AI text. The store dedupes,
+    // so this is free for every consumer beyond the first.
+    void loadCharacterisations()
 
     const loadFrontier = async () => {
       try {
@@ -273,19 +331,9 @@ export default function Dashboard() {
     }
     void loadCumulative()
 
-    // Strategy-data freshness — reuses the Settings data-status endpoint so
-    // the Dashboard shows the same server-side computed_at + staleness.
-    const loadDataStatus = async () => {
-      try {
-        const res = await axios.get<{
-          tables: { name: string; last_updated: string | null; staleness: Staleness }[]
-        }>('/api/v1/admin/data-status')
-        const t = res.data.tables?.find((x) => x.name === 'strategy_results_cache')
-        if (t) setDataFreshness({ last_updated: t.last_updated, staleness: t.staleness })
-      } catch (_) { /* freshness line is omitted on failure */ }
-    }
-    void loadDataStatus()
-  }, [loadStrategies, loadRegime, loadTerms])
+    // Strategy-data freshness — the useDataStatus hook (line above)
+    // pulls it from the shared Zustand store. No fetch here.
+  }, [loadStrategies, loadRegime, loadTerms, loadCharacterisations])
 
   const cumulativeData = cumulative?.points ?? []
   const sorted = [...strategies].sort((a, b) => (b.sharpe_ratio ?? 0) - (a.sharpe_ratio ?? 0))
@@ -615,6 +663,10 @@ export default function Dashboard() {
                     selected={selectedStrategy === s.strategy_name}
                     onSelect={setSelectedStrategy}
                     showAll={showAllCols}
+                    behaviouralTag={
+                      charsById[s.strategy_name]?.behavioural_tag ?? null}
+                    onOpenProfile={(strategyId, displayName) =>
+                      setProfileModalFor({ strategyId, displayName })}
                   />
                 ))}
               </tbody>
@@ -661,6 +713,16 @@ export default function Dashboard() {
         {/* Efficient frontier */}
         {frontier && <EfficientFrontier data={frontier} />}
       </div>
+
+      {/* Item 9 Commit 4 — the Portfolio Profile modal, opened by the
+          behavioural_tag click below each strategy name. Sits at the
+          page root so its z-index dominates the page content; the
+          modal owns its backdrop and Esc-to-close handler. */}
+      <PortfolioProfileModal
+        strategyId={profileModalFor?.strategyId ?? null}
+        strategyName={profileModalFor?.displayName}
+        onClose={() => setProfileModalFor(null)}
+      />
     </div>
   )
 }

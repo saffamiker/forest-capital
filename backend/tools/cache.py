@@ -21,6 +21,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -394,6 +395,11 @@ async def set_strategy_cache(
             )
             await session.commit()
             log.info("strategy_cache_written", strategy_hash=strategy_hash, n_strategies=len(results))
+        # Bust the get_latest_strategy_hash memo so the new hash is
+        # picked up immediately — otherwise the next batch of
+        # analytics requests within the 5-second TTL would still see
+        # the previous hash and miss the freshly-refreshed metrics.
+        _hash_memo_clear()
         # Item 7 (May 22 2026) — fire the pre-computed analytics
         # refresh so the next /api/v1/analytics/academic request
         # reads a single cached row instead of recomputing 7 NumPy
@@ -427,10 +433,46 @@ async def clear_strategy_cache() -> int:
             await session.commit()
             removed = res.rowcount or 0
             log.info("strategy_cache_cleared", rows=removed)
-            return removed
+        # The cleared table has no hash anymore — drop the memo so
+        # the next read goes to the DB and reflects the empty state.
+        _hash_memo_clear()
+        return removed
     except Exception as exc:
         log.warning("strategy_cache_clear_error", error=str(exc))
         return 0
+
+
+# ── Strategy-hash memo (F2 fix, May 22 2026) ──────────────────────────────────
+# The seven diversification analytics endpoints each call
+# get_latest_strategy_hash() at the top of their three-tier read. When
+# the Analytics page mounts, those seven endpoints fire in parallel —
+# seven identical 'SELECT strategy_hash ... ORDER BY computed_at DESC
+# LIMIT 1' queries within a few ms of each other. A small in-process
+# TTL memo coalesces them into one DB hit.
+#
+# Why module-level (not per-request): the seven requests are seven
+# distinct HTTP requests, each with its own request.state — a per-
+# request decorator would memoise within one request (where the value
+# is fetched exactly once anyway) and do nothing for the cross-request
+# duplication. A short module-level TTL is the only shape that
+# eliminates the seven duplicate queries the audit identified.
+#
+# Why 5 seconds: the hash only changes when new strategies are
+# computed (rare — a data ingestion event). A 5-second staleness window
+# is fine: at worst, one batch of analytics requests right after a fresh
+# ingestion sees the previous hash and falls back to the stale-cache
+# row in analytics_metrics_cache — still valid data, just one
+# generation behind. The refresh hook fires asynchronously after the
+# strategy write, so subsequent batches pick up the new hash.
+_HASH_MEMO_TTL_SECONDS = 5.0
+_hash_memo: dict[str, tuple[float, str | None]] = {}
+
+
+def _hash_memo_clear() -> None:
+    """Drops the in-process strategy_hash memo. Called by tests and by
+    the strategy_cache write path so a fresh ingestion is picked up
+    immediately rather than waiting out the TTL."""
+    _hash_memo.clear()
 
 
 async def get_latest_strategy_hash() -> str | None:
@@ -439,8 +481,18 @@ async def get_latest_strategy_hash() -> str | None:
     row. Smart audit caching compares it against the latest QA verdict's
     hash to tell whether the methodology audit is still current. None when
     no strategies have been computed (or on a database error — fail-open).
+
+    Memoised for 5 seconds in-process to coalesce the seven parallel
+    diversification endpoint calls that fire on Analytics page mount.
+    The strategy hash changes only on data ingestion; a short TTL is
+    cheap insurance against a thundering herd.
     """
+    now = time.monotonic()
+    cached = _hash_memo.get("latest")
+    if cached and (now - cached[0]) < _HASH_MEMO_TTL_SECONDS:
+        return cached[1]
     if not _DB_AVAILABLE:
+        _hash_memo["latest"] = (now, None)
         return None
     try:
         from sqlalchemy import text
@@ -449,7 +501,9 @@ async def get_latest_strategy_hash() -> str | None:
                 "SELECT strategy_hash FROM strategy_results_cache "
                 "ORDER BY computed_at DESC LIMIT 1"))
             r = row.fetchone()
-            return str(r[0]) if r and r[0] else None
+            value = str(r[0]) if r and r[0] else None
+            _hash_memo["latest"] = (now, value)
+            return value
     except Exception as exc:
         log.warning("latest_strategy_hash_read_error", error=str(exc))
     return None

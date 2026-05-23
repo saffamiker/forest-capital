@@ -148,6 +148,26 @@ in the final document.
 _AI_DRAFT_BANNER = "AI DRAFT — REQUIRES HUMAN REVIEW\n\n"
 
 
+def _writer_system_prompt() -> str:
+    """Returns _SYSTEM_PROMPT with the latest analytical findings block
+    appended.
+
+    Item 11 (analytical staging report, May 22 2026) — when the
+    Academic Writer generates any report or document section, the
+    latest staged findings_md is injected as a context block before
+    the writing prompt so reports cite only pre-computed numbers
+    rather than model assumptions. Fail-open: an empty findings cache
+    (no run yet) returns the prompt unchanged so the writer keeps
+    working in cold-deploy / pre-stage situations.
+    """
+    try:
+        from tools.analytical_findings import inject_findings_context
+        return inject_findings_context(_SYSTEM_PROMPT)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("findings_context_inject_failed", error=str(exc))
+        return _SYSTEM_PROMPT
+
+
 class AcademicWriter:
     """
     Generates APA-formatted academic prose for the three written deliverables.
@@ -203,7 +223,7 @@ class AcademicWriter:
         )
 
         try:
-            text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message,
+            text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
                                max_tokens=800, tools=[WEB_SEARCH_TOOL])
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
@@ -257,7 +277,7 @@ class AcademicWriter:
         )
 
         try:
-            text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message,
+            text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
                                max_tokens=1024, tools=[WEB_SEARCH_TOOL])
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
@@ -299,7 +319,7 @@ class AcademicWriter:
         )
 
         try:
-            text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message,
+            text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
                                max_tokens=512, tools=[WEB_SEARCH_TOOL])
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
@@ -321,7 +341,8 @@ class AcademicWriter:
         )
 
         try:
-            text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=300)
+            text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
+                               max_tokens=300)
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_abstract_error", error=str(exc))

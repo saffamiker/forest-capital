@@ -1,0 +1,150 @@
+{
+  "findings": [
+    {
+      "title": "BENCHMARK COMPETITIVENESS",
+      "finding": "BENCHMARK ranks 6 of 10 on risk-adjusted return; REGIME_SWITCHING leads by 0.10 Sharpe units.",
+      "evidence": [
+        "Sharpe ranking (best \u2192 worst): REGIME_SWITCHING 0.62 \u00b7 MOMENTUM_ROTATION 0.58 \u00b7 EQUAL_WEIGHT 0.57 \u00b7 RISK_PARITY 0.56 \u00b7 VOL_TARGETING 0.54 \u00b7 BENCHMARK 0.53 \u00b7 MAX_SHARPE_ROLLING 0.52 \u00b7 BLACK_LITTERMAN 0.48 \u00b7 CLASSIC_60_40 0.48 \u00b7 MIN_VARIANCE 0.44",
+        "CAGR ranking (best \u2192 worst): BENCHMARK 8.70% \u00b7 REGIME_SWITCHING 7.70% \u00b7 MOMENTUM_ROTATION 6.48% \u00b7 EQUAL_WEIGHT 5.99% \u00b7 CLASSIC_60_40 5.95% \u00b7 MAX_SHARPE_ROLLING 5.62% \u00b7 RISK_PARITY 5.41% \u00b7 BLACK_LITTERMAN 5.39% \u00b7 VOL_TARGETING 5.10% \u00b7 MIN_VARIANCE 4.60%",
+        "Max-drawdown ranking (best \u2192 worst): VOL_TARGETING -18.97% \u00b7 MOMENTUM_ROTATION -20.64% \u00b7 MIN_VARIANCE -23.16% \u00b7 RISK_PARITY -23.51% \u00b7 MAX_SHARPE_ROLLING -23.57% \u00b7 EQUAL_WEIGHT -28.76% \u00b7 BLACK_LITTERMAN -28.76% \u00b7 REGIME_SWITCHING -29.74% \u00b7 CLASSIC_60_40 -35.27% \u00b7 BENCHMARK -52.56%",
+        "BENCHMARK Sharpe rank: 6 of 10 (Sharpe 0.53); leader is REGIME_SWITCHING at 0.62 (margin 0.10)."
+      ],
+      "implication": "A capital planning mandate that pays active management fees must clear this Sharpe margin before fees on a post-cost basis. REGIME_SWITCHING's 0.10-unit edge is the budget for active fees and execution slippage before the mandate falls behind a passive alternative.",
+      "nugget_strength": "HIGH",
+      "surprise": false,
+      "surprise_reason": null
+    },
+    {
+      "title": "REGIME SHIFT EVIDENCE",
+      "finding": "Equity-IG correlation inverted in 2022; strategy dispersion widened materially.",
+      "evidence": [
+        "Equity-IG rolling correlation: pre-2022 avg -0.05, post-2022 avg 0.57 (shift 0.62).",
+        "Strategies that DEGRADED post-2022: VOL_TARGETING 0.80 \u2192 -0.13 (\u0394 -0.94) \u00b7 RISK_PARITY 0.75 \u2192 -0.12 (\u0394 -0.87) \u00b7 MIN_VARIANCE 0.63 \u2192 -0.14 (\u0394 -0.76) \u00b7 EQUAL_WEIGHT 0.71 \u2192 0.03 (\u0394 -0.69) \u00b7 BLACK_LITTERMAN 0.63 \u2192 0.03 (\u0394 -0.60)",
+        "Post-2022 best-worst Sharpe gap: BENCHMARK 0.43 vs MIN_VARIANCE -0.14 (spread 0.57)."
+      ],
+      "implication": "The 2022 break is the central finding of the project. Strategies that improved post-2022 are the ones that matter for a forward-looking mandate. Strategies that degraded performed well only when bonds diversified equity \u2014 that hedge is gone.",
+      "nugget_strength": "HIGH",
+      "surprise": false,
+      "surprise_reason": null
+    },
+    {
+      "title": "TAIL RISK DIVERGENCE",
+      "finding": "Tail-risk dispersion is 0.42x between best (BENCHMARK) and worst (VOL_TARGETING) on CVaR 99% annual.",
+      "evidence": [
+        "CVaR 99% annual ranking (best \u2192 worst): BENCHMARK -46.72% \u00b7 MOMENTUM_ROTATION -34.10% \u00b7 REGIME_SWITCHING -33.28% \u00b7 CLASSIC_60_40 -31.17% \u00b7 EQUAL_WEIGHT -31.06% \u00b7 BLACK_LITTERMAN -31.06% \u00b7 MAX_SHARPE_ROLLING -29.22% \u00b7 RISK_PARITY -28.42% \u00b7 MIN_VARIANCE -28.37% \u00b7 VOL_TARGETING -19.84%",
+        "Ratio between highest and lowest CVaR 99%: 0.42"
+      ],
+      "implication": "A Sharpe-only ranking hides material tail-risk differences. Two strategies with nearly identical Sharpe can have CVaR 99% diverging by 50%+ \u2014 the capital-planning loss budget depends on which one is chosen, not on the Sharpe-equivalent.",
+      "nugget_strength": "HIGH",
+      "surprise": false,
+      "surprise_reason": null
+    },
+    {
+      "title": "NATURAL COMPLEMENTS",
+      "finding": "VOL_TARGETING and MOMENTUM_ROTATION are the lowest-correlation pair (r = 0.84); a naive 50/50 blend delivers Sharpe 0.80.",
+      "evidence": [
+        "Lowest pairwise correlation pair (full period): VOL_TARGETING \u2194 MOMENTUM_ROTATION at r = 0.84.",
+        "Individual Sharpe: VOL_TARGETING 0.79 \u00b7 MOMENTUM_ROTATION 0.77.",
+        "Simulated 50/50 blend Sharpe: 0.80 (\u0394 vs best individual: 0.01).",
+        "Simulated 50/50 blend max drawdown: -19.38%."
+      ],
+      "implication": "Diversification benefit is largest where correlation is lowest. The 50/50 blend is the simplest demonstration of the free lunch \u2014 same realised data, better risk-adjusted return than either component on its own.",
+      "nugget_strength": "HIGH",
+      "surprise": false,
+      "surprise_reason": null
+    },
+    {
+      "title": "EFFICIENT FRONTIER SHIFT",
+      "finding": "Deferred \u2014 tangency weights not present in payload.",
+      "evidence": [],
+      "implication": "Finding could not be computed from the current payload. Re-stage once the missing inputs land.",
+      "nugget_strength": "LOW",
+      "surprise": false,
+      "surprise_reason": null
+    },
+    {
+      "title": "DIVERSIFICATION BENEFIT",
+      "finding": "Equal-weight blend of the active strategies delivers Sharpe 0.72 vs benchmark 0.65 (\u0394 0.06).",
+      "evidence": [
+        "Equal-weight blend: Sharpe 0.72, max DD -25.11%, CAGR 5.50%.",
+        "BENCHMARK: Sharpe 0.65, max DD -52.56%, CAGR 9.03%.",
+        "Sharpe improvement over benchmark: 0.06.",
+        "Max-drawdown reduction vs benchmark: -27.45% (positive = blend is shallower)."
+      ],
+      "implication": "Even na\u00efve 1/N diversification across the active strategies improves on the passive benchmark. The marginal Sharpe is the budget for cost + complexity of a multi-strategy implementation; the drawdown reduction is the principal-protection benefit.",
+      "nugget_strength": "HIGH",
+      "surprise": false,
+      "surprise_reason": null
+    },
+    {
+      "title": "MOMENTUM VS MEAN REVERSION",
+      "finding": "MOMENTUM_ROTATION + MIN_VARIANCE 50/50 blend delivers Sharpe 0.73 at correlation 0.90.",
+      "evidence": [
+        "Momentum-driven: MOMENTUM_ROTATION (Sharpe 0.77).",
+        "Mean-reverting: MIN_VARIANCE \u2014 covariance-driven with no trend signal (Sharpe 0.69).",
+        "Pairwise correlation: 0.90.",
+        "50/50 blend Sharpe 0.73 \u00b7 max DD -21.89% (vs MOMENTUM_ROTATION solo 0.77 \u00b7 vs MIN_VARIANCE solo 0.69)."
+      ],
+      "implication": "The momentum / mean-reversion axis is the most natural two-factor decomposition of the universe. A blend of the two delivers more Sharpe than either alone when their pairwise correlation is materially below 1 \u2014 the standard diversification math holds.",
+      "nugget_strength": "MEDIUM",
+      "surprise": false,
+      "surprise_reason": null
+    },
+    {
+      "title": "CRISIS PERFORMANCE",
+      "finding": "0 strategies clear BENCHMARK in every named crisis window.",
+      "evidence": [
+        "GFC_2008-2009: BEST MOMENTUM_ROTATION (-9.48%) \u00b7 WORST BENCHMARK (-38.61%) \u00b7 BENCHMARK -38.61%.",
+        "EU_Debt_2011: BEST VOL_TARGETING (3.12%) \u00b7 WORST MOMENTUM_ROTATION (-21.78%) \u00b7 BENCHMARK -14.53%.",
+        "COVID_Crash_2020: BEST VOL_TARGETING (-27.84%) \u00b7 WORST BENCHMARK (-73.53%) \u00b7 BENCHMARK -73.53%.",
+        "COVID_Recovery: BEST BENCHMARK (41.86%) \u00b7 WORST MIN_VARIANCE (13.68%) \u00b7 BENCHMARK 41.86%.",
+        "Rate_Shock_2022: BEST MIN_VARIANCE (-14.31%) \u00b7 WORST BENCHMARK (-19.44%) \u00b7 BENCHMARK -19.44%.",
+        "No strategy beat BENCHMARK in every crisis window."
+      ],
+      "implication": "Crisis performance is the realised tail-risk evidence alongside the parametric CVaR. Strategies that beat the benchmark in all three windows have demonstrated stress resilience across distinct shocks (credit, liquidity, rates) \u2014 the strongest qualifier for a capital-planning allocation.",
+      "nugget_strength": "HIGH",
+      "surprise": false,
+      "surprise_reason": null
+    },
+    {
+      "title": "FACTOR EXPOSURE",
+      "finding": "Market (MKT-RF) is the dominant variance driver; beta dispersion BENCHMARK 0.99 vs RISK_PARITY 0.38.",
+      "evidence": [
+        "Average absolute beta dominant factor: MKT-RF (mean |\u03b2| = 0.53).",
+        "Highest market beta: BENCHMARK (\u03b2 = 0.99).",
+        "Lowest market beta: RISK_PARITY (\u03b2 = 0.38).",
+        "No strategy carries a materially negative MOM beta \u2014 momentum tilts in this cohort are all flat-to-positive."
+      ],
+      "implication": "Factor exposure dispersion across the cohort is the structural reason the strategies have low pairwise correlation. A planning mandate should target factor balance (not just notional dollar balance) when blending two or more strategies.",
+      "nugget_strength": "MEDIUM",
+      "surprise": false,
+      "surprise_reason": null
+    },
+    {
+      "title": "MACRO CONTEXT ALIGNMENT",
+      "finding": "Current digest favours regime-aware and low-beta tilts; high-beta passives carry the most macro exposure.",
+      "evidence": [
+        "Digest summary: I'll start by running 5 parallel searches across the key macro categories to gather the latest signals from the past seven days.\n\nNow I have sufficient sourced data to construct the digest. Let me fetch the FOMC minutes released May 20 and the CNBC Treasury yields article for additional depth on the\u2026",
+        "Regime implication: ",
+        "No key signals in current digest.",
+        "Most aligned (heuristic): REGIME_SWITCHING, RISK_PARITY, MIN_VARIANCE.",
+        "Most exposed to current risks: BENCHMARK, MOMENTUM_ROTATION."
+      ],
+      "implication": "Macro context is the bridge between the historical backtest and the forward-looking mandate. A strategy ranked first on full-period Sharpe is not necessarily the right pick for the next 12 months \u2014 the macro layer is what determines which historical edge is still alive.",
+      "nugget_strength": "MEDIUM",
+      "surprise": false,
+      "surprise_reason": null
+    },
+    {
+      "title": "SURPRISES",
+      "finding": "No surprises in this run \u2014 every finding aligns with conventional portfolio-theory direction.",
+      "evidence": [
+        "All ten preceding findings carry surprise=False. The ranking, regime split, tail-risk dispersion, diversification benefit, factor exposure and macro alignment all behave directionally as expected."
+      ],
+      "implication": "A 'no surprises' run is a positive signal \u2014 the underlying data is consistent with the academic literature this project rests on (Markowitz, Sharpe, Carhart, L\u00f3pez de Prado). It does NOT mean every finding is HIGH-strength; magnitudes still vary.",
+      "nugget_strength": "LOW",
+      "surprise": false,
+      "surprise_reason": null
+    }
+  ]
+}

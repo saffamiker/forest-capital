@@ -222,6 +222,15 @@ async def lifespan(app: FastAPI):
             await refresh_macro_context()
         except Exception as exc:  # noqa: BLE001
             log.warning("macro_context_warm_failed", error=str(exc))
+        # Analytical staging findings — same warm-read pattern so the
+        # Academic Writer's first call after restart sees the most
+        # recent staged findings. The endpoint refresh() also fires
+        # after every fresh staging.
+        try:
+            from tools.analytical_findings import refresh_findings_context
+            await refresh_findings_context()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("findings_context_warm_failed", error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
@@ -989,7 +998,807 @@ async def get_analytics_distribution(
     )
 
 
+# ── Strategy characterisations (item 9) ───────────────────────────────────────
+
+
+@app.get("/api/v1/strategies/characterisations")
+@limiter.limit("30/minute")
+async def get_strategy_characterisations(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Item 9 — per-strategy Portfolio Profile data. Returns one row per
+    strategy with the AI-generated construction_summary,
+    behavioural_profile, regime_sensitivity, behavioural_tag, and the
+    deterministic portfolio_characteristics.
+
+    Reads from strategy_characterisations keyed by the current
+    data_hash. Cold-cache fallback returns the most recent
+    characterisation per strategy regardless of hash (DISTINCT ON in
+    the helper) so a fresh deploy that hasn't seen a refresh yet
+    still has something to render.
+
+    Auth: require_team_member. Same gate as the diversification
+    metrics — non-team viewers see the Dashboard rankings but not
+    the per-strategy editorial context.
+    """
+    if ENVIRONMENT == "test":
+        return {"available": False, "strategies": []}
+    try:
+        from tools.cache import get_latest_strategy_hash
+        from tools.strategy_characterisations import (
+            get_all_characterisations,
+        )
+        latest_hash = await get_latest_strategy_hash()
+        rows = await get_all_characterisations(latest_hash)
+        if not rows:
+            return {
+                "available": False,
+                "strategies": [],
+                "note": "Strategy characterisations have not been "
+                        "computed yet. They populate automatically "
+                        "after the first strategy_results_cache write.",
+            }
+        return {
+            "available": True,
+            "data_hash": latest_hash,
+            "strategies": rows,
+        }
+    except Exception as exc:
+        log.warning("strategy_characterisations_endpoint_failed",
+                    error=str(exc))
+        return {"available": False, "strategies": []}
+
+
+# ── Analytical findings staging (May 22 2026) ─────────────────────────────────
+
+
+@app.post("/api/v1/reports/stage-findings")
+@limiter.limit("5/minute")
+async def post_stage_findings(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Runs the analytical staging computation and writes the result to
+    analytical_findings_cache. The Academic Writer picks up the
+    latest row on its next document-generation call via the workflow
+    hook in agents/academic_writer._writer_system_prompt().
+
+    On-demand only — NOT triggered by data-hash change. Findings carry
+    interpretation (a NUGGET STRENGTH per finding and an IMPLICATION
+    paragraph); pre-computing them silently on every ingestion would
+    produce drift the team did not ask for.
+
+    Returns the structured findings + the rendered markdown so the
+    report writer UI can display the staging-summary card and let the
+    user open the full report inline before enabling [Generate Draft].
+
+    Rate-limited (5/minute). Auth: require_team_member.
+    """
+    if ENVIRONMENT == "test":
+        return {
+            "id":              None,
+            "data_hash":       None,
+            "strategy_count":  0,
+            "surprise_count":  0,
+            "n_high_strength": 0,
+            "findings":        [],
+            "findings_md":     "",
+        }
+    try:
+        from tools.analytical_findings import (
+            stage_findings, refresh_findings_context,
+        )
+        result = await stage_findings(triggered_by="api")
+        # Refresh the in-process context cache so the next academic-
+        # writer call picks up the fresh findings without waiting for
+        # a process restart.
+        await refresh_findings_context()
+        return result
+    except Exception as exc:
+        log.warning("stage_findings_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Findings staging failed — see server logs.",
+        )
+
+
+@app.get("/api/v1/reports/latest-findings")
+async def get_latest_findings_endpoint(
+    session: dict = Depends(require_team_member),
+):
+    """Returns the most recent staged-findings row. The report writer
+    UI reads this on mount so the "last staged at" pill renders
+    without firing a fresh compute."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    try:
+        from tools.analytical_findings import get_latest_findings
+        row = await get_latest_findings()
+        if not row:
+            return {"available": False}
+        return {"available": True, **row}
+    except Exception as exc:
+        log.warning("latest_findings_endpoint_failed", error=str(exc))
+        return {"available": False}
+
+
+# ── Report writer template pipeline (item 12) ────────────────────────────────
+
+
+@app.get("/api/v1/reports/templates")
+async def list_report_templates(
+    session: dict = Depends(require_team_member),
+):
+    """Active report templates for the report-writer dropdown.
+    Drops system_prompt + section_instructions from the response —
+    those are heavy and only needed at generation time."""
+    if ENVIRONMENT == "test":
+        return {"templates": []}
+    from tools.report_templates import list_active_templates
+    rows = await list_active_templates()
+    return {"templates": [
+        {k: v for k, v in r.items()
+         if k not in ("system_prompt", "section_instructions")}
+        for r in rows
+    ]}
+
+
+@app.post("/api/v1/reports/source-citations")
+@limiter.limit("3/minute")
+async def post_source_citations(
+    request: Request, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """STEP 1B — source citations for a template's concept list.
+
+    Body: {"template_id": "midpoint_check_fna670"}.
+
+    Returns the verified citations object + the quality indicator
+    (green / amber / red). Persists each citation in citations_cache.
+    Rate-limited (3/min) because each call hits the web_search tool
+    up to 10 times.
+    """
+    if ENVIRONMENT == "test":
+        return {
+            "template_id": body.get("template_id"),
+            "citations": {},
+            "quality": "red",
+            "verified_count": 0,
+        }
+    template_id = body.get("template_id")
+    if not template_id:
+        raise HTTPException(
+            status_code=422, detail="template_id is required.")
+    try:
+        from tools.report_templates import get_template
+        from tools.template_pipeline import (
+            source_citations, citation_quality, persist_citations,
+        )
+        tmpl = await get_template(template_id)
+        if not tmpl:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Template '{template_id}' not found.")
+        concepts = tmpl.get("concepts") or []
+        citations = await source_citations(concepts)
+        await persist_citations(citations)
+        verified = sum(
+            1 for c in citations.values()
+            if c.get("verification_status") == "verified")
+        return {
+            "template_id":     template_id,
+            "citations":       citations,
+            "quality":         citation_quality(citations),
+            "verified_count":  verified,
+            "concept_count":   len(concepts),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("source_citations_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Citation sourcing failed — see server logs.")
+
+
+@app.post("/api/v1/reports/team-activity")
+@limiter.limit("30/minute")
+async def post_team_activity(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """STEP 1C — per-member + platform-wide activity counts.
+
+    No body required — the team_emails are pinned in the pipeline
+    helper. Used by the report writer and the Issue Tracker activity
+    view both.
+    """
+    if ENVIRONMENT == "test":
+        return {"activity": {}, "cross_check_flags": []}
+    try:
+        from tools.template_pipeline import (
+            fetch_team_activity, cross_check_team_activity,
+        )
+        activity = await fetch_team_activity()
+        flags = cross_check_team_activity(activity)
+        return {"activity": activity, "cross_check_flags": flags}
+    except Exception as exc:
+        log.warning("team_activity_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Team activity fetch failed — see server logs.")
+
+
+@app.post("/api/v1/reports/validate-thesis")
+@limiter.limit("30/minute")
+async def post_validate_thesis(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """STEP 6 — thesis validation gate. Pulls the latest verified data
+    + ranked findings from the cache and runs the three thesis
+    conditions. Blocks generation when any condition fails."""
+    if ENVIRONMENT == "test":
+        return {
+            "passed":           True,
+            "conditions":       [],
+            "blocker_reasons":  [],
+        }
+    try:
+        from tools.analytical_findings import (
+            gather_payload_from_db, get_latest_findings,
+        )
+        from tools.cache import get_latest_strategy_hash
+        from tools.template_pipeline import (
+            live_from_payload, cross_check, validate_thesis,
+        )
+        data_hash = await get_latest_strategy_hash()
+        payload = await gather_payload_from_db(data_hash)
+        live = live_from_payload(payload)
+        findings_row = await get_latest_findings()
+        staged_md = (findings_row or {}).get("findings_md") or ""
+        verified, _ = cross_check(live, staged_md)
+        ranked = (findings_row or {}).get("ranked_findings") or []
+        result = validate_thesis(verified, ranked)
+        return result
+    except Exception as exc:
+        log.warning("validate_thesis_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Thesis validation failed — see server logs.")
+
+
+@app.post("/api/v1/reports/rank-findings")
+@limiter.limit("30/minute")
+async def post_rank_findings(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """STEP 7 — explicit ranking endpoint. Reads the latest findings,
+    re-ranks them, and returns the ordered list. The stage-findings
+    endpoint already writes ranked_findings; this endpoint is a
+    convenience for the UI to refresh the ranking after a manual
+    findings edit."""
+    if ENVIRONMENT == "test":
+        return {"ranked_findings": []}
+    try:
+        from tools.analytical_findings import get_latest_findings
+        from tools.template_pipeline import rank_findings
+        row = await get_latest_findings()
+        if not row:
+            return {"ranked_findings": []}
+        ranked = rank_findings(row.get("findings") or [])
+        return {"ranked_findings": ranked}
+    except Exception as exc:
+        log.warning("rank_findings_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Rank findings failed — see server logs.")
+
+
+# ── Report writer — generation + editor + download endpoints ────────────────
+#
+# Backs item 12 commit 2. The generate endpoint runs the eight-step
+# pipeline; the editor endpoints (paper-md PATCH, iterate, resolve-bob,
+# final-check) support Bob's iteration loop; the academic-review
+# endpoint scores the draft against the FNA670 rubric; the download
+# endpoints emit the two .docx files. Every endpoint is team_member-
+# gated so a viewer cannot kick off a generation that costs Anthropic
+# tokens. The download endpoints honor a soft gate on
+# academic_readiness=needs_significant_revision — Bob can override
+# with acknowledge_warning=true on the query string.
+
+
+_DOCX_MEDIA = (
+    "application/vnd.openxmlformats-officedocument."
+    "wordprocessingml.document")
+
+
+@app.post("/api/v1/reports/templates/{template_id}/generate")
+@limiter.limit("3/minute")
+async def generate_report_from_template(
+    request: Request, template_id: str,
+    session: dict = Depends(require_team_member),
+):
+    """End-to-end report generation. Runs the full pipeline, persists
+    one report_generations row, returns the full draft payload
+    (paper_md, appendix_md, flags, bob_blocks, verified_data, etc.).
+
+    Failure modes:
+      404 — template_not_found
+      422 — thesis_validation_blocked (returns the failing conditions)
+      500 — unexpected pipeline error
+    """
+    if ENVIRONMENT == "test":
+        return {
+            "id":              None,
+            "template_id":     template_id,
+            "paper_md":        "",
+            "appendix_md":     "",
+            "flag_count":      0,
+            "bob_block_count": 0,
+            "bob_blocks":      [],
+            "flags":           [],
+        }
+    try:
+        from tools.report_generator import generate_paper
+        result = await generate_paper(template_id)
+        if result.get("error") == "template_not_found":
+            raise HTTPException(
+                status_code=404,
+                detail=f"Template '{template_id}' not found.")
+        if result.get("error") == "thesis_validation_blocked":
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "thesis_validation_blocked",
+                    "thesis_validation": result.get("thesis_validation"),
+                })
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("generate_report_failed",
+                    template_id=template_id, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Report generation failed — see server logs.")
+
+
+@app.get("/api/v1/reports/generations/{generation_id}")
+async def get_report_generation(
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Returns the persisted generation row + a fresh post-check on
+    the current paper_md so the editor renders the same flag list the
+    backend will gate on."""
+    if ENVIRONMENT == "test":
+        return {"error": "test_environment_no_generations"}
+    try:
+        from tools.report_generator import (
+            get_generation, _post_check_summary,
+            _load_citations_for_generation,
+        )
+        gen = await get_generation(generation_id)
+        if not gen:
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        citations = await _load_citations_for_generation(generation_id)
+        checks = _post_check_summary(
+            gen.get("paper_md") or "",
+            gen.get("verified_data") or {},
+            citations)
+        return {**gen, **checks, "citations": citations}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("get_generation_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Read generation failed — see server logs.")
+
+
+@app.patch("/api/v1/reports/generations/{generation_id}/paper-md")
+@limiter.limit("60/minute")
+async def patch_generation_paper_md(
+    request: Request, generation_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Inline editor save. Body: {paper_md: str}. Re-runs the post-
+    check, persists the new paper_md + flag_count + word_counts."""
+    if ENVIRONMENT == "test":
+        return {"saved": False, "flag_count": 0}
+    paper_md = body.get("paper_md")
+    if paper_md is None:
+        raise HTTPException(
+            status_code=422, detail="paper_md is required.")
+    try:
+        from tools.report_generator import update_paper_md
+        result = await update_paper_md(int(generation_id), str(paper_md))
+        if result.get("error") == "generation_not_found":
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("patch_paper_md_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Save failed — see server logs.")
+
+
+@app.post("/api/v1/reports/generations/{generation_id}/iterate")
+@limiter.limit("30/minute")
+async def post_iterate_text(
+    request: Request, generation_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """AI iteration toolbar. Body: {action, selection, instruction?}.
+
+    action ∈ {rephrase, tighten, expand, ask}.
+
+    Returns the rewritten text + any new unverified numbers or
+    citations the iteration introduced — the editor warns Bob before
+    accepting changes that would fail the next final check."""
+    if ENVIRONMENT == "test":
+        return {
+            "original":  body.get("selection", ""),
+            "rewritten": body.get("selection", ""),
+            "word_delta": 0,
+            "new_unverified_numbers": [],
+            "new_unverified_citations": [],
+        }
+    action = body.get("action")
+    selection = body.get("selection")
+    if not action or selection is None:
+        raise HTTPException(
+            status_code=422,
+            detail="action and selection are required.")
+    if action not in ("rephrase", "tighten", "expand", "ask"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown action '{action}'")
+    try:
+        from tools.report_generator import iterate_text
+        return await iterate_text(
+            int(generation_id), action, str(selection),
+            instruction=body.get("instruction"))
+    except Exception as exc:
+        log.warning("iterate_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Iteration failed — see server logs.")
+
+
+@app.post("/api/v1/reports/generations/{generation_id}/resolve-bob")
+@limiter.limit("60/minute")
+async def post_resolve_bob_block(
+    request: Request, generation_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Replaces the FIRST occurrence of `marker` in paper_md with
+    `replacement`. Body: {marker: str, replacement: str}."""
+    if ENVIRONMENT == "test":
+        return {"saved": False, "flag_count": 0}
+    marker = body.get("marker")
+    replacement = body.get("replacement")
+    if marker is None or replacement is None:
+        raise HTTPException(
+            status_code=422,
+            detail="marker and replacement are required.")
+    try:
+        from tools.report_generator import resolve_bob_block
+        result = await resolve_bob_block(
+            int(generation_id), str(marker), str(replacement))
+        if result.get("error") == "generation_not_found":
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        if result.get("error") == "marker_not_found":
+            raise HTTPException(
+                status_code=422,
+                detail=f"marker not found in paper_md: {marker}")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("resolve_bob_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Resolve failed — see server logs.")
+
+
+@app.post("/api/v1/reports/generations/{generation_id}/final-check")
+@limiter.limit("60/minute")
+async def post_run_final_check(
+    request: Request, generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Re-runs the post-checks against the current paper_md and
+    updates flag_count on the row so the download endpoints can gate.
+    No body required."""
+    if ENVIRONMENT == "test":
+        return {"passed": True, "flag_count": 0, "flags": []}
+    try:
+        from tools.report_generator import run_final_check
+        result = await run_final_check(int(generation_id))
+        if result.get("error") == "generation_not_found":
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("final_check_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Final check failed — see server logs.")
+
+
+@app.post("/api/v1/reports/generations/{generation_id}/academic-review")
+@limiter.limit("6/minute")
+async def post_run_academic_review(
+    request: Request, generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Step 10 — scores the current paper_md against the active
+    rubric for its template. Persists the review payload + readiness
+    on the row so the download endpoint can soft-gate."""
+    if ENVIRONMENT == "test":
+        return {
+            "per_criterion":     [],
+            "data_gaps":         [],
+            "citation_gaps":     [],
+            "thesis_coherence":  [],
+            "tone_violations":   [],
+            "length_compliance": [],
+            "readiness":         "ready_to_submit",
+            "summary":           "(test environment)",
+        }
+    try:
+        from tools.report_generator import run_academic_review
+        result = await run_academic_review(int(generation_id))
+        if result.get("error") == "generation_not_found":
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        if result.get("error") == "rubric_not_found":
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No rubric uploaded for template "
+                    f"'{result.get('template_id')}'."))
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("academic_review_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Academic review failed — see server logs.")
+
+
+def _download_filename(template_id: str, kind: str, ext: str) -> str:
+    """forest-capital-midpoint-check-paper-2026-05-22.docx"""
+    from datetime import date
+    slug = template_id.replace("_", "-")
+    return (
+        f"forest-capital-{slug}-{kind}-{date.today().isoformat()}.{ext}")
+
+
+def _gate_download(
+    gen: dict, acknowledge_warning: bool,
+) -> None:
+    """Enforces the two-tier download gate.
+
+    Hard gate: flag_count > 0 means BOB blocks or unresolved numbers
+    are still present — refuse with 422.
+    Soft gate: academic_readiness == needs_significant_revision —
+    refuse unless acknowledge_warning is True. The endpoint records
+    the override in the row's audit trail (caller's responsibility
+    via the activity log, not duplicated here)."""
+    if int(gen.get("flag_count") or 0) > 0:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "flags_remaining",
+                "flag_count": int(gen.get("flag_count") or 0),
+                "message": (
+                    "Resolve all [BOB] blocks and unverified numbers "
+                    "before downloading."),
+            })
+    readiness = gen.get("academic_readiness")
+    if (readiness == "needs_significant_revision"
+            and not acknowledge_warning):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "academic_review_significant_revision",
+                "readiness": readiness,
+                "message": (
+                    "Academic review flagged significant gaps. "
+                    "Retry with ?acknowledge_warning=true to "
+                    "download anyway."),
+            })
+
+
+@app.get(
+    "/api/v1/reports/generations/{generation_id}/download-paper")
+async def download_report_paper(
+    generation_id: int,
+    acknowledge_warning: bool = False,
+    session: dict = Depends(require_team_member),
+):
+    """Returns the paper .docx. Soft-gated by academic_readiness."""
+    if ENVIRONMENT == "test":
+        raise HTTPException(
+            status_code=404,
+            detail="No generation available in test environment.")
+    try:
+        from tools.report_generator import (
+            get_generation, render_paper_bytes,
+        )
+        gen = await get_generation(generation_id)
+        if not gen:
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        _gate_download(gen, acknowledge_warning)
+        content = await render_paper_bytes(generation_id)
+        if not content:
+            raise HTTPException(
+                status_code=500,
+                detail="Render failed — see server logs.")
+        filename = _download_filename(
+            gen.get("template_id") or "report", "paper", "docx")
+        return Response(
+            content=content, media_type=_DOCX_MEDIA,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("download_paper_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Download failed.")
+
+
+@app.get(
+    "/api/v1/reports/generations/{generation_id}/download-appendix")
+async def download_report_appendix(
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Returns the appendix .docx. Always available once a generation
+    exists — the appendix is the data record, not the editable
+    submission, so it is NOT gated by flag_count or readiness."""
+    if ENVIRONMENT == "test":
+        raise HTTPException(
+            status_code=404,
+            detail="No generation available in test environment.")
+    try:
+        from tools.report_generator import (
+            get_generation, render_appendix_bytes,
+        )
+        gen = await get_generation(generation_id)
+        if not gen:
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        content = await render_appendix_bytes(generation_id)
+        if not content:
+            raise HTTPException(
+                status_code=500,
+                detail="Render failed — see server logs.")
+        filename = _download_filename(
+            gen.get("template_id") or "report", "appendix", "docx")
+        return Response(
+            content=content, media_type=_DOCX_MEDIA,
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+            })
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("download_appendix_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Download failed.")
+
+
+@app.get("/api/v1/reports/templates/{template_id}/rubric")
+async def get_template_rubric(
+    template_id: str,
+    session: dict = Depends(require_team_member),
+):
+    """Latest active rubric for a template. Drives the report
+    writer's Rubric panel."""
+    if ENVIRONMENT == "test":
+        return {"rubric": None}
+    try:
+        from tools.report_rubrics import get_latest_rubric
+        rubric = await get_latest_rubric(template_id)
+        return {"rubric": rubric}
+    except Exception as exc:
+        log.warning("get_rubric_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Read rubric failed.")
+
+
+@app.post("/api/v1/reports/templates/{template_id}/rubric")
+@limiter.limit("6/minute")
+async def post_upload_rubric(
+    request: Request, template_id: str, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Uploads a new rubric version for a template.
+
+    Body: {rubric_text, criteria, source_filename?}. The PDF/docx
+    text extraction runs client-side (the frontend uses the same
+    pypdf path as the academic_documents flow) so this endpoint
+    accepts already-extracted text + already-parsed criteria.
+    """
+    if ENVIRONMENT == "test":
+        return {"id": None, "version": 1}
+    rubric_text = body.get("rubric_text")
+    criteria = body.get("criteria")
+    if not rubric_text or not isinstance(criteria, list):
+        raise HTTPException(
+            status_code=422,
+            detail="rubric_text and criteria (list) are required.")
+    try:
+        from tools.report_rubrics import upload_rubric, get_latest_rubric
+        await upload_rubric(
+            template_id, str(rubric_text), criteria,
+            uploaded_by=session.get("email"),
+            source_filename=body.get("source_filename"))
+        latest = await get_latest_rubric(template_id)
+        return {"rubric": latest}
+    except Exception as exc:
+        log.warning("upload_rubric_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500, detail="Upload rubric failed.")
+
+
 _RISK_FREE_SOURCE = "FRED DTB3 (3-month T-bill, mean monthly rate, annualised)"
+
+
+async def _read_cached_metric_or_fallback(
+    metric_kind: str,
+    fallback: "Callable[[], Awaitable[dict]]",
+) -> dict:
+    """Three-tier read for analytics_metrics_cache where the cold-cache
+    fallback isn't the strategy-keyed inline path that
+    _read_div_metric_or_compute assumes. The fallback is an arbitrary
+    async callable that produces the payload from whatever the
+    endpoint's natural inline path is.
+
+    Used by /api/v1/analytics/sensitivity (cold path needs the full
+    pipeline history) and /api/v1/analytics/config (cold path reads
+    market_data_monthly directly). Both pre-existed the cache layer;
+    F1 + F4 fold them in alongside the seven diversification metrics
+    that already use _read_div_metric_or_compute.
+    """
+    try:
+        from tools.cache import get_latest_strategy_hash
+        from tools.precomputed_analytics import (
+            get_metric, get_latest_metric,
+        )
+        latest_hash = await get_latest_strategy_hash()
+        if latest_hash:
+            cached = await get_metric(latest_hash, metric_kind)
+            if cached:
+                log.info("metric_cache_hit", metric=metric_kind)
+                return cached
+            stale = await get_latest_metric(metric_kind)
+            if stale:
+                log.info("metric_cache_stale_hit", metric=metric_kind)
+                return stale
+        log.info("metric_cache_miss_inline", metric=metric_kind)
+        return await fallback()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("metric_read_failed", metric=metric_kind, error=str(exc))
+        return await fallback()
 
 
 @app.get("/api/v1/analytics/config")
@@ -1000,24 +1809,36 @@ async def get_analytics_config(session: dict = Depends(require_auth)):
     ratio and to the efficient frontier — the mean monthly DTB3 rate from
     market_data_monthly, annualised (×12). This is the SAME value the
     /api/optimize/weights frontier and the analytics layer use. Read-only.
+
+    F4 (May 22 2026): cache-first via analytics_metrics_cache. The
+    cold-cache fallback runs the original inline compute so the
+    contract is preserved on a fresh deploy that hasn't seen a
+    strategy_cache write yet.
     """
     if ENVIRONMENT == "test":
         return {"available": False, "risk_free_rate": None,
                 "risk_free_source": _RISK_FREE_SOURCE}
-    try:
-        from tools.cache import get_monthly_returns
-        monthly = await get_monthly_returns()
-        rf_list = (monthly or {}).get("rf") or []
-        rf_annual = (sum(rf_list) / len(rf_list) * 12) if rf_list else None
-        return {
-            "available": rf_annual is not None,
-            "risk_free_rate": round(rf_annual, 4) if rf_annual is not None else None,
-            "risk_free_source": _RISK_FREE_SOURCE,
-        }
-    except Exception as exc:
-        log.warning("analytics_config_failed", error=str(exc))
-        return {"available": False, "risk_free_rate": None,
-                "risk_free_source": _RISK_FREE_SOURCE}
+
+    async def _inline_config() -> dict:
+        try:
+            from tools.cache import get_monthly_returns
+            monthly = await get_monthly_returns()
+            rf_list = (monthly or {}).get("rf") or []
+            rf_annual = (
+                sum(rf_list) / len(rf_list) * 12) if rf_list else None
+            return {
+                "available": rf_annual is not None,
+                "risk_free_rate":
+                    round(rf_annual, 4) if rf_annual is not None else None,
+                "risk_free_source": _RISK_FREE_SOURCE,
+            }
+        except Exception as exc:
+            log.warning("analytics_config_failed", error=str(exc))
+            return {"available": False, "risk_free_rate": None,
+                    "risk_free_source": _RISK_FREE_SOURCE}
+
+    return await _read_cached_metric_or_fallback(
+        "risk_free_rate_config", _inline_config)
 
 
 @app.get("/api/v1/analytics/sensitivity")
@@ -1027,23 +1848,32 @@ async def get_analytics_sensitivity(request: Request, session: dict = Depends(re
     Parameter sensitivity analysis for the four dynamic strategies — the
     Sharpe ratio swept across a range of each strategy's key parameter.
 
-    This is a ~23-backtest computation, so it has its OWN endpoint rather
-    than being bundled into the light /api/v1/analytics/academic payload —
-    bundling would make every analytics page load run 23 backtests. The
-    result is memoised in-process (tools/sensitivity.compute_sensitivity):
-    the first call after a restart pays the cost once, then it is instant.
-    The frontend section shows its own loading state.
+    This is a ~23-backtest computation. F1 (May 22 2026) folded it into
+    analytics_metrics_cache: refresh_sensitivity runs the sweep once
+    when a fresh strategy_results_cache row lands, and this endpoint
+    serves the cached payload on every subsequent request. The cold-
+    cache fallback below preserves the original
+    get_full_history + compute_sensitivity path for a fresh deploy
+    that has not seen a strategy_cache write yet — compute_sensitivity
+    has its own worker-local memo so even the cold path only does
+    full work once per worker per history. The frontend section
+    shows its own loading state regardless.
     """
     if ENVIRONMENT == "test":
         return {"available": False, "strategies": []}
-    try:
-        from tools.data_fetcher import get_full_history
-        from tools.sensitivity import compute_sensitivity
-        result = compute_sensitivity(get_full_history())
-        return {"available": True, **result}
-    except Exception as exc:
-        log.warning("analytics_sensitivity_failed", error=str(exc))
-        return {"available": False, "strategies": []}
+
+    async def _inline_sensitivity() -> dict:
+        try:
+            from tools.data_fetcher import get_full_history
+            from tools.sensitivity import compute_sensitivity
+            result = compute_sensitivity(get_full_history())
+            return {"available": True, **result}
+        except Exception as exc:
+            log.warning("analytics_sensitivity_failed", error=str(exc))
+            return {"available": False, "strategies": []}
+
+    return await _read_cached_metric_or_fallback(
+        "sensitivity", _inline_sensitivity)
 
 
 # ── Admin: data status ────────────────────────────────────────────────────────
