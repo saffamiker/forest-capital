@@ -559,8 +559,11 @@ function Step2Detail({ payload }: { payload: Record<string, unknown> }) {
         {Number(total) - Number(verified)} concept
         {Number(total) - Number(verified) === 1 ? '' : 's'} still
         need review. The 3-pass search has already captured
-        alternatives where it could; review and apply them via the
-        Citation Review panel on the editor screen.
+        alternatives where it could; the pipeline continues with
+        the current cache. After Step 7 generates the draft, the
+        Citation Review panel appears in the editor sidebar and
+        lets you accept / reject / replace each unverified
+        citation before the final check.
       </p>
     </div>
   )
@@ -822,24 +825,43 @@ export function useAutoFireStep5And6(
   results: StepResults,
   fireStep: (n: number) => Promise<void>,
 ): void {
+  // A step has "passed enough to continue" when its status is
+  // 'complete' OR 'warning'. The pipeline already treats Step 5 →
+  // Step 6 this way; the same rule applies to Steps 1-4 → Step 5.
+  //
+  // Hotfix May 23 2026: Step 2 frequently lands at 'warning' when
+  // 1-2 citations need human review but most are verified — that's
+  // a normal mid-pipeline state, not a failure. The previous
+  // strict-'complete' check deadlocked the pipeline: Step 5/6
+  // never auto-fired, so the user could never reach the Generate
+  // button. Citations still needing review surface in the
+  // CitationReviewPanel on the editor screen AFTER generation.
+  // Only an explicit 'failed' status (a real error in the step's
+  // call) should gate the pipeline.
+  const passedEnough = (n: number): boolean => {
+    const s = results[n]?.status
+    return s === 'complete' || s === 'warning'
+  }
+
   useEffect(() => {
-    const step1Done = results[1]?.status === 'complete'
-    const step2Done = results[2]?.status === 'complete'
-    const step3Done = results[3]?.status === 'complete'
-    const step4Done = results[4]?.status === 'complete'
     const step5Idle = !results[5] || results[5].status === 'idle'
-    if (step1Done && step2Done && step3Done && step4Done && step5Idle) {
+    if (passedEnough(1) && passedEnough(2)
+        && passedEnough(3) && passedEnough(4) && step5Idle) {
       void fireStep(5)
     }
+    // The hook intentionally depends only on `results` so a
+    // status change in any earlier step re-evaluates the gate;
+    // fireStep is the action and `passedEnough` is a pure
+    // closure over `results`, so adding them to deps wouldn't
+    // change behaviour.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [results, fireStep])
 
   useEffect(() => {
-    const step5OK = (
-      results[5]?.status === 'complete'
-      || results[5]?.status === 'warning')
     const step6Idle = !results[6] || results[6].status === 'idle'
-    if (step5OK && step6Idle) {
+    if (passedEnough(5) && step6Idle) {
       void fireStep(6)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [results, fireStep])
 }
