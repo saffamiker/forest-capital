@@ -511,6 +511,66 @@ def cross_check(
 # ── STEP 1B — citation finder (concept-driven, no hardcoded slots) ───────────
 
 
+# ── 7-state citation machine ─────────────────────────────────────────────────
+#
+# The Analytical Appendix grade requires every citation to be either
+# explicitly verified or explicitly excluded — never silently missing.
+# These seven states capture every legitimate position a citation can
+# be in. The legacy "untrusted_source" state is retained for backwards
+# compatibility (rows written by the pre-review-workflow code path)
+# and treated as equivalent to PENDING_REVIEW everywhere downstream.
+#
+#   not_found          search returned nothing usable on any pass
+#   pending_review     search returned a candidate but trust is unclear;
+#                      waiting on a human decision
+#   verified           auto-verified, trusted domain — needs no review
+#   human_verified     reviewer accepted a pending_review citation
+#                      via the accept_untrusted action
+#   search_selected    reviewer picked an alternative from pass 2 or 3
+#                      via the select_alternative action
+#   manually_added     reviewer entered the citation by hand via the
+#                      manual_add action — no search source attached
+#   rejected           reviewer rejected — the concept is dropped from
+#                      the references list; the inline marker is replaced
+#                      with the concept's natural-language description
+#                      instead of an APA citation
+CITATION_STATE_NOT_FOUND       = "not_found"
+CITATION_STATE_PENDING_REVIEW  = "pending_review"
+CITATION_STATE_VERIFIED        = "verified"
+CITATION_STATE_HUMAN_VERIFIED  = "human_verified"
+CITATION_STATE_SEARCH_SELECTED = "search_selected"
+CITATION_STATE_MANUALLY_ADDED  = "manually_added"
+CITATION_STATE_REJECTED        = "rejected"
+
+# Frozenset for membership checks in citation_quality and elsewhere.
+# These map to the "passes" bucket — any state in this set counts as
+# a real citation for quality colouring and downstream rendering.
+CITATION_VERIFIED_STATES: frozenset[str] = frozenset({
+    CITATION_STATE_VERIFIED,
+    CITATION_STATE_HUMAN_VERIFIED,
+    CITATION_STATE_SEARCH_SELECTED,
+    CITATION_STATE_MANUALLY_ADDED,
+})
+
+# States that require human action before the paper is presentation-ready.
+CITATION_NEEDS_REVIEW_STATES: frozenset[str] = frozenset({
+    CITATION_STATE_PENDING_REVIEW,
+    "untrusted_source",  # legacy alias — same meaning, older rows
+    CITATION_STATE_NOT_FOUND,
+})
+
+# Reviewer actions accepted by the /review endpoint.
+CITATION_REVIEW_ACTIONS: frozenset[str] = frozenset({
+    "accept_untrusted",     # pending_review → human_verified
+    "select_alternative",   # any → search_selected (with the picked entry)
+    "reject",               # any → rejected
+    "manual_add",           # any → manually_added (with entered citation)
+})
+
+
+# Search pass 1 — strictly trusted domains. These are the journals,
+# central banks, institutions, and research firms whose citations the
+# Analytical Appendix can defend without further review.
 _TRUSTED_DOMAINS = (
     "jstor.org", "ssrn.com", "papers.ssrn.com", "nber.org",
     "federalreserve.gov", "bis.org", "imf.org", "ecb.europa.eu",
@@ -523,6 +583,25 @@ _TRUSTED_DOMAINS = (
 )
 
 
+# Search pass 2 — wider academic / quasi-academic. Working papers,
+# university hosting, regional Fed banks, professional bodies. A
+# reviewer must accept these before they count as verified; the
+# search itself flags them as pending_review.
+_ACADEMIC_DOMAINS = (
+    ".edu/", ".edu.", ".ac.uk", ".ac.au",
+    "stlouisfed.org", "newyorkfed.org", "minneapolisfed.org",
+    "chicagofed.org", "philadelphiafed.org", "atlantafed.org",
+    "kansascityfed.org", "dallasfed.org", "richmondfed.org",
+    "sanfranciscofed.org", "bostonfed.org", "clevelandfed.org",
+    "sec.gov", "treasury.gov", "europa.eu", "oecd.org",
+    "worldbank.org", "tandfonline.com",
+    "cambridge.org", "springer.com", "mitpressjournals.org",
+)
+
+
+# Never returned, ever — even from pass 3. These are popular finance
+# blogs that look authoritative on first read but do not meet the
+# citation bar.
 _NEVER_DOMAINS = (
     "investopedia.com", "wikipedia.org", "wikipedia.com",
     "medium.com", "linkedin.com", "seekingalpha.com",
@@ -537,6 +616,40 @@ def _is_trusted_url(url: str) -> bool:
     if any(d in url_lower for d in _NEVER_DOMAINS):
         return False
     return any(d in url_lower for d in _TRUSTED_DOMAINS)
+
+
+def _is_academic_url(url: str) -> bool:
+    """True for pass 2 — wider academic / quasi-academic sources.
+    Distinct from _is_trusted_url: an academic URL is publishable but
+    requires a human accept before it counts as verified."""
+    if not url:
+        return False
+    url_lower = url.lower()
+    if any(d in url_lower for d in _NEVER_DOMAINS):
+        return False
+    if _is_trusted_url(url_lower):
+        # Already trusted — counts as pass 1, not pass 2.
+        return False
+    return any(d in url_lower for d in _ACADEMIC_DOMAINS)
+
+
+def _is_publishable_url(url: str) -> bool:
+    """True for pass 3 — widest acceptable. Anything that isn't on
+    the never-list AND has a domain that looks like an org / academic
+    / governmental source. This is the last fallback so a not_found
+    result is genuinely rare. The reviewer still has to accept it."""
+    if not url:
+        return False
+    url_lower = url.lower()
+    if any(d in url_lower for d in _NEVER_DOMAINS):
+        return False
+    # Any URL with a publishable-looking TLD passes pass 3 — the
+    # reviewer's job is to filter from here.
+    publishable_suffixes = (
+        ".org/", ".org.", ".gov/", ".gov.", ".edu/", ".edu.",
+        ".int/", ".int.",
+    )
+    return any(s in url_lower for s in publishable_suffixes)
 
 
 def _parse_citation_json(raw: str) -> dict | None:
@@ -611,32 +724,44 @@ def _format_citation(c: dict) -> str:
 async def source_citations(
     concepts: list[dict],
 ) -> dict[str, dict]:
-    """STEP 1B — find and verify one citation per concept_id via the
-    Anthropic web_search tool.
+    """STEP 1B — find one citation per concept_id via a 3-pass web
+    search.
+
+    PASS 1 — trusted domain (Journal of Finance, NBER, BIS, Fed, AQR,
+            CFA Institute, SSRN). A hit here goes straight to
+            CITATION_STATE_VERIFIED.
+    PASS 2 — wider academic. .edu, regional Feds, sec.gov, treasury.gov,
+            publishing houses (Cambridge, Springer, MIT Press). Stored
+            as CITATION_STATE_PENDING_REVIEW so the reviewer can accept
+            with one click.
+    PASS 3 — widest publishable. Any .org / .gov / .edu / .int that
+            isn't on the never-list. Also CITATION_STATE_PENDING_REVIEW
+            but flagged as a wider-pass result so the reviewer knows
+            the source has lower priors of being right.
+
+    Every pass that fires stores its result in `alternatives` so the
+    reviewer can pick from any of the three passes via the
+    select_alternative action. The primary entry is whichever pass
+    produced the first viable citation; the other passes' results are
+    appended as alternatives.
 
     Each entry returned:
       concept_id, author, year, title, journal_or_institution,
-      volume_issue_pages, url, verification_status
-        ('verified' | 'untrusted_source' | 'not_found'),
-      search_query_used, formatted (rendered References-section line).
+      volume_issue_pages, url, verification_status,
+      search_query_used, formatted, alternatives (list of dicts),
+      passes_run (int 1-3).
 
     Fail-open: when ENVIRONMENT=test or no Anthropic key is configured,
-    every concept is marked 'not_found'. The downstream pipeline writes
-    [CITATION REQUIRED] inline for unverified slots — never invents one.
+    every concept is marked CITATION_STATE_NOT_FOUND. The downstream
+    pipeline writes [CITATION REQUIRED] inline for unverified slots —
+    never invents one.
     """
     out: dict[str, dict] = {}
     if os.getenv("ENVIRONMENT", "").lower() == "test":
         for c in concepts:
             cid = c.get("concept_id", "")
-            out[cid] = {
-                "concept_id": cid,
-                "verification_status": "not_found",
-                "search_query_used": c.get("search_query", ""),
-                "author": None, "year": None, "title": None,
-                "journal_or_institution": None,
-                "volume_issue_pages": None, "url": None,
-                "formatted": None,
-            }
+            out[cid] = _empty_citation_entry(
+                cid, c.get("search_query", ""))
         return out
 
     try:
@@ -644,90 +769,103 @@ async def source_citations(
     except Exception:  # noqa: BLE001
         for c in concepts:
             cid = c.get("concept_id", "")
-            out[cid] = {
-                "concept_id": cid,
-                "verification_status": "not_found",
-                "search_query_used": c.get("search_query", ""),
-                "author": None, "year": None, "title": None,
-                "journal_or_institution": None,
-                "volume_issue_pages": None, "url": None,
-                "formatted": None,
-            }
+            out[cid] = _empty_citation_entry(
+                cid, c.get("search_query", ""))
         return out
 
-    web_search_tool = {
-        "type": "web_search_20250305",
-        "name": "web_search",
-        "max_uses": 2,
-    }
-    sys_prompt = (
-        "You are a citation finder. Given a concept and a search "
-        "query, use web_search to find the most appropriate academic "
-        "citation from a TRUSTED domain only (Journal of Finance, "
-        "Journal of Financial Economics, NBER, BIS, Fed, AQR, CFA "
-        "Institute, SSRN). Return ONLY a JSON object with fields: "
-        "author, year, title, journal_or_institution, "
-        "volume_issue_pages, url. Author in 'Surname, Initials' "
-        "format; multiple authors joined with ' and '. If no trusted "
-        "source is found, return {\"unverified\": true}. NEVER invent "
-        "details — only what the search results support.")
-
-    # Parallelise across concepts. call_claude is synchronous (the
-    # Anthropic SDK's tool-loop runs server-side and returns a single
-    # response), so asyncio.to_thread runs each lookup on a worker;
-    # asyncio.gather fans the workers out concurrently — turning a
-    # ~3s × 10 sequential dispatch into ~3s wall-clock. The bounded
-    # semaphore protects the Anthropic rate limit (10 concurrent
-    # citation requests is well within the published cap, but we keep
-    # the explicit bound so a 25-concept template doesn't suddenly
-    # change the load shape).
+    # Parallelise across concepts. Each _one_concept runs up to three
+    # search passes serially (so pass 2 only fires if pass 1 failed,
+    # pass 3 only if pass 2 also failed) — but different concepts run
+    # in parallel via the bounded semaphore.
     import asyncio
     sem = asyncio.Semaphore(10)
 
-    def _one(c: dict) -> tuple[str, dict[str, Any]]:
+    def _one_concept(c: dict) -> tuple[str, dict[str, Any]]:
         cid = c.get("concept_id", "")
         query = c.get("search_query", "")
-        entry: dict[str, Any] = {
-            "concept_id": cid,
-            "search_query_used": query,
-            "author": None, "year": None, "title": None,
-            "journal_or_institution": None,
-            "volume_issue_pages": None, "url": None,
-            "formatted": None,
-        }
+        entry: dict[str, Any] = _empty_citation_entry(cid, query)
+        alternatives: list[dict[str, Any]] = []
+
         try:
-            raw = call_claude(
-                model=SONNET_MODEL,
-                system_prompt=sys_prompt,
-                user_message=(
-                    f"concept: {cid}\n"
-                    f"search query: {query}\n\n"
-                    "Use web_search now. Return ONLY the JSON."),
-                max_tokens=512,
-                tools=[web_search_tool],
-            )
-            parsed = _parse_citation_json(raw)
-            if not parsed or parsed.get("unverified"):
-                entry["verification_status"] = "not_found"
+            # ── Pass 1 — trusted domains only ───────────────────────────────
+            primary = _run_citation_pass(
+                call_claude, SONNET_MODEL,
+                query=query, concept_id=cid, pass_index=1)
+            entry["passes_run"] = 1
+            if primary and primary.get("verification_status") == \
+                    CITATION_STATE_VERIFIED:
+                entry.update(primary)
+                entry["formatted"] = _format_citation(entry)
                 return cid, entry
-            url = parsed.get("url") or ""
-            if not _is_trusted_url(url):
-                entry.update(parsed)
-                entry["verification_status"] = "untrusted_source"
+            # Pass 1 returned a candidate but on an untrusted domain —
+            # capture it as the primary pending_review hit AND keep
+            # searching for a better one.
+            if primary and primary.get("url"):
+                primary["pass_source"] = "pass_1_off_trusted"
+                alternatives.append(primary)
+
+            # ── Pass 2 — wider academic ─────────────────────────────────────
+            wider = _run_citation_pass(
+                call_claude, SONNET_MODEL,
+                query=query, concept_id=cid, pass_index=2)
+            entry["passes_run"] = 2
+            if wider and wider.get("url"):
+                wider["pass_source"] = "pass_2_academic"
+                # If pass 2 found an academic-domain hit, promote it
+                # to the primary entry as pending_review.
+                if _is_academic_url(wider.get("url") or ""):
+                    entry.update(wider)
+                    entry["verification_status"] = (
+                        CITATION_STATE_PENDING_REVIEW)
+                    entry["formatted"] = _format_citation(entry)
+                    entry["alternatives"] = alternatives
+                    return cid, entry
+                alternatives.append(wider)
+
+            # ── Pass 3 — widest publishable ─────────────────────────────────
+            widest = _run_citation_pass(
+                call_claude, SONNET_MODEL,
+                query=query, concept_id=cid, pass_index=3)
+            entry["passes_run"] = 3
+            if widest and widest.get("url") \
+                    and _is_publishable_url(widest.get("url") or ""):
+                widest["pass_source"] = "pass_3_widest"
+                entry.update(widest)
+                entry["verification_status"] = (
+                    CITATION_STATE_PENDING_REVIEW)
+                entry["formatted"] = _format_citation(entry)
+                entry["alternatives"] = alternatives
                 return cid, entry
-            entry.update(parsed)
-            entry["verification_status"] = "verified"
-            entry["formatted"] = _format_citation(entry)
+            if widest and widest.get("url"):
+                widest["pass_source"] = "pass_3_off_publishable"
+                alternatives.append(widest)
+
+            # No pass produced a viable primary — but we might have
+            # alternatives the reviewer can promote. Promote the
+            # first alternative as a pending_review primary if any
+            # alternative had a URL; otherwise leave as not_found.
+            if alternatives:
+                first = alternatives.pop(0)
+                entry.update({k: v for k, v in first.items()
+                              if k not in ("pass_source",)})
+                entry["verification_status"] = (
+                    CITATION_STATE_PENDING_REVIEW)
+                entry["formatted"] = _format_citation(entry)
+                entry["alternatives"] = alternatives
+                return cid, entry
+
+            entry["verification_status"] = CITATION_STATE_NOT_FOUND
+            entry["alternatives"] = []
             return cid, entry
         except Exception as exc:  # noqa: BLE001
             log.warning("citation_search_failed",
                         concept_id=cid, error=str(exc))
-            entry["verification_status"] = "not_found"
+            entry["verification_status"] = CITATION_STATE_NOT_FOUND
             return cid, entry
 
     async def _bounded(c: dict) -> tuple[str, dict[str, Any]]:
         async with sem:
-            return await asyncio.to_thread(_one, c)
+            return await asyncio.to_thread(_one_concept, c)
 
     results = await asyncio.gather(
         *[_bounded(c) for c in concepts],
@@ -737,25 +875,129 @@ async def source_citations(
     return out
 
 
+def _empty_citation_entry(cid: str, query: str) -> dict[str, Any]:
+    """A fresh citation entry with every field initialised. Used as
+    the starting point for every search and as the fail-open shape."""
+    return {
+        "concept_id":              cid,
+        "verification_status":     CITATION_STATE_NOT_FOUND,
+        "search_query_used":       query,
+        "author":                  None,
+        "year":                    None,
+        "title":                   None,
+        "journal_or_institution":  None,
+        "volume_issue_pages":      None,
+        "url":                     None,
+        "formatted":               None,
+        "alternatives":            [],
+        "passes_run":              0,
+    }
+
+
+def _run_citation_pass(
+    call_claude_fn,
+    model: str,
+    *,
+    query: str,
+    concept_id: str,
+    pass_index: int,
+) -> dict[str, Any] | None:
+    """Runs ONE citation search pass with a pass-specific system
+    prompt that names the acceptable domain set. Returns the parsed
+    citation dict (with author/year/title/journal/url) on success,
+    or None on a failed parse / unverified flag. The CALLER is
+    responsible for deciding the resulting verification_status based
+    on the URL the search returned — this function just runs the
+    search and parses the result.
+
+    `call_claude_fn` is the Anthropic call wrapper; passed in so the
+    caller can mock it in tests without monkeypatching the import.
+    """
+    web_search_tool = {
+        "type":     "web_search_20250305",
+        "name":     "web_search",
+        "max_uses": 2,
+    }
+    pass_instructions = {
+        1: (
+            "use web_search to find the most appropriate academic "
+            "citation from a TRUSTED domain only — Journal of Finance, "
+            "Journal of Financial Economics, Review of Financial Studies, "
+            "NBER working papers, BIS, the Federal Reserve Board, AQR, "
+            "CFA Institute, SSRN, JSTOR. Return ONLY a JSON object."),
+        2: (
+            "the trusted-domain search returned nothing. Now run a WIDER "
+            "search. ACCEPTABLE sources for this pass: university-hosted "
+            "papers (.edu domains), regional Federal Reserve banks, the "
+            "SEC, Treasury, OECD, World Bank, ECB, Cambridge / Springer / "
+            "MIT Press journals. The result will be flagged for human "
+            "review — pick the most authoritative hit you find. Return "
+            "ONLY a JSON object."),
+        3: (
+            "neither the trusted nor the academic search returned a "
+            "result. Run the WIDEST acceptable search now. Anything on "
+            "a .org / .gov / .edu / .int domain that isn't a popular "
+            "finance blog (no Investopedia, Wikipedia, Medium, Seeking "
+            "Alpha, Motley Fool, LinkedIn) is acceptable for this pass. "
+            "The reviewer will decide whether to use it. Return ONLY a "
+            "JSON object."),
+    }
+    sys_prompt = (
+        "You are a citation finder. " + pass_instructions[pass_index]
+        + " Required JSON fields: author, year, title, "
+        "journal_or_institution, volume_issue_pages, url. Author in "
+        "'Surname, Initials' format; multiple authors joined with "
+        "' and '. If no source is found at all, return "
+        "{\"unverified\": true}. NEVER invent details — only what the "
+        "search results support.")
+
+    try:
+        raw = call_claude_fn(
+            model=model,
+            system_prompt=sys_prompt,
+            user_message=(
+                f"concept: {concept_id}\n"
+                f"search query: {query}\n"
+                f"pass: {pass_index}/3\n\n"
+                "Use web_search now. Return ONLY the JSON."),
+            max_tokens=512,
+            tools=[web_search_tool],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("citation_pass_call_failed",
+                    concept_id=concept_id,
+                    pass_index=pass_index, error=str(exc))
+        return None
+
+    parsed = _parse_citation_json(raw)
+    if not parsed or parsed.get("unverified"):
+        return None
+
+    # Per-pass URL classification: pass 1 only counts as verified if
+    # the URL is on the trusted list; pass 2 only counts as a primary
+    # if academic; pass 3 only if publishable. The CALLER then makes
+    # the verification_status decision.
+    url = parsed.get("url") or ""
+    if pass_index == 1 and _is_trusted_url(url):
+        parsed["verification_status"] = CITATION_STATE_VERIFIED
+    else:
+        parsed["verification_status"] = CITATION_STATE_PENDING_REVIEW
+    return parsed
+
+
 def citation_quality(citations: dict) -> str:
     """Green / amber / red indicator per the spec.
 
     Updated May 23 2026 (user request): green 8-10 verified,
-    amber 5-7 verified, red fewer than 5 verified. Both auto-
-    verified (the original "verified" state) and the future
-    human_verified / search_selected / manually_added states (see
-    deferred citation review workflow) count toward the verified
-    total; not_found and untrusted_source do not."""
-    verified_states = {
-        "verified",            # auto-verified, current state
-        "human_verified",      # reviewer-accepted untrusted source
-        "search_selected",     # picked from extended search
-        "manually_added",      # entered manually
-    }
+    amber 5-7 verified, red fewer than 5 verified. Every state in
+    CITATION_VERIFIED_STATES counts toward the verified total —
+    auto-verified, human-accepted, alternative-selected, and
+    manually-added all qualify. The needs-review states (not_found,
+    pending_review, the legacy untrusted_source) do not."""
     verified = sum(
         1 for v in (citations or {}).values()
         if isinstance(v, dict)
-        and v.get("verification_status") in verified_states)
+        and v.get("verification_status") in CITATION_VERIFIED_STATES)
     if verified >= 8:
         return "green"
     if verified >= 5:
@@ -1079,7 +1321,7 @@ def post_check_citations(
         inline_keys.add((m.group(1).lower(), m.group(2)))
     ref_keys: set[tuple[str, str]] = set()
     for c in (citations or {}).values():
-        if c.get("verification_status") != "verified":
+        if c.get("verification_status") not in CITATION_VERIFIED_STATES:
             continue
         author = (c.get("author") or "").strip().lower()
         surname = author.split(",")[0].strip() if author else ""
@@ -1159,7 +1401,12 @@ async def persist_citations(
 ) -> list[int]:
     """Writes each citation row to citations_cache. Returns the
     inserted row ids so the caller can persist citations_cache_ids
-    on report_generations."""
+    on report_generations.
+
+    Includes the new (May 23 2026) alternatives column populated from
+    the 3-pass search. The reviewer_email / reviewed_at / review_action
+    columns are left NULL on initial insert — they get filled by
+    apply_citation_review() when Bob reviews each citation."""
     ids: list[int] = []
     try:
         from sqlalchemy import text
@@ -1168,24 +1415,28 @@ async def persist_citations(
             return []
         async with AsyncSessionLocal() as s:
             for cid, c in (citations or {}).items():
+                alts = c.get("alternatives") or []
                 row = await s.execute(text(
                     "INSERT INTO citations_cache "
                     "(generation_id, concept_id, author, year, title, "
                     " journal_or_institution, volume_issue_pages, "
-                    " url, verification_status, search_query_used) "
-                    "VALUES (:g, :c, :au, :y, :t, :j, :v, :u, :s, :q) "
+                    " url, verification_status, search_query_used, "
+                    " alternatives) "
+                    "VALUES (:g, :c, :au, :y, :t, :j, :v, :u, :s, :q, "
+                    " CAST(:alts AS JSONB)) "
                     "RETURNING id"
                 ), {
-                    "g":  generation_id,
-                    "c":  cid,
-                    "au": c.get("author"),
-                    "y":  c.get("year"),
-                    "t":  c.get("title"),
-                    "j":  c.get("journal_or_institution"),
-                    "v":  c.get("volume_issue_pages"),
-                    "u":  c.get("url"),
-                    "s":  c.get("verification_status"),
-                    "q":  c.get("search_query_used"),
+                    "g":    generation_id,
+                    "c":    cid,
+                    "au":   c.get("author"),
+                    "y":    c.get("year"),
+                    "t":    c.get("title"),
+                    "j":    c.get("journal_or_institution"),
+                    "v":    c.get("volume_issue_pages"),
+                    "u":    c.get("url"),
+                    "s":    c.get("verification_status"),
+                    "q":    c.get("search_query_used"),
+                    "alts": json.dumps(alts) if alts else None,
                 })
                 new_id = row.scalar()
                 if new_id is not None:
@@ -1194,3 +1445,231 @@ async def persist_citations(
     except Exception as exc:  # noqa: BLE001
         log.warning("persist_citations_failed", error=str(exc))
     return ids
+
+
+# ── Reviewer-action helpers ──────────────────────────────────────────────────
+
+
+async def get_citations_for_generation(
+    generation_id: int,
+) -> list[dict[str, Any]]:
+    """Returns every citation row for a generation_id, ordered by
+    concept_id. Fail-open: a database error returns []."""
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return []
+        async with AsyncSessionLocal() as s:
+            rows = await s.execute(text(
+                "SELECT id, concept_id, author, year, title, "
+                " journal_or_institution, volume_issue_pages, url, "
+                " verification_status, search_query_used, "
+                " alternatives, reviewer_email, reviewed_at, "
+                " review_action "
+                "FROM citations_cache "
+                "WHERE generation_id = :g "
+                "ORDER BY concept_id"
+            ), {"g": int(generation_id)})
+            out: list[dict[str, Any]] = []
+            for r in rows.fetchall():
+                alts = r[10]
+                if isinstance(alts, str):
+                    try:
+                        alts = json.loads(alts)
+                    except json.JSONDecodeError:
+                        alts = []
+                out.append({
+                    "id":                     int(r[0]),
+                    "concept_id":             r[1],
+                    "author":                 r[2],
+                    "year":                   r[3],
+                    "title":                  r[4],
+                    "journal_or_institution": r[5],
+                    "volume_issue_pages":     r[6],
+                    "url":                    r[7],
+                    "verification_status":    r[8],
+                    "search_query_used":      r[9],
+                    "alternatives":           alts or [],
+                    "reviewer_email":         r[11],
+                    "reviewed_at":            (r[12].isoformat()
+                                                if r[12] else None),
+                    "review_action":          r[13],
+                    "formatted":              _format_citation({
+                        "author": r[2], "year": r[3], "title": r[4],
+                        "journal_or_institution": r[5],
+                        "volume_issue_pages": r[6], "url": r[7],
+                    }),
+                })
+            return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_citations_failed", error=str(exc),
+                    generation_id=generation_id)
+        return []
+
+
+async def apply_citation_review(
+    citation_id: int,
+    action: str,
+    reviewer_email: str,
+    *,
+    selected_alternative: dict[str, Any] | None = None,
+    manual_citation: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Apply a reviewer action to a citations_cache row, transitioning
+    its state per the 7-state machine.
+
+      accept_untrusted   — pending_review → human_verified
+                            (keeps the existing search result)
+      select_alternative — any → search_selected
+                            (caller supplies the picked entry as
+                            selected_alternative; the row's primary
+                            citation fields are overwritten)
+      reject             — any → rejected
+                            (clears the citation fields; the inline
+                            marker will fall back to the concept's
+                            description)
+      manual_add         — any → manually_added
+                            (caller supplies manual_citation; the
+                            row's fields are overwritten)
+
+    Returns the updated row as a dict, or None on a database error /
+    unknown action / unknown citation_id.
+    """
+    if action not in CITATION_REVIEW_ACTIONS:
+        log.warning("citation_review_unknown_action",
+                    citation_id=citation_id, action=action)
+        return None
+
+    # Decide the new state + which fields to overwrite based on action.
+    overwrite: dict[str, Any] = {}
+    if action == "accept_untrusted":
+        new_state = CITATION_STATE_HUMAN_VERIFIED
+    elif action == "select_alternative":
+        if not selected_alternative:
+            log.warning("citation_review_select_alternative_missing_payload",
+                        citation_id=citation_id)
+            return None
+        new_state = CITATION_STATE_SEARCH_SELECTED
+        overwrite = {
+            "author":                 selected_alternative.get("author"),
+            "year":                   selected_alternative.get("year"),
+            "title":                  selected_alternative.get("title"),
+            "journal_or_institution":
+                selected_alternative.get("journal_or_institution"),
+            "volume_issue_pages":
+                selected_alternative.get("volume_issue_pages"),
+            "url":                    selected_alternative.get("url"),
+        }
+    elif action == "reject":
+        new_state = CITATION_STATE_REJECTED
+        # Clear the citation fields — the references list will skip
+        # this concept entirely.
+        overwrite = {
+            "author":                 None,
+            "year":                   None,
+            "title":                  None,
+            "journal_or_institution": None,
+            "volume_issue_pages":     None,
+            "url":                    None,
+        }
+    elif action == "manual_add":
+        if not manual_citation:
+            log.warning("citation_review_manual_add_missing_payload",
+                        citation_id=citation_id)
+            return None
+        new_state = CITATION_STATE_MANUALLY_ADDED
+        overwrite = {
+            "author":                 manual_citation.get("author"),
+            "year":                   manual_citation.get("year"),
+            "title":                  manual_citation.get("title"),
+            "journal_or_institution":
+                manual_citation.get("journal_or_institution"),
+            "volume_issue_pages":
+                manual_citation.get("volume_issue_pages"),
+            "url":                    manual_citation.get("url"),
+        }
+    else:  # pragma: no cover — covered by the membership check above
+        return None
+
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as s:
+            # Build the UPDATE dynamically so we only touch the
+            # overwrite columns for the actions that need them.
+            set_clauses = [
+                "verification_status = :state",
+                "reviewer_email     = :rev",
+                "reviewed_at        = now()",
+                "review_action      = :act",
+            ]
+            params: dict[str, Any] = {
+                "state": new_state,
+                "rev":   reviewer_email,
+                "act":   action,
+                "id":    int(citation_id),
+            }
+            for col, val in overwrite.items():
+                set_clauses.append(f"{col} = :{col}")
+                params[col] = val
+
+            sql = (
+                "UPDATE citations_cache SET "
+                + ", ".join(set_clauses)
+                + " WHERE id = :id RETURNING id"
+            )
+            res = await s.execute(text(sql), params)
+            row = res.fetchone()
+            if not row:
+                return None
+            await s.commit()
+            # Read back via the canonical accessor so the shape
+            # matches every other read path.
+            rows = await s.execute(text(
+                "SELECT id, concept_id, author, year, title, "
+                " journal_or_institution, volume_issue_pages, url, "
+                " verification_status, search_query_used, "
+                " alternatives, reviewer_email, reviewed_at, "
+                " review_action, generation_id "
+                "FROM citations_cache WHERE id = :id"
+            ), {"id": int(citation_id)})
+            r = rows.fetchone()
+            if not r:
+                return None
+            alts = r[10]
+            if isinstance(alts, str):
+                try:
+                    alts = json.loads(alts)
+                except json.JSONDecodeError:
+                    alts = []
+            return {
+                "id":                     int(r[0]),
+                "concept_id":             r[1],
+                "author":                 r[2],
+                "year":                   r[3],
+                "title":                  r[4],
+                "journal_or_institution": r[5],
+                "volume_issue_pages":     r[6],
+                "url":                    r[7],
+                "verification_status":    r[8],
+                "search_query_used":      r[9],
+                "alternatives":           alts or [],
+                "reviewer_email":         r[11],
+                "reviewed_at":            (r[12].isoformat()
+                                            if r[12] else None),
+                "review_action":          r[13],
+                "generation_id":          (int(r[14])
+                                            if r[14] is not None else None),
+                "formatted":              _format_citation({
+                    "author": r[2], "year": r[3], "title": r[4],
+                    "journal_or_institution": r[5],
+                    "volume_issue_pages": r[6], "url": r[7],
+                }),
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("apply_citation_review_failed", error=str(exc),
+                    citation_id=citation_id, action=action)
+        return None
