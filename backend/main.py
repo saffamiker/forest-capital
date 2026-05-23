@@ -2294,6 +2294,69 @@ async def get_admin_data_status(session: dict = Depends(require_auth)):
     return await get_data_status()
 
 
+@app.get("/api/v1/admin/team-activity/merge-commit-authors")
+async def get_merge_commit_authors_diagnostic(
+    session: dict = Depends(require_sysadmin),
+):
+    """Sysadmin diagnostic — returns the distinct `author` values
+    of every commit_activity row whose message contains "merge
+    pull request" (ILIKE).
+
+    Hotfix May 23 2026 (iteration 4): production data shows ~100
+    merged PRs but only 2 matches against the IN clause for
+    Michael's known git emails. This endpoint exposes the actual
+    author identities used on merge commits so we can confirm the
+    fix is catching them.
+
+    Expected output: a small set of distinct emails, e.g.
+    mikeruurds@gmail.com (2) + mikeruurds@users.noreply.github.com
+    (~98). The hotfix's local-part match should bring the count
+    to ~100.
+
+    Sysadmin-only — the endpoint exposes git author emails which
+    could be PII for non-team contributors. Returns at most the
+    most recent N rows to bound the response.
+    """
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return {"available": False, "rows": []}
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "SELECT LOWER(author) AS author_email, COUNT(*) AS n, "
+                " MAX(timestamp) AS latest_at "
+                "FROM commit_activity "
+                "WHERE message ILIKE '%merge pull request%' "
+                "GROUP BY LOWER(author) "
+                "ORDER BY n DESC LIMIT 50"
+            ))
+            rows = [
+                {"author": row[0],
+                 "merge_commit_count": int(row[1] or 0),
+                 "latest_at": (row[2].isoformat() if row[2] else None)}
+                for row in r.fetchall()
+            ]
+            r2 = await s.execute(text(
+                "SELECT COUNT(*) FROM commit_activity "
+                "WHERE message ILIKE '%merge pull request%'"))
+            total = int(r2.scalar() or 0)
+            return {
+                "available": True,
+                "total_merge_commits": total,
+                "distinct_authors": rows,
+                "note": (
+                    "Hotfix iteration 4: if Michael's GitHub "
+                    "noreply email appears here with a high count, "
+                    "the local-part LIKE match in template_pipeline."
+                    "fetch_team_activity is what now catches it. "
+                    "Confirm Step 3's michael_prs_merged increases "
+                    "to approximately this total."),
+            }
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "error": str(exc)}
+
+
 # ── Academic documents (agent context) ───────────────────────────────────────
 
 # 10 MB upload ceiling — the rubric / requirements documents are short;

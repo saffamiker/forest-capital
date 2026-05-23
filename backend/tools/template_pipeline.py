@@ -396,6 +396,35 @@ async def _git_identities_for(session, platform_email: str) -> list[str]:
         return [platform_email.lower()]
 
 
+async def _git_author_local_parts_for(
+    session, platform_email: str,
+) -> list[str]:
+    """Return every local-part (the bit before @) of the user's
+    known git identities.
+
+    Hotfix iteration 4 (May 23 2026): GitHub UI merges + gh pr merge
+    sometimes write the merge commit under the user's GitHub noreply
+    email — `<id>+<username>@users.noreply.github.com` or
+    `<username>@users.noreply.github.com` — which won't match a
+    strict equality against `mikeruurds@gmail.com`. Matching on the
+    local-part (e.g. `mikeruurds@%`) catches both the personal
+    address AND every noreply form GitHub generates, without the
+    operator needing to know the numeric account ID.
+
+    The message ILIKE '%merge pull request%' filter already
+    restricts the universe to merge commits, so the broader local-
+    part match never picks up unrelated activity.
+    """
+    identities = await _git_identities_for(session, platform_email)
+    locals_: list[str] = []
+    for ident in identities:
+        if "@" in ident:
+            local = ident.split("@", 1)[0].strip().lower()
+            if local and local not in locals_:
+                locals_.append(local)
+    return locals_
+
+
 async def fetch_team_activity() -> dict[str, Any]:
     """Per-member + platform-wide counts pulled from the existing
     activity tables (test_results, test_feedback, agent_interactions,
@@ -472,30 +501,48 @@ async def fetch_team_activity() -> dict[str, Any]:
                 f"SELECT COUNT(*) FROM commit_activity "
                 f"WHERE LOWER(author) IN ({placeholders})",
                 params_michael_git)
-            # Merged-PR count — hotfix May 23 2026 (third iteration).
-            # PR #98 (the first fix) switched from pr_suggestions
-            # to commit_activity but used:
+            # Merged-PR count — hotfix iteration 4 (May 23 2026).
             #
-            #   message LIKE 'Merge pull request #%'
+            # The third iteration's ILIKE fix made the message
+            # match robust, but the author filter still only
+            # checked equality against {ruurdsm@queens.edu,
+            # mikeruurds@gmail.com}. Production showed only 2
+            # matches for ~100 PRs because GitHub UI merges and
+            # `gh pr merge` sometimes write the merge commit under
+            # the user's GitHub noreply email — typically
+            # mikeruurds@users.noreply.github.com or a numeric-id
+            # prefixed variant — which doesn't match either listed
+            # identity.
             #
-            # which is case-sensitive AND anchored to the prefix.
-            # Several merge commits in production didn't match — the
-            # exact stored form sometimes differs (a leading space,
-            # a slightly different capitalisation from `gh pr merge`
-            # vs the GitHub UI vs an older squash flow). Switching
-            # to ILIKE with wildcards on both sides catches every
-            # variant of "merge pull request" anywhere in the
-            # message, case-insensitive — robust to whichever
-            # merge mechanism produced the commit.
-            #
-            # The author filter still uses Michael's full git-
-            # identity set (platform email + github_email) via the
-            # _git_identities_for helper above.
+            # The local-part OR-match catches every noreply variant
+            # by matching against `mikeruurds@%`. The message
+            # ILIKE already restricts to merge commits, so the
+            # broader local-part match never picks up unrelated
+            # activity.
+            michael_local_parts = await _git_author_local_parts_for(
+                s, _TEAM_EMAILS["michael"])
+            lp_placeholders = ", ".join(
+                f":mlp{i}" for i in range(len(michael_local_parts)))
+            # Build a single OR-able LIKE expression: each local-
+            # part becomes (LOWER(author) LIKE :mlpN || '@%'). The
+            # OR joins them so any one match suffices.
+            lp_likes = " OR ".join(
+                f"LOWER(author) LIKE :mlp{i} || '@%'"
+                for i in range(len(michael_local_parts)))
+            params_michael_localparts = {
+                f"mlp{i}": p
+                for i, p in enumerate(michael_local_parts)
+            }
+            # _ for the IN-clause case where the user has no
+            # github_email populated yet — falls back to just the
+            # platform email's local part, still works.
+            _ = lp_placeholders  # placeholders not directly used
             out["michael_prs_merged"] = await _try_count(s,
                 f"SELECT COUNT(*) FROM commit_activity "
-                f"WHERE LOWER(author) IN ({placeholders}) "
-                f"  AND message ILIKE '%merge pull request%'",
-                params_michael_git)
+                f"WHERE message ILIKE '%merge pull request%' "
+                f"  AND (LOWER(author) IN ({placeholders}) "
+                f"    OR ({lp_likes}))",
+                {**params_michael_git, **params_michael_localparts})
             try:
                 from pathlib import Path
                 mig_dir = (Path(__file__).resolve().parents[1]

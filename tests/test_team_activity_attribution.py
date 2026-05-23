@@ -222,6 +222,88 @@ class TestGitIdentitiesHelper:
             "(migration 038) is the canonical lookup.")
 
 
+class TestLocalPartFallback:
+    """Hotfix iteration 4 (May 23 2026): GitHub UI / gh pr merge
+    writes merge commits under the user's GitHub noreply email
+    (mikeruurds@users.noreply.github.com or a numeric-id prefixed
+    variant). Strict equality against {ruurdsm@queens.edu,
+    mikeruurds@gmail.com} missed ~98 of ~100 PRs. The local-part
+    OR-match (LOWER(author) LIKE 'mikeruurds@%') catches every
+    noreply variant without needing the operator to know the
+    numeric account ID."""
+
+    def test_local_parts_helper_exists_and_is_async(self):
+        assert callable(tp._git_author_local_parts_for)
+        assert inspect.iscoroutinefunction(
+            tp._git_author_local_parts_for)
+
+    def test_local_parts_returns_locals_only(self, monkeypatch):
+        # Mock _git_identities_for to return two emails; expect
+        # the helper to return their local parts.
+        async def _fake_identities(_s, _e):
+            return ["ruurdsm@queens.edu", "mikeruurds@gmail.com"]
+        monkeypatch.setattr(
+            tp, "_git_identities_for", _fake_identities)
+
+        class _StubSession: pass
+        out = asyncio.run(tp._git_author_local_parts_for(
+            _StubSession(), "ruurdsm@queens.edu"))
+        assert "ruurdsm" in out
+        assert "mikeruurds" in out
+        # No duplicates and no full email strings.
+        for p in out:
+            assert "@" not in p
+
+    def test_local_parts_deduplicates(self, monkeypatch):
+        # A user whose platform and github email have the same
+        # local part (rare but possible) should not see duplicates.
+        async def _fake_identities(_s, _e):
+            return ["foo@queens.edu", "foo@gmail.com"]
+        monkeypatch.setattr(
+            tp, "_git_identities_for", _fake_identities)
+
+        class _StubSession: pass
+        out = asyncio.run(tp._git_author_local_parts_for(
+            _StubSession(), "foo@queens.edu"))
+        assert out == ["foo"]
+
+    def test_michael_pr_query_includes_local_part_like_match(self):
+        # The PR query must OR-match against the local-part LIKE
+        # clause. A regression to a strict-equality-only filter
+        # would re-introduce the ~98-PR undercount.
+        #
+        # The local-part LIKE clause is built via an f-string above
+        # the out["michael_prs_merged"] assignment, then OR'd into
+        # the SQL via the {lp_likes} interpolation. Inspect the
+        # full Michael block (from the # ── Michael banner to the
+        # # ── Bob banner) so both the helper setup and the SQL
+        # interpolation are visible.
+        src = inspect.getsource(tp.fetch_team_activity)
+        michael_block_start = src.index("# ── Michael")
+        bob_block_start = src.index("# ── Bob")
+        michael_block = src[michael_block_start:bob_block_start]
+        # Local-part bind parameter convention is :mlpN; the LIKE
+        # clause uses the '@%' suffix to anchor to the local part
+        # so a match against the local part PRECEDES the @ sign.
+        assert "LOWER(author) LIKE :mlp" in michael_block, (
+            "michael_prs_merged must OR-match against the local "
+            "part of Michael's known git identities ("
+            "LOWER(author) LIKE :mlp0 || '@%') so GitHub noreply "
+            "emails are caught.")
+        assert "'@%'" in michael_block, (
+            "The local-part LIKE pattern must anchor to '@%' so a "
+            "match against the local PRECEDES the @ — preventing "
+            "false positives where the local part happens to "
+            "appear elsewhere in an unrelated email.")
+        # Helper call must be present so the local parts are
+        # actually fetched.
+        assert "_git_author_local_parts_for" in michael_block, (
+            "The local-part list must be sourced from "
+            "_git_author_local_parts_for so populating "
+            "github_email automatically yields the right local "
+            "part — no hardcoded substring.")
+
+
 # ── Fail-open contracts ──────────────────────────────────────────────────────
 
 
