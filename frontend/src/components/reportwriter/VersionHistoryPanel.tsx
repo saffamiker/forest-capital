@@ -24,6 +24,7 @@
  * version history.
  */
 import { useCallback, useEffect, useState } from 'react'
+import axios from 'axios'
 import { AlertCircle, ChevronDown, ChevronRight, Clock,
          Loader2, RotateCcw, Save } from 'lucide-react'
 
@@ -80,20 +81,24 @@ export default function VersionHistoryPanel({
   const [showSaveForm, setShowSaveForm] = useState(false)
   const [previewVer, setPreviewVer] = useState<number | null>(null)
 
+  // Hotfix May 23 2026: switched from raw fetch() to axios so the
+  // session token (X-API-Key on axios.defaults.headers.common) is
+  // attached to every request. Without this every list/save/restore
+  // call was 401-ing because fetch() doesn't inherit axios defaults.
   const fetchVersions = useCallback(async () => {
     if (generationId === null) return
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch(
-        `/api/v1/reports/generations/${generationId}/versions`,
-        { credentials: 'include' })
-      if (!res.ok) throw new Error(`Versions fetch returned ${res.status}`)
-      const data = await res.json() as VersionListResponse
-      setVersions(data.versions ?? [])
-      setRevision(data.paper_revision ?? null)
+      const res = await axios.get<VersionListResponse>(
+        `/api/v1/reports/generations/${generationId}/versions`)
+      setVersions(res.data.versions ?? [])
+      setRevision(res.data.paper_revision ?? null)
     } catch (e) {
-      setError((e as Error).message)
+      const msg = axios.isAxiosError(e)
+        ? (e.response?.data?.detail || e.message)
+        : (e as Error).message
+      setError(String(msg))
     } finally {
       setLoading(false)
     }
@@ -106,26 +111,17 @@ export default function VersionHistoryPanel({
     setBusyVer(-1)
     setError(null)
     try {
-      const res = await fetch(
+      await axios.post(
         `/api/v1/reports/generations/${generationId}/versions`,
-        {
-          method:      'POST',
-          credentials: 'include',
-          headers:     { 'Content-Type': 'application/json' },
-          body:        JSON.stringify({
-            label:  saveLabel || null,
-            source: 'manual',
-          }),
-        })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error(body.detail || `Save failed (${res.status})`)
-      }
+        { label: saveLabel || null, source: 'manual' })
       setSaveLabel('')
       setShowSaveForm(false)
       await fetchVersions()
     } catch (e) {
-      setError((e as Error).message)
+      const msg = axios.isAxiosError(e)
+        ? (e.response?.data?.detail || e.message)
+        : (e as Error).message
+      setError(String(msg))
     } finally {
       setBusyVer(null)
     }
@@ -140,18 +136,16 @@ export default function VersionHistoryPanel({
     setBusyVer(versionNumber)
     setError(null)
     try {
-      const res = await fetch(
+      await axios.post(
         `/api/v1/reports/generations/${generationId}`
-        + `/versions/${versionNumber}/restore`,
-        { method: 'POST', credentials: 'include' })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}))
-        throw new Error(body.detail || `Restore failed (${res.status})`)
-      }
+        + `/versions/${versionNumber}/restore`)
       await fetchVersions()
       onRestored?.()
     } catch (e) {
-      setError((e as Error).message)
+      const msg = axios.isAxiosError(e)
+        ? (e.response?.data?.detail || e.message)
+        : (e as Error).message
+      setError(String(msg))
     } finally {
       setBusyVer(null)
     }

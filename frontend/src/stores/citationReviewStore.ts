@@ -37,6 +37,7 @@
  * load/refresh/_reset API, same Zustand convention.
  */
 import { create } from 'zustand'
+import axios from 'axios'
 
 
 // ── Type contracts (mirror CitationReviewPanel's local types) ───────────────
@@ -148,13 +149,14 @@ export const useCitationReviewStore = create<CitationReviewState>((set, get) => 
 
     const fetchPromise = (async () => {
       try {
-        const res = await fetch(
-          `/api/v1/citations/${generationId}`,
-          { credentials: 'include' })
-        if (!res.ok) {
-          throw new Error(`Citation fetch returned ${res.status}`)
-        }
-        const data = await res.json() as { citations: Citation[] }
+        // Hotfix May 23 2026: switched from raw fetch() to axios so
+        // the request inherits axios.defaults.headers.common which
+        // carries the X-API-Key session token. The previous fetch
+        // call only sent cookies (credentials: 'include') and was
+        // hitting 401 on every page load.
+        const res = await axios.get<{ citations: Citation[] }>(
+          `/api/v1/citations/${generationId}`)
+        const data = res.data
         set((s) => ({
           citationsByGenerationId: {
             ...s.citationsByGenerationId,
@@ -170,10 +172,13 @@ export const useCitationReviewStore = create<CitationReviewState>((set, get) => 
           },
         }))
       } catch (e) {
+        const msg = axios.isAxiosError(e)
+          ? (e.response?.data?.detail || e.message)
+          : (e as Error).message
         set((s) => ({
           errorByGenerationId: {
             ...s.errorByGenerationId,
-            [generationId]: (e as Error).message,
+            [generationId]: String(msg),
           },
         }))
       } finally {
