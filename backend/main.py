@@ -2993,6 +2993,24 @@ def _deliberate_to_frontend(query: str, council_response: dict[str, Any]) -> dic
     }
 
 
+def _chunk_synthesis(text: str, words_per_chunk: int = 8) -> list[str]:
+    """
+    Splits the CIO synthesis prose into small chunks for SSE streaming.
+    Mirrors agents.academic_review.chunk_arbiter_text — word groups so
+    the consumer sees the synthesis arrive progressively rather than as
+    one large final frame. 8 words ≈ 50 chars typical, well below the
+    user-spec'd 100-char ceiling, but big enough to keep frame count
+    bounded for a 1000-word synthesis.
+    """
+    if not text:
+        return []
+    words = text.split(" ")
+    return [
+        " ".join(words[i:i + words_per_chunk]) + " "
+        for i in range(0, len(words), words_per_chunk)
+    ]
+
+
 @app.post("/api/council/query")
 @limiter.limit("10/minute")
 async def council_query(
@@ -3001,11 +3019,35 @@ async def council_query(
     session: dict = Depends(require_auth),
 ):
     """
-    Convenes the full investment council and returns a CouncilDebateResponse.
+    Convenes the full investment council and STREAMS phase events via SSE.
 
-    Scope guard runs first (Haiku classifier). If in scope, CIO orchestrates
-    all specialist agents + Gemini challenge + final synthesis. Falls back to
-    mock data only if both real pipeline and scope guard fail entirely.
+    Replaces the previous synchronous JSON response — the deliberation
+    routinely takes 50-100 seconds and was hitting Render's gateway
+    timeout. Streaming keeps the connection alive at each phase
+    boundary; the frontend assembles the same CouncilDebateResponse
+    shape from the events.
+
+    Event sequence (each `data: {json}\\n\\n`):
+      1. council_started     — fires immediately on request receipt
+      2. specialist_complete — one per analyst, in as_completed order
+      3. draft_ready         — CIO draft consensus
+      4. dissent_complete    — gemini, then grok
+      5. synthesis_chunk     — CIO synthesis text, chunked progressively
+      6. council_complete    — full CouncilDebateResponse dict
+      7. data: [DONE]\\n\\n   — end-of-stream sentinel
+
+    On a deliberation failure the stream yields a `council_error` frame
+    and a [DONE] sentinel rather than silently falling through to mock
+    data — the previous fall-through hid real errors from the user.
+
+    Scope guard runs synchronously BEFORE the StreamingResponse so a
+    422 still returns as a normal HTTP error; the same for the 429
+    quota response. The stream only starts once the request has been
+    cleared for processing.
+
+    The test environment keeps the synchronous JSON contract — every
+    council test in tests/test_council_deliberation.py asserts on
+    resp.json() and would break if asked to parse SSE.
     """
     if len(body.query) > 500:
         raise HTTPException(status_code=422, detail="Query exceeds 500 character limit.")
@@ -3014,6 +3056,7 @@ async def council_query(
     # set is blocked once their lifetime allowance is spent. Team members
     # and sysadmins have a NULL limit and are never blocked. Checked before
     # the scope guard so a blocked viewer never spends a classifier call.
+    # The 429 returns as a normal HTTP response, BEFORE the stream starts.
     council_quota: dict[str, Any] | None = None
     from tools.platform_users import (
         get_council_allocation, increment_council_queries,
@@ -3034,7 +3077,9 @@ async def council_query(
         # The query is counted against the allowance before processing.
         council_quota = await increment_council_queries(session["email"])
 
-    # Scope guard — must pass before any agent is invoked
+    # Scope guard — must pass before any agent is invoked.
+    # Runs synchronously so a 422 returns as a normal HTTP error, not
+    # as an SSE frame.
     if ENVIRONMENT != "test":
         try:
             from scope_guard import ScopeGuard
@@ -3058,78 +3103,141 @@ async def council_query(
     log.info("council_query_started", user=session["email"], query_len=len(body.query))
     start_time = time.time()
 
-    if ENVIRONMENT != "test":
+    # Test environment keeps the synchronous JSON contract so the existing
+    # /api/council/query test suite (TestClient.post(...).json()) keeps
+    # passing without rewrite. Production streams; tests do not need to.
+    if ENVIRONMENT == "test":
+        response = dict(MOCK_COUNCIL_RESPONSE)
+        response["query"] = body.query
+        response["mode"] = "fallback"
+        if council_quota:
+            response["council_queries_used"] = council_quota["council_queries_used"]
+            response["council_queries_limit"] = council_quota["council_queries_limit"]
+        return response
+
+    query = body.query
+
+    async def event_stream():
+        # The CIO generator is synchronous and does heavy work (parallel
+        # specialists, network-bound LLM calls). We bridge it to async
+        # via asyncio.to_thread(next, ...) so the event loop stays free
+        # between yields — that is what allows the gateway connection
+        # to keep alive past 30s.
+        import asyncio
+        import traceback
+
+        from agents.cio import CIO
+        from agents.harness import (
+            start_harness_capture, collect_harness_metrics,
+        )
+        from agents.usage import start_usage_capture
+        from tools.backtester import run_all_strategies
+        from tools.data_fetcher import get_full_history
+
+        final_result: dict[str, Any] | None = None
+
         try:
-            from tools.data_fetcher import get_full_history
-            from tools.backtester import run_all_strategies
-            from agents.cio import CIO
-            from agents.harness import (
-                start_harness_capture, collect_harness_metrics,
-            )
-            from agents.usage import start_usage_capture
+            yield _sse("council_started", query=query)
 
-            history = get_full_history()
-            strategy_results = run_all_strategies(history)
+            # Heavy data load offloaded to threads so the council_started
+            # event flushes immediately and the event loop stays
+            # responsive. get_full_history() is memoised (30s); a warm
+            # call is fast, but the first call after a hash change runs
+            # the read pipeline.
+            history = await asyncio.to_thread(get_full_history)
+            strategy_results = await asyncio.to_thread(
+                run_all_strategies, history)
 
-            # Capture every specialist's harness run for the Team Activity
-            # metrics, and every agent call's token usage for cost
-            # tracking — both seeded before the parallel specialist phase
-            # so the copied thread contexts share the accumulator lists.
+            # Capture every specialist's harness run + every agent
+            # call's token usage. Seeded before the generator runs so
+            # the copied thread contexts share the accumulator lists.
             start_harness_capture()
             start_usage_capture()
+
             cio = CIO()
-            council_response = cio.deliberate(
-                query=body.query,
-                strategy_results=strategy_results,
-                history=history,
+            gen = cio.deliberate_streaming(query, strategy_results, history)
+            sentinel = object()
+            while True:
+                # Each next(gen) runs a phase — specialists fan-out,
+                # draft, dissenter, synthesis. The phase work happens
+                # in the worker thread; the yield back to async land
+                # flushes the SSE frame.
+                event = await asyncio.to_thread(next, gen, sentinel)
+                if event is sentinel:
+                    break
+                kind = event[0]
+                if kind == "specialist_complete":
+                    _, agent_id, report = event
+                    yield _sse("specialist_complete",
+                               agent_id=agent_id, response=report)
+                elif kind == "draft_ready":
+                    _, draft = event
+                    yield _sse("draft_ready", draft=draft)
+                elif kind == "dissent_complete":
+                    _, source, report = event
+                    yield _sse("dissent_complete",
+                               source=source, challenge=report)
+                elif kind == "cio_synthesis_text":
+                    _, synthesis_text = event
+                    # Chunk the synthesis prose so the user sees it
+                    # arrive progressively — same pattern as
+                    # academic_review.chunk_arbiter_text.
+                    for chunk in _chunk_synthesis(synthesis_text):
+                        yield _sse("synthesis_chunk", text=chunk)
+                elif kind == "council_complete":
+                    _, full_result = event
+                    final_result = full_result
+                    # Convert to the CouncilDebateResponse shape the
+                    # frontend store assembles into — same dict the
+                    # previous synchronous handler returned.
+                    result = _deliberate_to_frontend(query, full_result)
+                    if council_quota:
+                        result["council_queries_used"] = (
+                            council_quota["council_queries_used"])
+                        result["council_queries_limit"] = (
+                            council_quota["council_queries_limit"])
+                    yield _sse("council_complete", result=result)
+
+            # Post-stream logging — runs only when the deliberation
+            # completed cleanly. _log_council_session writes to the
+            # AI usage log; _log_interaction_bg is fire-and-forget
+            # Team Activity.
+            if final_result is not None:
+                harness_meta = collect_harness_metrics()
+                council_agents = [
+                    "equity_analyst", "fixed_income_analyst",
+                    "risk_manager", "quant_backtester",
+                    "independent_analyst", "contrarian_analyst", "cio",
+                ]
+                _log_council_session(
+                    query=query,
+                    agents_called=council_agents,
+                    response=final_result,
+                    start_time=start_time,
+                    user_email=session["email"],
+                )
+                _log_interaction_bg(
+                    request, session, "council",
+                    question_text=query,
+                    agents_involved=council_agents,
+                    response_summary=final_result.get(
+                        "final_recommendation", ""),
+                    metadata=({"harness": harness_meta}
+                              if harness_meta else None),
+                )
+        except Exception as exc:  # noqa: BLE001
+            # A deliberation failure surfaces clearly — no silent
+            # fall-through to mock data. The frontend renders the
+            # error and lets the user retry.
+            log.error("council_query_failed", error=str(exc),
+                      traceback=traceback.format_exc())
+            yield _sse(
+                "council_error",
+                message="Council query failed. Please try again.",
             )
-            harness_meta = collect_harness_metrics()
+        yield "data: [DONE]\n\n"
 
-            council_agents = ["equity_analyst", "fixed_income_analyst",
-                              "risk_manager", "quant_backtester",
-                              "independent_analyst", "contrarian_analyst", "cio"]
-            _log_council_session(
-                query=body.query,
-                agents_called=council_agents,
-                response=council_response,
-                start_time=start_time,
-                user_email=session["email"],
-            )
-            # Team Activity — non-blocking; the council response is already
-            # assembled, so this never delays what the user sees. The
-            # harness block is attached only when at least one harness run
-            # was captured.
-            _log_interaction_bg(
-                request, session, "council",
-                question_text=body.query,
-                agents_involved=council_agents,
-                response_summary=council_response.get("final_recommendation", ""),
-                metadata=({"harness": harness_meta} if harness_meta else None),
-            )
-
-            result = _deliberate_to_frontend(body.query, council_response)
-            if council_quota:
-                result["council_queries_used"] = (
-                    council_quota["council_queries_used"])
-                result["council_queries_limit"] = (
-                    council_quota["council_queries_limit"])
-            return result
-
-        except Exception as exc:
-            log.error("council_query_error", error=str(exc))
-            # Fall through to mock response rather than returning 500 —
-            # a demo-critical endpoint should degrade gracefully.
-
-    # Mock fallback — reached in the test environment, or when the real
-    # pipeline raised above. "mode": "fallback" flags it so a consumer
-    # never mistakes demo data for a genuine council run.
-    response = dict(MOCK_COUNCIL_RESPONSE)
-    response["query"] = body.query
-    response["mode"] = "fallback"
-    if council_quota:
-        response["council_queries_used"] = council_quota["council_queries_used"]
-        response["council_queries_limit"] = council_quota["council_queries_limit"]
-    return response
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 # ── Academic review ───────────────────────────────────────────────────────────
