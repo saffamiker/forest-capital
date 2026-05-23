@@ -5775,33 +5775,70 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
 
     begin_methodology()
     try:
-        if ENVIRONMENT != "test":
-            try:
-                from tools.data_fetcher import get_full_history
-                from tools.backtester import run_all_strategies
-                from agents.qa_agent import QAAgent
-                from agents.usage import start_usage_capture
+        if ENVIRONMENT == "test":
+            return MOCK_QA_AUDIT
 
-                history = get_full_history()
-                strategy_results = run_all_strategies(history)
+        # Hotfix May 23 2026: this handler used to swallow every
+        # exception, log it, and return MOCK_QA_AUDIT — a 200
+        # response with mock data. The frontend treated that as a
+        # successful run, overwrote real per-check state with the
+        # mock's empty data, and the user's "Re-run" click
+        # produced no visible result. Now we propagate the real
+        # error as a 500 so the qaStore surfaces it via its
+        # error field.
+        try:
+            from tools.data_fetcher import get_full_history
+            from tools.backtester import run_all_strategies
+            from agents.qa_agent import QAAgent
+            from agents.usage import start_usage_capture
 
-                # Seed the per-request usage bucket before the QA agent's
-                # call_claude invocations so their token usage is captured.
-                start_usage_capture()
-                qa = QAAgent()
-                audit = qa.run_audit(strategy_results, run_full_checklist=True)
-                # Team Activity — record the audit run (non-blocking).
-                _log_interaction_bg(
-                    request, session, "qa",
-                    response_summary=str(audit.get("summary", "")),
-                    metadata={"verdict": audit.get("verdict")},
-                )
-                return audit
+            history = get_full_history()
+            strategy_results = run_all_strategies(history)
 
-            except Exception as exc:
-                log.error("qa_audit_error", error=str(exc))
+            # Seed the per-request usage bucket before the QA
+            # agent's call_claude invocations so their token usage
+            # is captured.
+            start_usage_capture()
+            qa = QAAgent()
+            audit = qa.run_audit(strategy_results, run_full_checklist=True)
+            # Team Activity — record the audit run (non-blocking).
+            _log_interaction_bg(
+                request, session, "qa",
+                response_summary=str(audit.get("summary", "")),
+                metadata={"verdict": audit.get("verdict")},
+            )
+            return audit
 
-        return MOCK_QA_AUDIT
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # Surface the real error so the frontend's "Re-run"
+            # button shows what actually went wrong instead of
+            # silently appearing to succeed. The previous catch-all
+            # mock fallback hid the underlying data pipeline
+            # failures (get_full_history timeout, missing strategy
+            # cache row, etc.) from every operator.
+            import traceback
+            log.error(
+                "qa_audit_error",
+                error=str(exc),
+                error_type=type(exc).__name__,
+                traceback=traceback.format_exc(limit=10),
+            )
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error":      "qa_audit_failed",
+                    "error_type": type(exc).__name__,
+                    "message":    str(exc),
+                    "hint": (
+                        "The QA audit needs the strategy results "
+                        "cache. If this is a fresh deploy, wait "
+                        "for the analytics warm-up to complete and "
+                        "retry. If the error persists, check the "
+                        "Render logs for the qa_audit_error event."),
+                },
+            )
     finally:
         end_methodology()
 
