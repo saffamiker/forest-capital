@@ -320,6 +320,41 @@ _TEAM_EMAILS = {
     "molly":    "murdockm@queens.edu",
 }
 
+# Git author emails for each team member (mapped onto their platform
+# identity for commit attribution). Mirrors GIT_AUTHOR_EMAIL_MAP in
+# reverse — platform email → list of git author emails. Michael
+# commits under his personal account; Bob and Molly commit under
+# their queens.edu address so the lookup is a single-element list
+# for them. This drives the commit_activity / pr_suggestions
+# attribution lookups so a commit authored under a git identity
+# still attributes to the correct platform identity.
+_TEAM_GIT_EMAILS: dict[str, list[str]] = {
+    "michael":  ["ruurdsm@queens.edu", "mikeruurds@gmail.com"],
+    "bob":      ["thaob@queens.edu"],
+    "molly":    ["murdockm@queens.edu"],
+}
+
+
+async def _try_count(session, sql: str, params: dict) -> int:
+    """Run a single SELECT COUNT(*) with isolated error handling.
+
+    fetch_team_activity USED to wrap every query in one big try/except
+    — so a single query failure (e.g. a schema-drift column name)
+    blanked every subsequent count to zero. This helper isolates each
+    count: a failing query logs and returns 0 while the rest of the
+    function continues. Hotfix May 23 2026: the audit_runs.statistical
+    _status column reference threw, which is what was returning 0 for
+    Bob and Molly even though their council rows existed.
+    """
+    try:
+        from sqlalchemy import text
+        r = await session.execute(text(sql), params)
+        return int(r.scalar() or 0)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("team_activity_count_failed",
+                    sql_head=sql[:80], error=str(exc))
+        return 0
+
 
 async def fetch_team_activity() -> dict[str, Any]:
     """Per-member + platform-wide counts pulled from the existing
@@ -345,43 +380,60 @@ async def fetch_team_activity() -> dict[str, Any]:
         "molly_feedback_items": 0,
     }
     try:
-        from sqlalchemy import text
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return out
         async with AsyncSessionLocal() as s:
-            # Platform-wide
-            r = await s.execute(text(
+            # ── Platform-wide ───────────────────────────────────────────────
+            out["team_total_uat_steps"] = await _try_count(s,
                 "SELECT COUNT(*) FROM test_results "
-                "WHERE result IN ('pass','fail')"))
-            out["team_total_uat_steps"] = int(r.scalar() or 0)
-            r = await s.execute(text(
-                "SELECT COUNT(*) FROM test_results WHERE result = 'fail'"))
-            out["team_total_failure_reports"] = int(r.scalar() or 0)
-            r = await s.execute(text(
+                "WHERE result IN ('pass','fail')",
+                {})
+            out["team_total_failure_reports"] = await _try_count(s,
+                "SELECT COUNT(*) FROM test_results WHERE result = 'fail'",
+                {})
+            out["team_total_failure_reports_resolved"] = await _try_count(s,
                 "SELECT COUNT(*) FROM test_results "
-                "WHERE result = 'fail' AND resolved_at IS NOT NULL"))
-            out["team_total_failure_reports_resolved"] = int(r.scalar() or 0)
-            r = await s.execute(text(
+                "WHERE result = 'fail' AND resolved_at IS NOT NULL",
+                {})
+            out["team_total_council_sessions"] = await _try_count(s,
                 "SELECT COUNT(*) FROM agent_interactions "
-                "WHERE interaction_type = 'council'"))
-            out["team_total_council_sessions"] = int(r.scalar() or 0)
-            r = await s.execute(text(
+                "WHERE interaction_type = 'council'",
+                {})
+            # Hotfix May 23 2026: audit_runs has layer_1_status /
+            # layer_2_status / layer_3_status — there is no
+            # statistical_status column. The old query referenced a
+            # non-existent column, raising on every call and aborting
+            # the rest of the function via the (formerly-shared)
+            # try/except — that is what was returning 0 for every
+            # per-member count. Use layer_2_status (the recompute
+            # layer that maps to "validated") for the audit total.
+            out["team_total_audit_validations"] = await _try_count(s,
                 "SELECT COUNT(*) FROM audit_runs "
-                "WHERE statistical_status = 'pass' "
-                " OR layer_2_status = 'pass'"))
-            out["team_total_audit_validations"] = int(r.scalar() or 0)
+                "WHERE layer_2_status = 'pass'",
+                {})
 
-            # Michael
-            r = await s.execute(text(
-                "SELECT COUNT(*) FROM commit_activity WHERE author = :e"),
-                {"e": _TEAM_EMAILS["michael"]})
-            out["michael_commits"] = int(r.scalar() or 0)
-            r = await s.execute(text(
+            # ── Michael ─────────────────────────────────────────────────────
+            # commit_activity.author carries the GIT author email; for
+            # Michael this is mikeruurds@gmail.com, NOT his platform
+            # email. Match against the full git-email list so commits
+            # authored under either identity attribute correctly.
+            # _TEAM_GIT_EMAILS["michael"] = ["ruurdsm@queens.edu",
+            # "mikeruurds@gmail.com"]; an IN clause handles both.
+            michael_git_emails = _TEAM_GIT_EMAILS["michael"]
+            placeholders = ", ".join(
+                f":mg{i}" for i in range(len(michael_git_emails)))
+            params_michael_git = {
+                f"mg{i}": e for i, e in enumerate(michael_git_emails)
+            }
+            out["michael_commits"] = await _try_count(s,
+                f"SELECT COUNT(*) FROM commit_activity "
+                f"WHERE LOWER(author) IN ({placeholders})",
+                params_michael_git)
+            out["michael_prs_merged"] = await _try_count(s,
                 "SELECT COUNT(*) FROM pr_suggestions "
-                "WHERE reviewed_by = :e"),
+                "WHERE reviewed_by = :e",
                 {"e": _TEAM_EMAILS["michael"]})
-            out["michael_prs_merged"] = int(r.scalar() or 0)
             try:
                 from pathlib import Path
                 mig_dir = (Path(__file__).resolve().parents[1]
@@ -391,50 +443,42 @@ async def fetch_team_activity() -> dict[str, Any]:
                     if p.name[0].isdigit())
             except Exception:  # noqa: BLE001
                 pass
-            r = await s.execute(text(
+            out["michael_failure_reports_resolved"] = await _try_count(s,
                 "SELECT COUNT(*) FROM test_results "
-                "WHERE result = 'fail' AND resolved_by = :e"),
+                "WHERE result = 'fail' AND resolved_by = :e",
                 {"e": _TEAM_EMAILS["michael"]})
-            out["michael_failure_reports_resolved"] = int(r.scalar() or 0)
 
-            # Bob
-            r = await s.execute(text(
+            # ── Bob ─────────────────────────────────────────────────────────
+            out["bob_uat_steps"] = await _try_count(s,
                 "SELECT COUNT(*) FROM test_results "
-                "WHERE user_email = :e AND result IN ('pass','fail')"),
+                "WHERE user_email = :e AND result IN ('pass','fail')",
                 {"e": _TEAM_EMAILS["bob"]})
-            out["bob_uat_steps"] = int(r.scalar() or 0)
-            r = await s.execute(text(
+            out["bob_council_sessions"] = await _try_count(s,
                 "SELECT COUNT(*) FROM agent_interactions "
-                "WHERE user_email = :e AND interaction_type = 'council'"),
+                "WHERE user_email = :e AND interaction_type = 'council'",
                 {"e": _TEAM_EMAILS["bob"]})
-            out["bob_council_sessions"] = int(r.scalar() or 0)
-            r = await s.execute(text(
+            out["bob_academic_review_runs"] = await _try_count(s,
                 "SELECT COUNT(*) FROM agent_interactions "
                 "WHERE user_email = :e "
-                " AND interaction_type = 'academic_review'"),
+                " AND interaction_type = 'academic_review'",
                 {"e": _TEAM_EMAILS["bob"]})
-            out["bob_academic_review_runs"] = int(r.scalar() or 0)
-            r = await s.execute(text(
+            out["bob_report_drafts"] = await _try_count(s,
                 "SELECT COUNT(*) FROM editor_drafts "
-                "WHERE owner_email = :e"),
+                "WHERE owner_email = :e",
                 {"e": _TEAM_EMAILS["bob"]})
-            out["bob_report_drafts"] = int(r.scalar() or 0)
 
-            # Molly
-            r = await s.execute(text(
+            # ── Molly ───────────────────────────────────────────────────────
+            out["molly_uat_steps"] = await _try_count(s,
                 "SELECT COUNT(*) FROM test_results "
-                "WHERE user_email = :e AND result IN ('pass','fail')"),
+                "WHERE user_email = :e AND result IN ('pass','fail')",
                 {"e": _TEAM_EMAILS["molly"]})
-            out["molly_uat_steps"] = int(r.scalar() or 0)
-            r = await s.execute(text(
+            out["molly_failure_reports_filed"] = await _try_count(s,
                 "SELECT COUNT(*) FROM test_results "
-                "WHERE user_email = :e AND result = 'fail'"),
+                "WHERE user_email = :e AND result = 'fail'",
                 {"e": _TEAM_EMAILS["molly"]})
-            out["molly_failure_reports_filed"] = int(r.scalar() or 0)
-            r = await s.execute(text(
-                "SELECT COUNT(*) FROM test_feedback WHERE user_email = :e"),
+            out["molly_feedback_items"] = await _try_count(s,
+                "SELECT COUNT(*) FROM test_feedback WHERE user_email = :e",
                 {"e": _TEAM_EMAILS["molly"]})
-            out["molly_feedback_items"] = int(r.scalar() or 0)
     except Exception as exc:  # noqa: BLE001
         log.warning("team_activity_fetch_failed", error=str(exc))
     return out
