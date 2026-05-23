@@ -1510,20 +1510,53 @@ async def patch_generation_paper_md(
     request: Request, generation_id: int, body: dict,
     session: dict = Depends(require_team_member),
 ):
-    """Inline editor save. Body: {paper_md: str}. Re-runs the post-
-    check, persists the new paper_md + flag_count + word_counts."""
+    """Inline editor save. Body:
+      paper_md (required) — the new full paper text
+      expected_revision (optional) — the paper_revision the caller
+        last saw. If supplied AND it does not match the current row,
+        the endpoint returns 409 with the actual revision so the
+        frontend can show a "concurrent edit detected" prompt. The
+        debounced auto-save typically omits this so it never blocks
+        itself; the explicit Save action passes it.
+      source (optional) — what triggered the save. One of: manual,
+        auto_iterate, auto_resolve_bob, auto_edit (default). Stored
+        on the version snapshot so the history reads cleanly.
+    """
     if ENVIRONMENT == "test":
-        return {"saved": False, "flag_count": 0}
+        return {"saved": False, "flag_count": 0, "paper_revision": 0}
     paper_md = body.get("paper_md")
     if paper_md is None:
         raise HTTPException(
             status_code=422, detail="paper_md is required.")
+    expected_revision = body.get("expected_revision")
+    source = body.get("source") or "auto_edit"
     try:
         from tools.report_generator import update_paper_md
-        result = await update_paper_md(int(generation_id), str(paper_md))
+        result = await update_paper_md(
+            int(generation_id), str(paper_md),
+            expected_revision=(int(expected_revision)
+                                 if expected_revision is not None else None),
+            saved_by_email=session.get("email"),
+            source=source,
+        )
         if result.get("error") == "generation_not_found":
             raise HTTPException(status_code=404,
                                 detail="Generation not found.")
+        if result.get("error") == "revision_mismatch":
+            # 409 Conflict — the caller's snapshot is stale. The
+            # response body carries the current revision so the
+            # frontend can offer a "refresh and re-apply" flow.
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error":             "revision_mismatch",
+                    "current_revision":  result.get("current_revision"),
+                    "expected_revision": result.get("expected_revision"),
+                    "message": (
+                        "Another reviewer saved while you were "
+                        "editing. Refresh the paper and re-apply "
+                        "your change."),
+                })
         return result
     except HTTPException:
         raise
@@ -1531,6 +1564,86 @@ async def patch_generation_paper_md(
         log.warning("patch_paper_md_failed", error=str(exc))
         raise HTTPException(
             status_code=500, detail="Save failed — see server logs.")
+
+
+# ── Paper version history (item 2, May 23 2026) ──────────────────────────────
+#
+# Every save to paper_md creates an append-only snapshot in
+# report_paper_versions. The three endpoints below back the version
+# history panel: list, save (manual snapshot), restore.
+
+@app.get("/api/v1/reports/generations/{generation_id}/versions")
+async def get_paper_versions(
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Every version snapshot for a generation, newest first.
+    Includes paper_md so the preview can render without a second
+    round-trip per version. Powers VersionHistoryPanel."""
+    from tools.paper_versions import check_revision, list_versions
+    versions = await list_versions(generation_id)
+    revision = await check_revision(generation_id)
+    return {
+        "generation_id":     generation_id,
+        "paper_revision":    revision,
+        "versions":          versions,
+        "version_count":     len(versions),
+    }
+
+
+@app.post("/api/v1/reports/generations/{generation_id}/versions")
+async def post_paper_version(
+    generation_id: int, body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Save the CURRENT paper_md as a named version snapshot. Body:
+      label (optional) — short description of the save point
+      source (optional) — defaults to 'manual'
+    The current paper_md is read fresh from report_generations so a
+    concurrent inline edit just before the manual save is captured."""
+    from tools.report_generator import get_generation
+    from tools.paper_versions import save_version
+    gen = await get_generation(generation_id)
+    if not gen:
+        raise HTTPException(
+            status_code=404, detail="Generation not found.")
+    snapshot = await save_version(
+        generation_id, gen.get("paper_md") or "",
+        saved_by_email=session.get("email"),
+        label=body.get("label"),
+        source=body.get("source") or "manual",
+        flag_count=int(gen.get("flag_count") or 0),
+        word_counts=gen.get("word_counts") or {},
+    )
+    if snapshot is None:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to save version — see server logs.")
+    return {"snapshot": snapshot}
+
+
+@app.post(
+    "/api/v1/reports/generations/{generation_id}/versions"
+    "/{version_number}/restore")
+async def post_paper_version_restore(
+    generation_id: int, version_number: int,
+    session: dict = Depends(require_team_member),
+):
+    """Restore a prior version as the new current paper_md. The
+    older version row is preserved — a new row is appended with
+    source='restore' and restored_from_version pointing at the
+    source. Returns the new version snapshot."""
+    from tools.paper_versions import restore_version
+    snapshot = await restore_version(
+        generation_id, version_number,
+        reviewer_email=session.get("email"),
+    )
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=("Version not found, or the restore failed — "
+                    "see server logs."))
+    return {"snapshot": snapshot}
 
 
 @app.post("/api/v1/reports/generations/{generation_id}/iterate")

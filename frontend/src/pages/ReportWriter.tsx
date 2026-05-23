@@ -30,6 +30,7 @@ import type { AcademicReview } from '../components/reportwriter/AcademicReviewPa
 import RubricPanel from '../components/reportwriter/RubricPanel'
 import type { Rubric } from '../components/reportwriter/RubricPanel'
 import CitationReviewPanel from '../components/reportwriter/CitationReviewPanel'
+import VersionHistoryPanel from '../components/reportwriter/VersionHistoryPanel'
 import PipelineGate, {
   useAutoFireStep5And6,
 } from '../components/reportwriter/PipelineGate'
@@ -740,6 +741,22 @@ export default function ReportWriter() {
           />
           <CitationReviewPanel
             generationId={generation?.id ?? null}
+          />
+          <VersionHistoryPanel
+            generationId={generation?.id ?? null}
+            onRestored={() => {
+              // Re-fetch the generation so the editor textarea
+              // picks up the restored paper_md.
+              if (generation?.id) {
+                axios.get<GenerationResponse>(
+                  `/api/v1/reports/generations/${generation.id}`)
+                  .then((r) => {
+                    setGeneration(r.data)
+                    setPaperMd(r.data.paper_md || '')
+                  })
+                  .catch(() => { /* best-effort */ })
+              }
+            }}
           />
           <WordCountSidebar counts={sectionCounts} />
         </aside>
