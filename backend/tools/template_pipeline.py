@@ -554,7 +554,31 @@ def _parse_citation_json(raw: str) -> dict | None:
 
 
 def _format_citation(c: dict) -> str:
-    """APA-ish formatter."""
+    """APA 7th edition reference list formatter.
+
+    Journal article:
+      Author, A. A., & Author, B. B. (year). Title of article in
+      sentence case. Journal Name in Title Case, volume(issue),
+      pages. https://doi.org/xxxxx
+
+    Working paper / report:
+      Author, A. A. (year). Title of paper. Institution Name. URL
+
+    The .docx renderer wraps the result in a hanging-indent
+    paragraph so the visual format matches the APA convention.
+
+    Inputs:
+      author              — 'Surname, A. A.' or
+                            'Surname1, A. A., & Surname2, B. B.'
+      year                — '1994' or '2018'
+      title               — sentence case title of the work
+      journal_or_institution — italics-wrapped at render time
+                            (the .docx renderer can't see asterisks
+                            inside table cells, so we use '*Journal*'
+                            markers that _split_inline interprets)
+      volume_issue_pages  — '15(2), 3-44' or '9(3), 203-228'
+      url                 — DOI URL or institution URL
+    """
     author = (c.get("author") or "").strip()
     year = c.get("year")
     if year is not None:
@@ -562,17 +586,25 @@ def _format_citation(c: dict) -> str:
     title = (c.get("title") or "").strip()
     journal = (c.get("journal_or_institution") or "").strip()
     vol = (c.get("volume_issue_pages") or "").strip()
+    url = (c.get("url") or "").strip()
     parts: list[str] = []
     if author:
-        parts.append(author)
+        # Author block ends with a period only when no year follows.
+        parts.append(author.rstrip(".") + ".")
     if year:
         parts.append(f"({year}).")
     if title:
-        parts.append(f'"{title}".')
+        # APA 7th sentence case: trailing period.
+        parts.append(title.rstrip(".") + ".")
     if journal:
-        parts.append(f"{journal}{',' if vol else '.'}")
-    if vol:
-        parts.append(f"{vol}.")
+        # Journal name is italicised in APA — emit Markdown asterisks
+        # so the docx renderer's _split_inline reads the italics.
+        if vol:
+            parts.append(f"*{journal}*, {vol}.")
+        else:
+            parts.append(f"*{journal}*.")
+    if url:
+        parts.append(url)
     return " ".join(parts).strip()
 
 

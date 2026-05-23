@@ -1,27 +1,52 @@
-"""tools/report_writer_docx.py — docx assembly for the report-writer
-midpoint paper + appendix.
+"""tools/report_writer_docx.py — APA 7th edition docx assembly.
 
-May 22 2026 (item 12 commit 2). Pure document assembly: takes a
-generated markdown body and a context dict, emits Word (.docx) bytes.
-No LLM calls, no database reads — the upstream pipeline (template_
-pipeline + report_generator) does all the gathering.
+May 22 2026 (item 12 commit C). Renders the midpoint paper +
+appendix as APA 7th edition formatted .docx files for FNA670
+submission.
 
-Formatting follows the FNA670 brief:
-  12-point Times New Roman / equivalent serif body
-  Double-spaced body, single-spaced tables / appendix data
-  1-inch margins
-  Page numbers in the footer
-  Standard header: "Forest Capital — FNA670 Industry Practicum —
-    Midpoint Check"
-  Standard footer line above page number: "Confidential — Queens
-    University — May 2026"
+APA 7th EDITION CONFORMANCE:
 
-The build_paper_docx function renders a markdown body (produced by
-the Academic Writer) — headings (`## Section N`), paragraphs, and
-inline emphasis are all preserved. The build_appendix_docx function
-assembles four sections programmatically from the context dict — it
-does NOT take a markdown body, because the appendix structure is
-fixed and tabular and is filled with live data, not narrative.
+  Document formatting:
+    Font: Times New Roman 12pt
+    Line spacing: double (1.0 in tables / data blocks)
+    Margins: 1 inch all sides
+    Page numbers: top-right header, starting at the title page
+    Running head: NOT required for student papers in APA 7th
+    First-line indent: 0.5 inch on every body paragraph
+
+  Title page (additional page, not counted in the three-page limit):
+    Paper title in title case — bold, centred, 3-4 lines down from
+      the top
+    Author names — centred below the title
+    Institutional affiliation — Queens University · McColl School
+      of Business — centred
+    Course name + number — FNA670 Industry Practicum
+    Instructor — Dr. Panttser
+    Submission date — May 27 2026
+
+  Headings:
+    Level 1 (section): bold, centred, title case
+    Level 2 (subsection): bold, left-aligned, title case
+    (No heading at the document top — the title page replaces it.)
+
+  References page:
+    Starts on a fresh page after Section 4
+    Title: References (bold, centred, Level 1)
+    Hanging indent of 0.5 inch on every entry
+    Double-spaced
+
+  Appendix formatting:
+    Each appendix starts on a new page
+    Label: Appendix A / B / ... (bold, centred)
+    Title below the label (bold, centred)
+    Continued APA paragraph formatting
+
+The paper has NO header text — APA 7th student papers do not use a
+running head. Only the page number appears in the top-right header.
+
+Build entry points (unchanged interface):
+  build_paper_docx(paper_md, references_md=None) → bytes
+  build_appendix_docx(context) → bytes
 """
 from __future__ import annotations
 
@@ -30,17 +55,27 @@ from io import BytesIO
 from typing import Any
 
 from docx import Document
-from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
+from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
 _BODY_FONT = "Times New Roman"
+_INDENT_FIRST_LINE = Inches(0.5)
+_INDENT_HANGING = Inches(0.5)
 
-_HEADER_TEXT = (
-    "Forest Capital — FNA670 Industry Practicum — Midpoint Check")
-_FOOTER_TEXT = "Confidential — Queens University — May 2026"
+
+# ── Title page constants ────────────────────────────────────────────────────
+
+
+PAPER_TITLE = (
+    "Multi-Strategy Portfolio Diversification: A Midpoint Analysis")
+AUTHOR_LINE = "Michael Ruurds, Bob Thao, and Molly Murdock"
+INSTITUTION_LINE = "Queens University — McColl School of Business"
+COURSE_LINE = "FNA670 Industry Practicum"
+INSTRUCTOR_LINE = "Instructor: Dr. Panttser"
+SUBMISSION_DATE_LINE = "May 27, 2026"
 
 
 # ── Low-level helpers ────────────────────────────────────────────────────────
@@ -67,8 +102,21 @@ def _add_page_number(paragraph) -> None:
     run._r.append(end)
 
 
-def _new_document(double_spaced: bool = True) -> Document:
-    """Document pre-configured to the FNA670 formatting brief."""
+def _add_page_break(doc: Document) -> None:
+    """Forces the next paragraph onto a new page. APA 7th requires
+    page breaks before the References section and before each
+    Appendix label."""
+    para = doc.add_paragraph()
+    run = para.add_run()
+    run.add_break(WD_BREAK.PAGE)
+
+
+def _new_apa_document(
+    *, body_spacing: WD_LINE_SPACING = WD_LINE_SPACING.DOUBLE,
+) -> Document:
+    """APA 7th edition document — 1-inch margins, Times New Roman
+    12pt double-spaced body, page number in the top-right header.
+    No running head (student papers in APA 7th do not require it)."""
     doc = Document()
     section = doc.sections[0]
     section.left_margin = Inches(1)
@@ -79,62 +127,135 @@ def _new_document(double_spaced: bool = True) -> Document:
     normal = doc.styles["Normal"]
     normal.font.name = _BODY_FONT
     normal.font.size = Pt(12)
-    normal.paragraph_format.line_spacing_rule = (
-        WD_LINE_SPACING.DOUBLE if double_spaced
-        else WD_LINE_SPACING.SINGLE)
+    normal.paragraph_format.line_spacing_rule = body_spacing
     normal.paragraph_format.space_after = Pt(0)
 
-    # Header line — fixed across the whole document.
+    # APA 7th student paper: page number only in the top-right header.
     header_para = section.header.paragraphs[0]
-    header_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    h_run = header_para.add_run(_HEADER_TEXT)
-    h_run.font.name = _BODY_FONT
-    h_run.font.size = Pt(10)
-    _set_run_color(h_run, "#374151")  # slate-700
-
-    # Footer — confidential line + page number.
-    footer_para = section.footer.paragraphs[0]
-    footer_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    f_run = footer_para.add_run(_FOOTER_TEXT + "    Page ")
-    f_run.font.name = _BODY_FONT
-    f_run.font.size = Pt(9)
-    _set_run_color(f_run, "#6b7280")
-    _add_page_number(footer_para)
+    header_para.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+    _add_page_number(header_para)
+    for r in header_para.runs:
+        r.font.name = _BODY_FONT
+        r.font.size = Pt(12)
 
     return doc
 
 
-def _add_section_heading(doc: Document, text: str, *, size: int = 13) -> None:
-    """Bold heading on the body font — kept off Word Heading styles so
-    the 12pt serif brief holds throughout."""
+def _add_title_page(doc: Document) -> None:
+    """APA 7th student paper title page. The paper title appears 3-4
+    double-spaced lines down from the top — implemented as three
+    empty paragraphs above the title for a defensible approximation
+    of the convention. Every line is centred, double-spaced, and in
+    the body font.
+
+    The page closes with a page break so Section 1 begins on a fresh
+    page (also a standard APA convention — body text starts on
+    page 2)."""
+    # Spacer lines pushing the title block down the page.
+    for _ in range(4):
+        para = doc.add_paragraph()
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Title — bold, centred, title case.
+    title_para = doc.add_paragraph()
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_run = title_para.add_run(PAPER_TITLE)
+    title_run.bold = True
+    title_run.font.name = _BODY_FONT
+    title_run.font.size = Pt(12)
+
+    # One empty line between the title and the author block.
+    spacer = doc.add_paragraph()
+    spacer.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    # Author + institution + course + instructor + date — each on
+    # its own centred line.
+    for line in (
+        AUTHOR_LINE,
+        INSTITUTION_LINE,
+        COURSE_LINE,
+        INSTRUCTOR_LINE,
+        SUBMISSION_DATE_LINE,
+    ):
+        para = doc.add_paragraph()
+        para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = para.add_run(line)
+        run.font.name = _BODY_FONT
+        run.font.size = Pt(12)
+
+    _add_page_break(doc)
+
+
+def _add_section_heading(
+    doc: Document, text: str, *,
+    level: int = 1,
+) -> None:
+    """APA 7th heading.
+
+      Level 1: bold, centred, title case  (section headings)
+      Level 2: bold, left-aligned, title case  (subsection if used)
+
+    Both use 12pt body font (NOT enlarged) per APA 7th convention.
+    Single-spaced before/after to keep the body double spacing intact."""
     para = doc.add_paragraph()
+    para.alignment = (
+        WD_ALIGN_PARAGRAPH.CENTER if level <= 1
+        else WD_ALIGN_PARAGRAPH.LEFT)
     para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
     para.paragraph_format.space_before = Pt(12)
-    para.paragraph_format.space_after = Pt(4)
+    para.paragraph_format.space_after = Pt(6)
     run = para.add_run(text)
     run.bold = True
     run.font.name = _BODY_FONT
-    run.font.size = Pt(size)
+    run.font.size = Pt(12)
+
+
+def _add_body_paragraph(doc: Document, text: str) -> None:
+    """Adds one body paragraph with the APA 0.5-inch first-line
+    indent and double spacing. Inline markdown bold/italic/code is
+    preserved via _split_inline."""
+    para = doc.add_paragraph()
+    para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    para.paragraph_format.first_line_indent = _INDENT_FIRST_LINE
+    para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.DOUBLE
+    for run_text, bold, italic in _split_inline(text):
+        if not run_text:
+            continue
+        run = para.add_run(run_text)
+        run.font.name = _BODY_FONT
+        run.font.size = Pt(12)
+        run.bold = bold
+        run.italic = italic
+
+
+def _add_reference_entry(doc: Document, text: str) -> None:
+    """Adds one References-list entry with the APA hanging indent
+    (the FIRST line starts at the left margin; every subsequent line
+    indents 0.5 inch). Double-spaced like the body."""
+    para = doc.add_paragraph()
+    para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    para.paragraph_format.left_indent = _INDENT_HANGING
+    para.paragraph_format.first_line_indent = Inches(-0.5)
+    para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.DOUBLE
+    para.paragraph_format.space_after = Pt(0)
+    for run_text, bold, italic in _split_inline(text):
+        if not run_text:
+            continue
+        run = para.add_run(run_text)
+        run.font.name = _BODY_FONT
+        run.font.size = Pt(12)
+        run.bold = bold
+        run.italic = italic
 
 
 def _add_body_block(doc: Document, text: str) -> None:
-    """Renders a markdown-ish body block. Recognises bold (**), italic
-    (*), and inline code (`) — same convention the Academic Writer
-    emits. No nested lists; one paragraph per blank-line-separated
-    block."""
+    """Renders a markdown body block — paragraphs separated by blank
+    lines become individual APA paragraphs. Empty input is a no-op."""
     for block in (text or "").strip().split("\n\n"):
         block = block.strip()
         if not block:
             continue
-        para = doc.add_paragraph()
-        for run_text, bold, italic in _split_inline(block):
-            if not run_text:
-                continue
-            run = para.add_run(run_text)
-            run.font.name = _BODY_FONT
-            run.font.size = Pt(12)
-            run.bold = bold
-            run.italic = italic
+        _add_body_paragraph(doc, block)
 
 
 _INLINE_RE = re.compile(
@@ -142,7 +263,6 @@ _INLINE_RE = re.compile(
 
 
 def _split_inline(block: str) -> "list[tuple[str, bool, bool]]":
-    """Splits an inline block into (text, bold, italic) tuples."""
     out: list[tuple[str, bool, bool]] = []
     for part in _INLINE_RE.split(block):
         if not part:
@@ -165,10 +285,11 @@ def _add_table(
     *,
     column_widths_in: list[float] | None = None,
 ) -> None:
-    """Single-spaced data table with a header row."""
+    """APA tables. Single-spaced, font matches the body. APA 7th uses
+    minimal borders (no vertical lines); we keep the Table Grid style
+    for legibility — the produced docx renders cleanly in Word."""
     table = doc.add_table(rows=1 + len(rows), cols=len(headers))
     table.style = "Table Grid"
-    # Header row.
     for i, h in enumerate(headers):
         cell = table.rows[0].cells[i]
         p = cell.paragraphs[0]
@@ -176,8 +297,7 @@ def _add_table(
         run = p.add_run(h)
         run.bold = True
         run.font.name = _BODY_FONT
-        run.font.size = Pt(10)
-    # Data rows.
+        run.font.size = Pt(11)
     for r_idx, row in enumerate(rows):
         for c_idx, val in enumerate(row):
             cell = table.rows[r_idx + 1].cells[c_idx]
@@ -185,7 +305,7 @@ def _add_table(
             p.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
             run = p.add_run(str(val) if val is not None else "")
             run.font.name = _BODY_FONT
-            run.font.size = Pt(10)
+            run.font.size = Pt(11)
     if column_widths_in:
         for i, w in enumerate(column_widths_in):
             if i < len(table.columns):
@@ -205,8 +325,10 @@ def _split_paper_sections(
     paper_md: str,
 ) -> list[tuple[str, str]]:
     """Splits a paper markdown body into (heading, body) tuples.
-    Falls back to a single (no-heading, body) tuple when no H2
-    headings are found."""
+    Falls back to a single ("", body) tuple when no H2 headings are
+    found. The heading is reformatted into APA title case — the
+    section number is dropped from the rendered heading per APA 7th
+    convention (numbered subsection labels are unusual)."""
     matches = list(_PAPER_SECTION_RE.finditer(paper_md or ""))
     if not matches:
         return [("", (paper_md or "").strip())]
@@ -216,9 +338,35 @@ def _split_paper_sections(
         end = matches[i + 1].start() if i + 1 < len(matches) else len(paper_md)
         body = paper_md[start:end].strip()
         title = m.group(2).strip() or f"Section {m.group(1)}"
-        heading = f"{m.group(1)}. {title}"
-        out.append((heading, body))
+        out.append((_to_title_case(title), body))
     return out
+
+
+_TITLE_CASE_LOWERS = {
+    "a", "an", "the",
+    "and", "but", "or", "nor", "for", "yet", "so",
+    "at", "by", "in", "of", "on", "to", "up", "as", "via",
+    "with", "from", "into", "onto", "over", "vs",
+}
+
+
+def _to_title_case(text: str) -> str:
+    """APA title case: capitalise the first/last word + all major
+    words; leave short prepositions / articles / conjunctions
+    lowercase unless they're the first or last token. Already-cased
+    input passes through largely unchanged."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    parts = raw.split()
+    out: list[str] = []
+    for i, w in enumerate(parts):
+        bare = w.lower()
+        if i != 0 and i != len(parts) - 1 and bare in _TITLE_CASE_LOWERS:
+            out.append(bare)
+        else:
+            out.append(w[:1].upper() + w[1:] if w else w)
+    return " ".join(out)
 
 
 def build_paper_docx(
@@ -226,33 +374,33 @@ def build_paper_docx(
     *,
     references_md: str | None = None,
 ) -> bytes:
-    """Renders the main paper markdown into Word bytes.
+    """Renders the main paper markdown into APA 7th edition .docx
+    bytes.
 
-    paper_md should carry section H2 headings ('## 1. Data and
-    Methodology' etc.). The renderer splits on those and lays each
-    section out as a bold heading followed by the section body.
-
-    references_md, when supplied, is appended as a final 'References'
-    section. The pipeline builds it from citations_cache so it always
-    matches the inline citations.
+    Layout:
+      Page 1  Title page (centred title, authors, institution,
+              course, instructor, date)
+      Page 2+ Section 1 → 4 with the configured first-line indent
+              and double-spacing; Level 1 headings centred + bold
+      Final   References (when references_md is non-empty), starting
+              on its own page with hanging-indent entries
     """
-    doc = _new_document(double_spaced=True)
+    doc = _new_apa_document()
+    _add_title_page(doc)
 
-    # Title block.
-    _add_section_heading(doc, "Midpoint Check Paper", size=16)
-    _add_body_block(doc, "FNA670 Industry Practicum")
-
-    # Each section.
     sections = _split_paper_sections(paper_md)
     for heading, body in sections:
         if heading:
-            _add_section_heading(doc, heading, size=13)
+            _add_section_heading(doc, heading, level=1)
         _add_body_block(doc, body)
 
-    # References.
     if references_md:
-        _add_section_heading(doc, "References", size=13)
-        _add_body_block(doc, references_md)
+        _add_page_break(doc)
+        _add_section_heading(doc, "References", level=1)
+        for line in (references_md or "").split("\n\n"):
+            line = line.strip()
+            if line:
+                _add_reference_entry(doc, line)
 
     buf = BytesIO()
     doc.save(buf)
@@ -272,12 +420,35 @@ def _fmt_value(v: Any) -> str:
     return str(v)
 
 
-def _appendix_a(
-    doc: Document, context: dict,
+def _add_appendix_label(
+    doc: Document, letter: str, title: str,
 ) -> None:
+    """APA 7th appendix: label (Appendix A) on one centred bold
+    line; title on the next centred bold line. Starts on a new page."""
+    _add_page_break(doc)
+    label_para = doc.add_paragraph()
+    label_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    label_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    label_para.paragraph_format.space_after = Pt(6)
+    label_run = label_para.add_run(f"Appendix {letter}")
+    label_run.bold = True
+    label_run.font.name = _BODY_FONT
+    label_run.font.size = Pt(12)
+
+    title_para = doc.add_paragraph()
+    title_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    title_para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    title_para.paragraph_format.space_after = Pt(12)
+    title_run = title_para.add_run(title)
+    title_run.bold = True
+    title_run.font.name = _BODY_FONT
+    title_run.font.size = Pt(12)
+
+
+def _appendix_a(doc: Document, context: dict) -> None:
     """Appendix A — Platform Overview."""
-    _add_section_heading(doc, "Appendix A — Platform Overview", size=14)
-    _add_body_block(doc, (
+    _add_appendix_label(doc, "A", "Platform Overview")
+    _add_body_paragraph(doc, (
         "The Forest Capital Portfolio Intelligence Platform is a "
         "purpose-built portfolio intelligence system developed for "
         "this practicum. It provides live data pipelines, a ten-"
@@ -288,7 +459,7 @@ def _appendix_a(
     vd = context.get("verified_data") or {}
     activity = context.get("team_activity") or {}
 
-    _add_section_heading(doc, "Key platform statistics", size=11)
+    _add_section_heading(doc, "Key Platform Statistics", level=2)
     _add_table(
         doc,
         headers=["Statistic", "Value"],
@@ -309,14 +480,11 @@ def _appendix_a(
         ],
         column_widths_in=[3.0, 2.0])
 
-    _add_body_block(doc, "")
-    _add_body_block(doc, (
-        "Platform URL: forest-capital.vercel.app"))
-    _add_body_block(doc, (
-        "Access has been granted to course faculty. Login with your "
-        "Queens University email address."))
+    _add_body_paragraph(doc, "Platform URL: forest-capital.vercel.app.")
+    _add_body_paragraph(doc, (
+        "Access has been granted to course faculty. Login uses the "
+        "user's Queens University email address."))
 
-    # Methodology references — pull from citations_cache only.
     citations = context.get("citations_cache") or {}
     cited: list[str] = []
     for cid in ("cvar_coherent_risk", "four_factor_model",
@@ -325,69 +493,63 @@ def _appendix_a(
         if c.get("verification_status") == "verified":
             cited.append(c.get("formatted") or "")
     if cited:
-        _add_section_heading(doc, "Methodological references",
-                             size=11)
-        _add_body_block(doc, (
+        _add_section_heading(doc, "Methodological References", level=2)
+        _add_body_paragraph(doc, (
             "The platform's independent validation methodology draws "
             "on established practices in quantitative finance:"))
         for entry in cited:
-            _add_body_block(doc, f"• {entry}")
+            _add_body_paragraph(doc, f"• {entry}")
     else:
-        _add_body_block(doc, "[CITATION REQUIRED — methodological references]")
+        _add_body_paragraph(
+            doc, "[CITATION REQUIRED — methodological references]")
 
 
-def _appendix_b(
-    doc: Document, context: dict,
-) -> None:
+def _appendix_b(doc: Document, context: dict) -> None:
     """Appendix B — Full Analytical Findings."""
-    _add_section_heading(doc, "Appendix B — Full Analytical Findings",
-                          size=14)
-    _add_body_block(doc, (
-        "All findings pre-computed from live platform data. Use these "
-        "as the factual record alongside the main paper's evidence."))
+    _add_appendix_label(doc, "B", "Full Analytical Findings")
+    _add_body_paragraph(doc, (
+        "All findings pre-computed from live platform data. The "
+        "findings below form the factual record alongside the main "
+        "paper's evidence."))
 
     findings = context.get("ranked_findings") or []
     if not findings:
-        _add_body_block(doc, "[DATA REQUIRED — no findings staged]")
+        _add_body_paragraph(doc, "[DATA REQUIRED — no findings staged]")
     for i, f in enumerate(findings, start=1):
         _add_section_heading(
             doc,
             f"F{i} — {f.get('title', '')} ({f.get('nugget_strength', 'LOW')})",
-            size=11)
-        _add_body_block(doc, f"**FINDING:** {f.get('finding', '')}")
+            level=2)
+        _add_body_paragraph(doc, f"**FINDING:** {f.get('finding', '')}")
         ev = f.get("evidence") or []
         if ev:
-            _add_body_block(doc, "**EVIDENCE:**")
+            _add_body_paragraph(doc, "**EVIDENCE:**")
             for e in ev:
-                _add_body_block(doc, f"• {e}")
-        _add_body_block(doc, f"**IMPLICATION:** {f.get('implication', '')}")
+                _add_body_paragraph(doc, f"• {e}")
+        _add_body_paragraph(
+            doc, f"**IMPLICATION:** {f.get('implication', '')}")
         if f.get("surprise"):
-            _add_body_block(doc, f"**SURPRISE:** {f.get('surprise_reason') or 'yes'}")
+            _add_body_paragraph(
+                doc, f"**SURPRISE:** {f.get('surprise_reason') or 'yes'}")
 
-    # Footer line.
     md = context.get("findings_metadata") or {}
-    _add_body_block(doc, "")
-    _add_body_block(doc, (
+    _add_body_paragraph(doc, (
         f"All figures pulled live from platform analytics cache on "
         f"{md.get('computed_at', '—')}. Data hash: "
         f"{md.get('data_hash', '—')}. Independent validation: "
         f"three-layer audit {md.get('audit_status', '—')}."))
 
 
-def _appendix_c(
-    doc: Document, context: dict,
-) -> None:
+def _appendix_c(doc: Document, context: dict) -> None:
     """Appendix C — Team Activity Log."""
-    _add_section_heading(doc, "Appendix C — Team Activity Log", size=14)
-    _add_body_block(doc, (
+    _add_appendix_label(doc, "C", "Team Activity Log")
+    _add_body_paragraph(doc, (
         "Auditable record of team contributions throughout the "
-        "project lifecycle. All counts pulled live from platform "
-        "audit tables at generation time."))
+        "project lifecycle. All counts pulled live from the "
+        "platform's audit tables at generation time."))
 
     activity = context.get("team_activity") or {}
     rows: list[list[Any]] = []
-
-    # Per-member rows.
     member_groups = [
         ("Michael Ruurds", [
             ("Commits to repository",  "michael_commits"),
@@ -412,8 +574,6 @@ def _appendix_c(
             rows.append([
                 member, activity_label, _fmt_value(activity.get(field_key)),
             ])
-
-    # Platform totals row.
     rows.append([
         "Platform total", "UAT test steps",
         _fmt_value(activity.get("team_total_uat_steps")),
@@ -434,32 +594,27 @@ def _appendix_c(
         "Platform total", "Independent validations",
         _fmt_value(activity.get("team_total_audit_validations")),
     ])
-
     _add_table(
         doc,
         headers=["Member / Total", "Activity", "Count"],
         rows=rows,
         column_widths_in=[2.0, 3.0, 1.0])
-
-    _add_body_block(doc, "")
-    _add_body_block(doc, (
-        "Activity data pulled live from platform audit log at "
-        f"{context.get('generated_at', '—')}. All timestamps "
+    _add_body_paragraph(doc, (
+        f"Activity data pulled live from the platform's audit log "
+        f"at {context.get('generated_at', '—')}. All timestamps "
         "recorded at point of action."))
 
 
-def _appendix_d(
-    doc: Document, context: dict,
-) -> None:
-    """Appendix D — Data Validation Certificate."""
-    _add_section_heading(doc, "Appendix D — Independent Data Validation Summary",
-                          size=14)
+def _appendix_d(doc: Document, context: dict) -> None:
+    """Appendix D — Independent Data Validation Summary."""
+    _add_appendix_label(
+        doc, "D", "Independent Data Validation Summary")
     validation = context.get("validation_summary") or {}
 
-    _add_section_heading(doc, "Three-layer audit results", size=11)
+    _add_section_heading(doc, "Three-Layer Audit Results", level=2)
     _add_table(
         doc,
-        headers=["Layer", "Status", "Checks", "Last run"],
+        headers=["Layer", "Status", "Checks", "Last Run"],
         rows=[
             ["1 — Raw data audit",
              _fmt_value(validation.get("layer1_status")),
@@ -476,41 +631,40 @@ def _appendix_d(
         ],
         column_widths_in=[2.5, 1.5, 1.0, 1.5])
 
-    _add_section_heading(doc, "Validation methodology", size=11)
-    _add_body_block(doc, (
+    _add_section_heading(doc, "Validation Methodology", level=2)
+    _add_body_paragraph(doc, (
         "Layer 1 (raw data audit) verifies source data integrity "
         "against published benchmarks. US equity returns benchmarked "
         "against published S&P 500 total return index data; risk-free "
         "rate benchmarked against published DTB3 Treasury bill data "
         "(Federal Reserve H.15 release)."))
-    _add_body_block(doc, (
+    _add_body_paragraph(doc, (
         "Layer 2 (calculation audit) recomputes every metric from "
         "raw inputs in an independent model instance. Standard "
         "formulas: CAGR as the geometric mean of (1 + r) compounded "
-        "monthly; Sharpe as (Rp − Rf) / σp annualised by √12; CVaR "
-        "as the mean of returns below the VaR threshold via historical "
-        "simulation; max drawdown as the maximum peak-to-trough decline "
-        "in the cumulative return series."))
-    _add_body_block(doc, (
-        "Layer 3 (consistency audit) cross-checks every metric across "
-        "every surface where it appears. Tolerances: ratios 0.001, "
-        "percentages 0.01%, factor betas 0.001."))
+        "monthly; Sharpe as (Rp − Rf) / σp annualized by √12; CVaR "
+        "as the mean of returns below the VaR threshold via "
+        "historical simulation; max drawdown as the maximum peak-"
+        "to-trough decline in the cumulative return series."))
+    _add_body_paragraph(doc, (
+        "Layer 3 (consistency audit) cross-checks every metric "
+        "across every surface where it appears. Tolerances: ratios "
+        "0.001, percentages 0.01%, factor betas 0.001."))
 
-    # Cite the GIPS reference and the methodology references from the cache.
     citations = context.get("citations_cache") or {}
     gips = citations.get("gips_verification") or {}
     if gips.get("verification_status") == "verified":
-        _add_body_block(doc, (
+        _add_body_paragraph(doc, (
             f"This methodology is consistent with industry standards "
             f"for independent performance verification as described "
             f"in {gips.get('formatted')}"))
     else:
-        _add_body_block(doc, "[CITATION REQUIRED — GIPS]")
+        _add_body_paragraph(doc, "[CITATION REQUIRED — GIPS]")
 
 
 def _build_references_md(citations: dict) -> str:
-    """Builds the consolidated References section markdown from
-    verified entries only. Alphabetical by first-author surname."""
+    """Builds the consolidated References markdown from verified
+    entries only. Alphabetical by first-author surname."""
     verified = [
         c for c in (citations or {}).values()
         if c.get("verification_status") == "verified"]
@@ -524,7 +678,11 @@ def _build_references_md(citations: dict) -> str:
 
 
 def build_appendix_docx(context: dict) -> bytes:
-    """Assembles the four-section appendix into Word bytes.
+    """Assembles the four-section appendix into APA 7th .docx bytes.
+
+    Each appendix starts on a new page with a centred 'Appendix X'
+    label and a centred bold title. The References list appears
+    after Appendix D with hanging-indent APA entries.
 
     context schema:
       verified_data:       dict — for Appendix A statistics + footers
@@ -535,28 +693,25 @@ def build_appendix_docx(context: dict) -> bytes:
       findings_metadata:   dict — computed_at, data_hash, audit_status
       generated_at:        str  — for Appendix C footer
     """
-    doc = _new_document(double_spaced=False)
-
-    _add_section_heading(doc, "Appendix — Midpoint Paper", size=16)
-    _add_body_block(doc, (
-        "This appendix accompanies the FNA670 midpoint paper. It is "
-        "self-contained: every claim in the appendix is supported by "
-        "live data pulled from the platform analytics cache at "
-        "generation time."))
+    doc = _new_apa_document()
 
     _appendix_a(doc, context)
     _appendix_b(doc, context)
     _appendix_c(doc, context)
     _appendix_d(doc, context)
 
-    # Consolidated References after all appendices.
     refs_md = _build_references_md(context.get("citations_cache") or {})
+    _add_page_break(doc)
+    _add_section_heading(doc, "References", level=1)
     if refs_md:
-        _add_section_heading(doc, "References", size=14)
-        _add_body_block(doc, refs_md)
+        for line in refs_md.split("\n\n"):
+            line = line.strip()
+            if line:
+                _add_reference_entry(doc, line)
     else:
-        _add_section_heading(doc, "References", size=14)
-        _add_body_block(doc, "[REFERENCES UNAVAILABLE — citations not yet sourced]")
+        _add_body_paragraph(
+            doc,
+            "[REFERENCES UNAVAILABLE — citations not yet sourced]")
 
     buf = BytesIO()
     doc.save(buf)

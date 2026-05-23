@@ -281,6 +281,59 @@ class TestValidateThesisWithRank:
 # ── live_from_payload computes benchmark_sharpe_rank ───────────────────────
 
 
+class TestApaCitationFormatter:
+    def test_apa_journal_article_format(self):
+        from tools.template_pipeline import _format_citation
+        out = _format_citation({
+            "author": "Markowitz, H.",
+            "year": "1952",
+            "title": "Portfolio selection",
+            "journal_or_institution": "Journal of Finance",
+            "volume_issue_pages": "7(1), 77-91",
+            "url": "https://doi.org/10.1111/j.1540-6261.1952.tb01525.x",
+        })
+        # Author period, year in parens, title period, italicised
+        # journal with volume + issue + pages, DOI.
+        assert "Markowitz, H." in out
+        assert "(1952)" in out
+        assert "Portfolio selection." in out
+        # Italics markdown carries the journal title.
+        assert "*Journal of Finance*" in out
+        assert "7(1), 77-91" in out
+        assert "doi.org" in out
+
+    def test_apa_no_url(self):
+        from tools.template_pipeline import _format_citation
+        out = _format_citation({
+            "author": "Sharpe, W. F.",
+            "year": "1994",
+            "title": "The Sharpe ratio",
+            "journal_or_institution":
+                "Journal of Portfolio Management",
+            "volume_issue_pages": "21(1), 49-58",
+            "url": None,
+        })
+        assert "Sharpe, W. F." in out
+        assert "*Journal of Portfolio Management*" in out
+        # No trailing URL — last token is the volume citation.
+        assert out.rstrip().endswith("21(1), 49-58.") \
+            or out.rstrip().endswith("49-58.")
+
+    def test_apa_working_paper_no_volume(self):
+        from tools.template_pipeline import _format_citation
+        out = _format_citation({
+            "author": "Author, A. A.",
+            "year": "2020",
+            "title": "Working paper title",
+            "journal_or_institution": "NBER",
+            "volume_issue_pages": "",
+            "url": "https://nber.org/papers/wXXXXX",
+        })
+        # Italicised institution; URL at the end.
+        assert "*NBER*" in out
+        assert "nber.org" in out
+
+
 class TestLiveFromPayloadRank:
     def _payload(self, sharpes: dict[str, float]) -> dict:
         return {
