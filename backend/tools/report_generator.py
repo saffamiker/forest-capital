@@ -835,7 +835,17 @@ async def update_paper_md(
             bump_paper_revision, save_version,
         )
         new_revision = await bump_paper_revision(generation_id)
-        if create_snapshot:
+        # Performance fix (item 6, May 23 2026): the auto-save loop
+        # fires this endpoint every ~30s on debounce; creating a
+        # version snapshot on every keystroke round-trips
+        # report_paper_versions for no real value (Bob can't even
+        # see the intermediate auto-saves on the version panel).
+        # Snapshots fire on the meaningful save kinds (manual,
+        # auto_iterate, auto_resolve_bob, restore); auto_edit is
+        # the debounced keystroke path and skips the write.
+        snapshot_worth_taking = (
+            create_snapshot and source != "auto_edit")
+        if snapshot_worth_taking:
             snapshot = await save_version(
                 generation_id, paper_md,
                 saved_by_email=saved_by_email,
