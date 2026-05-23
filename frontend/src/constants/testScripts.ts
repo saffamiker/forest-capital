@@ -34,7 +34,10 @@ export interface TestScript {
 }
 
 // Bumped in lockstep with backend config.TEST_SCRIPT_VERSION.
-export const TEST_SCRIPT_VERSION = 1
+// v2 (May 22 2026) — adds the report-writer editor flow + macro research +
+// explainer CIO follow-up + diversification chart steps to all three
+// scripts; adds QA audit / failure / issue tracker steps to Molly's script.
+export const TEST_SCRIPT_VERSION = 2
 
 const allTesters: TestScript = {
   id: 'all_testers_v1',
@@ -338,6 +341,76 @@ const allTesters: TestScript = {
       title: 'Retake Site Tour',
       instruction: 'Click the Retake Site Tour button in Account.',
       expectedResult: 'The site tour starts from the beginning.',
+      allowSkip: true,
+    },
+    // ── Macro research tile (v2) ────────────────────────────────────────
+    {
+      id: 'macro_research_tile', route: '/', target: null,
+      title: 'Macro research tile renders',
+      instruction: 'Look at the Dashboard for the macro research tile.',
+      expectedResult: 'The macro research tile is visible with a recent '
+        + 'digest summary and last-updated timestamp.',
+      allowSkip: true,
+    },
+    {
+      id: 'macro_research_freshness', route: '/', target: null,
+      title: 'Macro digest freshness indicator',
+      instruction: 'Check the macro research tile timestamp.',
+      expectedResult: 'The timestamp is within the last 24 hours, OR '
+        + 'a (stale) warning is shown if older.',
+      allowSkip: true,
+    },
+    {
+      id: 'macro_citation_badges', route: '/', target: null,
+      title: 'Macro digest citation badges',
+      instruction: 'Look at the macro research tile signals.',
+      expectedResult: 'Each signal carries a source URL badge linking to '
+        + 'a trusted source (Fed / BIS / NBER / similar).',
+      allowSkip: true,
+    },
+    // ── Explainer CIO follow-up (v2) ────────────────────────────────────
+    {
+      id: 'explainer_council_followup', route: '/analytics', target: null,
+      title: 'Explainer → Ask the Council follow-up',
+      instruction: 'Open an InfoIcon (ⓘ) explainer on a metric, then '
+        + 'click "Ask the Council about this".',
+      expectedResult: 'The Council screen opens with a contextual '
+        + 'question pre-populated naming the metric and its value.',
+      allowSkip: true,
+    },
+    {
+      id: 'explainer_council_runs', route: '/council', target: null,
+      title: 'Pre-populated question runs',
+      instruction: 'On the Council screen, submit the pre-populated '
+        + 'question (do not edit it).',
+      expectedResult: 'The council answers the question with reference '
+        + 'to the specific metric.',
+      allowSkip: true,
+    },
+    // ── Diversification analytics charts (v2) ───────────────────────────
+    {
+      id: 'analytics_diversification', route: '/analytics', target: null,
+      title: 'Diversification charts render',
+      instruction: 'Scroll to the diversification section on Analytics.',
+      expectedResult: 'Marginal Contribution to Risk, Capture Ratios, '
+        + 'Correlation Heatmap, and Return Distribution charts all '
+        + 'render with real data.',
+      allowSkip: true,
+    },
+    {
+      id: 'analytics_diversification_explainers', route: '/analytics', target: null,
+      title: 'Diversification charts have explainers',
+      instruction: 'Click the ⓘ on each diversification chart.',
+      expectedResult: 'Each chart has a plain-English explanation.',
+      allowSkip: true,
+    },
+    // ── Feedback backlog ID column (v2) ─────────────────────────────────
+    {
+      id: 'feedback_id_column', route: '/settings', target: null,
+      title: 'Feedback backlog ID column',
+      instruction: 'In Settings → Test Administration → Feedback Backlog, '
+        + 'check the table columns.',
+      expectedResult: 'There is an ID column showing the feedback row id.',
       allowSkip: true,
     },
   ],
@@ -744,6 +817,148 @@ const bob: TestScript = {
         + 'Documents.',
       allowSkip: true,
     },
+    // ── Report Writer — verified-data midpoint paper flow (v2) ──────────
+    {
+      id: 'bob_writer_entry', route: '/reports', target: '[data-tour="report-writer-entry"]',
+      title: 'Report Writer entry card',
+      instruction: 'On the Reports screen, find the Report Writer card.',
+      expectedResult: 'A Report Writer card is visible with an Open '
+        + 'Report Writer link.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_open', route: '/reports/writer', target: null,
+      title: 'Open the Report Writer',
+      instruction: 'Click Open Report Writer.',
+      expectedResult: 'The /reports/writer page loads with a template '
+        + 'selector pre-selecting the FNA670 midpoint template.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_pipeline', route: '/reports/writer', target: null,
+      title: 'Pipeline steps panel',
+      instruction: 'Look at the left sidebar.',
+      expectedResult: 'The Generation Pipeline shows all eleven steps '
+        + '(Stage Findings → Download), each with a status pill.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_rubric', route: '/reports/writer', target: null,
+      title: 'Rubric panel collapsible',
+      instruction: 'Click the Grading Rubric panel to expand it.',
+      expectedResult: 'It expands to show four criteria (Clarity & '
+        + 'Rigor, Analytical Progress, Results Quality, Division of '
+        + 'Labor) with indicators of success.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_generate', route: '/reports/writer', target: null,
+      title: 'Generate Draft',
+      instruction: 'Click Generate Draft. Wait for the writer to finish '
+        + '(30–60 seconds).',
+      expectedResult: 'The pipeline panel lights up steps 1–7 as '
+        + 'Complete; step 8 shows a count of remaining callout points; '
+        + 'the editor populates with the draft.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_bob_blocks', route: '/reports/writer', target: null,
+      title: '[BOB] callout blocks render',
+      instruction: 'Scroll to the preview pane.',
+      expectedResult: 'Any [BOB] / [DATA REQUIRED] / [CITATION REQUIRED] '
+        + 'markers are highlighted as amber callout badges.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_resolve', route: '/reports/writer', target: null,
+      title: 'Resolve a [BOB] block',
+      instruction: 'Click any callout badge, enter replacement text, '
+        + 'click Done.',
+      expectedResult: 'The block is replaced inline; the callout count '
+        + 'decrements; the editor reflects the new paper text.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_iterate_select', route: '/reports/writer', target: null,
+      title: 'AI iteration toolbar enables on selection',
+      instruction: 'Highlight a sentence in the editor.',
+      expectedResult: 'The Rephrase / Tighten / Expand / Ask the Writer '
+        + 'buttons become enabled.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_iterate_rephrase', route: '/reports/writer', target: null,
+      title: 'Rephrase a selection',
+      instruction: 'With text selected, click Rephrase. Wait for the '
+        + 'proposal, then click Accept.',
+      expectedResult: 'A proposal renders with the rewritten text. '
+        + 'Accept replaces the selection inline.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_iterate_warnings', route: '/reports/writer', target: null,
+      title: 'Iteration warns on new unverified numbers',
+      instruction: 'Use Ask the Writer with an instruction that would '
+        + 'introduce a fabricated number (e.g. "Add a Sharpe ratio of '
+        + '1.75").',
+      expectedResult: 'If the writer introduces a new unverified number, '
+        + 'the proposal shows an amber warning naming it before Accept.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_word_counts', route: '/reports/writer', target: null,
+      title: 'Word count sidebar updates',
+      instruction: 'Look at the Word Counts sidebar.',
+      expectedResult: 'Each section shows current words / budget; over '
+        + 'budget renders amber, 10%+ over renders red.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_final_check', route: '/reports/writer', target: null,
+      title: 'Run Final Check',
+      instruction: 'After resolving every [BOB] block, click Run Final '
+        + 'Check.',
+      expectedResult: 'Step 9 turns green; the flag count drops to 0; '
+        + 'the Download Paper button becomes enabled.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_academic_review', route: '/reports/writer', target: null,
+      title: 'Run Academic Review',
+      instruction: 'Click Run Academic Review.',
+      expectedResult: 'The four-criterion review renders with score '
+        + 'badges (Strong / Developing / Needs Work), a readiness pill '
+        + '(Ready to Submit / Needs Minor Revision / Needs Significant '
+        + 'Revision), and per-flag lists where applicable.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_suggestions', route: '/reports/writer', target: null,
+      title: 'Apply a suggestion',
+      instruction: 'Expand a criterion card and read its suggestion.',
+      expectedResult: 'The suggestion is specific and actionable; the '
+        + 'Apply suggestion button is visible for non-trivial gaps.',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_download_paper', route: '/reports/writer', target: null,
+      title: 'Download paper .docx',
+      instruction: 'Click Download Paper.',
+      expectedResult: 'A .docx file downloads with the FNA670 header, '
+        + 'footer page numbers, four numbered sections, and Bob\'s '
+        + 'resolved text inline (no remaining [BOB] markers).',
+      allowSkip: true,
+    },
+    {
+      id: 'bob_writer_download_appendix', route: '/reports/writer', target: null,
+      title: 'Download appendix .docx',
+      instruction: 'Click Download Appendix.',
+      expectedResult: 'A second .docx downloads with four appendices '
+        + '(A: Platform Overview, B: Full Findings, C: Team Activity '
+        + 'Log, D: Validation Summary) plus a References section built '
+        + 'from verified citations.',
+      allowSkip: true,
+    },
   ],
 }
 
@@ -904,6 +1119,73 @@ const molly: TestScript = {
       instruction: 'Read the response.',
       expectedResult: 'It is specific and helpful for presentation '
         + 'preparation.',
+      allowSkip: true,
+    },
+    // ── QA audit WARN/FAIL cards (v2) ──────────────────────────────────
+    {
+      id: 'molly_qa_open', route: '/qa', target: null,
+      title: 'QA Audit screen loads',
+      instruction: 'Navigate to the QA Audit tab.',
+      expectedResult: 'The QA dashboard loads with the latest audit run.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_qa_warn_card', route: '/qa', target: null,
+      title: 'WARN findings card',
+      instruction: 'Look for any WARN cards in the QA findings list.',
+      expectedResult: 'WARN cards (when present) show their detail and '
+        + 'an acknowledge action.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_qa_fail_card', route: '/qa', target: null,
+      title: 'FAIL findings card',
+      instruction: 'Look for any FAIL cards in the QA findings list.',
+      expectedResult: 'FAIL cards (when present) clearly stand out from '
+        + 'PASS / WARN cards visually.',
+      allowSkip: true,
+    },
+    // ── Failure reports resolution modal (v2) ──────────────────────────
+    {
+      id: 'molly_failures_open', route: '/settings', target: null,
+      title: 'Failure Reports list',
+      instruction: 'In Settings → Test Administration, scroll to Failure '
+        + 'Reports.',
+      expectedResult: 'The Failure Reports table loads with any '
+        + 'recorded failures.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_failures_resolve', route: '/settings', target: null,
+      title: 'Open the resolution modal',
+      instruction: 'Click Resolve on a failure row.',
+      expectedResult: 'The resolution modal opens with fields for '
+        + 'resolution type, root cause, and remediation note.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_failures_resolve_cancel', route: '/settings', target: null,
+      title: 'Cancel the resolution modal',
+      instruction: 'Close the resolution modal without saving.',
+      expectedResult: 'The modal closes; the failure remains Open.',
+      allowSkip: true,
+    },
+    // ── Issue Tracker tab (v2) ─────────────────────────────────────────
+    {
+      id: 'molly_issue_tracker', route: '/settings', target: null,
+      title: 'Issue Tracker tab',
+      instruction: 'In Settings → Test Administration, find the Issue '
+        + 'Tracker tab.',
+      expectedResult: 'The Issue Tracker tab is visible and lists '
+        + 'tracked items with their GitHub issue links where available.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_issue_tracker_filter', route: '/settings', target: null,
+      title: 'Issue Tracker filters',
+      instruction: 'Use the Issue Tracker filters.',
+      expectedResult: 'Filters narrow the list correctly (by status, '
+        + 'severity, or type).',
       allowSkip: true,
     },
   ],
