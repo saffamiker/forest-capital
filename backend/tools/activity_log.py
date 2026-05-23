@@ -57,7 +57,13 @@ _SESSION_EVENT_TYPES = {
 }
 _INTERACTION_TYPES = {"council", "academic_review", "qa", "document_upload",
                       "explain", "explain_data", "export", "test_quality_eval",
-                      "writing_assistant"}
+                      "writing_assistant",
+                      # ── May 23 2026 — item 7 peer-review flows. ──
+                      # Peer Review Assistant evaluates ANOTHER team's
+                      # midpoint submission against the FNA 670 rubric.
+                      # Defense Prep generates anticipated panel Q&A
+                      # against the team's OWN current draft.
+                      "peer_review", "defense_prep"}
 _SESSION_TYPES = {"analytical", "testing"}
 
 

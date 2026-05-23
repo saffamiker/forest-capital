@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle, BarChart3,
-  Activity, FileText, LineChart, Menu, X, LogOut,
+  Activity, FileText, LineChart, Menu, X, LogOut, ClipboardCheck,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../App'
@@ -52,8 +52,13 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: 'AI and Review',
     items: [
-      { to: '/council', label: 'Council',  icon: Users },
-      { to: '/qa',      label: 'QA Audit', icon: ShieldCheck },
+      { to: '/council',     label: 'Council',     icon: Users },
+      { to: '/qa',          label: 'QA Audit',    icon: ShieldCheck },
+      // ── May 23 2026 — item 7. Peer Review surfaces two flows:
+      // (A) upload another team's midpoint paper for a structured
+      // review script, and (B) generate a mock-panel Q&A prep
+      // sheet against the team's own current draft.
+      { to: '/peer-review', label: 'Peer Review', icon: ClipboardCheck },
     ],
   },
   {
