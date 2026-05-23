@@ -233,9 +233,10 @@ def call_claude(
         "model": model,
         "max_tokens": max_tokens,
         "system": _with_strategy_context(
-            _with_diversification_context(
-                _with_macro_context(
-                    _with_academic_context(system_prompt))),
+            _with_analytics_context(
+                _with_diversification_context(
+                    _with_macro_context(
+                        _with_academic_context(system_prompt)))),
             strategy_ids),
         "messages": [{"role": "user", "content": content}],
     }
@@ -286,6 +287,29 @@ def _with_academic_context(system_prompt: str) -> str:
         # Fail-open, but log so a persistently broken academic-context
         # cache is visible rather than silently dropping agent context.
         log.warning("academic_context_inject_failed", error=str(exc))
+        return system_prompt
+
+
+def _with_analytics_context(system_prompt: str) -> str:
+    """
+    Appends the analytics NARRATIVE context block (item 5,
+    May 23 2026) to a system prompt. Complements the structured
+    diversification + strategy blocks: where those answer "what are
+    the numbers?", this layer answers "what is the story behind the
+    numbers?" — a five-sentence synthesis covering the 2022
+    correlation regime shift, the dynamic/static implication, the
+    top-Sharpe leader, the 0/10 strict-significance caveat, and a
+    one-line current-macro frame.
+
+    Fail-open — a missing module / read miss / empty cache returns
+    the prompt unaltered so an agent call never breaks on this
+    layer.
+    """
+    try:
+        from tools.analytics_context import inject_analytics_context
+        return inject_analytics_context(system_prompt)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("analytics_context_inject_failed", error=str(exc))
         return system_prompt
 
 
