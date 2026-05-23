@@ -243,6 +243,147 @@ class TestRunResearchCompletePath:
         # Post-success refresh fired exactly once.
         assert refreshed == [1]
 
+    def test_freshness_gate_after_row_creation_finalises_as_skipped(
+        self, monkeypatch,
+    ):
+        # The row-15 bug, May 23 2026: a non-manual trigger reaches
+        # run_research, _create_running_row inserts a 'running' row,
+        # and the digest is already current. Without this guard the
+        # row sits in 'running' forever and the concurrency lock
+        # blocks every subsequent run. The guard finalises as
+        # 'skipped' so the lock is released.
+        finalised: dict = {}
+        agent_called: list[int] = []
+
+        async def _running(): return False
+
+        async def _create(triggered_by):
+            return 15
+
+        async def _current(window_hours=24):
+            # Cache is current — the freshness guard should fire and
+            # the row should be finalised as 'skipped' without ever
+            # reaching the agent call.
+            return True
+
+        async def _finalise(row_id, *, digest, usage, status):
+            finalised.update({
+                "row_id": row_id, "digest": digest,
+                "usage": usage, "status": status,
+            })
+
+        def _spy_mock():
+            # Tripping this means the agent was called despite the
+            # freshness guard — failing the test.
+            agent_called.append(1)
+            return ({}, {})
+
+        monkeypatch.setattr(research_engine, "is_research_running",
+                            _running)
+        monkeypatch.setattr(research_engine, "_create_running_row",
+                            _create)
+        monkeypatch.setattr(research_engine, "_is_current", _current)
+        monkeypatch.setattr(research_engine, "_finalise_row",
+                            _finalise)
+        monkeypatch.setattr(research_engine, "_mock_digest", _spy_mock)
+
+        out = asyncio.run(research_engine.run_research("scheduled"))
+
+        assert out["status"] == "skipped"
+        assert out["reason"] == "current"
+        assert out["row_id"] == 15
+        # The agent was never called.
+        assert agent_called == []
+        # The row was finalised with status='skipped' so the lock is
+        # released and the dashboard's Run Now is not blocked.
+        assert finalised["status"] == "skipped"
+        assert finalised["row_id"] == 15
+        assert "skipped" in (finalised["digest"]["error"] or "").lower()
+
+    def test_freshness_gate_does_not_fire_for_manual_triggers(
+        self, monkeypatch,
+    ):
+        # Manual sysadmin runs (Run Now button) intentionally bypass
+        # the freshness window — the user explicitly asked for a
+        # fresh digest, so a current cache must NOT block the run.
+        finalised: dict = {}
+
+        async def _running(): return False
+        async def _create(triggered_by): return 16
+
+        async def _current(window_hours=24):
+            # Cache is current, but the run is manual — must NOT skip.
+            return True
+
+        async def _finalise(row_id, *, digest, usage, status):
+            finalised.update({"status": status, "digest": digest})
+
+        async def _noop_refresh():
+            return None
+
+        monkeypatch.setattr(research_engine, "is_research_running",
+                            _running)
+        monkeypatch.setattr(research_engine, "_create_running_row",
+                            _create)
+        monkeypatch.setattr(research_engine, "_is_current", _current)
+        monkeypatch.setattr(research_engine, "_finalise_row",
+                            _finalise)
+        from tools import macro_context
+        monkeypatch.setattr(macro_context, "refresh_macro_context",
+                            _noop_refresh)
+
+        out = asyncio.run(research_engine.run_research("manual"))
+
+        # Manual run completes despite the current cache.
+        assert out["status"] == "complete"
+        assert finalised["status"] == "complete"
+
+    def test_unhandled_exception_finalises_row_as_failed(
+        self, monkeypatch,
+    ):
+        # If the agent call raises an unhandled exception, the row
+        # MUST be finalised as 'failed' rather than left in 'running'
+        # forever. Without the try/except wrapper, an exception
+        # propagates past _finalise_row and the row holds the
+        # concurrency lock until the reaper fires _RUN_TIMEOUT_MINUTES
+        # later.
+        finalised: dict = {}
+
+        async def _running(): return False
+        async def _create(triggered_by): return 17
+
+        async def _current(window_hours=24):
+            return False  # stale, so freshness guard does not skip
+
+        async def _finalise(row_id, *, digest, usage, status):
+            finalised.update({
+                "row_id": row_id, "status": status,
+                "digest": digest, "usage": usage,
+            })
+
+        def _boom_mock():
+            raise RuntimeError("agent worker died")
+
+        monkeypatch.setattr(research_engine, "is_research_running",
+                            _running)
+        monkeypatch.setattr(research_engine, "_create_running_row",
+                            _create)
+        monkeypatch.setattr(research_engine, "_is_current", _current)
+        monkeypatch.setattr(research_engine, "_finalise_row",
+                            _finalise)
+        monkeypatch.setattr(research_engine, "_mock_digest", _boom_mock)
+
+        out = asyncio.run(research_engine.run_research("manual"))
+
+        assert out["status"] == "failed"
+        assert out["row_id"] == 17
+        assert "agent worker died" in out["error"]
+        # The row was finalised — the concurrency lock is released.
+        assert finalised["status"] == "failed"
+        assert finalised["row_id"] == 17
+        assert "agent worker died" in (
+            finalised["digest"]["error"] or "")
+
     def test_failure_digest_persists_with_failed_status(self, monkeypatch):
         finalised: dict = {}
 
@@ -446,6 +587,36 @@ class TestFailStaleRunningDigests:
 
         asyncio.run(research_engine.is_research_running())
         assert call_order == ["reap"]
+
+    def test_accepts_timeout_minutes_parameter(self, monkeypatch):
+        # The startup hook calls fail_stale_running_digests(
+        # timeout_minutes=0) to reap EVERY 'running' row regardless of
+        # age — the previous process is dead post-restart, so its rows
+        # cannot possibly still be executing. Without an overridable
+        # timeout the startup reaper would miss any row stuck under
+        # the 10-minute default (the row-15 case, May 23 2026).
+        import inspect
+
+        sig = inspect.signature(
+            research_engine.fail_stale_running_digests)
+        params = sig.parameters
+        assert "timeout_minutes" in params
+        # Default value preserved for runtime callers.
+        assert (params["timeout_minutes"].default
+                == research_engine._RUN_TIMEOUT_MINUTES)
+
+    def test_timeout_minutes_zero_returns_zero_without_db(
+        self, monkeypatch,
+    ):
+        # No-DB path still returns 0 with the explicit override —
+        # confirms the fail-open contract is intact for the startup
+        # call.
+        import database as db_mod
+        monkeypatch.setattr(db_mod, "AsyncSessionLocal", None)
+        out = asyncio.run(
+            research_engine.fail_stale_running_digests(
+                timeout_minutes=0))
+        assert out == 0
 
     def test_reaper_failure_is_swallowed(self, monkeypatch):
         # A database error inside the reaper must NOT propagate —

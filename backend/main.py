@@ -184,7 +184,16 @@ async def lifespan(app: FastAPI):
                     fail_stale_running_digests, start_daily_scheduler,
                     trigger_research_async,
                 )
-                reaped = await fail_stale_running_digests()
+                # timeout_minutes=0 on startup: the previous process is
+                # dead by definition post-restart, so ANY row left in
+                # 'running' is a zombie regardless of age. The default
+                # 10-minute timeout protects runtime checks against
+                # legitimately-in-flight rows; startup has no live
+                # process to protect against. This catches the row-15
+                # case where a row was stuck for less than the timeout
+                # when the worker crashed.
+                reaped = await fail_stale_running_digests(
+                    timeout_minutes=0)
                 if reaped:
                     log.warning(
                         f"Startup reap: marked {reaped} stuck research "

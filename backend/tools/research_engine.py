@@ -160,10 +160,12 @@ def start_daily_scheduler() -> asyncio.Task[Any] | None:
     return task
 
 
-async def fail_stale_running_digests() -> int:
+async def fail_stale_running_digests(
+    *, timeout_minutes: int = _RUN_TIMEOUT_MINUTES,
+) -> int:
     """
     Marks every macro_research_digests row stuck in 'running' past
-    _RUN_TIMEOUT_MINUTES as 'failed' so the concurrency lock the row
+    `timeout_minutes` as 'failed' so the concurrency lock the row
     holds is released. Returns the number of rows reaped.
 
     A research run that crashes mid-flight (Render restart, worker
@@ -172,6 +174,15 @@ async def fail_stale_running_digests() -> int:
     skipped with reason 'already_running' and the dashboard's Run
     Now button does nothing — the surface the user reported as the
     "Run now is not actuating" bug on May 22 2026.
+
+    `timeout_minutes` is the minimum age (in minutes) a row must
+    have to be reaped. Default _RUN_TIMEOUT_MINUTES for runtime
+    safety checks (a row in 'running' under the timeout might still
+    be live). The startup hook passes timeout_minutes=0 so EVERY
+    'running' row is reaped — the previous process is dead by
+    definition post-restart, so its rows cannot possibly still be
+    executing. This catches the row-15 case: a row stuck in 'running'
+    for less than the timeout when the worker crashed.
 
     Called from:
       - lifespan startup hook (main.py) so a Render redeploy reaps
@@ -205,9 +216,11 @@ async def fail_stale_running_digests() -> int:
             ), {
                 "reason": (
                     f"Auto-reaped: stuck in 'running' state for more "
-                    f"than {_RUN_TIMEOUT_MINUTES} minutes."
+                    f"than {timeout_minutes} minutes — either the worker "
+                    f"crashed mid-run or the freshness gate skipped "
+                    f"execution after row creation."
                 ),
-                "mins": _RUN_TIMEOUT_MINUTES,
+                "mins": int(timeout_minutes),
             })
             reaped = res.fetchall()
             await session.commit()
@@ -217,7 +230,7 @@ async def fail_stale_running_digests() -> int:
                 row_id=int(row[0]),
                 generated_at=row[1].isoformat() if row[1] else None,
                 triggered_by=row[2],
-                timeout_minutes=_RUN_TIMEOUT_MINUTES,
+                timeout_minutes=timeout_minutes,
             )
         return len(reaped)
     except Exception as exc:  # noqa: BLE001
@@ -500,17 +513,106 @@ async def run_research(triggered_by: str = "manual") -> dict[str, Any]:
     log.info("research_run_started",
              triggered_by=triggered_by, row_id=row_id)
 
-    # Agent generation. Synchronous (SDK is synchronous). In the test
-    # env we substitute the mock digest so pytest never hits Anthropic.
-    if _is_test_env():
-        digest, usage = _mock_digest()
-    else:
-        from agents.research_agent import generate_digest
-        # Run the synchronous SDK call off the event loop.
-        digest, usage = await asyncio.to_thread(generate_digest)
+    # Freshness guard AFTER row creation. A non-manual trigger that
+    # reaches this point with a current digest (under the freshness
+    # window) skips execution rather than burning model budget — but
+    # the row already exists, so we MUST finalise it as 'skipped'
+    # instead of returning silently. Without this, the row sits in
+    # 'running' forever and the concurrency lock blocks every
+    # subsequent run (the row-15 bug, May 23 2026: a non-manual
+    # trigger reached this path with a current digest and the row
+    # never got finalised).
+    #
+    # Manual runs (triggered_by="manual") intentionally bypass the
+    # freshness window — the sysadmin clicked Run Now to force a
+    # fresh digest, so we do not skip.
+    if triggered_by != "manual" and await _is_current():
+        log.info(
+            "research_run_skipped_current_post_row",
+            row_id=row_id, triggered_by=triggered_by)
+        await _finalise_row(
+            row_id,
+            digest={
+                "summary_text":       "",
+                "regime_implication": "",
+                "key_signals":        [],
+                "citation_urls":      [],
+                "raw_response":       "",
+                "error": (
+                    "Run skipped: a completed digest under the 24h "
+                    "freshness window already exists. Row finalised "
+                    "as skipped so the concurrency lock is released."),
+            },
+            usage={
+                "model": None, "input_tokens": None,
+                "output_tokens": None,
+                "n_searches": None, "n_fetches": None,
+            },
+            status="skipped",
+        )
+        return {
+            "status": "skipped",
+            "reason": "current",
+            "row_id": row_id,
+        }
 
-    status = "failed" if digest.get("error") else "complete"
-    await _finalise_row(row_id, digest=digest, usage=usage, status=status)
+    # CRITICAL: the row exists in 'running' state. Every exit path
+    # below MUST finalise it, otherwise it sits in 'running' forever
+    # and holds the concurrency lock. The reaper catches stuck rows
+    # past _RUN_TIMEOUT_MINUTES, but a row stuck under the timeout
+    # still blocks the dashboard's Run Now button until the timeout
+    # elapses. Wrap the agent + finalise path in try/except and
+    # finalise on any unhandled exception.
+    try:
+        # Agent generation. Synchronous (SDK is synchronous). In the
+        # test env we substitute the mock digest so pytest never hits
+        # Anthropic.
+        if _is_test_env():
+            digest, usage = _mock_digest()
+        else:
+            from agents.research_agent import generate_digest
+            # Run the synchronous SDK call off the event loop.
+            digest, usage = await asyncio.to_thread(generate_digest)
+
+        status = "failed" if digest.get("error") else "complete"
+        await _finalise_row(
+            row_id, digest=digest, usage=usage, status=status)
+    except Exception as exc:  # noqa: BLE001
+        # Defensive: ensure the row is finalised on ANY unhandled
+        # exception so it does not stay 'running' forever. Without
+        # this, a generate_digest exception propagates and the row
+        # holds the concurrency lock until the timeout reaper fires.
+        log.warning(
+            "research_run_unhandled_exception",
+            row_id=row_id, triggered_by=triggered_by, error=str(exc))
+        await _finalise_row(
+            row_id,
+            digest={
+                "summary_text":       "",
+                "regime_implication": "",
+                "key_signals":        [],
+                "citation_urls":      [],
+                "raw_response":       "",
+                "error": (
+                    f"Unhandled exception in run_research: {exc}. "
+                    f"Row finalised as failed so the concurrency lock "
+                    f"is released."),
+            },
+            usage={
+                "model": None, "input_tokens": None,
+                "output_tokens": None,
+                "n_searches": None, "n_fetches": None,
+            },
+            status="failed",
+        )
+        return {
+            "status": "failed",
+            "row_id": row_id,
+            "error":  str(exc),
+            "signals_count": 0,
+            "citations_count": 0,
+        }
+
     # Refresh the macro-context cache (Commit 3) so the fresh digest
     # flows into agent prompts within one tick of land. A failed run
     # ALSO refreshes — the cache returns to whatever the latest
