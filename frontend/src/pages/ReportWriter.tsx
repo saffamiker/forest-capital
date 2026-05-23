@@ -370,8 +370,8 @@ export default function ReportWriter() {
       const step7Result: StepResult = {
         status: bobCount > 0 ? 'warning' : 'complete',
         message: bobCount > 0
-          ? `Draft generated · ${bobCount} callout point${bobCount === 1 ? '' : 's'} remaining`
-          : 'Draft generated · no callouts',
+          ? `Draft generated · ${bobCount} block${bobCount === 1 ? '' : 's'} need${bobCount === 1 ? 's' : ''} your review`
+          : 'Draft generated · ready for Final Check',
         detail: `${(ms / 1000).toFixed(1)}s`,
         payload: { _ms: ms, generation_id: data.id } as Record<string, unknown>,
       }
@@ -503,6 +503,27 @@ export default function ReportWriter() {
     onPaperMdChange(next)
     setSelectedText('')
   }, [paperMd, selectedText])
+
+  // ── [BOB] block iteration ─────────────────────────────────────────────────
+  // Variant of handleIterate that takes the block content explicitly
+  // (rather than reading from the editor selection state). Wired into
+  // BobBlockBadge's [Rephrase in my voice] and [Expand] toolbar buttons
+  // so each pre-populated draft block can iterate independently of
+  // whatever Bob has selected in the textarea below.
+  const handleBobIterate = useCallback(async (
+    action: 'rephrase' | 'expand', selection: string,
+  ) => {
+    if (!generation) throw new Error('No generation in progress.')
+    const res = await axios.post<{
+      original: string; rewritten: string;
+      word_delta: number;
+      new_unverified_numbers: number[];
+      new_unverified_citations: string[];
+    }>(
+      `/api/v1/reports/generations/${generation.id}/iterate`,
+      { action, selection })
+    return res.data
+  }, [generation])
 
   // ── Final check ───────────────────────────────────────────────────────────
   const handleRunFinalCheck = async () => {
@@ -654,8 +675,9 @@ export default function ReportWriter() {
           Report Writer
         </h1>
         <p className="text-text-secondary text-sm">
-          Pull verified data, generate a midpoint paper draft, resolve
-          callout points, and download a submission-ready docx.
+          Pull verified data, generate a midpoint paper draft, review
+          and personalise the agent's pre-populated blocks, and
+          download a submission-ready docx.
         </p>
       </header>
 
@@ -712,6 +734,7 @@ export default function ReportWriter() {
             count={bobCount}
             blocks={blocks}
             onResolve={handleResolveBob}
+            onIterate={handleBobIterate}
             disabled={!generation}
           />
           <WordCountSidebar counts={sectionCounts} />
@@ -837,11 +860,14 @@ export default function ReportWriter() {
           data-testid="preview-pane"
           className="mt-6 p-4 bg-navy-900 border border-navy-700 rounded">
           <h3 className="text-white font-medium text-sm mb-2">
-            Preview · {bobCount} callout point{bobCount === 1 ? '' : 's'} remaining
+            Preview · {bobCount === 0
+              ? 'all blocks reviewed'
+              : `${bobCount} block${bobCount === 1 ? '' : 's'} need${bobCount === 1 ? 's' : ''} your review`}
           </h3>
           <PreviewWithBlocks
             paperMd={paperMd}
             onResolve={handleResolveBob}
+            onIterate={handleBobIterate}
             disabled={!generation}
           />
         </section>
@@ -1059,10 +1085,17 @@ async function postAudit(
 
 
 function PreviewWithBlocks({
-  paperMd, onResolve, disabled,
+  paperMd, onResolve, onIterate, disabled,
 }: {
   paperMd: string
   onResolve: (marker: string, replacement: string) => Promise<void>
+  onIterate?: ((
+    action: 'rephrase' | 'expand', selection: string,
+  ) => Promise<{
+    original: string; rewritten: string; word_delta: number;
+    new_unverified_numbers: number[];
+    new_unverified_citations: string[];
+  }>) | undefined
   disabled?: boolean
 }) {
   const tokens = tokenize(paperMd)
@@ -1081,6 +1114,7 @@ function PreviewWithBlocks({
             key={i}
             block={tok.block}
             onResolve={onResolve}
+            onIterate={onIterate}
             disabled={disabled}
           />
         )
@@ -1091,11 +1125,18 @@ function PreviewWithBlocks({
 
 
 function CalloutSidebar({
-  count, blocks, onResolve, disabled,
+  count, blocks, onResolve, onIterate, disabled,
 }: {
   count: number
   blocks: ReturnType<typeof extractBobBlocks>
   onResolve: (marker: string, replacement: string) => Promise<void>
+  onIterate?: ((
+    action: 'rephrase' | 'expand', selection: string,
+  ) => Promise<{
+    original: string; rewritten: string; word_delta: number;
+    new_unverified_numbers: number[];
+    new_unverified_citations: string[];
+  }>) | undefined
   disabled?: boolean
 }) {
   const [open, setOpen] = useState(true)
@@ -1109,7 +1150,9 @@ function CalloutSidebar({
         className="w-full flex items-center justify-between p-3 hover:bg-navy-800">
         <span className="text-white font-medium text-sm flex items-center gap-2">
           <AlertCircle className="w-4 h-4 text-amber-400" />
-          Callout points
+          {count === 0
+            ? 'All blocks reviewed'
+            : 'Blocks needing your review'}
           <span
             data-testid="callout-count"
             className={
@@ -1118,7 +1161,9 @@ function CalloutSidebar({
                 ? 'bg-green-500/15 text-green-300'
                 : 'bg-amber-500/15 text-amber-300')
             }>
-            {count} remaining
+            {count === 0
+              ? 'ready for Final Check'
+              : `${count} need${count === 1 ? 's' : ''} review`}
           </span>
         </span>
       </button>
@@ -1129,6 +1174,7 @@ function CalloutSidebar({
               key={`${b.marker}-${i}`}
               block={b}
               onResolve={onResolve}
+              onIterate={onIterate}
               disabled={disabled}
             />
           ))}
@@ -1137,7 +1183,7 @@ function CalloutSidebar({
       {open && count === 0 ? (
         <div className="p-3 pt-0">
           <p className="text-text-muted text-xs italic">
-            No callout points remaining.
+            All blocks reviewed — ready for Final Check.
           </p>
         </div>
       ) : null}
