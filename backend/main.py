@@ -262,6 +262,43 @@ async def lifespan(app: FastAPI):
             await refresh_strategy_context_cache()
         except Exception as exc:  # noqa: BLE001
             log.warning("strategy_context_warm_failed", error=str(exc))
+        # Hotfix (May 23 2026): warm the analytics precompute caches
+        # if the dashboard endpoints would otherwise time out on a
+        # cold deploy. Two endpoints were observed timing out at 30s
+        # post-#93 — /api/v1/analytics/academic (Cumulative Returns)
+        # and /api/optimize/weights (Efficient Frontier). The former
+        # falls back to a slow inline OLS compute when its cache is
+        # empty; the latter ran the 100-point SLSQP sweep on every
+        # request unconditionally. Both now share the same precompute
+        # cache table — if EITHER row is missing on startup, fire the
+        # refresh dispatch in the background so the first user
+        # request hits a warm cache.
+        if not _is_test_env:
+            try:
+                from tools.cache import get_latest_strategy_hash
+                from tools.precomputed_analytics import (
+                    get_metric as get_precomputed,
+                    trigger_refresh_async as trigger_analytics_refresh,
+                )
+                latest_hash = await get_latest_strategy_hash()
+                if latest_hash:
+                    aa = await get_precomputed(
+                        latest_hash, "academic_analytics")
+                    ef = await get_precomputed(
+                        latest_hash, "efficient_frontier")
+                    if aa is None or ef is None:
+                        log.warning(
+                            "analytics_cache_cold_on_startup_firing_warm",
+                            academic_present=bool(aa),
+                            frontier_present=bool(ef),
+                            data_hash=latest_hash[:8])
+                        trigger_analytics_refresh(latest_hash)
+                    else:
+                        log.info("analytics_cache_warm_on_startup",
+                                 data_hash=latest_hash[:8])
+            except Exception as exc:  # noqa: BLE001
+                log.warning("analytics_cache_warm_check_failed",
+                            error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
@@ -2983,12 +3020,68 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
             rf_annual = (sum(rf_monthly) / len(rf_monthly) * 12) if rf_monthly else 0.0
             log.info("optimize_frontier_risk_free", risk_free_annual=round(rf_annual, 4))
 
-            # Monthly returns → annualise with 12, not 252, so the frontier
-            # curve's (volatility, return) coordinates sit on the same
-            # scale as the strategy scatter (also annualised from monthly).
-            raw_frontier = _frontier(
-                returns, n_points=100, periods_per_year=12, risk_free=rf_annual,
-            )
+            # Hotfix (May 23 2026): try the precomputed frontier cache
+            # before running the 100-point SLSQP sweep on the request
+            # thread. The frontier depends only on the equity/IG/HY
+            # monthly returns — same input → same output across every
+            # method — so the cache row is method-agnostic. Reading
+            # the cached row drops a 10-30s request to ~50ms; the
+            # endpoint times out at 30s without this on Render's
+            # shared CPU.
+            raw_frontier: list[dict] | None = None
+            try:
+                from tools.cache import get_latest_strategy_hash
+                from tools.precomputed_analytics import (
+                    get_metric as get_precomputed,
+                    get_latest_metric as get_latest_precomputed,
+                )
+                latest_hash = await get_latest_strategy_hash()
+                cached = None
+                if latest_hash:
+                    cached = await get_precomputed(
+                        latest_hash, "efficient_frontier")
+                if cached is None:
+                    # Stale-cache fallback — serve the previous data-
+                    # hash's frontier rather than block on the inline
+                    # sweep when the refresh hook is in flight or has
+                    # not yet fired.
+                    cached = await get_latest_precomputed(
+                        "efficient_frontier")
+                if cached and cached.get("frontier_points"):
+                    raw_frontier = cached["frontier_points"]
+                    log.info("optimize_frontier_cache_hit",
+                             n_points=len(raw_frontier),
+                             data_hash=(latest_hash[:8]
+                                          if latest_hash else None))
+            except Exception as cache_exc:  # noqa: BLE001
+                log.warning("optimize_frontier_cache_read_failed",
+                            error=str(cache_exc))
+
+            if raw_frontier is None:
+                # Cold cache — run the inline sweep. This is the slow
+                # path that caused the 30s timeout; we still keep it
+                # as the fallback so a fresh deploy without a cache
+                # row returns SOMETHING rather than a mock. Future
+                # requests will hit the cache once the background
+                # refresh writes the row.
+                log.warning("optimize_frontier_cache_miss_inline_sweep")
+                raw_frontier = _frontier(
+                    returns, n_points=100,
+                    periods_per_year=12, risk_free=rf_annual,
+                )
+                # Fire the precomputed refresh in the background so
+                # the NEXT request hits the cache (avoids repeated
+                # slow inline sweeps on a sustained cold-cache state).
+                try:
+                    from tools.cache import get_latest_strategy_hash
+                    from tools.precomputed_analytics import (
+                        trigger_refresh_async,
+                    )
+                    h = await get_latest_strategy_hash()
+                    if h:
+                        trigger_refresh_async(h)
+                except Exception:  # noqa: BLE001
+                    pass
 
             # efficient_frontier() returns a flat list keyed `return`, but
             # the EfficientFrontier component reads `expected_return` off a
