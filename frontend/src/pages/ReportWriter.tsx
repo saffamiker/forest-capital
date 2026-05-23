@@ -893,13 +893,28 @@ const STEP_ACTIONS: Record<number, (templateId: string) => Promise<StepSummary>>
     }
   },
   // Step 3 — Pull Team Activity.
+  // Send an explicit empty-object body — axios.post() with no second
+  // arg sends `undefined` which some FastAPI/Starlette middleware
+  // chains reject before the route handler sees the request (user
+  // report: "clicking does nothing"). An empty {} is safe — the
+  // endpoint signature takes no body, FastAPI ignores extra fields.
   3: async () => {
     const res = await axios.post<{
       activity: Record<string, number>;
       cross_check_flags: string[];
-    }>('/api/v1/reports/team-activity')
-    const total = res.data.activity?.team_total_uat_steps ?? 0
+    }>('/api/v1/reports/team-activity', {})
+    const activity = res.data.activity || {}
+    const total = activity.team_total_uat_steps ?? 0
     const flags = res.data.cross_check_flags || []
+    // Distinguish "endpoint returned no activity" (DB empty, fresh
+    // deploy) from "endpoint returned with cross-check warnings".
+    if (Object.keys(activity).length === 0 || total === 0) {
+      return {
+        status: 'complete',
+        message: 'No activity recorded yet — pipeline proceeds',
+        payload: res.data as Record<string, unknown>,
+      }
+    }
     return {
       status: flags.length > 0 ? 'warning' : 'complete',
       message: flags.length > 0
@@ -909,17 +924,47 @@ const STEP_ACTIONS: Record<number, (templateId: string) => Promise<StepSummary>>
     }
   },
   // Step 4 — Pull Validation Data (latest audit run).
+  // FIX (May 23 2026 — user report): when no audit has been run yet
+  // the endpoint returns 200 with statistical_status: null. The
+  // previous handler rendered this as "Statistical audit: unknown"
+  // which read as a failure. The pipeline is informational — a
+  // missing audit is a "run the QA audit first" prompt, NOT a
+  // generation blocker. Now: returns 'complete' with a clear
+  // "No audit on record" message and an actionable detail in the
+  // payload so the expansion panel can suggest the QA audit run.
   4: async () => {
-    const res = await axios.get<{
-      statistical_status?: string;
-      total_checks?: number; failed_checks?: number;
-      run_at?: string; passed?: number; warning?: number; failed?: number;
-    }>('/api/v1/audit/runs/latest')
-    const status = res.data.statistical_status || 'unknown'
-    return {
-      status: status === 'pass' ? 'complete' : 'warning',
-      message: `Statistical audit: ${status}`,
-      payload: res.data as Record<string, unknown>,
+    try {
+      const res = await axios.get<{
+        statistical_status?: string | null;
+        qa_status?: string | null;
+        total_checks?: number; failed_checks?: number;
+        run_at?: string; passed?: number; warning?: number; failed?: number;
+        layer1_status?: string; layer2_status?: string; layer3_status?: string;
+      }>('/api/v1/audit/runs/latest')
+      const status = res.data.statistical_status
+      if (!status) {
+        return {
+          status: 'complete',
+          message: 'No audit on record — pipeline proceeds (run QA audit before submission)',
+          payload: { ...res.data, _no_audit: true } as Record<string, unknown>,
+        }
+      }
+      return {
+        status: status === 'pass' ? 'complete' : 'warning',
+        message: `Statistical audit: ${status}`,
+        payload: res.data as Record<string, unknown>,
+      }
+    } catch (err) {
+      // A 404 is also "no audit on record yet" — treat as
+      // informational, not as a failed pipeline step.
+      if (axios.isAxiosError(err) && err.response?.status === 404) {
+        return {
+          status: 'complete',
+          message: 'No audit on record — pipeline proceeds (run QA audit before submission)',
+          payload: { _no_audit: true } as Record<string, unknown>,
+        }
+      }
+      throw err
     }
   },
   // Step 5 — Cross-Reference Check (recompute live ↔ staged).

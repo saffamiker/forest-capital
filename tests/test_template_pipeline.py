@@ -230,22 +230,66 @@ class TestSourceCitations:
             assert entry["concept_id"] == cid
 
     def test_citation_quality_thresholds(self):
+        """Updated May 23 2026 — thresholds shifted from 7/4/<4 to
+        8/5/<5 per the user's amendment."""
         from tools.template_pipeline import citation_quality
-        # 7 verified → green
+        # 8 verified → green
+        verified_8 = {f"c{i}": {"verification_status": "verified"}
+                       for i in range(8)}
+        assert citation_quality(verified_8) == "green"
+        # 7 verified → amber (used to be green)
         verified_7 = {f"c{i}": {"verification_status": "verified"}
                        for i in range(7)}
-        assert citation_quality(verified_7) == "green"
+        assert citation_quality(verified_7) == "amber"
         # 5 verified → amber
         verified_5 = {f"c{i}": {"verification_status": "verified"}
                        for i in range(5)}
-        # Pad with unverified.
         verified_5.update({f"u{i}": {"verification_status": "not_found"}
                             for i in range(5)})
         assert citation_quality(verified_5) == "amber"
+        # 4 verified → red (used to be amber)
+        verified_4 = {f"c{i}": {"verification_status": "verified"}
+                       for i in range(4)}
+        assert citation_quality(verified_4) == "red"
         # 2 verified → red
         verified_2 = {f"c{i}": {"verification_status": "verified"}
                        for i in range(2)}
         assert citation_quality(verified_2) == "red"
+
+    def test_citation_quality_counts_new_state_machine_values(self):
+        """The deferred citation review workflow introduces additional
+        verified-bucket states (human_verified, search_selected,
+        manually_added). citation_quality must count them toward the
+        verified total alongside the original 'verified' so the
+        forward-looking workflow ships without a follow-up patch
+        here."""
+        from tools.template_pipeline import citation_quality
+        mixed = {
+            "c1": {"verification_status": "verified"},
+            "c2": {"verification_status": "human_verified"},
+            "c3": {"verification_status": "search_selected"},
+            "c4": {"verification_status": "manually_added"},
+            "c5": {"verification_status": "verified"},
+            "c6": {"verification_status": "verified"},
+            "c7": {"verification_status": "verified"},
+            "c8": {"verification_status": "verified"},
+            "c9": {"verification_status": "not_found"},
+            "c10": {"verification_status": "untrusted_source"},
+        }
+        # 8 in any verified-bucket state → green.
+        assert citation_quality(mixed) == "green"
+
+    def test_citation_quality_ignores_unactioned_states(self):
+        """pending_review / not_found_pending / rejected_no_citation
+        do NOT count toward the verified total — only terminal
+        verified states do."""
+        from tools.template_pipeline import citation_quality
+        all_pending = {
+            "c1": {"verification_status": "pending_review"},
+            "c2": {"verification_status": "not_found_pending"},
+            "c3": {"verification_status": "rejected_no_citation"},
+        }
+        assert citation_quality(all_pending) == "red"
 
 
 # ── Thesis validation gate (STEP 6) ─────────────────────────────────────────

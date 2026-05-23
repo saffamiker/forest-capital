@@ -740,14 +740,25 @@ async def source_citations(
 def citation_quality(citations: dict) -> str:
     """Green / amber / red indicator per the spec.
 
-    Green: 7-10 verified.  Amber: 4-6 verified.  Red: < 4 verified."""
+    Updated May 23 2026 (user request): green 8-10 verified,
+    amber 5-7 verified, red fewer than 5 verified. Both auto-
+    verified (the original "verified" state) and the future
+    human_verified / search_selected / manually_added states (see
+    deferred citation review workflow) count toward the verified
+    total; not_found and untrusted_source do not."""
+    verified_states = {
+        "verified",            # auto-verified, current state
+        "human_verified",      # reviewer-accepted untrusted source
+        "search_selected",     # picked from extended search
+        "manually_added",      # entered manually
+    }
     verified = sum(
         1 for v in (citations or {}).values()
         if isinstance(v, dict)
-        and v.get("verification_status") == "verified")
-    if verified >= 7:
+        and v.get("verification_status") in verified_states)
+    if verified >= 8:
         return "green"
-    if verified >= 4:
+    if verified >= 5:
         return "amber"
     return "red"
 
