@@ -73,6 +73,38 @@ function statusFromVerdict(p: QAStatusPayload | null): QAStatus {
   return 'unknown'
 }
 
+/**
+ * Format the /api/qa/audit error payload as a human-readable
+ * string. The backend's hotfix (May 23 2026) returns a structured
+ * detail object — {error, error_type, message, hint} — so the user
+ * sees the real underlying error instead of the previous mock-
+ * audit silent fallback. Falls back to .message or a generic
+ * string for any non-structured error shape.
+ */
+function _formatAuditError(err: unknown): string {
+  if (axios.isAxiosError(err)) {
+    const detail = err.response?.data?.detail
+    if (typeof detail === 'string') return detail
+    if (detail && typeof detail === 'object') {
+      const d = detail as {
+        error?: string; error_type?: string;
+        message?: string; hint?: string
+      }
+      const parts: string[] = []
+      if (d.message) parts.push(d.message)
+      else if (d.error) parts.push(d.error)
+      if (d.error_type && d.error_type !== d.error) {
+        parts.push(`(${d.error_type})`)
+      }
+      if (d.hint) parts.push(`— ${d.hint}`)
+      if (parts.length > 0) return parts.join(' ')
+    }
+    return err.message || 'QA audit request failed.'
+  }
+  return (err as Error)?.message || 'Failed to run QA audit.'
+}
+
+
 export const useQAStore = create<QAState>((set, get) => ({
   result: null,
   status: 'unknown',
@@ -100,10 +132,15 @@ export const useQAStore = create<QAState>((set, get) => ({
         error: null,
       })
     } catch (err) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.detail ?? err.message)
-        : 'Failed to run QA audit'
-      set({ loading: false, error: String(msg) })
+      // The backend's /api/qa/audit error now returns a structured
+      // detail object: {error, error_type, message, hint}. Format
+      // it as a human-readable string for the qaStore.error field
+      // so the user sees the real failure instead of the previous
+      // silent fallback to mock data (the hotfix prompt — May 23
+      // 2026). A plain-string detail still works (backwards
+      // compat with other handlers that return detail: "msg").
+      const msg = _formatAuditError(err)
+      set({ loading: false, error: msg })
     }
   },
 
