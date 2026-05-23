@@ -1737,8 +1737,41 @@ async def get_template_rubric(
             status_code=500, detail="Read rubric failed.")
 
 
+@app.get("/api/v1/reports/pipeline-audit/active")
+async def get_active_pipeline_audit(
+    session: dict = Depends(require_team_member),
+):
+    """Returns the most recent pipeline run started by the caller in
+    the last two hours, or {available: false} when none exists. The
+    report writer reads this on mount to restore step state across
+    navigation."""
+    if ENVIRONMENT == "test":
+        return {"available": False}
+    try:
+        from tools.pipeline_audit import get_active_run_for_user
+        row = await get_active_run_for_user(session["email"])
+        if not row:
+            return {"available": False}
+        # Attach the persisted paper_md when a generation_id exists,
+        # so the editor restores the draft text on the same fetch.
+        paper_md = ""
+        gen_id = row.get("generation_id")
+        if isinstance(gen_id, int):
+            try:
+                from tools.report_generator import get_generation
+                gen = await get_generation(gen_id)
+                if gen:
+                    paper_md = gen.get("paper_md") or ""
+            except Exception:  # noqa: BLE001
+                paper_md = ""
+        return {"available": True, "audit": row, "paper_md": paper_md}
+    except Exception as exc:
+        log.warning("active_audit_endpoint_failed", error=str(exc))
+        return {"available": False}
+
+
 @app.post("/api/v1/reports/pipeline-audit")
-@limiter.limit("30/minute")
+@limiter.limit("60/minute")
 async def post_pipeline_audit(
     request: Request, body: dict,
     session: dict = Depends(require_team_member),
@@ -1767,17 +1800,24 @@ async def post_pipeline_audit(
             status_code=422, detail="template_id is required.")
     try:
         from tools.pipeline_audit import (
-            record_audit_run, update_generation_timings,
+            upsert_active_run, update_generation_timings,
         )
         steps = body.get("steps") or {}
-        new_id = await record_audit_run(
-            generation_id=body.get("generation_id"),
+        # Item 12 commit B — incremental upsert. The frontend rounds
+        # trip the audit_id so every step completion writes to the
+        # same row. First write (audit_id None) inserts; subsequent
+        # writes update only the fields present in the steps dict.
+        # The terminal write (Step 7 success/failure) still flows
+        # through here — it just happens to be the last upsert.
+        new_id = await upsert_active_run(
             template_id=str(template_id),
             triggered_by=session.get("email"),
             steps=steps,
             total_pipeline_ms=body.get("total_pipeline_ms"),
             failure_step=body.get("failure_step"),
             failure_reason=body.get("failure_reason"),
+            generation_id=body.get("generation_id"),
+            audit_id=body.get("audit_id"),
         )
         # When the run produced a generation, also persist the
         # per-step ms dict on the row so the summary card has a
@@ -1790,7 +1830,7 @@ async def post_pipeline_audit(
             }
             if timings:
                 await update_generation_timings(gen_id, timings)
-        return {"id": new_id}
+        return {"id": new_id, "audit_id": new_id}
     except Exception as exc:
         log.warning("pipeline_audit_endpoint_failed", error=str(exc))
         raise HTTPException(

@@ -43,7 +43,7 @@ export type StepStatus =
 export interface StepResult {
   status: StepStatus
   message: string
-  detail?: string
+  detail?: string | undefined
   payload?: unknown
 }
 

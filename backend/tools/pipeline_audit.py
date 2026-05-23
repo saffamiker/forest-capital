@@ -191,6 +191,170 @@ async def get_audit_run(audit_id: int) -> dict[str, Any] | None:
         return None
 
 
+async def upsert_active_run(
+    *,
+    template_id: str,
+    triggered_by: str | None,
+    steps: dict[str, Any],
+    total_pipeline_ms: int | None = None,
+    failure_step: int | None = None,
+    failure_reason: str | None = None,
+    generation_id: int | None = None,
+    audit_id: int | None = None,
+) -> int | None:
+    """Idempotent UPSERT for incremental persistence.
+
+    On first call (audit_id None) inserts a fresh row and returns the
+    new id. On subsequent calls with the same audit_id updates the
+    existing row's step columns, total ms, failure fields, and
+    generation_id. The frontend round-trips the audit_id so every
+    step completion writes to the same row.
+
+    This is the second key persistence pattern alongside
+    record_audit_run() (the terminal one-shot write). The terminal
+    write is retained for compatibility with the original commit-5
+    contract; new callers from commit-B use the incremental flow.
+    """
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as s:
+            if audit_id is None:
+                r = await s.execute(text(
+                    f"INSERT INTO report_pipeline_audit ({_INSERT_COLS}) "
+                    "VALUES ("
+                    ":g, :t, :u, "
+                    ":s1, :ms1, :s2, :ms2, :s3, :ms3, :s4, :ms4, "
+                    ":s5, :ms5, :mc5, "
+                    ":s6, :ms6, :c6, "
+                    ":s7, :ms7, "
+                    ":total, :fs, :fr) RETURNING id"
+                ), _build_audit_params(
+                    generation_id, template_id, triggered_by, steps,
+                    total_pipeline_ms, failure_step, failure_reason))
+                new_id = r.scalar()
+                await s.commit()
+                return int(new_id) if new_id is not None else None
+            # Update existing row — only fields that are present in
+            # the steps dict are overwritten so a later step does not
+            # blank an earlier step's result.
+            updates: list[str] = []
+            params: dict[str, Any] = {"i": int(audit_id)}
+            for n in (1, 2, 3, 4, 5, 6, 7):
+                key_s = f"step_{n}_status"
+                key_ms = f"step_{n}_ms"
+                if key_s in steps:
+                    updates.append(f"{key_s} = :{key_s}")
+                    params[key_s] = steps[key_s]
+                if key_ms in steps:
+                    updates.append(f"{key_ms} = :{key_ms}")
+                    params[key_ms] = _safe_int(steps[key_ms])
+            if "step_5_mismatch_count" in steps:
+                updates.append(
+                    "step_5_mismatch_count = :step_5_mismatch_count")
+                params["step_5_mismatch_count"] = _safe_int(
+                    steps["step_5_mismatch_count"])
+            if "step_6_conditions" in steps:
+                updates.append(
+                    "step_6_conditions = :step_6_conditions")
+                params["step_6_conditions"] = json.dumps(
+                    steps["step_6_conditions"], default=str)
+            if total_pipeline_ms is not None:
+                updates.append("total_pipeline_ms = :total")
+                params["total"] = _safe_int(total_pipeline_ms)
+            if failure_step is not None:
+                updates.append("failure_step = :fs")
+                params["fs"] = _safe_int(failure_step)
+            if failure_reason is not None:
+                updates.append("failure_reason = :fr")
+                params["fr"] = failure_reason
+            if generation_id is not None:
+                updates.append("generation_id = :g")
+                params["g"] = int(generation_id)
+            if not updates:
+                return int(audit_id)
+            await s.execute(text(
+                "UPDATE report_pipeline_audit "
+                f"SET {', '.join(updates)} WHERE id = :i"
+            ), params)
+            await s.commit()
+            return int(audit_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pipeline_audit_upsert_failed", error=str(exc))
+        return None
+
+
+def _build_audit_params(
+    generation_id: int | None,
+    template_id: str,
+    triggered_by: str | None,
+    steps: dict[str, Any],
+    total_pipeline_ms: int | None,
+    failure_step: int | None,
+    failure_reason: str | None,
+) -> dict[str, Any]:
+    return {
+        "g":  generation_id,
+        "t":  template_id,
+        "u":  triggered_by,
+        "s1": steps.get("step_1_status"),
+        "ms1": _safe_int(steps.get("step_1_ms")),
+        "s2": steps.get("step_2_status"),
+        "ms2": _safe_int(steps.get("step_2_ms")),
+        "s3": steps.get("step_3_status"),
+        "ms3": _safe_int(steps.get("step_3_ms")),
+        "s4": steps.get("step_4_status"),
+        "ms4": _safe_int(steps.get("step_4_ms")),
+        "s5": steps.get("step_5_status"),
+        "ms5": _safe_int(steps.get("step_5_ms")),
+        "mc5": _safe_int(steps.get("step_5_mismatch_count")),
+        "s6": steps.get("step_6_status"),
+        "ms6": _safe_int(steps.get("step_6_ms")),
+        "c6": json.dumps(steps.get("step_6_conditions") or [],
+                         default=str),
+        "s7": steps.get("step_7_status"),
+        "ms7": _safe_int(steps.get("step_7_ms")),
+        "total": _safe_int(total_pipeline_ms),
+        "fs": _safe_int(failure_step),
+        "fr": failure_reason,
+    }
+
+
+async def get_active_run_for_user(
+    user_email: str,
+    *,
+    window_hours: int = 2,
+) -> dict[str, Any] | None:
+    """Returns the most recent audit row started by `user_email`
+    within the past `window_hours` hours. Used by the report writer's
+    restore-on-mount path so Bob can navigate away and come back.
+
+    The row may be in any state — fresh, in-progress, complete, or
+    failed. The frontend decides whether to restore based on the
+    per-step statuses and the run_at timestamp."""
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                f"SELECT {_SELECT_COLS} FROM report_pipeline_audit "
+                "WHERE triggered_by = :u "
+                "AND run_at > now() - (:h * interval '1 hour') "
+                "ORDER BY run_at DESC LIMIT 1"
+            ), {"u": user_email, "h": int(window_hours)})
+            row = r.fetchone()
+            if not row:
+                return None
+            return _row_to_dict(row)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("pipeline_audit_active_read_failed", error=str(exc))
+        return None
+
+
 async def update_generation_timings(
     generation_id: int, timings: dict[str, Any],
 ) -> bool:

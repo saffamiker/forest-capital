@@ -37,6 +37,7 @@ import {
   extractBobBlocks, tokenize,
   SECTION_BUDGETS, countWords, wordCountStatus,
 } from '../lib/bobBlocks'
+import { useReportWriterStore } from '../stores/reportWriterStore'
 
 interface Template {
   template_id: string
@@ -76,6 +77,28 @@ interface AuditPayload {
   steps: Record<string, unknown>
 }
 
+interface AuditRow {
+  id: number
+  generation_id: number | null
+  template_id: string
+  triggered_by: string | null
+  run_at: string | null
+  step_1_status?: string | null
+  step_1_ms?: number | null
+  step_2_status?: string | null
+  step_2_ms?: number | null
+  step_3_status?: string | null
+  step_3_ms?: number | null
+  step_4_status?: string | null
+  step_4_ms?: number | null
+  step_5_status?: string | null
+  step_5_ms?: number | null
+  step_6_status?: string | null
+  step_6_ms?: number | null
+  step_7_status?: string | null
+  step_7_ms?: number | null
+}
+
 
 export default function ReportWriter() {
   const [templates, setTemplates] = useState<Template[]>([])
@@ -92,12 +115,23 @@ export default function ReportWriter() {
   const [selectedText, setSelectedText] = useState('')
   const [downloading, setDownloading] = useState<'paper' | 'appendix' | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [pipelineStartedAt, setPipelineStartedAt] = useState<number | null>(null)
   const [auditPosted, setAuditPosted] = useState(false)
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const stepResultsRef = useRef<StepResults>({})
   stepResultsRef.current = stepResults
+
+  // Cross-screen pipeline state — drives the nav-bar badge and
+  // round-trips the audit_id so incremental persistence updates the
+  // same audit row on every step completion.
+  const {
+    badge: navBadge, setBadge, auditId, setAuditId,
+    pipelineStartedAt, setPipelineStartedAt,
+  } = useReportWriterStore()
+  void navBadge // referenced via the store; silence the lint
+  const auditIdRef = useRef<number | null>(null)
+  auditIdRef.current = auditId
+  const restoredOnceRef = useRef(false)
 
   // ── Initial template + rubric load ────────────────────────────────────────
   useEffect(() => {
@@ -119,48 +153,185 @@ export default function ReportWriter() {
     setStepResults((prev) => ({ ...prev, [n]: result }))
   }, [])
 
+  // ── Incremental persistence — every step write upserts the audit row ─────
+  const persistStep = useCallback(async (
+    n: number, result: StepResult,
+  ): Promise<void> => {
+    // The frontend round-trips audit_id so the backend updates the
+    // same row across step completions. The first call (audit_id
+    // null) inserts and returns the new id; we cache it in the
+    // store so every cross-screen render sees the same value.
+    try {
+      const stepKey = `step_${n}_status`
+      const msKey = `step_${n}_ms`
+      const payload = result.payload as Record<string, unknown> | undefined
+      const ms = payload && typeof payload['_ms'] === 'number'
+        ? payload['_ms'] as number : null
+      const steps: Record<string, unknown> = {
+        [stepKey]: result.status,
+        [msKey]: ms,
+      }
+      if (n === 5 && payload && payload['mismatch_count'] !== undefined) {
+        steps['step_5_mismatch_count'] = payload['mismatch_count']
+      }
+      if (n === 6 && payload && payload['conditions'] !== undefined) {
+        steps['step_6_conditions'] = payload['conditions']
+      }
+      const body: Record<string, unknown> = {
+        template_id: templateId,
+        steps,
+        audit_id: auditIdRef.current,
+      }
+      if (result.status === 'failed') {
+        body['failure_step'] = n
+        body['failure_reason'] = result.message
+      }
+      const res = await axios.post<{ id: number | null; audit_id: number | null }>(
+        '/api/v1/reports/pipeline-audit', body)
+      const newId = res.data.audit_id ?? res.data.id
+      if (typeof newId === 'number' && auditIdRef.current === null) {
+        auditIdRef.current = newId
+        setAuditId(newId)
+      }
+    } catch {
+      // Audit failures are silent — the primary UX cannot be blocked
+      // by an informational layer.
+    }
+  }, [templateId, setAuditId])
+
   // ── Generic step runner ───────────────────────────────────────────────────
   const runStep = useCallback(async (n: number): Promise<void> => {
     if (!pipelineStartedAt) {
-      setPipelineStartedAt(Date.now())
+      const t = Date.now()
+      setPipelineStartedAt(t)
     }
+    setBadge('running', `Step ${n} running`)
     setStep(n, { status: 'running', message: 'Running…' })
     const t0 = performance.now()
     try {
       const summary = await STEP_ACTIONS[n](templateId)
       const ms = Math.round(performance.now() - t0)
-      setStep(n, {
+      const result: StepResult = {
         status: summary.status,
         message: summary.message,
         detail: `${(ms / 1000).toFixed(1)}s`,
         payload: { ...summary.payload, _ms: ms } as Record<string, unknown>,
-      })
+      }
+      setStep(n, result)
+      void persistStep(n, result)
+      if (summary.status === 'failed') {
+        setBadge('failed', `Step ${n} failed`)
+      } else {
+        setBadge('running', `Step ${n} complete`)
+      }
     } catch (err) {
       const ms = Math.round(performance.now() - t0)
       const msg = axios.isAxiosError(err)
         ? (err.response?.data?.detail || err.message) : (err as Error).message
-      setStep(n, {
+      const result: StepResult = {
         status: 'failed',
         message: typeof msg === 'string' ? msg : 'Step failed.',
         detail: `${(ms / 1000).toFixed(1)}s`,
         payload: { _ms: ms } as Record<string, unknown>,
-      })
+      }
+      setStep(n, result)
+      setBadge('failed', `Step ${n} failed`)
+      void persistStep(n, result)
     }
-  }, [templateId, setStep, pipelineStartedAt])
+  }, [templateId, setStep, pipelineStartedAt, setPipelineStartedAt,
+       setBadge, persistStep])
 
-  // ── Auto-cascade: Step 1 → 2,3,4 → 5 → 6 ───────────────────────────────────
-  // Step 1 fires once on mount and once per template change. The cascade
-  // is driven by useEffect: each step's prerequisites are checked, and
-  // it fires only when previously idle. A re-run of a completed step
-  // resets it to idle which re-triggers the downstream cascade.
+  // ── Restore on mount + auto-cascade Step 1 → 2,3,4 → 5 → 6 ─────────────────
+  // Before kicking off a fresh run we ask the backend for any
+  // pipeline started by this user in the last 2 hours. When one
+  // exists, we hydrate the step state from it so a user navigating
+  // back to /reports/writer mid-run sees the same picture they left.
+  // Otherwise we fall through to the fresh-run path.
   const autoStartedRef = useRef<string | null>(null)
   useEffect(() => {
+    let cancelled = false
     if (autoStartedRef.current === templateId) return
     autoStartedRef.current = templateId
-    setStepResults({})
-    setPipelineStartedAt(Date.now())
-    void runStep(1)
-  }, [templateId, runStep])
+
+    ;(async () => {
+      if (!restoredOnceRef.current) {
+        restoredOnceRef.current = true
+        try {
+          const r = await axios.get<{
+            available: boolean;
+            audit?: AuditRow;
+            paper_md?: string;
+          }>('/api/v1/reports/pipeline-audit/active')
+          if (!cancelled && r.data.available && r.data.audit) {
+            hydrateFromAudit(r.data.audit, r.data.paper_md ?? '')
+            return  // skip fresh-run kickoff
+          }
+        } catch {
+          // Restore is best-effort — fall through to fresh run.
+        }
+      }
+      if (cancelled) return
+      setStepResults({})
+      setAuditId(null)
+      auditIdRef.current = null
+      setPipelineStartedAt(Date.now())
+      setBadge('running', 'Pipeline starting')
+      void runStep(1)
+    })()
+    return () => { cancelled = true }
+  }, [templateId, runStep, setAuditId, setPipelineStartedAt, setBadge])
+
+  // Hydrate from a persisted audit row — populate step results from
+  // the row's per-step columns, restore the paper_md, the audit_id,
+  // and the pipeline-started-at timestamp.
+  const hydrateFromAudit = useCallback((
+    audit: AuditRow, paperFromServer: string,
+  ) => {
+    const restored: StepResults = {}
+    for (const n of [1, 2, 3, 4, 5, 6, 7]) {
+      const key = `step_${n}_status` as keyof AuditRow
+      const msKey = `step_${n}_ms` as keyof AuditRow
+      const status = audit[key]
+      if (typeof status === 'string' && status) {
+        const ms = audit[msKey]
+        restored[n] = {
+          status: status as StepResult['status'],
+          message: status === 'complete' ? 'Restored from previous session'
+                : status === 'warning' ? 'Restored with warning'
+                : status === 'failed' ? 'Restored — previous run failed'
+                : 'Restored — was in progress',
+          detail: typeof ms === 'number' ? `${(ms / 1000).toFixed(1)}s` : undefined,
+          payload: { _ms: ms } as Record<string, unknown>,
+        }
+      }
+    }
+    setStepResults(restored)
+    setAuditId(audit.id)
+    auditIdRef.current = audit.id
+    if (audit.run_at) {
+      const t = new Date(audit.run_at).getTime()
+      if (Number.isFinite(t)) setPipelineStartedAt(t)
+    }
+    if (paperFromServer) {
+      setPaperMd(paperFromServer)
+      if (audit.generation_id) {
+        // Pull the generation row so the editor knows flag_count etc.
+        axios.get<GenerationResponse & { citations?: Record<string, unknown> }>(
+          `/api/v1/reports/generations/${audit.generation_id}`)
+          .then((r) => setGeneration(r.data))
+          .catch(() => { /* best-effort */ })
+      }
+    }
+    const allComplete = [1, 2, 3, 4, 5, 6, 7].every((n) => {
+      const s = restored[n]?.status
+      return s === 'complete' || s === 'warning'
+    })
+    setBadge(
+      allComplete ? 'complete'
+      : restored[7]?.status === 'failed' ? 'failed'
+      : 'running',
+      'Restored from previous session')
+  }, [setAuditId, setBadge, setPipelineStartedAt])
 
   // After step 1 completes, fan out 2/3/4 in parallel — but only when
   // each is idle (so a manual re-run of just one doesn't re-trigger
@@ -196,27 +367,29 @@ export default function ReportWriter() {
       setGeneration(data)
       setPaperMd(data.paper_md || '')
       const bobCount = data.bob_block_count ?? 0
-      setStep(7, {
+      const step7Result: StepResult = {
         status: bobCount > 0 ? 'warning' : 'complete',
         message: bobCount > 0
           ? `Draft generated · ${bobCount} callout point${bobCount === 1 ? '' : 's'} remaining`
           : 'Draft generated · no callouts',
         detail: `${(ms / 1000).toFixed(1)}s`,
         payload: { _ms: ms, generation_id: data.id } as Record<string, unknown>,
-      })
-      // Persist the full audit row now that the pipeline reached step 7.
-      void postAudit(buildAuditPayload({
-        templateId,
-        results: { ...stepResultsRef.current, 7: {
-          status: bobCount > 0 ? 'warning' : 'complete',
-          message: '', detail: '',
-          payload: { _ms: ms } as Record<string, unknown>,
-        } },
-        startedAt: pipelineStartedAt,
-        generation_id: data.id,
-        failure_step: null,
-        failure_reason: null,
-      })).then(() => setAuditPosted(true))
+      }
+      setStep(7, step7Result)
+      setBadge('complete', 'Draft ready')
+      // Final upsert — locks in the generation_id + total ms.
+      void persistStep(7, step7Result)
+      void postAudit({
+        ...buildAuditPayload({
+          templateId,
+          results: { ...stepResultsRef.current, 7: step7Result },
+          startedAt: pipelineStartedAt,
+          generation_id: data.id,
+          failure_step: null,
+          failure_reason: null,
+        }),
+        audit_id: auditIdRef.current,
+      }).then(() => setAuditPosted(true))
     } catch (err) {
       const ms = Math.round(performance.now() - t0)
       let msg = 'Generation failed.'
@@ -235,24 +408,30 @@ export default function ReportWriter() {
         }
       }
       setError(msg)
-      setStep(7, {
+      const step7Failed: StepResult = {
         status: 'failed', message: msg, detail: `${(ms / 1000).toFixed(1)}s`,
         payload: { _ms: ms } as Record<string, unknown>,
-      })
+      }
+      setStep(7, step7Failed)
+      setBadge('failed', `Step 7 failed`)
+      void persistStep(7, step7Failed)
       if (thesisDetail) {
         setStep(6, {
           ...(stepResultsRef.current[6] || { status: 'failed', message: '' }),
           status: 'failed', message: thesisDetail,
         })
       }
-      void postAudit(buildAuditPayload({
-        templateId,
-        results: stepResultsRef.current,
-        startedAt: pipelineStartedAt,
-        generation_id: null,
-        failure_step: 7,
-        failure_reason: msg,
-      }))
+      void postAudit({
+        ...buildAuditPayload({
+          templateId,
+          results: stepResultsRef.current,
+          startedAt: pipelineStartedAt,
+          generation_id: null,
+          failure_step: 7,
+          failure_reason: msg,
+        }),
+        audit_id: auditIdRef.current,
+      })
     } finally {
       setGenerating(false)
     }
@@ -820,7 +999,9 @@ function buildAuditPayload(args: {
 }
 
 
-async function postAudit(payload: AuditPayload): Promise<void> {
+async function postAudit(
+  payload: AuditPayload & { audit_id?: number | null },
+): Promise<void> {
   try {
     await axios.post('/api/v1/reports/pipeline-audit', payload)
   } catch {
