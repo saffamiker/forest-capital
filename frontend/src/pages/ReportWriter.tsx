@@ -324,6 +324,78 @@ export default function ReportWriter() {
           .catch(() => { /* best-effort */ })
       }
     }
+
+    // Hotfix May 23 2026 — Step 2 cross-session persistence.
+    // The audit row stores Step 2's status but NOT its citation
+    // payload, so _hasDetail(2, restored) returned false and the
+    // View Details button disappeared on a fresh login. The
+    // citations themselves DO persist (citations_cache table),
+    // so we can reconstruct Step 2's result by reading them back.
+    // Steps 3 / 4 carry their own payloads through the audit row
+    // and don't need this — only Step 2's data lives in a separate
+    // table.
+    if (audit.generation_id
+        && restored[2]
+        && (restored[2].status === 'complete'
+            || restored[2].status === 'warning')) {
+      axios.get<{ citations: Array<{
+        concept_id: string
+        verification_status: string
+        url: string | null
+        search_query_used: string | null
+        author: string | null
+        year: string | null
+      }> }>(`/api/v1/citations/${audit.generation_id}`)
+        .then((r) => {
+          const rows = r.data.citations || []
+          if (rows.length === 0) return
+          // Reconstruct Step 2's original payload shape so
+          // _hasDetail(2, result) sees `citations` and renders
+          // the View Details button + count badge.
+          const citationsMap: Record<string, {
+            verification_status: string
+            url: string | null
+            search_query_used: string | null
+            author: string | null
+            year: string | null
+          }> = {}
+          const VERIFIED = new Set([
+            'verified', 'human_verified',
+            'search_selected', 'manually_added',
+          ])
+          let verifiedCount = 0
+          for (const c of rows) {
+            citationsMap[c.concept_id] = {
+              verification_status: c.verification_status,
+              url:                 c.url,
+              search_query_used:   c.search_query_used,
+              author:              c.author,
+              year:                c.year,
+            }
+            if (VERIFIED.has(c.verification_status)) verifiedCount += 1
+          }
+          const total = rows.length
+          const quality = verifiedCount >= 8 ? 'green'
+            : verifiedCount >= 5 ? 'amber'
+            : 'red'
+          setStep(2, {
+            status:  restored[2]!.status,
+            message: 'Restored from previous session — citations from cache',
+            ...(restored[2]!.detail !== undefined
+                ? { detail: restored[2]!.detail } : {}),
+            payload: {
+              citations:      citationsMap,
+              verified_count: verifiedCount,
+              concept_count:  total,
+              quality,
+              _restored:      true,
+            },
+          })
+        })
+        .catch(() => { /* best-effort — the View Details button
+                          just stays hidden if the read fails */ })
+    }
+
     const allComplete = [1, 2, 3, 4, 5, 6, 7].every((n) => {
       const s = restored[n]?.status
       return s === 'complete' || s === 'warning'
@@ -333,7 +405,7 @@ export default function ReportWriter() {
       : restored[7]?.status === 'failed' ? 'failed'
       : 'running',
       'Restored from previous session')
-  }, [setAuditId, setBadge, setPipelineStartedAt])
+  }, [setAuditId, setBadge, setPipelineStartedAt, setStep])
 
   // After step 1 completes, fan out 2/3/4 in parallel — but only when
   // each is idle (so a manual re-run of just one doesn't re-trigger
