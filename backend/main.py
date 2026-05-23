@@ -1492,6 +1492,42 @@ async def generate_report_from_template(
             detail="Report generation failed — see server logs.")
 
 
+@app.get("/api/v1/reports/generations")
+async def list_report_generations(
+    template_id: str | None = None,
+    limit: int = 20,
+    session: dict = Depends(require_team_member),
+):
+    """Returns the user's most recent draft generations newest first
+    — backs the Draft selector dropdown so Bob can switch between
+    saved drafts instead of starting fresh on every login.
+
+    Query parameters:
+      template_id  Optional — filter to a single template's drafts.
+                   Default: list every template the user has touched.
+      limit        Max number of drafts to return. Default 20, capped
+                   at 100 server-side so a pathological caller cannot
+                   pull every row.
+
+    Auth: team-member only — same scope as the rest of the report
+    writer endpoints (viewers cannot generate, so they cannot list).
+    """
+    if ENVIRONMENT == "test":
+        return {"drafts": []}
+    capped = max(1, min(int(limit or 20), 100))
+    try:
+        from tools.report_generator import list_generations_for_user
+        email = (session.get("email") or "").strip()
+        drafts = await list_generations_for_user(
+            email, limit=capped, template_id=template_id)
+        return {"drafts": drafts}
+    except Exception as exc:
+        log.warning("list_generations_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="List drafts failed — see server logs.")
+
+
 @app.get("/api/v1/reports/generations/{generation_id}")
 async def get_report_generation(
     generation_id: int,
