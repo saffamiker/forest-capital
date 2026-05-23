@@ -67,7 +67,13 @@ describe('PipelineGate — step detail expansion', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('expands and collapses on click', () => {
+  it('opens the detail modal on click; close X dismisses it', () => {
+    // Item 3 (May 23 2026): the inline expansion was replaced with a
+    // modal so wide detail tables can show full width instead of
+    // truncating to fit the sidebar. The button still says "View
+    // details" and the detail container still carries the
+    // pipeline-step-N-detail testid — but a second click no longer
+    // toggles, the close X is the explicit dismissal.
     _renderGate(_baseResults({
       2: { status: 'complete', message: '',
            payload: { citations: {} } } as StepResult,
@@ -78,12 +84,63 @@ describe('PipelineGate — step detail expansion', () => {
     ).not.toBeInTheDocument()
     fireEvent.click(btn)
     expect(
+      screen.getByTestId('pipeline-step-2-modal'),
+    ).toBeInTheDocument()
+    expect(
       screen.getByTestId('pipeline-step-2-detail'),
     ).toBeInTheDocument()
-    fireEvent.click(btn)
+    // Close via the explicit X button.
+    fireEvent.click(
+      screen.getByTestId('pipeline-step-2-modal-close'))
+    expect(
+      screen.queryByTestId('pipeline-step-2-modal'),
+    ).not.toBeInTheDocument()
     expect(
       screen.queryByTestId('pipeline-step-2-detail'),
     ).not.toBeInTheDocument()
+  })
+
+  it('backdrop click closes the modal', () => {
+    _renderGate(_baseResults({
+      2: { status: 'complete', message: '',
+           payload: { citations: {} } } as StepResult,
+    }))
+    fireEvent.click(screen.getByTestId('pipeline-step-2-expand'))
+    const modal = screen.getByTestId('pipeline-step-2-modal')
+    // The backdrop is the testid'd container itself; clicking it
+    // closes (the inner role="dialog" stops propagation).
+    fireEvent.click(modal)
+    expect(
+      screen.queryByTestId('pipeline-step-2-modal'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('escape key closes the modal', () => {
+    _renderGate(_baseResults({
+      2: { status: 'complete', message: '',
+           payload: { citations: {} } } as StepResult,
+    }))
+    fireEvent.click(screen.getByTestId('pipeline-step-2-expand'))
+    expect(
+      screen.getByTestId('pipeline-step-2-modal'),
+    ).toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(
+      screen.queryByTestId('pipeline-step-2-modal'),
+    ).not.toBeInTheDocument()
+  })
+
+  it('modal carries the step name + status pill', () => {
+    _renderGate(_baseResults({
+      2: { status: 'warning', message: '',
+           payload: { citations: {} } } as StepResult,
+    }))
+    fireEvent.click(screen.getByTestId('pipeline-step-2-expand'))
+    const modal = screen.getByTestId('pipeline-step-2-modal')
+    // Step 2 default label is "Source Citations".
+    expect(modal.textContent).toMatch(/Source Citations/i)
+    // Status pill mirrors the result status (warning).
+    expect(modal.textContent).toMatch(/warning/i)
   })
 })
 

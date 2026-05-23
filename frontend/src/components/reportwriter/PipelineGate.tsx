@@ -31,7 +31,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   CheckCircle, AlertCircle, Loader2, Play, Circle,
-  ChevronDown, ChevronUp, ExternalLink,
+  ExternalLink, Search, X,
 } from 'lucide-react'
 
 export type StepStatus =
@@ -259,35 +259,168 @@ function _hasDetail(n: number, result: StepResult): boolean {
 }
 
 
+/**
+ * StepDetailToggle — opens the StepDetailModal for a step.
+ *
+ * Replaces the prior inline expansion (which truncated tables to
+ * fit the sidebar's narrow column). The modal gives the detail
+ * tables full width and lets the reviewer keep the editor pane
+ * visible behind a transparent backdrop while reading the detail.
+ *
+ * The button is also still labelled "View details" so users with
+ * muscle memory from the inline expansion find it in the same
+ * place. The chevron is dropped because the affordance is now a
+ * modal-open, not a collapse.
+ */
 function StepDetailToggle({
-  number, result,
-}: { number: number; result: StepResult }) {
+  number, result, label,
+}: { number: number; result: StepResult; label?: string | undefined }) {
   const [open, setOpen] = useState(false)
   return (
     <div className="mt-1.5 pl-6">
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={() => setOpen(true)}
         data-testid={`pipeline-step-${number}-expand`}
         className={
           'inline-flex items-center gap-1 px-2 py-0.5 ' +
           'text-2xs text-electric-blue hover:text-electric-blue/80'
         }>
-        {open ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-        {open ? 'Hide details' : 'View details'}
+        <Search className="w-3 h-3" />
+        View details
       </button>
       {open ? (
-        <div
-          data-testid={`pipeline-step-${number}-detail`}
-          className={
-            'mt-2 p-2 bg-navy-950 border border-navy-700 rounded ' +
-            'text-2xs text-text-secondary overflow-x-auto'
-          }>
-          {_renderDetail(number, result)}
-        </div>
+        <StepDetailModal
+          number={number}
+          result={result}
+          label={label}
+          onClose={() => setOpen(false)}
+        />
       ) : null}
     </div>
   )
+}
+
+
+/**
+ * StepDetailModal — full-width inspection of a pipeline step's
+ * payload. Renders the same Step{1..6}Detail components the inline
+ * expansion used, but gives them room to breathe — tables show full
+ * widths instead of truncating to fit the sidebar.
+ *
+ * Backdrop click + Escape close. The modal is single-column on
+ * mobile (overlay covers the screen) and a centred card from sm:
+ * up. Pinned header carries the step number + name + a status
+ * pill; pinned footer carries the elapsed time.
+ *
+ * The inner Step{1..6}Detail render is wrapped in an
+ * overflow-x-auto container so a wide table scrolls inside the
+ * modal rather than expanding the modal itself past the viewport.
+ */
+function StepDetailModal({
+  number, result, label, onClose,
+}: {
+  number: number
+  result: StepResult
+  label?: string | undefined
+  onClose: () => void
+}) {
+  // Escape closes the modal.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const status = result.status
+  const ms = (result.payload && typeof result.payload === 'object'
+    ? (result.payload as Record<string, unknown>)['_ms']
+    : undefined) as number | undefined
+
+  const statusKind: 'green' | 'amber' | 'red' | 'info' =
+    status === 'complete' ? 'green' :
+    status === 'warning'  ? 'amber' :
+    status === 'failed'   ? 'red'   :
+    'info'
+
+  return (
+    <div
+      data-testid={`pipeline-step-${number}-modal`}
+      role="presentation"
+      onClick={onClose}
+      className="fixed inset-0 z-[80] flex items-center justify-center
+                 bg-black/60 p-0 sm:p-4">
+      <div
+        role="dialog"
+        aria-label={`Step ${number} details`}
+        onClick={(e) => e.stopPropagation()}
+        className="w-full h-full flex flex-col bg-navy-900 shadow-2xl
+                   sm:h-auto sm:max-h-[85vh] sm:max-w-4xl
+                   sm:rounded-lg sm:border sm:border-border">
+        {/* Header — step number, name, status pill, close X */}
+        <header className="flex items-start justify-between gap-2
+                            px-4 py-3 border-b border-navy-700 shrink-0">
+          <div className="min-w-0">
+            <p className="text-2xs uppercase tracking-wider text-text-muted">
+              Pipeline step {number}
+            </p>
+            <h2 className="text-sm font-semibold text-text-primary">
+              {label ?? _defaultStepLabel(number)}
+            </h2>
+          </div>
+          <div className="flex items-center gap-2">
+            <Pill text={status} kind={statusKind} />
+            <button
+              type="button"
+              onClick={onClose}
+              data-testid={`pipeline-step-${number}-modal-close`}
+              aria-label="Close details"
+              className="text-text-muted hover:text-text-primary
+                         transition-colors p-1">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+        </header>
+
+        {/* Body — the existing per-step detail component, but with
+            room to breathe. overflow-x-auto so wide tables scroll
+            within the modal rather than expanding it. */}
+        <div
+          data-testid={`pipeline-step-${number}-detail`}
+          className="flex-1 overflow-y-auto p-4
+                     text-xs text-text-secondary">
+          <div className="overflow-x-auto">
+            {_renderDetail(number, result)}
+          </div>
+        </div>
+
+        {/* Footer — elapsed time on the right; help cue on the left */}
+        <footer className="flex items-center justify-between gap-2
+                            px-4 py-2 border-t border-navy-700 shrink-0
+                            text-2xs text-text-muted">
+          <span>Press Esc to close</span>
+          {ms !== undefined ? (
+            <span>elapsed {Math.round(ms)} ms</span>
+          ) : null}
+        </footer>
+      </div>
+    </div>
+  )
+}
+
+
+function _defaultStepLabel(n: number): string {
+  return ({
+    1: 'Stage Findings',
+    2: 'Source Citations',
+    3: 'Pull Team Activity',
+    4: 'Pull Validation Data',
+    5: 'Cross-Reference Check',
+    6: 'Thesis Validation',
+    7: 'Generate Draft',
+  } as Record<number, string>)[n] ?? `Step ${n}`
 }
 
 
