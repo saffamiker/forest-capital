@@ -325,7 +325,7 @@ def _build_audit_params(
 async def get_active_run_for_user(
     user_email: str,
     *,
-    window_hours: int = 2,
+    window_hours: int = 24 * 14,
 ) -> dict[str, Any] | None:
     """Returns the most recent audit row started by `user_email`
     within the past `window_hours` hours. Used by the report writer's
@@ -333,7 +333,17 @@ async def get_active_run_for_user(
 
     The row may be in any state — fresh, in-progress, complete, or
     failed. The frontend decides whether to restore based on the
-    per-step statuses and the run_at timestamp."""
+    per-step statuses and the run_at timestamp.
+
+    Window widened to 14 days (May 23 2026): the original 2-hour
+    window meant that logging out for longer than a coffee break
+    forced Bob to regenerate the draft from scratch on next login.
+    For a midpoint paper that's worked on over days/weeks, the
+    most recent generation should restore on login regardless of
+    elapsed time. 14 days is a comfortable upper bound — past that
+    the data ingestion has almost certainly drifted and a fresh
+    pipeline run is actually appropriate.
+    """
     try:
         from sqlalchemy import text
         from database import AsyncSessionLocal
