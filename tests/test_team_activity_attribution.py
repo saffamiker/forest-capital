@@ -134,31 +134,92 @@ class TestPRMergeAttribution:
     def test_pr_query_reads_commit_activity_not_pr_suggestions(self):
         src = inspect.getsource(tp.fetch_team_activity)
         # The michael_prs_merged section must use commit_activity
-        # with a merge-commit LIKE pattern, NOT pr_suggestions.
+        # with a merge-commit pattern, NOT pr_suggestions.
         # Locate the line that assigns to michael_prs_merged and
-        # inspect the next ~6 lines of SQL.
+        # inspect the next ~600 chars of context.
         pr_section = src.split('out["michael_prs_merged"]')[1]
-        # Inspect ~500 chars of context — well past the SQL block.
-        ctx = pr_section[:500]
+        ctx = pr_section[:600]
         assert "commit_activity" in ctx, (
             "michael_prs_merged must query commit_activity for "
             "merge commits, not pr_suggestions (which only carries "
             "failure-linked PRs).")
-        assert "Merge pull request" in ctx, (
-            "Merge commits start with 'Merge pull request #N' — "
-            "the LIKE pattern that catches them must be present.")
+        assert "merge pull request" in ctx.lower(), (
+            "The merge-commit message pattern must be present in "
+            "the query — that's what identifies a PR-merge "
+            "commit in commit_activity.")
+
+    def test_pr_query_uses_ilike_with_wildcards(self):
+        # Hotfix iteration 3: LIKE 'Merge pull request #%' was too
+        # strict — case-sensitive AND prefix-anchored. Real-world
+        # merge commits sometimes vary (leading whitespace, case
+        # differences between gh pr merge vs GitHub UI vs older
+        # squash flows). ILIKE with %merge pull request% on both
+        # sides catches every variant.
+        src = inspect.getsource(tp.fetch_team_activity)
+        pr_section = src.split('out["michael_prs_merged"]')[1][:600]
+        assert "ILIKE" in pr_section, (
+            "Use ILIKE (case-insensitive) for the merge-commit "
+            "message match — LIKE is case-sensitive and misses "
+            "commits with non-canonical capitalisation.")
+        assert "%merge pull request%" in pr_section.lower(), (
+            "The pattern must have wildcards on BOTH sides of "
+            "'merge pull request' — anchored prefix matching was "
+            "the previous bug.")
 
     def test_pr_query_admits_michael_git_identities(self):
         src = inspect.getsource(tp.fetch_team_activity)
-        pr_section = src.split('out["michael_prs_merged"]')[1][:500]
+        pr_section = src.split('out["michael_prs_merged"]')[1][:600]
         # Same IN-clause shape the commits query uses — verifies the
         # author filter is applied to the PR merge count too.
         assert "LOWER(author) IN" in pr_section \
             or "author IN" in pr_section, (
                 "michael_prs_merged must match against BOTH of "
-                "Michael's git identities (the same _TEAM_GIT_EMAILS "
-                "list the commit count uses), not just the platform "
-                "email.")
+                "Michael's git identities (the same "
+                "_git_identities_for list the commit count uses), "
+                "not just the platform email.")
+
+
+class TestGitIdentitiesHelper:
+    """The _git_identities_for helper drives the author-filter for
+    BOTH the commits count and the merged-PR count. It pulls each
+    user's git identities from platform_users (email +
+    github_email) so the query is data-driven, not hardcoded."""
+
+    def test_helper_exists_and_is_async(self):
+        assert callable(tp._git_identities_for)
+        assert inspect.iscoroutinefunction(tp._git_identities_for)
+
+    def test_helper_returns_platform_email_lower_on_no_db(self, monkeypatch):
+        # No DB → fall back to the platform email lower-cased so
+        # the IN clause has at least one entry to match against.
+        # This is the fail-open contract.
+        import database as db_mod
+        monkeypatch.setattr(db_mod, "AsyncSessionLocal", None)
+        from sqlalchemy import text as _text  # noqa: F401
+
+        # We can't easily construct a session without DB, so call
+        # directly with a None-like session that raises on use.
+        class _BoomSession:
+            async def execute(self, *a, **kw):
+                raise RuntimeError("DB unavailable")
+        out = asyncio.run(tp._git_identities_for(
+            _BoomSession(), "ruurdsm@queens.edu"))
+        assert out == ["ruurdsm@queens.edu"]
+
+    def test_michael_block_uses_data_driven_identities(self):
+        # The Michael block must NOT hardcode the git emails in a
+        # Python literal — it must fetch them from platform_users
+        # via _git_identities_for so populating github_email on
+        # any future team member auto-attributes their activity.
+        src = inspect.getsource(tp.fetch_team_activity)
+        michael_block_start = src.index("# ── Michael")
+        bob_block_start = src.index("# ── Bob")
+        michael_block = src[michael_block_start:bob_block_start]
+        assert "_git_identities_for" in michael_block, (
+            "Michael's commit + PR queries must source his git "
+            "identities from platform_users via "
+            "_git_identities_for so the github_email column "
+            "(migration 038) is the canonical lookup.")
 
 
 # ── Fail-open contracts ──────────────────────────────────────────────────────

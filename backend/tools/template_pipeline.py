@@ -356,6 +356,46 @@ async def _try_count(session, sql: str, params: dict) -> int:
         return 0
 
 
+async def _git_identities_for(session, platform_email: str) -> list[str]:
+    """Return every git author identity that maps to a platform user.
+
+    Queries platform_users for the row matching `platform_email` and
+    returns its email + github_email (when set). The result is the
+    canonical list of `commit_activity.author` values that attribute
+    to this person — drives both the commit count and the merged-PR
+    count for Michael (whose GitHub identity is mikeruurds@gmail.com,
+    not his platform login). Future contributors get correct
+    attribution simply by populating the github_email column on
+    their platform_users row.
+
+    Fail-open: a database error or a missing row returns the
+    platform email lower-cased so the caller still has SOMETHING to
+    filter on — better an undercount than a query that crashes the
+    whole Step 3 response.
+    """
+    try:
+        from sqlalchemy import text
+        r = await session.execute(text(
+            "SELECT LOWER(email), LOWER(github_email) "
+            "FROM platform_users WHERE email = :e"
+        ), {"e": platform_email})
+        row = r.fetchone()
+        if not row:
+            return [platform_email.lower()]
+        out: list[str] = [row[0]]
+        if row[1]:
+            out.append(row[1])
+        return out
+    except Exception as exc:  # noqa: BLE001
+        # The github_email column was added by migration 038 (May 23
+        # 2026). If the migration has not been applied yet, the
+        # SELECT raises; fall back to the platform email so the
+        # query still works.
+        log.warning("git_identities_lookup_failed",
+                    platform_email=platform_email, error=str(exc))
+        return [platform_email.lower()]
+
+
 async def fetch_team_activity() -> dict[str, Any]:
     """Per-member + platform-wide counts pulled from the existing
     activity tables (test_results, test_feedback, agent_interactions,
@@ -416,11 +456,13 @@ async def fetch_team_activity() -> dict[str, Any]:
             # ── Michael ─────────────────────────────────────────────────────
             # commit_activity.author carries the GIT author email; for
             # Michael this is mikeruurds@gmail.com, NOT his platform
-            # email. Match against the full git-email list so commits
-            # authored under either identity attribute correctly.
-            # _TEAM_GIT_EMAILS["michael"] = ["ruurdsm@queens.edu",
-            # "mikeruurds@gmail.com"]; an IN clause handles both.
-            michael_git_emails = _TEAM_GIT_EMAILS["michael"]
+            # email. Fetch his git identities from platform_users
+            # (email + github_email column added by migration 038) so
+            # the IN clause is data-driven — populating github_email
+            # on any team member's row automatically attributes their
+            # commits AND merged PRs to them.
+            michael_git_emails = await _git_identities_for(
+                s, _TEAM_EMAILS["michael"])
             placeholders = ", ".join(
                 f":mg{i}" for i in range(len(michael_git_emails)))
             params_michael_git = {
@@ -430,33 +472,29 @@ async def fetch_team_activity() -> dict[str, Any]:
                 f"SELECT COUNT(*) FROM commit_activity "
                 f"WHERE LOWER(author) IN ({placeholders})",
                 params_michael_git)
-            # Merged-PR count — hotfix May 23 2026 (the day-of fix).
-            # The earlier query counted pr_suggestions.reviewed_by =
-            # platform_email, which only counted PRs Bob ever
-            # "reviewed" inside the triage workflow (failure-link
-            # suggestions). Most merged PRs do not reference a
-            # failure and never enter pr_suggestions at all, so the
-            # count was 0 even on days with 8+ merged PRs.
+            # Merged-PR count — hotfix May 23 2026 (third iteration).
+            # PR #98 (the first fix) switched from pr_suggestions
+            # to commit_activity but used:
             #
-            # The durable source is the merge-commit pattern in
-            # commit_activity. GitHub's web-merge produces a commit
-            # whose message starts with 'Merge pull request #N'
-            # under the merger's GIT identity. Counting those by
-            # Michael's git_emails attributes correctly to him
-            # whether he merged from the GitHub UI or via gh pr
-            # merge from the CLI.
+            #   message LIKE 'Merge pull request #%'
             #
-            # CAVEAT: a "Squash and merge" or "Rebase and merge" UI
-            # choice produces a different message shape. Saffamiker
-            # uses standard merge commits on this repo per the
-            # gh pr merge --merge flag in the working conventions,
-            # so the LIKE pattern catches every merge today. If the
-            # convention changes, add a UNION ALL with the squash
-            # pattern.
+            # which is case-sensitive AND anchored to the prefix.
+            # Several merge commits in production didn't match — the
+            # exact stored form sometimes differs (a leading space,
+            # a slightly different capitalisation from `gh pr merge`
+            # vs the GitHub UI vs an older squash flow). Switching
+            # to ILIKE with wildcards on both sides catches every
+            # variant of "merge pull request" anywhere in the
+            # message, case-insensitive — robust to whichever
+            # merge mechanism produced the commit.
+            #
+            # The author filter still uses Michael's full git-
+            # identity set (platform email + github_email) via the
+            # _git_identities_for helper above.
             out["michael_prs_merged"] = await _try_count(s,
                 f"SELECT COUNT(*) FROM commit_activity "
                 f"WHERE LOWER(author) IN ({placeholders}) "
-                f"  AND message LIKE 'Merge pull request #%'",
+                f"  AND message ILIKE '%merge pull request%'",
                 params_michael_git)
             try:
                 from pathlib import Path
