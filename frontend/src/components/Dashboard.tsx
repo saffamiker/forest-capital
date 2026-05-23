@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
-import axios from 'axios'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer
@@ -10,8 +9,8 @@ import RegimeIndicator from './RegimeIndicator'
 import EfficientFrontier from './EfficientFrontier'
 import StrategyCard from './StrategyCard'
 import type { StrategyResult } from '../types/strategies'
-import type { EfficientFrontierData } from '../types/api'
 import { useStrategiesStore } from '../stores/strategiesStore'
+import { useDashboardDataStore } from '../stores/dashboardDataStore'
 import { useRegimeStore } from '../stores/regimeStore'
 import { useGlossaryStore } from '../stores/glossaryStore'
 import { useDataStatus, tableOf } from '../hooks/useDataStatus'
@@ -35,14 +34,12 @@ import {
 } from '../constants/strategyMetadata'
 
 // ── Real cumulative-return series ──────────────────────────────────────────
-// Growth of $1, one point per month, served by /api/v1/analytics/academic
-// (analytics.cumulative_returns — computed from market_data_monthly). The
-// Dashboard chart renders these verbatim; it never synthesises a curve.
-type CumulativePoint = { date: string } & Record<string, number | null>
-interface CumulativeReturns {
-  strategies: string[]
-  points: CumulativePoint[]
-}
+// Type definitions now live in stores/dashboardDataStore alongside the
+// load() helper that fetches them — Dashboard re-exports nothing of
+// its own. The shape is { strategies: string[]; points: CumulativePoint[] }
+// served by /api/v1/analytics/academic.cumulative_returns — computed
+// from market_data_monthly. The Dashboard chart renders these
+// verbatim; it never synthesises a curve.
 
 // ── Data-freshness pill — mirrors Settings → Data and Study Period ─────────
 type Staleness = 'green' | 'amber' | 'red' | 'unknown'
@@ -278,8 +275,19 @@ export default function Dashboard() {
         staleness: (strategyTable.staleness as Staleness),
       }
     : null
-  const [frontier, setFrontier] = useState<EfficientFrontierData | null>(null)
-  const [cumulative, setCumulative] = useState<CumulativeReturns | null>(null)
+  // dashboardDataStore caches cumulative + frontier across navigation
+  // so a remount reads from the store immediately rather than firing
+  // a fresh round-trip that races with the other dashboard fetches.
+  // Before this store the user saw "Cumulative return series
+  // unavailable" + an empty frontier on every navigation return
+  // because component state was cleared on unmount (May 23 2026
+  // production fire). load() is a no-op when loaded === true so the
+  // useEffect below safely fires it on every visit.
+  const {
+    cumulative, frontier,
+    cumulativeError, frontierError,
+    load: loadDashboardData,
+  } = useDashboardDataStore()
   const [selectedStrategy, setSelectedStrategy] = useState<string | null>(null)
   // Item 9 Commit 4 — Portfolio Profile modal state. The tag below
   // each strategy name on the table opens this modal. The
@@ -298,8 +306,12 @@ export default function Dashboard() {
   const navigate = useNavigate()
 
   useEffect(() => {
-    // load() checks loaded flag — safe to call on every mount without re-fetching.
-    // Frontier (optimizer) runs independently and updates in-place when resolved.
+    // Every load() checks the store's `loaded` flag — safe to call on
+    // every mount without re-fetching. This is the navigation-remount
+    // contract: a user returning to the dashboard re-runs this effect,
+    // each store recognises it's already loaded, and the cached data
+    // renders immediately. Network only fires on the first visit of
+    // the session OR an explicit refresh.
     void loadStrategies()
     void loadRegime()
     void loadTerms()
@@ -307,33 +319,16 @@ export default function Dashboard() {
     // below each strategy name renders the AI text. The store dedupes,
     // so this is free for every consumer beyond the first.
     void loadCharacterisations()
-
-    const loadFrontier = async () => {
-      try {
-        const res = await axios.post<{ efficient_frontier: EfficientFrontierData }>(
-          '/api/optimize/weights', { method: 'MAX_SHARPE' }
-        )
-        setFrontier(res.data.efficient_frontier)
-      } catch (_) { /* frontier is decorative — failures are silent */ }
-    }
-    void loadFrontier()
-
-    // Real cumulative-return series for the chart below. Sourced from the
-    // analytics endpoint (computed from market_data_monthly) — never
-    // synthesised. On failure the chart shows an empty state, not a fake curve.
-    const loadCumulative = async () => {
-      try {
-        const res = await axios.get<{ cumulative_returns?: CumulativeReturns }>(
-          '/api/v1/analytics/academic'
-        )
-        setCumulative(res.data.cumulative_returns ?? null)
-      } catch (_) { /* chart falls back to an empty state */ }
-    }
-    void loadCumulative()
-
-    // Strategy-data freshness — the useDataStatus hook (line above)
-    // pulls it from the shared Zustand store. No fetch here.
-  }, [loadStrategies, loadRegime, loadTerms, loadCharacterisations])
+    // Cumulative + frontier — same load() contract via the dashboardData
+    // store. Previously these lived in component useState which CLEARED
+    // on every navigation away, leaving the user with "Cumulative return
+    // series unavailable" + empty frontier on every return until the
+    // silent retry races completed (May 23 2026 production fire).
+    void loadDashboardData()
+  }, [
+    loadStrategies, loadRegime, loadTerms,
+    loadCharacterisations, loadDashboardData,
+  ])
 
   const cumulativeData = cumulative?.points ?? []
   const sorted = [...strategies].sort((a, b) => (b.sharpe_ratio ?? 0) - (a.sharpe_ratio ?? 0))
@@ -566,8 +561,17 @@ export default function Dashboard() {
             </LineChart>
           </ResponsiveContainer>
           ) : (
-            <div className="h-[280px] flex items-center justify-center text-muted text-xs">
-              Cumulative return series unavailable
+            <div
+              data-testid="cumulative-empty-state"
+              className="h-[280px] flex flex-col items-center justify-center text-muted text-xs gap-1">
+              <span>Cumulative return series unavailable</span>
+              {cumulativeError ? (
+                <span
+                  data-testid="cumulative-error"
+                  className="text-red-400 text-2xs italic max-w-[60ch] text-center">
+                  {cumulativeError}
+                </span>
+              ) : null}
             </div>
           )}
         </div>
@@ -711,7 +715,15 @@ export default function Dashboard() {
         )}
 
         {/* Efficient frontier */}
-        {frontier && <EfficientFrontier data={frontier} />}
+        {frontier ? (
+          <EfficientFrontier data={frontier} />
+        ) : frontierError ? (
+          <div
+            data-testid="frontier-error"
+            className="card p-4 text-center text-red-400 text-xs italic">
+            Efficient frontier unavailable — {frontierError}
+          </div>
+        ) : null}
       </div>
 
       {/* Item 9 Commit 4 — the Portfolio Profile modal, opened by the
