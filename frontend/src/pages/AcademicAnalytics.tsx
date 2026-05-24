@@ -41,6 +41,7 @@ import { RiskContributionBar } from '../components/diversification/RiskContribut
 import { DistributionTable } from '../components/diversification/DistributionTable'
 // Item 9 — per-strategy Portfolio Profile inside the methodology accordion.
 import { PortfolioProfilePanel } from '../components/PortfolioProfilePanel'
+import { formatDate } from '../lib/dateFormat'
 
 // Purple accent — analytics sits alongside the academic-rigour screens.
 const ACCENT = '#7c3aed'
@@ -1223,7 +1224,14 @@ export default function AcademicAnalytics() {
         {data?.study_period && (
           <p className="text-xs text-muted mt-1">
             <span className="font-mono">
-              Study period: {data.study_period.start} → {data.study_period.end}
+              {/* UAT 2026-05-24 (#117): wrap raw-ISO dates through
+                 formatDate() so the platform-wide MM-DD-YYYY
+                 convention (PR #120 commit bdbd702) applies here
+                 too. Previously the Study period line was rendering
+                 raw "2002-07-31 → 2026-04-30" which was the last
+                 raw-ISO date pair on the Analytics page. */}
+              Study period: {formatDate(data.study_period.start)}
+              {' → '}{formatDate(data.study_period.end)}
               {' '}({data.study_period.n_months} months)
             </span>
             . Five strategies have shorter histories due to initialisation
@@ -1232,7 +1240,8 @@ export default function AcademicAnalytics() {
         )}
         {ffLagsMarket && ffTable && (
           <p className="text-xs text-muted mt-0.5 font-mono">
-            Factor model: {ffTable.min_date} → {ffTable.max_date}
+            Factor model: {formatDate(ffTable.min_date)}
+            {' → '}{formatDate(ffTable.max_date)}
             {' '}({ffTable.row_count} months)
           </p>
         )}
