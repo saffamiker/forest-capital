@@ -25,12 +25,39 @@
  * but they live on different surfaces).
  */
 import { useState, useMemo } from 'react'
+// May 24 2026 — `useLocation` requires a Router ancestor; the test
+// suite renders this component standalone. `useSafeLocation` falls
+// back to a noop pathname when there is no Router, so the
+// HIDDEN_ROUTES check degrades gracefully (advisor shows by default).
+import * as Router from 'react-router-dom'
 import {
   GraduationCap, X, AlertTriangle, CheckCircle, Loader2, ExternalLink, Quote,
 } from 'lucide-react'
 import { useAdvisorStore } from '../stores/advisorStore'
 import { useUI } from '../context/UIContext'
 import type { DeliverableType, AdvisorAnalysis, VerifiedCitation } from '../types/advisor'
+
+
+// May 24 2026 — context-aware floating button visibility per user spec.
+// The advisor button is hidden on routes where an inline AI surface
+// already covers the use case:
+//
+//   /report-writer  — the editor's "Ask the Writer" panel is the
+//                     inline AI for this page.
+//   /peer-review    — both tabs (Peer Review Assistant + Thesis
+//                     Defense Prep) already host harness-gated AI
+//                     flows. A floating advisor would be a
+//                     redundant third AI affordance on the page.
+//
+// Every other page (Dashboard, Analytics, Statistical Evidence,
+// Regime Analysis, QA Audit, Council, Reports) keeps the floating
+// button so the team always has a one-click route to ad-hoc
+// academic guidance from anywhere in the app.
+const HIDDEN_ROUTES: ReadonlySet<string> = new Set([
+  '/report-writer',
+  '/reports/writer',  // legacy alias for the report writer route
+  '/peer-review',
+])
 
 const GOLD = '#f59e0b'
 
@@ -64,6 +91,16 @@ export default function AdvisorPanel({
   onClose,
 }: AdvisorPanelProps) {
   const { mode } = useUI()
+  // Wrap useLocation in a try/catch so a Router-less render
+  // (the standalone test cases) degrades to "show everywhere"
+  // instead of crashing on `useLocation() may be used only in
+  // the context of a <Router>`.
+  let pathname = ''
+  try {
+    pathname = Router.useLocation().pathname
+  } catch {
+    pathname = ''
+  }
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
   const [deliverable, setDeliverable] = useState<DeliverableType>(initialDeliverable)
   const [query, setQuery] = useState('')
@@ -90,7 +127,14 @@ export default function AdvisorPanel({
   // not Forest-Capital-facing content.
   if (mode === 'present') return null
 
+  // May 24 2026 — context-aware visibility. The floating button is
+  // hidden on pages with their own inline AI surfaces. Controlled
+  // opens (Reports screen "Get Advisor Feedback") still work — the
+  // hide-route gate only suppresses the standalone floating button.
   const isControlled = controlledOpen !== undefined
+  if (!isControlled && HIDDEN_ROUTES.has(pathname)) {
+    return null
+  }
   const isOpen = isControlled ? controlledOpen : uncontrolledOpen
 
   const handleOpen = () => {
@@ -138,11 +182,11 @@ export default function AdvisorPanel({
             color: '#0a0e1a',
             fontWeight: 600,
           }}
-          title="Academic Advisor — grade-aware guidance and citation verification"
-          aria-label="Open Academic Advisor"
+          title="Ask a question — grade-aware academic guidance with verified citations"
+          aria-label="Ask a question — Academic Advisor"
         >
           <GraduationCap className="w-4 h-4" />
-          <span className="text-xs tracking-wide uppercase">Advisor</span>
+          <span className="text-xs tracking-wide">Ask a question</span>
         </button>
       )}
 
