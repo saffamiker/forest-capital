@@ -71,6 +71,19 @@ export type { EfficientFrontierData } from '../types/api'
 const MAX_WARMING_RETRIES = 8
 
 
+// 5-minute client-side stale-while-revalidate window — mirrors
+// macroDigestStore. UAT 2026-05-24: the user reported the
+// cumulative + frontier "reloading intermittently on navigation".
+// The session-scoped `loaded` flag was correct (cached forever
+// once set), but the brief window before `loaded` flips on the
+// first request meant a fast back-and-forth navigation re-fired
+// the fetch when the first one was still in flight. The TTL
+// gates skip strictly on lastFetchedAt — once the data lands,
+// every subsequent mount inside the 5-minute window short-
+// circuits, no re-fetch, no flicker.
+const STALE_AFTER_MS = 5 * 60 * 1000
+
+
 interface DashboardDataStore {
   cumulative: CumulativeReturns | null
   frontier: EfficientFrontierData | null
@@ -82,6 +95,9 @@ interface DashboardDataStore {
   warming: boolean
   loaded: boolean
   loading: boolean
+  /** When the most recent successful fetch landed (Date.now() ms).
+   *  Drives the 5-minute stale-while-revalidate gate. */
+  lastFetchedAt: number | null
 
   load: () => Promise<void>
 
@@ -102,8 +118,16 @@ export const useDashboardDataStore = create<DashboardDataStore>((set, get) => ({
   warming: false,
   loaded: false,
   loading: false,
+  lastFetchedAt: null,
 
   load: async () => {
+    // 5-minute TTL — if a previous successful fetch is fresher than
+    // STALE_AFTER_MS, render from the cache and skip the network
+    // entirely. UAT 2026-05-24 fix for the "intermittent reload"
+    // report: a tight navigation loop within the freshness window
+    // now never re-fires the fetch.
+    const lastAt = get().lastFetchedAt
+    if (lastAt && (Date.now() - lastAt) < STALE_AFTER_MS) return
     if (get().loaded || get().loading) return
     set({ loading: true })
     await _fetchAll(set, 0)
@@ -111,6 +135,7 @@ export const useDashboardDataStore = create<DashboardDataStore>((set, get) => ({
 
   refresh: async () => {
     set({ loaded: false, loading: true, warming: false,
+          lastFetchedAt: null,
           cumulativeError: null, frontierError: null })
     await _fetchAll(set, 0)
   },
@@ -120,6 +145,7 @@ export const useDashboardDataStore = create<DashboardDataStore>((set, get) => ({
     cumulativeError: null, frontierError: null,
     warming: false,
     loaded: false, loading: false,
+    lastFetchedAt: null,
   }),
 }))
 
@@ -225,8 +251,17 @@ async function _fetchAll(
   const stillWarming = c.cumulativeWarming || f.frontierWarming
   const canRetry = retriesSoFar < MAX_WARMING_RETRIES
 
-  // Strip the warming/retry helper keys before set() so they don't
-  // pollute the public store shape.
+  // Stamp lastFetchedAt only when the round-trip actually landed
+  // meaningful data — a still-warming response is not a successful
+  // load, and stamping the freshness clock would let the 5-minute
+  // TTL gate skip a real fetch later. The retry chain (below)
+  // re-enters _fetchAll on its own schedule; the eventual non-
+  // warming response stamps the clock.
+  const haveData = (
+    !stillWarming
+    && (c.cumulative !== null || f.frontier !== null)
+  )
+
   set({
     cumulative:      c.cumulative,
     cumulativeError: c.cumulativeError,
@@ -235,6 +270,7 @@ async function _fetchAll(
     warming:         stillWarming,
     loaded:          true,
     loading:         stillWarming && canRetry,
+    lastFetchedAt:   haveData ? Date.now() : null,
   })
 
   if (stillWarming && canRetry) {

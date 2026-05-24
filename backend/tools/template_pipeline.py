@@ -1701,6 +1701,21 @@ async def persist_citations(
                 # array carries the same four fields per entry; the
                 # array shape doesn't need a schema change because
                 # it's already JSONB.
+                #
+                # May 24 2026 — every field below now passes through
+                # a type-coercion helper. asyncpg is strict about
+                # PEP 249 driver types: passing an int (1966) into
+                # a VARCHAR column raises
+                #     DataError: invalid input for query argument $4:
+                #     1966 (expected str, got int)
+                # and the whole INSERT fails — empties citations_cache
+                # and breaks Open Review. The writer agent sometimes
+                # returns year as an int when it parses a clean
+                # numeric year, and could plausibly return numeric
+                # volumes / page ranges too. Coerce each STRING
+                # column with _to_str_or_none and the float column
+                # with _to_float_or_none. JSONB column already goes
+                # through json.dumps + CAST(:alts AS JSONB).
                 row = await s.execute(text(
                     "INSERT INTO citations_cache "
                     "(generation_id, concept_id, author, year, title, "
@@ -1713,21 +1728,21 @@ async def persist_citations(
                     " CAST(:alts AS JSONB), :ext, :rat, :cs, :fd) "
                     "RETURNING id"
                 ), {
-                    "g":    generation_id,
-                    "c":    cid,
-                    "au":   c.get("author"),
-                    "y":    c.get("year"),
-                    "t":    c.get("title"),
-                    "j":    c.get("journal_or_institution"),
-                    "v":    c.get("volume_issue_pages"),
-                    "u":    c.get("url"),
-                    "s":    c.get("verification_status"),
-                    "q":    c.get("search_query_used"),
+                    "g":    _to_int_or_none(generation_id),
+                    "c":    _to_str_or_none(cid) or "",
+                    "au":   _to_str_or_none(c.get("author")),
+                    "y":    _to_str_or_none(c.get("year")),
+                    "t":    _to_str_or_none(c.get("title")),
+                    "j":    _to_str_or_none(c.get("journal_or_institution")),
+                    "v":    _to_str_or_none(c.get("volume_issue_pages")),
+                    "u":    _to_str_or_none(c.get("url")),
+                    "s":    _to_str_or_none(c.get("verification_status")) or "",
+                    "q":    _to_str_or_none(c.get("search_query_used")),
                     "alts": json.dumps(alts) if alts else None,
-                    "ext":  c.get("supporting_extract"),
-                    "rat":  c.get("selection_rationale"),
-                    "cs":   c.get("confidence_score"),
-                    "fd":   c.get("finding_supported"),
+                    "ext":  _to_str_or_none(c.get("supporting_extract")),
+                    "rat":  _to_str_or_none(c.get("selection_rationale")),
+                    "cs":   _to_float_or_none(c.get("confidence_score")),
+                    "fd":   _to_str_or_none(c.get("finding_supported")),
                 })
                 new_id = row.scalar()
                 if new_id is not None:
@@ -1736,6 +1751,58 @@ async def persist_citations(
     except Exception as exc:  # noqa: BLE001
         log.warning("persist_citations_failed", error=str(exc))
     return ids
+
+
+# ── Citation-field type coercions ────────────────────────────────────────────
+#
+# Defensive helpers used by persist_citations to guarantee asyncpg
+# receives the column types Postgres expects. The writer agent's
+# output is structured JSON but the model occasionally emits an
+# int where the schema says VARCHAR (a year, a page range that
+# looks numeric). asyncpg is strict — it raises DataError on the
+# first mismatch and aborts the whole INSERT. These helpers do the
+# str()/float() conversion at the BOUNDARY between the writer
+# output and the database, in one place, with one log site if a
+# value resists coercion. Schema is not touched.
+
+def _to_str_or_none(value) -> str | None:
+    """str() any non-None value; preserve None for nullable columns."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    try:
+        return str(value)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _to_float_or_none(value) -> float | None:
+    """float() coercion for the confidence_score column. None on a
+    failed cast — never raise inside the INSERT loop."""
+    if value is None:
+        return None
+    if isinstance(value, float):
+        return value
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_int_or_none(value) -> int | None:
+    """int() coercion for generation_id (BigInteger, nullable). The
+    column accepts None — a citation not tied to a draft passes None
+    here. Anything else gets cast; a bad value returns None so the
+    INSERT writes a standalone citation rather than failing."""
+    if value is None:
+        return None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ── Reviewer-action helpers ──────────────────────────────────────────────────

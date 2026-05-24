@@ -64,6 +64,10 @@ interface Props {
   step2b?: {
     untrustedCount: number
     onJump: () => void
+    /** True while the parent-controlled citation fetch the
+     *  onJump handler kicked off is still in flight. Drives the
+     *  Open Review button's "Loading…" feedback. UAT 2026-05-24. */
+    loading?: boolean
   }
 }
 
@@ -140,6 +144,7 @@ export default function PipelineGate({
                 result={step2bResult}
                 untrustedCount={step2b?.untrustedCount ?? 0}
                 onJump={step2b?.onJump ?? (() => {})}
+                loading={step2b?.loading ?? false}
                 disabledReason={
                   _stepPassed(results, 2)
                     ? null : 'Run Step 2 first'
@@ -230,12 +235,19 @@ function disabledReasonFor(
  * > 0 → warning, before Step 2 runs → idle/locked.
  */
 function Step2bRow({
-  result, untrustedCount, onJump, disabledReason,
+  result, untrustedCount, onJump, disabledReason, loading = false,
 }: {
   result?: StepResult | undefined
   untrustedCount: number
   onJump: () => void
   disabledReason: string | null
+  // True while the citation fetch the button kicked off is still in
+  // flight. UAT (May 24 2026): the citation fetch can take seconds
+  // on a cold cache, and the prior button gave no feedback during
+  // the wait — testers clicked it repeatedly thinking the click had
+  // not registered. The button now shows "Loading…" + a spinner +
+  // disables itself while loading is true.
+  loading?: boolean
 }) {
   const status = result?.status ?? 'idle'
   const locked = !!disabledReason
@@ -279,15 +291,25 @@ function Step2bRow({
             type="button"
             onClick={onJump}
             data-testid="pipeline-step-2b-button"
-            disabled={status === 'complete'}
+            disabled={status === 'complete' || loading}
+            aria-busy={loading}
             className={
               'inline-flex items-center gap-1 px-2.5 py-1 ' +
               (status === 'complete'
                 ? 'bg-navy-700 text-text-muted cursor-default'
-                : 'bg-amber-500/30 hover:bg-amber-500/40 text-amber-100') +
+                : loading
+                  ? 'bg-amber-500/20 text-amber-200/80 cursor-wait'
+                  : 'bg-amber-500/30 hover:bg-amber-500/40 text-amber-100') +
               ' text-2xs font-medium rounded transition-colors'
             }>
-            {status === 'complete' ? 'Done' : 'Open Review'}
+            {loading ? (
+              <>
+                <Loader2
+                  className="w-3 h-3 animate-spin"
+                  aria-hidden="true" />
+                <span>Loading…</span>
+              </>
+            ) : status === 'complete' ? 'Done' : 'Open Review'}
           </button>
         ) : null}
       </div>
