@@ -16,6 +16,7 @@
  */
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 
 import PipelineGate from '../components/reportwriter/PipelineGate'
 import type {
@@ -33,14 +34,18 @@ function _baseResults(overrides: Partial<StepResults>): StepResults {
 
 
 function _renderGate(results: StepResults) {
+  // May 24 2026 RW1 — Step 4 detail now uses useNavigate to drive
+  // the "Run QA Audit" CTA button. Tests must wrap in a Router.
   return render(
-    <PipelineGate
-      results={results}
-      generating={false}
-      generateDisabledReason={null}
-      onRunStep={vi.fn()}
-      onGenerate={vi.fn()}
-    />,
+    <MemoryRouter>
+      <PipelineGate
+        results={results}
+        generating={false}
+        generateDisabledReason={null}
+        onRunStep={vi.fn()}
+        onGenerate={vi.fn()}
+      />
+    </MemoryRouter>,
   )
 }
 
@@ -257,16 +262,21 @@ describe('Step 3 — team activity detail', () => {
 
 describe('Step 4 — validation data fallback', () => {
   it('renders the no-audit fallback when _no_audit is set', () => {
+    // May 24 2026 RW1 — Step 4 with _no_audit is now WARNING
+    // (was previously falsely-complete). The detail panel
+    // explains the gate + carries a Run QA Audit CTA button.
     _renderGate(_baseResults({
-      4: { status: 'complete',
-           message: 'No audit on record — pipeline proceeds',
+      4: { status: 'warning',
+           message: 'No audit on record — run QA Audit before generation',
            payload: { _no_audit: true } } as StepResult,
     }))
     fireEvent.click(screen.getByTestId('pipeline-step-4-expand'))
     const detail = screen.getByTestId('pipeline-step-4-detail')
-    expect(detail).toHaveTextContent(/No audit has been run yet/i)
-    expect(detail).toHaveTextContent(/QA Audit/)
-    expect(detail).toHaveTextContent(/before submitting/i)
+    expect(detail).toHaveTextContent(/No QA audit has been run yet/i)
+    expect(detail).toHaveTextContent(/Step 7/)
+    expect(detail).toHaveTextContent(/before generating/i)
+    // The Run QA Audit CTA button is the actionable affordance.
+    expect(screen.getByTestId('step4-run-qa-audit')).toBeInTheDocument()
   })
 
   it('renders the audit status when present', () => {

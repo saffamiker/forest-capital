@@ -29,9 +29,10 @@
  * panel below (handled by the existing buttons in ReportWriter.tsx).
  */
 import { useCallback, useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import {
   CheckCircle, AlertCircle, Loader2, Play, Circle,
-  ExternalLink, Search, X,
+  ExternalLink, Search, X, ShieldCheck, Lock,
 } from 'lucide-react'
 
 export type StepStatus =
@@ -117,17 +118,34 @@ export default function PipelineGate({
 function disabledReasonFor(
   step: number, results: StepResults,
 ): string | null {
-  // Step 1 has no prerequisites.
+  // May 24 2026 RW3 hotfix — strict sequential gating. Each step's
+  // Run button is disabled until ALL prior steps have GENUINE
+  // completed results. The original gating only checked Step 1
+  // for Steps 2-4, letting Bob run Steps 3-4 without Step 2.
   if (step === 1) return null
-  // Steps 2-4 require Step 1 to be complete.
   if (step === 2 || step === 3 || step === 4) {
-    return results[1]?.status === 'complete'
-      ? null
-      : 'Run Step 1 first'
+    if (!_stepPassed(results, 1)) return 'Run Step 1 first'
+    return null
   }
-  // Auto steps cannot be clicked.
+  // Auto steps cannot be clicked manually.
   if (step === 5 || step === 6) return 'Runs automatically'
   return null
+}
+
+
+function _stepPassed(results: StepResults, n: number): boolean {
+  // A step has "passed" the gate when its status is 'complete' OR
+  // 'warning' AND the payload does NOT carry a `_bypass_*` flag.
+  // _no_audit (Step 4 specifically) is the canonical bypass flag —
+  // a Step 4 in warning state with _no_audit: true does NOT count
+  // as passed for the purpose of gating Step 7. Restored-from-
+  // cache counts as passed (the status reflects the cache state).
+  const r = results[n]
+  if (!r) return false
+  if (r.status !== 'complete' && r.status !== 'warning') return false
+  const payload = (r.payload as Record<string, unknown> | undefined) || {}
+  if (payload['_no_audit'] === true) return false
+  return true
 }
 
 
@@ -165,6 +183,14 @@ function StepRow({
   else if (status === 'warning') { Icon = AlertCircle; iconCls = 'text-amber-400' }
   else if (status === 'failed') { Icon = AlertCircle; iconCls = 'text-red-400' }
 
+  // May 24 2026 RW3 — show a visual locked indicator when the step
+  // is disabled BECAUSE of an upstream dependency (not because it
+  // is itself running, auto, or generating). The user reads the
+  // lock icon as "this step is gated, click on the indicated
+  // upstream step first".
+  const isLockedByDependency = !!disabledReason
+    && !isAuto && !running && status !== 'running'
+    && !(number === 7 && isGenerating)
   return (
     <li
       data-testid={`pipeline-step-${number}`}
@@ -175,10 +201,23 @@ function StepRow({
         + (status === 'failed' ? 'bg-red-500/5 ' : '')
       }>
       <div className="flex items-center gap-2">
-        <Icon className={`w-4 h-4 flex-shrink-0 ${iconCls}`} />
+        {isLockedByDependency ? (
+          <Lock
+            className="w-4 h-4 flex-shrink-0 text-text-muted"
+            data-testid={`pipeline-step-${number}-locked`}
+            aria-label={`Step ${number} locked — ${disabledReason}`}
+          />
+        ) : (
+          <Icon className={`w-4 h-4 flex-shrink-0 ${iconCls}`} />
+        )}
         <span className="text-text-secondary text-xs flex-1">
           <span className="text-text-muted">{number}.</span>{' '}
           {label}
+          {isLockedByDependency ? (
+            <span className="ml-1.5 text-2xs text-text-muted italic">
+              · {disabledReason}
+            </span>
+          ) : null}
         </span>
         {isAuto ? (
           <span className={
@@ -632,19 +671,41 @@ function Step3Detail({ payload }: { payload: Record<string, unknown> }) {
 
 
 function Step4Detail({ payload }: { payload: Record<string, unknown> }) {
+  const navigate = useNavigate()
   if (payload['_no_audit']) {
+    // May 24 2026 RW1 hotfix — Step 4 false-green was undermining
+    // confidence in the platform: it showed a green checkmark and
+    // "pipeline proceeds" even when no QA audit had ever run. The
+    // step is now AMBER + this panel surfaces a Run QA Audit CTA
+    // that takes the user to the QA tab where they can fire the
+    // independent three-layer audit. Step 7 (Generate Draft) is
+    // also gated until the audit has run (generateDisabledReason
+    // in ReportWriter.tsx).
     return (
       <div className="space-y-2">
         <p className="text-text-secondary">
-          No audit has been run yet on this deployment. The pipeline
-          proceeds without validation data — validation is
-          informational, not a hard gate.
+          No QA audit has been run yet. Step 7 (Generate Draft) is
+          gated on the independent three-layer audit so the
+          submission's figures all carry validation. Run the audit
+          before generating the draft.
         </p>
-        <p className="text-text-muted italic">
-          Run the QA Audit (in the QA tab) before submitting the
-          final paper so the independent three-layer validation
-          appears in Appendix D.
-        </p>
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={() => navigate('/qa')}
+            data-testid="step4-run-qa-audit"
+            className="inline-flex items-center gap-1.5 px-3 py-1.5
+                       bg-electric-blue hover:bg-electric-blue/80
+                       text-white text-2xs font-medium rounded
+                       transition-colors">
+            <ShieldCheck className="w-3.5 h-3.5" />
+            Run QA Audit
+          </button>
+          <span className="text-text-muted text-2xs italic">
+            Opens the QA tab in a new view — return here when the
+            audit completes.
+          </span>
+        </div>
       </div>
     )
   }
