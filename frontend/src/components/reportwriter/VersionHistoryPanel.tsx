@@ -208,7 +208,7 @@ export default function VersionHistoryPanel({
     } finally {
       setBusyVer(null)
     }
-  }, [generationId, fetchVersions])
+  }, [generationId, fetchVersions, versions])
 
   const submitDeleteAll = useCallback(async () => {
     if (generationId === null) return
@@ -230,7 +230,7 @@ export default function VersionHistoryPanel({
     } finally {
       setBusyVer(null)
     }
-  }, [generationId, fetchVersions])
+  }, [generationId, fetchVersions, versions])
 
   const submitRestore = useCallback(async (versionNumber: number) => {
     if (generationId === null) return

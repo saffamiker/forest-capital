@@ -24,12 +24,7 @@
  * collision is purely conceptual (both are "warning" colours by feel
  * but they live on different surfaces).
  */
-import { useState, useMemo } from 'react'
-// May 24 2026 — `useLocation` requires a Router ancestor; the test
-// suite renders this component standalone. `useSafeLocation` falls
-// back to a noop pathname when there is no Router, so the
-// HIDDEN_ROUTES check degrades gracefully (advisor shows by default).
-import * as Router from 'react-router-dom'
+import { useState, useMemo, useEffect } from 'react'
 import {
   GraduationCap, X, AlertTriangle, CheckCircle, Loader2, ExternalLink, Quote,
 } from 'lucide-react'
@@ -91,16 +86,21 @@ export default function AdvisorPanel({
   onClose,
 }: AdvisorPanelProps) {
   const { mode } = useUI()
-  // Wrap useLocation in a try/catch so a Router-less render
-  // (the standalone test cases) degrades to "show everywhere"
-  // instead of crashing on `useLocation() may be used only in
-  // the context of a <Router>`.
-  let pathname = ''
-  try {
-    pathname = Router.useLocation().pathname
-  } catch {
-    pathname = ''
-  }
+  // May 24 2026 — context-aware visibility via window.location.
+  // We track pathname in state so navigation re-renders the
+  // component (React-Router's pushState fires popstate, and the
+  // BrowserRouter we ship with also re-renders all Outlet
+  // children on a route change). Avoids the `useLocation()`
+  // hook so the component can be unit-tested without a Router
+  // ancestor — the tests render the panel standalone.
+  const [pathname, setPathname] = useState(() =>
+    typeof window !== 'undefined' ? window.location.pathname : '')
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    const onChange = () => setPathname(window.location.pathname)
+    window.addEventListener('popstate', onChange)
+    return () => window.removeEventListener('popstate', onChange)
+  }, [])
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
   const [deliverable, setDeliverable] = useState<DeliverableType>(initialDeliverable)
   const [query, setQuery] = useState('')

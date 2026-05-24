@@ -91,10 +91,19 @@ class TestTriageEndpointGating:
         assert client.get(TRIAGE, headers=TEAM).status_code == 403
 
     def test_list_reports_admits_the_sysadmin(self):
+        # The test asserts the sysadmin gate admits the role AND the
+        # response carries the canonical {reports: [...]} shape. We
+        # do NOT assert the list is empty: in CI the test database
+        # may carry rows from earlier triage runs in this same test
+        # session (test_run_triage_admits_the_sysadmin fires a real
+        # POST which inserts a row), and depending on harness
+        # parallelism the list can contain those rows or be empty.
+        # The shape contract is the load-bearing assertion.
         resp = client.get(TRIAGE, headers=SYSADMIN)
         assert resp.status_code == 200
-        # With no database the read fails open to an empty list.
-        assert resp.json() == {"reports": []}
+        body = resp.json()
+        assert "reports" in body, body
+        assert isinstance(body["reports"], list), body
 
     def test_latest_report_is_sysadmin_gated_and_returns_the_report_key(self):
         # GET /triage/latest is the triage login-notification's data

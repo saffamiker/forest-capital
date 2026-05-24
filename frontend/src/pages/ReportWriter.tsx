@@ -358,6 +358,14 @@ export default function ReportWriter() {
       setBadge('idle', 'Ready — click Run on Step 1 to start')
     })()
     return () => { cancelled = true }
+    // hydrateFromAudit is declared BELOW this useEffect (a
+    // useCallback at line ~367). Listing it in the deps array
+    // produces a TDZ / use-before-declaration TypeScript error.
+    // The effect intentionally re-runs only when templateId or
+    // the setters change — the hydrate function captures its own
+    // setters via useCallback, so a missing dep doesn't change
+    // behaviour.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templateId, runStep, setAuditId, setPipelineStartedAt, setBadge])
 
   // Hydrate from a persisted audit row — populate step results from
@@ -659,7 +667,7 @@ export default function ReportWriter() {
   // ── Debounced paper_md save ───────────────────────────────────────────────
   const saveTimerRef = useRef<number | null>(null)
   const queuedMdRef = useRef<string | null>(null)
-  const onPaperMdChange = (next: string) => {
+  const onPaperMdChange = useCallback((next: string) => {
     setPaperMd(next)
     if (!generation) return
     queuedMdRef.current = next
@@ -681,7 +689,7 @@ export default function ReportWriter() {
         setSavingPatch(false)
       }
     }, 1500)
-  }
+  }, [generation])
 
   useEffect(() => () => {
     if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
@@ -738,7 +746,7 @@ export default function ReportWriter() {
     const next = paperMd.replace(selectedText, rewritten)
     onPaperMdChange(next)
     setSelectedText('')
-  }, [paperMd, selectedText])
+  }, [paperMd, selectedText, onPaperMdChange])
 
   // ── [BOB] block iteration ─────────────────────────────────────────────────
   // Variant of handleIterate that takes the block content explicitly

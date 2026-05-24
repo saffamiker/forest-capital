@@ -30,7 +30,7 @@ function hoursAgo(h: number) {
 
 
 function _mockAxiosGet(data: unknown) {
-  ;(axios.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+  (axios.get as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
     data,
     status: 200,
     statusText: 'OK',
@@ -57,7 +57,7 @@ beforeEach(() => {
   // isAxiosError is referenced in the badge's catch block — make
   // sure it's available even when the mocked error path is unused.
   if (!(axios.isAxiosError as unknown as { mock?: unknown }).mock) {
-    ;(axios.isAxiosError as unknown as ReturnType<typeof vi.fn>) =
+    (axios.isAxiosError as unknown as ReturnType<typeof vi.fn>) =
       vi.fn().mockReturnValue(false)
   }
 })
