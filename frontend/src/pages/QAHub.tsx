@@ -21,6 +21,7 @@ import {
 import QAAuditPanel from '../components/QAAuditPanel'
 import AuditPanel from '../components/AuditPanel'
 import TeamGate from '../components/TeamGate'
+import FloatingSectionNav from '../components/FloatingSectionNav'
 import { useIsTeamMember } from '../hooks/usePermissions'
 import { useQAStore } from '../stores/qaStore'
 import type { QAAuditResult } from '../types/agents'
@@ -449,7 +450,11 @@ export default function QAHub() {
 
   return (
     <div className="p-4 md:p-6 max-w-4xl mx-auto space-y-8">
-      <div className="flex items-start justify-between gap-3 flex-wrap">
+      <FloatingSectionNav pageKey="qa-audit" />
+      <div
+        className="flex items-start justify-between gap-3 flex-wrap"
+        data-section-id="overview"
+        data-section-label="Overview">
         <div>
           <h1 className="text-xl font-semibold text-white">Quality Assurance</h1>
           <p className="text-sm text-muted mt-1">
@@ -610,7 +615,10 @@ export default function QAHub() {
       )}
 
       {/* Section 1 — Methodology Review (every authenticated user). */}
-      <section className="space-y-3">
+      <section
+        className="space-y-3"
+        data-section-id="methodology-review"
+        data-section-label="Methodology Review">
         <div className="flex items-start justify-between gap-3">
           <div>
             <h2 className="text-base font-semibold text-white">Methodology Review</h2>
@@ -636,7 +644,10 @@ export default function QAHub() {
       </section>
 
       {/* Section 2 — Statistical Audit (full panel: team only). */}
-      <section className="space-y-3">
+      <section
+        className="space-y-3"
+        data-section-id="statistical-audit"
+        data-section-label="Statistical Audit">
         <div>
           <h2 className="text-base font-semibold text-white">Statistical Audit</h2>
           <p className="text-xs text-muted mt-0.5">

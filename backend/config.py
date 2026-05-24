@@ -207,12 +207,28 @@ PERMISSIONS = {
     "export_package":     "Export the academic ZIP package",
     "manage_users":       "Manage platform users (sysadmin only)",
     "view_admin":         "View failure reports and the feedback backlog",
+    # May 24 2026 (ID 275 follow-up) — narrower permission that
+    # only opens the in-app Test Administration UI section. The
+    # three admin-only API endpoints (failures / feedback /
+    # issue-tracker) still gate on view_admin and remain
+    # sysadmin-only. team_member needs access_test_panel to see
+    # the Settings section; clicking through to the data tables
+    # makes its own request which the backend gates separately.
+    "access_test_panel":  "Open the Test Administration settings section",
 }
 
 ROLE_PRESETS = {
     "viewer":      ["view_analytics", "ask_council"],
+    # May 24 2026 (ID 275 follow-up) — replaced view_admin with
+    # the narrower access_test_panel so Molly can OPEN the Test
+    # Administration settings section without inheriting access
+    # to the underlying sysadmin-only API routes. The action
+    # endpoints (mark resolved, dismiss suggestion, etc.) and
+    # the failures / feedback / issue-tracker GET endpoints
+    # stay view_admin-gated and remain sysadmin-only.
     "team_member": ["view_analytics", "ask_council", "team_member",
-                    "generate_documents", "export_package"],
+                    "generate_documents", "export_package",
+                    "access_test_panel"],
     "sysadmin":    list(PERMISSIONS.keys()),
 }
 

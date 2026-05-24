@@ -165,6 +165,175 @@ substantive finding cannot exist.
 
 {SCOPE_ENFORCEMENT}"""
 
+# May 24 2026 — submission_classification taxonomy.
+#
+# The user's spec: each check carries its CLASSIFICATION in metadata
+# so the UI can render outcome-specific badges and an overall
+# readiness banner without hardcoding rules in the frontend.
+#
+# Two classification fields per check — they answer the two
+# follow-up questions the dashboard asks:
+#
+#   warn_class       — what does WARN mean for THIS check?
+#     "disclosure_required" → WARN must be acknowledged before
+#                              submission (amber, blocking until
+#                              acknowledged).
+#     "non_blocking"        → WARN is informational only (amber,
+#                              never blocks submission).
+#     "blocks"              → WARN should be treated as failure
+#                              (red, blocks submission).
+#
+#   incomplete_class — what does INCOMPLETE mean for THIS check?
+#     "blocks_submission" → INCOMPLETE must be resolved before
+#                            submission (red).
+#     "planned_extension" → INCOMPLETE acceptable for midpoint;
+#                            documented in Section 4 (grey).
+#
+# The UI overlays a third, RUNTIME-DETERMINED class on top of these:
+#
+#   non_deterministic — when two consecutive audit runs on
+#     unchanged data return different verdicts for the same
+#     check, the audit runner flags it as orange "requires
+#     human review". This is set in the per-check result dict,
+#     not in the static metadata.
+#
+# Defaults if absent: warn_class = "disclosure_required" and
+# incomplete_class = "blocks_submission" (the most conservative
+# reading — every check defaults to "must be addressed").
+
+
+# Per-check classifications, by check_id. Keys not listed inherit
+# the defaults above. Centralising this map keeps the long
+# _CHECKLIST_ITEMS array readable while satisfying the user's spec
+# ("defined in the check metadata, not hardcoded in the UI"):
+# the helper attaches these fields to each item below so each
+# check.metadata carries its own classification.
+_SUBMISSION_CLASSIFICATIONS: dict[str, dict[str, str]] = {
+    # DATA INTEGRITY — WARN means a data issue that needs disclosure;
+    # INCOMPLETE is acceptable as a planned analytical extension
+    # documented in Section 4 (per user spec).
+    "D01": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "D02": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "D03": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "D04": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "D05": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "D06": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "D07": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    # PORTFOLIO MECHANICS — all five are mathematical invariants.
+    # WARN/FAIL/INCOMPLETE on these mean the platform's core
+    # backtester is broken; all block submission.
+    "P01": {"warn_class": "blocks",               "incomplete_class": "blocks_submission"},
+    "P02": {"warn_class": "blocks",               "incomplete_class": "blocks_submission"},
+    "P03": {"warn_class": "blocks",               "incomplete_class": "blocks_submission"},
+    "P04": {"warn_class": "blocks",               "incomplete_class": "blocks_submission"},
+    "P05": {"warn_class": "blocks",               "incomplete_class": "blocks_submission"},
+    # STATISTICAL INTEGRITY — same pattern as D: disclosure on WARN,
+    # planned extension on INCOMPLETE (per user spec).
+    "S01": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "S02": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "S03": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "S04": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "S05": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "S06": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "S07": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "S08": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "S09": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "S10": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    # CROSS-VALIDATION — same pattern (per user spec).
+    "C01": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "C02": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "C03": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    "C04": {"warn_class": "disclosure_required",  "incomplete_class": "planned_extension"},
+    # OVERFITTING — disclosure on WARN; INCOMPLETE blocks (a missing
+    # SPA test or sensitivity sweep is a methodology gap, not a
+    # planned extension).
+    "O01": {"warn_class": "disclosure_required",  "incomplete_class": "blocks_submission"},
+    "O02": {"warn_class": "disclosure_required",  "incomplete_class": "blocks_submission"},
+    # ECONOMIC SIGNIFICANCE — informational; not a structural gate.
+    "E01": {"warn_class": "non_blocking",         "incomplete_class": "blocks_submission"},
+    # PRESENTATION — the 2022 correlation breakdown disclosure IS
+    # central to the project's thesis. Both WARN and INCOMPLETE
+    # block (a paper without the regime-break narrative is not
+    # ready).
+    "PR01": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
+    # ANALYTICS — Carhart, turnover, regime consistency, info ratio,
+    # cumulative-return integrity are first-class invariants.
+    "AN01": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
+    "AN02": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
+    # AN03 sensitivity is a Section 4 extension per the user's
+    # explicit spec — acceptable INCOMPLETE for the midpoint.
+    "AN03": {"warn_class": "non_blocking",        "incomplete_class": "planned_extension"},
+    "AN04": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
+    "AN05": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
+    "AN06": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
+    # PLATFORM INTEGRATION — IN01/02/03 verify the platform's own
+    # subsystems; their failure means the audit chain itself is
+    # broken. Blocks.
+    "IN01": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
+    "IN02": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
+    "IN03": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
+}
+
+
+def _classify(check_id: str) -> dict[str, str]:
+    """Returns the {warn_class, incomplete_class} pair for a check_id.
+    Defaults to the most conservative reading (disclosure_required +
+    blocks_submission) when the id is absent — so a new check added
+    without a classification still blocks rather than silently
+    passing through.
+    """
+    return _SUBMISSION_CLASSIFICATIONS.get(check_id, {
+        "warn_class": "disclosure_required",
+        "incomplete_class": "blocks_submission",
+    })
+
+
+def _submission_label(
+    status: str,
+    warn_class: str | None,
+    incomplete_class: str | None,
+) -> str:
+    """Maps a (status, warn_class, incomplete_class) triple to the
+    user-visible submission-readiness label.
+
+    The taxonomy (per user spec May 24 2026):
+
+      PASS                              → "pass"
+      WARN  + disclosure_required       → "warn_disclosure"
+      WARN  + non_blocking              → "warn_non_blocking"
+      WARN  + blocks                    → "warn_blocking"
+      INCOMPLETE + blocks_submission    → "incomplete_blocking"
+      INCOMPLETE + planned_extension    → "incomplete_planned"
+      FAIL                              → "fail_blocking"
+
+    The frontend reads the label and applies the corresponding
+    badge style — green / amber blocking / amber informational /
+    red / grey. A separate "non_deterministic" overlay is applied
+    at runtime by the audit runner when consecutive runs disagree;
+    that flag rides alongside the label rather than replacing it.
+    """
+    if status == "PASS":
+        return "pass"
+    if status == "FAIL":
+        return "fail_blocking"
+    if status == "WARN":
+        wc = warn_class or "disclosure_required"
+        if wc == "non_blocking":
+            return "warn_non_blocking"
+        if wc == "blocks":
+            return "warn_blocking"
+        return "warn_disclosure"
+    if status == "INCOMPLETE":
+        ic = incomplete_class or "blocks_submission"
+        if ic == "planned_extension":
+            return "incomplete_planned"
+        return "incomplete_blocking"
+    # Defensive default — any unrecognised status reads as blocking
+    # so a missing classification cannot accidentally green-light
+    # submission.
+    return "fail_blocking"
+
+
 # 39 checklist items — the original 30 methodology checks plus 9 added
 # (May 2026) so every built platform feature has QA coverage: the
 # analytics layer (AN01-AN06) and the platform's own verification
@@ -283,6 +452,17 @@ _CHECKLIST_ITEMS: list[dict[str, str]] = [
 ]
 
 assert len(_CHECKLIST_ITEMS) == 39, f"QA checklist must have exactly 39 items, got {len(_CHECKLIST_ITEMS)}"
+
+
+# Attach the submission classification fields to each item in place.
+# Done after the array literal so the metadata stays defined ONCE
+# (in _SUBMISSION_CLASSIFICATIONS) but the consumer sees them on the
+# item — matches the user's directive that the classification live
+# in the check metadata, not in a parallel UI table.
+for _item in _CHECKLIST_ITEMS:
+    _cls = _classify(_item["check_id"])
+    _item["warn_class"] = _cls["warn_class"]
+    _item["incomplete_class"] = _cls["incomplete_class"]
 
 # ── raw_analysis parsing ──────────────────────────────────────────────────────
 # The QA LLM delimits each check in its analysis text with a markdown-bold
@@ -1165,6 +1345,13 @@ class QAAgent:
                     "remediation":     None,
                     "action_type":     None,
                     "disclosure_text": None,
+                    "warn_class":      item.get("warn_class"),
+                    "incomplete_class": item.get("incomplete_class"),
+                    "submission_label": _submission_label(
+                        det["status"],
+                        item.get("warn_class"),
+                        item.get("incomplete_class"),
+                    ),
                 })
             else:
                 # LLM-assessed item. The verdict is parsed FROM this
@@ -1224,6 +1411,13 @@ class QAAgent:
                     "remediation":     fields["remediation"],
                     "action_type":     fields["action_type"],
                     "disclosure_text": fields["disclosure_text"],
+                    "warn_class":      item.get("warn_class"),
+                    "incomplete_class": item.get("incomplete_class"),
+                    "submission_label": _submission_label(
+                        status,
+                        item.get("warn_class"),
+                        item.get("incomplete_class"),
+                    ),
                 })
 
         n_pass       = sum(1 for i in item_results if i["status"] == "PASS")
@@ -1286,6 +1480,13 @@ class QAAgent:
                 "remediation":     remediation,
                 "action_type":     action_type,
                 "disclosure_text": None,
+                "warn_class":      item.get("warn_class"),
+                "incomplete_class": item.get("incomplete_class"),
+                "submission_label": _submission_label(
+                    status,
+                    item.get("warn_class"),
+                    item.get("incomplete_class"),
+                ),
             })
 
         n_pass       = sum(1 for i in item_results if i["status"] == "PASS")
@@ -1352,6 +1553,61 @@ class QAAgent:
         elif n_warn > 0:
             summary_parts.append("Review warnings before presenting.")
 
+        # ── Submission-readiness summary (May 24 2026) ──────────────
+        # Counts each check's submission_label so the frontend can
+        # render the green/amber/red banner without re-reading
+        # every item. The readiness verdict is derived from these
+        # counts:
+        #
+        #   ready                      — every check passes or is a
+        #                                planned extension; no
+        #                                blocking items.
+        #   ready_with_acknowledgements — at least one warn_disclosure
+        #                                 (must be acknowledged
+        #                                 pre-submission), no
+        #                                 blocking items.
+        #   not_ready                  — any blocking item (fail,
+        #                                warn_blocking, or
+        #                                incomplete_blocking).
+        def _count(label: str) -> int:
+            return sum(1 for i in item_results
+                       if i.get("submission_label") == label)
+        n_pass_label = _count("pass")
+        n_warn_disclosure = _count("warn_disclosure")
+        n_warn_non_blocking = _count("warn_non_blocking")
+        n_warn_blocking = _count("warn_blocking")
+        n_incomplete_blocking = _count("incomplete_blocking")
+        n_incomplete_planned = _count("incomplete_planned")
+        n_fail_blocking = _count("fail_blocking")
+        n_non_deterministic = sum(
+            1 for i in item_results
+            if i.get("non_deterministic") is True
+        )
+
+        n_blocking = (
+            n_fail_blocking + n_warn_blocking + n_incomplete_blocking
+        )
+        if n_blocking > 0:
+            submission_status = "not_ready"
+            submission_banner = (
+                f"\U0001f534 Not ready — {n_blocking} check"
+                f"{'s' if n_blocking != 1 else ''} blocking submission."
+            )
+        elif n_warn_disclosure > 0:
+            submission_status = "ready_with_acknowledgements"
+            submission_banner = (
+                f"\U0001f7e1 Ready with acknowledgments — "
+                f"{n_warn_disclosure} warning"
+                f"{'s' if n_warn_disclosure != 1 else ''} require "
+                "disclosure."
+            )
+        else:
+            submission_status = "ready"
+            submission_banner = (
+                "\U0001f7e2 Ready for submission — "
+                "all blocking checks passed."
+            )
+
         return {
             "sprint":             "4",
             "checks_passed":      n_pass,
@@ -1367,6 +1623,22 @@ class QAAgent:
             "data_caveats":       self._generate_data_caveats(strategy_results),
             "model_assumptions":  self._generate_model_assumptions(),
             "raw_analysis":       raw_analysis,
+            # May 24 2026 submission-readiness fields. The frontend
+            # reads submission_status to choose the banner colour
+            # and gates the Pre-Submission Audit button on it.
+            "submission_status":          submission_status,
+            "submission_banner":          submission_banner,
+            "submission_counts": {
+                "pass":                  n_pass_label,
+                "warn_disclosure":       n_warn_disclosure,
+                "warn_non_blocking":     n_warn_non_blocking,
+                "warn_blocking":         n_warn_blocking,
+                "incomplete_blocking":   n_incomplete_blocking,
+                "incomplete_planned":    n_incomplete_planned,
+                "fail_blocking":         n_fail_blocking,
+                "non_deterministic":     n_non_deterministic,
+                "blocking_total":        n_blocking,
+            },
         }
 
     def _generate_limitations(self, strategy_results: dict[str, Any]) -> list[str]:

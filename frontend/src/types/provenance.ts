@@ -151,6 +151,18 @@ export const CHART_PROVENANCE_REGISTRY: Record<string, string[]> = {
   ],
   significance_journey_matrix: ["equity_monthly", "ig_monthly_bnd", "hy_monthly_baml"],
   rolling_correlation: ["equity_daily_spy", "ig_daily_bnd", "hy_daily_baml"],
+  // May 24 2026 (UAT ID 286) — diversification suite charts.
+  // All seven derive from monthly strategy returns, which themselves
+  // are computed from the four core return series + the risk-free
+  // rate. Adding the registry entries makes ChartCommentStrip render
+  // the Sources line on every diversification chart wrapped in one.
+  correlation_heatmap: ["equity_monthly", "ig_monthly_bnd", "hy_monthly_baml"],
+  tail_risk: ["equity_monthly", "ig_monthly_bnd", "hy_monthly_baml", "risk_free_dtb3"],
+  capture_ratios: ["equity_monthly", "ig_monthly_bnd", "hy_monthly_baml"],
+  drawdown_duration: ["equity_monthly", "ig_monthly_bnd", "hy_monthly_baml"],
+  crisis_performance: ["equity_monthly", "ig_monthly_bnd", "hy_monthly_baml", "risk_free_dtb3"],
+  marginal_contribution_to_risk: ["equity_monthly", "ig_monthly_bnd", "hy_monthly_baml"],
+  return_distribution: ["equity_monthly", "ig_monthly_bnd", "hy_monthly_baml"],
 };
 
 // ── Display helper ────────────────────────────────────────────────────────────

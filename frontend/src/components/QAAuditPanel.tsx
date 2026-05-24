@@ -35,6 +35,161 @@ function VerdictBadge({ verdict }: { verdict: Verdict }) {
   return <span className={cfg.badge}>{verdict}</span>
 }
 
+
+// May 24 2026 — submission-readiness badge taxonomy. Each
+// submission_label maps to one badge style. The colours follow the
+// user's spec: green pass, amber blocking, amber informational,
+// red blocking, grey planned, orange non-deterministic.
+//
+// The labels are deliberately verbose ("WARN – disclosure required")
+// because the user's spec asks for the classification to be
+// visible AT THE BADGE, not behind a hover.
+const SUBMISSION_BADGES: Record<string, {
+  label: string
+  bg: string
+  text: string
+  border: string
+}> = {
+  pass: {
+    label: 'PASS',
+    bg: 'bg-green-500/15',
+    text: 'text-green-300',
+    border: 'border-green-500/30',
+  },
+  warn_disclosure: {
+    label: 'WARN — disclosure required',
+    bg: 'bg-amber-500/15',
+    text: 'text-amber-300',
+    border: 'border-amber-500/40',
+  },
+  warn_non_blocking: {
+    label: 'WARN — non-blocking',
+    bg: 'bg-amber-500/10',
+    text: 'text-amber-300/80',
+    border: 'border-amber-500/20',
+  },
+  warn_blocking: {
+    label: 'WARN — blocks submission',
+    bg: 'bg-red-500/15',
+    text: 'text-red-300',
+    border: 'border-red-500/30',
+  },
+  incomplete_blocking: {
+    label: 'INCOMPLETE — blocks submission',
+    bg: 'bg-red-500/15',
+    text: 'text-red-300',
+    border: 'border-red-500/30',
+  },
+  incomplete_planned: {
+    label: 'INCOMPLETE — planned extension',
+    bg: 'bg-slate-500/15',
+    text: 'text-slate-300',
+    border: 'border-slate-400/30',
+  },
+  fail_blocking: {
+    label: 'FAIL — blocks submission',
+    bg: 'bg-red-500/15',
+    text: 'text-red-300',
+    border: 'border-red-500/30',
+  },
+}
+
+// Orange overlay applied when the audit runner flagged the check as
+// non-deterministic (two consecutive runs disagreed on its verdict).
+// The overlay style replaces the submission_label style — see
+// SubmissionBadge below.
+const NON_DETERMINISTIC_STYLE = {
+  label: 'NON-DETERMINISTIC — requires human review',
+  bg: 'bg-orange-500/15',
+  text: 'text-orange-300',
+  border: 'border-orange-500/40',
+}
+
+
+function SubmissionBadge({
+  check,
+}: {
+  check: { submission_label?: string | null; non_deterministic?: boolean | null; status: Verdict }
+}) {
+  // Non-deterministic overlay wins regardless of submission_label —
+  // an AI verdict that flickers across runs is never a clean PASS.
+  if (check.non_deterministic) {
+    const s = NON_DETERMINISTIC_STYLE
+    return (
+      <span className={`px-2 py-0.5 rounded text-2xs font-medium border ${s.bg} ${s.text} ${s.border}`}>
+        {s.label}
+      </span>
+    )
+  }
+  const label = check.submission_label
+  if (!label || !(label in SUBMISSION_BADGES)) {
+    // Legacy fall-back — pre-May-24 audit rows have no submission_label.
+    // Render the plain status badge so the panel still shows something.
+    return <VerdictBadge verdict={check.status} />
+  }
+  const s = SUBMISSION_BADGES[label]
+  return (
+    <span className={`px-2 py-0.5 rounded text-2xs font-medium border ${s.bg} ${s.text} ${s.border}`}>
+      {s.label}
+    </span>
+  )
+}
+
+
+// May 24 2026 — top-of-page submission readiness banner. Reads
+// `submission_status` + `submission_banner` from the audit
+// response (set by the backend's _build_report).
+function SubmissionReadinessBanner({
+  status, banner, counts,
+}: {
+  status?: 'ready' | 'ready_with_acknowledgements' | 'not_ready' | undefined
+  banner?: string | undefined
+  counts?: {
+    blocking_total?: number
+    warn_disclosure?: number
+    incomplete_blocking?: number
+    fail_blocking?: number
+    warn_blocking?: number
+  } | undefined
+}) {
+  if (!status || !banner) return null
+
+  const styles: Record<typeof status, {
+    bg: string; text: string; border: string;
+  }> = {
+    ready: {
+      bg: 'bg-green-500/10', text: 'text-green-200',
+      border: 'border-green-500/40',
+    },
+    ready_with_acknowledgements: {
+      bg: 'bg-amber-500/10', text: 'text-amber-200',
+      border: 'border-amber-500/40',
+    },
+    not_ready: {
+      bg: 'bg-red-500/10', text: 'text-red-200',
+      border: 'border-red-500/50',
+    },
+  }
+  const s = styles[status]
+  return (
+    <div
+      data-testid="qa-submission-banner"
+      data-status={status}
+      className={`mb-3 px-4 py-3 rounded-lg border ${s.bg} ${s.text} ${s.border}`}>
+      <p className="text-sm font-semibold">{banner}</p>
+      {counts && (counts.warn_disclosure || counts.incomplete_blocking ||
+                   counts.fail_blocking || counts.warn_blocking) ? (
+        <p className="text-xs mt-1 leading-snug opacity-90">
+          {counts.fail_blocking ? `${counts.fail_blocking} fail · ` : ''}
+          {counts.incomplete_blocking ? `${counts.incomplete_blocking} incomplete · ` : ''}
+          {counts.warn_blocking ? `${counts.warn_blocking} warn blocking · ` : ''}
+          {counts.warn_disclosure ? `${counts.warn_disclosure} disclosure(s) required` : ''}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
 // One short label per action_type — surfaced as the heading of the
 // Action Required card so the user reads what's expected of them.
 const ACTION_HEADINGS: Record<QAActionType, string> = {
@@ -439,7 +594,7 @@ function CheckRow({
         <Icon className={`w-4 h-4 shrink-0 ${cfg.color}`} />
         <span className="font-mono text-2xs text-muted w-7 shrink-0">{check.check_id}</span>
         <span className="text-white text-xs flex-1">{check.description}</span>
-        <VerdictBadge verdict={check.status} />
+        <SubmissionBadge check={check} />
         {open ? (
           <ChevronUp className="w-3.5 h-3.5 text-muted ml-1 shrink-0" />
         ) : (
@@ -650,6 +805,15 @@ export default function QAAuditPanel() {
     // No page chrome here — QAHub owns the page container so this panel
     // embeds cleanly as the hub's Methodology Review section.
     <div className="space-y-5">
+      {/* May 24 2026 — submission readiness banner. Reads
+          submission_status / submission_banner / submission_counts
+          from the audit response. Falls back silently when the
+          fields are absent (e.g. a cached pre-May-24 audit row). */}
+      <SubmissionReadinessBanner
+        status={audit.submission_status}
+        banner={audit.submission_banner}
+        counts={audit.submission_counts}
+      />
       {/* Summary card */}
       <div className={`card p-5 border ${overallCfg.border} ${overallCfg.bg}`}>
         <div className="flex items-center gap-4">

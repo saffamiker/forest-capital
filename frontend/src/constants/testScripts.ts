@@ -443,7 +443,7 @@ const michael: TestScript = {
       id: 'an_study_period', route: '/analytics', target: null,
       title: 'Study period',
       instruction: 'Find the study-period line on the Analytics page.',
-      expectedResult: 'It shows 2002-07-31 to 2025-12-31 (282 months).',
+      expectedResult: 'It shows the live study period (Jul 2002 to the most recent ingested month — 286 months on Render now).',
       allowSkip: true,
     },
     {

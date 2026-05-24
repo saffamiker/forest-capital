@@ -158,5 +158,17 @@ export function extractTopPriority(sections: VerdictSection[]): string | null {
   // `$` only matches end-of-string in the lookahead.
   const m = priority.body.match(
     /(?:^|\n)\s*1\.\s+([\s\S]*?)(?=\n\s*2\.|$)/)
-  return m ? m[1].trim() : null
+  if (m) return m[1].trim()
+  // May 24 2026 (UAT ID 216) — fallback. The arbiter sometimes
+  // produces a section 4 with a prose body and no numbered list
+  // (e.g. "The priority area is X..."). Rather than render
+  // nothing — which was the original symptom — return the first
+  // non-empty line as the "top priority" surface. Trims to ~200
+  // chars so the callout doesn't grow uncontrollably.
+  const firstLine = priority.body
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0)
+  if (!firstLine) return null
+  return firstLine.length > 200 ? firstLine.slice(0, 197) + '…' : firstLine
 }

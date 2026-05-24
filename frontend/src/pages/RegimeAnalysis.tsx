@@ -22,6 +22,7 @@ import RegimeTransitionMatrix from '../components/charts/RegimeTransitionMatrix'
 import ChartCommentStrip from '../components/ChartCommentStrip'
 import LearnModeBanner from '../components/LearnModeBanner'
 import DataCurrencyBar from '../components/DataCurrencyBar'
+import FloatingSectionNav from '../components/FloatingSectionNav'
 
 // Purple accent — Regime Analysis is the regime/macro screen.
 const ACCENT = '#7c3aed'
@@ -41,6 +42,7 @@ export default function RegimeAnalysis() {
 
   return (
     <div className="p-4 md:p-6 space-y-5">
+      <FloatingSectionNav pageKey="regime-analysis" />
       <div>
         <h1 className="text-xl font-semibold text-white">Regime Analysis</h1>
         <p className="text-sm text-muted mt-1">
@@ -56,7 +58,9 @@ export default function RegimeAnalysis() {
         <div className="card p-8 text-center text-muted text-sm">Loading…</div>
       ) : (
         <>
-          <div>
+          <div
+            data-section-id="regime-timeline"
+            data-section-label="Regime Timeline">
             <RegimeTimeline timeline={chartData?.regime_timeline ?? []} />
             <ChartCommentStrip
               chartId="regime_timeline"
@@ -66,7 +70,9 @@ export default function RegimeAnalysis() {
             />
           </div>
 
-          <div>
+          <div
+            data-section-id="correlation-breakdown"
+            data-section-label="Correlation Breakdown">
             <CorrelationBreakdownChart
               correlation={chartData?.correlation_breakdown ?? []}
               pre2022={regime?.pre_2022_avg_correlation ?? null}
@@ -80,7 +86,9 @@ export default function RegimeAnalysis() {
             />
           </div>
 
-          <div>
+          <div
+            data-section-id="regime-conditional"
+            data-section-label="Regime-Conditional Performance">
             <RegimeConditionalPerformance regimeConditional={chartData?.regime_conditional ?? {}} />
             <ChartCommentStrip
               chartId="regime_conditional_performance"
@@ -91,7 +99,9 @@ export default function RegimeAnalysis() {
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-            <div>
+            <div
+              data-section-id="factor-exposure"
+              data-section-label="Factor Exposure">
               <FactorExposureHeatmap factorLoadings={chartData?.factor_loadings ?? {}} />
               <ChartCommentStrip
                 chartId="factor_exposure_heatmap"
@@ -100,7 +110,9 @@ export default function RegimeAnalysis() {
                 accentColor={ACCENT}
               />
             </div>
-            <div>
+            <div
+              data-section-id="transition-matrix"
+              data-section-label="Regime Transition Matrix">
               <RegimeTransitionMatrix matrix={chartData?.transition_matrix ?? ({} as never)} />
               <ChartCommentStrip
                 chartId="regime_transition_matrix"
@@ -111,7 +123,9 @@ export default function RegimeAnalysis() {
             </div>
           </div>
 
-          <div>
+          <div
+            data-section-id="attribution"
+            data-section-label="Performance Attribution">
             <PerformanceAttributionWaterfall attribution={chartData?.attribution ?? {}} />
             <ChartCommentStrip
               chartId="performance_attribution_waterfall"

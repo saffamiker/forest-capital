@@ -14,10 +14,24 @@
  *
  * A free-form feedback submission (step === null) carries no script/step
  * — only the captured source route.
+ *
+ * May 24 2026 — UAT-blocking refactor per user spec:
+ *   1. Draggable — title-bar drag moves the window so the user can
+ *      reposition it over the content they're describing.
+ *   2. Non-locking — no backdrop; the page behind stays scrollable
+ *      so the tester can reference the UI they're documenting.
+ *   3. Resizable — bottom-right corner drag-handle resizes the
+ *      window (min 360x240, max viewport).
+ *   4. Persistent — backdrop click does NOT close. Only X, Cancel,
+ *      Escape, or Submit dismiss the panel.
+ *   5. Auto-save — in-progress text is keyed by (mode, scriptId,
+ *      stepId) in localStorage and restored on next open. Cleared
+ *      on successful submit.
  */
-import { useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import axios from 'axios'
-import { X, Upload, Loader2, AlertTriangle, Lightbulb } from 'lucide-react'
+import { X, Upload, Loader2, AlertTriangle, Lightbulb,
+         Move, Maximize2 } from 'lucide-react'
 import type { TestStep } from '../constants/testScripts'
 
 type Mode = 'failure' | 'feedback'
@@ -53,27 +67,221 @@ const PRIORITIES = [
   { value: 'nice_to_have', label: 'Nice to Have' },
 ] as const
 
+// Auto-save key — keyed on the (mode, scriptId, stepId) tuple so two
+// concurrent test sessions on different steps don't overwrite each
+// other. A single 24-hour TTL guard wraps every saved blob so stale
+// drafts from a prior week don't reappear.
+const _AUTOSAVE_KEY_PREFIX = 'fc_test_submission_draft_'
+const _AUTOSAVE_TTL_MS = 24 * 60 * 60 * 1000
+
+
+interface AutosaveBlob {
+  ts: number
+  whatHappened?: string
+  expected?: string
+  actual?: string
+  severity?: string
+  feedbackType?: string
+  title?: string
+  description?: string
+  priority?: string
+  browser?: string
+}
+
+
+function _autosaveKey(
+  mode: Mode, scriptId: string | null, stepId: string | null,
+): string {
+  return `${_AUTOSAVE_KEY_PREFIX}${mode}_${scriptId ?? 'free'}_${stepId ?? 'free'}`
+}
+
+
+function _readAutosave(key: string): AutosaveBlob | null {
+  try {
+    const raw = localStorage.getItem(key)
+    if (!raw) return null
+    const blob = JSON.parse(raw) as AutosaveBlob
+    if (!blob.ts || Date.now() - blob.ts > _AUTOSAVE_TTL_MS) {
+      // Stale draft — drop it so a week-old in-progress note
+      // doesn't ghost the next test run for the same step.
+      localStorage.removeItem(key)
+      return null
+    }
+    return blob
+  } catch {
+    return null
+  }
+}
+
+
+function _writeAutosave(key: string, blob: AutosaveBlob): void {
+  try {
+    localStorage.setItem(key, JSON.stringify({ ...blob, ts: Date.now() }))
+  } catch {
+    // Storage quota / disabled — silent no-op. Auto-save is a
+    // convenience, not a contract.
+  }
+}
+
+
+function _clearAutosave(key: string): void {
+  try {
+    localStorage.removeItem(key)
+  } catch { /* noop */ }
+}
+
+
 export default function TestSubmissionPanel({
   mode, step, scriptId, sourceRoute, onClose, onSubmitted,
 }: Props) {
+  // Auto-save key for the current (mode, script, step) tuple.
+  // Restore the in-progress text on mount; save on every keystroke
+  // (debounced via the useEffect at end); clear on successful
+  // submit.
+  const autosaveKey = _autosaveKey(mode, scriptId, step?.id ?? null)
+  const restored = _readAutosave(autosaveKey)
+
   // Shared
   const [files, setFiles] = useState<File[]>([])
-  const [browser, setBrowser] = useState(navigator.userAgent)
+  const [browser, setBrowser] = useState(
+    restored?.browser ?? navigator.userAgent)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   // Quality gate
   const [clarification, setClarification] = useState<string | null>(null)
   const [reevaluated, setReevaluated] = useState(false)
   // Failure fields
-  const [whatHappened, setWhatHappened] = useState('')
-  const [expected, setExpected] = useState(step?.expectedResult ?? '')
-  const [actual, setActual] = useState('')
-  const [severity, setSeverity] = useState<string>('major')
+  const [whatHappened, setWhatHappened] = useState(
+    restored?.whatHappened ?? '')
+  const [expected, setExpected] = useState(
+    restored?.expected ?? (step?.expectedResult ?? ''))
+  const [actual, setActual] = useState(restored?.actual ?? '')
+  const [severity, setSeverity] = useState<string>(
+    restored?.severity ?? 'major')
   // Feedback fields
-  const [feedbackType, setFeedbackType] = useState<string>('observation')
-  const [title, setTitle] = useState('')
-  const [description, setDescription] = useState('')
-  const [priority, setPriority] = useState<string>('should_have')
+  const [feedbackType, setFeedbackType] = useState<string>(
+    restored?.feedbackType ?? 'observation')
+  const [title, setTitle] = useState(restored?.title ?? '')
+  const [description, setDescription] = useState(
+    restored?.description ?? '')
+  const [priority, setPriority] = useState<string>(
+    restored?.priority ?? 'should_have')
+
+  // Auto-save on every keystroke — the writer is cheap (localStorage
+  // synchronous write of a small JSON blob) so we don't bother
+  // debouncing. The effect's dep array makes React batch updates
+  // naturally.
+  useEffect(() => {
+    _writeAutosave(autosaveKey, {
+      ts: Date.now(),
+      whatHappened, expected, actual, severity,
+      feedbackType, title, description, priority, browser,
+    })
+  }, [
+    autosaveKey, whatHappened, expected, actual, severity,
+    feedbackType, title, description, priority, browser,
+  ])
+
+  // Escape closes — keyboard convention. Click-outside does NOT
+  // close (per user spec) so a stray click doesn't dump 5 minutes
+  // of typing.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  // ── Drag + resize state ─────────────────────────────────────────────────
+  //
+  // The modal is a fixed-position floating window. The user can:
+  //   - drag it by the title bar to reposition (no overlap clamp;
+  //     bounded by viewport so it never goes fully off-screen)
+  //   - resize from the bottom-right corner (min 360x320, max
+  //     viewport - 32px)
+  //
+  // Both drag and resize use the pointer-event API so trackpad,
+  // mouse, and touch all work. The handlers attach to the WINDOW
+  // (not the modal) so the user can drag fast without losing the
+  // pointer when it moves off the title bar.
+  const _initialPos = (): { x: number; y: number } => {
+    const w = window.innerWidth
+    const h = window.innerHeight
+    // Default to the right side, vertically centred-ish.
+    return {
+      x: Math.max(16, w - 460),
+      y: Math.max(16, Math.round(h * 0.15)),
+    }
+  }
+  const [pos, setPos] = useState(_initialPos)
+  const [size, setSize] = useState({ width: 420, height: 540 })
+  const dragRef = useRef<{ startX: number; startY: number;
+                            originX: number; originY: number } | null>(null)
+  const resizeRef = useRef<{ startX: number; startY: number;
+                              startW: number; startH: number } | null>(null)
+
+  const onDragStart = useCallback((e: React.PointerEvent) => {
+    // Only respond to primary button (left mouse / single touch).
+    if (e.button !== 0 && e.pointerType !== 'touch') return
+    e.preventDefault()
+    dragRef.current = {
+      startX: e.clientX, startY: e.clientY,
+      originX: pos.x, originY: pos.y,
+    }
+    const onMove = (m: PointerEvent) => {
+      if (!dragRef.current) return
+      const dx = m.clientX - dragRef.current.startX
+      const dy = m.clientY - dragRef.current.startY
+      // Keep at least 80px of the title bar inside the viewport so
+      // the user can always grab it back even if they drag past
+      // an edge.
+      const nextX = Math.min(
+        window.innerWidth - 80,
+        Math.max(-(size.width - 80), dragRef.current.originX + dx))
+      const nextY = Math.min(
+        window.innerHeight - 40,
+        Math.max(0, dragRef.current.originY + dy))
+      setPos({ x: nextX, y: nextY })
+    }
+    const onUp = () => {
+      dragRef.current = null
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [pos.x, pos.y, size.width])
+
+  const onResizeStart = useCallback((e: React.PointerEvent) => {
+    if (e.button !== 0 && e.pointerType !== 'touch') return
+    e.preventDefault()
+    e.stopPropagation()
+    resizeRef.current = {
+      startX: e.clientX, startY: e.clientY,
+      startW: size.width, startH: size.height,
+    }
+    const onMove = (m: PointerEvent) => {
+      if (!resizeRef.current) return
+      const dw = m.clientX - resizeRef.current.startX
+      const dh = m.clientY - resizeRef.current.startY
+      setSize({
+        width: Math.min(
+          window.innerWidth - 32,
+          Math.max(360, resizeRef.current.startW + dw)),
+        height: Math.min(
+          window.innerHeight - 32,
+          Math.max(320, resizeRef.current.startH + dh)),
+      })
+    }
+    const onUp = () => {
+      resizeRef.current = null
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [size.width, size.height])
 
   const addFiles = (list: FileList | null) => {
     if (!list) return
@@ -131,6 +339,9 @@ export default function TestSubmissionPanel({
         form.append('actual_result', actual)
         form.append('severity', severity)
         await axios.post('/api/v1/testing/results', form)
+        // May 24 2026 — clear autosave on successful submit so a
+        // follow-up open on the same step starts clean.
+        _clearAutosave(autosaveKey)
         onSubmitted({})
       } else {
         form.append('feedback_type', feedbackType)
@@ -146,6 +357,7 @@ export default function TestSubmissionPanel({
         const res = await axios.post<{
           ai_category: string | null; ai_effort_estimate: string | null
         }>('/api/v1/testing/feedback', form)
+        _clearAutosave(autosaveKey)
         onSubmitted({ categorization: {
           ai_category: res.data.ai_category,
           ai_effort_estimate: res.data.ai_effort_estimate,
@@ -164,26 +376,48 @@ export default function TestSubmissionPanel({
   const accent = mode === 'failure' ? 'text-danger' : 'text-electric'
 
   return (
-    <div className="fixed inset-0 z-[95] flex items-center justify-center
-                    bg-black/60 p-4" role="presentation" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-label={heading}
-        onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md max-h-[88vh] flex flex-col rounded-lg
-                   border border-border bg-navy-800 shadow-2xl"
-      >
-        <header className="flex items-center justify-between gap-3 px-4 py-3
-                           border-b border-border shrink-0">
-          <div className="flex items-center gap-2">
-            <Icon className={`w-4 h-4 ${accent}`} />
-            <h2 className="text-sm font-semibold text-white">{heading}</h2>
-          </div>
-          <button type="button" onClick={onClose} aria-label="Close"
-                  className="text-muted hover:text-white">
-            <X className="w-4 h-4" />
-          </button>
-        </header>
+    // May 24 2026 — non-locking, draggable, resizable floating panel.
+    // No backdrop element (the page behind stays interactive); the
+    // panel itself is fixed-positioned at the user's chosen
+    // coordinates. Pointer events on the panel are isolated by the
+    // panel's own root element — the user can scroll the page
+    // outside the panel by clicking elsewhere.
+    <div
+      role="dialog"
+      aria-label={heading}
+      data-testid="test-submission-panel"
+      style={{
+        position: 'fixed',
+        left:    `${pos.x}px`,
+        top:     `${pos.y}px`,
+        width:   `${size.width}px`,
+        height:  `${size.height}px`,
+        zIndex:  95,
+      }}
+      className="relative flex flex-col rounded-lg
+                 border border-border bg-navy-800 shadow-2xl
+                 overflow-hidden">
+      <header
+        onPointerDown={onDragStart}
+        data-testid="test-submission-drag-handle"
+        className="flex items-center justify-between gap-3 px-4 py-3
+                   border-b border-border shrink-0
+                   cursor-move select-none
+                   bg-navy-900/60">
+        <div className="flex items-center gap-2 min-w-0">
+          <Move className="w-3 h-3 text-muted shrink-0"
+                aria-hidden="true" />
+          <Icon className={`w-4 h-4 ${accent} shrink-0`} />
+          <h2 className="text-sm font-semibold text-white truncate">
+            {heading}
+          </h2>
+        </div>
+        <button type="button" onClick={onClose} aria-label="Close"
+                data-testid="test-submission-close"
+                className="text-muted hover:text-white shrink-0">
+          <X className="w-4 h-4" />
+        </button>
+      </header>
 
         <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
           {step === null && mode === 'feedback' && (
@@ -319,20 +553,45 @@ export default function TestSubmissionPanel({
               </button>
             </>
           ) : (
-            <button
-              type="button"
-              onClick={() => void submit(false)}
-              disabled={busy || !canSubmit}
-              className="flex items-center gap-1.5 px-4 py-1.5 text-xs rounded
-                         font-medium bg-electric text-white hover:bg-blue-500
-                         disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {busy && <Loader2 className="w-3 h-3 animate-spin" />}
-              {mode === 'failure' ? 'Submit Failure Report' : 'Submit Feedback'}
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                disabled={busy}
+                data-testid="test-submission-cancel"
+                className="px-3 py-1.5 text-xs rounded
+                           border border-border text-slate-300
+                           hover:bg-navy-700
+                           disabled:opacity-50 disabled:cursor-not-allowed">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void submit(false)}
+                disabled={busy || !canSubmit}
+                data-testid="test-submission-submit"
+                className="flex items-center gap-1.5 px-4 py-1.5 text-xs rounded
+                           font-medium bg-electric text-white hover:bg-blue-500
+                           disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {busy && <Loader2 className="w-3 h-3 animate-spin" />}
+                {mode === 'failure' ? 'Submit Failure Report' : 'Submit Feedback'}
+              </button>
+            </>
           )}
         </footer>
-      </div>
+
+        {/* Resize handle — bottom-right corner. Pointer-events
+            isolated so a drag here resizes, not moves. */}
+        <div
+          onPointerDown={onResizeStart}
+          data-testid="test-submission-resize-handle"
+          aria-label="Resize"
+          className="absolute right-0 bottom-0 w-4 h-4 cursor-se-resize
+                     flex items-end justify-end pr-1 pb-1
+                     text-muted hover:text-white">
+          <Maximize2 className="w-3 h-3 rotate-90" aria-hidden="true" />
+        </div>
     </div>
   )
 }

@@ -44,6 +44,30 @@ export type QAActionType =
                             // Renders Re-run Audit; INCOMPLETE checks
                             // default to this action_type.
 
+// May 24 2026 — per-check submission classification. The backend
+// attaches these to every item dict (see backend/agents/qa_agent.py
+// _SUBMISSION_CLASSIFICATIONS); the frontend reads them to render
+// the outcome-specific badge.
+export type WarnClass =
+  | 'disclosure_required'
+  | 'non_blocking'
+  | 'blocks'
+
+export type IncompleteClass =
+  | 'blocks_submission'
+  | 'planned_extension'
+
+// The user-visible label the badge renders. Computed server-side
+// from (status, warn_class, incomplete_class).
+export type SubmissionLabel =
+  | 'pass'
+  | 'warn_disclosure'
+  | 'warn_non_blocking'
+  | 'warn_blocking'
+  | 'incomplete_blocking'
+  | 'incomplete_planned'
+  | 'fail_blocking'
+
 export interface QACheck {
   check_id: string
   check: string
@@ -64,6 +88,17 @@ export interface QACheck {
   remediation?: string | null
   action_type?: QAActionType | null
   disclosure_text?: string | null
+
+  // May 24 2026 submission classification — see above. Optional so
+  // a cached pre-May-24 audit row that lacks them still renders
+  // (the panel falls back to the legacy badge in that case).
+  warn_class?: WarnClass | null
+  incomplete_class?: IncompleteClass | null
+  submission_label?: SubmissionLabel | null
+  // Runtime overlay — set when two consecutive runs disagree on
+  // this check's verdict. Frontend renders an orange "requires
+  // human review" badge regardless of submission_label when set.
+  non_deterministic?: boolean | null
 }
 
 // Overall audit verdict. Strictly THREE-tier — INCOMPLETE is a per-
@@ -73,6 +108,27 @@ export interface QACheck {
 // narrowing the type here so call sites (worstVerdict, badge colour
 // lookups) can rely on the 3-tier set without coercion.
 export type OverallVerdict = Exclude<Verdict, 'INCOMPLETE'>
+
+// May 24 2026 — submission readiness state for the QA Audit page
+// banner. Computed server-side from per-check submission_label
+// totals.
+export type SubmissionStatus =
+  | 'ready'                       // 🟢 green — all blocking checks passed
+  | 'ready_with_acknowledgements' // 🟡 amber — disclosures required
+  | 'not_ready'                   // 🔴 red — at least one blocking item
+
+export interface SubmissionCounts {
+  pass: number
+  warn_disclosure: number
+  warn_non_blocking: number
+  warn_blocking: number
+  incomplete_blocking: number
+  incomplete_planned: number
+  fail_blocking: number
+  non_deterministic: number
+  blocking_total: number
+}
+
 
 export interface QAAuditResult {
   sprint?: string
@@ -95,4 +151,10 @@ export interface QAAuditResult {
   // evidence line pointing here — the panel renders this under each such
   // warning/fail item so the reasoning is visible, not just referenced.
   raw_analysis?: string
+
+  // May 24 2026 submission-readiness — optional for back-compat with
+  // cached audits before this contract landed.
+  submission_status?: SubmissionStatus
+  submission_banner?: string
+  submission_counts?: SubmissionCounts
 }

@@ -189,9 +189,16 @@ export default function CouncilDebate() {
     if (state?.handoff) {
       setHandoff(state.handoff)
     }
-    // Mount-only — a later navigation without state must not re-fire.
+    // May 24 2026 (ID 271) — dep on location.state.
+    // The mount-only `[]` deps array meant that when the user was
+    // ALREADY on /council and clicked the Explainer's "Ask the
+    // Council" button, the navigation kept CouncilDebate mounted
+    // and only updated location.state — so the effect never
+    // refired and the prefill never landed. Tying the effect to
+    // location.state makes every cross-screen handoff land its
+    // contextual question.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [location.state])
 
   const handleSubmit = (e?: React.FormEvent) => {
     e?.preventDefault()

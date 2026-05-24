@@ -179,10 +179,23 @@ describe('extractTopPriority', () => {
     expect(extractTopPriority(sections)).toBeNull()
   })
 
-  it('returns null when the section has no numbered list', () => {
+  it('falls back to the first prose line when the section has no numbered list', () => {
+    // May 24 2026 (UAT ID 216) — the arbiter occasionally produces
+    // a section 4 with prose instead of a numbered list. The
+    // previous behaviour was to return null and hide the
+    // TopPriorityCallout entirely; the new fallback surfaces the
+    // first non-empty line so the user still sees a top priority
+    // signal even when the arbiter's formatting drifts.
     const text = `### 4. Priority Areas for Further Investigation
 **Rating:** Strong
 Nothing actionable surfaced.`
+    const { sections } = parseVerdict(text)
+    expect(extractTopPriority(sections)).toBe('Nothing actionable surfaced.')
+  })
+
+  it('returns null when the section body is empty', () => {
+    const text = `### 4. Priority Areas for Further Investigation
+**Rating:** Strong`
     const { sections } = parseVerdict(text)
     expect(extractTopPriority(sections)).toBeNull()
   })

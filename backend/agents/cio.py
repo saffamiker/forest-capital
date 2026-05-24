@@ -389,19 +389,30 @@ class CIO:
         # is logged and yielded as a None report — the council still
         # produces a draft from whatever survived (matching the existing
         # fallback paths each specialist already returns on failure).
+        # May 24 2026 (ID 217) — thread the user's query through to
+        # every specialist. The streaming variant previously omitted
+        # the kwarg, so each specialist defaulted to query="" and
+        # produced a generic report regardless of what the user
+        # asked. Users perceived this as "context bleed" — every
+        # follow-up question seemed to get the same answer.
+        # deliberate() (the synchronous variant) already does this;
+        # this brings the streaming path in line.
         specialist_jobs = [
-            ("equity_analyst", self._equity.analyse, (strategy_results,)),
+            ("equity_analyst", self._equity.analyse,
+             (strategy_results,), {"query": query}),
             ("fixed_income_analyst", self._fi.analyse,
-             (strategy_results, history)),
-            ("risk_manager", self._risk.analyse, (strategy_results,)),
-            ("quant_backtester", self._quant.analyse, (strategy_results,)),
+             (strategy_results, history), {"query": query}),
+            ("risk_manager", self._risk.analyse,
+             (strategy_results,), {"query": query}),
+            ("quant_backtester", self._quant.analyse,
+             (strategy_results,), {"query": query}),
         ]
         reports: dict[str, Any] = {}
         with ThreadPoolExecutor(max_workers=4) as pool:
             future_to_label = {
                 pool.submit(contextvars.copy_context().run,
-                            _run_tagged, label, fn, args): label
-                for label, fn, args in specialist_jobs
+                            _run_tagged, label, fn, args, kwargs): label
+                for label, fn, args, kwargs in specialist_jobs
             }
             for future in as_completed(future_to_label):
                 label = future_to_label[future]
@@ -600,7 +611,27 @@ class CIO:
             default=str,
         )
 
+        # May 24 2026 (ID 217) — every council response must directly
+        # answer the user's question. The previous synthesis prompt
+        # just asked for a generic FINAL RECOMMENDATION, so the
+        # response read disconnected from whatever the user asked.
+        # The query is now surfaced at the TOP of the prompt with an
+        # explicit "answer this question" instruction; the
+        # specialist reports are the evidence base, not the
+        # question.
+        query_line = (
+            f"USER QUESTION: {query.strip()}\n\n"
+            "Answer the user question above directly, using the "
+            "specialist reports and the data below as evidence. "
+            "Anchor every claim to a number from the data. If the "
+            "question is meta or methodology-oriented (peer-reviewer "
+            "anticipation, presentation framing, written-report "
+            "scope), answer in those terms — do not produce a "
+            "generic strategy recommendation when the user asked "
+            "something specific.\n\n"
+        ) if query and query.strip() else ""
         user_message = (
+            f"{query_line}"
             "You have reviewed four specialist reports and received TWO independent "
             "challenges — Gemini (blind spots) and Grok (stress test). "
             "Now produce the FINAL RECOMMENDATION. Required:\n"

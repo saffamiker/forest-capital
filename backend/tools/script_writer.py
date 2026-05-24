@@ -313,7 +313,7 @@ def build_qa_prep_docx(
         ("Is the Deflated Sharpe Ratio calibrated correctly for your sample size?",
          "DSR per Bailey & López de Prado 2012 with n_trials=10 and the "
          "observed return distribution moments (skewness, kurtosis). With "
-         "n=282 monthly observations we exceed the 220-observation power "
+         "the full study period's monthly observations we exceed the 220-observation power "
          "threshold for p < 0.005 at 80% power.",
          None, "HIGH", "Bob"),
         ("How do you avoid p-hacking with this many strategies?",

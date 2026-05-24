@@ -32,6 +32,7 @@ import type { Rubric } from '../components/reportwriter/RubricPanel'
 import CitationReviewPanel from '../components/reportwriter/CitationReviewPanel'
 import VersionHistoryPanel from '../components/reportwriter/VersionHistoryPanel'
 import DraftSelector from '../components/reportwriter/DraftSelector'
+import FloatingSectionNav from '../components/FloatingSectionNav'
 import PipelineGate, {
   useAutoFireStep5And6,
 } from '../components/reportwriter/PipelineGate'
@@ -358,6 +359,14 @@ export default function ReportWriter() {
       setBadge('idle', 'Ready — click Run on Step 1 to start')
     })()
     return () => { cancelled = true }
+    // hydrateFromAudit is declared BELOW this useEffect (a
+    // useCallback at line ~367). Listing it in the deps array
+    // produces a TDZ / use-before-declaration TypeScript error.
+    // The effect intentionally re-runs only when templateId or
+    // the setters change — the hydrate function captures its own
+    // setters via useCallback, so a missing dep doesn't change
+    // behaviour.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [templateId, runStep, setAuditId, setPipelineStartedAt, setBadge])
 
   // Hydrate from a persisted audit row — populate step results from
@@ -659,7 +668,7 @@ export default function ReportWriter() {
   // ── Debounced paper_md save ───────────────────────────────────────────────
   const saveTimerRef = useRef<number | null>(null)
   const queuedMdRef = useRef<string | null>(null)
-  const onPaperMdChange = (next: string) => {
+  const onPaperMdChange = useCallback((next: string) => {
     setPaperMd(next)
     if (!generation) return
     queuedMdRef.current = next
@@ -681,7 +690,7 @@ export default function ReportWriter() {
         setSavingPatch(false)
       }
     }, 1500)
-  }
+  }, [generation])
 
   useEffect(() => () => {
     if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current)
@@ -738,7 +747,7 @@ export default function ReportWriter() {
     const next = paperMd.replace(selectedText, rewritten)
     onPaperMdChange(next)
     setSelectedText('')
-  }, [paperMd, selectedText])
+  }, [paperMd, selectedText, onPaperMdChange])
 
   // ── [BOB] block iteration ─────────────────────────────────────────────────
   // Variant of handleIterate that takes the block content explicitly
@@ -994,7 +1003,11 @@ export default function ReportWriter() {
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="p-4 md:p-6 max-w-screen-2xl mx-auto" data-testid="report-writer-page">
-      <header className="mb-4">
+      <FloatingSectionNav pageKey="report-writer" minSections={2} />
+      <header
+        className="mb-4"
+        data-section-id="report-writer-header"
+        data-section-label="Header">
         <h1 className="text-white font-semibold text-xl flex items-center gap-2">
           <FileText className="w-5 h-5 text-electric-blue" />
           Report Writer
@@ -1046,7 +1059,10 @@ export default function ReportWriter() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <aside className="lg:col-span-1 space-y-4">
+        <aside
+          className="lg:col-span-1 space-y-4"
+          data-section-id="pipeline"
+          data-section-label="Generation Pipeline">
           <PipelineGate
             results={stepResults}
             generating={generating}
@@ -1106,7 +1122,10 @@ export default function ReportWriter() {
           <WordCountSidebar counts={sectionCounts} />
         </aside>
 
-        <main className="lg:col-span-2 space-y-4">
+        <main
+          className="lg:col-span-2 space-y-4"
+          data-section-id="editor"
+          data-section-label="Paper Editor">
           {/* RW4 — stale banner. Renders when a pipeline re-run
               invalidated the current draft. Bob's edits are still
               saved to Version History; the banner directs him to

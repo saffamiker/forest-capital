@@ -101,13 +101,21 @@ class TestStartupWarmHook:
     ingestion manually."""
 
     def test_lifespan_warms_analytics_cache_when_cold(self):
-        # Source-level check — the lifespan hook must reach
-        # trigger_analytics_refresh when the cache row is missing.
+        # Source-level check — the lifespan hook must schedule the
+        # analytics warm task on startup. May 24 2026: switched
+        # from inline trigger_refresh_async to the fully automatic
+        # auto_warm_analytics helper from tools.cache_warm_state,
+        # which retries up to 3 times with exponential backoff so
+        # the cache always warms within ~60s of boot without an
+        # operator action. The assertion looks for the new
+        # function name + the analytics_cache_auto_warm_scheduled
+        # log event the hook emits.
         from main import lifespan
         src = inspect.getsource(lifespan)
-        assert "academic_analytics" in src
-        assert "efficient_frontier" in src
-        assert "trigger_analytics_refresh" in src \
-            or "trigger_refresh_async" in src, (
-                "lifespan must fire the analytics refresh on a cold "
-                "cache so the first request hits a warm row.")
+        assert "auto_warm_analytics" in src, (
+            "lifespan must call auto_warm_analytics on startup so "
+            "the cache always warms within ~60s of boot.")
+        assert "analytics_cache_auto_warm_scheduled" in src, (
+            "lifespan must emit analytics_cache_auto_warm_scheduled "
+            "so the operator can see the schedule fired in Render "
+            "logs.")

@@ -25,9 +25,10 @@ import type { BrandMode } from '../context/BrandContext'
 import { useSession } from '../context/SessionContext'
 import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 import UserManagementPanel from '../components/UserManagementPanel'
+import WarmAnalyticsCacheButton from '../components/admin/WarmAnalyticsCacheButton'
 import { TestResultsSection, TestAdminSections } from '../components/TestRunnerSettings'
 import TeamGate from '../components/TeamGate'
-import { useIsTeamMember, useIsSysadmin } from '../hooks/usePermissions'
+import { useIsTeamMember, useIsSysadmin, useCanAccessTestPanel } from '../hooks/usePermissions'
 
 interface SettingsSectionProps {
   id: string
@@ -456,6 +457,11 @@ export default function Settings() {
   const isTeam = useIsTeamMember()
   // The Test Administration and Users sections are sysadmin-only.
   const isSysadmin = useIsSysadmin()
+  // May 24 2026 — Test Administration is `access_test_panel`-gated
+  // (a narrow permission carried by team_member + sysadmin; the
+  // underlying API routes are still view_admin-gated which only
+  // sysadmin has).
+  const canAccessTestPanel = useCanAccessTestPanel()
 
   // Deep-link support — /settings#academic-documents scrolls to that section.
   useEffect(() => {
@@ -510,6 +516,20 @@ export default function Settings() {
         </SettingsSection>
       )}
 
+      {/* Admin — sysadmin-only. Operator controls that previously required
+          the Render web shell. Currently houses the Warm Analytics Cache
+          trigger; future operator actions (force pipeline rerun, cache
+          invalidate) belong in this section too. */}
+      {isSysadmin && (
+        <SettingsSection
+          id="admin"
+          title="Admin"
+          description="Operator controls — warm caches, trigger pipelines, manage subsystem state."
+        >
+          <WarmAnalyticsCacheButton />
+        </SettingsSection>
+      )}
+
       {/* The Statistical Audit moved to the QA tab (a two-section quality
           hub alongside the methodology review) — it is no longer here. */}
 
@@ -556,7 +576,16 @@ export default function Settings() {
         </SettingsSection>
       )}
 
-      {isSysadmin && (
+      {/* May 24 2026 — ID 275: relaxed from sysadmin-only to
+          team_member via the new `access_test_panel` permission.
+          The team_member role preset carries access_test_panel
+          (Molly can open the panel) but does NOT carry view_admin
+          (the three admin-only API routes — failures, feedback,
+          issue-tracker — still 403 a team_member key). So Molly
+          gets the panel; clicking through to a sysadmin-only data
+          table renders the empty state with the underlying 403.
+          Resolution actions remain require_sysadmin-gated. */}
+      {canAccessTestPanel && (
         <SettingsSection
           id="test-administration"
           title="Test Administration"

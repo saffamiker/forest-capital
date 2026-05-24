@@ -638,7 +638,7 @@ MOCK_ADVISOR_ANALYSE = {
         }
     ],
     "potential_issues": [
-        "Only 282 monthly observations may be borderline for tier-1 power on regime-conditional tests.",
+        "Monthly observations are at the low end for tier-1 power on regime-conditional tests — verify n_months against the live study period before reporting subperiod p-values.",
     ],
     "verified_sources": [
         {"title": "AQR Research", "url": "https://www.aqr.com/Insights/Research/Journal-Article/Stock-Bond-Correlations", "verified": True}

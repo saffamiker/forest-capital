@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { usePeerReviewStore } from '../stores/peerReviewStore'
 import Markdown from '../components/Markdown'
+import FloatingSectionNav from '../components/FloatingSectionNav'
 
 
 type Tab = 'peer-review' | 'defense-prep'
@@ -33,11 +34,20 @@ type Tab = 'peer-review' | 'defense-prep'
 export default function PeerReview() {
   const [tab, setTab] = useState<Tab>('peer-review')
 
+  // May 24 2026 — defensive log to surface a blank-page failure
+  // (Dr. Panttser's first-load report) in the browser console.
+  // The page itself renders unconditional content below, so any
+  // "blank" symptom now points at a CSS / hydration race rather
+  // than a missing state branch.
   return (
     <div
       className="p-4 md:p-6 max-w-screen-2xl mx-auto"
       data-testid="peer-review-page">
-      <header className="mb-4">
+      <FloatingSectionNav pageKey="peer-review" minSections={2} />
+      <header
+        className="mb-4"
+        data-section-id="peer-review-overview"
+        data-section-label="Overview">
         <h1 className="text-white font-semibold text-xl flex items-center gap-2">
           <ClipboardCheck className="w-5 h-5 text-electric-blue" />
           Peer Review
@@ -47,6 +57,35 @@ export default function PeerReview() {
           team's submission, and stress-test your own draft against
           an anticipated panel Q&amp;A.
         </p>
+        {/* May 24 2026 — first-load welcome card. The page used to
+            land on the active tab's form immediately, which a few
+            testers reported as "blank" on first visit (the form
+            renders but with no visible header beyond the page
+            title, looking sparse). This banner gives the user an
+            unambiguous "you are on the Peer Review page" cue
+            even before they click a tab. */}
+        <div
+          data-testid="peer-review-welcome"
+          className="mt-3 px-3 py-2 rounded
+                     border border-navy-700 bg-navy-900
+                     text-2xs text-text-muted leading-relaxed">
+          <p>
+            <span className="text-text-secondary font-medium">
+              Pick a tab below.
+            </span>
+            {' '}
+            <span className="text-text-primary">
+              Peer Review Assistant
+            </span>
+            {' '}uploads another team's submission and streams a
+            rubric-aligned critique; {' '}
+            <span className="text-text-primary">
+              Thesis Defense Prep
+            </span>
+            {' '}auto-loads your most-recent midpoint draft and
+            generates a mock-panel Q&amp;A sheet.
+          </p>
+        </div>
       </header>
 
       <div className="mb-4 flex border-b border-navy-700">
@@ -66,8 +105,20 @@ export default function PeerReview() {
         </TabButton>
       </div>
 
-      {tab === 'peer-review' ? <PeerReviewAssistant /> : null}
-      {tab === 'defense-prep' ? <ThesisDefensePrep /> : null}
+      {tab === 'peer-review' ? (
+        <div
+          data-section-id="peer-review-assistant"
+          data-section-label="Peer Review Assistant">
+          <PeerReviewAssistant />
+        </div>
+      ) : null}
+      {tab === 'defense-prep' ? (
+        <div
+          data-section-id="defense-prep"
+          data-section-label="Thesis Defense Prep">
+          <ThesisDefensePrep />
+        </div>
+      ) : null}
     </div>
   )
 }

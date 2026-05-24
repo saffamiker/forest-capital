@@ -412,6 +412,61 @@ async def get_generation(generation_id: int) -> dict[str, Any] | None:
         return None
 
 
+async def delete_generation(generation_id: int) -> bool:
+    """Hard-deletes a generation and every dependent row.
+
+    May 24 2026 P5 — the Draft Selector dropdown's trash icon
+    calls this. Removes report_generations + all dependent
+    report_paper_versions rows + the pipeline-audit row that
+    pointed at this generation. The citations_cache row is left
+    alone (it's keyed on the concept, not the generation, and
+    may be reused by other drafts).
+
+    Returns True when the generation row was removed, False on
+    any DB error or when the row did not exist.
+    """
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return False
+        async with AsyncSessionLocal() as s:
+            # Drop dependents first. report_paper_versions has no FK
+            # cascade in older deployments, so we delete it explicitly.
+            # The pipeline audit row is the same; both tables tolerate
+            # NULL writes if the FK is set up that way.
+            try:
+                await s.execute(text(
+                    "DELETE FROM report_paper_versions "
+                    "WHERE generation_id = :g"
+                ), {"g": int(generation_id)})
+            except Exception:
+                # The table may not exist in older test environments.
+                pass
+            try:
+                await s.execute(text(
+                    "DELETE FROM pipeline_audits "
+                    "WHERE generation_id = :g"
+                ), {"g": int(generation_id)})
+            except Exception:
+                pass
+            r = await s.execute(text(
+                "DELETE FROM report_generations "
+                "WHERE id = :g"
+            ), {"g": int(generation_id)})
+            await s.commit()
+            ok = (r.rowcount or 0) > 0
+            if ok:
+                log.info("report_generation_deleted",
+                         generation_id=generation_id)
+            return ok
+    except Exception as exc:  # noqa: BLE001
+        log.warning("delete_report_generation_failed",
+                    error=str(exc),
+                    generation_id=generation_id)
+        return False
+
+
 async def list_generations_for_user(
     email: str,
     limit: int = 20,
