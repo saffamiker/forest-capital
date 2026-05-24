@@ -9,7 +9,7 @@
  * sysadmin path.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 
 vi.mock('axios')
@@ -17,6 +17,7 @@ vi.mock('axios')
 import axios from 'axios'
 import { AuthContext } from '../App'
 import MacroResearchPanel from '../components/MacroResearchPanel'
+import { useMacroDigestStore } from '../stores/macroDigestStore'
 
 const mockedAxios = vi.mocked(axios, true)
 
@@ -93,7 +94,22 @@ function renderWith(
 
 beforeEach(() => {
   vi.clearAllMocks()
+  // Reset the macroDigestStore so a cached digest from a previous
+  // test does not satisfy the freshness check and skip this
+  // test's fetch.
+  useMacroDigestStore.getState()._reset()
 })
+
+
+// Helper — clicks the expand toggle so tests that assert on the
+// FULL-digest view (summary paragraph, every signal, source links,
+// full regime-read section) reach the expanded panel. The May 24
+// 2026 redesign made the panel collapsed-by-default, so most of
+// the original assertions need this click first.
+async function _expand() {
+  const toggle = await screen.findByTestId('macro-expand-toggle')
+  fireEvent.click(toggle)
+}
 
 describe('MacroResearchPanel', () => {
   it('renders the loading state initially', () => {
@@ -105,6 +121,9 @@ describe('MacroResearchPanel', () => {
     renderWith([], () => Promise.resolve({
       data: { digest: null, last_completed_at: null },
     }))
+    // May 24 2026 redesign — panel is collapsed by default. Empty
+    // state renders inside the expanded body so expand first.
+    await _expand()
     await waitFor(() =>
       expect(screen.getByText(/no completed digest yet/i)).toBeInTheDocument())
   })
@@ -114,15 +133,18 @@ describe('MacroResearchPanel', () => {
     renderWith([], () => Promise.resolve({
       data: { digest, last_completed_at: digest.generated_at },
     }))
+    // Regime read renders in BOTH the condensed AND expanded views —
+    // it is the first thing the dashboard surfaces.
     await waitFor(() =>
-      expect(screen.getByText(/fed paused/i)).toBeInTheDocument())
-    // Both signals' text bodies surface.
+      expect(screen.getByText(/Mildly risk-on/i)).toBeInTheDocument())
+    // Expand to reveal the full summary paragraph, signals, and
+    // implications (P2 redesign — these live inside the expanded
+    // body only).
+    await _expand()
+    expect(screen.getByText(/fed paused/i)).toBeInTheDocument()
     expect(screen.getByText(/Fed holds at 5\.25/)).toBeInTheDocument()
     expect(screen.getByText(/CPI 3\.1%/)).toBeInTheDocument()
-    // Implication lines render alongside the signals.
     expect(screen.getByText(/IG duration tailwind/i)).toBeInTheDocument()
-    // Regime read paragraph.
-    expect(screen.getByText(/Mildly risk-on/i)).toBeInTheDocument()
   })
 
   it('renders source links for each signal', async () => {
@@ -130,6 +152,8 @@ describe('MacroResearchPanel', () => {
     renderWith([], () => Promise.resolve({
       data: { digest, last_completed_at: digest.generated_at },
     }))
+    // Source links live in the expanded body only.
+    await _expand()
     await waitFor(() => {
       const links = screen.getAllByRole('link')
       // Two signals → two source links.
@@ -147,12 +171,16 @@ describe('MacroResearchPanel', () => {
     renderWith([], () => Promise.resolve({
       data: { digest: stale, last_completed_at: stale.generated_at },
     }))
+    // The stale badge renders in the collapsed header — no expand
+    // needed.
     await waitFor(() => expect(screen.getByText(/stale/i)).toBeInTheDocument())
   })
 
   it('renders an error message when the fetch fails but does not crash',
     async () => {
       renderWith([], () => Promise.reject(new Error('500')))
+      // Error + empty-state both live in the expanded body.
+      await _expand()
       await waitFor(() =>
         expect(screen.getByText(/could not load/i)).toBeInTheDocument())
       // Even on a fetch error the panel still renders its empty-state
@@ -165,8 +193,10 @@ describe('MacroResearchPanel', () => {
     renderWith([], () => Promise.resolve({
       data: { digest: sampleDigest(), last_completed_at: null },
     }))
+    // Wait for the digest to land — regime read is condensed-view
+    // visible without expanding.
     await waitFor(() =>
-      expect(screen.getByText(/fed paused/i)).toBeInTheDocument())
+      expect(screen.getByText(/Mildly risk-on/i)).toBeInTheDocument())
     expect(screen.queryByRole('button', { name: /run now/i })).toBeNull()
   })
 

@@ -60,10 +60,15 @@ export type { EfficientFrontierData } from '../types/api'
 
 
 // Maximum warming retries before giving up. The backend's
-// retry_after_ms is 10s by default; 3 retries = ~30s of waiting,
-// enough for a typical cold-cache warmup to complete (the
-// frontier sweep is 10-30s on Render shared CPU).
-const MAX_WARMING_RETRIES = 3
+// retry_after_ms is 10s by default. Raised from 3 → 8 on
+// May 24 2026 (P0 hotfix): the academic_analytics refresh runs
+// six analytics reductions PLUS factor_loadings OLS plus the
+// 100-point SLSQP frontier sweep — on a cold Render deploy the
+// combined first-warm can run 40-60s. 3 retries (30s budget) was
+// timing out before the cache row landed. 8 retries gives an
+// 80s budget; the frontend renders "computing… (~60s)" while
+// the cache populates.
+const MAX_WARMING_RETRIES = 8
 
 
 interface DashboardDataStore {

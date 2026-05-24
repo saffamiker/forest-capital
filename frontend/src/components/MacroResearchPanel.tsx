@@ -3,22 +3,18 @@
  * the council and academic_review prompts inject as a CURRENT MACRO
  * CONDITIONS block. FEATURE 2 (May 21 2026), Commit 4/5.
  *
- * Two reasons the panel sits on the dashboard:
- *  1. Transparency — the user can see exactly what current-conditions
- *     context the agents are reasoning against.
- *  2. Verification — every key signal carries the source URL the
- *     web_search tool returned. The user (and the FNA 670 panel) can
- *     click through and verify the citation.
- *
- * STATES:
- *  - loading                — initial fetch in flight
- *  - empty (no digest yet)  — cold deploy state; the startup hook will
- *                             produce a digest in minutes
- *  - failed (latest=null
- *           but had a run)  — the last research run errored; "Try
- *                             again" surfaced to sysadmins only
- *  - normal                 — digest summary + signals + regime
- *                             implication + generated_at timestamp
+ * May 24 2026 — P1 + P2 hotfix:
+ *   P1 — digest state moved into macroDigestStore (Zustand) with a
+ *        5-minute stale-while-revalidate window. The previous panel
+ *        held the digest in useState, so every dashboard mount fired
+ *        a fresh GET. Now the cached digest renders instantly on
+ *        re-mount and a background refresh only runs past the
+ *        freshness window.
+ *   P2 — panel is CONDENSED BY DEFAULT. The collapsed view shows
+ *        the regime read line + the top 2 key signals as a single
+ *        compact card so the dashboard header reads cleanly. An
+ *        expand toggle reveals the full key-signals list +
+ *        implications + source links.
  *
  * The "Run now" button is sysadmin-only (TeamGate with permission
  * "manage_users") because it bypasses the 24h freshness gate and
@@ -26,33 +22,10 @@
  * latest digest but not the trigger.
  */
 import { useCallback, useEffect, useState } from 'react'
-import axios from 'axios'
 import { Newspaper, RefreshCw, ExternalLink, ChevronDown } from 'lucide-react'
 import TeamGate from './TeamGate'
+import { useMacroDigestStore, type MacroSignal } from '../stores/macroDigestStore'
 
-interface MacroSignal {
-  category:    string
-  signal:      string
-  implication: string
-  source_url:  string
-}
-
-interface MacroDigest {
-  id:                 number
-  generated_at:       string | null
-  triggered_by:       string
-  summary_text:       string
-  regime_implication: string
-  key_signals:        MacroSignal[]
-  citation_urls:      string[]
-  model:              string | null
-  metadata:           Record<string, unknown>
-}
-
-interface LatestResponse {
-  digest:            MacroDigest | null
-  last_completed_at: string | null
-}
 
 const CATEGORY_LABELS: Record<string, string> = {
   monetary_policy: 'Monetary Policy',
@@ -88,80 +61,31 @@ function ageHours(iso: string | null | undefined): number | null {
 
 
 export default function MacroResearchPanel() {
-  const [data, setData] = useState<LatestResponse | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  const [triggering, setTriggering] = useState(false)
-  const [expanded, setExpanded] = useState(true)
+  // Collapsed by default per the P2 spec — Dr. Panttser sees a
+  // compact summary card, not the full digest.
+  const [expanded, setExpanded] = useState(false)
 
-  const refresh = useCallback(async () => {
-    try {
-      setError(null)
-      const r = await axios.get<LatestResponse>('/api/v1/research/latest')
-      setData(r.data)
-    } catch (exc) {
-      setError('Could not load the macro digest.')
-      // Leave whatever `data` was — a transient fetch failure should
-      // not blank the dashboard.
-    } finally {
-      setLoading(false)
-    }
-  }, [])
+  const latest = useMacroDigestStore((s) => s.latest)
+  const loading = useMacroDigestStore((s) => s.loading)
+  const error = useMacroDigestStore((s) => s.error)
+  const triggering = useMacroDigestStore((s) => s.triggeringRunNow)
+  const load = useMacroDigestStore((s) => s.load)
+  const runNow = useMacroDigestStore((s) => s.runNow)
 
+  // Stale-while-revalidate on every mount. load() short-circuits
+  // when the cached entry is under the freshness window so this
+  // hits the network at most once per 5 minutes regardless of how
+  // many times the dashboard mounts.
   useEffect(() => {
-    void refresh()
-  }, [refresh])
+    void load()
+  }, [load])
 
-  const runNow = useCallback(async () => {
-    setTriggering(true)
-    setError(null)
-    // Capture the timestamp BEFORE the trigger so we can detect when
-    // the new run has landed (a fresh timestamp replaces the old).
-    // The previous implementation chained a second axios.get inside
-    // the poll's conditional and compared against `data` which the
-    // earlier refresh() inside the same call had already mutated —
-    // racy and emitted two GETs per poll. The capture-up-front +
-    // single-GET-per-poll pattern below is deterministic.
-    const baselineTs = data?.last_completed_at ?? null
-    try {
-      await axios.post('/api/v1/research/run')
-    } catch (exc) {
-      setError('Could not start a research run.')
-      setTriggering(false)
-      return
-    }
-    setTriggering(false)
-    // Poll for completion. The model call takes 30-90s; we poll five
-    // times at 20s intervals (100s total cap) before giving up the
-    // "fresh result will appear" promise. The first poll fires after
-    // a 20s delay so we are not racing the trigger.
-    let attempts = 0
-    const MAX_ATTEMPTS = 5
-    const POLL_INTERVAL_MS = 20000
-    const poll = async () => {
-      attempts += 1
-      try {
-        const r = await axios.get<LatestResponse>('/api/v1/research/latest')
-        setData(r.data)
-        // A fresh timestamp on the latest digest means the new run
-        // landed — stop polling.
-        if (r.data.last_completed_at
-            && r.data.last_completed_at !== baselineTs) {
-          return
-        }
-      } catch {
-        // Transient fetch failure during polling — keep trying.
-      }
-      if (attempts < MAX_ATTEMPTS) {
-        setTimeout(() => void poll(), POLL_INTERVAL_MS)
-      }
-    }
-    setTimeout(() => void poll(), POLL_INTERVAL_MS)
-  }, [data?.last_completed_at])
+  const onRunNow = useCallback(() => { void runNow() }, [runNow])
 
-  if (loading) {
+  if (loading && !latest) {
     return (
-      <div className="rounded-lg border border-border bg-navy-800 p-4">
+      <div className="rounded-lg border border-border bg-navy-800 p-4"
+           data-testid="macro-research-panel">
         <div className="flex items-center gap-2 text-sm text-muted">
           <Newspaper className="w-4 h-4 animate-pulse" />
           Loading current macro conditions…
@@ -170,21 +94,27 @@ export default function MacroResearchPanel() {
     )
   }
 
-  const digest = data?.digest ?? null
+  const digest = latest?.digest ?? null
   const ageH = ageHours(digest?.generated_at)
   const stale = ageH !== null && ageH > 24
+  // Top 2 signals are surfaced inline in the collapsed view so
+  // Dr. Panttser sees the most salient signals without expanding.
+  // The signals are already ranked by the research engine
+  // (high-priority first).
+  const topSignals: MacroSignal[] = (digest?.key_signals ?? []).slice(0, 2)
 
   return (
     <div className="rounded-lg border border-border bg-navy-800 overflow-hidden"
-         data-tour="macro-research-panel">
+         data-tour="macro-research-panel"
+         data-testid="macro-research-panel">
       <div className="flex items-start justify-between gap-3 px-4 py-3
                       border-b border-border">
         <button
           type="button"
           onClick={() => setExpanded((v) => !v)}
-          className="flex items-center gap-2 text-left flex-1 min-h-[36px]"
+          data-testid="macro-expand-toggle"
           aria-expanded={expanded}
-        >
+          className="flex items-center gap-2 text-left flex-1 min-h-[36px]">
           <Newspaper className="w-4 h-4 text-electric shrink-0" />
           <span className="text-sm font-semibold text-white">
             Current Macro Conditions
@@ -204,7 +134,7 @@ export default function MacroResearchPanel() {
         <TeamGate permission="manage_users" showDisabled={false}>
           <button
             type="button"
-            onClick={(e) => { e.stopPropagation(); void runNow() }}
+            onClick={(e) => { e.stopPropagation(); onRunNow() }}
             disabled={triggering}
             className="text-xs px-2.5 py-1.5 rounded border border-electric/30
                        bg-electric/10 text-electric hover:bg-electric/20
@@ -218,8 +148,57 @@ export default function MacroResearchPanel() {
         </TeamGate>
       </div>
 
+      {/* CONDENSED VIEW — always rendered when there's a digest.
+          Shows regime read + top 2 signals inline so the dashboard
+          header reads cleanly. The full key-signals list + every
+          implication + source link is behind the expand toggle. */}
+      {!expanded && digest && (
+        <div data-testid="macro-condensed" className="px-4 py-3 space-y-2">
+          {digest.regime_implication && (
+            <p className="text-xs text-slate-200 leading-relaxed">
+              <span className="text-2xs uppercase tracking-wider text-muted
+                               mr-1.5">
+                Regime
+              </span>
+              {digest.regime_implication}
+            </p>
+          )}
+          {topSignals.length > 0 && (
+            <ul className="space-y-1">
+              {topSignals.map((sig, i) => (
+                <li key={i}
+                    className="text-xs text-slate-300 leading-snug
+                               flex items-baseline gap-1.5">
+                  <span className="text-[10px] uppercase tracking-wider
+                                   text-muted px-1.5 py-0.5 rounded
+                                   bg-navy-900 border border-border
+                                   shrink-0">
+                    {CATEGORY_LABELS[sig.category] ?? sig.category}
+                  </span>
+                  <span className="line-clamp-1">{sig.signal}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {digest.key_signals.length > topSignals.length && (
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              data-testid="macro-show-all"
+              className="text-2xs text-electric hover:underline">
+              + {digest.key_signals.length - topSignals.length} more signal
+              {digest.key_signals.length - topSignals.length === 1 ? '' : 's'}
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* EXPANDED VIEW — the original full-digest render. Reached via
+          the expand toggle. Includes the long summary paragraph,
+          every key signal with its implication and source URL, and
+          the regime-read paragraph. */}
       {expanded && (
-        <div className="px-4 py-3 space-y-3">
+        <div className="px-4 py-3 space-y-3" data-testid="macro-expanded">
           {error && (
             <p className="text-xs text-warning">{error}</p>
           )}
