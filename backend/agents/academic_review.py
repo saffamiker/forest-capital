@@ -928,15 +928,30 @@ def _verdict_has_section_5(text: str, script_review: bool) -> bool:
     True when the verdict carries the Section 5 heading the active rubric
     requires. Both rubrics end with a Section 5 — the written rubric
     calls it "Overall Academic Readiness" and the script rubric "Overall
-    Delivery Readiness". We check the heading number AND the rubric-
-    specific title so a verdict that fakes a Section 5 with an
-    off-rubric title still trips the fallback.
+    Delivery Readiness".
+
+    UAT 2026-05-24 (#53/#59) — the prior check was
+    `expected_title.lower() in text.lower()` which searched the WHOLE
+    verdict text for the title. The arbiter sometimes wrote section 5
+    with an off-rubric heading (e.g. "Overall Readiness Assessment")
+    AND mentioned "Overall Academic Readiness" elsewhere in the body
+    of a different section — the loose check passed, the fallback
+    didn't fire, and the user saw a section 5 with the wrong title or
+    no rating badge. The tightened check requires the rubric-correct
+    title to appear ON the `### 5.` heading line itself.
     """
-    if "### 5." not in text:
-        return False
+    import re
     expected_title = ("Overall Delivery Readiness" if script_review
                       else "Overall Academic Readiness")
-    return expected_title.lower() in text.lower()
+    # `### 5.` heading line whose text matches the rubric-correct
+    # title. Case-insensitive, multiline. The pattern is anchored to
+    # line start so a `### 5. ` literal embedded mid-sentence in
+    # someone's prose body never matches.
+    pattern = re.compile(
+        r"^\s*###\s*5\.\s*" + re.escape(expected_title),
+        re.IGNORECASE | re.MULTILINE,
+    )
+    return bool(pattern.search(text))
 
 
 def _assemble_section_5_fallback(
@@ -944,21 +959,53 @@ def _assemble_section_5_fallback(
 ) -> str:
     """
     Defence-in-depth: when the harness returned a verdict without
-    Section 5, append a substantive fallback so the rendered output
-    always carries it. The fallback aggregates the four other section
-    ratings into a balanced overall paragraph rather than emitting a
-    placeholder — UAT #128/#125 root cause was Section 5 truncation;
-    the fallback guarantees Section 5 always renders even if the model
-    fails to write one.
+    Section 5, append (or repair) a substantive fallback so the
+    rendered output always carries the correctly-titled section.
+    UAT #128/#125 root cause was Section 5 truncation; UAT #53/#59
+    root cause was Section 5 with a wrong title slipping past the
+    detector.
 
     The fallback rating is derived from the present sections:
       - Any "Needs Work" → "Needs Work"
       - Otherwise any "Developing" → "Developing"  (or "Needs Work"
         for the script-review rating scale which uses Incomplete)
       - Otherwise "Strong"
+
+    UAT 2026-05-24 (#53/#59) — when the model wrote a Section 5
+    with an off-rubric title (e.g. `### 5. Overall Readiness
+    Assessment` instead of `### 5. Overall Academic Readiness`),
+    the prior fallback APPENDED a fresh section 5 alongside the
+    model's wrong-titled one — the user saw two Section 5s. Now we
+    REPLACE the wrong-titled heading in place when one exists,
+    preserving the model's body content underneath it; only when
+    there's no `### 5.` heading at all do we append a freshly
+    assembled section.
     """
     import re
-    # Collect every "**Rating:** X" line that DOES appear.
+
+    title = ("Overall Delivery Readiness" if script_review
+             else "Overall Academic Readiness")
+
+    # ── Case 1: a `### 5.` heading already exists with the WRONG
+    # title. Rewrite the heading line to the rubric-correct title
+    # and preserve the body the model already wrote. The detector
+    # (`_verdict_has_section_5`) requires the title to match
+    # exactly on the heading line, so this branch only fires when
+    # the heading is present but mistitled.
+    wrong_heading = re.compile(
+        r"^(\s*###\s*5\.\s*)(.+)$",
+        re.MULTILINE,
+    )
+    if wrong_heading.search(text):
+        return wrong_heading.sub(
+            lambda m: f"{m.group(1)}{title}",
+            text,
+            count=1,
+        )
+
+    # ── Case 2: no `### 5.` heading at all — assemble + append a
+    # full fallback so the rendered output always carries five
+    # sections. Rating derived from the four present sections.
     ratings = re.findall(
         r"\*\*Rating:\*\*\s*(Strong|Developing|Needs Work|Incomplete)",
         text, re.IGNORECASE)
@@ -979,8 +1026,6 @@ def _assemble_section_5_fallback(
         else:
             rating = "Strong"
 
-    title = ("Overall Delivery Readiness" if script_review
-             else "Overall Academic Readiness")
     n_peers = len(peer_responses)
     return (
         f"{text.rstrip()}\n\n"
