@@ -152,6 +152,19 @@ export const useCitationReviewStore = create<CitationReviewState>((set, get) => 
   ..._initial,
 
   load: async (generationId, opts = {}) => {
+    // Defensive ID coercion (May 24 2026) — see lib/generationId.ts.
+    // A malformed generation_id (the "3:1" colon-separated composite
+    // observed in production) would build /api/v1/citations/3:1 and
+    // 422 / 500 at the backend. The store accepts only positive
+    // integers; anything else short-circuits without hitting the
+    // network. The store's typed API still says `number`, but a
+    // stringified pair (TypeScript can't catch every cast site)
+    // would otherwise reach the URL builder.
+    const safeId = Math.trunc(Number(generationId))
+    if (!Number.isFinite(safeId) || safeId <= 0) {
+      return
+    }
+    generationId = safeId
     const { force = false } = opts
     const now = Date.now()
     const lastAt = get().lastFetchedAt[generationId]

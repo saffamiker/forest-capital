@@ -41,6 +41,7 @@ import {
   extractBobBlocks, tokenize,
   SECTION_BUDGETS, countWords, wordCountStatus,
 } from '../lib/bobBlocks'
+import { safeGenerationId, generationUrl } from '../lib/generationId'
 import { useReportWriterStore } from '../stores/reportWriterStore'
 
 interface Template {
@@ -279,8 +280,10 @@ export default function ReportWriter() {
   const _invalidateDraftAndRun = useCallback(async (n: number) => {
     if (generation?.id) {
       try {
+        const url = generationUrl(generation.id, '/versions')
+        if (!url) { return }
         await axios.post(
-          `/api/v1/reports/generations/${generation.id}/versions`,
+          url,
           {
             paper_md: paperMd,
             label: `Auto-save before re-running Step ${n}`,
@@ -402,10 +405,13 @@ export default function ReportWriter() {
     }
     if (paperFromServer) {
       setPaperMd(paperFromServer)
-      if (audit.generation_id) {
+      const auditGenUrl = generationUrl(audit.generation_id)
+      if (auditGenUrl) {
         // Pull the generation row so the editor knows flag_count etc.
+        // safeGenerationId blocks colon-format / NaN values that
+        // would otherwise reach the backend as 422/500 noise.
         axios.get<GenerationResponse & { citations?: Record<string, unknown> }>(
-          `/api/v1/reports/generations/${audit.generation_id}`)
+          auditGenUrl)
           .then((r) => setGeneration(r.data))
           .catch(() => { /* best-effort */ })
       }
@@ -420,10 +426,16 @@ export default function ReportWriter() {
     // Steps 3 / 4 carry their own payloads through the audit row
     // and don't need this — only Step 2's data lives in a separate
     // table.
-    if (audit.generation_id
+    const auditCitationsGenId = safeGenerationId(audit.generation_id)
+    if (auditCitationsGenId !== null
         && restored[2]
         && (restored[2].status === 'complete'
             || restored[2].status === 'warning')) {
+      // safeGenerationId() blocks the "3:1" composite-ID format the
+      // user observed in production (May 24 2026). If the audit row
+      // carries a malformed generation_id, the citations restore
+      // request is suppressed entirely rather than fired as a doomed
+      // 422 with no useful frontend handling.
       axios.get<{ citations: Array<{
         concept_id: string
         verification_status: string
@@ -431,7 +443,7 @@ export default function ReportWriter() {
         search_query_used: string | null
         author: string | null
         year: string | null
-      }> }>(`/api/v1/citations/${audit.generation_id}`)
+      }> }>(`/api/v1/citations/${auditCitationsGenId}`)
         .then((r) => {
           const rows = r.data.citations || []
           if (rows.length === 0) return
@@ -539,9 +551,13 @@ export default function ReportWriter() {
     }
     try {
       setError(null)
+      const draftUrl = generationUrl(draftId)
+      if (!draftUrl) {
+        throw new Error(`Invalid draft id: ${draftId}`)
+      }
       const res = await axios.get<GenerationResponse & {
         citations?: Record<string, unknown>
-      }>(`/api/v1/reports/generations/${draftId}`)
+      }>(draftUrl)
       const data = res.data
       setGeneration(data)
       setPaperMd(data.paper_md || '')
@@ -680,8 +696,10 @@ export default function ReportWriter() {
       if (queued === null) return
       setSavingPatch(true)
       try {
+        const url = generationUrl(generation.id, '/paper-md')
+        if (!url) { return }
         const res = await axios.patch<GenerationResponse>(
-          `/api/v1/reports/generations/${generation.id}/paper-md`,
+          url,
           { paper_md: queued })
         setGeneration((g) => g ? { ...g, ...res.data } : g)
       } catch {
@@ -701,8 +719,10 @@ export default function ReportWriter() {
     marker: string, replacement: string,
   ): Promise<void> => {
     if (!generation) return
+    const url = generationUrl(generation.id, '/resolve-bob')
+    if (!url) { return }
     const res = await axios.post<GenerationResponse>(
-      `/api/v1/reports/generations/${generation.id}/resolve-bob`,
+      url,
       { marker, replacement })
     setGeneration((g) => g ? { ...g, ...res.data } : g)
     setPaperMd(res.data.paper_md || paperMd)
@@ -718,8 +738,10 @@ export default function ReportWriter() {
     marker: string,
   ): Promise<void> => {
     if (!generation) return
+    const url = generationUrl(generation.id, '/resolve-bob')
+    if (!url) { return }
     const res = await axios.post<GenerationResponse>(
-      `/api/v1/reports/generations/${generation.id}/resolve-bob`,
+      url,
       { marker, replacement: '' })
     setGeneration((g) => g ? { ...g, ...res.data } : g)
     setPaperMd(res.data.paper_md || paperMd)
@@ -731,13 +753,15 @@ export default function ReportWriter() {
     instruction?: string,
   ) => {
     if (!generation) throw new Error('No generation in progress.')
+    const url = generationUrl(generation.id, '/iterate')
+    if (!url) throw new Error(`Invalid generation id: ${generation.id}`)
     const res = await axios.post<{
       original: string; rewritten: string;
       word_delta: number;
       new_unverified_numbers: number[];
       new_unverified_citations: string[];
     }>(
-      `/api/v1/reports/generations/${generation.id}/iterate`,
+      url,
       { action, selection: selectedText, instruction })
     return res.data
   }, [generation, selectedText])
@@ -759,13 +783,15 @@ export default function ReportWriter() {
     action: 'rephrase' | 'expand', selection: string,
   ) => {
     if (!generation) throw new Error('No generation in progress.')
+    const url = generationUrl(generation.id, '/iterate')
+    if (!url) throw new Error(`Invalid generation id: ${generation.id}`)
     const res = await axios.post<{
       original: string; rewritten: string;
       word_delta: number;
       new_unverified_numbers: number[];
       new_unverified_citations: string[];
     }>(
-      `/api/v1/reports/generations/${generation.id}/iterate`,
+      url,
       { action, selection })
     return res.data
   }, [generation])
@@ -775,8 +801,9 @@ export default function ReportWriter() {
     if (!generation) return
     setRunningCheck(true)
     try {
-      const res = await axios.post<GenerationResponse & { passed: boolean }>(
-        `/api/v1/reports/generations/${generation.id}/final-check`)
+      const url = generationUrl(generation.id, '/final-check')
+      if (!url) { return }
+      const res = await axios.post<GenerationResponse & { passed: boolean }>(url)
       setGeneration((g) => g ? { ...g, ...res.data } : g)
     } catch (err) {
       const msg = axios.isAxiosError(err)
@@ -802,12 +829,13 @@ export default function ReportWriter() {
     setRebalancing(true)
     setError(null)
     try {
+      const url = generationUrl(generation.id, '/rebalance')
+      if (!url) { setRebalancing(false); return }
       const res = await axios.post<GenerationResponse & {
         rebalanced: boolean
         targets?: Array<{ section: number; before: number; target: number }>
         note?: string
-      }>(
-        `/api/v1/reports/generations/${generation.id}/rebalance`)
+      }>(url)
       setGeneration((g) => g ? { ...g, ...res.data } : g)
       if (res.data.paper_md) {
         setPaperMd(res.data.paper_md)
@@ -830,8 +858,9 @@ export default function ReportWriter() {
     if (!generation) return
     setRunningReview(true)
     try {
-      const res = await axios.post<AcademicReview & { rubric_version?: number }>(
-        `/api/v1/reports/generations/${generation.id}/academic-review`)
+      const url = generationUrl(generation.id, '/academic-review')
+      if (!url) { return }
+      const res = await axios.post<AcademicReview & { rubric_version?: number }>(url)
       setReview(res.data)
       setGeneration((g) => g ? { ...g, academic_readiness: res.data.readiness } : g)
     } catch (err) {
@@ -848,9 +877,9 @@ export default function ReportWriter() {
     if (!generation) return
     setDownloading(which)
     try {
-      const url = which === 'paper'
-        ? `/api/v1/reports/generations/${generation.id}/download-paper`
-        : `/api/v1/reports/generations/${generation.id}/download-appendix`
+      const suffix = which === 'paper' ? '/download-paper' : '/download-appendix'
+      const url = generationUrl(generation.id, suffix)
+      if (!url) { return }
       const res = await axios.get(url, { responseType: 'blob' })
       const dispo = String(res.headers['content-disposition'] ?? '')
       const m = /filename="?([^";]+)"?/i.exec(dispo)
@@ -871,8 +900,9 @@ export default function ReportWriter() {
       }
       if (allowAck && window.confirm(`${msg}\n\nDownload anyway?`)) {
         try {
-          const url = `/api/v1/reports/generations/${generation.id}/download-paper`
-                     + '?acknowledge_warning=true'
+          const baseUrl = generationUrl(generation.id, '/download-paper')
+          if (!baseUrl) { return }
+          const url = `${baseUrl}?acknowledge_warning=true`
           const res = await axios.get(url, { responseType: 'blob' })
           const dispo = String(res.headers['content-disposition'] ?? '')
           const m = /filename="?([^";]+)"?/i.exec(dispo)
@@ -1108,9 +1138,9 @@ export default function ReportWriter() {
             onRestored={() => {
               // Re-fetch the generation so the editor textarea
               // picks up the restored paper_md.
-              if (generation?.id) {
-                axios.get<GenerationResponse>(
-                  `/api/v1/reports/generations/${generation.id}`)
+              const refreshUrl = generationUrl(generation?.id)
+              if (refreshUrl) {
+                axios.get<GenerationResponse>(refreshUrl)
                   .then((r) => {
                     setGeneration(r.data)
                     setPaperMd(r.data.paper_md || '')

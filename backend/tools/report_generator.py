@@ -447,19 +447,33 @@ async def delete_generation(generation_id: int) -> dict[str, Any]:
             # cascade in older deployments, so we delete it explicitly.
             # The pipeline audit row is the same; both tables tolerate
             # NULL writes if the FK is set up that way.
+            #
+            # May 24 2026 — SAVEPOINTs (s.begin_nested) wrap each
+            # optional DELETE. PostgreSQL aborts the WHOLE outer
+            # transaction on any error and rejects every subsequent
+            # statement with InFailedSQLTransactionError. A bare
+            # try/except Exception: pass swallows the Python error but
+            # leaves the transaction poisoned, so the final DELETE FROM
+            # report_generations then fails. begin_nested() emits
+            # SAVEPOINT before the statement and ROLLBACK TO SAVEPOINT
+            # on exception, isolating the failure to that one statement
+            # while keeping the outer transaction alive and healthy.
             try:
-                await s.execute(text(
-                    "DELETE FROM report_paper_versions "
-                    "WHERE generation_id = :g"
-                ), {"g": int(generation_id)})
+                async with s.begin_nested():
+                    await s.execute(text(
+                        "DELETE FROM report_paper_versions "
+                        "WHERE generation_id = :g"
+                    ), {"g": int(generation_id)})
             except Exception:
                 # The table may not exist in older test environments.
+                # Savepoint already rolled back; outer txn intact.
                 pass
             try:
-                await s.execute(text(
-                    "DELETE FROM pipeline_audits "
-                    "WHERE generation_id = :g"
-                ), {"g": int(generation_id)})
+                async with s.begin_nested():
+                    await s.execute(text(
+                        "DELETE FROM pipeline_audits "
+                        "WHERE generation_id = :g"
+                    ), {"g": int(generation_id)})
             except Exception:
                 pass
             r = await s.execute(text(

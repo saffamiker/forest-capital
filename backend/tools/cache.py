@@ -531,6 +531,50 @@ async def get_latest_qa_hash() -> str | None:
     return None
 
 
+async def get_most_recent_qa_run(
+    min_tier: int = 1,
+) -> dict[str, Any] | None:
+    """
+    The MOST RECENT QA verdict in the cache REGARDLESS OF strategy_hash —
+    used by the /api/qa/audit minimum-interval guard to cap token burn.
+    `get_latest_qa(hash)` filters to a specific hash; this helper does
+    not. Returns None if the table is empty or on any error (fail-open).
+
+    Shape mirrors get_latest_qa: {tier, verdict, checklist, run_at,
+    expires_at, strategy_hash}.
+    """
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(
+                text(
+                    "SELECT tier, verdict, checklist_json, run_at, "
+                    "       expires_at, strategy_hash "
+                    "FROM qa_results_cache "
+                    "WHERE tier >= :mt "
+                    "ORDER BY run_at DESC LIMIT 1"
+                ),
+                {"mt": min_tier},
+            )
+            r = row.fetchone()
+            if not r:
+                return None
+            checklist = r[2] if isinstance(r[2], dict) else json.loads(r[2])
+            return {
+                "tier":           int(r[0]),
+                "verdict":        str(r[1]),
+                "checklist":      checklist,
+                "run_at":         r[3].isoformat() if r[3] else None,
+                "expires_at":     r[4].isoformat() if r[4] else None,
+                "strategy_hash":  str(r[5]) if r[5] else "",
+            }
+    except Exception as exc:
+        log.warning("most_recent_qa_read_error", error=str(exc))
+    return None
+
+
 async def get_regime_cache() -> dict[str, Any] | None:
     """
     Returns cached regime signals if not expired, else None.
