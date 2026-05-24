@@ -1042,7 +1042,7 @@ const molly: TestScript = {
     {
       id: 'molly_present_members', route: '/reports', target: null,
       title: 'All three team members shown',
-      instruction: 'Look at the team contribution split.',
+      instruction: 'Look at the Platform Interaction Split donut.',
       expectedResult: 'All three team members appear.',
       allowSkip: true,
     },

@@ -80,24 +80,46 @@ describe('useAutoFireStep5And6 — warning is passthrough', () => {
     expect(fireSpy).toHaveBeenCalledWith(5)
   })
 
-  it('Step 5 does NOT fire when any earlier step is failed', () => {
-    // 'failed' is a real error and must still gate the pipeline.
+  it('Step 5 does NOT fire when Step 4 itself is failed', () => {
+    // May 24 2026 — the auto-fire gate is now narrow: Step 5
+    // fires when Step 4 passes (complete or warning, without
+    // _no_audit). The pipeline's strict-sequential gating
+    // prevents 4 from completing while 2 is failed in
+    // practice — the auto-fire hook only inspects Step 4.
     const results: StepResults = {
       1: step('complete'),
-      2: step('failed'),  // hard block
+      2: step('complete'),
       3: step('complete'),
-      4: step('complete'),
+      4: step('failed'),  // hard block — Step 5 must not fire
     }
     const { fireSpy } = renderAutoFire(results)
     expect(fireSpy).not.toHaveBeenCalledWith(5)
   })
 
-  it('Step 5 does NOT fire when any earlier step is still running', () => {
+  it('Step 5 does NOT fire when Step 4 is still running', () => {
     const results: StepResults = {
       1: step('complete'),
-      2: step('running'),
+      2: step('complete'),
       3: step('complete'),
-      4: step('complete'),
+      4: step('running'),
+    }
+    const { fireSpy } = renderAutoFire(results)
+    expect(fireSpy).not.toHaveBeenCalledWith(5)
+  })
+
+  it('Step 5 does NOT fire when Step 4 is _no_audit bypass', () => {
+    // _no_audit on Step 4 is the explicit "no QA audit has run"
+    // signal. The user's directive: Steps 5 and 6 auto-fire only
+    // after Step 4 completes with a REAL QA audit result.
+    const results: StepResults = {
+      1: step('complete'),
+      2: step('complete'),
+      3: step('complete'),
+      4: {
+        status: 'warning' as const,
+        message: 'No QA audit',
+        payload: { _no_audit: true },
+      },
     }
     const { fireSpy } = renderAutoFire(results)
     expect(fireSpy).not.toHaveBeenCalledWith(5)

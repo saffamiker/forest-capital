@@ -271,6 +271,14 @@ export default function MacroResearchPanel() {
               block. Citations verified via web_search.
             </p>
           )}
+
+          <button
+            type="button"
+            onClick={() => setExpanded(false)}
+            data-testid="macro-show-less"
+            className="text-2xs text-electric hover:underline">
+            − Show less
+          </button>
         </div>
       )}
     </div>

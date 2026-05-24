@@ -344,12 +344,18 @@ export default function ReportWriter() {
         }
       }
       if (cancelled) return
+      // May 24 2026 — Manual-only pipeline. Step 1 no longer
+      // auto-fires on fresh load; the user must explicitly click
+      // its Run button. This matches the user's directive: "No
+      // step runs unless the user explicitly clicks its Run
+      // button." A fresh load now lands with every step idle and
+      // the badge at 'idle' so Bob sees the queue and decides
+      // when to start.
       setStepResults({})
       setAuditId(null)
       auditIdRef.current = null
-      setPipelineStartedAt(Date.now())
-      setBadge('running', 'Pipeline starting')
-      void runStep(1)
+      setPipelineStartedAt(null)
+      setBadge('idle', 'Ready — click Run on Step 1 to start')
     })()
     return () => { cancelled = true }
   }, [templateId, runStep, setAuditId, setPipelineStartedAt, setBadge])
@@ -478,22 +484,16 @@ export default function ReportWriter() {
       'Restored from previous session')
   }, [setAuditId, setBadge, setPipelineStartedAt, setStep])
 
-  // After step 1 completes, fan out 2/3/4 in parallel — but only when
-  // each is idle (so a manual re-run of just one doesn't re-trigger
-  // the others).
-  useEffect(() => {
-    if (stepResults[1]?.status !== 'complete') return
-    for (const n of [2, 3, 4]) {
-      const r = stepResults[n]
-      if (!r || r.status === 'idle') {
-        void runStep(n)
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stepResults[1]?.status])
-
-  // Steps 5 + 6 auto-fire when their prerequisites land. The shared
-  // hook isolates the trigger logic from this component's render loop.
+  // May 24 2026 — Steps 1-4 and 7 are MANUAL ONLY. Per the user's
+  // directive: "No step runs unless the user explicitly clicks its
+  // Run button. Remove all auto-trigger logic for Steps 1-4 and Step
+  // 7 entirely. Steps 5 and 6 auto-fire only after Step 4 completes
+  // with a real QA audit result." The previous version auto-fanned
+  // out 2/3/4 in parallel when Step 1 completed, which caused the
+  // "all steps fire simultaneously" race the user reported.
+  //
+  // Auto-fire for Steps 5 + 6 ONLY — the shared hook gates Step 5 on
+  // Step 4 passing with a real QA audit (no _no_audit bypass).
   useAutoFireStep5And6(stepResults, runStep)
 
   // ── Draft selector — switch between saved drafts ─────────────────────────
@@ -1053,51 +1053,22 @@ export default function ReportWriter() {
             generateDisabledReason={generateDisabledReason}
             onRunStep={confirmedRunStep}
             onGenerate={handleGenerate}
+            step2b={{
+              untrustedCount: untrustedCitationsCount,
+              onJump: () => {
+                const el = document.querySelector(
+                  '[data-testid="citation-review-panel"]')
+                if (el) el.scrollIntoView(
+                  { behavior: 'smooth', block: 'start' })
+              },
+            }}
           />
-          {/* May 24 2026 Step 2b — Citation Adjudication gate.
-              Counts how many citations from Step 2 are still
-              untrusted. Renders when count > 0 + scrolls to the
-              CitationReviewPanel below where Bob can Accept /
-              Reject / Manual-add each one. Step 7 (Generate
-              Draft) is gated until count === 0 via
-              generateDisabledReason. */}
-          {untrustedCitationsCount > 0 ? (
-            <section
-              data-testid="step2b-citation-adjudication"
-              className="bg-amber-500/5 border border-amber-500/40 rounded p-3
-                         space-y-2">
-              <h3 className="text-white font-medium text-sm flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 text-amber-400" />
-                Step 2b — Adjudicate citations
-                <span className="px-2 py-0.5 text-2xs rounded
-                                 bg-amber-500/15 text-amber-300">
-                  {untrustedCitationsCount} untrusted
-                </span>
-              </h3>
-              <p className="text-text-secondary text-xs leading-snug">
-                {untrustedCitationsCount} citation
-                {untrustedCitationsCount === 1 ? '' : 's'} from the
-                3-pass search {untrustedCitationsCount === 1 ? 'is' : 'are'} still
-                untrusted. Accept, Reject, or Manually add each one
-                in the Citation Review panel before Generate Draft
-                unlocks.
-              </p>
-              <button
-                type="button"
-                data-testid="step2b-jump-to-citations"
-                onClick={() => {
-                  const el = document.querySelector(
-                    '[data-testid="citation-review-panel"]')
-                  if (el) el.scrollIntoView(
-                    { behavior: 'smooth', block: 'start' })
-                }}
-                className="text-2xs px-2 py-1 rounded
-                           border border-amber-500/40 text-amber-200
-                           hover:bg-amber-500/15">
-                Open Citation Review →
-              </button>
-            </section>
-          ) : null}
+          {/* May 24 2026 — the former standalone Step 2b amber
+              callout was promoted INTO the pipeline list as a
+              first-class step (PipelineGate.step2b prop). It now
+              appears between Step 2 and Step 3, and Step 3's Run
+              button is gated until 2b shows complete. No external
+              callout needed any more. */}
           <RubricPanel
             rubric={rubric}
             formatSpec={

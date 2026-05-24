@@ -476,3 +476,125 @@ class TestQAChecklist:
             assert "category" in item
             assert "check" in item
             assert "description" in item
+
+
+# ── May 24 2026 — deterministic-audit reliability tests ─────────────────────
+#
+# The user surfaced that the QA audit was producing inconsistent
+# verdicts across runs on unchanged data — e.g. D04 returning WARN
+# on one run and PASS on the next with no remediation in between.
+# An audit whose result depends on the LLM's running mood is not a
+# reliable validation layer. These tests pin the contract:
+#
+#   1. The deterministic-checks bag is a pure function of the
+#      strategy_results input. The same input produces the same
+#      bag every time — no random seeds, no clock reads, no
+#      hidden state.
+#
+#   2. The four checks the user reported INCOMPLETE on real data —
+#      P04 / P05 / S01 / S02 — are now deterministic, not LLM-judged.
+#      Same for the six analytics + integration checks the user
+#      called out next: AN01 / AN04 / AN06 / IN01 / IN02 / IN03.
+#
+# These do NOT test the Opus LLM call itself — that one still
+# carries an irreducible amount of judgement variance. The user's
+# spec is for the DETERMINISTIC layer to be reproducible.
+
+
+class TestQADeterministicReliability:
+    """The deterministic check bag is a pure function of inputs."""
+
+    @pytest.fixture
+    def qa(self):
+        from agents.qa_agent import QAAgent
+        return QAAgent()
+
+    @pytest.fixture
+    def realistic_strategy_results(self):
+        return {
+            "BENCHMARK": {
+                "sharpe_ratio": 0.52, "oos_sharpe": 0.42,
+                "avg_equity_weight": 1.0, "avg_bond_weight": 0.0,
+                "is_significant": False,
+                "monthly_returns": [("2002-07-31", 0.01)],
+                "is_adequately_powered": True,
+                "n_obs": 282,
+                "information_ratio": None,
+                "p_value_threshold_tier": "tier_1",
+                "true_turnover": 0.0,
+            },
+            "REGIME_SWITCHING": {
+                "sharpe_ratio": 0.63, "oos_sharpe": 0.51,
+                "avg_equity_weight": 0.60, "avg_bond_weight": 0.40,
+                "is_significant": True,
+                "p_value_ttest": 0.004, "p_value_corrected": 0.004,
+                "dsr_p_value": 0.003, "oos_p_value": 0.012,
+                "alpha_after_costs_bps": 73,
+                "deflated_sharpe_ratio": 0.61,
+                "probabilistic_sharpe_ratio": 0.85,
+                "cross_validation": {"cv_stability_score": 0.72},
+                "monthly_returns": [("2002-10-31", 0.008)],
+                "is_adequately_powered": True,
+                "n_obs": 279,
+                "information_ratio": 0.41,
+                "factor_loadings": {
+                    "mkt_rf": 0.62, "smb": 0.04, "hml": -0.02,
+                    "mom": 0.05, "alpha": 0.011, "r_squared": 0.71,
+                },
+                "regime_conditional": {
+                    "pre_sharpe": 0.78, "post_sharpe": 0.24,
+                },
+                "p_value_threshold_tier": "tier_1",
+                "true_turnover": 0.18,
+            },
+        }
+
+    def test_deterministic_checks_are_reproducible(
+        self, qa, realistic_strategy_results,
+    ):
+        """Same input → same output, every time."""
+        a = qa._run_deterministic_checks(realistic_strategy_results)
+        b = qa._run_deterministic_checks(realistic_strategy_results)
+        c = qa._run_deterministic_checks(realistic_strategy_results)
+        assert a == b == c, (
+            "Deterministic checks must produce identical output on "
+            "unchanged input. A diff means hidden state is leaking "
+            "into the verdict."
+        )
+
+    def test_p04_p05_s01_s02_are_deterministic(
+        self, qa, realistic_strategy_results,
+    ):
+        """The four checks the user reported INCOMPLETE on real data
+        are now deterministic — they appear in the bag with PASS or
+        WARN, never the LLM-driven INCOMPLETE."""
+        bag = qa._run_deterministic_checks(realistic_strategy_results)
+        for key in (
+            "rebalance_timing",      # P04
+            "no_test_leakage",       # P05
+            "power_analysis",        # S01
+            "threshold_disclosure",  # S02
+        ):
+            assert key in bag, f"{key} is no longer deterministic"
+            assert bag[key]["status"] in {"PASS", "WARN", "FAIL"}, (
+                f"{key} returned unexpected status "
+                f"{bag[key]['status']!r}"
+            )
+
+    def test_an_and_in_checks_are_deterministic(
+        self, qa, realistic_strategy_results,
+    ):
+        """AN01 / AN04 / AN06 / IN01 / IN02 / IN03 are also pinned
+        to deterministic checks so the methodology audit doesn't
+        hallucinate verdicts on them."""
+        bag = qa._run_deterministic_checks(realistic_strategy_results)
+        for key in (
+            "carhart_regression",  # AN01
+            "regime_consistency",  # AN04
+            "cumulative_returns",  # AN06
+            "audit_integration",   # IN01
+            "academic_review",     # IN02
+            "document_generation", # IN03
+        ):
+            assert key in bag, f"{key} is no longer deterministic"
+            assert bag[key]["status"] in {"PASS", "WARN", "FAIL"}

@@ -1040,9 +1040,16 @@ def run_max_sharpe_rolling(history: dict, optimization_window: int = OPTIMIZATIO
     correlations). Quarterly rebalancing limits overfitting to short-term noise
     in the max-Sharpe optimum — the optimizer output at any single quarter can be
     driven by a single outlier month if rebalanced more frequently.
-    Risk-free annualised = mean monthly rf * 12; the optimizer divides internally
-    by ANNUALIZATION_FACTOR=252. This slight scale mismatch is negligible because
-    rf (~4-5% annual) << mean excess return over the estimation window.
+
+    May 24 2026 fix: this function passes MONTHLY returns to the optimizer
+    so periods_per_year=12 is required. The previous version relied on the
+    optimizer's hardcoded ANNUALIZATION_FACTOR=252 default, which mis-scaled
+    the risk-free rate by ~21× (rf/252 vs rf/12) and biased the Sharpe
+    optimum toward higher-mu/higher-vol assets. Symptom: the audit Layer 2
+    recomputation of the tangency point disagreed with the platform by
+    ~8% on sigma and the platform's reported tangency Sharpe was lower
+    than HY-alone. Passing periods_per_year=12 explicitly removes the
+    mismatch.
     """
     from tools.optimizer import max_sharpe_optimize
 
@@ -1053,7 +1060,7 @@ def run_max_sharpe_rolling(history: dict, optimization_window: int = OPTIMIZATIO
     schedule = []
 
     rf_mean = float(rf.mean()) if len(rf) > 0 else RISK_FREE_RATE_FALLBACK / _ANN_M
-    # Annualise for the optimizer (it divides by 252 internally)
+    # Annualise for the optimizer (it divides by periods_per_year=12)
     rf_annual = rf_mean * _ANN_M
 
     for date in qtr_dates:
@@ -1071,6 +1078,7 @@ def run_max_sharpe_rolling(history: dict, optimization_window: int = OPTIMIZATIO
             risk_free=rf_current_annual,
             min_weight=MIN_WEIGHT,
             max_weight=MAX_WEIGHT,
+            periods_per_year=12,
         )
         weights = _weights_from_array(w_arr)
         _validate_weights(weights, f"MAX_SHARPE_{date.date()}")
