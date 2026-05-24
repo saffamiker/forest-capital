@@ -563,6 +563,12 @@ def _appendix_c(doc: Document, context: dict) -> None:
             ("PRs merged",             "michael_prs_merged"),
             ("Migrations deployed",    "michael_migrations_deployed"),
             ("Failure reports resolved", "michael_failure_reports_resolved"),
+            # UAT 2026-05-24 — Michael runs UAT Section 2 per the
+            # project backlog. The row was missing from the rendered
+            # table even though michael_uat_steps fed the cross-check
+            # reconciliation, leaving the reader unable to see why
+            # the platform total exceeded Bob + Molly.
+            ("UAT test steps completed", "michael_uat_steps"),
         ]),
         ("Bob Thao", [
             ("UAT test steps completed", "bob_uat_steps"),
