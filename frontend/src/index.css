@@ -74,6 +74,25 @@
   to { transform: translateY(0); }
 }
 
+/* FloatingSectionNav first-mount discovery pulse — UAT 2026-05-24.
+   Runs on the collapsed pill exactly once per browser (the React
+   component writes a localStorage flag the first time it mounts;
+   the class is only applied while the flag is unset). Two pulses
+   over ~2.5s — quick enough to be subtle, slow enough to be
+   noticed. The electric-blue glow draws the eye without using
+   movement so it works under prefers-reduced-motion (the global
+   reduced-motion rule below clips animation-duration to 10ms,
+   making the pulse effectively invisible — exactly the
+   accessibility-correct behaviour). */
+@keyframes fc-floating-nav-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.55); }
+  50%  { box-shadow: 0 0 0 10px rgba(59, 130, 246, 0);   }
+  100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0);      }
+}
+.fc-floating-nav-pulse {
+  animation: fc-floating-nav-pulse 1.25s ease-out 2;
+}
+
 /* Touch feedback — a subtle press-in on every interactive element so a
    tap is visibly acknowledged. Suppressed under reduced-motion. */
 @media (prefers-reduced-motion: no-preference) {

@@ -78,6 +78,31 @@ function _writeCollapsed(pageKey: string, collapsed: boolean): void {
 }
 
 
+// One-time-ever discovery pulse. UAT 2026-05-24 — the redesigned
+// collapsed tab is intentionally subtle so it never competes with
+// the dashboard charts for attention; a first-time visitor might
+// not notice it. A gentle pulse on the FIRST mount EVER (per
+// browser, across every page in the app) draws the eye once and
+// then never again. The flag is written to localStorage the moment
+// the pulse class is applied, so subsequent navigations and future
+// sessions render the tab statically.
+const _PULSE_FLAG_KEY = 'fc_floating_nav_pulse_shown_v1'
+
+function _shouldPulseOnce(): boolean {
+  try {
+    return localStorage.getItem(_PULSE_FLAG_KEY) !== '1'
+  } catch {
+    return false
+  }
+}
+
+function _markPulseShown(): void {
+  try {
+    localStorage.setItem(_PULSE_FLAG_KEY, '1')
+  } catch { /* noop */ }
+}
+
+
 export default function FloatingSectionNav({
   pageKey, minSections = 3, defaultCollapsed,
 }: FloatingSectionNavProps) {
@@ -99,6 +124,24 @@ export default function FloatingSectionNav({
   // so the listener isn't running pointlessly when the panel is
   // already closed.
   const desktopRef = useRef<HTMLElement | null>(null)
+
+  // Discovery pulse — true on the FIRST mount EVER (per browser).
+  // Initialised from localStorage so a remount on the same page
+  // immediately reads "already pulsed" and renders the tab
+  // statically. The pulse class is applied to the collapsed tab
+  // for two seconds, then a setTimeout clears it AND writes the
+  // localStorage flag — guaranteeing the animation runs exactly
+  // once across every page in the app.
+  const [showPulse, setShowPulse] = useState<boolean>(() =>
+    _shouldPulseOnce())
+  useEffect(() => {
+    if (!showPulse) return
+    const t = setTimeout(() => {
+      setShowPulse(false)
+      _markPulseShown()
+    }, 2500)
+    return () => clearTimeout(t)
+  }, [showPulse])
 
   // Discover sections from the DOM. Re-runs after every page mount
   // and whenever the route changes (the cleanup function clears
@@ -178,14 +221,44 @@ export default function FloatingSectionNav({
     const el = document.querySelector(
       `[data-section-id="${id}"]`) as HTMLElement | null
     if (!el) return
-    // 64px offset keeps the section heading clear of the fixed
-    // nav ribbon when the browser lands.
-    const top = el.getBoundingClientRect().top + window.scrollY - 64
-    window.scrollTo({ top, behavior: 'smooth' })
-    // On mobile, auto-collapse the drawer after a section pick
-    // so the user sees the content they navigated to.
+    // SCROLL-TARGET FIX (UAT 2026-05-24): the page content scrolls
+    // INSIDE MainLayout's <main class="flex-1 overflow-y-auto">,
+    // NOT the window. The window itself never scrolls — its height
+    // is locked at 100vh by the app-shell flex layout. The prior
+    // implementation called window.scrollTo() which is a silent
+    // no-op against an unscrollable window, so clicking a section
+    // appeared to do nothing.
+    //
+    // Find the nearest scrollable ancestor (<main>) and scroll IT.
+    // The scroll target is computed in the scrollable element's
+    // local coordinates: parent.scrollTop + (rect.top - parentRect.top)
+    // gives the section's absolute offset within the scrollable
+    // container. A small 16px breathing room above the section
+    // keeps its heading clear of any sticky chrome inside <main>.
+    //
+    // Fall through to el.scrollIntoView for any future layout
+    // where <main> isn't present (login page, full-screen modals)
+    // — scrollIntoView finds the nearest scrollable ancestor on
+    // its own, so the worst case is "no scroll target found, no
+    // scroll happens" — the same as before, never an exception.
+    const scrollable = el.closest('main') as HTMLElement | null
+    if (scrollable) {
+      const rect = el.getBoundingClientRect()
+      const parentRect = scrollable.getBoundingClientRect()
+      const target = scrollable.scrollTop
+        + (rect.top - parentRect.top) - 16
+      scrollable.scrollTo({ top: target, behavior: 'smooth' })
+    } else {
+      el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    }
+    // Collapse on pick — UAT directive: clicking a section should
+    // scroll AND collapse the nav, not just one or the other.
+    // Both desktop and mobile collapse flags are written so the
+    // localStorage state matches the UI state for the next mount.
     setMobileOpen(false)
     _writeCollapsed(`${pageKey}_mobile`, false)
+    setDesktopCollapsed(true)
+    _writeCollapsed(`${pageKey}_desktop`, true)
   }, [pageKey])
 
   const toggleDesktop = useCallback(() => {
@@ -244,20 +317,27 @@ export default function FloatingSectionNav({
 
   return (
     <>
-      {/* Desktop — two distinct visual modes (UAT 2026-05-24).
-          COLLAPSED: a small icon-only tab at the right edge, 60%
-                     opacity at rest, 100% on hover. Sits flush to
-                     the right viewport edge (right-0) with a
-                     rounded-l-md so it reads as a tab clipped to
-                     the page, not an opaque panel. The collapsed
-                     footprint is 32px wide — narrow enough that
-                     it never overlaps the main content column on
-                     any of the wired pages.
-          EXPANDED:  a 200px panel anchored at right-3, opacity-95
-                     so it sits clearly above content but isn't
-                     visually heavy. Activated only by an explicit
-                     click on the collapsed tab; click-outside or
-                     Esc collapses it. No hover-expand.
+      {/* Desktop — two visual modes (UAT 2026-05-24 iteration 2).
+          The first iteration was a 32px icon-only tab — testers
+          reported it was too easy to miss. The second iteration
+          (this one) strikes a balance: a small but visible PILL
+          with a List icon + the literal text "Sections", a
+          semi-transparent navy background and a 1px border so it
+          reads as a clickable control rather than an icon floating
+          in space. Anchored to the right edge of the viewport and
+          vertically centered so it never overlaps the dashboard
+          summary tiles (which sit in the top third) or the main
+          chart column (which is centered).
+
+          COLLAPSED: ~104px pill, vertically centred, semi-
+                     transparent navy bg with visible border. Pulses
+                     once on the user's first ever mount to draw the
+                     eye (localStorage flag — never replays).
+          EXPANDED:  220px panel at right-3, top-1/2 (vertically
+                     centered), opacity-95 so it reads clearly
+                     above content. Activated by an explicit click;
+                     click-outside or Esc collapses it. NO hover-
+                     expand — hover only highlights the toggle.
 
           Mounted unconditionally so the same DOM element drives
           both states — keeps the click-outside ref stable across
@@ -269,50 +349,70 @@ export default function FloatingSectionNav({
         data-collapsed={desktopCollapsed ? 'true' : 'false'}
         className={
           'hidden md:flex fixed z-30 flex-col ' +
-          'border border-navy-700 shadow-2xl backdrop-blur-sm ' +
-          'transition-[width,opacity] duration-150 ease-out ' +
+          'shadow-2xl backdrop-blur-sm ' +
+          'transition-[width,opacity,right] duration-150 ease-out ' +
+          // Vertical centering via top-1/2 + translate-y-1/2 keeps
+          // the nav clear of both the page header (top third) AND
+          // the AdvisorPanel button at the bottom-right. Same
+          // anchor for both states so toggling doesn't reposition.
+          'top-1/2 -translate-y-1/2 ' +
           (desktopCollapsed
-            // Collapsed: right-edge tab, narrow, low-opacity. The
-            // hover opacity-100 keeps the affordance discoverable
-            // without auto-expanding (per UAT directive: NO hover
-            // expansion, hover only highlights the toggle).
-            ? 'right-0 top-32 w-8 rounded-l-md bg-navy-900/80 ' +
-              'opacity-60 hover:opacity-100'
-            // Expanded: stepped in from the edge, 200px wide,
-            // mostly opaque. max-h-[60vh] caps the height so a
-            // page with many sections stays scroll-contained.
-            : 'right-3 top-32 w-52 max-h-[60vh] rounded-lg ' +
-              'bg-navy-900/95 opacity-100'
+            // Collapsed: pill anchored at right-0, rounded only on
+            // the left so it reads as a tab clipped to the edge.
+            // The pulse class is applied only on the first ever
+            // mount; the keyframes live in index.css.
+            ? 'right-0 w-auto rounded-l-lg ' +
+              'border-y border-l border-electric-blue/40 ' +
+              'bg-navy-900/90 hover:bg-navy-900/95 ' +
+              (showPulse ? 'fc-floating-nav-pulse' : '')
+            // Expanded: stepped in from the edge, wider, more
+            // opaque. max-h-[70vh] caps the height so a page with
+            // many sections stays scroll-contained.
+            : 'right-3 w-56 max-h-[70vh] rounded-lg ' +
+              'border border-navy-600 bg-navy-900/95 opacity-100'
           )
         }
         aria-label="Section navigator">
         {desktopCollapsed ? (
-          /* Collapsed mode — single tap target. Tall enough to be
-             easy to hit (44px) without dominating the viewport. */
+          /* Collapsed mode — a single pill with icon AND the
+             literal text "Sections". The text is the affordance
+             the icon-only version lacked: a first-time visitor
+             reads it as "click here for a section navigator", not
+             as "an icon floating in space". title= renders as the
+             browser tooltip when the user hovers — answers the
+             "Jump to section" hint the user requested without
+             adding a custom tooltip layer. */
           <button
             type="button"
             onClick={toggleDesktop}
             data-testid="floating-section-nav-toggle"
-            aria-label="Expand section navigator"
+            aria-label="Open section navigator"
             aria-expanded="false"
+            title="Jump to section"
             className={
-              'flex items-center justify-center ' +
-              'w-full h-11 text-text-muted ' +
-              'hover:text-white hover:bg-navy-800/60 ' +
-              'rounded-l-md transition-colors'
+              'flex items-center gap-2 px-3 py-2 min-h-[40px] ' +
+              'text-xs font-medium tracking-wide ' +
+              'text-text-secondary hover:text-white ' +
+              'transition-colors rounded-l-lg'
             }>
-            <List className="w-3.5 h-3.5" aria-hidden="true" />
+            <List className="w-3.5 h-3.5 text-electric-blue"
+                  aria-hidden="true" />
+            <span>Sections</span>
           </button>
         ) : (
           <>
             <header
               className={
-                'flex items-center justify-between gap-2 px-3 py-2 ' +
+                'flex items-center justify-between gap-2 px-3.5 py-2.5 ' +
                 'border-b border-navy-700 shrink-0'
               }>
-              <span className="text-2xs uppercase tracking-wider text-text-muted">
-                Sections
-              </span>
+              <div className="flex items-center gap-2">
+                <List className="w-3.5 h-3.5 text-electric-blue"
+                      aria-hidden="true" />
+                <span className="text-xs font-semibold text-white">
+                  Sections
+                </span>
+              </div>
               <button
                 type="button"
                 onClick={toggleDesktop}
@@ -325,7 +425,7 @@ export default function FloatingSectionNav({
                 <X className="w-3.5 h-3.5" />
               </button>
             </header>
-            <nav className="overflow-y-auto py-1.5">
+            <nav className="overflow-y-auto py-2">
               <ul className="space-y-0.5">
                 {sections.map((s) => (
                   <li key={s.id}>
@@ -335,13 +435,19 @@ export default function FloatingSectionNav({
                       data-testid={`floating-section-nav-link-${s.id}`}
                       data-active={s.id === activeId ? 'true' : 'false'}
                       className={
-                        'w-full text-left px-3 py-1.5 text-xs ' +
+                        // Larger px/py + slightly bigger font + a
+                        // proper hover/active contrast so the
+                        // expanded list is easy to scan. UAT
+                        // 2026-05-24 iteration 2: the previous
+                        // px-3 py-1.5 text-xs was too cramped.
+                        'w-full text-left px-3.5 py-2 text-sm ' +
                         'transition-colors truncate ' +
                         (s.id === activeId
-                          ? 'text-electric-blue bg-electric-blue/10 ' +
-                            'border-l-2 border-electric-blue pl-[10px]'
+                          ? 'text-electric-blue bg-electric-blue/15 ' +
+                            'font-medium ' +
+                            'border-l-2 border-electric-blue pl-[12px]'
                           : 'text-text-secondary border-l-2 border-transparent ' +
-                            'hover:text-white hover:bg-navy-800')
+                            'hover:text-white hover:bg-navy-800/70')
                       }>
                       {s.label}
                     </button>
