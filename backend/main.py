@@ -1579,18 +1579,42 @@ async def delete_report_generation(
     Frontend confirms with a type-DELETE dialog before firing the
     request — same pattern as the version-history Delete UX.
 
-    May 24 2026 — Delete Draft from selector.
+    Idempotent contract (May 24 2026 update — user-reported fix):
+      - 200 OK with {"deleted": True}                — row removed
+      - 200 OK with {"deleted": True,
+                     "already_absent": True}         — row was
+                                                       already gone
+                                                       (a second
+                                                       click, a
+                                                       parallel
+                                                       session, a
+                                                       stale FE
+                                                       cache)
+      - 500 with structured detail                   — real DB
+                                                       failure
     """
     if ENVIRONMENT == "test":
         return {"deleted": True}
     from tools.report_generator import delete_generation
-    ok = await delete_generation(generation_id)
-    if not ok:
-        raise HTTPException(
-            status_code=404,
-            detail="Generation not found, or the delete failed — "
-                   "see server logs.")
-    return {"deleted": True}
+    result = await delete_generation(generation_id)
+    status = result.get("status")
+    if status == "deleted":
+        return {"deleted": True}
+    if status == "already_absent":
+        # Idempotent success — DO NOT raise. The user clicked
+        # Delete on a draft that's already gone; the desired
+        # outcome (no draft) is reached, so we return 200.
+        return {"deleted": True, "already_absent": True}
+    # status == "error" — surface as 500 so the frontend can
+    # render an actual error message. The detail block carries
+    # the underlying error string for Render-logs cross-reference.
+    raise HTTPException(
+        status_code=500,
+        detail={
+            "error":   "delete_failed",
+            "message": result.get("error")
+                       or "Delete failed — see server logs.",
+        })
 
 
 @app.get("/api/v1/reports/generations/{generation_id}")

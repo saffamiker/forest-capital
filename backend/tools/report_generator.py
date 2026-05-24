@@ -412,7 +412,7 @@ async def get_generation(generation_id: int) -> dict[str, Any] | None:
         return None
 
 
-async def delete_generation(generation_id: int) -> bool:
+async def delete_generation(generation_id: int) -> dict[str, Any]:
     """Hard-deletes a generation and every dependent row.
 
     May 24 2026 P5 — the Draft Selector dropdown's trash icon
@@ -422,14 +422,26 @@ async def delete_generation(generation_id: int) -> bool:
     alone (it's keyed on the concept, not the generation, and
     may be reused by other drafts).
 
-    Returns True when the generation row was removed, False on
-    any DB error or when the row did not exist.
+    May 24 2026 update — idempotent contract. Returns a result
+    dict so the endpoint can distinguish three cases without
+    collapsing them into the same False signal:
+
+        {"status": "deleted",        "rows": 1}  — row was removed
+        {"status": "already_absent", "rows": 0}  — row didn't exist
+                                                   (idempotent success)
+        {"status": "error", "error": "..."}      — real DB failure
+
+    The endpoint maps already_absent → 200 OK, error → 500. A
+    Delete Draft re-click (or two concurrent deletes) should never
+    surface as an error to the user; the prior False-for-both
+    behaviour was the bug the user reported.
     """
     try:
         from sqlalchemy import text
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
-            return False
+            return {"status": "error",
+                    "error": "Database unavailable."}
         async with AsyncSessionLocal() as s:
             # Drop dependents first. report_paper_versions has no FK
             # cascade in older deployments, so we delete it explicitly.
@@ -455,16 +467,24 @@ async def delete_generation(generation_id: int) -> bool:
                 "WHERE id = :g"
             ), {"g": int(generation_id)})
             await s.commit()
-            ok = (r.rowcount or 0) > 0
-            if ok:
+            rowcount = int(r.rowcount or 0)
+            if rowcount > 0:
                 log.info("report_generation_deleted",
                          generation_id=generation_id)
-            return ok
+                return {"status": "deleted", "rows": rowcount}
+            # Row didn't exist — idempotent success path. The
+            # caller may have already deleted this draft (a
+            # second click, a parallel session, a stale
+            # frontend cache) and the user should not see an
+            # error for it.
+            log.info("report_generation_already_absent",
+                     generation_id=generation_id)
+            return {"status": "already_absent", "rows": 0}
     except Exception as exc:  # noqa: BLE001
         log.warning("delete_report_generation_failed",
                     error=str(exc),
                     generation_id=generation_id)
-        return False
+        return {"status": "error", "error": str(exc)}
 
 
 async def list_generations_for_user(
