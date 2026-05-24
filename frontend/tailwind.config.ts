@@ -24,7 +24,30 @@ const config: Config = {
           500: '#1a2742',
           400: '#213252',
         },
-        electric: '#3b82f6',
+        electric: {
+          // May 24 2026 — the `electric-blue` class is used widely
+          // across the report writer and the navigation chrome.
+          // Tailwind 3 lets the same key serve both a flat colour
+          // (text-electric) and a scale (text-electric-blue) by
+          // including a DEFAULT entry alongside the named shades.
+          DEFAULT: '#3b82f6',
+          blue:    '#3b82f6',
+        },
+        // May 24 2026 — text token aliases. 90 uses of
+        // text-text-primary / text-text-secondary / text-text-muted
+        // existed across the codebase but the names weren't defined
+        // in this config, so Tailwind compiled them to no-op CSS.
+        // The dark-theme pages mostly rendered fine because they
+        // inherited a white-on-dark parent, but the native file-
+        // input button (Choose File) defaults to black-on-white at
+        // browser level — surfacing as the "black on dark"
+        // unreadable button the user reported (P4).
+        text: {
+          primary:   '#f1f5f9',
+          secondary: '#cbd5e1',
+          muted:     '#64748b',
+          disabled:  '#475569',
+        },
         success: '#22c55e',
         warning: '#f59e0b',
         danger:  '#ef4444',

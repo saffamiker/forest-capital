@@ -48,14 +48,36 @@ async def list_versions(generation_id: int) -> list[dict[str, Any]]:
         if AsyncSessionLocal is None:
             return []
         async with AsyncSessionLocal() as s:
-            rows = await s.execute(text(
-                "SELECT id, version_number, paper_md, flag_count, "
-                " word_counts, saved_by_email, saved_at, label, "
-                " source, restored_from_version "
-                "FROM report_paper_versions "
-                "WHERE generation_id = :g "
-                "ORDER BY version_number DESC"
-            ), {"g": int(generation_id)})
+            # May 24 2026 — defensive read of is_final_submission /
+            # final_submission_at: migration 040 adds these columns,
+            # but the test environment runs against a schema-free
+            # SQLite shim that hasn't been migrated yet. The COALESCE
+            # below is harmless on Postgres; on the test shim the
+            # missing columns surface as a column-not-found error,
+            # which is caught by the outer try/except so the panel
+            # still renders with these fields absent.
+            try:
+                rows = await s.execute(text(
+                    "SELECT id, version_number, paper_md, flag_count, "
+                    " word_counts, saved_by_email, saved_at, label, "
+                    " source, restored_from_version, "
+                    " COALESCE(is_final_submission, false), "
+                    " final_submission_at "
+                    "FROM report_paper_versions "
+                    "WHERE generation_id = :g "
+                    "ORDER BY version_number DESC"
+                ), {"g": int(generation_id)})
+                has_final = True
+            except Exception:
+                rows = await s.execute(text(
+                    "SELECT id, version_number, paper_md, flag_count, "
+                    " word_counts, saved_by_email, saved_at, label, "
+                    " source, restored_from_version "
+                    "FROM report_paper_versions "
+                    "WHERE generation_id = :g "
+                    "ORDER BY version_number DESC"
+                ), {"g": int(generation_id)})
+                has_final = False
             out: list[dict[str, Any]] = []
             for r in rows.fetchall():
                 wc = r[4]
@@ -64,7 +86,7 @@ async def list_versions(generation_id: int) -> list[dict[str, Any]]:
                         wc = json.loads(wc)
                     except json.JSONDecodeError:
                         wc = {}
-                out.append({
+                entry = {
                     "id":                     int(r[0]),
                     "version_number":         int(r[1]),
                     "paper_md":               r[2] or "",
@@ -78,7 +100,15 @@ async def list_versions(generation_id: int) -> list[dict[str, Any]]:
                     "restored_from_version":  (int(r[9])
                                                  if r[9] is not None
                                                  else None),
-                })
+                }
+                if has_final:
+                    entry["is_final_submission"] = bool(r[10])
+                    entry["final_submission_at"] = (
+                        r[11].isoformat() if r[11] else None)
+                else:
+                    entry["is_final_submission"] = False
+                    entry["final_submission_at"] = None
+                out.append(entry)
             return out
     except Exception as exc:  # noqa: BLE001
         log.warning("list_paper_versions_failed", error=str(exc),
@@ -352,6 +382,146 @@ async def delete_version(
                     generation_id=generation_id,
                     version_number=version_number)
         return False
+
+
+# ── Final Submission marker (May 24 2026, P5) ────────────────────────────────
+#
+# Bob marks one version as the "Final Submission" so Defense Prep
+# and Citation Adjudication reference the SAME version every time —
+# not "the most recent draft". The marker lives on report_paper_
+# versions.is_final_submission (migration 040). At most ONE row per
+# generation_id may be the Final marker (enforced by a partial
+# unique index).
+#
+# When the marked version is later DELETED via delete_version,
+# the marker is naturally dropped with the row. The endpoint logic
+# surfaces a warning in that case.
+
+
+async def mark_version_final(
+    generation_id: int, version_number: int,
+) -> dict[str, Any] | None:
+    """Marks one version of a generation as the Final Submission.
+    Clears any prior Final marker on the same generation (only one
+    Final per generation, enforced by partial unique index too).
+
+    Returns the marked version row, or None on database error.
+    """
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as s:
+            # Clear any existing Final marker on this generation.
+            await s.execute(text(
+                "UPDATE report_paper_versions "
+                "SET is_final_submission = false, "
+                "    final_submission_at = NULL "
+                "WHERE generation_id = :g "
+                "  AND is_final_submission = true"
+            ), {"g": int(generation_id)})
+            # Mark the named version as Final.
+            r = await s.execute(text(
+                "UPDATE report_paper_versions "
+                "SET is_final_submission = true, "
+                "    final_submission_at = now() "
+                "WHERE generation_id = :g AND version_number = :v "
+                "RETURNING version_number"
+            ), {"g": int(generation_id), "v": int(version_number)})
+            await s.commit()
+            row = r.fetchone()
+            if not row:
+                log.warning("mark_version_final_not_found",
+                            generation_id=generation_id,
+                            version_number=version_number)
+                return None
+            log.info("paper_version_marked_final",
+                     generation_id=generation_id,
+                     version_number=version_number)
+            return await get_version(generation_id, version_number)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("mark_version_final_failed", error=str(exc),
+                    generation_id=generation_id,
+                    version_number=version_number)
+        return None
+
+
+async def unmark_final_version(generation_id: int) -> bool:
+    """Clears the Final Submission marker on a generation. Returns
+    True if any row was unmarked, False otherwise."""
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return False
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "UPDATE report_paper_versions "
+                "SET is_final_submission = false, "
+                "    final_submission_at = NULL "
+                "WHERE generation_id = :g "
+                "  AND is_final_submission = true"
+            ), {"g": int(generation_id)})
+            await s.commit()
+            ok = (r.rowcount or 0) > 0
+            if ok:
+                log.info("paper_version_final_unmarked",
+                         generation_id=generation_id)
+            return ok
+    except Exception as exc:  # noqa: BLE001
+        log.warning("unmark_final_version_failed", error=str(exc),
+                    generation_id=generation_id)
+        return False
+
+
+async def get_final_version(
+    generation_id: int,
+) -> dict[str, Any] | None:
+    """Returns the Final-marked version row for a generation, or
+    None if no version is marked Final. Used by Defense Prep and
+    Citation Adjudication to resolve "the canonical submission"
+    for this generation — they fall back to the most recent
+    version when no Final marker exists.
+    """
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "SELECT version_number "
+                "FROM report_paper_versions "
+                "WHERE generation_id = :g "
+                "  AND is_final_submission = true "
+                "LIMIT 1"
+            ), {"g": int(generation_id)})
+            row = r.fetchone()
+            if not row:
+                return None
+            return await get_version(generation_id, int(row[0]))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_final_version_failed", error=str(exc),
+                    generation_id=generation_id)
+        return None
+
+
+async def get_canonical_version(
+    generation_id: int,
+) -> dict[str, Any] | None:
+    """Returns the canonical submission version for a generation:
+    the Final-marked version when one exists, the most recent
+    saved version otherwise. This is the function Defense Prep
+    and Citation Adjudication call so the same row backs both
+    consumers.
+    """
+    final = await get_final_version(generation_id)
+    if final is not None:
+        return final
+    # Fallback — most recent saved version.
+    versions = await list_versions(generation_id)
+    return versions[0] if versions else None
 
 
 async def delete_all_versions(generation_id: int) -> int:

@@ -1738,6 +1738,75 @@ async def post_paper_version_restore(
     return {"snapshot": snapshot}
 
 
+@app.post(
+    "/api/v1/reports/generations/{generation_id}/versions"
+    "/{version_number}/mark-final")
+async def post_mark_version_final(
+    generation_id: int, version_number: int,
+    session: dict = Depends(require_team_member),
+):
+    """Marks one saved version as the Final Submission. Clears any
+    prior Final marker on the same generation. Defense Prep and
+    Citation Adjudication reference the Final-marked version
+    instead of the most recent draft.
+
+    May 24 2026 P5 — Final Submission marker.
+    """
+    if ENVIRONMENT == "test":
+        return {"marked": True, "version_number": version_number}
+    from tools.paper_versions import mark_version_final
+    snapshot = await mark_version_final(generation_id, version_number)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=404,
+            detail=("Version not found or the mark failed — "
+                    "see server logs."))
+    return {"marked": True, "snapshot": snapshot}
+
+
+@app.delete(
+    "/api/v1/reports/generations/{generation_id}/versions"
+    "/final-marker")
+async def delete_final_marker(
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Clears the Final Submission marker on a generation. The
+    versions themselves are preserved; only the flag is cleared.
+
+    May 24 2026 P5 — Final Submission marker.
+    """
+    if ENVIRONMENT == "test":
+        return {"unmarked": True}
+    from tools.paper_versions import unmark_final_version
+    ok = await unmark_final_version(generation_id)
+    return {"unmarked": ok}
+
+
+@app.get(
+    "/api/v1/reports/generations/{generation_id}/versions/canonical")
+async def get_canonical_version_endpoint(
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Returns the canonical submission version for a generation:
+    the Final-marked version when one exists, the most recent
+    saved version otherwise. Defense Prep and Citation
+    Adjudication consume this so both reference the same row.
+
+    May 24 2026 P5 — Final Submission marker.
+    """
+    if ENVIRONMENT == "test":
+        return {"canonical": None}
+    from tools.paper_versions import get_canonical_version
+    canonical = await get_canonical_version(generation_id)
+    if canonical is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No saved version found for this generation.")
+    return {"canonical": canonical}
+
+
 @app.delete(
     "/api/v1/reports/generations/{generation_id}/versions"
     "/{version_number}")
@@ -4134,16 +4203,23 @@ async def council_defense_prep(
     session: dict = Depends(require_team_member),
 ):
     """Streams a mock-panel Q&A prep sheet for the calling user's
-    current midpoint_paper editor draft.
+    paper.
 
-    No request body — the draft is auto-fetched from editor_drafts
-    via get_current_draft(email, "midpoint_paper"). When no draft
-    exists, returns a single error frame and [DONE] so the
-    frontend can prompt Bob to generate or open a draft first.
+    May 24 2026 (P5 — Final Submission marker): if the request body
+    carries `generation_id`, Defense Prep references the
+    Final-marked version of THAT generation when one exists
+    (falling back to the most recent saved version). Otherwise it
+    auto-fetches the user's most-recent midpoint_paper editor
+    draft via get_current_draft (the prior behaviour).
+
+    The body shape:
+      {generation_id?: int}    optional; when present pins the
+                               canonical version per migration 040.
 
     SSE wire format:
-      data: {"type": "draft_meta",     "title": "...",
-              "word_count": N, "updated_at": "..."}
+      data: {"type": "draft_meta", "title": "...",
+              "word_count": N, "updated_at": "...",
+              "source": "final_marker" | "most_recent" | "editor_draft"}
       data: {"type": "arbiter_chunk", "text": "..."}     (repeated)
       data: [DONE]
     """
@@ -4155,14 +4231,50 @@ async def council_defense_prep(
         chunk_arbiter_text,
     )
 
+    # Optional generation_id from the request body — when present,
+    # the Final-marked version takes precedence over the editor
+    # draft. Read defensively: a missing body or non-JSON body
+    # falls through to the prior editor-draft path.
+    generation_id: int | None = None
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and body.get("generation_id") is not None:
+            generation_id = int(body["generation_id"])
+    except Exception:
+        generation_id = None
+
     # Resolve the draft BEFORE opening the stream so a 404-style
     # error frame fires immediately rather than mid-flow.
     draft = None
+    source = "editor_draft"
     try:
-        from tools.editor_drafts import get_current_draft
-        draft = await get_current_draft(
-            owner_email=session.get("email") or "",
-            document_type="midpoint_paper")
+        if generation_id is not None:
+            from tools.paper_versions import (
+                get_canonical_version, get_final_version,
+            )
+            canonical = await get_canonical_version(generation_id)
+            if canonical:
+                final = await get_final_version(generation_id)
+                source = ("final_marker"
+                          if final is not None else "most_recent")
+                draft = {
+                    "content_text": canonical.get("paper_md") or "",
+                    "title":        (canonical.get("label")
+                                       or f"Generation {generation_id} "
+                                          f"v{canonical.get('version_number')}"),
+                    "word_count":   sum(
+                        int(v) for v in
+                        (canonical.get("word_counts") or {}).values()
+                        if isinstance(v, (int, float))
+                    ),
+                    "updated_at":   canonical.get("saved_at"),
+                }
+        if draft is None:
+            from tools.editor_drafts import get_current_draft
+            draft = await get_current_draft(
+                owner_email=session.get("email") or "",
+                document_type="midpoint_paper")
+            source = "editor_draft"
     except Exception as exc:  # noqa: BLE001
         log.warning("defense_prep_draft_lookup_failed",
                     error=str(exc))
@@ -4189,6 +4301,7 @@ async def council_defense_prep(
                 title=title,
                 word_count=draft.get("word_count") or 0,
                 updated_at=draft.get("updated_at") or None,
+                source=source,
             )
 
             ctx_dict = build_defense_prep_context_block(
