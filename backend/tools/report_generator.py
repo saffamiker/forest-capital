@@ -373,6 +373,62 @@ async def _persist_generation_row(
         return None
 
 
+async def create_placeholder_generation(template_id: str) -> int | None:
+    """Inserts a STUB report_generations row BEFORE any content exists.
+
+    UAT 2026-05-24 fix for Open Review. The original pipeline only
+    created a report_generations row in Step 7 (handleGenerate), so
+    Step 1B (source-citations) was forced to persist its citations
+    with generation_id = NULL. The frontend Citation Review panel
+    is keyed on generation_id — with no row, the panel could not
+    render and the Open Review click was a silent no-op. Creating a
+    placeholder row at source-citations time:
+
+      - the citations get a real generation_id to attach to
+      - the source-citations response can echo that id back, so the
+        frontend has something to put into `generation.id`
+      - the CitationReviewPanel mounts and renders the citation
+        tiles, the Open Review click scrolls to a real panel
+      - Step 7's final generate still INSERTs its own row (the
+        canonical paper); the placeholder remains as a record of
+        when citations were sourced. A future cleanup pass can
+        filter `WHERE paper_md IS NOT NULL` to hide placeholders
+        from the DraftSelector dropdown.
+
+    Most columns carry server-side defaults so a minimal INSERT
+    (template_id only) succeeds. paper_md / appendix_md are
+    nullable; the rest default to '{}' or 0 or false.
+
+    Fail-open: a DB outage returns None and the caller falls back
+    to the legacy "no generation_id" path (citations stored
+    standalone). The user sees the same behaviour they saw before
+    this fix — Open Review still won't work, but nothing else
+    breaks.
+    """
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "INSERT INTO report_generations (template_id) "
+                "VALUES (:t) RETURNING id"
+            ), {"t": str(template_id)})
+            new_id = r.scalar()
+            await s.commit()
+            if new_id is not None:
+                log.info("placeholder_generation_created",
+                         generation_id=int(new_id),
+                         template_id=template_id)
+                return int(new_id)
+            return None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("placeholder_generation_failed",
+                    error=str(exc), template_id=template_id)
+        return None
+
+
 async def get_generation(generation_id: int) -> dict[str, Any] | None:
     try:
         from sqlalchemy import text

@@ -518,6 +518,36 @@ export default function ReportWriter() {
   // Step 4 passing with a real QA audit (no _no_audit bypass).
   useAutoFireStep5And6(stepResults, runStep)
 
+  // UAT 2026-05-24 — Open Review hydration. When Step 2 completes
+  // successfully, the backend returns a generation_id (the
+  // placeholder report_generations row created so citations have
+  // something to attach to). Fetch the full generation row and
+  // hydrate `generation` state so the Citation Review panel mounts
+  // and the Open Review button has a real id to scroll to. Without
+  // this, generation stayed null until Step 7 (Generate Draft),
+  // which meant Open Review at Step 2b was a silent no-op.
+  //
+  // Idempotent: re-fires only when the generation_id in Step 2's
+  // payload changes (a Step 2 re-run produces a new placeholder),
+  // and short-circuits when generation.id already matches.
+  useEffect(() => {
+    const step2 = stepResults[2]
+    if (!step2 || step2.status === 'failed') return
+    const payload = step2.payload as Record<string, unknown> | undefined
+    const genId = payload?.generation_id
+    if (typeof genId !== 'number' || genId <= 0) return
+    if (generation?.id === genId) return
+
+    const url = generationUrl(genId)
+    if (!url) return
+    let cancelled = false
+    axios.get<GenerationResponse>(url)
+      .then((r) => { if (!cancelled) setGeneration(r.data) })
+      .catch(() => { /* best-effort — keeps the Open Review path
+                        gracefully degraded rather than crashing */ })
+    return () => { cancelled = true }
+  }, [stepResults, generation?.id])
+
   // ── Draft selector — switch between saved drafts ─────────────────────────
   //
   // May 23 2026. Picking a saved draft fetches the full generation
@@ -1128,10 +1158,22 @@ export default function ReportWriter() {
                 // immediately so the user gets feedback that the
                 // click registered while the citation fetch runs
                 // in the background.
-                if (generation?.id != null) {
-                  void useCitationReviewStore.getState().load(
-                    generation.id)
+                //
+                // Defensive surface (UAT iteration 2): if
+                // generation.id is somehow still null at click
+                // time (Step 2 didn't return a generation_id, or
+                // the hydration effect hasn't run yet) the click
+                // sets a visible error rather than silently doing
+                // nothing. The button onJump never produces zero
+                // visible result.
+                if (generation?.id == null) {
+                  setError(
+                    'No active generation — re-run Step 2 (Source '
+                    + 'Citations) so the citation review can load.')
+                  return
                 }
+                void useCitationReviewStore.getState().load(
+                  generation.id)
                 const el = document.querySelector(
                   '[data-testid="citation-review-panel"]')
                 if (el) el.scrollIntoView(
@@ -1503,6 +1545,12 @@ const STEP_ACTIONS: Record<number, (templateId: string) => Promise<StepSummary>>
   2: async (tid) => {
     const res = await axios.post<{
       verified_count: number; concept_count: number; quality: string;
+      // UAT 2026-05-24 — backend now creates a placeholder
+      // report_generations row at source-citations time so the
+      // citations have a real generation_id to attach to. The id is
+      // returned here so the parent ReportWriter can hydrate its
+      // `generation` state and the Citation Review panel can mount.
+      generation_id?: number | null;
     }>('/api/v1/reports/source-citations', { template_id: tid })
     const status: StepSummary['status'] =
       res.data.quality === 'red' ? 'warning' : 'complete'

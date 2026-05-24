@@ -1320,6 +1320,7 @@ async def post_source_citations(
         from tools.template_pipeline import (
             source_citations, citation_quality, persist_citations,
         )
+        from tools.report_generator import create_placeholder_generation
         tmpl = await get_template(template_id)
         if not tmpl:
             raise HTTPException(
@@ -1327,7 +1328,26 @@ async def post_source_citations(
                 detail=f"Template '{template_id}' not found.")
         concepts = tmpl.get("concepts") or []
         citations = await source_citations(concepts)
-        await persist_citations(citations)
+
+        # UAT 2026-05-24 — Open Review fix. Create a placeholder
+        # report_generations row BEFORE persisting citations so each
+        # citation row carries a real generation_id (was NULL before
+        # this change). The frontend Citation Review panel is keyed on
+        # generation_id; without a row, the panel rendered nothing
+        # and Open Review was a silent no-op.
+        #
+        # Body accepts an existing generation_id so a re-run uses the
+        # same row instead of leaving an orphan placeholder behind.
+        # On placeholder failure (DB unavailable) generation_id stays
+        # None — citations are still persisted (standalone), behaviour
+        # degrades to the pre-fix state rather than failing the step.
+        gid_in = body.get("generation_id")
+        if isinstance(gid_in, int) and gid_in > 0:
+            generation_id: int | None = gid_in
+        else:
+            generation_id = await create_placeholder_generation(template_id)
+
+        await persist_citations(citations, generation_id=generation_id)
         # CITATION_VERIFIED_STATES covers every state that counts as a
         # real citation — auto-verified, human-accepted, alternative-
         # selected, manually-added. Initial counts are all
@@ -1339,6 +1359,7 @@ async def post_source_citations(
             if c.get("verification_status") in CITATION_VERIFIED_STATES)
         return {
             "template_id":     template_id,
+            "generation_id":   generation_id,
             "citations":       citations,
             "quality":         citation_quality(citations),
             "verified_count":  verified,
