@@ -278,24 +278,46 @@ async def lifespan(app: FastAPI):
                 from tools.cache import get_latest_strategy_hash
                 from tools.precomputed_analytics import (
                     get_metric as get_precomputed,
+                    get_latest_metric as get_latest_precomputed,
                     trigger_refresh_async as trigger_analytics_refresh,
                 )
                 latest_hash = await get_latest_strategy_hash()
+                # May 24 2026 P0 hotfix — fire the refresh
+                # UNCONDITIONALLY on every boot, not gated on
+                # latest_hash. The pre-existing gate skipped the
+                # whole block when strategy_results_cache was
+                # empty, leaving the analytics cache cold and
+                # every dashboard request timing out at 30s. The
+                # check below is now used only to DECIDE whether
+                # to fire — we look for ANY row by metric_kind
+                # (hash-agnostic) so previously-written rows
+                # under different hashes count as warm too.
+                aa: dict | None = None
+                ef: dict | None = None
                 if latest_hash:
                     aa = await get_precomputed(
                         latest_hash, "academic_analytics")
                     ef = await get_precomputed(
                         latest_hash, "efficient_frontier")
-                    if aa is None or ef is None:
-                        log.warning(
-                            "analytics_cache_cold_on_startup_firing_warm",
-                            academic_present=bool(aa),
-                            frontier_present=bool(ef),
-                            data_hash=latest_hash[:8])
-                        trigger_analytics_refresh(latest_hash)
-                    else:
-                        log.info("analytics_cache_warm_on_startup",
-                                 data_hash=latest_hash[:8])
+                if aa is None:
+                    aa = await get_latest_precomputed("academic_analytics")
+                if ef is None:
+                    ef = await get_latest_precomputed("efficient_frontier")
+                if aa is None or ef is None:
+                    log.warning(
+                        "analytics_cache_cold_on_startup_firing_warm",
+                        academic_present=bool(aa),
+                        frontier_present=bool(ef),
+                        data_hash=(latest_hash[:8]
+                                    if latest_hash else None))
+                    trigger_analytics_refresh(latest_hash or "")
+                else:
+                    log.info(
+                        "analytics_cache_warm_on_startup",
+                        data_hash=(latest_hash[:8]
+                                    if latest_hash else None),
+                        academic_stale=bool(aa.get("_stale")),
+                        frontier_stale=bool(ef.get("_stale")))
             except Exception as exc:  # noqa: BLE001
                 log.warning("analytics_cache_warm_check_failed",
                             error=str(exc))
@@ -880,15 +902,25 @@ async def get_academic_analytics(request: Request, session: dict = Depends(requi
         # fire the background refresh and return a warming response
         # immediately. The frontend retries every ~10s until the
         # cache row lands.
-        log.warning("academic_analytics_cache_cold_warming")
+        #
+        # May 24 2026 P0 hotfix — fire the refresh UNCONDITIONALLY,
+        # not gated on `if latest_hash:`. The pre-existing gate meant
+        # that on a Render restart with an empty strategy_results_
+        # cache, the refresh NEVER fired and the user saw a 30s
+        # timeout forever. refresh_all_analytics now substitutes a
+        # "BOOT-WARM" sentinel hash when none is supplied, so the
+        # subsequent get_latest_precomputed call finds the row even
+        # without a real strategy hash to key against.
+        log.warning("academic_analytics_cache_cold_warming",
+                    has_strategy_hash=bool(latest_hash))
         try:
             from tools.precomputed_analytics import (
                 trigger_refresh_async,
             )
-            if latest_hash:
-                trigger_refresh_async(latest_hash)
-        except Exception:  # noqa: BLE001
-            pass
+            trigger_refresh_async(latest_hash or "")
+        except Exception as trig_exc:  # noqa: BLE001
+            log.warning("academic_analytics_refresh_trigger_failed",
+                        error=str(trig_exc))
         return {
             "available": False,
             "warming": True,
@@ -3172,6 +3204,13 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
                 # component reads to render a "computing..." state.
                 # portfolio_points still ships so the strategy
                 # scatter is visible during the warmup.
+                # May 24 2026 P0 hotfix — fire the refresh
+                # UNCONDITIONALLY. The pre-existing `if h:` gate
+                # meant a cold Render deploy with an empty
+                # strategy_results_cache never triggered the
+                # background sweep, and the user saw a 30s timeout
+                # forever. refresh_all_analytics now substitutes a
+                # BOOT-WARM sentinel hash when none is supplied.
                 log.warning("optimize_frontier_cache_cold_warming",
                             method=body.method)
                 try:
@@ -3180,10 +3219,11 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
                         trigger_refresh_async,
                     )
                     h = await get_latest_strategy_hash()
-                    if h:
-                        trigger_refresh_async(h)
-                except Exception:  # noqa: BLE001
-                    pass
+                    trigger_refresh_async(h or "")
+                except Exception as trig_exc:  # noqa: BLE001
+                    log.warning(
+                        "optimize_frontier_refresh_trigger_failed",
+                        error=str(trig_exc))
 
                 portfolio_points = await _strategy_portfolio_points()
                 return {

@@ -444,7 +444,18 @@ async def refresh_all_analytics(data_hash: str) -> None:
     """Top-level dispatch — calls every refresh function. Fires from
     tools/cache.set_strategy_cache after a successful strategy write.
     Fail-open per-metric so one bad compute does not block the others.
+
+    May 24 2026 P0 hotfix — accepts empty string / None data_hash and
+    substitutes a "BOOT-WARM" sentinel so the cold-deploy path (no
+    strategy_results_cache rows yet) still produces a row in
+    analytics_metrics_cache. get_latest_metric is hash-agnostic so
+    the stale-cache fallback path served by both endpoints will then
+    find it.
     """
+    if not data_hash:
+        data_hash = "BOOT-WARM"
+        log.info("precomputed_analytics_refresh_sentinel_hash",
+                 note="no strategy hash available; using BOOT-WARM")
     log.info("precomputed_analytics_refresh_started",
              data_hash=data_hash[:8] if data_hash else None)
     await refresh_academic_analytics(data_hash)

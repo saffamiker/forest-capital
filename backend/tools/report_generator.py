@@ -631,6 +631,20 @@ async def generate_paper(template_id: str) -> dict[str, Any]:
     raw = await asyncio.to_thread(
         _call_writer_sync, substituted, 3000)
 
+    # ── May 24 2026 RW2 hotfix — strategy display-name substitution.
+    # The prompt instructs the model to use display names, but for
+    # any raw SCREAMING_SNAKE_CASE identifier the model leaves
+    # behind, this post-processing pass rewrites it to the human
+    # form (e.g. EQUAL_WEIGHT → Equal-Weight). Applied BEFORE the
+    # post-check + word-count + persistence so every downstream
+    # consumer reads the clean text. Idempotent — see
+    # substitute_strategy_names docstring.
+    try:
+        from agents.academic_writer import substitute_strategy_names
+        raw = substitute_strategy_names(raw)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("strategy_substitution_failed", error=str(exc))
+
     # Post-check + word counts.
     checks = _post_check_summary(
         raw, inputs["verified_data"], citations)
@@ -653,6 +667,15 @@ async def generate_paper(template_id: str) -> dict[str, Any]:
         },
     )
     appendix_md = _appendix_context_to_md(appendix_context)
+    # Substitute strategy display names in the appendix too — the
+    # appendix carries findings prose that references strategies
+    # by name. Idempotent so the explicit second call is safe.
+    try:
+        from agents.academic_writer import substitute_strategy_names
+        appendix_md = substitute_strategy_names(appendix_md)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("appendix_strategy_substitution_failed",
+                    error=str(exc))
 
     findings_cache_id = (findings_row or {}).get("id")
     gen_id = await _persist_generation_row(

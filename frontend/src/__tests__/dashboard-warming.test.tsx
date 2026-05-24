@@ -130,9 +130,12 @@ describe('dashboardDataStore — warming state', () => {
     expect(mockedAxios.post).toHaveBeenCalledTimes(2)
   })
 
-  it('caps retries at MAX_WARMING_RETRIES (3)', async () => {
+  it('caps retries at MAX_WARMING_RETRIES (8 — bumped May 24 2026)', async () => {
     // Always warming — backend never finishes.
-    for (let i = 0; i < 5; i++) {
+    // May 24 2026 P0 hotfix bumped the cap 3 → 8 because the cold
+    // analytics + frontier first-warm runs 40-60s on Render and the
+    // 30s budget was timing out before the cache row landed.
+    for (let i = 0; i < 12; i++) {
       mockedAxios.get.mockResolvedValueOnce({
         data: { warming: true, retry_after_ms: 10000 },
       })
@@ -150,15 +153,15 @@ describe('dashboardDataStore — warming state', () => {
     }
     await useDashboardDataStore.getState().load()
 
-    // Advance well past 4 retries' worth of time.
-    for (let i = 0; i < 5; i++) {
+    // Advance well past 9 retries' worth of time.
+    for (let i = 0; i < 10; i++) {
       await vi.advanceTimersByTimeAsync(11_000)
     }
 
-    // 1 initial + 3 retries = 4 total calls. The 4th retry past
+    // 1 initial + 8 retries = 9 total calls. The 9th retry past
     // the cap does NOT fire.
-    expect(mockedAxios.get).toHaveBeenCalledTimes(4)
-    expect(mockedAxios.post).toHaveBeenCalledTimes(4)
+    expect(mockedAxios.get).toHaveBeenCalledTimes(9)
+    expect(mockedAxios.post).toHaveBeenCalledTimes(9)
 
     // Warming is still true (the backend never returned data) but
     // loading is false — we've stopped retrying.

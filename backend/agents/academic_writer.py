@@ -111,6 +111,27 @@ ACADEMIC NUMBER + CITATION REGISTER:
 - In-text citations are placed at the END of the claim, not mid-\
   sentence where they interrupt the flow.
 
+STRATEGY DISPLAY NAMES — REQUIRED:
+Always use the human-readable display name when referring to a \
+strategy in prose. Never the SCREAMING_SNAKE_CASE identifier. \
+Substitutions:
+- EQUAL_WEIGHT → Equal-Weight
+- REGIME_SWITCHING → Regime-Switching
+- VOL_TARGETING → Volatility-Targeting
+- MIN_VARIANCE → Minimum-Variance
+- MOMENTUM_ROTATION → Momentum-Rotation
+- MAX_SHARPE_ROLLING → Maximum Sharpe (Rolling)
+- RISK_PARITY → Risk-Parity
+- BLACK_LITTERMAN → Black-Litterman
+- CLASSIC_60_40 → Classic 60/40
+- BENCHMARK → Benchmark (100% Equity)
+The raw identifiers are appropriate in code listings or table \
+column headers ONLY. Prose, captions, headlines, and the [BOB] \
+blocks all use the display names. The post-processing pass will \
+substitute remaining instances at render time, but writing the \
+display name directly is preferred so the prose flows naturally \
+without obvious substitution seams.
+
 THESE RULES APPLY TO ALL GENERATED CONTENT INCLUDING [BOB] \
 PRE-POPULATED BLOCKS. The reviewer expects the BOB drafts to read in \
 the same voice as the rest of the paper.
@@ -208,6 +229,72 @@ in the final document.
 {SCOPE_ENFORCEMENT}"""
 
 _AI_DRAFT_BANNER = "AI DRAFT — REQUIRES HUMAN REVIEW\n\n"
+
+
+# ── Strategy display-name post-processing ──────────────────────────────────
+#
+# May 24 2026 RW2 hotfix. Strategy identifiers were rendering in Bob's
+# drafts as their raw SCREAMING_SNAKE_CASE form (EQUAL_WEIGHT,
+# REGIME_SWITCHING, VOL_TARGETING). Those are appropriate in code
+# listings and as a column header in raw data, but they read poorly
+# in academic prose. The prompt now instructs the model to use the
+# display names directly, and THIS post-processing pass catches every
+# raw identifier the model leaves behind for any reason. The
+# substitution is applied at generation time on the full text body
+# (paper_md + appendix_md) BEFORE it is persisted, so the editor and
+# the .docx export both see clean display names.
+#
+# Substitution shape: word-boundary regex so a string like
+# "REGIME_SWITCHING_strategy_v2" (a hypothetical variable name in a
+# code listing) does NOT get rewritten. \b around the identifier
+# handles common surrounds (whitespace, punctuation, dashes) but
+# preserves embedded matches.
+
+import re as _re_for_substitution
+
+STRATEGY_DISPLAY_NAMES: dict[str, str] = {
+    "EQUAL_WEIGHT":       "Equal-Weight",
+    "REGIME_SWITCHING":   "Regime-Switching",
+    "VOL_TARGETING":      "Volatility-Targeting",
+    "MIN_VARIANCE":       "Minimum-Variance",
+    "MOMENTUM_ROTATION":  "Momentum-Rotation",
+    "MAX_SHARPE_ROLLING": "Maximum Sharpe (Rolling)",
+    "RISK_PARITY":        "Risk-Parity",
+    "BLACK_LITTERMAN":    "Black-Litterman",
+    "CLASSIC_60_40":      "Classic 60/40",
+    "BENCHMARK":          "Benchmark (100% Equity)",
+}
+
+# Compile once — invoked on every draft generation. Sort by length
+# DESC so longer identifiers match first (e.g. MAX_SHARPE_ROLLING is
+# matched before MAX_SHARPE would be, were it ever a separate row).
+_STRATEGY_SUBSTITUTION_RE = _re_for_substitution.compile(
+    r"\b(" + "|".join(
+        _re_for_substitution.escape(k)
+        for k in sorted(STRATEGY_DISPLAY_NAMES.keys(),
+                         key=len, reverse=True)
+    ) + r")\b"
+)
+
+
+def substitute_strategy_names(text: str) -> str:
+    """Replaces SCREAMING_SNAKE_CASE strategy identifiers with the
+    display names defined in STRATEGY_DISPLAY_NAMES. Word-boundary
+    matched so embedded identifiers (in code or hyphenated compound
+    words) are not rewritten.
+
+    Idempotent — calling twice is a no-op because the display names
+    contain spaces and hyphens that fail the \\b(IDENTIFIER)\\b
+    pattern. Safe to apply at multiple points in the pipeline
+    without double-substitution.
+
+    Returns the input unchanged when it is empty, None, or already
+    contains no identifiers.
+    """
+    if not text:
+        return text or ""
+    return _STRATEGY_SUBSTITUTION_RE.sub(
+        lambda m: STRATEGY_DISPLAY_NAMES[m.group(1)], text)
 
 
 def _writer_system_prompt() -> str:
