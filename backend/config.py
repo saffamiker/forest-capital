@@ -211,8 +211,16 @@ PERMISSIONS = {
 
 ROLE_PRESETS = {
     "viewer":      ["view_analytics", "ask_council"],
+    # May 24 2026 (ID 275 + UAT shared visibility) — added
+    # view_admin to the team_member preset. Molly leads UAT and
+    # needs the Failure Reports + Feedback Backlog admin views so
+    # she can see issues other testers flagged before filing a
+    # duplicate. Resolution actions (mark resolved / dismiss
+    # suggestion) stay sysadmin-only via require_sysadmin gating
+    # on the action endpoints.
     "team_member": ["view_analytics", "ask_council", "team_member",
-                    "generate_documents", "export_package"],
+                    "generate_documents", "export_package",
+                    "view_admin"],
     "sysadmin":    list(PERMISSIONS.keys()),
 }
 

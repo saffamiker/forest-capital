@@ -94,7 +94,7 @@ export default function InfoIcon({
     // higher z still (ExplainerPanel uses z-[60]/[61]); the
     // setHovered(false) on click clears this elevation before the
     // panel mounts, so the panel correctly covers everything.
-    <span className={`relative inline-flex items-center
+    <span className={`relative inline-flex items-center shrink-0
                       ${hovered || panelOpen ? 'z-[60]' : ''}`}>
       <button
         ref={iconRef}

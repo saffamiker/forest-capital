@@ -571,7 +571,13 @@ export default function Settings() {
         </SettingsSection>
       )}
 
-      {isSysadmin && (
+      {/* May 24 2026 — ID 275: relaxed from sysadmin-only to
+          team_member so Molly can access the feedback backlog
+          ID column she needs while leading UAT. Resolution
+          actions inside the panel are still gated server-side
+          to sysadmin (see _require_test_admin); team members
+          see the backlog but cannot mark items resolved. */}
+      {isTeam && (
         <SettingsSection
           id="test-administration"
           title="Test Administration"
