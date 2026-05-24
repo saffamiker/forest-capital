@@ -148,9 +148,21 @@ export default function DraftSelector({
   }, [onSelect])
 
   const submitDelete = useCallback(async (id: number) => {
-    setDeletingId(id)
+    // May 24 2026 — defensive integer coercion. A malformed
+    // generation_id (the "3:1" URL the user reported) would
+    // produce a 404 the user can't act on. Number(...) collapses
+    // a stringified pair like "3:1" to NaN; Math.trunc on NaN
+    // → NaN; the truthy check below short-circuits without
+    // firing the request, so a bad id never reaches the network.
+    const safeId = Math.trunc(Number(id))
+    if (!Number.isFinite(safeId) || safeId <= 0) {
+      setError(`Invalid draft id: ${id}`)
+      setDeletingId(null)
+      return
+    }
+    setDeletingId(safeId)
     try {
-      await axios.delete(`/api/v1/reports/generations/${id}`)
+      await axios.delete(`/api/v1/reports/generations/${safeId}`)
       // If the deleted draft is the currently-loaded one, clear
       // the editor by selecting "new draft".
       if (selectedDraftId === id) onSelect(null)
@@ -158,10 +170,43 @@ export default function DraftSelector({
       setDeleteText('')
       await refresh()
     } catch (err) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.detail || err.message)
-        : (err as Error).message
-      setError(String(msg))
+      // May 24 2026 — DELETE is idempotent: a 404 on the
+      // generation-delete endpoint means the row is already
+      // gone (a second click, a parallel session, a stale FE
+      // cache), which is the desired outcome. Treat it as
+      // success — clear the confirm UI, refresh the list, do
+      // NOT show an error banner. The backend's
+      // delete_report_generation now returns 200 with
+      // already_absent: true for this case directly, so a
+      // 404 should only fire from a route mismatch — even
+      // then, the user's intent (delete this draft) is met.
+      // 5xx and other 4xx (401, 403, 422) surface as errors.
+      const status = axios.isAxiosError(err)
+        ? err.response?.status ?? 0
+        : 0
+      if (status === 404) {
+        if (selectedDraftId === id) onSelect(null)
+        setConfirmDeleteId(null)
+        setDeleteText('')
+        await refresh()
+      } else {
+        const detail = axios.isAxiosError(err)
+          ? err.response?.data?.detail
+          : undefined
+        // The backend's 500 path returns a structured
+        // {error, message} block; the previous string-only
+        // detail still flows through as-is.
+        const msg = (
+          typeof detail === 'object' && detail !== null
+            && 'message' in detail
+            ? (detail as { message: string }).message
+            : (typeof detail === 'string'
+                ? detail
+                : axios.isAxiosError(err)
+                  ? err.message
+                  : (err as Error).message))
+        setError(String(msg))
+      }
     } finally {
       setDeletingId(null)
     }

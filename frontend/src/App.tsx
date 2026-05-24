@@ -182,6 +182,36 @@ function AuthProvider({ children }: { children: ReactNode }) {
     return () => { cancelled = true }
   }, [applyMe]) // applyMe is stable (useCallback) — effect runs once on mount
 
+  // May 24 2026 — REQUEST interceptor: ensure X-API-Key from
+  // localStorage is attached to every outgoing axios call.
+  // axios.defaults.headers.common['X-API-Key'] is set on login and
+  // on mount, but a race (a component firing before the mount
+  // effect runs, a stale cleared default from a prior session) can
+  // leave it absent. Re-applying from localStorage on every
+  // request is a belt-and-braces guarantee: the token is the
+  // source of truth in localStorage, axios.defaults is a
+  // convenience mirror. Citation adjudicate calls and other rapid-
+  // fire actions were intermittently going out without the header
+  // — this interceptor closes the gap.
+  useEffect(() => {
+    const requestInterceptorId = axios.interceptors.request.use(
+      (config) => {
+        const token = localStorage.getItem('fc_session_token')
+        if (token) {
+          config.headers = config.headers || {}
+          // Only set if missing — never override a deliberate
+          // per-request header (e.g. a future endpoint that uses
+          // a scoped token).
+          if (!config.headers['X-API-Key']) {
+            config.headers['X-API-Key'] = token
+          }
+        }
+        return config
+      }
+    )
+    return () => axios.interceptors.request.eject(requestInterceptorId)
+  }, [])
+
   // 401 interceptor — redirect to /login when the backend rejects a session.
   // Auth endpoints (/api/auth/*) are excluded: their 401 responses are handled
   // by the AuthVerify page (expired/invalid magic link) and must not trigger a redirect.
