@@ -699,6 +699,23 @@ export default function ReportWriter() {
     setPaperMd(res.data.paper_md || paperMd)
   }, [generation, paperMd])
 
+  // May 24 2026 RW5 full spec — Reject removes the [BOB] marker
+  // without inserting any replacement text. The block disappears
+  // entirely. Backed by the same /resolve-bob endpoint with an
+  // empty replacement string — backend strips the marker from
+  // paper_md and the post-check recomputes flag_count from the
+  // updated text.
+  const handleRejectBob = useCallback(async (
+    marker: string,
+  ): Promise<void> => {
+    if (!generation) return
+    const res = await axios.post<GenerationResponse>(
+      `/api/v1/reports/generations/${generation.id}/resolve-bob`,
+      { marker, replacement: '' })
+    setGeneration((g) => g ? { ...g, ...res.data } : g)
+    setPaperMd(res.data.paper_md || paperMd)
+  }, [generation, paperMd])
+
   // ── AI iteration ──────────────────────────────────────────────────────────
   const handleIterate = useCallback(async (
     action: 'rephrase' | 'tighten' | 'expand' | 'ask',
@@ -758,6 +775,44 @@ export default function ReportWriter() {
       setError(String(msg))
     } finally {
       setRunningCheck(false)
+    }
+  }
+
+  // ── Two-pass Pass 2 — word-count rebalance (May 24 2026) ──────────────────
+  //
+  // After every [BOB] block is adjudicated (Accept / Edit /
+  // Reject), the per-section word counts no longer match their
+  // budgets. The rebalance endpoint re-runs the writer over the
+  // current paper_md with a "trim/expand each off-budget section"
+  // instruction. Bob clicks the button; the new paper_md replaces
+  // the editor content; a version snapshot is saved server-side
+  // so revert is one click away in Version History.
+  const [rebalancing, setRebalancing] = useState(false)
+  const handleRebalance = async () => {
+    if (!generation || rebalancing) return
+    setRebalancing(true)
+    setError(null)
+    try {
+      const res = await axios.post<GenerationResponse & {
+        rebalanced: boolean
+        targets?: Array<{ section: number; before: number; target: number }>
+        note?: string
+      }>(
+        `/api/v1/reports/generations/${generation.id}/rebalance`)
+      setGeneration((g) => g ? { ...g, ...res.data } : g)
+      if (res.data.paper_md) {
+        setPaperMd(res.data.paper_md)
+      }
+      if (res.data.rebalanced === false && res.data.note) {
+        // No targets — surface the note so Bob knows nothing fired.
+        setError(res.data.note)
+      }
+    } catch (err) {
+      const msg = axios.isAxiosError(err)
+        ? (err.response?.data?.detail || err.message) : 'Rebalance failed.'
+      setError(String(msg))
+    } finally {
+      setRebalancing(false)
     }
   }
 
@@ -859,6 +914,32 @@ export default function ReportWriter() {
     return { sections: out, total, total_budget: 825 }
   }, [paperMd])
 
+  // May 24 2026 Step 2b — citation adjudication count. Derived
+  // from Step 2's citation cache payload. A citation is
+  // "untrusted" when its verification_status is anything other
+  // than the four verified states (verified / human_verified /
+  // search_selected / manually_added). Generate Draft is gated
+  // until count === 0.
+  const untrustedCitationsCount = useMemo(() => {
+    const raw = stepResults[2]?.payload as
+      Record<string, unknown> | undefined
+    const payload: Record<string, unknown> = raw ?? {}
+    const rawCit = payload['citations'] as
+      Record<string, Record<string, unknown>> | undefined
+    const citations: Record<string, Record<string, unknown>> =
+      rawCit ?? {}
+    const verified = new Set([
+      'verified', 'human_verified', 'search_selected', 'manually_added',
+      'rejected', 'rejected_no_citation',
+    ])
+    let count = 0
+    for (const c of Object.values(citations)) {
+      const state = String(c?.['verification_status'] ?? '')
+      if (!verified.has(state)) count += 1
+    }
+    return count
+  }, [stepResults])
+
   const generateDisabledReason = useMemo(() => {
     // May 24 2026 RW3 hotfix — strict pipeline gating. Each step
     // must show a GENUINE completed result. "Restored from cache"
@@ -884,12 +965,20 @@ export default function ReportWriter() {
         }
       }
     }
+    // May 24 2026 Step 2b — block generation while any citation is
+    // untrusted. Bob adjudicates via the Citation Review panel
+    // (Accept / Reject / Manual add) before reaching the writer.
+    if (untrustedCitationsCount > 0) {
+      return (`${untrustedCitationsCount} untrusted citation`
+        + (untrustedCitationsCount === 1 ? '' : 's')
+        + ' — adjudicate in the Citation Review panel before generation')
+    }
     const s5 = stepResults[5]?.status
     if (s5 !== 'complete' && s5 !== 'warning') return 'Step 5 incomplete'
     const s6 = stepResults[6]?.status
     if (s6 !== 'complete') return 'Step 6 not passing'
     return null
-  }, [stepResults])
+  }, [stepResults, untrustedCitationsCount])
 
   const downloadGateLabel = useMemo(() => {
     if (!generation) return 'Generate the draft first'
@@ -965,6 +1054,50 @@ export default function ReportWriter() {
             onRunStep={confirmedRunStep}
             onGenerate={handleGenerate}
           />
+          {/* May 24 2026 Step 2b — Citation Adjudication gate.
+              Counts how many citations from Step 2 are still
+              untrusted. Renders when count > 0 + scrolls to the
+              CitationReviewPanel below where Bob can Accept /
+              Reject / Manual-add each one. Step 7 (Generate
+              Draft) is gated until count === 0 via
+              generateDisabledReason. */}
+          {untrustedCitationsCount > 0 ? (
+            <section
+              data-testid="step2b-citation-adjudication"
+              className="bg-amber-500/5 border border-amber-500/40 rounded p-3
+                         space-y-2">
+              <h3 className="text-white font-medium text-sm flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-400" />
+                Step 2b — Adjudicate citations
+                <span className="px-2 py-0.5 text-2xs rounded
+                                 bg-amber-500/15 text-amber-300">
+                  {untrustedCitationsCount} untrusted
+                </span>
+              </h3>
+              <p className="text-text-secondary text-xs leading-snug">
+                {untrustedCitationsCount} citation
+                {untrustedCitationsCount === 1 ? '' : 's'} from the
+                3-pass search {untrustedCitationsCount === 1 ? 'is' : 'are'} still
+                untrusted. Accept, Reject, or Manually add each one
+                in the Citation Review panel before Generate Draft
+                unlocks.
+              </p>
+              <button
+                type="button"
+                data-testid="step2b-jump-to-citations"
+                onClick={() => {
+                  const el = document.querySelector(
+                    '[data-testid="citation-review-panel"]')
+                  if (el) el.scrollIntoView(
+                    { behavior: 'smooth', block: 'start' })
+                }}
+                className="text-2xs px-2 py-1 rounded
+                           border border-amber-500/40 text-amber-200
+                           hover:bg-amber-500/15">
+                Open Citation Review →
+              </button>
+            </section>
+          ) : null}
           <RubricPanel
             rubric={rubric}
             formatSpec={
@@ -976,6 +1109,7 @@ export default function ReportWriter() {
             count={bobCount}
             blocks={blocks}
             onResolve={handleResolveBob}
+            onReject={handleRejectBob}
             onIterate={handleBobIterate}
             disabled={!generation}
           />
@@ -1095,6 +1229,31 @@ export default function ReportWriter() {
                   <Search className="w-3.5 h-3.5" />
                   {runningCheck ? 'Checking…' : 'Run Final Check'}
                 </button>
+                {/* May 24 2026 — Pass 2 of the two-pass draft flow.
+                    Enabled once every [BOB] block is adjudicated
+                    (bobCount === 0). Brings each section's word
+                    count back within budget after Bob's
+                    integration. Disabled while blocks remain so
+                    Bob clears them before re-balancing. */}
+                <button
+                  type="button"
+                  disabled={!generation || rebalancing || bobCount > 0}
+                  onClick={handleRebalance}
+                  data-testid="rebalance-button"
+                  title={bobCount > 0
+                    ? `Adjudicate ${bobCount} block${bobCount === 1 ? '' : 's'} before rebalancing`
+                    : 'Re-run the writer to bring section word counts within budget'}
+                  className={
+                    'inline-flex items-center gap-1.5 px-3 py-1.5 ' +
+                    'bg-electric-blue hover:bg-electric-blue/80 ' +
+                    'disabled:bg-navy-900 disabled:text-text-muted ' +
+                    'text-white text-sm font-medium rounded'
+                  }>
+                  <Clock className="w-3.5 h-3.5" />
+                  {rebalancing
+                    ? 'Re-balancing…'
+                    : 'Re-balance Word Counts'}
+                </button>
                 <button
                   type="button"
                   disabled={!generation || runningReview || flagCount > 0}
@@ -1176,6 +1335,7 @@ export default function ReportWriter() {
           <PreviewWithBlocks
             paperMd={paperMd}
             onResolve={handleResolveBob}
+            onReject={handleRejectBob}
             onIterate={handleBobIterate}
             disabled={!generation}
           />
@@ -1477,10 +1637,11 @@ async function postAudit(
 
 
 function PreviewWithBlocks({
-  paperMd, onResolve, onIterate, disabled,
+  paperMd, onResolve, onReject, onIterate, disabled,
 }: {
   paperMd: string
   onResolve: (marker: string, replacement: string) => Promise<void>
+  onReject?: ((marker: string) => Promise<void>) | undefined
   onIterate?: ((
     action: 'rephrase' | 'expand', selection: string,
   ) => Promise<{
@@ -1506,6 +1667,7 @@ function PreviewWithBlocks({
             key={i}
             block={tok.block}
             onResolve={onResolve}
+            onReject={onReject}
             onIterate={onIterate}
             disabled={disabled}
           />
@@ -1517,11 +1679,12 @@ function PreviewWithBlocks({
 
 
 function CalloutSidebar({
-  count, blocks, onResolve, onIterate, disabled,
+  count, blocks, onResolve, onReject, onIterate, disabled,
 }: {
   count: number
   blocks: ReturnType<typeof extractBobBlocks>
   onResolve: (marker: string, replacement: string) => Promise<void>
+  onReject?: ((marker: string) => Promise<void>) | undefined
   onIterate?: ((
     action: 'rephrase' | 'expand', selection: string,
   ) => Promise<{
@@ -1566,6 +1729,7 @@ function CalloutSidebar({
               key={`${b.marker}-${i}`}
               block={b}
               onResolve={onResolve}
+              onReject={onReject}
               onIterate={onIterate}
               disabled={disabled}
             />

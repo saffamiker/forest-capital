@@ -967,6 +967,134 @@ async def update_paper_md(
     }
 
 
+async def rebalance_paper(generation_id: int) -> dict[str, Any]:
+    """May 24 2026 — two-pass draft generation Pass 2 (MVP).
+
+    After Bob adjudicates every [BOB] block (Accept / Edit /
+    Reject), the section word counts are off-budget because the
+    Pass-1 prose was sized assuming full [BOB] integrations. This
+    helper re-runs the writer over the CURRENT paper_md with a
+    rebalance instruction: rewrite each off-budget section to land
+    within its word limit (see _SECTION_BUDGETS) while keeping
+    every inline citation and specific number intact.
+
+    Returns the updated paper_md + the new word_counts. The
+    paper_md is persisted via _update_paper_md and snapshotted to
+    version_history with source='two_pass_rebalance' so Bob can
+    revert if the rebalance over-trimmed.
+    """
+    from tools.template_pipeline import word_count_report, _SECTION_BUDGETS
+    gen = await get_generation(generation_id)
+    if not gen:
+        return {"error": "generation_not_found"}
+    paper_md = gen.get("paper_md") or ""
+    if not paper_md.strip():
+        return {"error": "empty_paper"}
+
+    # Identify off-budget sections so the prompt is specific.
+    counts = word_count_report(paper_md)
+    per = counts.get("per_section") or {}
+    targets: list[tuple[int, int, int]] = []
+    for sec_num, budget in _SECTION_BUDGETS.items():
+        info = per.get(sec_num) or {}
+        words = int(info.get("words") or 0)
+        # Within ±10% — no work needed.
+        if words and abs(words - budget) / budget <= 0.10:
+            continue
+        if words:
+            targets.append((sec_num, words, budget))
+    if not targets:
+        # Everything in range — nothing to do.
+        return {
+            "saved":      False,
+            "paper_md":   paper_md,
+            "rebalanced": False,
+            "note":       "All sections within ±10% of budget.",
+            **_post_check_summary(
+                paper_md, gen.get("verified_data") or {},
+                await _load_citations_for_generation(generation_id)),
+        }
+
+    # Build the rebalance instruction. Compact + specific — names
+    # each off-budget section and its delta so the writer knows
+    # exactly what to do.
+    instructions = (
+        "REBALANCE PASS — the user has integrated every [BOB] "
+        "block and now needs the section bodies brought to their "
+        "exact word budgets.\n\n"
+        "Rebalance the FOLLOWING sections in the draft below. For "
+        "each section: rewrite the BODY ONLY (do NOT alter "
+        "section headings, do NOT alter inline citation references, "
+        "do NOT change specific numbers or statistics). Land each "
+        "section within ±5 words of its target. Keep the existing "
+        "prose voice and academic register from the writer prompt.\n\n"
+    )
+    for sec_num, words, budget in targets:
+        delta = budget - words
+        verb = "trim" if delta < 0 else "expand"
+        instructions += (
+            f"  Section {sec_num}: currently {words} words → "
+            f"target {budget} words ({verb} by {abs(delta)})\n")
+    instructions += (
+        "\nReturn the COMPLETE updated paper_md with every section "
+        "present (sections not in the list above are untouched). "
+        "Do NOT add a preface or epilogue; return only the paper.")
+
+    user_message = instructions + "\n\n=== CURRENT DRAFT ===\n\n" + paper_md
+
+    try:
+        rewritten = await asyncio.to_thread(
+            _call_writer_sync, user_message, 3500)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("rebalance_writer_call_failed", error=str(exc))
+        return {"error": "writer_unavailable", "detail": str(exc)}
+
+    # Defensive: if the writer returned nothing usable, fall back to
+    # the unchanged paper rather than wiping Bob's draft.
+    if not rewritten or not rewritten.strip():
+        return {
+            "error":    "writer_returned_empty",
+            "paper_md": paper_md,
+        }
+
+    # Apply strategy display-name substitution (RW2 pass).
+    try:
+        from agents.academic_writer import substitute_strategy_names
+        rewritten = substitute_strategy_names(rewritten)
+    except Exception:  # noqa: BLE001
+        pass
+
+    # Persist + snapshot for revert.
+    citations = await _load_citations_for_generation(generation_id)
+    checks = _post_check_summary(
+        rewritten, gen.get("verified_data") or {}, citations)
+    await _update_paper_md(
+        generation_id, rewritten,
+        checks["flag_count"], checks["word_counts"])
+    try:
+        from tools.paper_versions import save_version, bump_paper_revision
+        await bump_paper_revision(generation_id)
+        await save_version(
+            generation_id, rewritten,
+            saved_by_email=None,
+            source="two_pass_rebalance",
+            flag_count=checks["flag_count"],
+            word_counts=checks["word_counts"],
+            label="Pass 2 — word-count rebalance")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("rebalance_snapshot_failed", error=str(exc))
+
+    return {
+        "saved":      True,
+        "paper_md":   rewritten,
+        "rebalanced": True,
+        "targets":    [
+            {"section": s, "before": w, "target": b}
+            for s, w, b in targets],
+        **checks,
+    }
+
+
 async def run_final_check(generation_id: int) -> dict[str, Any]:
     """Re-runs the three post-checks against the current paper_md.
     Same checks that ran at generation time — the editor's iteration

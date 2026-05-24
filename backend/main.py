@@ -1842,6 +1842,52 @@ async def post_resolve_bob_block(
             detail="Resolve failed — see server logs.")
 
 
+@app.post("/api/v1/reports/generations/{generation_id}/rebalance")
+@limiter.limit("12/minute")
+async def post_rebalance_paper(
+    request: Request, generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """May 24 2026 — Pass 2 of the two-pass draft generation flow.
+    After Bob adjudicates every [BOB] block, the section word
+    counts are off-budget. This endpoint re-runs the writer over
+    the current paper_md with a rebalance instruction that brings
+    each off-budget section back within ±5 words of its target,
+    without touching inline citations or specific numbers.
+
+    No body required — the endpoint reads the current paper_md
+    from the generation row. Returns the updated paper_md + a
+    targets list naming which sections were re-balanced."""
+    if ENVIRONMENT == "test":
+        return {"saved": True, "paper_md": "", "rebalanced": False,
+                "note": "test environment"}
+    try:
+        from tools.report_generator import rebalance_paper
+        result = await rebalance_paper(int(generation_id))
+        if result.get("error") == "generation_not_found":
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        if result.get("error") == "empty_paper":
+            raise HTTPException(status_code=422,
+                                detail="Paper is empty — cannot rebalance.")
+        if result.get("error") == "writer_unavailable":
+            raise HTTPException(
+                status_code=503,
+                detail="Writer model unavailable for rebalance — try again.")
+        if result.get("error") == "writer_returned_empty":
+            raise HTTPException(
+                status_code=502,
+                detail="Writer returned empty response — try again.")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("rebalance_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Rebalance failed — see server logs.")
+
+
 @app.post("/api/v1/reports/generations/{generation_id}/final-check")
 @limiter.limit("60/minute")
 async def post_run_final_check(
