@@ -32,6 +32,7 @@ import type { Rubric } from '../components/reportwriter/RubricPanel'
 import CitationReviewPanel from '../components/reportwriter/CitationReviewPanel'
 import VersionHistoryPanel from '../components/reportwriter/VersionHistoryPanel'
 import DraftSelector from '../components/reportwriter/DraftSelector'
+import FloatingSectionNav from '../components/FloatingSectionNav'
 import PipelineGate, {
   useAutoFireStep5And6,
 } from '../components/reportwriter/PipelineGate'
@@ -1002,7 +1003,11 @@ export default function ReportWriter() {
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <div className="p-4 md:p-6 max-w-screen-2xl mx-auto" data-testid="report-writer-page">
-      <header className="mb-4">
+      <FloatingSectionNav pageKey="report-writer" minSections={2} />
+      <header
+        className="mb-4"
+        data-section-id="report-writer-header"
+        data-section-label="Header">
         <h1 className="text-white font-semibold text-xl flex items-center gap-2">
           <FileText className="w-5 h-5 text-electric-blue" />
           Report Writer
@@ -1054,7 +1059,10 @@ export default function ReportWriter() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        <aside className="lg:col-span-1 space-y-4">
+        <aside
+          className="lg:col-span-1 space-y-4"
+          data-section-id="pipeline"
+          data-section-label="Generation Pipeline">
           <PipelineGate
             results={stepResults}
             generating={generating}
@@ -1114,7 +1122,10 @@ export default function ReportWriter() {
           <WordCountSidebar counts={sectionCounts} />
         </aside>
 
-        <main className="lg:col-span-2 space-y-4">
+        <main
+          className="lg:col-span-2 space-y-4"
+          data-section-id="editor"
+          data-section-label="Paper Editor">
           {/* RW4 — stale banner. Renders when a pipeline re-run
               invalidated the current draft. Bob's edits are still
               saved to Version History; the banner directs him to

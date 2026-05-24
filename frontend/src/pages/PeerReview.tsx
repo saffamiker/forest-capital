@@ -25,6 +25,7 @@ import {
 } from 'lucide-react'
 import { usePeerReviewStore } from '../stores/peerReviewStore'
 import Markdown from '../components/Markdown'
+import FloatingSectionNav from '../components/FloatingSectionNav'
 
 
 type Tab = 'peer-review' | 'defense-prep'
@@ -42,7 +43,11 @@ export default function PeerReview() {
     <div
       className="p-4 md:p-6 max-w-screen-2xl mx-auto"
       data-testid="peer-review-page">
-      <header className="mb-4">
+      <FloatingSectionNav pageKey="peer-review" minSections={2} />
+      <header
+        className="mb-4"
+        data-section-id="peer-review-overview"
+        data-section-label="Overview">
         <h1 className="text-white font-semibold text-xl flex items-center gap-2">
           <ClipboardCheck className="w-5 h-5 text-electric-blue" />
           Peer Review
@@ -100,8 +105,20 @@ export default function PeerReview() {
         </TabButton>
       </div>
 
-      {tab === 'peer-review' ? <PeerReviewAssistant /> : null}
-      {tab === 'defense-prep' ? <ThesisDefensePrep /> : null}
+      {tab === 'peer-review' ? (
+        <div
+          data-section-id="peer-review-assistant"
+          data-section-label="Peer Review Assistant">
+          <PeerReviewAssistant />
+        </div>
+      ) : null}
+      {tab === 'defense-prep' ? (
+        <div
+          data-section-id="defense-prep"
+          data-section-label="Thesis Defense Prep">
+          <ThesisDefensePrep />
+        </div>
+      ) : null}
     </div>
   )
 }

@@ -24,6 +24,7 @@ import WalkForwardChart from '../components/charts/WalkForwardChart'
 import ChartCommentStrip from '../components/ChartCommentStrip'
 import LearnModeBanner from '../components/LearnModeBanner'
 import DataCurrencyBar from '../components/DataCurrencyBar'
+import FloatingSectionNav from '../components/FloatingSectionNav'
 
 // Teal accent — Statistical Evidence is the academic-rigour screen.
 const ACCENT = '#0d9488'
@@ -43,6 +44,7 @@ export default function StatisticalEvidence() {
 
   return (
     <div className="p-4 md:p-6 space-y-5">
+      <FloatingSectionNav pageKey="statistical-evidence" />
       <div>
         <h1 className="text-xl font-semibold text-white">Statistical Evidence</h1>
         <p className="text-sm text-muted mt-1">
@@ -58,7 +60,9 @@ export default function StatisticalEvidence() {
         <div className="card p-8 text-center text-muted text-sm">Loading…</div>
       ) : (
         <>
-          <div>
+          <div
+            data-section-id="significance-journey"
+            data-section-label="Significance Journey Matrix">
             <SignificanceJourneyMatrix strategies={strategies} />
             <ChartCommentStrip
               chartId="significance_journey_matrix"
@@ -69,7 +73,9 @@ export default function StatisticalEvidence() {
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-            <div>
+            <div
+              data-section-id="cpcv-sharpe"
+              data-section-label="CPCV Sharpe Distribution">
               <CPCVSharpePlot cpcv={chartData?.cpcv ?? {}} />
               <ChartCommentStrip
                 chartId="cpcv_sharpe_distribution"
@@ -78,7 +84,9 @@ export default function StatisticalEvidence() {
                 accentColor={ACCENT}
               />
             </div>
-            <div>
+            <div
+              data-section-id="probabilistic-sharpe"
+              data-section-label="Probabilistic Sharpe">
               <ProbabilisticSharpeChart strategies={strategies} />
               <ChartCommentStrip
                 chartId="probabilistic_sharpe_chart"
@@ -89,7 +97,9 @@ export default function StatisticalEvidence() {
             </div>
           </div>
 
-          <div>
+          <div
+            data-section-id="cv-stability"
+            data-section-label="CV Stability Radar">
             <CVStabilityRadar radar={chartData?.cv_radar ?? {}} />
             <ChartCommentStrip
               chartId="cv_stability_radar"
@@ -100,7 +110,9 @@ export default function StatisticalEvidence() {
           </div>
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">
-            <div>
+            <div
+              data-section-id="fdr-correction"
+              data-section-label="FDR Correction">
               <MultipleComparisonTable strategies={strategies} />
               <ChartCommentStrip
                 chartId="multiple_comparison_table"
@@ -109,7 +121,9 @@ export default function StatisticalEvidence() {
                 accentColor={ACCENT}
               />
             </div>
-            <div>
+            <div
+              data-section-id="walk-forward"
+              data-section-label="Walk-Forward OOS">
               <WalkForwardChart walkForward={chartData?.walk_forward ?? {}} />
               <ChartCommentStrip
                 chartId="walk_forward_chart"

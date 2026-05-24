@@ -30,6 +30,7 @@ import { DARK_CHART_THEME } from '../lib/exportTheme'
 // Diversification suite (item 8) — managed by its own hooks against
 // /api/v1/analytics/correlation etc. (the analytics_metrics_cache hot
 // path is sub-millisecond, so a per-mount fetch is fine here).
+import FloatingSectionNav from '../components/FloatingSectionNav'
 import { CorrelationHeatmap } from '../components/diversification/CorrelationHeatmap'
 import { TailRiskTable } from '../components/diversification/TailRiskTable'
 import { CaptureScatter } from '../components/diversification/CaptureScatter'
@@ -222,7 +223,7 @@ function SignedPct({ x }: { x: number | null | undefined }) {
 
 function SectionCard({
   title, subtitle, exportButton, infoKey, tourId, theme = DARK_CHART_THEME,
-  dataExplain, children,
+  dataExplain, sectionId, children,
 }: {
   title: string
   subtitle: string
@@ -240,6 +241,11 @@ function SectionCard({
    *  a contextual reading of the chart's current values. Suppressed in
    *  light (export) mode, where interactive chrome must not render. */
   dataExplain?: { currentValue?: string; context?: string }
+  /** May 24 2026 — when set, the card emits the data-section-id +
+   *  data-section-label attributes the FloatingSectionNav picks up.
+   *  Omit it for cards that should not appear in the page TOC (e.g.
+   *  the methodology accordion's per-strategy sub-cards). */
+  sectionId?: string
   children: React.ReactNode
 }) {
   // In light mode the dark `card` class is bypassed entirely — the export
@@ -258,6 +264,9 @@ function SectionCard({
           : { borderLeft: `3px solid ${ACCENT}` }
       }
       {...(tourId ? { 'data-tour': tourId } : {})}
+      {...(sectionId
+        ? { 'data-section-id': sectionId, 'data-section-label': title }
+        : {})}
     >
       <div className="flex items-start justify-between mb-3 gap-2">
         <div className="min-w-0">
@@ -375,6 +384,7 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
   return (
     <SectionCard
       title="Summary Statistics"
+      sectionId="summary-statistics"
       subtitle="Full study period — equity, investment-grade bonds, high-yield bonds, and the benchmark. Excess return is annualised CAGR minus the benchmark CAGR; information ratio is excess return over tracking error."
       exportButton={<TableExportButton tableId="summary_statistics" headers={headers} rows={exportRows} />}
     >
@@ -447,6 +457,7 @@ export function RollingExcessReturnChart(
   return (
     <SectionCard
       title="Rolling Excess Return vs Benchmark"
+      sectionId="rolling-excess-return"
       infoKey="rolling_excess_return"
       theme={theme}
       subtitle={`${data.window_months}-month rolling total return of each strategy minus the 100% equity benchmark. Above zero is outperformance, below zero is underperformance.`}
@@ -518,6 +529,7 @@ export function RollingCorrelationChart(
   return (
     <SectionCard
       title="Rolling Correlation — Equity vs Bonds"
+      sectionId="rolling-correlation"
       tourId="rolling-correlation"
       infoKey="rolling_correlation_chart"
       theme={theme}
@@ -594,6 +606,7 @@ function RegimeConditionalTable({ rows }: { rows: RegimeRow[] }) {
   return (
     <SectionCard
       title="Regime-Conditional Performance"
+      sectionId="regime-conditional"
       tourId="regime-conditional"
       infoKey="regime_conditional_table"
       subtitle="Each strategy split at the 2022 break. Sorted by post-2022 Sharpe — which strategies held up once diversification stopped working."
@@ -639,6 +652,7 @@ function DrawdownComparisonTable({ rows }: { rows: DrawdownRow[] }) {
   return (
     <SectionCard
       title="Drawdown Comparison"
+      sectionId="drawdown"
       infoKey="drawdown_table"
       subtitle="Max peak-to-trough loss and months to a new equity high. Sorted by max drawdown — deepest loss first."
       dataExplain={{ currentValue:
@@ -701,6 +715,7 @@ function FactorLoadingsTable(
   return (
     <SectionCard
       title="Carhart Four-Factor Loadings"
+      sectionId="factor-loadings"
       tourId="factor-loadings"
       // Title-level InfoIcon restored May 22 2026 (Molly UAT Group 5).
       // The earlier comment claimed the per-column ExplainableText
@@ -848,6 +863,7 @@ export function CumulativeReturnChart(
   return (
     <SectionCard
       title="Cumulative Total Return"
+      sectionId="cumulative-returns"
       tourId="cumulative-return"
       infoKey="cumulative_return_chart"
       theme={theme}
@@ -1003,6 +1019,7 @@ export function SensitivityAnalysis(
   return (
     <SectionCard
       title="Sensitivity Analysis"
+      sectionId="sensitivity"
       infoKey="sensitivity_analysis"
       theme={theme}
       subtitle="How sensitive is each dynamic strategy's risk-adjusted performance to its key parameter? The vertical line marks the current setting."
@@ -1061,6 +1078,7 @@ function StrategyMethodologyPanel({ rows }: { rows: StrategyMeta[] }) {
   return (
     <SectionCard
       title="Strategy Rules and Methodology"
+      sectionId="methodology"
       subtitle="The construction logic of every strategy — and, for the dynamic strategies, the signal and the economic intuition behind it."
     >
       <div className="space-y-1.5">
@@ -1192,6 +1210,7 @@ export default function AcademicAnalytics() {
 
   return (
     <div className="p-4 md:p-6 space-y-5">
+      <FloatingSectionNav pageKey="academic-analytics" />
       <div>
         <h1 className="text-xl font-semibold text-white" data-tour="analytics-header">Academic Analytics</h1>
         <p className="text-sm text-muted mt-1">
