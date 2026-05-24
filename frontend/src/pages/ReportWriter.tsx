@@ -984,13 +984,64 @@ export default function ReportWriter() {
     return { sections: out, total, total_budget: 825 }
   }, [paperMd])
 
-  // May 24 2026 Step 2b — citation adjudication count. Derived
-  // from Step 2's citation cache payload. A citation is
-  // "untrusted" when its verification_status is anything other
-  // than the four verified states (verified / human_verified /
-  // search_selected / manually_added). Generate Draft is gated
-  // until count === 0.
+  // May 24 2026 Step 2b — citation adjudication count. A citation
+  // is "untrusted" when its verification_status is anything other
+  // than the verified states (verified / human_verified /
+  // search_selected / manually_added / rejected). Generate Draft +
+  // Steps 3/4 are gated until count === 0.
+  //
+  // UAT 2026-05-24 fix: the count now reads from
+  // citationReviewStore.citationsByGenerationId WHEN POPULATED, with
+  // a fallback to the Step 2 API-response snapshot in
+  // stepResults[2].payload.citations.
+  //
+  // Why: Citation Review's Accept/Reject buttons POST to
+  // /api/v1/citations/{id}/review and call upsertCitation() to
+  // mutate the store. The store reflects user actions live. The
+  // stepResults snapshot is frozen at the moment Step 2's response
+  // arrived and is NEVER updated by adjudication. Reading from
+  // stepResults left Step 2b stuck at "5 untrusted" even after Bob
+  // resolved every citation in the panel — Steps 3 and 4 stayed
+  // locked, Generate Draft stayed gated, and the user had to
+  // refresh the page to recover.
+  //
+  // Reading from the store instead means: as soon as Bob accepts
+  // the last citation, the store updates → this useMemo re-runs
+  // (it depends on the store value) → disabledReasonFor sees
+  // untrustedCount === 0 → Step 3/4 buttons un-lock in the same
+  // render. No refresh, no polling, no manual re-evaluation.
+  //
+  // The fallback to stepResults[2].payload is the first-paint
+  // path: before the user clicks Open Review, the store hasn't
+  // been populated yet for this generation. Step 2's API response
+  // is the snapshot we have at that moment, so the count is
+  // accurate enough to gate Step 3/4 from the start.
+  const VERIFIED_CITATION_STATES = useMemo(() => new Set([
+    'verified', 'human_verified', 'search_selected', 'manually_added',
+    'rejected', 'rejected_no_citation',
+  ]), [])
+
+  const liveCitations = useCitationReviewStore((s) => {
+    const gid = generation?.id
+    if (gid == null) return null
+    const rows = s.citationsByGenerationId[gid]
+    return Array.isArray(rows) && rows.length > 0 ? rows : null
+  })
+
   const untrustedCitationsCount = useMemo(() => {
+    // Prefer the live store — reflects every Accept / Reject /
+    // Manual the user has just performed in the Citation Review
+    // panel. Falls back to Step 2's snapshot only when the store
+    // hasn't yet been populated for this generation_id (i.e.
+    // before Open Review has been clicked or the panel mounted).
+    if (liveCitations) {
+      let count = 0
+      for (const c of liveCitations) {
+        const state = String(c?.verification_status ?? '')
+        if (!VERIFIED_CITATION_STATES.has(state)) count += 1
+      }
+      return count
+    }
     const raw = stepResults[2]?.payload as
       Record<string, unknown> | undefined
     const payload: Record<string, unknown> = raw ?? {}
@@ -998,17 +1049,13 @@ export default function ReportWriter() {
       Record<string, Record<string, unknown>> | undefined
     const citations: Record<string, Record<string, unknown>> =
       rawCit ?? {}
-    const verified = new Set([
-      'verified', 'human_verified', 'search_selected', 'manually_added',
-      'rejected', 'rejected_no_citation',
-    ])
     let count = 0
     for (const c of Object.values(citations)) {
       const state = String(c?.['verification_status'] ?? '')
-      if (!verified.has(state)) count += 1
+      if (!VERIFIED_CITATION_STATES.has(state)) count += 1
     }
     return count
-  }, [stepResults])
+  }, [liveCitations, stepResults, VERIFIED_CITATION_STATES])
 
   // UAT 2026-05-24 — Open Review button loading state. Reads the
   // citationReviewStore's per-generation `inFlight` map; a truthy
