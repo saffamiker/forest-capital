@@ -25,6 +25,7 @@ import type { BrandMode } from '../context/BrandContext'
 import { useSession } from '../context/SessionContext'
 import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 import UserManagementPanel from '../components/UserManagementPanel'
+import WarmAnalyticsCacheButton from '../components/admin/WarmAnalyticsCacheButton'
 import { TestResultsSection, TestAdminSections } from '../components/TestRunnerSettings'
 import TeamGate from '../components/TeamGate'
 import { useIsTeamMember, useIsSysadmin } from '../hooks/usePermissions'
@@ -507,6 +508,20 @@ export default function Settings() {
           description="Manage who can access the platform and their permission level."
         >
           <UserManagementPanel />
+        </SettingsSection>
+      )}
+
+      {/* Admin — sysadmin-only. Operator controls that previously required
+          the Render web shell. Currently houses the Warm Analytics Cache
+          trigger; future operator actions (force pipeline rerun, cache
+          invalidate) belong in this section too. */}
+      {isSysadmin && (
+        <SettingsSection
+          id="admin"
+          title="Admin"
+          description="Operator controls — warm caches, trigger pipelines, manage subsystem state."
+        >
+          <WarmAnalyticsCacheButton />
         </SettingsSection>
       )}
 

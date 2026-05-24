@@ -13,6 +13,7 @@ import {
   CheckCircle2,
 } from 'lucide-react'
 import TeamGate from './TeamGate'
+import { useQAStore } from '../stores/qaStore'
 
 interface AuditFinding {
   id: number
@@ -34,6 +35,71 @@ interface AuditFinding {
 // history so a forced presentation run is not mistaken for a real audit.
 function triggerLabel(triggeredBy: string): string {
   return triggeredBy === 'demo' ? '🎯 demo' : triggeredBy
+}
+
+
+/**
+ * PreSubmissionAuditButton — sysadmin-only trigger for a
+ * pre-submission audit run. May 24 2026.
+ *
+ * Per user spec: this button must only render in the green/amber
+ * "ready to run" style when the QA submission readiness banner is
+ * green (ready) or amber (ready_with_acknowledgements). When the
+ * QA banner reads NOT READY (a blocking item exists), the button
+ * stays clickable but renders in red with a warning sub-label so
+ * the operator can SEE that running a pre-submission audit now
+ * would publish a not-yet-ready submission.
+ *
+ * Decision NOT to disable the button outright: an operator may
+ * still want to run a pre-submission audit for a separate reason
+ * (e.g. to verify the audit pipeline itself is reachable). The UI
+ * communicates "this is risky, here's why" rather than blocking.
+ */
+function PreSubmissionAuditButton({
+  running, onRun,
+}: { running: boolean; onRun: () => void }) {
+  const qaResult = useQAStore((s) => s.result)
+  const submissionStatus = qaResult?.submission_status
+
+  // Default to the legacy amber rendering — used when the QA audit
+  // hasn't been run yet (so we have no submission_status to read).
+  let cls = 'border-warning/30 bg-warning/10 text-warning hover:bg-warning/20'
+  let warnNote: string | null = null
+
+  if (submissionStatus === 'not_ready') {
+    cls = 'border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20'
+    warnNote = 'QA shows blocking items — run methodology review first'
+  } else if (submissionStatus === 'ready') {
+    cls = 'border-green-500/40 bg-green-500/10 text-green-300 hover:bg-green-500/20'
+  } else if (submissionStatus === 'ready_with_acknowledgements') {
+    cls = 'border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20'
+  }
+
+  return (
+    <TeamGate
+      permission="manage_users"
+      tooltip="Running an audit is restricted to the platform sysadmin">
+      <div className="flex flex-col gap-0.5">
+        <button
+          type="button"
+          onClick={onRun}
+          disabled={running}
+          data-testid="pre-submission-audit-button"
+          data-readiness={submissionStatus ?? 'unknown'}
+          className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs
+                      font-medium border transition-colors
+                      disabled:opacity-50 ${cls}`}>
+          <FileSearch className="w-3 h-3" />
+          Run Pre-Submission Audit
+        </button>
+        {warnNote ? (
+          <span className="text-2xs text-red-300/80 italic">
+            ⚠ {warnNote}
+          </span>
+        ) : null}
+      </div>
+    </TeamGate>
+  )
 }
 
 interface AuditRun {
@@ -354,20 +420,11 @@ export default function AuditPanel() {
             : <><ShieldCheck className="w-3 h-3" /> Run Full Audit</>}
         </button>
         </TeamGate>
-        <TeamGate permission="manage_users"
-          tooltip="Running an audit is restricted to the platform sysadmin">
-        <button
-          type="button"
-          onClick={() => void runAudit('pre_submission')}
-          disabled={running}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs
-                     font-medium border border-warning/30 bg-warning/10
-                     text-warning hover:bg-warning/20 transition-colors
-                     disabled:opacity-50"
-        >
-          <FileSearch className="w-3 h-3" /> Run Pre-Submission Audit
-        </button>
-        </TeamGate>
+        <PreSubmissionAuditButton
+          running={running}
+          onRun={() => void runAudit('pre_submission')}
+        />
+        {/* End Pre-Submission button — gated on QA readiness */}
         {latest && latest.status !== 'running' && (
           <button
             type="button"

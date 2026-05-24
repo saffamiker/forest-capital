@@ -4,6 +4,7 @@ Sprint 4: all 8 agents live, council deliberation wired, QA methodology checklis
           WebSocket streaming, scope guard enforced, council_sessions logging.
 """
 from __future__ import annotations
+import asyncio
 import json
 import os
 import time
@@ -262,73 +263,39 @@ async def lifespan(app: FastAPI):
             await refresh_strategy_context_cache()
         except Exception as exc:  # noqa: BLE001
             log.warning("strategy_context_warm_failed", error=str(exc))
-        # May 24 2026 P0 (third attempt) — the user observed that
-        # firing the analytics refresh from the lifespan startup
-        # hook competes with first-request handling on a cold
-        # Render boot: the refresh runs at the exact moment the
-        # worker is still binding its event-loop event/database
-        # connection pool and apparently hangs or fails silently.
-        # Symptom: every dashboard request returns warming forever.
+        # May 24 2026 (fourth iteration) — fully automatic warm with
+        # retry. Per user directive: "after every deploy, cache warms
+        # automatically within 60 seconds of startup. No operator
+        # action required."
         #
-        # New strategy per user directive:
-        #   "precompute and persist results to analytics_metrics_
-        #    cache table on first successful compute, serve from DB
-        #    cache on all subsequent requests, recompute only when
-        #    underlying data changes (new market data ingested)."
+        # The auto-warm runs as a fire-and-forget background task so
+        # the lifespan handler does NOT block on it. asyncio's task
+        # scheduler picks up the coroutine after the server is
+        # accepting requests, avoiding the cold-boot competition
+        # that caused the prior iteration's hang.
         #
-        # The data-ingest hook in tools/cache.set_strategy_cache
-        # already fires trigger_refresh_async after every fresh
-        # strategy write — that satisfies the "recompute when data
-        # changes" leg. The endpoint cold-cache fallback
-        # (already in place) fires the refresh on first user
-        # request — that satisfies the "first compute" leg.
-        # Removing the startup-hook refresh eliminates the boot-
-        # time competition and lets the data-ingest hook be the
-        # single canonical refresh trigger.
+        # `auto_warm_analytics` retries up to MAX_ATTEMPTS (3) with
+        # exponential backoff (5s → 15s → 45s). A transient hiccup
+        # at boot doesn't leave the cache cold.
         #
-        # If you need to MANUALLY warm the cache on a fresh deploy
-        # (e.g. the data hasn't changed but you want fresh
-        # analytics), hit POST /api/v1/admin/warm-analytics-cache
-        # (manage_users-gated). That endpoint runs the refresh
-        # synchronously and returns when the row lands.
+        # Status is reported through GET /api/v1/admin/cache-status.
+        # The manual POST /api/v1/admin/warm-analytics-cache endpoint
+        # remains as a sysadmin-only override.
         if not _is_test_env:
             try:
-                from tools.cache import get_latest_strategy_hash
-                from tools.precomputed_analytics import (
-                    get_metric as get_precomputed,
-                    get_latest_metric as get_latest_precomputed,
-                )
-                latest_hash = await get_latest_strategy_hash()
-                aa: dict | None = None
-                ef: dict | None = None
-                if latest_hash:
-                    aa = await get_precomputed(
-                        latest_hash, "academic_analytics")
-                    ef = await get_precomputed(
-                        latest_hash, "efficient_frontier")
-                if aa is None:
-                    aa = await get_latest_precomputed("academic_analytics")
-                if ef is None:
-                    ef = await get_latest_precomputed("efficient_frontier")
-                if aa is None or ef is None:
-                    # Do NOT fire the refresh from startup. The
-                    # first endpoint hit will fire it.
-                    log.warning(
-                        "analytics_cache_cold_on_startup_no_fire",
-                        academic_present=bool(aa),
-                        frontier_present=bool(ef),
-                        note=("First user request will fire refresh; "
-                              "manual warm: POST /api/v1/admin/"
-                              "warm-analytics-cache"))
-                else:
-                    log.info(
-                        "analytics_cache_warm_on_startup",
-                        data_hash=(latest_hash[:8]
-                                    if latest_hash else None),
-                        academic_stale=bool(aa.get("_stale")),
-                        frontier_stale=bool(ef.get("_stale")))
+                from tools.cache_warm_state import auto_warm_analytics
+
+                async def _auto_warm_task() -> None:
+                    # Tiny initial delay so the server has settled
+                    # into its first-request handler before we
+                    # kick off the heavier compute path.
+                    await asyncio.sleep(2.0)
+                    await auto_warm_analytics()
+
+                asyncio.create_task(_auto_warm_task())
+                log.info("analytics_cache_auto_warm_scheduled")
             except Exception as exc:  # noqa: BLE001
-                log.warning("analytics_cache_warm_check_failed",
+                log.warning("analytics_cache_auto_warm_schedule_failed",
                             error=str(exc))
     yield
     log.info("forest_capital_shutdown")
@@ -2454,15 +2421,16 @@ async def get_analytics_sensitivity(request: Request, session: dict = Depends(re
 async def post_warm_analytics_cache(
     session: dict = Depends(require_team_member),
 ):
-    """May 24 2026 P0 (third attempt) — manual warm trigger for the
-    analytics_metrics_cache table.
+    """May 24 2026 — manual warm trigger for the
+    analytics_metrics_cache table. The auto-warm hook fires this
+    automatically at startup with retry; this endpoint is the
+    sysadmin override for "warm now, regardless of cache state".
 
-    Runs refresh_all_analytics SYNCHRONOUSLY (awaits completion)
-    and returns when the rows have landed. Bob hits this once
-    after a Render deploy to guarantee the analytics cache is hot
-    before Dr. Panttser opens the dashboard.
+    Runs refresh_all_analytics inline and returns when the rows
+    have landed. Updates WarmState so /cache-status reflects the
+    completed run.
 
-    Surfaces the warm result so the caller knows what landed:
+    Returns:
       {warmed: bool, latest_hash: str | None, took_s: float,
        academic_analytics: bool, efficient_frontier: bool}
     """
@@ -2475,33 +2443,91 @@ async def post_warm_analytics_cache(
             "efficient_frontier": False,
             "note":              "test environment",
         }
-    import time
     try:
         from tools.cache import get_latest_strategy_hash
-        from tools.precomputed_analytics import (
-            get_metric as get_precomputed,
-            refresh_all_analytics,
-        )
+        from tools.cache_warm_state import auto_warm_analytics, get_warm_state
+        # Single attempt — the user is asking for an explicit
+        # warm now, so we don't apply the auto-warm's exponential
+        # backoff. Failures still surface to the WarmState.
+        state = await auto_warm_analytics(max_attempts=1)
         latest_hash = await get_latest_strategy_hash()
-        t0 = time.monotonic()
-        await refresh_all_analytics(latest_hash or "")
-        took_s = round(time.monotonic() - t0, 2)
-        # Verify the rows landed.
-        sentinel = latest_hash or "BOOT-WARM"
-        aa = await get_precomputed(sentinel, "academic_analytics")
-        ef = await get_precomputed(sentinel, "efficient_frontier")
+        if state.status != "warm":
+            raise HTTPException(
+                status_code=500,
+                detail=f"Warm failed: {state.last_attempt_error}")
+        landed = state.last_landed or {}
         return {
             "warmed":              True,
             "latest_hash":         latest_hash,
-            "took_s":              took_s,
-            "academic_analytics":  bool(aa),
-            "efficient_frontier":  bool(ef),
+            "took_s":              state.last_took_s or 0.0,
+            "academic_analytics":  bool(landed.get("academic_analytics")),
+            "efficient_frontier":  bool(landed.get("efficient_frontier")),
         }
+    except HTTPException:
+        raise
     except Exception as exc:
         log.warning("warm_analytics_cache_failed", error=str(exc))
         raise HTTPException(
             status_code=500,
             detail=f"Warm failed: {exc}")
+
+
+@app.get("/api/v1/admin/cache-status")
+async def get_cache_status(
+    session: dict = Depends(require_auth),
+):
+    """May 24 2026 — analytics cache status for the Admin UI.
+
+    Returns the auto-warm subsystem's current state plus the
+    per-row landed booleans from analytics_metrics_cache so the
+    Admin UI can show the right state without a second round-trip:
+
+      {
+        "status": "idle" | "warming" | "warm" | "failed",
+        "in_progress": bool,
+        "attempts": int,
+        "last_attempt_at": ISO8601 | null,
+        "last_success_at": ISO8601 | null,
+        "last_success_age_seconds": float | null,
+        "last_attempt_error": str | null,
+        "last_took_s": float | null,
+        "last_landed": {academic_analytics, efficient_frontier},
+        "cache_present": {
+            "academic_analytics": bool,
+            "efficient_frontier": bool,
+        },
+      }
+
+    Any authenticated user can read this — the UI's Warm Cache
+    button itself is sysadmin-only but every team member should
+    be able to see whether the dashboard's cache is hot.
+    """
+    from tools.cache_warm_state import get_warm_state
+    state = get_warm_state().to_dict()
+    cache_present = {"academic_analytics": False, "efficient_frontier": False}
+    if ENVIRONMENT != "test":
+        try:
+            from tools.cache import get_latest_strategy_hash
+            from tools.precomputed_analytics import (
+                get_metric as get_precomputed,
+                get_latest_metric as get_latest_precomputed,
+            )
+            latest_hash = await get_latest_strategy_hash()
+            sentinel = latest_hash or "BOOT-WARM"
+            aa = await get_precomputed(sentinel, "academic_analytics")
+            ef = await get_precomputed(sentinel, "efficient_frontier")
+            if aa is None:
+                aa = await get_latest_precomputed("academic_analytics")
+            if ef is None:
+                ef = await get_latest_precomputed("efficient_frontier")
+            cache_present = {
+                "academic_analytics":  bool(aa),
+                "efficient_frontier":  bool(ef),
+            }
+        except Exception as exc:  # noqa: BLE001
+            log.warning("cache_status_read_failed", error=str(exc))
+    state["cache_present"] = cache_present
+    return state
 
 
 @app.get("/api/v1/admin/data-status")
