@@ -31,6 +31,8 @@ const DocumentEditor = lazy(() =>
   import('./pages/DocumentEditor'))
 const ReportWriter = lazy(() =>
   import('./pages/ReportWriter'))
+const PeerReview = lazy(() =>
+  import('./pages/PeerReview'))
 
 
 /** Minimal page-load fallback. Keeps the route mount measurable in
@@ -263,6 +265,7 @@ export default function App() {
                 <Route path="analytics" element={<AcademicAnalytics />} />
                 <Route path="council" element={<CouncilDebate />} />
                 <Route path="qa" element={<QAHub />} />
+                <Route path="peer-review" element={<PeerReview />} />
                 <Route path="reports" element={<Reports />} />
                 <Route path="settings" element={<Settings />} />
                 <Route path="reports/writer"

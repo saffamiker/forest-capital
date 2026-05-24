@@ -3793,6 +3793,218 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+# ── Peer Review Assistant (item 7, Feature A) ─────────────────────────────────
+#
+# Bob / Michael / Molly each review another team's midpoint
+# submission for the June 3 cohort meetup. Upload the peer team's
+# PDF / DOCX / MD; we extract text in-memory (no persistence —
+# peer papers are not reference documents and don't belong in
+# academic_documents), run the harness-gated Opus call against the
+# four FNA 670 rubric dimensions, and stream a 3-4 minute review
+# script SSE-style.
+
+@app.post("/api/council/peer-review")
+@limiter.limit("10/minute")
+async def council_peer_review(
+    request: Request,
+    file: UploadFile = File(...),
+    submission_name: str = Form(""),
+    session: dict = Depends(require_team_member),
+):
+    """Streams a peer-review script for the uploaded submission.
+
+    multipart/form-data:
+      file              the peer team's midpoint paper (.pdf, .docx, .md)
+      submission_name   optional display name surfaced in the verdict;
+                        defaults to the file's basename
+
+    SSE wire format mirrors /api/council/academic-review for UI
+    consistency:
+      data: {"type": "submission_meta", "name": "...", "char_count": N}
+      data: {"type": "arbiter_chunk", "text": "..."}     (repeated)
+      data: [DONE]
+
+    Errors flow as a single `{"type": "error", "message": "..."}`
+    frame followed by [DONE] so the frontend has one consistent
+    parse path."""
+    import asyncio
+    from agents.peer_review import (
+        extract_peer_paper_text,
+        build_peer_review_context_block,
+        render_peer_review_context_block,
+        run_peer_review_with_harness,
+        chunk_arbiter_text,
+        MAX_PEER_PAPER_BYTES,
+    )
+
+    # Read + extract synchronously BEFORE the stream opens so a
+    # 422 (unsupported format, scanned PDF, oversize) lands on the
+    # POST itself instead of mid-stream. Frontend renders the
+    # error inline.
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=422,
+                             detail="Uploaded file is empty.")
+    if len(raw) > MAX_PEER_PAPER_BYTES:
+        raise HTTPException(
+            status_code=422,
+            detail=(f"Uploaded file exceeds "
+                    f"{MAX_PEER_PAPER_BYTES} bytes."))
+    try:
+        text = extract_peer_paper_text(file.filename or "", raw)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    name = (submission_name or "").strip()
+    if not name:
+        # Fall back to the filename without the extension.
+        from pathlib import Path
+        name = Path(file.filename or "submission").stem or "submission"
+
+    ctx_dict = build_peer_review_context_block(name, text)
+    context_block = render_peer_review_context_block(ctx_dict)
+
+    async def event_stream():
+        try:
+            yield _sse(
+                "submission_meta",
+                name=name,
+                char_count=len(text),
+            )
+            verdict = await asyncio.to_thread(
+                run_peer_review_with_harness, context_block)
+            for chunk in chunk_arbiter_text(verdict):
+                yield _sse("arbiter_chunk", text=chunk)
+            log.info(
+                "peer_review_complete",
+                submission_name=name,
+                paper_chars=len(text),
+                verdict_chars=len(verdict))
+            _log_interaction_bg(
+                request, session, "peer_review",
+                agents_involved=["peer_review_assistant"],
+                response_summary=verdict,
+                metadata={
+                    "submission_name": name,
+                    "paper_chars":     len(text),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("peer_review_failed", error=str(exc))
+            yield _sse(
+                "error",
+                message="Peer review failed — please retry.")
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(),
+                              media_type="text/event-stream")
+
+
+# ── Thesis Defense Prep (item 7, Feature B) ───────────────────────────────────
+#
+# Auto-loads the calling user's most-recent midpoint_paper editor
+# draft and streams an anticipated Q&A prep sheet across three
+# categories (technical, academic, governance). No file upload —
+# the draft is the source of truth.
+
+@app.post("/api/council/defense-prep")
+@limiter.limit("10/minute")
+async def council_defense_prep(
+    request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """Streams a mock-panel Q&A prep sheet for the calling user's
+    current midpoint_paper editor draft.
+
+    No request body — the draft is auto-fetched from editor_drafts
+    via get_current_draft(email, "midpoint_paper"). When no draft
+    exists, returns a single error frame and [DONE] so the
+    frontend can prompt Bob to generate or open a draft first.
+
+    SSE wire format:
+      data: {"type": "draft_meta",     "title": "...",
+              "word_count": N, "updated_at": "..."}
+      data: {"type": "arbiter_chunk", "text": "..."}     (repeated)
+      data: [DONE]
+    """
+    import asyncio
+    from agents.peer_review import (
+        build_defense_prep_context_block,
+        render_defense_prep_context_block,
+        run_defense_prep_with_harness,
+        chunk_arbiter_text,
+    )
+
+    # Resolve the draft BEFORE opening the stream so a 404-style
+    # error frame fires immediately rather than mid-flow.
+    draft = None
+    try:
+        from tools.editor_drafts import get_current_draft
+        draft = await get_current_draft(
+            owner_email=session.get("email") or "",
+            document_type="midpoint_paper")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("defense_prep_draft_lookup_failed",
+                    error=str(exc))
+
+    async def event_stream():
+        if not draft or not (draft.get("content_text") or "").strip():
+            # No draft — surface the gap rather than running the
+            # agent against empty input. The frontend renders the
+            # error and offers a "Open editor" link.
+            yield _sse(
+                "error",
+                message=(
+                    "No midpoint paper draft found. Generate or "
+                    "open a draft in the Reports editor first, "
+                    "then re-run Defense Prep."))
+            yield "data: [DONE]\n\n"
+            return
+        draft_text = draft["content_text"] or ""
+        title = draft.get("title") or "Midpoint paper draft"
+
+        try:
+            yield _sse(
+                "draft_meta",
+                title=title,
+                word_count=draft.get("word_count") or 0,
+                updated_at=draft.get("updated_at") or None,
+            )
+
+            ctx_dict = build_defense_prep_context_block(
+                "Forest Capital (team draft)", draft_text)
+            context_block = render_defense_prep_context_block(
+                ctx_dict)
+
+            verdict = await asyncio.to_thread(
+                run_defense_prep_with_harness, context_block)
+            for chunk in chunk_arbiter_text(verdict):
+                yield _sse("arbiter_chunk", text=chunk)
+            log.info(
+                "defense_prep_complete",
+                draft_id=draft.get("id"),
+                draft_chars=len(draft_text),
+                verdict_chars=len(verdict))
+            _log_interaction_bg(
+                request, session, "defense_prep",
+                agents_involved=["thesis_defense_prep"],
+                response_summary=verdict,
+                metadata={
+                    "draft_id":   draft.get("id"),
+                    "draft_chars": len(draft_text),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.error("defense_prep_failed", error=str(exc))
+            yield _sse(
+                "error",
+                message="Defense prep failed — please retry.")
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(),
+                              media_type="text/event-stream")
+
+
 # ── Inline metric explainer ───────────────────────────────────────────────────
 
 @app.post("/api/council/explain")
