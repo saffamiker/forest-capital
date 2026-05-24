@@ -121,7 +121,7 @@ export const TOUR_STEPS: TourStep[] = [
       'Growth of $1 invested at inception across all ten strategies and '
       + 'the benchmark — the foundational portfolio comparison visual.',
       'This is slide one of your final presentation. The divergence '
-      + 'between strategies and benchmark across 282 months is the visual '
+      + 'between strategies and benchmark across the full study period is the visual '
       + 'evidence that allocation decisions matter.',
     ],
     relevantFor: 'Molly — this is slide one of the final presentation.',

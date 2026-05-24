@@ -599,9 +599,13 @@ async def get_provenance_justification(session: dict = Depends(require_auth)):
                 "corporate bond universe as BND and began trading July 2002. Monthly "
                 "returns spliced: LQD used 2002-07 to 2007-04, BND from 2007-05.",
             "months_added": 58,
-            "statistical_impact": "n=282 vs n=224 observations. Power analysis requires "
-                "n >= 220 for 80% power at p < 0.005 — the bridge provides the "
-                "statistical margin. Without it, the dataset barely clears the minimum.",
+            "statistical_impact": "Without the bridge, n=224 observations; "
+                "with the bridge, n is the live monthly count (286 on the "
+                "current Render snapshot — auto-extends past 2025-12 once "
+                "Apr 2026 fully closes). Power analysis requires n >= 220 "
+                "for 80% power at p < 0.005 — the bridge provides the "
+                "statistical margin. Without it, the dataset barely clears "
+                "the minimum.",
         },
     }
 
