@@ -20,6 +20,7 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    STRUCTURE_INSTRUCTION,
     VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
     build_agent_response,
@@ -75,6 +76,8 @@ evidence for factor exposures that may flag overfitting (e.g. a strategy \
 loading heavily on a single factor inflates idiosyncratic risk).
 
 {VISUAL_REASONING_RULES}
+
+{STRUCTURE_INSTRUCTION}
 
 {GLOBAL_AGENT_RULE}
 

@@ -40,6 +40,24 @@ SCOPE_ENFORCEMENT = (
     "off-topic content in any way."
 )
 
+
+# UAT 2026-05-24 (#76/#77) — every council response needs to read as a
+# structured analyst note, not a wall of prose. This block is injected
+# at the end of every specialist + dissenter + CIO prompt so the
+# rendered output carries headings + emphasis the frontend Markdown
+# component can style. The user reported that even thorough responses
+# read as "plain text" because they lacked visible structure.
+STRUCTURE_INSTRUCTION = (
+    "STRUCTURE YOUR RESPONSE WITH MARKDOWN. Use `### ` for top-level "
+    "section headings within your response (e.g. `### Key finding`, "
+    "`### Supporting evidence`, `### Caveat`). Use `**bold**` for the "
+    "most load-bearing phrases — the specific strategy, the specific "
+    "number, the specific risk. Use bullet lists where the content is "
+    "list-shaped. A wall of unstructured prose looks unfinished to a "
+    "sophisticated reader; every response must be scannable in 5 "
+    "seconds and readable in detail in 60."
+)
+
 # Cross-cutting visual-reasoning rules. Embedded in every prompt of an
 # agent that may receive chart snapshots (the council specialists, the
 # CIO, the Academic Review peers/arbiter, and the Academic Writer).
