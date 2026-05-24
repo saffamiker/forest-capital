@@ -20,7 +20,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios'
 import {
-  FileText, Download, Search, AlertCircle, Clock,
+  FileText, Download, Search, AlertCircle, Clock, Lock,
 } from 'lucide-react'
 
 import BobBlockBadge from '../components/reportwriter/BobBlockBadge'
@@ -124,6 +124,15 @@ export default function ReportWriter() {
   // without a page reload. Also re-bumped when the user picks a
   // saved draft so the selector reflects the new selection.
   const [draftListNonce, setDraftListNonce] = useState(0)
+  // ── May 24 2026 RW4 hotfix — draft invalidation on pipeline re-run.
+  // When a draft EXISTS and the user clicks Re-run on any Step 1-6,
+  // confirm with a dialog before executing. On confirm, save the
+  // current draft to Version History and mark it stale. The banner
+  // tells the user the draft is outdated and Generate Draft re-
+  // enables. Bob's edits are preserved in Version History — never
+  // silently deleted.
+  const [pendingRerunStep, setPendingRerunStep] = useState<number | null>(null)
+  const [draftStale, setDraftStale] = useState(false)
 
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const stepResultsRef = useRef<StepResults>({})
@@ -248,6 +257,62 @@ export default function ReportWriter() {
     }
   }, [templateId, setStep, pipelineStartedAt, setPipelineStartedAt,
        setBadge, persistStep])
+
+  // ── RW4 (May 24 2026) — confirm-before-re-run when a draft exists ──────────
+  //
+  // Pipeline re-runs invalidate the current draft because the
+  // verified data + citation cache the draft was built against
+  // change. Without a confirm dialog, a misclick on a Run button
+  // would silently invalidate Bob's hand-edited prose. The flow:
+  //
+  //   1. Click Run on Step 1-6 while a draft exists →
+  //      open confirm dialog (PendingRerunDialog below).
+  //   2. Click "Continue" → save the current paper_md to Version
+  //      History (POST /api/v1/reports/generations/{id}/versions)
+  //      then mark the draft stale and run the step.
+  //   3. Click "Cancel" → clear the pending state, no-op.
+  //
+  // Step 7 (Generate Draft) re-enables once stale because the
+  // generationDisabledReason check passes; the stale banner stays
+  // until Bob re-generates.
+  const _invalidateDraftAndRun = useCallback(async (n: number) => {
+    if (generation?.id) {
+      try {
+        await axios.post(
+          `/api/v1/reports/generations/${generation.id}/versions`,
+          {
+            paper_md: paperMd,
+            label: `Auto-save before re-running Step ${n}`,
+            source: 'pre_rerun_snapshot',
+          })
+      } catch {
+        // Version-save failure does NOT block the re-run — the
+        // user explicitly asked for this. Surface a warning, keep
+        // going. The pre-edit content is still recoverable via
+        // the audit row + previous generation pull.
+        setError(`Could not save pre-re-run snapshot to Version History — re-run proceeds anyway.`)
+      }
+    }
+    setDraftStale(true)
+    setPendingRerunStep(null)
+    await runStep(n)
+  }, [generation?.id, paperMd, runStep])
+
+  const confirmedRunStep = useCallback(async (n: number) => {
+    // Confirm only when a real draft exists AND the user is about
+    // to re-run a step that already has a terminal result. A first-
+    // time run (no draft, no prior step result) needs no confirm.
+    const hasDraft = !!generation?.id && (paperMd?.length ?? 0) > 0
+    const prior = stepResultsRef.current[n]
+    const priorTerminal = prior
+      && prior.status !== 'idle'
+      && prior.status !== 'running'
+    if (hasDraft && priorTerminal) {
+      setPendingRerunStep(n)
+      return
+    }
+    await runStep(n)
+  }, [generation?.id, paperMd, runStep])
 
   // ── Restore on mount + auto-cascade Step 1 → 2,3,4 → 5 → 6 ─────────────────
   // Before kicking off a fresh run we ask the backend for any
@@ -542,6 +607,8 @@ export default function ReportWriter() {
       // Tell the DraftSelector to re-fetch — the new draft should
       // appear in the dropdown immediately without a page reload.
       setDraftListNonce((n) => n + 1)
+      // RW4 — the freshly-generated draft is no longer stale.
+      setDraftStale(false)
     } catch (err) {
       const ms = Math.round(performance.now() - t0)
       let msg = 'Generation failed.'
@@ -793,11 +860,28 @@ export default function ReportWriter() {
   }, [paperMd])
 
   const generateDisabledReason = useMemo(() => {
+    // May 24 2026 RW3 hotfix — strict pipeline gating. Each step
+    // must show a GENUINE completed result. "Restored from cache"
+    // counts (any complete or warning state with a real payload
+    // is fine). False-green bypass states do NOT count — Step 4's
+    // _no_audit: true is the only known bypass today, but the
+    // pattern is generalisable: a payload-level boolean
+    // `_bypass_<reason>` flags a step as "passed for tactical
+    // reasons but does NOT meet the gate".
     if (!(stepResults[1]?.status === 'complete')) return 'Step 1 incomplete'
     for (const n of [2, 3, 4]) {
       const r = stepResults[n]
       if (!r || (r.status !== 'complete' && r.status !== 'warning')) {
         return `Step ${n} incomplete`
+      }
+      // Step 4 specifically — _no_audit means no QA audit on
+      // record. The step is informational-warning, NOT a gate
+      // pass. Block Step 7 until the QA audit has actually run.
+      if (n === 4) {
+        const payload = (r.payload as Record<string, unknown> | undefined) || {}
+        if (payload['_no_audit'] === true) {
+          return 'Step 4 awaiting QA Audit — run the audit before generation'
+        }
       }
     }
     const s5 = stepResults[5]?.status
@@ -878,7 +962,7 @@ export default function ReportWriter() {
             results={stepResults}
             generating={generating}
             generateDisabledReason={generateDisabledReason}
-            onRunStep={runStep}
+            onRunStep={confirmedRunStep}
             onGenerate={handleGenerate}
           />
           <RubricPanel
@@ -918,6 +1002,54 @@ export default function ReportWriter() {
         </aside>
 
         <main className="lg:col-span-2 space-y-4">
+          {/* RW4 — stale banner. Renders when a pipeline re-run
+              invalidated the current draft. Bob's edits are still
+              saved to Version History; the banner directs him to
+              regenerate to produce a current draft. */}
+          {draftStale && generation ? (
+            <div
+              data-testid="draft-stale-banner"
+              className="bg-amber-500/10 border border-amber-500/30 rounded p-3
+                         flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="text-amber-300 text-xs leading-snug">
+                <p className="font-semibold mb-0.5">
+                  Pipeline data has changed — this draft is outdated.
+                </p>
+                <p>
+                  The previous draft is preserved in Version History.
+                  Regenerate to reflect current data.
+                </p>
+              </div>
+            </div>
+          ) : null}
+          {/* RW5 — [BOB] block adjudication banner + editing-tools
+              lock. Tighten / Rephrase / Expand / Ask are disabled
+              until every [BOB] block in the draft has been
+              adjudicated (resolved via the CalloutSidebar's
+              Accept/Edit/Reject flow). bobCount
+              counts unresolved blocks. */}
+          {bobCount > 0 ? (
+            <div
+              data-testid="bob-adjudication-banner"
+              className="bg-amber-500/10 border border-amber-500/30 rounded p-3
+                         flex items-start gap-2">
+              <Lock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <div className="text-amber-300 text-xs leading-snug">
+                <p className="font-semibold mb-0.5">
+                  Review all staging blocks before editing —
+                  {' '}{bobCount} block
+                  {bobCount === 1 ? '' : 's'}
+                  {' '}awaiting decision.
+                </p>
+                <p>
+                  The Tighten / Rephrase / Expand / Ask the writer
+                  tools unlock once every [BOB] block has an Accept
+                  or Reject decision in the sidebar.
+                </p>
+              </div>
+            </div>
+          ) : null}
           <div
             data-tour="editor-iteration"
             className="bg-navy-900 border border-navy-700 rounded p-3 space-y-3">
@@ -925,7 +1057,7 @@ export default function ReportWriter() {
               selectedText={selectedText}
               onRun={handleIterate}
               onAccept={handleAcceptRewrite}
-              disabled={!generation}
+              disabled={!generation || bobCount > 0}
             />
             <textarea
               ref={textareaRef}
@@ -1049,6 +1181,82 @@ export default function ReportWriter() {
           />
         </section>
       ) : null}
+
+      {/* RW4 — confirm dialog when re-running Steps 1-6 while a
+          draft exists. Continue saves the current paper_md to
+          Version History, marks the draft stale, and runs the
+          step. Cancel clears the pending state. */}
+      {pendingRerunStep !== null ? (
+        <PendingRerunDialog
+          step={pendingRerunStep}
+          onCancel={() => setPendingRerunStep(null)}
+          onConfirm={() => { void _invalidateDraftAndRun(pendingRerunStep) }}
+        />
+      ) : null}
+    </div>
+  )
+}
+
+
+/**
+ * PendingRerunDialog — confirm-before-invalidate gate for the
+ * pipeline re-run UX (RW4, May 24 2026). When a draft exists and
+ * the user clicks Re-run on Step 1-6, this dialog warns that the
+ * current draft will move to Version History before the step
+ * fires. Two buttons: Continue / Cancel.
+ */
+function PendingRerunDialog({
+  step, onCancel, onConfirm,
+}: {
+  step: number
+  onCancel: () => void
+  onConfirm: () => void
+}) {
+  return (
+    <div
+      role="dialog"
+      aria-label={`Confirm re-run of Step ${step}`}
+      data-testid="pipeline-rerun-confirm"
+      className="fixed inset-0 z-[80] flex items-center justify-center
+                 bg-black/60 p-4"
+      onClick={onCancel}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-md bg-navy-900 border border-navy-700
+                   rounded-lg shadow-2xl p-5 space-y-3">
+        <h2 className="text-white font-semibold text-sm flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-amber-400" />
+          Re-running Step {step} will invalidate the current draft
+        </h2>
+        <p className="text-text-secondary text-xs leading-relaxed">
+          Re-running this step will mark your current draft as
+          outdated. Your draft will be saved to Version History
+          and will remain retrievable, but it will no longer be
+          the active draft. You will need to regenerate to produce
+          a current version. Continue?
+        </p>
+        <div className="flex items-center justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onCancel}
+            data-testid="pipeline-rerun-confirm-cancel"
+            className="px-3 py-1.5 text-xs rounded
+                       border border-navy-600 text-text-secondary
+                       hover:bg-navy-800">
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            data-testid="pipeline-rerun-confirm-continue"
+            className="px-3 py-1.5 text-xs rounded
+                       bg-electric-blue hover:bg-electric-blue/80
+                       text-white font-medium">
+            Continue
+          </button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -1127,14 +1335,21 @@ const STEP_ACTIONS: Record<number, (templateId: string) => Promise<StepSummary>>
     }
   },
   // Step 4 — Pull Validation Data (latest audit run).
-  // FIX (May 23 2026 — user report): when no audit has been run yet
-  // the endpoint returns 200 with statistical_status: null. The
-  // previous handler rendered this as "Statistical audit: unknown"
-  // which read as a failure. The pipeline is informational — a
-  // missing audit is a "run the QA audit first" prompt, NOT a
-  // generation blocker. Now: returns 'complete' with a clear
-  // "No audit on record" message and an actionable detail in the
-  // payload so the expansion panel can suggest the QA audit run.
+  //
+  // May 24 2026 RW1 hotfix: when no audit has been run yet, the
+  // step now returns 'warning' (NOT 'complete') with `_no_audit:
+  // true` in the payload. The previous behavior was a false-green
+  // — green status + "No audit on record — pipeline proceeds"
+  // message — which let Step 7 (Generate Draft) fire against a
+  // submission with no independent validation. The graders' first
+  // question on a paper without QA-validated figures is "where's
+  // the audit?", so a green pipeline indicator at this gate
+  // undermines confidence during the walkthrough.
+  //
+  // The pipeline gates Step 7 on `_no_audit !== true` (see
+  // generateDisabledReason), so a missing audit now BLOCKS
+  // generation until the user clicks the "Run QA Audit" button
+  // surfaced in the Step 4 detail panel.
   4: async () => {
     try {
       const res = await axios.get<{
@@ -1147,8 +1362,8 @@ const STEP_ACTIONS: Record<number, (templateId: string) => Promise<StepSummary>>
       const status = res.data.statistical_status
       if (!status) {
         return {
-          status: 'complete',
-          message: 'No audit on record — pipeline proceeds (run QA audit before submission)',
+          status: 'warning',
+          message: 'No audit on record — run QA Audit before generation',
           payload: { ...res.data, _no_audit: true } as Record<string, unknown>,
         }
       }
@@ -1158,12 +1373,12 @@ const STEP_ACTIONS: Record<number, (templateId: string) => Promise<StepSummary>>
         payload: res.data as Record<string, unknown>,
       }
     } catch (err) {
-      // A 404 is also "no audit on record yet" — treat as
-      // informational, not as a failed pipeline step.
+      // A 404 is also "no audit on record yet" — treat the same
+      // way as the null-status case above (warning + _no_audit).
       if (axios.isAxiosError(err) && err.response?.status === 404) {
         return {
-          status: 'complete',
-          message: 'No audit on record — pipeline proceeds (run QA audit before submission)',
+          status: 'warning',
+          message: 'No audit on record — run QA Audit before generation',
           payload: { _no_audit: true } as Record<string, unknown>,
         }
       }
