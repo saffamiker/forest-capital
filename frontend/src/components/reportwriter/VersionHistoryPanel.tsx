@@ -26,7 +26,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import axios from 'axios'
 import { AlertCircle, ChevronDown, ChevronRight, Clock,
-         Loader2, RotateCcw, Save } from 'lucide-react'
+         Loader2, RotateCcw, Save, Trash2 } from 'lucide-react'
 
 
 export interface PaperVersion {
@@ -80,6 +80,13 @@ export default function VersionHistoryPanel({
   const [saveLabel, setSaveLabel] = useState('')
   const [showSaveForm, setShowSaveForm] = useState(false)
   const [previewVer, setPreviewVer] = useState<number | null>(null)
+  // May 24 2026 — Delete UX state. `confirmDeleteVer` holds the
+  // version_number under the type-DELETE prompt; null means the
+  // confirm dialog is closed. `confirmDeleteAll` is the bulk-delete
+  // confirm state.
+  const [confirmDeleteVer, setConfirmDeleteVer] = useState<number | null>(null)
+  const [confirmDeleteAll, setConfirmDeleteAll] = useState(false)
+  const [deleteText, setDeleteText] = useState('')
 
   // Hotfix May 23 2026: switched from raw fetch() to axios so the
   // session token (X-API-Key on axios.defaults.headers.common) is
@@ -126,6 +133,47 @@ export default function VersionHistoryPanel({
       setBusyVer(null)
     }
   }, [generationId, saveLabel, fetchVersions])
+
+  const submitDelete = useCallback(async (versionNumber: number) => {
+    if (generationId === null) return
+    setBusyVer(versionNumber)
+    setError(null)
+    try {
+      await axios.delete(
+        `/api/v1/reports/generations/${generationId}`
+        + `/versions/${versionNumber}`)
+      setConfirmDeleteVer(null)
+      setDeleteText('')
+      await fetchVersions()
+    } catch (e) {
+      const msg = axios.isAxiosError(e)
+        ? (e.response?.data?.detail || e.message)
+        : (e as Error).message
+      setError(String(msg))
+    } finally {
+      setBusyVer(null)
+    }
+  }, [generationId, fetchVersions])
+
+  const submitDeleteAll = useCallback(async () => {
+    if (generationId === null) return
+    setBusyVer(-2)
+    setError(null)
+    try {
+      await axios.delete(
+        `/api/v1/reports/generations/${generationId}/versions`)
+      setConfirmDeleteAll(false)
+      setDeleteText('')
+      await fetchVersions()
+    } catch (e) {
+      const msg = axios.isAxiosError(e)
+        ? (e.response?.data?.detail || e.message)
+        : (e as Error).message
+      setError(String(msg))
+    } finally {
+      setBusyVer(null)
+    }
+  }, [generationId, fetchVersions])
 
   const submitRestore = useCallback(async (versionNumber: number) => {
     if (generationId === null) return
@@ -303,12 +351,80 @@ export default function VersionHistoryPanel({
                       <RotateCcw className="w-2.5 h-2.5" />
                       {busyVer === v.version_number ? 'Restoring…' : 'Restore'}
                     </button>
+                    <button
+                      type="button"
+                      disabled={busyVer === v.version_number}
+                      onClick={() => {
+                        setConfirmDeleteVer(v.version_number)
+                        setDeleteText('')
+                      }}
+                      data-testid={`version-delete-${v.version_number}`}
+                      title="Delete this saved version"
+                      className="text-2xs inline-flex items-center gap-1
+                                 px-1.5 py-0.5 rounded
+                                 border border-red-400/40
+                                 text-red-300
+                                 hover:bg-red-500/15
+                                 disabled:opacity-50 disabled:cursor-not-allowed">
+                      <Trash2 className="w-2.5 h-2.5" />
+                      Delete
+                    </button>
                     {v.flag_count > 0 ? (
                       <span className="text-2xs text-amber-300">
                         {v.flag_count} flag{v.flag_count === 1 ? '' : 's'}
                       </span>
                     ) : null}
                   </div>
+
+                  {confirmDeleteVer === v.version_number ? (
+                    <div
+                      data-testid={`version-delete-confirm-${v.version_number}`}
+                      className="space-y-1 mt-1 p-1.5 rounded
+                                 bg-red-950/40 border border-red-400/30">
+                      <p className="text-2xs text-red-200">
+                        Permanently delete v{v.version_number}? Type
+                        <strong className="font-mono"> DELETE </strong>
+                        to confirm.
+                      </p>
+                      <input
+                        type="text"
+                        value={deleteText}
+                        onChange={(e) => setDeleteText(e.target.value)}
+                        data-testid={`version-delete-text-${v.version_number}`}
+                        autoFocus
+                        className="w-full text-2xs px-2 py-1 rounded
+                                   bg-navy-950 border border-red-400/30
+                                   text-text-primary font-mono" />
+                      <div className="flex gap-1">
+                        <button
+                          type="button"
+                          disabled={
+                            deleteText !== 'DELETE'
+                            || busyVer === v.version_number
+                          }
+                          onClick={() => submitDelete(v.version_number)}
+                          data-testid={`version-delete-submit-${v.version_number}`}
+                          className="text-2xs px-2 py-0.5 rounded
+                                     bg-red-600 text-white font-medium
+                                     hover:bg-red-500
+                                     disabled:opacity-50 disabled:cursor-not-allowed">
+                          {busyVer === v.version_number
+                            ? 'Deleting…' : 'Delete'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setConfirmDeleteVer(null)
+                            setDeleteText('')
+                          }}
+                          className="text-2xs px-2 py-0.5 rounded
+                                     border border-navy-600 text-text-secondary
+                                     hover:bg-navy-700">
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
 
                   {previewVer === v.version_number ? (
                     <pre
@@ -325,6 +441,72 @@ export default function VersionHistoryPanel({
               ))}
             </ol>
           )}
+
+          {versions.length > 0 ? (
+            <div className="pt-2 mt-2 border-t border-navy-700">
+              {confirmDeleteAll ? (
+                <div
+                  data-testid="version-delete-all-confirm"
+                  className="space-y-1 p-1.5 rounded
+                             bg-red-950/40 border border-red-400/30">
+                  <p className="text-2xs text-red-200">
+                    Permanently delete <strong>all {versions.length}</strong>
+                    {' '}versions for this draft? Type
+                    <strong className="font-mono"> DELETE </strong>
+                    to confirm. This cannot be undone.
+                  </p>
+                  <input
+                    type="text"
+                    value={deleteText}
+                    onChange={(e) => setDeleteText(e.target.value)}
+                    data-testid="version-delete-all-text"
+                    autoFocus
+                    className="w-full text-2xs px-2 py-1 rounded
+                               bg-navy-950 border border-red-400/30
+                               text-text-primary font-mono" />
+                  <div className="flex gap-1">
+                    <button
+                      type="button"
+                      disabled={deleteText !== 'DELETE' || busyVer === -2}
+                      onClick={submitDeleteAll}
+                      data-testid="version-delete-all-submit"
+                      className="text-2xs px-2 py-0.5 rounded
+                                 bg-red-600 text-white font-medium
+                                 hover:bg-red-500
+                                 disabled:opacity-50 disabled:cursor-not-allowed">
+                      {busyVer === -2 ? 'Deleting…' : 'Delete all drafts'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setConfirmDeleteAll(false)
+                        setDeleteText('')
+                      }}
+                      className="text-2xs px-2 py-0.5 rounded
+                                 border border-navy-600 text-text-secondary
+                                 hover:bg-navy-700">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmDeleteAll(true)
+                    setDeleteText('')
+                  }}
+                  data-testid="version-delete-all"
+                  className="text-2xs inline-flex items-center gap-1
+                             px-2 py-1 rounded
+                             border border-red-400/30 text-red-300
+                             hover:bg-red-500/10">
+                  <Trash2 className="w-3 h-3" />
+                  Delete all drafts
+                </button>
+              )}
+            </div>
+          ) : null}
         </>
       ) : null}
     </section>

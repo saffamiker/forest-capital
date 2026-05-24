@@ -7,9 +7,10 @@
  * filters the panel applied):
  *
  *   1. Activity over time — weekly stacked bars by activity type.
- *   2. Team contribution split — a donut of substantive interactions
- *      per member (council + academic review + uploads; commits and
- *      page views excluded).
+ *   2. Platform Interaction Split — a donut of substantive platform
+ *      interactions per member (council + academic review + uploads;
+ *      commits and page views excluded — commits show in #1 / Team
+ *      Activity timeline).
  *   3. Agent engagement — how often each council agent was consulted.
  *
  * In Presentation View the panel hides its filters and timeline and
@@ -234,8 +235,8 @@ export default function TeamActivityCharts({
 
   const chartContribution = (
       <ChartCard
-        title="Team contribution split"
-        subtitle="Share of substantive interactions — council, academic review, uploads"
+        title="Platform Interaction Split"
+        subtitle="Share of substantive platform interactions — council sessions, academic review runs, and document uploads. Development contributions (commits, migrations, deployments) are tracked separately in Team Activity."
         presentMode={presentMode}
         theme={theme}
       >

@@ -29,7 +29,7 @@
  */
 import { useMemo, useState } from 'react'
 import {
-  AlertCircle, Check, Edit3, Loader2, Wand2, Maximize2, X,
+  AlertCircle, Check, Edit3, Loader2, Wand2, Maximize2, X, Trash2,
 } from 'lucide-react'
 
 import type { BobBlock } from '../../lib/bobBlocks'
@@ -45,6 +45,12 @@ interface IterationResponse {
 interface Props {
   block: BobBlock
   onResolve: (marker: string, replacement: string) => Promise<void>
+  /** May 24 2026 RW5 full spec — explicit Reject action. Removes
+   *  the [BOB] marker from paper_md without inserting any
+   *  replacement text. The block disappears entirely; bobCount
+   *  drops. Distinct from Accept (which keeps the agent draft)
+   *  and Edit-then-Accept (which keeps Bob's revised version). */
+  onReject?: ((marker: string) => Promise<void>) | undefined
   onIterate?:
     | ((action: 'rephrase' | 'expand', selection: string) =>
         Promise<IterationResponse>)
@@ -63,7 +69,7 @@ const NON_BOB_LABEL: Record<string, string> = {
 
 
 export default function BobBlockBadge({
-  block, onResolve, onIterate, disabled,
+  block, onResolve, onReject, onIterate, disabled,
 }: Props) {
   // Route by kind. The five non-BOB kinds keep the collapsed
   // pill UX — they're missing-data flags, not draft prompts.
@@ -80,6 +86,7 @@ export default function BobBlockBadge({
     <BobDraftBadge
       block={block}
       onResolve={onResolve}
+      onReject={onReject}
       onIterate={onIterate}
       disabled={disabled}
     />
@@ -91,7 +98,7 @@ export default function BobBlockBadge({
 
 
 function BobDraftBadge({
-  block, onResolve, onIterate, disabled,
+  block, onResolve, onReject, onIterate, disabled,
 }: Props) {
   // The draft is the block's description — the agent's pre-
   // populated paragraph. Bob edits it in place; Mark as reviewed
@@ -100,7 +107,14 @@ function BobDraftBadge({
   const [submitting, setSubmitting] = useState(false)
   const [iterating, setIterating] =
     useState<'rephrase' | 'expand' | null>(null)
+  const [rejecting, setRejecting] = useState(false)
   const [err, setErr] = useState<string | null>(null)
+  // May 24 2026 RW5 full spec — Edit mode toggle. The default
+  // surface treats the draft as accept-as-is + iterate-buttons;
+  // clicking Edit reveals the textarea for inline edits. Keeps
+  // the three actions (Accept / Edit / Reject) prominent at the
+  // top of the block; the textarea is one click away.
+  const [editing, setEditing] = useState(false)
 
   const wordCount = useMemo(
     () => draft.trim() ? draft.trim().split(/\s+/).length : 0,
@@ -121,6 +135,33 @@ function BobDraftBadge({
       setErr(msg)
     } finally {
       setSubmitting(false)
+    }
+  }
+
+  const handleReject = async () => {
+    if (!onReject) {
+      // Defensive — the parent should always wire onReject for
+      // [BOB] blocks. If not, fall back to resolving with an
+      // empty replacement (the marker disappears either way).
+      setSubmitting(true)
+      setErr(null)
+      try {
+        await onResolve(block.marker, '')
+      } catch (e: unknown) {
+        setErr(e instanceof Error ? e.message : 'Reject failed.')
+      } finally {
+        setSubmitting(false)
+      }
+      return
+    }
+    setRejecting(true)
+    setErr(null)
+    try {
+      await onReject(block.marker)
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : 'Reject failed.')
+    } finally {
+      setRejecting(false)
     }
   }
 
@@ -178,19 +219,151 @@ function BobDraftBadge({
         This draft was generated from your data. Edit to reflect
         your own analysis and voice, then click Mark as reviewed.
       </p>
-      <textarea
-        value={draft}
-        onChange={(e) => setDraft(e.target.value)}
-        rows={Math.max(4, Math.min(12, draft.split('\n').length + 1))}
-        data-testid="bob-draft-textarea"
-        disabled={submitting || iterating !== null}
-        className={
-          'w-full px-2 py-1.5 bg-navy-950 border border-amber-500/30 ' +
-          'rounded text-white text-sm leading-relaxed ' +
-          'placeholder-amber-100/40 focus:outline-none ' +
-          'focus:border-amber-400 disabled:opacity-60'
-        }
-      />
+      {/* May 24 2026 RW5 full spec — three primary actions are
+          always visible at the top of the block. The textarea +
+          iterate buttons are revealed only when Edit is clicked,
+          keeping the Accept / Edit / Reject decision the clearest
+          surface. */}
+      <div className="flex flex-wrap items-center gap-2 mb-2">
+        <button
+          type="button"
+          onClick={() => handleMarkReviewed(block.description)}
+          disabled={submitting || iterating !== null
+                    || rejecting || disabled}
+          data-testid="bob-accept"
+          title="Accept the agent draft verbatim and remove the block"
+          className={
+            'inline-flex items-center gap-1.5 px-3 py-1 ' +
+            'bg-green-500 hover:bg-green-400 disabled:bg-green-700 ' +
+            'text-navy-950 text-xs font-semibold rounded transition-colors'
+          }>
+          <Check className="w-3 h-3" />
+          Accept
+        </button>
+        <button
+          type="button"
+          onClick={() => setEditing((v) => !v)}
+          disabled={submitting || iterating !== null
+                    || rejecting || disabled}
+          data-testid="bob-edit-toggle"
+          title="Edit the agent draft inline, then confirm"
+          className={
+            'inline-flex items-center gap-1.5 px-3 py-1 ' +
+            'bg-amber-500 hover:bg-amber-400 disabled:bg-amber-700 ' +
+            'text-navy-950 text-xs font-semibold rounded transition-colors'
+          }>
+          <Edit3 className="w-3 h-3" />
+          {editing ? 'Done editing' : 'Edit'}
+        </button>
+        <button
+          type="button"
+          onClick={() => { void handleReject() }}
+          disabled={submitting || iterating !== null
+                    || rejecting || disabled}
+          data-testid="bob-reject"
+          title="Discard the block — no replacement text is inserted"
+          className={
+            'inline-flex items-center gap-1.5 px-3 py-1 ' +
+            'bg-red-500 hover:bg-red-400 disabled:bg-red-700 ' +
+            'text-navy-950 text-xs font-semibold rounded transition-colors'
+          }>
+          {rejecting ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : (
+            <Trash2 className="w-3 h-3" />
+          )}
+          {rejecting ? 'Rejecting…' : 'Reject'}
+        </button>
+      </div>
+      {/* The textarea + iterate row only renders in Edit mode. */}
+      {editing ? (
+        <>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            rows={Math.max(4, Math.min(12, draft.split('\n').length + 1))}
+            data-testid="bob-draft-textarea"
+            disabled={submitting || iterating !== null || rejecting}
+            className={
+              'w-full px-2 py-1.5 bg-navy-950 border border-amber-500/30 ' +
+              'rounded text-white text-sm leading-relaxed ' +
+              'placeholder-amber-100/40 focus:outline-none ' +
+              'focus:border-amber-400 disabled:opacity-60'
+            }
+          />
+          <div className="flex flex-wrap items-center gap-2 mt-2">
+            <button
+              type="button"
+              onClick={() => handleMarkReviewed(draft)}
+              disabled={submitting || iterating !== null
+                        || rejecting || disabled}
+              data-testid="bob-mark-reviewed"
+              className={
+                'inline-flex items-center gap-1.5 px-3 py-1 ' +
+                'bg-amber-500 hover:bg-amber-400 disabled:bg-amber-700 ' +
+                'text-navy-950 text-xs font-semibold rounded transition-colors'
+              }>
+              <Check className="w-3 h-3" />
+              {submitting ? 'Saving…' : 'Confirm edits'}
+            </button>
+            <button
+              type="button"
+              onClick={() => { void handleIterate('rephrase') }}
+              disabled={submitting || iterating !== null
+                        || rejecting || disabled || !onIterate}
+              data-testid="bob-rephrase"
+              title={onIterate
+                ? 'Rewrite in your voice (same length, same numbers)'
+                : 'AI iteration unavailable in this context'}
+              className={
+                'inline-flex items-center gap-1.5 px-2.5 py-1 ' +
+                'bg-navy-800 hover:bg-navy-700 border border-amber-500/20 ' +
+                'disabled:bg-navy-900 disabled:text-text-muted ' +
+                'text-amber-100/90 text-xs rounded transition-colors'
+              }>
+              {iterating === 'rephrase' ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Wand2 className="w-3 h-3" />
+              )}
+              Rephrase in my voice
+            </button>
+            <button
+              type="button"
+              onClick={() => { void handleIterate('expand') }}
+              disabled={submitting || iterating !== null
+                        || rejecting || disabled || !onIterate}
+              data-testid="bob-expand"
+              title={onIterate
+                ? 'Add one more sentence of detail'
+                : 'AI iteration unavailable in this context'}
+              className={
+                'inline-flex items-center gap-1.5 px-2.5 py-1 ' +
+                'bg-navy-800 hover:bg-navy-700 border border-amber-500/20 ' +
+                'disabled:bg-navy-900 disabled:text-text-muted ' +
+                'text-amber-100/90 text-xs rounded transition-colors'
+              }>
+              {iterating === 'expand' ? (
+                <Loader2 className="w-3 h-3 animate-spin" />
+              ) : (
+                <Maximize2 className="w-3 h-3" />
+              )}
+              Expand
+            </button>
+          </div>
+        </>
+      ) : (
+        // Read-only preview of the agent's draft so Bob can read
+        // before deciding. Same content the textarea would show in
+        // Edit mode.
+        <p
+          data-testid="bob-draft-preview"
+          className="text-white text-sm leading-relaxed
+                     bg-navy-950/60 border border-amber-500/20 rounded
+                     px-2 py-1.5 mb-1 whitespace-pre-wrap">
+          {block.description}
+        </p>
+      )}
       {err ? (
         <p
           data-testid="bob-draft-error"
@@ -198,79 +371,6 @@ function BobDraftBadge({
           {err}
         </p>
       ) : null}
-      <div className="flex flex-wrap items-center gap-2 mt-2">
-        <button
-          type="button"
-          onClick={() => handleMarkReviewed(draft)}
-          disabled={submitting || iterating !== null || disabled}
-          data-testid="bob-mark-reviewed"
-          className={
-            'inline-flex items-center gap-1.5 px-3 py-1 ' +
-            'bg-amber-500 hover:bg-amber-400 disabled:bg-amber-700 ' +
-            'text-navy-950 text-xs font-semibold rounded transition-colors'
-          }>
-          <Check className="w-3 h-3" />
-          {submitting ? 'Saving…' : 'Mark as reviewed'}
-        </button>
-        <button
-          type="button"
-          onClick={() => handleMarkReviewed(block.description)}
-          disabled={submitting || iterating !== null || disabled}
-          data-testid="bob-accept-as-is"
-          title="Accept the agent draft verbatim, ignoring any edits"
-          className={
-            'inline-flex items-center gap-1.5 px-2.5 py-1 ' +
-            'bg-navy-800 hover:bg-navy-700 border border-amber-500/30 ' +
-            'disabled:bg-navy-900 disabled:text-text-muted ' +
-            'text-amber-100/90 text-xs rounded transition-colors'
-          }>
-          Accept draft as-is
-        </button>
-        <button
-          type="button"
-          onClick={() => { void handleIterate('rephrase') }}
-          disabled={submitting || iterating !== null
-                    || disabled || !onIterate}
-          data-testid="bob-rephrase"
-          title={onIterate
-            ? 'Rewrite in your voice (same length, same numbers)'
-            : 'AI iteration unavailable in this context'}
-          className={
-            'inline-flex items-center gap-1.5 px-2.5 py-1 ' +
-            'bg-navy-800 hover:bg-navy-700 border border-amber-500/20 ' +
-            'disabled:bg-navy-900 disabled:text-text-muted ' +
-            'text-amber-100/90 text-xs rounded transition-colors'
-          }>
-          {iterating === 'rephrase' ? (
-            <Loader2 className="w-3 h-3 animate-spin" />
-          ) : (
-            <Wand2 className="w-3 h-3" />
-          )}
-          Rephrase in my voice
-        </button>
-        <button
-          type="button"
-          onClick={() => { void handleIterate('expand') }}
-          disabled={submitting || iterating !== null
-                    || disabled || !onIterate}
-          data-testid="bob-expand"
-          title={onIterate
-            ? 'Add one more sentence of detail'
-            : 'AI iteration unavailable in this context'}
-          className={
-            'inline-flex items-center gap-1.5 px-2.5 py-1 ' +
-            'bg-navy-800 hover:bg-navy-700 border border-amber-500/20 ' +
-            'disabled:bg-navy-900 disabled:text-text-muted ' +
-            'text-amber-100/90 text-xs rounded transition-colors'
-          }>
-          {iterating === 'expand' ? (
-            <Loader2 className="w-3 h-3 animate-spin" />
-          ) : (
-            <Maximize2 className="w-3 h-3" />
-          )}
-          Expand
-        </button>
-      </div>
     </div>
   )
 }

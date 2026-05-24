@@ -312,4 +312,72 @@ async def restore_version(
         log.warning("restore_paper_version_failed", error=str(exc),
                     generation_id=generation_id,
                     version_number=version_number)
+
+
+# ── Deletes ─────────────────────────────────────────────────────────────────
+#
+# May 24 2026 — per-version + bulk delete helpers (Report Writer
+# Version History panel Delete UX). Both fail-open: a database error
+# returns False so the caller (the endpoint) can surface a 500 with a
+# clear message rather than crashing the route.
+
+
+async def delete_version(
+    generation_id: int, version_number: int,
+) -> bool:
+    """Hard-deletes one report_paper_versions row.
+
+    Returns True when exactly one row was removed; False on any DB
+    error or when the row did not exist. Counterpart of save_version.
+    """
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return False
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "DELETE FROM report_paper_versions "
+                "WHERE generation_id = :g AND version_number = :v"
+            ), {"g": int(generation_id), "v": int(version_number)})
+            await s.commit()
+            ok = (r.rowcount or 0) > 0
+            if ok:
+                log.info("paper_version_deleted",
+                         generation_id=generation_id,
+                         version_number=version_number)
+            return ok
+    except Exception as exc:  # noqa: BLE001
+        log.warning("delete_paper_version_failed", error=str(exc),
+                    generation_id=generation_id,
+                    version_number=version_number)
+        return False
+
+
+async def delete_all_versions(generation_id: int) -> int:
+    """Hard-deletes EVERY report_paper_versions row for the generation.
+    Useful for the Delete All Drafts flow when the user wants to start
+    fresh.
+
+    Returns the number of rows deleted; 0 on any DB error.
+    """
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return 0
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "DELETE FROM report_paper_versions "
+                "WHERE generation_id = :g"
+            ), {"g": int(generation_id)})
+            await s.commit()
+            n = int(r.rowcount or 0)
+            log.info("paper_versions_bulk_deleted",
+                     generation_id=generation_id, rows=n)
+            return n
+    except Exception as exc:  # noqa: BLE001
+        log.warning("delete_all_paper_versions_failed", error=str(exc),
+                    generation_id=generation_id)
+        return 0
         return None

@@ -25,6 +25,7 @@ import type {
 function _gate(props: {
   results: StepResults
   generateDisabledReason?: string | null
+  step2b?: { untrustedCount: number; onJump: () => void }
 }) {
   return render(
     <MemoryRouter>
@@ -34,6 +35,7 @@ function _gate(props: {
         generateDisabledReason={props.generateDisabledReason ?? null}
         onRunStep={vi.fn()}
         onGenerate={vi.fn()}
+        {...(props.step2b !== undefined ? { step2b: props.step2b } : {})}
       />
     </MemoryRouter>,
   )
@@ -129,21 +131,69 @@ describe('RW3 — strict sequential pipeline gating', () => {
     expect(generate.disabled).toBe(true)
   })
 
-  it('Steps 2/3/4 unlock once Step 1 is complete', () => {
+  it('only Step 2 unlocks when Step 1 completes (strict sequential)', () => {
+    // May 24 2026 — under strict-sequential gating, only the
+    // IMMEDIATELY NEXT step unlocks. Step 1 done → Step 2 runnable;
+    // Steps 3 and 4 stay locked until 2 (and then 3) complete.
     _gate({
       results: {
         1: { status: 'complete', message: 'done', payload: {} },
       },
     })
-    for (const n of [2, 3, 4]) {
+    const btn2 = screen.getByTestId('pipeline-step-2-button') as HTMLButtonElement
+    expect(btn2.disabled).toBe(false)
+    expect(screen.queryByTestId('pipeline-step-2-locked')).toBeNull()
+    for (const n of [3, 4]) {
       const button = screen.getByTestId(
         `pipeline-step-${n}-button`) as HTMLButtonElement
-      expect(button.disabled).toBe(false)
-      // No lock indicator when the step is reachable.
+      expect(button.disabled).toBe(true)
       expect(
         screen.queryByTestId(`pipeline-step-${n}-locked`),
-      ).toBeNull()
+      ).not.toBeNull()
     }
+  })
+
+  it('Step 3 unlocks after Step 2 completes, Step 4 still locked', () => {
+    _gate({
+      results: {
+        1: { status: 'complete', message: 'done', payload: {} },
+        2: { status: 'complete', message: 'done', payload: {} },
+      },
+    })
+    const btn3 = screen.getByTestId('pipeline-step-3-button') as HTMLButtonElement
+    expect(btn3.disabled).toBe(false)
+    const btn4 = screen.getByTestId('pipeline-step-4-button') as HTMLButtonElement
+    expect(btn4.disabled).toBe(true)
+  })
+
+  it('Step 3 stays locked when Step 2b has untrusted citations', () => {
+    _gate({
+      results: {
+        1: { status: 'complete', message: 'done', payload: {} },
+        2: { status: 'complete', message: 'done', payload: {} },
+      },
+      step2b: {
+        untrustedCount: 2,
+        onJump: () => {},
+      },
+    })
+    const btn3 = screen.getByTestId('pipeline-step-3-button') as HTMLButtonElement
+    expect(btn3.disabled).toBe(true)
+    expect(screen.queryByTestId('pipeline-step-3-locked')).not.toBeNull()
+  })
+
+  it('Step 2b shows as a visible pipeline row', () => {
+    _gate({
+      results: {
+        1: { status: 'complete', message: 'done', payload: {} },
+        2: { status: 'complete', message: 'done', payload: {} },
+      },
+      step2b: {
+        untrustedCount: 3,
+        onJump: () => {},
+      },
+    })
+    expect(screen.queryByTestId('pipeline-step-2b')).not.toBeNull()
   })
 
   it('locked badge does NOT render on a running step', () => {

@@ -355,6 +355,7 @@ def max_sharpe_optimize(
     risk_free: float = 0.0,
     min_weight: float = MIN_WEIGHT,
     max_weight: float = MAX_WEIGHT,
+    periods_per_year: int | None = None,
 ) -> np.ndarray:
     """
     Maximum Sharpe ratio portfolio via scipy SLSQP.
@@ -365,19 +366,58 @@ def max_sharpe_optimize(
     the renormalisation step after z* can violate MAX_WEIGHT. SLSQP avoids
     this problem and produces results consistent with the weight bounds that
     every other method enforces.
-    risk_free is the annualised rate; divided by ANNUALIZATION_FACTOR to
-    compare with per-period μ estimates.
+
+    risk_free is the ANNUALISED rate. It is divided by periods_per_year
+    to convert to a per-period rate that matches the frequency of the
+    returns DataFrame.
+
+    periods_per_year (May 24 2026 fix): explicit annualisation factor —
+    252 for daily returns, 12 for monthly. When None (default), the
+    function INFERS the frequency from returns.index: a pandas DatetimeIndex
+    with a monthly frequency uses 12; everything else falls back to
+    ANNUALIZATION_FACTOR (252) for backward compatibility with daily callers.
+
+    THE BUG THIS REPLACES: this function previously hardcoded `risk_free /
+    ANNUALIZATION_FACTOR = risk_free / 252` regardless of the returns
+    frequency. When called from run_max_sharpe_rolling (backtester.py),
+    which passes MONTHLY returns, the rf was scaled to a daily rate
+    (rf_annual / 252) but compared against MONTHLY mean returns. This
+    overstated each asset's per-period excess return by ~21x the magnitude
+    of rf. With rf ~ 0.04 annual, the bias was roughly 0.04/252 - 0.04/12
+    ≈ -0.0032 per month — non-negligible against typical monthly mean
+    returns of 0.003-0.008. The bias was unequal across assets (a constant
+    -0.0032 boost to every asset's apparent excess) so the relative
+    Sharpe ranking changed and the optimizer chose weights that did not
+    actually maximise the true Sharpe.
+
     Fallback to min_variance when all excess returns ≤ 0 (problem infeasible).
     """
     if not _returns_have_finite_moments(returns):
         log.warning("optimizer_nonfinite_returns", method="max_sharpe", fallback="equal_weight")
         return _equal_weight(returns.shape[1])
 
+    # Frequency inference. Monthly index → 12; otherwise default to daily.
+    if periods_per_year is None:
+        periods_per_year = ANNUALIZATION_FACTOR
+        try:
+            idx = returns.index
+            if hasattr(idx, "inferred_freq"):
+                freq = idx.inferred_freq or ""
+                if any(t in freq.upper() for t in ("M", "Q", "Y", "A")):
+                    periods_per_year = 12
+            # Fallback heuristic: median spacing > 20 days = monthly.
+            elif hasattr(idx, "to_series") and len(idx) > 1:
+                spacing = (idx[1:] - idx[:-1]).total_seconds() / 86400
+                if float(np.median(spacing)) > 20:
+                    periods_per_year = 12
+        except Exception:  # noqa: BLE001
+            pass
+
     mu = returns.mean().values
     cov = returns.cov().values
     n = len(mu)
-    rf_daily = risk_free / ANNUALIZATION_FACTOR
-    excess = mu - rf_daily
+    rf_per_period = risk_free / periods_per_year
+    excess = mu - rf_per_period
 
     if np.max(excess) <= 0:
         log.warning("max_sharpe_all_negative_excess", fallback="min_variance")

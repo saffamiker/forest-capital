@@ -57,12 +57,29 @@ interface Props {
   generateDisabledReason: string | null
   onRunStep: (stepNumber: number) => Promise<void>
   onGenerate: () => Promise<void>
+  /** May 24 2026 — Step 2b is now a first-class pipeline step
+   *  between Step 2 and Step 3. The ReportWriter computes the
+   *  citation adjudication state (count of untrusted citations
+   *  remaining + a jump handler) and passes both in. */
+  step2b?: {
+    untrustedCount: number
+    onJump: () => void
+  }
 }
 
+
+// May 24 2026 — Step 2b sits between 2 and 3 visually, but is keyed
+// as 2.5 in the internal results so the rest of the gating logic
+// stays in integer-step land. The pipeline rendering treats 2.5
+// like any other row but skips the Run button (Step 2b is satisfied
+// by adjudicating citations in the Citation Review panel, not by
+// firing an endpoint).
+const STEP_2B_KEY = 2.5
 
 const STEP_LABELS: Record<number, string> = {
   1: 'Stage Findings',
   2: 'Source Citations',
+  [STEP_2B_KEY]: 'Adjudicate Citations',
   3: 'Pull Team Activity',
   4: 'Pull Validation Data',
   5: 'Cross-Reference Check',
@@ -75,8 +92,29 @@ const AUTO_STEPS = new Set<number>([5, 6])
 
 export default function PipelineGate({
   results, generating, generateDisabledReason,
-  onRunStep, onGenerate,
+  onRunStep, onGenerate, step2b,
 }: Props) {
+  // May 24 2026 — Synthesise Step 2b's result from the adjudication
+  // state passed in. 2b is satisfied when 0 untrusted citations
+  // remain (status 'complete'); it shows 'warning' while citations
+  // still need a decision and 'idle' before Step 2 has run.
+  const step2bResult: StepResult | undefined =
+    step2b !== undefined && _stepPassed(results, 2)
+      ? (step2b.untrustedCount === 0
+          ? {
+              status: 'complete',
+              message: 'All citations adjudicated.',
+            }
+          : {
+              status: 'warning',
+              message: `${step2b.untrustedCount} citation`
+                + `${step2b.untrustedCount === 1 ? '' : 's'}`
+                + ' still need a decision.',
+              detail: 'Open the Citation Review panel and Accept,'
+                + ' Reject, or Manually add each one.',
+            })
+      : undefined
+
   return (
     <section
       data-testid="pipeline-gate"
@@ -86,29 +124,49 @@ export default function PipelineGate({
           Generation pipeline
         </h3>
         <span className="text-text-muted text-2xs">
-          Run each step in order. Steps 5–6 fire automatically.
+          Click Run on each step. Steps 5–6 fire automatically.
         </span>
       </header>
       <ol className="space-y-2">
-        {[1, 2, 3, 4, 5, 6, 7].map((n) => (
-          <StepRow
-            key={n}
-            number={n}
-            label={STEP_LABELS[n]}
-            result={results[n]}
-            disabledReason={
-              n === 7 ? generateDisabledReason
-              : disabledReasonFor(n, results)
-            }
-            isAuto={AUTO_STEPS.has(n)}
-            isGenerating={generating}
-            onRun={
-              n === 7
-                ? onGenerate
-                : () => onRunStep(n)
-            }
-          />
-        ))}
+        {[1, 2, STEP_2B_KEY, 3, 4, 5, 6, 7].map((n) => {
+          if (n === STEP_2B_KEY) {
+            // Step 2b is a citation-adjudication gate, not a
+            // Run-button step. It renders without a Run button;
+            // its action is the "Open Citation Review" link
+            // which scrolls to the adjudication panel.
+            return (
+              <Step2bRow
+                key="2b"
+                result={step2bResult}
+                untrustedCount={step2b?.untrustedCount ?? 0}
+                onJump={step2b?.onJump ?? (() => {})}
+                disabledReason={
+                  _stepPassed(results, 2)
+                    ? null : 'Run Step 2 first'
+                }
+              />
+            )
+          }
+          return (
+            <StepRow
+              key={n}
+              number={n}
+              label={STEP_LABELS[n]}
+              result={results[n]}
+              disabledReason={
+                n === 7 ? generateDisabledReason
+                : disabledReasonFor(n, results, step2b)
+              }
+              isAuto={AUTO_STEPS.has(n)}
+              isGenerating={generating}
+              onRun={
+                n === 7
+                  ? onGenerate
+                  : () => onRunStep(n)
+              }
+            />
+          )
+        })}
       </ol>
     </section>
   )
@@ -117,19 +175,138 @@ export default function PipelineGate({
 
 function disabledReasonFor(
   step: number, results: StepResults,
+  step2b?: { untrustedCount: number; onJump: () => void },
 ): string | null {
-  // May 24 2026 RW3 hotfix — strict sequential gating. Each step's
-  // Run button is disabled until ALL prior steps have GENUINE
-  // completed results. The original gating only checked Step 1
-  // for Steps 2-4, letting Bob run Steps 3-4 without Step 2.
+  // May 24 2026 RW3 strict-sequential — Steps 2 → 3 → 4 unlock in
+  // order. Each one gates on the IMMEDIATELY PRIOR step having
+  // passed, not just Step 1. The previous version gated all of
+  // 2/3/4 on Step 1, which let Bob run them in any order and
+  // surfaced the "all steps fire when Step 1 completes" bug the
+  // user reported.
+  //
+  // A step "passes" the gate when its status is 'complete' OR
+  // 'warning' AND it carries no _no_audit bypass flag. Restored-
+  // from-cache states with one of those statuses count too — the
+  // status reflects what was true on the previous run.
   if (step === 1) return null
-  if (step === 2 || step === 3 || step === 4) {
+  if (step === 2) {
     if (!_stepPassed(results, 1)) return 'Run Step 1 first'
+    return null
+  }
+  if (step === 3) {
+    if (!_stepPassed(results, 1)) return 'Run Step 1 first'
+    if (!_stepPassed(results, 2)) return 'Run Step 2 first'
+    // Step 2b — citation adjudication MUST be complete before
+    // Step 3 unlocks. The Citation Review panel surfaces every
+    // untrusted citation with Accept/Reject/Manual-add controls;
+    // Step 2b is satisfied when zero untrusted remain.
+    if (step2b !== undefined && step2b.untrustedCount > 0) {
+      return `Adjudicate ${step2b.untrustedCount} citation`
+        + `${step2b.untrustedCount === 1 ? '' : 's'} (Step 2b)`
+    }
+    return null
+  }
+  if (step === 4) {
+    if (!_stepPassed(results, 1)) return 'Run Step 1 first'
+    if (!_stepPassed(results, 2)) return 'Run Step 2 first'
+    if (step2b !== undefined && step2b.untrustedCount > 0) {
+      return `Adjudicate ${step2b.untrustedCount} citation`
+        + `${step2b.untrustedCount === 1 ? '' : 's'} (Step 2b)`
+    }
+    if (!_stepPassed(results, 3)) return 'Run Step 3 first'
     return null
   }
   // Auto steps cannot be clicked manually.
   if (step === 5 || step === 6) return 'Runs automatically'
   return null
+}
+
+
+/**
+ * Step2bRow — citation adjudication gate. Renders as a pipeline row
+ * but instead of a Run button it shows an "Open Citation Review"
+ * link that scrolls to the adjudication panel. Status is derived
+ * from the count of untrusted citations remaining: 0 → complete,
+ * > 0 → warning, before Step 2 runs → idle/locked.
+ */
+function Step2bRow({
+  result, untrustedCount, onJump, disabledReason,
+}: {
+  result?: StepResult | undefined
+  untrustedCount: number
+  onJump: () => void
+  disabledReason: string | null
+}) {
+  const status = result?.status ?? 'idle'
+  const locked = !!disabledReason
+  let Icon = Circle
+  let iconCls = 'text-text-muted'
+  if (status === 'complete') { Icon = CheckCircle; iconCls = 'text-green-400' }
+  else if (status === 'warning') { Icon = AlertCircle; iconCls = 'text-amber-400' }
+  return (
+    <li
+      data-testid="pipeline-step-2b"
+      className={
+        'border border-navy-700 rounded p-2 '
+        + (status === 'complete' ? 'bg-green-500/5 ' : '')
+        + (status === 'warning' ? 'bg-amber-500/5 ' : '')
+      }>
+      <div className="flex items-center gap-2">
+        {locked ? (
+          <Lock
+            className="w-4 h-4 flex-shrink-0 text-text-muted"
+            data-testid="pipeline-step-2b-locked"
+            aria-label={`Step 2b locked — ${disabledReason}`}
+          />
+        ) : (
+          <Icon className={`w-4 h-4 flex-shrink-0 ${iconCls}`} />
+        )}
+        <span className="text-text-secondary text-xs flex-1">
+          <span className="text-text-muted">2b.</span>{' '}
+          Adjudicate Citations
+          {locked ? (
+            <span className="ml-1.5 text-2xs text-text-muted italic">
+              · {disabledReason}
+            </span>
+          ) : status === 'warning' ? (
+            <span className="ml-1.5 text-2xs text-amber-300">
+              · {untrustedCount} untrusted
+            </span>
+          ) : null}
+        </span>
+        {!locked ? (
+          <button
+            type="button"
+            onClick={onJump}
+            data-testid="pipeline-step-2b-button"
+            disabled={status === 'complete'}
+            className={
+              'inline-flex items-center gap-1 px-2.5 py-1 ' +
+              (status === 'complete'
+                ? 'bg-navy-700 text-text-muted cursor-default'
+                : 'bg-amber-500/30 hover:bg-amber-500/40 text-amber-100') +
+              ' text-2xs font-medium rounded transition-colors'
+            }>
+            {status === 'complete' ? 'Done' : 'Open Review'}
+          </button>
+        ) : null}
+      </div>
+      {result?.message ? (
+        <p className={
+          'mt-1.5 pl-6 text-2xs ' + (
+            status === 'warning' ? 'text-amber-300' : 'text-text-secondary'
+          )
+        }>
+          {result.message}
+        </p>
+      ) : null}
+      {result?.detail ? (
+        <p className="mt-0.5 pl-6 text-2xs text-text-muted italic">
+          {result.detail}
+        </p>
+      ) : null}
+    </li>
+  )
 }
 
 
@@ -886,41 +1063,28 @@ export function useAutoFireStep5And6(
   results: StepResults,
   fireStep: (n: number) => Promise<void>,
 ): void {
-  // A step has "passed enough to continue" when its status is
-  // 'complete' OR 'warning'. The pipeline already treats Step 5 →
-  // Step 6 this way; the same rule applies to Steps 1-4 → Step 5.
-  //
-  // Hotfix May 23 2026: Step 2 frequently lands at 'warning' when
-  // 1-2 citations need human review but most are verified — that's
-  // a normal mid-pipeline state, not a failure. The previous
-  // strict-'complete' check deadlocked the pipeline: Step 5/6
-  // never auto-fired, so the user could never reach the Generate
-  // button. Citations still needing review surface in the
-  // CitationReviewPanel on the editor screen AFTER generation.
-  // Only an explicit 'failed' status (a real error in the step's
-  // call) should gate the pipeline.
-  const passedEnough = (n: number): boolean => {
-    const s = results[n]?.status
-    return s === 'complete' || s === 'warning'
-  }
+  // May 24 2026 — strict-sequential auto-fire. Only Steps 5 and 6
+  // auto-fire; everything else is manual. Step 5 fires when Step 4
+  // completes with a REAL QA audit (no _no_audit bypass). Step 6
+  // fires when Step 5 lands. Both gates require passage by the
+  // _stepPassed contract (complete or warning AND no _no_audit
+  // flag) — a Step 4 in warning state with _no_audit: true does
+  // NOT trigger Step 5.
 
   useEffect(() => {
     const step5Idle = !results[5] || results[5].status === 'idle'
-    if (passedEnough(1) && passedEnough(2)
-        && passedEnough(3) && passedEnough(4) && step5Idle) {
+    if (_stepPassed(results, 4) && step5Idle) {
       void fireStep(5)
     }
     // The hook intentionally depends only on `results` so a
-    // status change in any earlier step re-evaluates the gate;
-    // fireStep is the action and `passedEnough` is a pure
-    // closure over `results`, so adding them to deps wouldn't
-    // change behaviour.
+    // status change in Step 4 re-evaluates the gate; fireStep is
+    // the action.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [results, fireStep])
 
   useEffect(() => {
     const step6Idle = !results[6] || results[6].status === 'idle'
-    if (passedEnough(5) && step6Idle) {
+    if (_stepPassed(results, 5) && step6Idle) {
       void fireStep(6)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

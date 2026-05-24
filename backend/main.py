@@ -262,36 +262,43 @@ async def lifespan(app: FastAPI):
             await refresh_strategy_context_cache()
         except Exception as exc:  # noqa: BLE001
             log.warning("strategy_context_warm_failed", error=str(exc))
-        # Hotfix (May 23 2026): warm the analytics precompute caches
-        # if the dashboard endpoints would otherwise time out on a
-        # cold deploy. Two endpoints were observed timing out at 30s
-        # post-#93 — /api/v1/analytics/academic (Cumulative Returns)
-        # and /api/optimize/weights (Efficient Frontier). The former
-        # falls back to a slow inline OLS compute when its cache is
-        # empty; the latter ran the 100-point SLSQP sweep on every
-        # request unconditionally. Both now share the same precompute
-        # cache table — if EITHER row is missing on startup, fire the
-        # refresh dispatch in the background so the first user
-        # request hits a warm cache.
+        # May 24 2026 P0 (third attempt) — the user observed that
+        # firing the analytics refresh from the lifespan startup
+        # hook competes with first-request handling on a cold
+        # Render boot: the refresh runs at the exact moment the
+        # worker is still binding its event-loop event/database
+        # connection pool and apparently hangs or fails silently.
+        # Symptom: every dashboard request returns warming forever.
+        #
+        # New strategy per user directive:
+        #   "precompute and persist results to analytics_metrics_
+        #    cache table on first successful compute, serve from DB
+        #    cache on all subsequent requests, recompute only when
+        #    underlying data changes (new market data ingested)."
+        #
+        # The data-ingest hook in tools/cache.set_strategy_cache
+        # already fires trigger_refresh_async after every fresh
+        # strategy write — that satisfies the "recompute when data
+        # changes" leg. The endpoint cold-cache fallback
+        # (already in place) fires the refresh on first user
+        # request — that satisfies the "first compute" leg.
+        # Removing the startup-hook refresh eliminates the boot-
+        # time competition and lets the data-ingest hook be the
+        # single canonical refresh trigger.
+        #
+        # If you need to MANUALLY warm the cache on a fresh deploy
+        # (e.g. the data hasn't changed but you want fresh
+        # analytics), hit POST /api/v1/admin/warm-analytics-cache
+        # (manage_users-gated). That endpoint runs the refresh
+        # synchronously and returns when the row lands.
         if not _is_test_env:
             try:
                 from tools.cache import get_latest_strategy_hash
                 from tools.precomputed_analytics import (
                     get_metric as get_precomputed,
                     get_latest_metric as get_latest_precomputed,
-                    trigger_refresh_async as trigger_analytics_refresh,
                 )
                 latest_hash = await get_latest_strategy_hash()
-                # May 24 2026 P0 hotfix — fire the refresh
-                # UNCONDITIONALLY on every boot, not gated on
-                # latest_hash. The pre-existing gate skipped the
-                # whole block when strategy_results_cache was
-                # empty, leaving the analytics cache cold and
-                # every dashboard request timing out at 30s. The
-                # check below is now used only to DECIDE whether
-                # to fire — we look for ANY row by metric_kind
-                # (hash-agnostic) so previously-written rows
-                # under different hashes count as warm too.
                 aa: dict | None = None
                 ef: dict | None = None
                 if latest_hash:
@@ -304,13 +311,15 @@ async def lifespan(app: FastAPI):
                 if ef is None:
                     ef = await get_latest_precomputed("efficient_frontier")
                 if aa is None or ef is None:
+                    # Do NOT fire the refresh from startup. The
+                    # first endpoint hit will fire it.
                     log.warning(
-                        "analytics_cache_cold_on_startup_firing_warm",
+                        "analytics_cache_cold_on_startup_no_fire",
                         academic_present=bool(aa),
                         frontier_present=bool(ef),
-                        data_hash=(latest_hash[:8]
-                                    if latest_hash else None))
-                    trigger_analytics_refresh(latest_hash or "")
+                        note=("First user request will fire refresh; "
+                              "manual warm: POST /api/v1/admin/"
+                              "warm-analytics-cache"))
                 else:
                     log.info(
                         "analytics_cache_warm_on_startup",
@@ -1762,6 +1771,51 @@ async def post_paper_version_restore(
     return {"snapshot": snapshot}
 
 
+@app.delete(
+    "/api/v1/reports/generations/{generation_id}/versions"
+    "/{version_number}")
+async def delete_paper_version(
+    generation_id: int, version_number: int,
+    session: dict = Depends(require_team_member),
+):
+    """Hard-delete a single saved version. The frontend Version History
+    panel gates this behind a type-DELETE confirmation. The currently-
+    active paper_md on report_generations is NOT touched — only the
+    snapshot row in report_paper_versions is removed.
+
+    May 24 2026 — Version History Delete UX.
+    """
+    if ENVIRONMENT == "test":
+        return {"deleted": True}
+    from tools.paper_versions import delete_version
+    ok = await delete_version(generation_id, version_number)
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail="Version not found, or the delete failed — "
+                   "see server logs.")
+    return {"deleted": True}
+
+
+@app.delete(
+    "/api/v1/reports/generations/{generation_id}/versions")
+async def delete_all_paper_versions(
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Hard-delete EVERY saved version for this generation. The
+    Delete All Drafts flow on the Version History panel; gated behind
+    a type-DELETE confirmation.
+
+    May 24 2026 — Version History Delete UX.
+    """
+    if ENVIRONMENT == "test":
+        return {"deleted": 0}
+    from tools.paper_versions import delete_all_versions
+    n = await delete_all_versions(generation_id)
+    return {"deleted": n}
+
+
 @app.post("/api/v1/reports/generations/{generation_id}/iterate")
 @limiter.limit("30/minute")
 async def post_iterate_text(
@@ -1840,6 +1894,52 @@ async def post_resolve_bob_block(
         raise HTTPException(
             status_code=500,
             detail="Resolve failed — see server logs.")
+
+
+@app.post("/api/v1/reports/generations/{generation_id}/rebalance")
+@limiter.limit("12/minute")
+async def post_rebalance_paper(
+    request: Request, generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """May 24 2026 — Pass 2 of the two-pass draft generation flow.
+    After Bob adjudicates every [BOB] block, the section word
+    counts are off-budget. This endpoint re-runs the writer over
+    the current paper_md with a rebalance instruction that brings
+    each off-budget section back within ±5 words of its target,
+    without touching inline citations or specific numbers.
+
+    No body required — the endpoint reads the current paper_md
+    from the generation row. Returns the updated paper_md + a
+    targets list naming which sections were re-balanced."""
+    if ENVIRONMENT == "test":
+        return {"saved": True, "paper_md": "", "rebalanced": False,
+                "note": "test environment"}
+    try:
+        from tools.report_generator import rebalance_paper
+        result = await rebalance_paper(int(generation_id))
+        if result.get("error") == "generation_not_found":
+            raise HTTPException(status_code=404,
+                                detail="Generation not found.")
+        if result.get("error") == "empty_paper":
+            raise HTTPException(status_code=422,
+                                detail="Paper is empty — cannot rebalance.")
+        if result.get("error") == "writer_unavailable":
+            raise HTTPException(
+                status_code=503,
+                detail="Writer model unavailable for rebalance — try again.")
+        if result.get("error") == "writer_returned_empty":
+            raise HTTPException(
+                status_code=502,
+                detail="Writer returned empty response — try again.")
+        return result
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.warning("rebalance_endpoint_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail="Rebalance failed — see server logs.")
 
 
 @app.post("/api/v1/reports/generations/{generation_id}/final-check")
@@ -2349,6 +2449,60 @@ async def get_analytics_sensitivity(request: Request, session: dict = Depends(re
 
 
 # ── Admin: data status ────────────────────────────────────────────────────────
+
+@app.post("/api/v1/admin/warm-analytics-cache")
+async def post_warm_analytics_cache(
+    session: dict = Depends(require_team_member),
+):
+    """May 24 2026 P0 (third attempt) — manual warm trigger for the
+    analytics_metrics_cache table.
+
+    Runs refresh_all_analytics SYNCHRONOUSLY (awaits completion)
+    and returns when the rows have landed. Bob hits this once
+    after a Render deploy to guarantee the analytics cache is hot
+    before Dr. Panttser opens the dashboard.
+
+    Surfaces the warm result so the caller knows what landed:
+      {warmed: bool, latest_hash: str | None, took_s: float,
+       academic_analytics: bool, efficient_frontier: bool}
+    """
+    if ENVIRONMENT == "test":
+        return {
+            "warmed":            True,
+            "latest_hash":       None,
+            "took_s":            0.0,
+            "academic_analytics": False,
+            "efficient_frontier": False,
+            "note":              "test environment",
+        }
+    import time
+    try:
+        from tools.cache import get_latest_strategy_hash
+        from tools.precomputed_analytics import (
+            get_metric as get_precomputed,
+            refresh_all_analytics,
+        )
+        latest_hash = await get_latest_strategy_hash()
+        t0 = time.monotonic()
+        await refresh_all_analytics(latest_hash or "")
+        took_s = round(time.monotonic() - t0, 2)
+        # Verify the rows landed.
+        sentinel = latest_hash or "BOOT-WARM"
+        aa = await get_precomputed(sentinel, "academic_analytics")
+        ef = await get_precomputed(sentinel, "efficient_frontier")
+        return {
+            "warmed":              True,
+            "latest_hash":         latest_hash,
+            "took_s":              took_s,
+            "academic_analytics":  bool(aa),
+            "efficient_frontier":  bool(ef),
+        }
+    except Exception as exc:
+        log.warning("warm_analytics_cache_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Warm failed: {exc}")
+
 
 @app.get("/api/v1/admin/data-status")
 async def get_admin_data_status(session: dict = Depends(require_auth)):
@@ -6100,14 +6254,43 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
         # produced no visible result. Now we propagate the real
         # error as a 500 so the qaStore surfaces it via its
         # error field.
+        #
+        # May 24 2026 deeper fix: this handler ALSO used to call
+        # get_full_history() + run_all_strategies() inline on every
+        # request, which is the heavy compute that times out on
+        # cold deploys. Symptom: every check returned INCOMPLETE
+        # ("Analysis not completed — re-run...") because the request
+        # was failing before the QA agent even ran. Per user
+        # directive: read from strategy_results_cache directly. If
+        # the cache is cold, return 503 with a specific actionable
+        # message rather than recomputing inline and timing out.
+        # The dashboard's /api/backtest/compare endpoint is the
+        # canonical warmer — hitting the dashboard once populates
+        # the cache so the QA audit can complete.
         try:
-            from tools.data_fetcher import get_full_history
-            from tools.backtester import run_all_strategies
+            from tools.cache import get_latest_strategy_cache
             from agents.qa_agent import QAAgent
             from agents.usage import start_usage_capture
 
-            history = get_full_history()
-            strategy_results = run_all_strategies(history)
+            strategy_results = await get_latest_strategy_cache()
+            if not strategy_results:
+                raise HTTPException(
+                    status_code=503,
+                    detail={
+                        "error": "analytics_cache_cold",
+                        "message": (
+                            "Analytics cache not warmed — load the "
+                            "dashboard first to populate cache, then "
+                            "re-run audit."
+                        ),
+                        "hint": (
+                            "Open the main Dashboard tab once. The "
+                            "strategy comparison call populates "
+                            "strategy_results_cache. Then return here "
+                            "and re-run the audit."
+                        ),
+                    },
+                )
 
             # Seed the per-request usage bucket before the QA
             # agent's call_claude invocations so their token usage
