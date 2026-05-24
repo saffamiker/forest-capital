@@ -443,12 +443,21 @@ async def fetch_team_activity() -> dict[str, Any]:
         "michael_commits": 0, "michael_prs_merged": 0,
         "michael_migrations_deployed": 0,
         "michael_failure_reports_resolved": 0,
+        "michael_uat_steps": 0,
         "bob_uat_steps": 0, "bob_council_sessions": 0,
         "bob_academic_review_runs": 0, "bob_report_drafts": 0,
         "molly_uat_steps": 0, "molly_failure_reports_filed": 0,
         "molly_feedback_items": 0,
+        # Per-user UAT breakdown for any rows NOT attributed to Bob /
+        # Molly / Michael — populated by fetch_team_activity below so
+        # cross_check_team_activity can document the residual instead
+        # of emitting a fabricated warning. Each entry: {email, count}.
+        # Empty list when the three named team members account for the
+        # full platform total.
+        "uat_steps_unattributed": [],
     }
     try:
+        from sqlalchemy import text
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return out
@@ -588,24 +597,123 @@ async def fetch_team_activity() -> dict[str, Any]:
             out["molly_feedback_items"] = await _try_count(s,
                 "SELECT COUNT(*) FROM test_feedback WHERE user_email = :e",
                 {"e": _TEAM_EMAILS["molly"]})
+
+            # ── Michael UAT steps (UAT 2026-05-24 cross-check fix) ─────────
+            #
+            # The cross-check formula was `bob + molly = platform total`
+            # — but Michael runs UAT Section 2 per the project backlog.
+            # His test_results rows were counted in the platform total
+            # (any result IN ('pass','fail')) yet excluded from the
+            # member-sum, producing a phantom mismatch warning visible
+            # to Dr. Panttser on the midpoint paper. Adding Michael's
+            # UAT count and including him in the cross-check formula
+            # reconciles the gap when those 12 rows are his.
+            out["michael_uat_steps"] = await _try_count(s,
+                "SELECT COUNT(*) FROM test_results "
+                "WHERE user_email = :e AND result IN ('pass','fail')",
+                {"e": _TEAM_EMAILS["michael"]})
+
+            # ── Residual UAT attribution ────────────────────────────────────
+            #
+            # If bob + molly + michael STILL doesn't equal the platform
+            # total, there are test_results rows attributed to neither
+            # of the three named team members (sysadmin-only test runs
+            # by anyone else with platform access, NULL user_email
+            # rows from a pre-auth code path, etc.). cross_check_team_
+            # activity reads this breakdown to DOCUMENT the residual
+            # in a note rather than emit a mismatch warning — the
+            # user directive: "do not fabricate attribution; document
+            # why in the cross-check note rather than showing a
+            # mismatch warning."
+            try:
+                rows = await s.execute(text(
+                    "SELECT COALESCE(user_email, '(null)') AS who, "
+                    "       COUNT(*) AS n "
+                    "FROM test_results "
+                    "WHERE result IN ('pass','fail') "
+                    "  AND COALESCE(user_email, '') NOT IN "
+                    "      (:m, :b, :y) "
+                    "GROUP BY COALESCE(user_email, '(null)') "
+                    "ORDER BY n DESC, who"
+                ), {
+                    "m": _TEAM_EMAILS["michael"],
+                    "b": _TEAM_EMAILS["bob"],
+                    "y": _TEAM_EMAILS["molly"],
+                })
+                out["uat_steps_unattributed"] = [
+                    {"email": str(r[0]), "count": int(r[1])}
+                    for r in rows.fetchall()
+                ]
+            except Exception as breakdown_exc:  # noqa: BLE001
+                log.warning("uat_residual_breakdown_failed",
+                            error=str(breakdown_exc))
     except Exception as exc:  # noqa: BLE001
         log.warning("team_activity_fetch_failed", error=str(exc))
     return out
 
 
 def cross_check_team_activity(activity: dict) -> list[str]:
-    """Activity cross-check from the spec: Bob UAT + Molly UAT must
-    equal the platform total. Returns a list of flag strings;
-    empty when everything reconciles."""
+    """Activity cross-check: the named team members' UAT step counts
+    must reconcile with the platform total.
+
+    UAT 2026-05-24 rewrite (user-reported phantom mismatch). The
+    prior formula was `Bob + Molly = platform total` — but Michael
+    runs UAT Section 2 per the project backlog, his rows landed in
+    the platform total, and the formula reported a phantom 12-row
+    mismatch warning visible to Dr. Panttser. The rewrite:
+
+      1. Include Michael in the reconciliation sum.
+      2. If the three named members STILL don't account for the
+         full platform total (a sysadmin-only test run by someone
+         else with platform access, a NULL user_email row from a
+         pre-auth code path), the residual is DOCUMENTED in a
+         neutral note — NOT a warning — listing each non-team
+         user_email with its row count. Per the user directive:
+         "do not fabricate attribution; document why in the cross-
+         check note rather than showing a mismatch warning."
+
+    Returns a list of zero or one note strings. A note documents
+    the reconciliation transparently when there's a residual; an
+    empty list when the three named members sum to the platform
+    total exactly.
+    """
+    michael = int(activity.get("michael_uat_steps") or 0)
     bob = int(activity.get("bob_uat_steps") or 0)
     molly = int(activity.get("molly_uat_steps") or 0)
     total = int(activity.get("team_total_uat_steps") or 0)
-    if bob + molly != total:
+    team_sum = michael + bob + molly
+
+    # Happy path — the three project team members account for every
+    # platform UAT row. Nothing to flag.
+    if team_sum == total:
+        return []
+
+    # Residual exists. Honest documentation rather than a warning.
+    # The breakdown is empty when the residual query failed; we
+    # still emit a note so the figure is acknowledged in the
+    # deliverable rather than silently absorbed.
+    residual = total - team_sum
+    breakdown: list[dict] = activity.get("uat_steps_unattributed") or []
+    if breakdown:
+        # The named-team sum doesn't cover the platform total; list
+        # each non-team email with its count so the reader can see
+        # the source. Keep the note neutral — not a warning, not a
+        # mismatch flag.
+        parts = ", ".join(
+            f"{r.get('email', '(unknown)')}={r.get('count', 0)}"
+            for r in breakdown
+        )
         return [(
-            f"[ACTIVITY CROSS-CHECK MISMATCH: "
-            f"Bob {bob} + Molly {molly} = {bob + molly} ≠ "
-            f"platform total {total} — verify before submission]")]
-    return []
+            f"[ACTIVITY NOTE — UAT attribution: "
+            f"Michael {michael} + Bob {bob} + Molly {molly} = "
+            f"{team_sum}; platform total {total}; "
+            f"residual {residual} attributed to: {parts}]")]
+    return [(
+        f"[ACTIVITY NOTE — UAT attribution: "
+        f"Michael {michael} + Bob {bob} + Molly {molly} = "
+        f"{team_sum}; platform total {total}; "
+        f"residual {residual} could not be attributed from the "
+        f"available test_results rows]")]
 
 
 # ── STEP 2 — cross-check live values against staged findings ─────────────────
