@@ -3530,8 +3530,6 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
                 source="market_data_monthly",
             )
 
-            result = _optimize(body.method, returns)
-
             # Annualised risk-free rate for the frontier's Sharpe — the mean
             # of the monthly DTB3 series, ×12. Using the same rate the
             # strategy scatter is built on keeps the curve's tangency
@@ -3540,14 +3538,26 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
             rf_annual = (sum(rf_monthly) / len(rf_monthly) * 12) if rf_monthly else 0.0
             log.info("optimize_frontier_risk_free", risk_free_annual=round(rf_annual, 4))
 
-            # Hotfix (May 23 2026): try the precomputed frontier cache
-            # before running the 100-point SLSQP sweep on the request
-            # thread. The frontier depends only on the equity/IG/HY
-            # monthly returns — same input → same output across every
-            # method — so the cache row is method-agnostic. Reading
-            # the cached row drops a 10-30s request to ~50ms; the
-            # endpoint times out at 30s without this on Render's
-            # shared CPU.
+            # CACHE LOOKUP MOVED EARLY (May 24 2026 UAT fix).
+            # Previously the endpoint ran `_optimize(method, returns)`
+            # (a single SLSQP solve) BEFORE checking the precomputed
+            # frontier cache. A transient solver convergence failure
+            # — cvxpy CLARABEL "infeasible_or_unbounded", SLSQP
+            # "Inequality constraints incompatible", etc. — would
+            # raise here, fall through to the outer except, and
+            # serve MOCK_EFFICIENT_FRONTIER. The user saw the chart
+            # render with 11 hardcoded mock points + the wrong asset
+            # universe (SPY/TLT/IEF/GLD) instead of the real frontier
+            # that WAS in the cache. Re-ordering: cache first, then
+            # solver. The chart never goes mock when real cache data
+            # exists, even if the per-method weights solve fails.
+            #
+            # Hotfix (May 23 2026) note kept: the cache exists because
+            # the 100-point SLSQP sweep runs once at ingestion via
+            # refresh_efficient_frontier; same input → same output
+            # across every method, so the cache row is method-
+            # agnostic. ~50ms cache hit vs ~10-30s on-demand sweep
+            # (would exceed Render's 30s gateway timeout).
             raw_frontier: list[dict] | None = None
             try:
                 from tools.cache import get_latest_strategy_hash
@@ -3576,6 +3586,29 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
             except Exception as cache_exc:  # noqa: BLE001
                 log.warning("optimize_frontier_cache_read_failed",
                             error=str(cache_exc))
+
+            # Per-method weights — runs AFTER the cache lookup so a
+            # solver failure here only nulls out the weights field,
+            # never wipes the cached frontier into a mock-data
+            # response. The dashboard's EfficientFrontier component
+            # only consumes `efficient_frontier`; the `weights` field
+            # is read by callers that explicitly asked for a method
+            # (e.g. a Portfolio Profile drill-down). A null weights
+            # field there degrades cleanly (the caller can re-try
+            # the specific method) — better than a fake frontier
+            # painted across the whole dashboard.
+            result: dict
+            try:
+                result = _optimize(body.method, returns)
+            except Exception as opt_exc:  # noqa: BLE001
+                log.warning("optimize_weights_solve_failed",
+                            method=body.method, error=str(opt_exc))
+                result = {
+                    "method":    body.method,
+                    "weights":   None,
+                    "sum_check": None,
+                    "error":     str(opt_exc),
+                }
 
             if raw_frontier is None:
                 # COLD CACHE — never run the inline sweep on the
