@@ -24,6 +24,7 @@ import hashlib
 import io
 import json
 import os
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
@@ -2202,8 +2203,15 @@ def _read_history_from_db() -> dict:
 # DataFrames; get_full_history's cold path copies `daily` before mutating).
 # Cleared via _history_memo_clear() — exposed for tests and any admin
 # force-refresh path that must bypass the memo.
-_HISTORY_MEMO_TTL_SECONDS = 30.0
+_HISTORY_MEMO_TTL_SECONDS = 300.0  # 5 min (was 30s — May 24 2026 dashboard-timeout fix)
 _history_memo: dict[str, Any] = {}  # {"result": dict, "cached_at": float}
+# May 24 2026 (dashboard timeout root-cause fix) — a single-flight
+# lock so two coincident memo misses share one _compute_full_history
+# call instead of each hitting the DB independently. threading.Lock
+# is held briefly by the first caller; subsequent callers block on
+# acquire(), then re-check the memo (which the first caller has
+# populated by then) and return the cached result.
+_history_memo_lock = threading.Lock()
 
 
 def _history_memo_clear() -> None:
@@ -2213,12 +2221,27 @@ def _history_memo_clear() -> None:
 
 def get_full_history() -> dict:
     """
-    30-second memoized entry point for the unified data pipeline.
+    Memoised entry point for the unified data pipeline.
 
     Returns the cached history dict when one was assembled less than
     _HISTORY_MEMO_TTL_SECONDS ago; otherwise delegates to
-    _compute_full_history() and caches the result. See the memo comment
-    block above for the rationale (QA badge poll storm).
+    _compute_full_history() and caches the result.
+
+    May 24 2026 (dashboard-timeout fix):
+      - TTL bumped from 30s to 300s. The DB rows it reads change at
+        most once per data-ingestion event; the data-ingest hook
+        clears the memo via _history_memo_clear() when needed, so a
+        long TTL is safe and dramatically reduces hot-path DB reads.
+      - Single-flight lock prevents two coincident misses from each
+        running _compute_full_history. The second caller blocks on
+        acquire, re-checks the memo (populated by the first caller),
+        and returns the cached result without a redundant DB hit.
+
+    THREADING NOTE: this function is SYNCHRONOUS. Async callers MUST
+    push it off the event loop with `await asyncio.to_thread(...)`
+    or use get_full_history_async() below. Calling it directly from
+    an async handler blocks the worker for the full read duration,
+    which serialises every other in-flight request.
     """
     now = time.time()
     cached = _history_memo.get("result")
@@ -2228,10 +2251,41 @@ def get_full_history() -> dict:
             age_seconds=int(now - _history_memo.get("cached_at", 0.0)),
         )
         return cached
-    result = _compute_full_history()
-    _history_memo["result"] = result
-    _history_memo["cached_at"] = now
-    return result
+    # MEMO MISS — acquire the single-flight lock. The first caller
+    # runs _compute_full_history; subsequent callers wait, re-check
+    # the memo (which is now populated), and return without a
+    # redundant compute.
+    with _history_memo_lock:
+        now = time.time()  # re-read in case of long acquire
+        cached = _history_memo.get("result")
+        if cached is not None and (now - _history_memo.get("cached_at", 0.0)) < _HISTORY_MEMO_TTL_SECONDS:
+            log.info(
+                "get_full_history_memo_hit_after_lock",
+                age_seconds=int(now - _history_memo.get("cached_at", 0.0)),
+            )
+            return cached
+        result = _compute_full_history()
+        _history_memo["result"] = result
+        _history_memo["cached_at"] = now
+        return result
+
+
+async def get_full_history_async() -> dict:
+    """Async-safe entry point for the unified data pipeline.
+
+    Pushes the synchronous read off the asyncio event loop into a
+    worker thread so the loop stays free to service other requests
+    in parallel. Use this from every async handler — calling
+    get_full_history() directly blocks the worker for the read
+    duration, which serialises every other in-flight request.
+
+    On a memo HIT this is roughly equivalent in cost to the direct
+    sync call (microseconds); on a memo MISS the loop is freed for
+    the duration of the DB read so concurrent dashboard requests
+    proceed in parallel.
+    """
+    import asyncio
+    return await asyncio.to_thread(get_full_history)
 
 
 def _compute_full_history() -> dict:

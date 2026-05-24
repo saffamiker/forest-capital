@@ -414,17 +414,53 @@ export default function CouncilDebate() {
         </div>
       )}
 
+      {/* Convening indicator — visible the moment a query is submitted
+          and stays up until council_complete fires (loading flips to
+          false). The previous gate was `loading && !result`, but
+          runQuery() now seeds an empty result skeleton up front so the
+          orderedMessages map can render specialists as they stream —
+          that made `!result` always false and the convening banner
+          stopped appearing. The single source of truth is `loading`;
+          this banner and the disagreement-heatmap skeleton below both
+          gate on it. Restored May 24 2026. */}
+      {loading && activeTab === 'debate' && (
+        <div
+          data-testid="council-convening-banner"
+          className="card border border-electric/30 bg-electric/5 px-4 py-3
+                     flex items-center gap-3"
+        >
+          <Loader2 className="w-4 h-4 text-electric animate-spin shrink-0" />
+          <div className="flex-1 min-w-0">
+            <div className="text-electric font-semibold text-sm">
+              Council is convening
+            </div>
+            <div className="text-xs text-muted mt-0.5">
+              Six specialists are deliberating — typically 30-90 seconds.
+              Their reports stream in as each completes.
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Agent cards */}
       {activeTab === 'debate' && (
         <>
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {loading && !result && agentOrder.map((name) => (
-              <AgentCard
-                key={name}
-                message={{ agent: name, role: name === 'CIO' ? 'cio' : 'specialist', model: AGENT_STYLE[name]?.note ?? '', content: '', is_final: name === 'CIO' }}
-                streaming
-              />
-            ))}
+            {/* Skeleton card for every agent that hasn't streamed in yet —
+                fires for any agent missing from orderedMessages WHILE
+                loading is true. The grid fills in progressively as each
+                specialist_complete frame arrives; once the streaming
+                response is done, every slot has been replaced by the
+                real AgentCard. */}
+            {loading && agentOrder
+              .filter((name) => !messages.some((m) => m.agent === name))
+              .map((name) => (
+                <AgentCard
+                  key={name}
+                  message={{ agent: name, role: name === 'CIO' ? 'cio' : 'specialist', model: AGENT_STYLE[name]?.note ?? '', content: '', is_final: name === 'CIO' }}
+                  streaming
+                />
+              ))}
             {orderedMessages.map((msg) => (
               <AgentCard
                 key={msg.agent}
@@ -461,7 +497,36 @@ export default function CouncilDebate() {
         </div>
       )}
 
-      {activeTab === 'heatmap' && <DisagreementHeatmap />}
+      {/* Heatmap — only renders once the streaming response is complete
+          AND the current run has produced at least one specialist
+          message. The prior unconditional render leaked the mock-data
+          fallback while the council was mid-stream, which read as
+          "stale data from the previous session" to the user. The
+          completion signal is `!loading && orderedMessages.length > 0`
+          — the same loading flag that powers the convening banner
+          above, so there is one source of truth for "decision
+          complete". A loading skeleton is rendered in its place while
+          the council is still streaming. May 24 2026. */}
+      {activeTab === 'heatmap' && (
+        loading ? (
+          <div
+            data-testid="council-heatmap-skeleton"
+            className="card p-6 flex items-center justify-center gap-3"
+          >
+            <Loader2 className="w-4 h-4 text-electric animate-spin shrink-0" />
+            <span className="text-muted text-sm">
+              Waiting for the council to finish before computing
+              disagreement.
+            </span>
+          </div>
+        ) : orderedMessages.length > 0 ? (
+          <DisagreementHeatmap />
+        ) : (
+          <div className="card p-6 text-center text-muted text-sm">
+            Submit a query to populate the disagreement heatmap.
+          </div>
+        )
+      )}
 
       {/* PersonaModal — mounted once. Open state is controlled by
           personaTarget; closing nulls it back. */}

@@ -27,6 +27,7 @@ import { useCallback, useEffect, useState } from 'react'
 import axios from 'axios'
 import { AlertCircle, ChevronDown, ChevronRight, Clock,
          Loader2, RotateCcw, Save, Trash2, Star, StarOff } from 'lucide-react'
+import { generationUrl } from '../../lib/generationId'
 
 
 export interface PaperVersion {
@@ -107,8 +108,13 @@ export default function VersionHistoryPanel({
     setLoading(true)
     setError(null)
     try {
-      const res = await axios.get<VersionListResponse>(
-        `/api/v1/reports/generations/${generationId}/versions`)
+      const url = generationUrl(generationId, '/versions')
+      if (!url) {
+        setError(`Invalid generation id: ${generationId}`)
+        setLoading(false)
+        return
+      }
+      const res = await axios.get<VersionListResponse>(url)
       setVersions(res.data.versions ?? [])
       setRevision(res.data.paper_revision ?? null)
     } catch (e) {
@@ -128,8 +134,9 @@ export default function VersionHistoryPanel({
     setBusyVer(-1)
     setError(null)
     try {
-      await axios.post(
-        `/api/v1/reports/generations/${generationId}/versions`,
+      const url = generationUrl(generationId, '/versions')
+      if (!url) { setBusyVer(null); return }
+      await axios.post(url,
         { label: saveLabel || null, source: 'manual' })
       setSaveLabel('')
       setShowSaveForm(false)
@@ -149,9 +156,10 @@ export default function VersionHistoryPanel({
     setBusyVer(versionNumber)
     setError(null)
     try {
-      await axios.post(
-        `/api/v1/reports/generations/${generationId}`
-        + `/versions/${versionNumber}/mark-final`)
+      const url = generationUrl(generationId,
+        `/versions/${versionNumber}/mark-final`)
+      if (!url) { setBusyVer(null); return }
+      await axios.post(url)
       await fetchVersions()
     } catch (e) {
       const msg = axios.isAxiosError(e)
@@ -168,9 +176,9 @@ export default function VersionHistoryPanel({
     setBusyVer(-3)
     setError(null)
     try {
-      await axios.delete(
-        `/api/v1/reports/generations/${generationId}`
-        + `/versions/final-marker`)
+      const url = generationUrl(generationId, '/versions/final-marker')
+      if (!url) { setBusyVer(null); return }
+      await axios.delete(url)
       await fetchVersions()
     } catch (e) {
       const msg = axios.isAxiosError(e)
@@ -193,9 +201,10 @@ export default function VersionHistoryPanel({
       .find((v) => v.version_number === versionNumber)
       ?.is_final_submission === true
     try {
-      await axios.delete(
-        `/api/v1/reports/generations/${generationId}`
-        + `/versions/${versionNumber}`)
+      const url = generationUrl(generationId,
+        `/versions/${versionNumber}`)
+      if (!url) { setBusyVer(null); return }
+      await axios.delete(url)
       setConfirmDeleteVer(null)
       setDeleteText('')
       if (wasFinal) setFinalCleared(true)
@@ -216,8 +225,9 @@ export default function VersionHistoryPanel({
     setError(null)
     const hadFinal = versions.some((v) => v.is_final_submission === true)
     try {
-      await axios.delete(
-        `/api/v1/reports/generations/${generationId}/versions`)
+      const url = generationUrl(generationId, '/versions')
+      if (!url) { setBusyVer(null); return }
+      await axios.delete(url)
       setConfirmDeleteAll(false)
       setDeleteText('')
       if (hadFinal) setFinalCleared(true)
@@ -241,9 +251,10 @@ export default function VersionHistoryPanel({
     setBusyVer(versionNumber)
     setError(null)
     try {
-      await axios.post(
-        `/api/v1/reports/generations/${generationId}`
-        + `/versions/${versionNumber}/restore`)
+      const url = generationUrl(generationId,
+        `/versions/${versionNumber}/restore`)
+      if (!url) { setBusyVer(null); return }
+      await axios.post(url)
       await fetchVersions()
       onRestored?.()
     } catch (e) {

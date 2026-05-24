@@ -312,6 +312,50 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+
+# ── Request validation logger ────────────────────────────────────────────────
+#
+# May 24 2026 — when a frontend bug constructs a malformed path
+# parameter (the "3:1" generation-id pattern was the reported case),
+# FastAPI returns a 422 with the validation detail but Starlette
+# doesn't log it. Production has no signal that the bug is occurring
+# until a user reports it. This handler preserves the default 422
+# response shape and adds a structured log line carrying the URL,
+# method, client IP and a compact dump of the validation errors so
+# future malformed IDs are visible in Render logs the moment they
+# fire — making it trivial to track the bad call to its origin.
+from fastapi.exceptions import RequestValidationError
+from fastapi.exception_handlers import request_validation_exception_handler
+
+
+@app.exception_handler(RequestValidationError)
+async def _logged_validation_error(request: Request, exc: RequestValidationError):
+    try:
+        client_ip = request.client.host if request.client else "unknown"
+        # exc.errors() may carry non-serializable objects (Decimal,
+        # datetime, set). str() is the conservative summary —
+        # full structured payload still goes back to the client.
+        compact = [
+            {
+                "loc": list(e.get("loc", [])),
+                "msg": str(e.get("msg", "")),
+                "type": str(e.get("type", "")),
+            }
+            for e in (exc.errors() or [])
+        ]
+        log.warning(
+            "request_validation_error",
+            method=request.method,
+            url=str(request.url),
+            path=str(request.url.path),
+            client_ip=client_ip,
+            errors=compact,
+        )
+    except Exception:  # noqa: BLE001
+        # Never let logging suppress the actual 422 response.
+        pass
+    return await request_validation_exception_handler(request, exc)
+
 # Uploads mount — serves UAT test-runner screenshots read-only.
 # config.SCREENSHOT_DIR resolves to /data/test_screenshots on Render (a
 # persistent disk — screenshots survive redeployments) and to
@@ -620,10 +664,13 @@ async def list_strategies(session: dict = Depends(require_auth)):
     # pipeline just to return a name/type list.
     if ENVIRONMENT != "test":
         try:
-            from tools.data_fetcher import get_full_history
+            from tools.data_fetcher import get_full_history_async
             from tools.backtester import run_all_strategies
-            history = get_full_history()
-            results_dict = run_all_strategies(history)
+            # OFF-LOOP: get_full_history reads the DB (and may run the cold
+            # pipeline through Excel/FRED/yfinance). Pushed to a worker
+            # thread so the event loop keeps serving concurrent requests.
+            history = await get_full_history_async()
+            results_dict = await asyncio.to_thread(run_all_strategies, history)
             return {
                 "strategies": [
                     {"name": name, "type": r.get("strategy_type", "static")}
@@ -669,10 +716,10 @@ async def run_backtest(
     # that branch dead code.  Fixed here to handle all strategies uniformly.
     if ENVIRONMENT != "test":
         try:
-            from tools.data_fetcher import get_full_history
+            from tools.data_fetcher import get_full_history_async
             from tools.backtester import run_all_strategies
-            history = get_full_history()
-            results_dict = run_all_strategies(history)
+            history = await get_full_history_async()
+            results_dict = await asyncio.to_thread(run_all_strategies, history)
             if body.strategy in results_dict:
                 return results_dict[body.strategy]
         except Exception as exc:
@@ -693,11 +740,20 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
     # Cache survives Render restarts because it lives in PostgreSQL, not memory.
     if ENVIRONMENT != "test":
         try:
-            from tools.data_fetcher import get_full_history
+            from tools.data_fetcher import get_full_history_async
             from tools.backtester import run_all_strategies
             from tools.cache import get_strategy_cache, set_strategy_cache, _compute_data_hash
 
-            history = get_full_history()
+            # OFF-LOOP — this endpoint is the dashboard hot path. Sync
+            # get_full_history() used to block the event loop on every
+            # call, serialising all parallel dashboard requests behind a
+            # single slow read and producing the 35-70s response-time
+            # cluster observed in Render logs on 2026-05-24. await
+            # get_full_history_async() pushes the entire read pipeline
+            # (DB + Excel + FRED + yfinance on a cold path) into a worker
+            # thread so the loop stays free to service the other 6+
+            # parallel dashboard calls.
+            history = await get_full_history_async()
 
             # Build a stable hash from pipeline metadata to detect new data
             monthly = history.get("equity_monthly")
@@ -724,7 +780,10 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
                 ranked = sorted(cached.values(), key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
                 return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": "hit", "data_range": data_range}
 
-            results_dict = run_all_strategies(history)
+            # Cache miss / schema refresh — run_all_strategies executes 10
+            # backtests serially (~30s on a cold pipeline). Offload to a
+            # worker thread so the loop is not blocked while it computes.
+            results_dict = await asyncio.to_thread(run_all_strategies, history)
             ranked = sorted(results_dict.values(), key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
 
             # Write-through: persist for next cold start or Render restart
@@ -765,12 +824,15 @@ async def get_chart_data(request: Request, session: dict = Depends(require_auth)
         }
 
     try:
-        from tools.data_fetcher import get_full_history
+        from tools.data_fetcher import get_full_history_async
         from tools.backtester import run_all_strategies
         from tools.chart_data import compute_chart_data
         from tools.cache import get_strategy_cache, _compute_data_hash
 
-        history = get_full_history()
+        # OFF-LOOP — second dashboard hot path. Same fix as
+        # /api/backtest/compare; the two endpoints together account for
+        # most of the dashboard's parallel-request fan-out.
+        history = await get_full_history_async()
         monthly = history.get("equity_monthly")
         n_rows = len(monthly) if monthly is not None else 0
         last_date = str(monthly.index[-1]) if monthly is not None and len(monthly) > 0 else "unknown"
@@ -2527,9 +2589,10 @@ async def get_analytics_sensitivity(request: Request, session: dict = Depends(re
 
     async def _inline_sensitivity() -> dict:
         try:
-            from tools.data_fetcher import get_full_history
+            from tools.data_fetcher import get_full_history_async
             from tools.sensitivity import compute_sensitivity
-            result = compute_sensitivity(get_full_history())
+            history = await get_full_history_async()
+            result = await asyncio.to_thread(compute_sensitivity, history)
             return {"available": True, **result}
         except Exception as exc:
             log.warning("analytics_sensitivity_failed", error=str(exc))
@@ -6462,7 +6525,11 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
         # canonical warmer — hitting the dashboard once populates
         # the cache so the QA audit can complete.
         try:
-            from tools.cache import get_latest_strategy_cache
+            from tools.cache import (
+                get_latest_strategy_cache, get_latest_qa,
+                get_most_recent_qa_run, set_qa_cache,
+                _compute_data_hash,
+            )
             from agents.qa_agent import QAAgent
             from agents.usage import start_usage_capture
 
@@ -6486,12 +6553,138 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
                     },
                 )
 
+            # ── QA RE-RUN GATE (May 24 2026) ──────────────────────────
+            # The QA agent uses Sonnet — a full audit is ~$0.05-0.10
+            # of token burn. The previous handler ran unconditionally
+            # on every click and on every QAHub mount (qaStore.load()
+            # fires reload() if its in-memory `loaded` flag is false,
+            # which a server restart or a fresh user session resets).
+            # Multiple users navigating to the QA tab triggered N
+            # redundant identical audits, all consuming tokens against
+            # the same strategy_hash.
+            #
+            # Two cascading gates BEFORE any LLM call fires:
+            #
+            #   1) HASH GATE — if a non-expired Tier 99 ("full audit")
+            #      verdict already exists for this strategy_hash, serve
+            #      it from qa_results_cache. The data has not changed
+            #      since the cached audit ran, so the audit verdict has
+            #      not changed either — no LLM call needed.
+            #
+            #   2) MIN-INTERVAL GATE — secondary safety net. Even if
+            #      the hash logic somehow misfired (e.g. the hash
+            #      computation changed subtly between deploys), never
+            #      run a full audit more than once per QA_MIN_INTERVAL
+            #      seconds across the whole platform. The cap is
+            #      generous (5 minutes) — a real user click after a
+            #      legitimate data refresh always proceeds, but a
+            #      polling-driven flood is capped.
+            #
+            # Each gate logs the skip with hash + age so a future
+            # production-log audit can confirm the rate limiter is
+            # firing. Bypassed by neither (i.e. real run) logs
+            # qa_audit_running so each authentic run is also visible.
+            #
+            # AUDIT_TIER_FULL=99 distinguishes the qa_audit endpoint's
+            # full-checklist response from Tier 1/2/3 narrow verdicts
+            # already stored in qa_results_cache. Same table, separate
+            # tier band so the tiered-QA paths and the full-audit path
+            # never overwrite each other.
+            AUDIT_TIER_FULL = 99
+            QA_MIN_INTERVAL_SECONDS = 5 * 60
+
+            # Stable hash computed from the cached strategy_results so
+            # the audit is keyed against the data block it verified.
+            # Mirrors the hash computation in _current_strategy_hash so
+            # the QA endpoints all agree on what "current data" means.
+            try:
+                first_row = next(iter(strategy_results.values()))
+                monthly = first_row.get("monthly_returns") or []
+                n_rows = len(monthly)
+                last_date = (
+                    monthly[-1].get("date", "unknown")
+                    if monthly and isinstance(monthly[-1], dict)
+                    else "unknown"
+                )
+                qa_hash = _compute_data_hash(
+                    n_rows, last_date, n_strategies=len(strategy_results)
+                )
+            except Exception as _exc:  # noqa: BLE001
+                # If the hash can't be computed, fall through to a real
+                # run — the audit is the safer default than skipping.
+                log.info("qa_audit_hash_compute_failed", error=str(_exc))
+                qa_hash = None
+
+            from datetime import datetime, timezone
+
+            # Gate 1 — hash gate. Same data → cached audit verdict
+            # stands. expires_at filtering inside get_latest_qa
+            # discards a row past its TTL so a freshly-changed dataset
+            # never reuses a verdict tied to old data.
+            if qa_hash:
+                cached_audit = await get_latest_qa(
+                    qa_hash, min_tier=AUDIT_TIER_FULL)
+                if cached_audit and isinstance(cached_audit.get("checklist"), dict):
+                    log.info(
+                        "qa_audit_skipped_hash_match",
+                        strategy_hash=qa_hash[:8],
+                        cached_run_at=cached_audit.get("run_at"),
+                    )
+                    return cached_audit["checklist"]
+
+            # Gate 2 — minimum-interval gate. Secondary safety net
+            # independent of hash. Caps token burn if the hash logic
+            # has an edge case (e.g. the strategy_results shape
+            # changed and the hash diverged without the data
+            # changing). Returns the most recent verdict regardless
+            # of which hash it ran against.
+            most_recent = await get_most_recent_qa_run(
+                min_tier=AUDIT_TIER_FULL)
+            if most_recent and most_recent.get("run_at"):
+                try:
+                    run_at = datetime.fromisoformat(
+                        most_recent["run_at"].replace("Z", "+00:00"))
+                    age_seconds = (datetime.now(timezone.utc)
+                                   - run_at).total_seconds()
+                    if (age_seconds < QA_MIN_INTERVAL_SECONDS
+                            and isinstance(most_recent.get("checklist"), dict)):
+                        log.info(
+                            "qa_audit_skipped_interval",
+                            age_seconds=int(age_seconds),
+                            min_interval_seconds=QA_MIN_INTERVAL_SECONDS,
+                            cached_strategy_hash=str(
+                                most_recent.get("strategy_hash", ""))[:8],
+                            current_strategy_hash=(
+                                qa_hash[:8] if qa_hash else "unknown"),
+                        )
+                        return most_recent["checklist"]
+                except (ValueError, AttributeError):
+                    pass  # malformed run_at — fall through to real run
+
+            log.info("qa_audit_running",
+                     strategy_hash=qa_hash[:8] if qa_hash else "unknown")
+
             # Seed the per-request usage bucket before the QA
             # agent's call_claude invocations so their token usage
             # is captured.
             start_usage_capture()
             qa = QAAgent()
             audit = qa.run_audit(strategy_results, run_full_checklist=True)
+
+            # Persist the full audit to qa_results_cache so the next
+            # /api/qa/audit call within the TTL window short-circuits
+            # at gate 1 above. Tier=AUDIT_TIER_FULL distinguishes this
+            # from the tiered-QA narrow verdicts. Fail-open: if the
+            # write fails (DB unavailable), the response still returns
+            # normally; the next call will just re-run.
+            if qa_hash:
+                try:
+                    await set_qa_cache(
+                        qa_hash, audit, tier=AUDIT_TIER_FULL)
+                except Exception as _exc:  # noqa: BLE001
+                    log.warning("qa_audit_cache_write_failed",
+                                error=str(_exc))
+
             # Team Activity — record the audit run (non-blocking).
             _log_interaction_bg(
                 request, session, "qa",
@@ -6553,12 +6746,14 @@ async def qa_export(request: Request, session: dict = Depends(require_auth)):
     audit = MOCK_QA_AUDIT
     if ENVIRONMENT != "test":
         try:
-            from tools.data_fetcher import get_full_history
+            from tools.data_fetcher import get_full_history_async
             from tools.backtester import run_all_strategies
             from agents.qa_agent import QAAgent
-            history = get_full_history()
-            strategy_results = run_all_strategies(history)
-            audit = QAAgent().run_audit(strategy_results, run_full_checklist=True)
+            history = await get_full_history_async()
+            strategy_results = await asyncio.to_thread(run_all_strategies, history)
+            audit = await asyncio.to_thread(
+                lambda: QAAgent().run_audit(strategy_results, run_full_checklist=True)
+            )
         except Exception as exc:
             log.error("qa_export_error", error=str(exc))
             audit = MOCK_QA_AUDIT
@@ -6632,10 +6827,14 @@ async def _current_strategy_hash() -> tuple[str, dict[str, dict] | None]:
     single hash computation can serve both the status read and any
     tier trigger that follows.
     """
-    from tools.data_fetcher import get_full_history
+    from tools.data_fetcher import get_full_history_async
     from tools.cache import get_strategy_cache, _compute_data_hash
 
-    history = get_full_history()
+    # OFF-LOOP — _current_strategy_hash is called from qa_status, which
+    # the dashboard polls every 30s. A sync get_full_history() here
+    # blocked the loop on every poll; in the 2026-05-24 timeout cluster
+    # the QA poll was visible alongside the dashboard fan-out.
+    history = await get_full_history_async()
     monthly = history.get("equity_monthly")
     n_rows = len(monthly) if monthly is not None else 0
     last_date = str(monthly.index[-1]) if monthly is not None and len(monthly) > 0 else "unknown"
@@ -6762,14 +6961,15 @@ async def qa_run(request: Request, session: dict = Depends(require_sysadmin)):
         from tools.qa_tiered import run_tier1_checks, schedule_tier2_background
         from tools.cache import set_qa_cache
         from tools.backtester import run_all_strategies
-        from tools.data_fetcher import get_full_history
+        from tools.data_fetcher import get_full_history_async
         from agents.usage import start_usage_capture
 
         strategy_hash, cached = await _current_strategy_hash()
         if cached:
             results_dict = cached
         else:
-            results_dict = run_all_strategies(get_full_history())
+            history = await get_full_history_async()
+            results_dict = await asyncio.to_thread(run_all_strategies, history)
 
         # Tier 1 — synchronous, deterministic, free. Tier 2 runs on a
         # background executor that does NOT inherit this context, so its
@@ -6847,15 +7047,16 @@ async def qa_full_review(request: Request, session: dict = Depends(require_sysad
         from tools.qa_tiered import run_tier3_review
         from tools.cache import set_qa_cache
         from tools.backtester import run_all_strategies
-        from tools.data_fetcher import get_full_history
+        from tools.data_fetcher import get_full_history_async
 
         strategy_hash, cached = await _current_strategy_hash()
         if cached:
             results_dict = cached
         else:
-            results_dict = run_all_strategies(get_full_history())
+            history = await get_full_history_async()
+            results_dict = await asyncio.to_thread(run_all_strategies, history)
 
-        t3 = run_tier3_review(results_dict)
+        t3 = await asyncio.to_thread(run_tier3_review, results_dict)
         await set_qa_cache(strategy_hash, t3, tier=3)
 
         return {
@@ -8207,7 +8408,7 @@ async def midpoint_template(request: Request, session: dict = Depends(require_au
 
     try:
         from agents.academic_writer import AcademicWriter
-        from tools.data_fetcher import get_full_history
+        from tools.data_fetcher import get_full_history_async
         from tools.backtester import run_all_strategies
         from tools.docx_generator import build_docx
         from tools.cache import get_strategy_cache, _compute_data_hash
@@ -8219,7 +8420,8 @@ async def midpoint_template(request: Request, session: dict = Depends(require_au
             results_dict: dict = {}
             data_range = {"start": "—", "end": "—", "n_months": 0}
         else:
-            history = get_full_history()
+            from tools.data_fetcher import get_full_history_async  # noqa: F401
+            history = await get_full_history_async()
             monthly = history.get("equity_monthly")
             n_rows = len(monthly) if monthly is not None else 0
             last_date = (
@@ -8231,7 +8433,7 @@ async def midpoint_template(request: Request, session: dict = Depends(require_au
             if cached:
                 results_dict = cached
             else:
-                results_dict = run_all_strategies(history)
+                results_dict = await asyncio.to_thread(run_all_strategies, history)
             first_date = (
                 str(monthly.index[0].date())
                 if monthly is not None and len(monthly) > 0 else "unknown"
@@ -8381,11 +8583,11 @@ async def _load_results_async() -> tuple[dict, dict]:
     if ENVIRONMENT == "test":
         return {}, {"start": "—", "end": "—", "n_months": 0}
 
-    from tools.data_fetcher import get_full_history
+    from tools.data_fetcher import get_full_history_async
     from tools.backtester import run_all_strategies
     from tools.cache import get_strategy_cache, _compute_data_hash
 
-    history = get_full_history()
+    history = await get_full_history_async()
     monthly = history.get("equity_monthly")
     n_rows = len(monthly) if monthly is not None else 0
     last_date = (
@@ -8398,7 +8600,7 @@ async def _load_results_async() -> tuple[dict, dict]:
     )
     strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
     cached = await get_strategy_cache(strategy_hash)
-    results = cached if cached else run_all_strategies(history)
+    results = cached if cached else await asyncio.to_thread(run_all_strategies, history)
     return results, {"start": first_date, "end": last_date, "n_months": n_rows}
 
 
@@ -9026,11 +9228,11 @@ async def storyboard_draft(request: Request, session: dict = Depends(require_aut
     strategy_hash: str | None = None
     if ENVIRONMENT != "test":
         try:
-            from tools.data_fetcher import get_full_history
+            from tools.data_fetcher import get_full_history_async
             from tools.backtester import run_all_strategies
             from tools.cache import get_strategy_cache, _compute_data_hash
 
-            history = get_full_history()
+            history = await get_full_history_async()
             monthly = history.get("equity_monthly")
             n_rows = len(monthly) if monthly is not None else 0
             last_date = (
@@ -9039,7 +9241,7 @@ async def storyboard_draft(request: Request, session: dict = Depends(require_aut
             )
             strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
             cached = await get_strategy_cache(strategy_hash)
-            results_dict = cached if cached else run_all_strategies(history)
+            results_dict = cached if cached else await asyncio.to_thread(run_all_strategies, history)
         except Exception as exc:
             log.warning("storyboard_draft_strategy_load_failed", error=str(exc))
 
@@ -9630,10 +9832,10 @@ async def generate_from_storyboard(
         results: dict = {}
         if ENVIRONMENT != "test":
             try:
-                from tools.data_fetcher import get_full_history
+                from tools.data_fetcher import get_full_history_async
                 from tools.backtester import run_all_strategies
-                history = get_full_history()
-                results = run_all_strategies(history)
+                history = await get_full_history_async()
+                results = await asyncio.to_thread(run_all_strategies, history)
             except Exception:
                 pass
         docx_bytes = build_qa_prep_docx(storyboard, strategy_results=results)
@@ -9918,7 +10120,7 @@ async def ws_council(websocket: WebSocket):
 
             if ENVIRONMENT != "test":
                 try:
-                    from tools.data_fetcher import get_full_history
+                    from tools.data_fetcher import get_full_history_async
                     from tools.backtester import run_all_strategies
                     from agents.equity_analyst import EquityAnalyst
                     from agents.fixed_income_analyst import FixedIncomeAnalyst
@@ -9927,8 +10129,8 @@ async def ws_council(websocket: WebSocket):
                     from agents.independent_analyst import IndependentAnalyst
                     from agents.cio import CIO
 
-                    history = get_full_history()
-                    strategy_results = run_all_strategies(history)
+                    history = await get_full_history_async()
+                    strategy_results = await asyncio.to_thread(run_all_strategies, history)
 
                     # Stream each specialist's report as it completes
                     for agent_name, agent_cls in [

@@ -43,7 +43,14 @@ log = structlog.get_logger(__name__)
 # Tier-specific TTLs (hours). Tier 1 is deterministic — its result for a
 # given strategy_hash will never change, so the TTL is effectively forever
 # (we still expire it nominally at 365 days so the cleanup job has a target).
-TIER_TTL_HOURS: dict[int, int] = {1: 24 * 365, 2: 24, 3: 24 * 7}
+#
+# Tier 99 (May 24 2026) — the full /api/qa/audit checklist response, stored
+# in qa_results_cache alongside the tiered verdicts but in its own band so
+# the two paths never overwrite each other. 24h TTL matches the Tier 2
+# pattern — same data hash will reuse the verdict for a day; a hash change
+# (new data ingested) invalidates it; the qa_audit endpoint's minimum-
+# interval gate caps re-runs within the day.
+TIER_TTL_HOURS: dict[int, int] = {1: 24 * 365, 2: 24, 3: 24 * 7, 99: 24}
 
 # Threshold below which Tier 1 reports an underpowered dataset.
 # CLAUDE.md Section 7 calls this MIN_OBSERVATIONS_FOR_POWER.
