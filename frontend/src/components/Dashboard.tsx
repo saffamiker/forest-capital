@@ -26,6 +26,7 @@ import DataCurrencyBar from './DataCurrencyBar'
 import ChartExportButton from './ChartExportButton'
 import TableExportButton from './TableExportButton'
 import MacroResearchPanel from './MacroResearchPanel'
+import FloatingSectionNav from './FloatingSectionNav'
 import ContextFreshnessBadge from './ContextFreshnessBadge'
 // Canonical strategy-colour map — one source of truth shared with every
 // chart component (was duplicated locally in this file).
@@ -431,8 +432,16 @@ export default function Dashboard() {
       )}
 
       <div className="p-4 md:p-6 space-y-5">
+        {/* UAT 2026-05-24 — Dashboard now mounts the FloatingSectionNav
+            (collapsed by default, click-to-expand). The data-section-id
+            markers on the major sections below feed its discovery loop.
+            minSections=3 — Dashboard has five tagged sections, well
+            above the threshold. */}
+        <FloatingSectionNav pageKey="dashboard" />
         {/* Page header — consistent with every other screen's title block. */}
-        <div>
+        <div
+          data-section-id="dashboard-overview"
+          data-section-label="Overview">
           <h1 className="text-xl font-semibold text-white">Dashboard</h1>
           <p className="text-sm text-muted mt-1">
             Ten portfolio strategies ranked by risk-adjusted performance against
@@ -459,10 +468,17 @@ export default function Dashboard() {
             MACRO CONDITIONS block). Sits above the summary tiles so
             the user reads "today's context" before scanning the
             strategy rankings. Sysadmin-only "Run now" trigger inside. */}
-        <MacroResearchPanel />
+        <div
+          data-section-id="dashboard-macro"
+          data-section-label="Macro Conditions">
+          <MacroResearchPanel />
+        </div>
 
         {/* Summary tiles */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div
+          className="grid grid-cols-2 sm:grid-cols-4 gap-3"
+          data-section-id="dashboard-summary"
+          data-section-label="Summary Tiles">
           <MetricTile
             label="Significant Strategies"
             value={`${significant.length} / 10`}
@@ -494,7 +510,11 @@ export default function Dashboard() {
         </div>
 
         {/* Cumulative returns chart */}
-        <div className="card p-4" ref={cumulativeChartRef}>
+        <div
+          className="card p-4"
+          ref={cumulativeChartRef}
+          data-section-id="dashboard-cumulative-returns"
+          data-section-label="Cumulative Returns">
           <div className="flex items-start justify-between mb-3">
             <div>
               <h3 className="text-white font-semibold text-sm flex items-center">
@@ -610,7 +630,11 @@ export default function Dashboard() {
         />
 
         {/* Strategy comparison table */}
-        <div className="card overflow-hidden" data-tour="strategy-table">
+        <div
+          className="card overflow-hidden"
+          data-tour="strategy-table"
+          data-section-id="dashboard-strategy-table"
+          data-section-label="Strategy Comparison">
           <div className="px-4 py-3 border-b border-border flex items-start justify-between gap-3">
             <div>
               <h3 className="text-white font-semibold text-sm">Strategy Comparison — Ranked by Sharpe</h3>
@@ -742,7 +766,11 @@ export default function Dashboard() {
 
         {/* Efficient frontier */}
         {frontier && (frontier.frontier_points?.length ?? 0) > 0 ? (
-          <EfficientFrontier data={frontier} />
+          <div
+            data-section-id="dashboard-frontier"
+            data-section-label="Efficient Frontier">
+            <EfficientFrontier data={frontier} />
+          </div>
         ) : dashboardWarming ? (
           <div
             data-testid="frontier-warming"

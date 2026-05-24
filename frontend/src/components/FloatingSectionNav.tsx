@@ -1,16 +1,19 @@
 /**
  * FloatingSectionNav — page-scoped table of contents for long-form
- * pages. May 24 2026.
+ * pages. May 24 2026 — UAT redesign.
  *
  * Auto-discovers sections via `[data-section-id]` markers on the
  * page. Click to jump; IntersectionObserver tracks the active
- * section as the user scrolls. Per-page localStorage keeps the
- * panel's expanded / collapsed state across navigation.
+ * section as the user scrolls.
  *
- *   Desktop (>= md): right-side floating panel, vertically centred,
- *                    positioned above the Advisor button (which
- *                    floats at the BOTTOM right). Doesn't overlap
- *                    chart export menus or the QA banner.
+ *   Desktop (>= md): right-side floating control. COLLAPSED by
+ *                    default — a small icon-only tab anchored to
+ *                    the viewport right edge. Click the tab to
+ *                    expand the section list; click outside (or
+ *                    press Esc / click the toggle again) to
+ *                    collapse. No hover-expand — interaction is
+ *                    purely click-driven so the panel never
+ *                    obscures a chart on a casual mouse-over.
  *   Mobile  (< md):  bottom drawer with swipe-up affordance.
  *                    Auto-collapses after a section pick.
  *
@@ -18,16 +21,21 @@
  *   - Every section gets `data-section-id="..."` (used in the URL
  *     fragment + as the IntersectionObserver target) and
  *     `data-section-label="..."` (the human-readable text shown
- *     in the nav). Optional `data-section-icon="..."` for a Lucide
- *     icon name on the entry.
+ *     in the nav).
  *   - The page mounts <FloatingSectionNav pageKey="qa-audit" />.
  *     The pageKey scopes the localStorage state and de-duplicates
  *     mounts (only one nav per page).
+ *
+ * The COLLAPSED state is the new default (UAT 2026-05-24): testers
+ * reported the prior always-expanded panel obscured the right edge
+ * of charts on the analytics screens. The collapsed tab carries a
+ * 60% opacity tint that lifts to 100% on hover so it remains
+ * discoverable without competing with the chart for attention.
  */
 import {
-  useCallback, useEffect, useState,
+  useCallback, useEffect, useRef, useState,
 } from 'react'
-import { ChevronUp, ChevronDown, List, X } from 'lucide-react'
+import { ChevronUp, List, X } from 'lucide-react'
 
 
 interface DiscoveredSection {
@@ -75,13 +83,22 @@ export default function FloatingSectionNav({
 }: FloatingSectionNavProps) {
   const [sections, setSections] = useState<DiscoveredSection[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
-  // Distinct desktop / mobile collapse state: the mobile drawer
-  // defaults closed to avoid covering content; the desktop panel
-  // defaults open so the user sees the nav.
+  // Distinct desktop / mobile collapse state. Both default to
+  // COLLAPSED — UAT 2026-05-24: the previous always-expanded desktop
+  // panel covered the right edge of analytics charts. A first-time
+  // visitor sees the small anchor tab and clicks to expand only when
+  // they want the TOC; subsequent toggles persist via localStorage.
   const [desktopCollapsed, setDesktopCollapsed] = useState(() =>
-    _readCollapsed(`${pageKey}_desktop`, defaultCollapsed ?? false))
+    _readCollapsed(`${pageKey}_desktop`, defaultCollapsed ?? true))
   const [mobileOpen, setMobileOpen] = useState(() =>
     _readCollapsed(`${pageKey}_mobile`, false) === false ? false : false)
+  // Ref on the desktop panel so a click-outside listener can tell
+  // whether a click landed inside the expanded TOC (preserve open
+  // state — the user is interacting with the nav) or outside
+  // (collapse — the user moved on). Attached only while expanded
+  // so the listener isn't running pointlessly when the panel is
+  // already closed.
+  const desktopRef = useRef<HTMLElement | null>(null)
 
   // Discover sections from the DOM. Re-runs after every page mount
   // and whenever the route changes (the cleanup function clears
@@ -179,6 +196,41 @@ export default function FloatingSectionNav({
     })
   }, [pageKey])
 
+  // Click-outside collapses the expanded panel. Listener attached
+  // ONLY while expanded so the listener isn't wasting cycles in
+  // the collapsed state. Mousedown (not click) so a drag started
+  // outside doesn't accidentally collapse mid-drag. Capture
+  // phase: ensures we see the event before any inner onClick
+  // could stopPropagation.
+  useEffect(() => {
+    if (desktopCollapsed) return
+    const handler = (e: MouseEvent) => {
+      const el = desktopRef.current
+      if (!el) return
+      if (el.contains(e.target as Node)) return
+      setDesktopCollapsed(true)
+      _writeCollapsed(`${pageKey}_desktop`, true)
+    }
+    document.addEventListener('mousedown', handler, true)
+    return () => {
+      document.removeEventListener('mousedown', handler, true)
+    }
+  }, [desktopCollapsed, pageKey])
+
+  // Esc collapses. Same mount/unmount discipline as click-outside.
+  useEffect(() => {
+    if (desktopCollapsed) return
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      setDesktopCollapsed(true)
+      _writeCollapsed(`${pageKey}_desktop`, true)
+    }
+    document.addEventListener('keydown', handler)
+    return () => {
+      document.removeEventListener('keydown', handler)
+    }
+  }, [desktopCollapsed, pageKey])
+
   const toggleMobile = useCallback(() => {
     setMobileOpen((prev) => {
       const next = !prev
@@ -192,77 +244,113 @@ export default function FloatingSectionNav({
 
   return (
     <>
-      {/* Desktop — right-side panel, vertically centred-ish.
-          Positioned at top-32 to clear the nav ribbon; bottom-32
-          keeps clear of the Advisor button at bottom-6. */}
+      {/* Desktop — two distinct visual modes (UAT 2026-05-24).
+          COLLAPSED: a small icon-only tab at the right edge, 60%
+                     opacity at rest, 100% on hover. Sits flush to
+                     the right viewport edge (right-0) with a
+                     rounded-l-md so it reads as a tab clipped to
+                     the page, not an opaque panel. The collapsed
+                     footprint is 32px wide — narrow enough that
+                     it never overlaps the main content column on
+                     any of the wired pages.
+          EXPANDED:  a 200px panel anchored at right-3, opacity-95
+                     so it sits clearly above content but isn't
+                     visually heavy. Activated only by an explicit
+                     click on the collapsed tab; click-outside or
+                     Esc collapses it. No hover-expand.
+
+          Mounted unconditionally so the same DOM element drives
+          both states — keeps the click-outside ref stable across
+          toggles. */}
       <aside
+        ref={(el) => { desktopRef.current = el }}
         data-testid="floating-section-nav"
         data-page-key={pageKey}
+        data-collapsed={desktopCollapsed ? 'true' : 'false'}
         className={
-          'hidden md:flex fixed right-3 z-30 flex-col ' +
-          'rounded-lg border border-navy-700 bg-navy-900/95 ' +
-          'shadow-2xl backdrop-blur-sm ' +
-          'top-32 max-h-[60vh] ' +
-          (desktopCollapsed ? 'w-12' : 'w-60')
+          'hidden md:flex fixed z-30 flex-col ' +
+          'border border-navy-700 shadow-2xl backdrop-blur-sm ' +
+          'transition-[width,opacity] duration-150 ease-out ' +
+          (desktopCollapsed
+            // Collapsed: right-edge tab, narrow, low-opacity. The
+            // hover opacity-100 keeps the affordance discoverable
+            // without auto-expanding (per UAT directive: NO hover
+            // expansion, hover only highlights the toggle).
+            ? 'right-0 top-32 w-8 rounded-l-md bg-navy-900/80 ' +
+              'opacity-60 hover:opacity-100'
+            // Expanded: stepped in from the edge, 200px wide,
+            // mostly opaque. max-h-[60vh] caps the height so a
+            // page with many sections stays scroll-contained.
+            : 'right-3 top-32 w-52 max-h-[60vh] rounded-lg ' +
+              'bg-navy-900/95 opacity-100'
+          )
         }
         aria-label="Section navigator">
-        <header
-          className={
-            'flex items-center justify-between gap-2 px-3 py-2 ' +
-            'border-b border-navy-700 shrink-0'
-          }>
-          {!desktopCollapsed ? (
-            <span className="text-2xs uppercase tracking-wider text-text-muted">
-              Sections
-            </span>
-          ) : (
-            <List
-              className="w-4 h-4 text-text-muted mx-auto"
-              aria-label="Sections" />
-          )}
+        {desktopCollapsed ? (
+          /* Collapsed mode — single tap target. Tall enough to be
+             easy to hit (44px) without dominating the viewport. */
           <button
             type="button"
             onClick={toggleDesktop}
             data-testid="floating-section-nav-toggle"
-            aria-label={desktopCollapsed
-              ? 'Expand section navigator'
-              : 'Collapse section navigator'}
-            className="text-text-muted hover:text-white p-1
-                       min-h-[24px] min-w-[24px] rounded
-                       hover:bg-navy-700 transition-colors">
-            {desktopCollapsed ? (
-              <ChevronDown className="w-3.5 h-3.5 rotate-90" />
-            ) : (
-              <ChevronUp className="w-3.5 h-3.5 rotate-90" />
-            )}
+            aria-label="Expand section navigator"
+            aria-expanded="false"
+            className={
+              'flex items-center justify-center ' +
+              'w-full h-11 text-text-muted ' +
+              'hover:text-white hover:bg-navy-800/60 ' +
+              'rounded-l-md transition-colors'
+            }>
+            <List className="w-3.5 h-3.5" aria-hidden="true" />
           </button>
-        </header>
-        {!desktopCollapsed ? (
-          <nav className="overflow-y-auto py-1.5">
-            <ul className="space-y-0.5">
-              {sections.map((s) => (
-                <li key={s.id}>
-                  <button
-                    type="button"
-                    onClick={() => scrollTo(s.id)}
-                    data-testid={`floating-section-nav-link-${s.id}`}
-                    data-active={s.id === activeId ? 'true' : 'false'}
-                    className={
-                      'w-full text-left px-3 py-1.5 text-xs ' +
-                      'transition-colors truncate ' +
-                      (s.id === activeId
-                        ? 'text-electric-blue bg-electric-blue/10 ' +
-                          'border-l-2 border-electric-blue pl-[10px]'
-                        : 'text-text-secondary border-l-2 border-transparent ' +
-                          'hover:text-white hover:bg-navy-800')
-                    }>
-                    {s.label}
-                  </button>
-                </li>
-              ))}
-            </ul>
-          </nav>
-        ) : null}
+        ) : (
+          <>
+            <header
+              className={
+                'flex items-center justify-between gap-2 px-3 py-2 ' +
+                'border-b border-navy-700 shrink-0'
+              }>
+              <span className="text-2xs uppercase tracking-wider text-text-muted">
+                Sections
+              </span>
+              <button
+                type="button"
+                onClick={toggleDesktop}
+                data-testid="floating-section-nav-toggle"
+                aria-label="Collapse section navigator"
+                aria-expanded="true"
+                className="text-text-muted hover:text-white p-1
+                           min-h-[24px] min-w-[24px] rounded
+                           hover:bg-navy-700 transition-colors">
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </header>
+            <nav className="overflow-y-auto py-1.5">
+              <ul className="space-y-0.5">
+                {sections.map((s) => (
+                  <li key={s.id}>
+                    <button
+                      type="button"
+                      onClick={() => scrollTo(s.id)}
+                      data-testid={`floating-section-nav-link-${s.id}`}
+                      data-active={s.id === activeId ? 'true' : 'false'}
+                      className={
+                        'w-full text-left px-3 py-1.5 text-xs ' +
+                        'transition-colors truncate ' +
+                        (s.id === activeId
+                          ? 'text-electric-blue bg-electric-blue/10 ' +
+                            'border-l-2 border-electric-blue pl-[10px]'
+                          : 'text-text-secondary border-l-2 border-transparent ' +
+                            'hover:text-white hover:bg-navy-800')
+                      }>
+                      {s.label}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </nav>
+          </>
+        )}
       </aside>
 
       {/* Mobile bottom drawer — collapsed by default, tap the

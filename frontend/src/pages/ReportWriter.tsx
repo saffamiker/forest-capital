@@ -30,6 +30,7 @@ import type { AcademicReview } from '../components/reportwriter/AcademicReviewPa
 import RubricPanel from '../components/reportwriter/RubricPanel'
 import type { Rubric } from '../components/reportwriter/RubricPanel'
 import CitationReviewPanel from '../components/reportwriter/CitationReviewPanel'
+import { useCitationReviewStore } from '../stores/citationReviewStore'
 import VersionHistoryPanel from '../components/reportwriter/VersionHistoryPanel'
 import DraftSelector from '../components/reportwriter/DraftSelector'
 import FloatingSectionNav from '../components/FloatingSectionNav'
@@ -979,6 +980,20 @@ export default function ReportWriter() {
     return count
   }, [stepResults])
 
+  // UAT 2026-05-24 — Open Review button loading state. Reads the
+  // citationReviewStore's per-generation `inFlight` map; a truthy
+  // entry means a citation fetch for THIS generation is mid-flight.
+  // The PipelineGate step2b row consumes the boolean and renders
+  // "Loading…" + a spinner so the user gets immediate feedback when
+  // they click Open Review (the citation fetch can take seconds on
+  // a cold cache; previously the button looked unresponsive and
+  // users clicked it repeatedly).
+  const citationReviewLoading = useCitationReviewStore((s) => {
+    const gid = generation?.id
+    if (gid == null) return false
+    return Boolean(s.inFlight[gid])
+  })
+
   const generateDisabledReason = useMemo(() => {
     // May 24 2026 RW3 hotfix — strict pipeline gating. Each step
     // must show a GENUINE completed result. "Restored from cache"
@@ -1102,11 +1117,27 @@ export default function ReportWriter() {
             step2b={{
               untrustedCount: untrustedCitationsCount,
               onJump: () => {
+                // UAT 2026-05-24 — kick off the citation fetch
+                // EAGERLY when the user clicks Open Review, rather
+                // than waiting for CitationReviewPanel's mount
+                // effect to fire. The store de-duplicates concurrent
+                // loads (`inFlight` guard), so calling load() from
+                // both the click handler AND the panel's useEffect
+                // is safe — both share the same promise. The visible
+                // upshot: the button's loading state flips on
+                // immediately so the user gets feedback that the
+                // click registered while the citation fetch runs
+                // in the background.
+                if (generation?.id != null) {
+                  void useCitationReviewStore.getState().load(
+                    generation.id)
+                }
                 const el = document.querySelector(
                   '[data-testid="citation-review-panel"]')
                 if (el) el.scrollIntoView(
                   { behavior: 'smooth', block: 'start' })
               },
+              loading: citationReviewLoading,
             }}
           />
           {/* May 24 2026 — the former standalone Step 2b amber
