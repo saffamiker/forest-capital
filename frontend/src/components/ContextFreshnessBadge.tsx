@@ -23,6 +23,7 @@
  * the badge to expand a tooltip with per-layer detail.
  */
 import { useCallback, useEffect, useState } from 'react'
+import axios from 'axios'
 import { CheckCircle2, AlertCircle, XCircle } from 'lucide-react'
 
 
@@ -86,14 +87,24 @@ export default function ContextFreshnessBadge() {
   const [open, setOpen] = useState(false)
 
   const refresh = useCallback(async () => {
+    // May 24 2026 — switched from raw fetch() to axios so the
+    // session token (X-API-Key, set on axios.defaults.headers.common
+    // at login) is attached to the request. The prior fetch() with
+    // credentials: 'include' did NOT carry the X-API-Key header,
+    // so every call to /api/v1/context/freshness returned 401,
+    // which surfaced as the Citation Review "Open Review" button
+    // breaking Step 2b. Same pattern as the May-23 PR #103 fixes
+    // for Citation Review and Version History.
     try {
-      const res = await fetch('/api/v1/context/freshness',
-        { credentials: 'include' })
-      if (!res.ok) throw new Error(`HTTP ${res.status}`)
-      setData(await res.json() as FreshnessResponse)
+      const res = await axios.get<FreshnessResponse>(
+        '/api/v1/context/freshness')
+      setData(res.data)
       setError(null)
     } catch (e) {
-      setError((e as Error).message)
+      const msg = axios.isAxiosError(e)
+        ? (e.response?.data?.detail || `HTTP ${e.response?.status ?? '??'}`)
+        : (e as Error).message
+      setError(String(msg))
     }
   }, [])
 

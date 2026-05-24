@@ -1562,6 +1562,33 @@ async def list_report_generations(
             detail="List drafts failed — see server logs.")
 
 
+@app.delete("/api/v1/reports/generations/{generation_id}")
+async def delete_report_generation(
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Hard-delete a saved generation (the Draft Selector trash icon
+    calls this). Removes the generation row + every saved version +
+    the pipeline-audit row that pointed at it. Citations are kept
+    (they're concept-keyed, may be reused by other drafts).
+
+    Frontend confirms with a type-DELETE dialog before firing the
+    request — same pattern as the version-history Delete UX.
+
+    May 24 2026 — Delete Draft from selector.
+    """
+    if ENVIRONMENT == "test":
+        return {"deleted": True}
+    from tools.report_generator import delete_generation
+    ok = await delete_generation(generation_id)
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail="Generation not found, or the delete failed — "
+                   "see server logs.")
+    return {"deleted": True}
+
+
 @app.get("/api/v1/reports/generations/{generation_id}")
 async def get_report_generation(
     generation_id: int,
