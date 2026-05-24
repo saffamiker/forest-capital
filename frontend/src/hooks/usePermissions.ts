@@ -37,3 +37,13 @@ export function useCanGenerateDocuments(): boolean {
 export function useCanExport(): boolean {
   return useHasPermission('export_package')
 }
+
+/** May 24 2026 (#275 follow-up) — narrow permission that opens the
+ *  Test Administration settings section. The underlying admin-only
+ *  API routes (failures / feedback / issue-tracker) still gate on
+ *  view_admin and remain sysadmin-only; team_members see the
+ *  Settings section but each API request gets its own server-side
+ *  check. */
+export function useCanAccessTestPanel(): boolean {
+  return useHasPermission('access_test_panel')
+}

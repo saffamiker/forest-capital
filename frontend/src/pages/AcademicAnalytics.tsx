@@ -31,6 +31,7 @@ import { DARK_CHART_THEME } from '../lib/exportTheme'
 // /api/v1/analytics/correlation etc. (the analytics_metrics_cache hot
 // path is sub-millisecond, so a per-mount fetch is fine here).
 import FloatingSectionNav from '../components/FloatingSectionNav'
+import ChartCommentStrip from '../components/ChartCommentStrip'
 import { CorrelationHeatmap } from '../components/diversification/CorrelationHeatmap'
 import { TailRiskTable } from '../components/diversification/TailRiskTable'
 import { CaptureScatter } from '../components/diversification/CaptureScatter'
@@ -1264,6 +1265,12 @@ export default function AcademicAnalytics() {
               equity-vs-bond regime break → full strategy correlation
               picture. Independently fetched (item 8 commit 3). */}
           <CorrelationHeatmap />
+          <ChartCommentStrip
+            chartId="correlation_heatmap"
+            chartType="diversification_heatmap"
+            chartData={null}
+            accentColor={ACCENT}
+          />
           {data.rolling_excess_return && data.rolling_excess_return.points.length > 0 &&
             <RollingExcessReturnChart data={data.rolling_excess_return} />}
           {data.regime_conditional && data.regime_conditional.length > 0 &&
@@ -1274,31 +1281,67 @@ export default function AcademicAnalytics() {
               DrawdownComparisonTable (the depth dimension) — same
               concept, complementary axes. Item 8 commit 4. */}
           <DrawdownDurationTable />
+          <ChartCommentStrip
+            chartId="drawdown_duration"
+            chartType="diversification_table"
+            chartData={null}
+            accentColor={ACCENT}
+          />
           {/* Tail risk (VaR / CVaR) follows the drawdown picture: same
               "how bad can it get" theme but parametrized at 95% / 99%
               confidence levels rather than worst observed. Item 8
               commit 4. */}
           <TailRiskTable />
+          <ChartCommentStrip
+            chartId="tail_risk"
+            chartType="diversification_table"
+            chartData={null}
+            accentColor={ACCENT}
+          />
           {/* Up / Down capture — the asymmetry view. Comes after the
               tail-risk picture so the reader has the worst-case framing
               before seeing the asymmetric capture profile. Item 8
               commit 4. */}
           <CaptureScatter />
+          <ChartCommentStrip
+            chartId="capture_ratios"
+            chartType="diversification_scatter"
+            chartData={null}
+            accentColor={ACCENT}
+          />
           {/* Crisis performance — historical stress test. Reads naturally
               after capture: capture is the average asymmetry, crisis
               performance is the worst-case asymmetry. Item 8 commit 5. */}
           <CrisisPerformanceTable />
+          <ChartCommentStrip
+            chartId="crisis_performance"
+            chartType="diversification_table"
+            chartData={null}
+            accentColor={ACCENT}
+          />
           {/* Marginal contribution to risk — flips the question from
               "what is each strategy's risk" to "how does each strategy
               contribute to the portfolio's risk". The bar chart's visual
               compactness pairs well with the table-heavy sections above.
               Item 8 commit 5. */}
           <RiskContributionBar />
+          <ChartCommentStrip
+            chartId="marginal_contribution_to_risk"
+            chartType="diversification_bar"
+            chartData={null}
+            accentColor={ACCENT}
+          />
           {/* Return distribution — distribution moments + normality test.
               Closes the diversification suite: every section above reads
               more carefully once the reader knows which strategies pass
               normality (and which don't). Item 8 commit 5. */}
           <DistributionTable />
+          <ChartCommentStrip
+            chartId="return_distribution"
+            chartType="diversification_table"
+            chartData={null}
+            accentColor={ACCENT}
+          />
           {data.factor_loadings && data.factor_loadings.length > 0 &&
             <FactorLoadingsTable rows={data.factor_loadings} ffNote={ffNote} />}
           <SensitivityAnalysis />
