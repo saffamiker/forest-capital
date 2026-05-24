@@ -3597,9 +3597,27 @@ async def optimize_weights(body: OptimizeRequest, session: dict = Depends(requir
             # field there degrades cleanly (the caller can re-try
             # the specific method) — better than a fake frontier
             # painted across the whole dashboard.
+            #
+            # UAT 2026-05-24 P0 fix — `_optimize` is a SYNC cvxpy
+            # call (CLARABEL / SLSQP) and was running on the asyncio
+            # event loop. On Render's shared CPU it can take 1-3s
+            # per solve, occasionally longer if the solver iterates
+            # to convergence. Dashboard mount fires `_optimize` AND
+            # `/api/v1/analytics/academic` in parallel via the
+            # store's Promise.all — a slow `_optimize` blocked the
+            # loop, queued the analytics request behind it, and
+            # both axios calls timed out at 30s. Same root cause for
+            # both timeouts the user reported.
+            #
+            # asyncio.to_thread pushes the sync solver into a worker
+            # thread so the event loop stays free to service the
+            # cumulative-returns request in parallel. Mirrors the
+            # PR #122 fix for get_full_history / run_all_strategies.
+            import asyncio
             result: dict
             try:
-                result = _optimize(body.method, returns)
+                result = await asyncio.to_thread(
+                    _optimize, body.method, returns)
             except Exception as opt_exc:  # noqa: BLE001
                 log.warning("optimize_weights_solve_failed",
                             method=body.method, error=str(opt_exc))
