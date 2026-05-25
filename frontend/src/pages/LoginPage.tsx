@@ -1,7 +1,33 @@
+/**
+ * LoginPage — institutional rebrand (May 24 2026).
+ *
+ * Five changes per the brand-uplift spec:
+ *   1. The "Forest Capital" text wordmark is replaced by the official
+ *      hexagon-and-wordmark lockup (forest-capital.jpg). The JPG
+ *      ships with a dark navy background that blends naturally into
+ *      the page; no inversion needed.
+ *   2. The subtitle is "McColl School of Business · FNA 670" — the
+ *      academic context that anchors the platform.
+ *   3. The Queens University and McColl School of Business marks
+ *      sit side by side ABOVE the sign-in card in slim white
+ *      lockup cards. Both source assets are navy-on-white; the
+ *      white card backdrop preserves the navy ink without inversion
+ *      artefacts (mix-blend-mode strips fine type detail).
+ *   4. The footer reads "MSFA FNA 670 · Queens University of
+ *      Charlotte · McColl School of Business" — the full
+ *      institutional attribution.
+ *   5. The dark navy page background, the magic-link flow, and the
+ *      sign-in card's internal layout are unchanged — only the
+ *      chrome around the card was rebranded.
+ *
+ * Asset filenames: the actual files in /public/assets/logos/ are
+ * forest-capital.jpg (not .png), mccoll.jpeg (not .jpg), queens.png.
+ * Vite serves them at /assets/logos/<name>.
+ */
 import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import axios from 'axios'
-import { TrendingUp, Mail, ArrowRight, AlertCircle } from 'lucide-react'
+import { Mail, ArrowRight, AlertCircle } from 'lucide-react'
 import type { MagicLinkResponse } from '../types/api'
 
 type LoginStatus = 'idle' | 'loading' | 'sent' | 'error'
@@ -39,19 +65,62 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-navy-900 flex flex-col items-center justify-center px-4">
-      {/* Logo */}
-      <div className="flex items-center gap-3 mb-10">
-        <div className="w-10 h-10 rounded-lg bg-electric/10 border border-electric/30 flex items-center justify-center">
-          <TrendingUp className="w-5 h-5 text-electric" />
+    <div className="min-h-screen bg-navy-900 flex flex-col items-center justify-center px-4 py-8">
+      {/* Forest Capital lockup — official hexagon + wordmark image.
+          The JPG already carries a dark navy background that blends
+          into the page surface; the wrapper just constrains size +
+          centres it. max-w-sm keeps it from dominating on a desktop
+          viewport; min-h on the img enforces the 44px header minimum
+          documented in the brand-uplift spec. */}
+      <div className="mb-6 flex justify-center" data-testid="login-forest-capital-lockup">
+        <img
+          src="/assets/logos/forest-capital.jpg"
+          alt="Forest Capital — Income & Growth Advisors"
+          className="block max-w-[280px] sm:max-w-[340px] w-full h-auto"
+          loading="eager"
+        />
+      </div>
+
+      {/* Subtitle — the academic-context anchor. */}
+      <p className="text-muted text-xs tracking-widest uppercase mb-6 text-center">
+        McColl School of Business · FNA 670
+      </p>
+
+      {/* Institutional lockup row — Queens + McColl side by side
+          above the sign-in card. Both assets are navy ink on a white
+          ground; the white card backdrop preserves the ink colour
+          exactly. The container is responsive: stacked on the
+          smallest phones (< sm), side-by-side from sm: up.
+          aspect-square on Queens vs aspect-[800/200] on McColl
+          keeps each one in proportion regardless of viewport. */}
+      <div
+        data-testid="login-institutional-lockup"
+        className="w-full max-w-md mb-6 flex flex-col xs:flex-row sm:flex-row
+                   items-stretch justify-center gap-3"
+      >
+        <div className="flex-1 bg-white rounded-md px-4 py-3 flex items-center
+                        justify-center min-h-[72px]">
+          <img
+            src="/assets/logos/queens.png"
+            alt="Queens University of Charlotte"
+            className="block max-h-12 w-auto"
+            loading="eager"
+          />
         </div>
-        <div>
-          <div className="text-white font-semibold tracking-wide text-lg leading-none">Forest Capital</div>
-          <div className="text-muted text-xs tracking-widest uppercase mt-0.5">Portfolio Intelligence System</div>
+        <div className="flex-1 bg-white rounded-md px-4 py-3 flex items-center
+                        justify-center min-h-[72px]">
+          <img
+            src="/assets/logos/mccoll.jpeg"
+            alt="McColl School of Business"
+            className="block max-h-10 w-auto"
+            loading="eager"
+          />
         </div>
       </div>
 
-      {/* Card */}
+      {/* Card — sign-in flow UNCHANGED. The magic-link contract,
+          the approved-email status-message branching, and every
+          field's wiring are identical to the pre-rebrand layout. */}
       <div className="w-full max-w-md card p-8">
         {status !== 'sent' ? (
           <>
@@ -143,9 +212,9 @@ export default function LoginPage() {
         )}
       </div>
 
-      {/* Footer */}
-      <p className="text-muted text-xs mt-8">
-        MSFA FNA 670 · Queens University of Charlotte · Forest Capital Practicum
+      {/* Footer — full institutional attribution per the brand spec. */}
+      <p className="text-muted text-xs mt-8 text-center" data-testid="login-footer">
+        MSFA FNA 670 · Queens University of Charlotte · McColl School of Business
       </p>
     </div>
   )
