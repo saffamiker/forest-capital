@@ -16,14 +16,22 @@
  *        expand toggle reveals the full key-signals list +
  *        implications + source links.
  *
- * The "Run now" button is sysadmin-only (TeamGate with permission
- * "manage_users") because it bypasses the 24h freshness gate and
- * burns the Sonnet + web_search budget on demand. Viewers see the
- * latest digest but not the trigger.
+ * The "Run now" button is sysadmin-only (useIsSysadmin) because it
+ * bypasses the 24h freshness gate and burns the Sonnet + web_search
+ * budget on demand. Viewers see the latest digest but not the trigger.
+ *
+ * May 28 2026 — UAT report: the button was reaching non-sysadmin
+ * users on the dashboard. The previous gate (TeamGate with
+ * permission="manage_users") was functionally correct but the
+ * useIsSysadmin hook is the pattern other admin controls use
+ * (Settings → Users, Settings → Admin in pages/Settings.tsx). The
+ * swap aligns the gating pattern across the codebase: every
+ * admin-only control reads `useIsSysadmin()` and conditionally
+ * renders, not a TeamGate wrap.
  */
 import { useCallback, useEffect, useState } from 'react'
 import { Newspaper, RefreshCw, ExternalLink, ChevronDown } from 'lucide-react'
-import TeamGate from './TeamGate'
+import { useIsSysadmin } from '../hooks/usePermissions'
 import { useMacroDigestStore, type MacroSignal } from '../stores/macroDigestStore'
 
 
@@ -64,6 +72,10 @@ export default function MacroResearchPanel() {
   // Collapsed by default per the P2 spec — Dr. Panttser sees a
   // compact summary card, not the full digest.
   const [expanded, setExpanded] = useState(false)
+  // Sysadmin gate for the Run Now button — same hook the Settings
+  // page's Users + Admin sections use. Non-sysadmin users see the
+  // digest with current data but no refresh trigger.
+  const isSysadmin = useIsSysadmin()
 
   const latest = useMacroDigestStore((s) => s.latest)
   const loading = useMacroDigestStore((s) => s.loading)
@@ -131,7 +143,10 @@ export default function MacroResearchPanel() {
             }`}
           />
         </button>
-        <TeamGate permission="manage_users" showDisabled={false}>
+        {/* Sysadmin-only: bypasses the 24h freshness gate and burns
+            the Sonnet + web_search budget on demand. Non-sysadmin
+            users see the digest with current data but no trigger. */}
+        {isSysadmin && (
           <button
             type="button"
             onClick={(e) => { e.stopPropagation(); onRunNow() }}
@@ -145,7 +160,7 @@ export default function MacroResearchPanel() {
             <RefreshCw className={`w-3 h-3 ${triggering ? 'animate-spin' : ''}`} />
             {triggering ? 'Running…' : 'Run now'}
           </button>
-        </TeamGate>
+        )}
       </div>
 
       {/* CONDENSED VIEW — always rendered when there's a digest.
