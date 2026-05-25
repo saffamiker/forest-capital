@@ -297,6 +297,36 @@ async def lifespan(app: FastAPI):
             except Exception as exc:  # noqa: BLE001
                 log.warning("analytics_cache_auto_warm_schedule_failed",
                             error=str(exc))
+
+        # PR-MODEL-1 (May 27 2026) — model availability check. Pings
+        # every chain's primary; on 404, advances the chain and
+        # pings the next entry. This is the SAME fallback chain
+        # call_claude / call_gemini consult at call time, so a model
+        # the startup check detected as deprecated is silently
+        # routed past for every request that follows. Fires in a
+        # background task so the lifespan handler does not block on
+        # the SDK round-trips (~1-3s each, larger on cold provider
+        # endpoints). Fail-open per chain.
+        if not _is_test_env:
+            try:
+                from agents.models import check_model_availability
+
+                async def _model_check_task() -> None:
+                    # 5s delay so the first user request is already
+                    # being served before the check fires — the
+                    # availability check itself never queues behind
+                    # a real request thanks to the model resolver,
+                    # but a deferred ping keeps cold-boot logs tidy.
+                    await asyncio.sleep(5.0)
+                    summary = await check_model_availability()
+                    log.info("model_availability_check_complete",
+                             summary=summary)
+
+                asyncio.create_task(_model_check_task())
+                log.info("model_availability_check_scheduled")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("model_availability_check_schedule_failed",
+                            error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
