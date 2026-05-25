@@ -1069,11 +1069,36 @@ function CategoryAccordion(
 }
 
 
-export default function QAAuditPanel() {
+interface QAAuditPanelProps {
+  /** May 25 2026 — when supplied, the inline "Re-run audit" button in
+   *  the summary card fires a UNIFIED re-run (both the methodology
+   *  checklist /api/qa/audit AND the statistical audit
+   *  /api/v1/audit/run) rather than firing methodology alone.
+   *  QAHub passes runFullQA here so the button matches the labelled
+   *  intent — the user's complaint that "Re-run Audit" only fires
+   *  one endpoint. When omitted (standalone use), the button falls
+   *  back to the methodology-only qaStore.reload(). */
+  onFullRerun?: () => void
+  /** True while a parent-coordinated full run is in flight — drives
+   *  the running-state overlay on the existing results so the user
+   *  has immediate visual confirmation rather than seeing stale
+   *  results with no feedback. */
+  isFullRunActive?: boolean
+}
+
+
+export default function QAAuditPanel(
+  { onFullRerun, isFullRunActive = false }: QAAuditPanelProps = {},
+) {
   // Audit result lives in qaStore — survives navigation away and back.
   // load() is a no-op when loaded=true, so re-entering this tab is instant
   // and never triggers a second 10-second audit run.
   const { result: audit, loading, load, reload } = useQAStore()
+  // The inline "Re-run audit" button is busy when EITHER the local
+  // qaStore.reload() call is in flight (standalone use) OR the parent
+  // is coordinating a full run (QAHub use). Both states mean the user
+  // shouldn't be able to re-click and the button should show feedback.
+  const isReRunning = loading || isFullRunActive
   // Per-audit Commentary narrative. Loaded once per audit-items array —
   // the Explainer Agent generates fresh what/why/failure/how text for
   // the checks based on their actual pass/warn/fail state in this run.
@@ -1141,7 +1166,27 @@ export default function QAAuditPanel() {
   return (
     // No page chrome here — QAHub owns the page container so this panel
     // embeds cleanly as the hub's Methodology Review section.
-    <div className="space-y-5">
+    // Wrapped in a relative div so an in-flight re-run can overlay a
+    // visible "Running…" badge + dim the existing results — the
+    // user's complaint that clicking re-run leaves the page looking
+    // static. data-running is also a test handle.
+    <div
+      className="space-y-5 relative"
+      data-running={isReRunning ? 'true' : 'false'}>
+      {isReRunning && (
+        <div
+          data-testid="qa-panel-running-overlay"
+          className="absolute top-0 right-0 flex items-center gap-1.5
+                     px-3 py-1.5 rounded text-xs font-medium
+                     bg-electric/15 border border-electric/40
+                     text-electric shadow-lg z-10">
+          <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+          Re-running methodology checklist…
+        </div>
+      )}
+      <div className={isReRunning
+        ? 'opacity-60 pointer-events-none transition-opacity'
+        : 'transition-opacity'}>
       {/* May 24 2026 — submission readiness banner. Reads
           submission_status / submission_banner / submission_counts
           from the audit response. Falls back silently when the
@@ -1206,13 +1251,31 @@ export default function QAAuditPanel() {
               <span className="text-muted text-xs">incomplete</span>
             </div>
           )}
+          {/* Re-run audit button (May 25 2026 hotfix):
+              - Fires the UNIFIED runner (methodology + statistical audit)
+                via onFullRerun when supplied by QAHub; falls back to
+                methodology-only qaStore.reload() in standalone use.
+              - disabled:opacity-50 + disabled:cursor-not-allowed give a
+                visible disabled state during a run — previously the
+                button had no visual feedback and clicks during a
+                long-running audit appeared 'unresponsive'.
+              - Label flips to 'Re-running…' during the run so the user
+                has explicit feedback that the click was accepted. */}
           <button
-            onClick={() => void reload()}
-            disabled={loading}
-            className="ml-auto flex items-center gap-1.5 text-muted hover:text-white text-xs transition-colors"
+            type="button"
+            onClick={() => {
+              if (onFullRerun) onFullRerun()
+              else void reload()
+            }}
+            disabled={isReRunning}
+            data-testid="qa-summary-rerun-button"
+            className="ml-auto flex items-center gap-1.5 text-electric
+                       hover:text-white text-xs font-medium transition-colors
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       min-h-[28px]"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            Re-run audit
+            <RefreshCw className={`w-3.5 h-3.5 ${isReRunning ? 'animate-spin' : ''}`} />
+            {isReRunning ? 'Re-running…' : 'Re-run audit'}
           </button>
         </div>
         {/* Honest disclosure line when checks are incomplete — the
@@ -1312,6 +1375,7 @@ export default function QAAuditPanel() {
           ))}
         </div>
       </div>
+      </div>{/* /isReRunning opacity wrapper */}
     </div>
   )
 }

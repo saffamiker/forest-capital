@@ -770,3 +770,60 @@ describe('QAAuditPanel — Revoke Disclosure (Workstream F)', () => {
       )).toBeNull()
     })
 })
+
+
+// ── Re-run audit button wiring (May 25 2026 hotfix) ──────────────────────────
+//
+// Pins the user-reported fix: the inline "Re-run audit" button in the
+// QAAuditPanel summary card now fires the UNIFIED runner (methodology +
+// statistical audit together) when QAHub passes it down via the
+// onFullRerun prop, and falls back to the methodology-only
+// qaStore.reload() in standalone use. Also pins the running-state
+// overlay that gives the user immediate visual feedback rather than
+// leaving stale results on the page during a long re-run.
+
+describe('QAAuditPanel — Re-run audit button', () => {
+  it('calls onFullRerun (NOT qaStore.reload) when supplied by QAHub', () => {
+    const onFullRerun = vi.fn()
+    render(<QAAuditPanel onFullRerun={onFullRerun} />)
+    fireEvent.click(screen.getByTestId('qa-summary-rerun-button'))
+    expect(onFullRerun).toHaveBeenCalledTimes(1)
+    // The methodology-only fallback path must NOT fire when the parent
+    // is coordinating a unified run — that would double-trigger
+    // /api/qa/audit on top of the unified runner's own call.
+    expect(useQAStore.getState().reload).not.toHaveBeenCalled()
+  })
+
+  it('falls back to qaStore.reload() when used standalone (no onFullRerun)',
+    () => {
+      render(<QAAuditPanel />)
+      fireEvent.click(screen.getByTestId('qa-summary-rerun-button'))
+      expect(useQAStore.getState().reload).toHaveBeenCalledTimes(1)
+    })
+
+  it('renders the running overlay + flips the button label when '
+     + 'isFullRunActive is true', () => {
+    render(<QAAuditPanel onFullRerun={vi.fn()} isFullRunActive />)
+    // The visible "Running…" overlay anchored top-right of the panel
+    // gives the user immediate feedback during a long-running audit.
+    expect(screen.getByTestId('qa-panel-running-overlay'))
+      .toBeInTheDocument()
+    // The summary-card button flips label + disables itself.
+    const btn = screen.getByTestId('qa-summary-rerun-button')
+    expect(btn).toBeDisabled()
+    expect(btn.textContent).toMatch(/Re-running…/)
+  })
+
+  it('renders the running overlay when local qaStore.loading flips true',
+    () => {
+      // Standalone use — no onFullRerun, but the store's own loading
+      // flag (from a click → reload() in flight) is the running signal.
+      useQAStore.setState({
+        result: buildAudit([PASSING_CHECK, METHODOLOGY_CHECK]),
+        loading: true,
+      })
+      render(<QAAuditPanel />)
+      expect(screen.getByTestId('qa-panel-running-overlay'))
+        .toBeInTheDocument()
+    })
+})
