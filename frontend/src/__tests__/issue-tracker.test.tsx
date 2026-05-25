@@ -13,8 +13,27 @@ vi.mock('axios')
 
 import axios from 'axios'
 import { TestAdminSections } from '../components/TestRunnerSettings'
+import { AuthContext } from '../App'
 
 const mockedAxios = vi.mocked(axios, true)
+
+/** Mounts TestAdminSections with sysadmin permissions — the surface
+ *  this file pins (Issue Tracker filters, status badges, sort, row
+ *  expand, export) is the admin view. Without an AuthContext provider
+ *  the useIsSysadmin hook inside TestAdminSections would throw, so
+ *  the wrapper is required (UAT #119 split). */
+const SYSADMIN_AUTH = {
+  session: {
+    token: 't', email: 'ruurdsm@queens.edu',
+    permissions: [
+      'view_analytics', 'ask_council', 'team_member',
+      'generate_documents', 'export_package',
+      'view_admin', 'manage_users',
+      'access_test_panel', 'view_uat_status',
+    ],
+  },
+  isVerifying: false, login: vi.fn(), logout: vi.fn(),
+}
 
 interface IssueRow {
   id: number
@@ -91,7 +110,11 @@ const SAMPLE: IssueRow[] = [
 
 
 function mountTabs() {
-  return render(<TestAdminSections />)
+  return render(
+    <AuthContext.Provider value={SYSADMIN_AUTH}>
+      <TestAdminSections />
+    </AuthContext.Provider>,
+  )
 }
 
 

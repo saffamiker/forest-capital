@@ -5008,17 +5008,23 @@ async def testing_summary(session: dict = Depends(require_team_member)):
 
 @app.get("/api/v1/testing/failures")
 async def testing_failures(
-    session: dict = Depends(require_permission("view_admin")),
+    session: dict = Depends(require_permission("view_uat_status")),
 ):
-    """Every failed step across all testers, severity-sorted. Requires the
-    view_admin permission."""
+    """Every failed step across all testers, severity-sorted.
+
+    May 24 2026 (UAT #119) — relaxed from view_admin to view_uat_status
+    so Bob and Molly can see real-time UAT progress without admin
+    access. The endpoint is read-only; mutation endpoints (resolve,
+    suggestions/approve, triage) remain manage_users / view_admin-
+    gated so a team_member cannot act on a row, only see it.
+    """
     from tools.test_runner import get_all_failures
     return {"failures": await get_all_failures()}
 
 
 @app.get("/api/v1/testing/issue-tracker")
 async def testing_issue_tracker(
-    session: dict = Depends(require_permission("view_admin")),
+    session: dict = Depends(require_permission("view_uat_status")),
 ):
     """
     Issue Tracker view — every row that has ever failed, with a
@@ -5029,7 +5035,9 @@ async def testing_issue_tracker(
 
     Filtering, sorting and column projection live on the frontend
     — the endpoint returns the full row set and the UI shapes it.
-    Requires view_admin (the existing Failure Reports access rule).
+
+    May 24 2026 (UAT #119) — relaxed from view_admin to view_uat_status
+    so team_member sees the same read-only tracker every admin sees.
     """
     from tools.test_runner import get_issue_tracker_rows
     return {"issues": await get_issue_tracker_rows()}
@@ -5331,10 +5339,14 @@ async def testing_get_feedback(
     category: str | None = None, severity: str | None = None,
     effort: str | None = None, status: str | None = None,
     user_email: str | None = None,
-    session: dict = Depends(require_permission("view_admin")),
+    session: dict = Depends(require_permission("view_uat_status")),
 ):
-    """All tester feedback, newest first, with optional filters. Requires
-    the view_admin permission."""
+    """All tester feedback, newest first, with optional filters.
+
+    May 24 2026 (UAT #119) — relaxed from view_admin to view_uat_status.
+    Team members READ the backlog; the resolve action below remains
+    view_admin so only an admin can change a feedback row's status.
+    """
     from tools.test_runner import get_all_feedback
     feedback = await get_all_feedback({
         "category": category, "severity": severity, "effort": effort,
