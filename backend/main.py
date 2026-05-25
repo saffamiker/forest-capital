@@ -9283,27 +9283,33 @@ async def executive_brief_template(request: Request, session: dict = Depends(req
                 "strategy universe."
             ),
         ]
+        from tools.academic_export import format_metric
         if top_three:
             best_name, best_r = top_three[0]
             exec_summary_lines.append(
                 f"The highest-performing strategy was {best_name.replace('_', ' ')}, "
-                f"with a Sharpe ratio of {best_r.get('sharpe_ratio', 0):.2f} "
+                f"with a Sharpe ratio of "
+                f"{format_metric(best_r.get('sharpe_ratio'), 'sharpe_ratio')} "
                 f"versus the benchmark's "
-                f"{results_dict.get('BENCHMARK', {}).get('sharpe_ratio', 0):.2f} — "
+                f"{format_metric(results_dict.get('BENCHMARK', {}).get('sharpe_ratio'), 'sharpe_ratio')} — "
                 "a result the team interprets in the body of this brief as "
                 "evidence that dynamic regime-aware allocation outperforms "
                 "static rebalancing under the conditions observed."
             )
         executive_summary = "\n\n".join(exec_summary_lines)
 
-        # Key Findings — top 3 strategies in APA reporting style.
+        # Key Findings — top 3 strategies in APA reporting style. The
+        # agent never receives a raw float — every metric is formatted
+        # by format_metric so the precision is identical to what every
+        # other generator embeds.
         findings_lines = []
         for name, r in top_three:
             findings_lines.append(
-                f"{name.replace('_', ' ')}: Sharpe = {r.get('sharpe_ratio', 0):.2f}, "
-                f"CAGR = {(r.get('cagr', 0) or 0) * 100:.2f}%, "
-                f"max drawdown = {(r.get('max_drawdown', 0) or 0) * 100:.2f}%, "
-                f"p (FDR) = {r.get('p_value_corrected', 1):.4f}, "
+                f"{name.replace('_', ' ')}: "
+                f"Sharpe = {format_metric(r.get('sharpe_ratio'), 'sharpe_ratio')}, "
+                f"CAGR = {format_metric(r.get('cagr'), 'cagr')}, "
+                f"max drawdown = {format_metric(r.get('max_drawdown'), 'max_drawdown')}, "
+                f"p (FDR) = {format_metric(r.get('p_value_corrected'), 'p_value')}, "
                 f"Tier 1 gates = {r.get('tier1_gates_passed', 0)}/5."
             )
         findings_lines.append(
@@ -9872,9 +9878,14 @@ def _build_section_doc_content(
             key=lambda kv: float(kv[1].get("sharpe_ratio", 0.0) or 0.0),
             reverse=True,
         )[:3]
+        # Agent prompt — every numeric metric is pre-formatted via
+        # format_metric so the LLM sees a string with the
+        # platform's canonical precision, never a raw float.
+        from tools.academic_export import format_metric
         findings = "\n\n".join(
-            f"{name.replace('_', ' ')}: Sharpe={r.get('sharpe_ratio', 0):.2f}, "
-            f"CAGR={(r.get('cagr', 0) or 0) * 100:.2f}%, "
+            f"{name.replace('_', ' ')}: "
+            f"Sharpe={format_metric(r.get('sharpe_ratio'), 'sharpe_ratio')}, "
+            f"CAGR={format_metric(r.get('cagr'), 'cagr')}, "
             f"Tier 1={r.get('tier1_gates_passed', 0)}/5."
             for name, r in top_three
         ) or "Strategy results not yet available."

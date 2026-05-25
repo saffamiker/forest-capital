@@ -493,15 +493,21 @@ def format_metric(value: Any, metric_type: str) -> str:
 
 
 def table_summary_statistics(stats: list[dict]) -> tuple[list[str], list[list[str]]]:
-    """Asset-level summary statistics — the headline figures table."""
+    """Asset-level summary statistics — the headline figures table.
+    Every numeric column routes through format_metric so precision
+    is governed by the metric type, not the call site."""
     headers = ["Asset", "CAGR", "Volatility", "Sharpe", "Max DD", "Skew"]
     rows = [
         [
             str(r.get("asset", "—")),
-            _pct(r.get("cagr")),
-            _pct(r.get("ann_volatility")),
-            _num(r.get("sharpe_ratio")),
-            _pct(r.get("max_drawdown")),
+            format_metric(r.get("cagr"), "cagr"),
+            format_metric(r.get("ann_volatility"), "volatility"),
+            format_metric(r.get("sharpe_ratio"), "sharpe_ratio"),
+            format_metric(r.get("max_drawdown"), "max_drawdown"),
+            # Skew has no canonical type in format_metric — it is a
+            # raw moment, not a metric the user listed for the 4dp
+            # standard. Kept on _num at 2dp to preserve legacy
+            # display ("0.12" stays "0.12", not "0.1234").
             _num(r.get("skewness"), 2),
         ]
         for r in stats
@@ -510,16 +516,20 @@ def table_summary_statistics(stats: list[dict]) -> tuple[list[str], list[list[st
 
 
 def table_regime_conditional(rows_in: list[dict]) -> tuple[list[str], list[list[str]]]:
-    """Per-strategy Sharpe and CAGR split at the 2022 regime break."""
+    """Per-strategy Sharpe and CAGR split at the 2022 regime break.
+    Every numeric column routes through format_metric. The Sharpe
+    discrepancy that motivated the centralisation (deck showed 0.55,
+    midpoint showed 0.5472) is closed here — both surfaces now read
+    "0.5472" identically from this builder."""
     headers = ["Strategy", "Pre-2022 Sharpe", "Post-2022 Sharpe",
                "Pre-2022 CAGR", "Post-2022 CAGR"]
     rows = [
         [
             str(r.get("strategy", "—")),
-            _num(r.get("pre_2022_sharpe")),
-            _num(r.get("post_2022_sharpe")),
-            _pct(r.get("pre_2022_cagr")),
-            _pct(r.get("post_2022_cagr")),
+            format_metric(r.get("pre_2022_sharpe"), "sharpe_ratio"),
+            format_metric(r.get("post_2022_sharpe"), "sharpe_ratio"),
+            format_metric(r.get("pre_2022_cagr"), "cagr"),
+            format_metric(r.get("post_2022_cagr"), "cagr"),
         ]
         for r in rows_in
     ]
@@ -527,13 +537,19 @@ def table_regime_conditional(rows_in: list[dict]) -> tuple[list[str], list[list[
 
 
 def table_factor_loadings(rows_in: list[dict]) -> tuple[list[str], list[list[str]]]:
-    """Carhart four-factor betas, annualised alpha and R² per strategy."""
+    """Carhart four-factor betas, annualised alpha and R² per strategy.
+    Every numeric column routes through format_metric — coefficients
+    fall through to the 4dp fallback path (no canonical metric_type
+    for a factor beta yet, and 4dp is the right precision for them)."""
     headers = ["Strategy", "Alpha (ann.)", "MKT-RF", "SMB", "HML", "MOM", "R²"]
     rows = []
     for r in rows_in:
         # A trailing '*' marks a coefficient significant at p < 0.05.
+        # `factor_coefficient` is not a registered metric_type — the
+        # formatter falls through to the 4dp default, which is the
+        # right precision for these.
         def _star(value: Any, sig_key: str) -> str:
-            s = _num(value)
+            s = format_metric(value, "factor_coefficient")
             return s + ("*" if r.get(sig_key) else "") if s != "—" else "—"
         rows.append([
             str(r.get("strategy", "—")),
@@ -542,18 +558,20 @@ def table_factor_loadings(rows_in: list[dict]) -> tuple[list[str], list[list[str
             _star(r.get("smb"), "smb_significant"),
             _star(r.get("hml"), "hml_significant"),
             _star(r.get("mom"), "mom_significant"),
-            _num(r.get("r_squared")),
+            format_metric(r.get("r_squared"), "r_squared"),
         ])
     return headers, rows
 
 
 def table_drawdown(rows_in: list[dict]) -> tuple[list[str], list[list[str]]]:
-    """Max drawdown and recovery period per strategy, deepest loss first."""
+    """Max drawdown and recovery period per strategy, deepest loss first.
+    Drawdown column routes through format_metric so the precision
+    matches every other max_drawdown display across the platform."""
     headers = ["Strategy", "Max Drawdown", "Recovery (months)"]
     rows = [
         [
             str(r.get("strategy", "—")),
-            _pct(r.get("max_drawdown")),
+            format_metric(r.get("max_drawdown"), "max_drawdown"),
             (str(r["recovery_months"]) if r.get("recovery_months") is not None
              else "not recovered"),
         ]
