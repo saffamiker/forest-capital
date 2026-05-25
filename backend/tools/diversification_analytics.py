@@ -21,6 +21,9 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import structlog
+
+log = structlog.get_logger(__name__)
 
 # Pre/post-2022 split — the platform's central regime-break finding.
 # Mirrors tools/analytics.REGIME_BREAK; imported rather than
@@ -321,7 +324,25 @@ def marginal_contribution_to_risk(
     tangency_weights: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """MCTR + % risk contribution for equal-weight and tangency-weight
-    portfolios. MCTR_i = (Sigma w)_i / sigma_p ; pct = w_i * MCTR_i / sigma_p"""
+    portfolios. MCTR_i = (Sigma w)_i / sigma_p ; pct = w_i * MCTR_i / sigma_p
+
+    May 25 2026 — tangency weights now computed inline when the caller
+    omits them. The frontend Marginal Contribution to Risk toggle had
+    'Tangency (max Sharpe)' permanently disabled because the
+    /api/v1/analytics/risk-contribution endpoint called this helper
+    without tangency_weights — leaving every tangency_* field None and
+    the UI button greyed out. The fix wires the optimizer in here so a
+    bare call still produces tangency outputs.
+
+    Fallback semantics: max_sharpe_optimize itself falls back to
+    min_variance when every strategy's excess return is non-positive
+    (the SLSQP problem is then infeasible). When that fallback fires,
+    the weights returned are min-variance weights — still a valid
+    long-only mix, but not strictly the Sharpe tangency. A
+    `tangency_fallback_to_min_variance` flag is set on the response so
+    the frontend can label the toggle accurately rather than
+    misrepresenting min-variance weights as 'max Sharpe'.
+    """
     series_map = {k: v for k, v in _series_map(strategy_results).items()
                   if k != "BENCHMARK"}
     if len(series_map) < 2:
@@ -329,7 +350,8 @@ def marginal_contribution_to_risk(
                 "pct_risk_contribution_equal": [],
                 "mctr_tangency_weight": None,
                 "pct_risk_contribution_tangency": None,
-                "tangency_weights": None}
+                "tangency_weights": None,
+                "tangency_fallback_to_min_variance": False}
 
     labels = list(series_map.keys())
     df = pd.DataFrame(series_map).dropna()
@@ -356,16 +378,52 @@ def marginal_contribution_to_risk(
         "mctr_tangency_weight":          None,
         "pct_risk_contribution_tangency": None,
         "tangency_weights":              None,
+        # Default False — set True only when we KNOW the optimizer
+        # fell back. A caller-provided tangency_weights dict is taken
+        # at face value (no fallback claim).
+        "tangency_fallback_to_min_variance": False,
     }
-    if tangency_weights:
-        tw = [float(tangency_weights.get(lbl, 0.0)) for lbl in labels]
-        s_tw = sum(tw)
-        if s_tw > 0:
-            tw = [w / s_tw for w in tw]
-            mctr_tg, pct_tg = _compute(tw)
-            out["mctr_tangency_weight"] = mctr_tg
-            out["pct_risk_contribution_tangency"] = pct_tg
-            out["tangency_weights"] = [round(w, 4) for w in tw]
+
+    # If the caller passed explicit weights, use them verbatim.
+    # Otherwise compute via the max-Sharpe optimizer so the UI toggle
+    # works on a bare call.
+    if tangency_weights is None:
+        try:
+            from tools.optimizer import max_sharpe_optimize
+            # Detect the all-non-positive-excess case BEFORE
+            # max_sharpe_optimize runs — its internal fallback to
+            # min_variance is silent (only a log line), but we want
+            # the response flag so the frontend can relabel.
+            mu = df.mean().to_numpy()
+            # The optimizer infers periods_per_year from the index
+            # when None — monthly returns → 12. Use the same
+            # convention here so the fallback detection matches.
+            periods_per_year = 12
+            rf_per_period = 0.0  # caller passes risk_free=0 below too
+            excess = mu - rf_per_period
+            fallback = bool(float(np.max(excess)) <= 0.0)
+            weights_arr = max_sharpe_optimize(df, risk_free=0.0)
+            tangency_weights = {
+                lbl: float(w) for lbl, w in zip(labels, weights_arr)
+            }
+            out["tangency_fallback_to_min_variance"] = fallback
+        except Exception as exc:  # noqa: BLE001
+            # Optimizer unavailable (cvxpy missing in a test env) or a
+            # solver crash on degenerate covariance — leave the
+            # tangency_* fields None so the frontend disables the
+            # toggle exactly as before. Better to surface "unavailable"
+            # than to claim a verdict from a failed solve.
+            log.warning("mctr_tangency_compute_failed", error=str(exc))
+            return out
+
+    tw = [float(tangency_weights.get(lbl, 0.0)) for lbl in labels]
+    s_tw = sum(tw)
+    if s_tw > 0:
+        tw = [w / s_tw for w in tw]
+        mctr_tg, pct_tg = _compute(tw)
+        out["mctr_tangency_weight"] = mctr_tg
+        out["pct_risk_contribution_tangency"] = pct_tg
+        out["tangency_weights"] = [round(w, 4) for w in tw]
     return out
 
 
