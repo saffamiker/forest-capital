@@ -169,6 +169,62 @@ class TestComputeIN01Attestation:
         assert result["status"] == "FAIL"
         assert "Database unavailable" in result["evidence"]
 
+    def test_window_parameter_is_bound_as_datetime_not_string(
+        self, monkeypatch,
+    ):
+        """asyncpg raises DataError on
+            invalid input for query argument $3: '2026-05-25T00:00:00+00:00'
+        because the triggered_at column is timestamptz and asyncpg
+        does NOT cast strings client-side. The query must bind a
+        datetime object, not the raw ISO string the human-readable
+        constant carries. Capture the params the SUT passes to
+        session.execute and assert the `window` field is a datetime
+        — bound-parameter contract pinned at the call site so a future
+        refactor can't silently regress to passing the string again."""
+        from tools import audit_engine as ae
+
+        captured_params: list[dict] = []
+
+        class _Result:
+            def fetchone(self):
+                return None
+
+        async def _execute(query, params, *args, **kwargs):
+            captured_params.append(params)
+            return _Result()
+
+        session = MagicMock()
+        session.execute = _execute
+        session.commit = MagicMock(return_value=None)
+
+        @asynccontextmanager
+        async def _ctx():
+            yield session
+
+        factory = MagicMock()
+        factory.return_value = _ctx()
+        monkeypatch.setattr(
+            "database.AsyncSessionLocal", factory, raising=False)
+
+        asyncio.run(ae.compute_in01_attestation())
+
+        # First execute = the qualifying-run lookup; that is the one
+        # that binds the :window parameter. The fallback query (second
+        # execute) doesn't bind a datetime.
+        assert captured_params, "session.execute was never called"
+        first_call_params = captured_params[0]
+        assert "window" in first_call_params
+        window = first_call_params["window"]
+        # asyncpg expects datetime for timestamptz; a string raises.
+        assert isinstance(window, datetime), (
+            f"window param must be datetime for asyncpg's timestamptz "
+            f"bind, got {type(window).__name__}: {window!r}"
+        )
+        # The parsed datetime must equal IN01_SUBMISSION_WINDOW_OPENS
+        # so the gate's chronological cutoff is preserved bit-for-bit.
+        assert window == datetime.fromisoformat(
+            ae.IN01_SUBMISSION_WINDOW_OPENS)
+
 
 # ── QAAgent.run_audit wiring ─────────────────────────────────────────────────
 
