@@ -45,6 +45,43 @@ def _auth_headers() -> dict:
     return {"X-API-Key": MASTER_API_KEY}
 
 
+_db_ready_cache: bool | None = None
+
+
+def _db_ready() -> bool:
+    """True when a live PostgreSQL with the qa_intentional_overrides
+    table is reachable. Mirrors the probe pattern in tests/test_audit.py
+    — `AsyncSessionLocal is not None` alone is not enough; the engine
+    object exists on import even when the database is unreachable.
+    Probe with an actual SELECT so a DB-less CI environment skips
+    cleanly instead of crashing on the first query."""
+    global _db_ready_cache
+    if _db_ready_cache is not None:
+        return _db_ready_cache
+    try:
+        import asyncio
+
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal, engine
+        if AsyncSessionLocal is None:
+            _db_ready_cache = False
+            return False
+
+        async def _probe() -> bool:
+            if engine is not None:
+                await engine.dispose()
+            async with AsyncSessionLocal() as s:
+                await s.execute(text(
+                    "SELECT 1 FROM qa_intentional_overrides LIMIT 1"))
+            return True
+
+        _db_ready_cache = asyncio.run(_probe())
+    except Exception:  # noqa: BLE001
+        _db_ready_cache = False
+    return _db_ready_cache
+
+
 @pytest.fixture
 def client() -> TestClient:
     from main import app  # noqa: WPS433
@@ -325,12 +362,19 @@ class TestQARevokeIntentional:
         intentional, confirm the row appears in /intentional-overrides,
         DELETE to revoke, confirm the row is gone, then DELETE again
         — the second call must return deleted=false (idempotent), not
-        404 or 500."""
+        404 or 500.
+
+        Live-DB only — skipped in CI where the database is unreachable.
+        The previous `AsyncSessionLocal is None` gate was not strict
+        enough; an unreachable database still leaves AsyncSessionLocal
+        bound (the engine object is created at import), so the SELECT
+        below would have crashed in CI rather than skipped. _db_ready
+        runs an actual SELECT against qa_intentional_overrides."""
+        if not _db_ready():
+            pytest.skip("no live database")
         from sqlalchemy import text as _text
 
         from database import AsyncSessionLocal
-        if AsyncSessionLocal is None:
-            pytest.skip("no live database")
 
         check_id = "TESTREV01"
         note = "Workstream F round-trip revoke test note."

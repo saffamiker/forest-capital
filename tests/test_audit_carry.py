@@ -26,12 +26,39 @@ os.environ.setdefault("ENVIRONMENT", "test")
 os.environ.setdefault("MASTER_API_KEY", "test-master-key")
 
 
+_db_ready_cache: bool | None = None
+
+
 def _db_ready() -> bool:
+    """True when a live PostgreSQL with the audit tables is reachable.
+    Mirrors the probe pattern in tests/test_audit.py and test_activity.py
+    — it is not enough that `AsyncSessionLocal is not None`; the engine
+    object is created on import even when the database is unreachable.
+    Probe with an actual SELECT against audit_runs (the seed-target
+    table) so a DB-less CI environment skips the live-DB tests cleanly
+    instead of crashing on the first query."""
+    global _db_ready_cache
+    if _db_ready_cache is not None:
+        return _db_ready_cache
     try:
-        from database import AsyncSessionLocal
-        return AsyncSessionLocal is not None
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal, engine
+        if AsyncSessionLocal is None:
+            _db_ready_cache = False
+            return False
+
+        async def _probe() -> bool:
+            if engine is not None:
+                await engine.dispose()
+            async with AsyncSessionLocal() as s:
+                await s.execute(text("SELECT 1 FROM audit_runs LIMIT 1"))
+            return True
+
+        _db_ready_cache = asyncio.run(_probe())
     except Exception:  # noqa: BLE001
-        return False
+        _db_ready_cache = False
+    return _db_ready_cache
 
 
 # ── Pure helpers ─────────────────────────────────────────────────────────────
