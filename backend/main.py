@@ -8269,6 +8269,107 @@ async def export_midpoint_paper(
     return _start_generation_job("midpoint_paper", session, request)
 
 
+# ── Midpoint word-count validation (May 25 2026) ──────────────────────────────
+#
+# The midpoint paper is 3 pages double-spaced 12pt — roughly 750-900 words
+# total. The four sections have their own targets (per the user spec):
+#   methodology  250-300 words
+#   results      250-300 words
+#   roles        125-150 words
+#   next_steps   125-150 words
+# Each task prompt names its target, but the harness retries up to a
+# quality threshold rather than a length one — so a generated section can
+# still drift outside its range. This validator scores the post-generation
+# narratives, surfaces section-by-section warnings into the editor draft
+# (so the user sees the problem before submitting), and logs a structured
+# warning so a Render scan reports drift over time.
+
+_MIDPOINT_WORD_TARGETS: dict[str, tuple[int, int]] = {
+    "methodology":  (250, 300),
+    "results":      (250, 300),
+    "roles":        (125, 150),
+    "next_steps":   (125, 150),
+}
+_MIDPOINT_TOTAL_TARGET = (750, 900)
+
+
+def _count_words(text: str) -> int:
+    """Whitespace-split word count — same convention Word's status bar
+    uses. [[VERIFY: …]] / [[BOB: …]] markers count as words; they are
+    written by the AI and will be resolved by the user before
+    submission, so counting them keeps the post-resolution count
+    realistic rather than systematically over-counting."""
+    if not text:
+        return 0
+    return len([w for w in text.split() if w.strip()])
+
+
+def _validate_midpoint_word_counts(
+    narratives: dict[str, str],
+) -> dict[str, object]:
+    """Returns a structured validation result for a generated midpoint
+    paper's narratives. Used to (a) log a warning when generation lands
+    out-of-range, and (b) inject a banner into the editor draft so the
+    user sees the discrepancy on first open. Always returns a usable
+    dict — never raises on missing keys.
+
+    Shape:
+      { valid: bool,
+        total_words: int,
+        total_target: (lo, hi),
+        sections: {
+          key: { words, target: (lo, hi), in_range, label }
+        },
+        warnings: [ "Methodology 220 words is below the 250-300 target.",
+                    "Total 670 words is below the 750-900 target.", ... ],
+      }
+    """
+    section_labels = {
+        "methodology": "Data and Methodology",
+        "results":     "Preliminary Results and Diagnostics",
+        "roles":       "Roles and Division of Labor",
+        "next_steps":  "Next Steps and Open Questions",
+    }
+    sections: dict[str, dict[str, object]] = {}
+    warnings_list: list[str] = []
+    total_words = 0
+    for key, (lo, hi) in _MIDPOINT_WORD_TARGETS.items():
+        text = narratives.get(key) or ""
+        words = _count_words(text)
+        total_words += words
+        in_range = lo <= words <= hi
+        label = section_labels.get(key, key)
+        sections[key] = {
+            "words": words,
+            "target": [lo, hi],
+            "in_range": in_range,
+            "label": label,
+        }
+        if not in_range:
+            direction = "below" if words < lo else "above"
+            warnings_list.append(
+                f"{label} ran {words} words — {direction} the "
+                f"{lo}-{hi} target."
+            )
+    total_lo, total_hi = _MIDPOINT_TOTAL_TARGET
+    total_in_range = total_lo <= total_words <= total_hi
+    if not total_in_range:
+        direction = "below" if total_words < total_lo else "above"
+        warnings_list.append(
+            f"Total ran {total_words} words — {direction} the "
+            f"{total_lo}-{total_hi} target for a 3-page double-spaced "
+            f"paper."
+        )
+    valid = total_in_range and all(s["in_range"] for s in sections.values())
+    return {
+        "valid": valid,
+        "total_words": total_words,
+        "total_target": [total_lo, total_hi],
+        "sections": sections,
+        "warnings": warnings_list,
+    }
+
+
 async def _generate_midpoint_document(
     email: str,
 ) -> tuple[bytes, str, str, int | None]:
@@ -8312,8 +8413,12 @@ async def _generate_midpoint_document(
              "agent_id": "midpoint_methodology",
              "task": (
                  "Write the Data and Methodology section of a graduate "
-                 "finance midpoint paper — about 250 words, APA style, past "
-                 "tense, third person. Cover the data sources (aligned "
+                 "finance midpoint paper. TARGET LENGTH: 250-300 words "
+                 "(this is a 3-page double-spaced 12-point paper; the "
+                 "section must land in that range — under 250 words is "
+                 "too thin, over 300 leaves no room for the other "
+                 "three sections). APA style, past tense, third person. "
+                 "Cover the data sources (aligned "
                  "monthly returns for equity, investment-grade and high-yield "
                  "bonds; Carhart factor series), the study period, the "
                  "portfolio constraints (long-only, fully invested, no cash, "
@@ -8346,7 +8451,9 @@ async def _generate_midpoint_document(
                          "them, then regenerate this paper."),
              "agent_id": "midpoint_results",
              "task": (
-                 "Write the Preliminary Results section — about 250 words. "
+                 "Write the Preliminary Results section. TARGET LENGTH: "
+                 "250-300 words (under 250 is too thin; over 300 leaves "
+                 "no room for Roles and Next Steps). "
                  "Interpret the summary statistics and the regime-conditional "
                  "performance; do not merely list numbers. You MUST explicitly "
                  "discuss the 2022 equity-bond correlation break and what the "
@@ -8374,8 +8481,10 @@ async def _generate_midpoint_document(
                          "regenerate; meanwhile describe the roles directly."),
              "agent_id": "midpoint_roles",
              "task": (
-                 "Write the Roles and Division of Labor section — about 150 "
-                 "words, APA style, past tense, third person. Use ONLY the "
+                 "Write the Roles and Division of Labor section. "
+                 "TARGET LENGTH: 125-150 words (this is a shorter "
+                 "section in the 3-page paper — keep it tight). "
+                 "APA style, past tense, third person. Use ONLY the "
                  "team_activity_summary data provided. State each team "
                  "member's role and attribute their documented platform "
                  "activity — commits, council sessions run, academic review "
@@ -8393,8 +8502,10 @@ async def _generate_midpoint_document(
                          "as planned work."),
              "agent_id": "midpoint_next_steps",
              "task": (
-                 "Write the Next Steps and Open Questions section — about 150 "
-                 "words. Convert the supplied Academic Review verdict — its "
+                 "Write the Next Steps and Open Questions section. "
+                 "TARGET LENGTH: 125-150 words (keep it tight — the "
+                 "section closes the paper and shouldn't bloat). "
+                 "Convert the supplied Academic Review verdict — its "
                  "Priority Areas for Further Investigation and any Developing "
                  "or Needs Work ratings — into a forward-looking next-steps "
                  "narrative."),
@@ -8404,6 +8515,29 @@ async def _generate_midpoint_document(
         narratives = await _generate_narratives(
             _apply_draft_caveats(specs),
             n_strategies=len(data.get("strategy_results") or {}))
+
+        # Word-count validation (May 25 2026). Three pages double-spaced
+        # 12pt is ~750-900 words; each section has its own target. If
+        # any section or the total drifts outside the range, log a
+        # structured warning AND surface it as a banner in the editor
+        # draft so the user sees it before submitting.
+        word_validation = _validate_midpoint_word_counts(narratives)
+        if not word_validation["valid"]:
+            log.warning(
+                "midpoint_word_count_validation_failed",
+                total_words=word_validation["total_words"],
+                section_words={
+                    k: v["words"]
+                    for k, v in word_validation["sections"].items()
+                },
+                warnings=word_validation["warnings"],
+            )
+        else:
+            log.info(
+                "midpoint_word_count_validation_passed",
+                total_words=word_validation["total_words"],
+            )
+
         docx_bytes = await asyncio.to_thread(build_midpoint_paper, data, narratives)
 
         # Load the generated content into an editor draft so the frontend
@@ -8414,7 +8548,10 @@ async def _generate_midpoint_document(
         try:
             from tools.editor_content import midpoint_to_editor
             from tools.editor_drafts import create_draft
-            content_json, content_text = midpoint_to_editor(narratives)
+            content_json, content_text = midpoint_to_editor(
+                narratives,
+                word_validation=word_validation,
+            )
             draft = await create_draft(
                 "midpoint_paper", email,
                 f"Midpoint Paper — {date.today().isoformat()}",

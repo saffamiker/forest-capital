@@ -248,8 +248,43 @@ def deck_to_editor(
     return content_json, content_text
 
 
+def _word_count_warning_block(
+    validation: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Builds an editor-draft banner that surfaces midpoint paper
+    word-count drift (May 25 2026). Renders as a `[[BOB: WORD COUNT
+    WARNING — …]]` callout the editor styles as an amber panel — the
+    same convention every other human-input prompt uses, so a user
+    already familiar with the [[BOB]] callout treats this banner the
+    same way: an actionable note to address before submitting.
+
+    Returns ([] / "") when the validation is missing or in-range so the
+    banner is invisible on a clean run.
+    """
+    if not validation or validation.get("valid"):
+        return [], []
+    warnings = validation.get("warnings") or []
+    if not warnings:
+        return [], []
+    total = validation.get("total_words")
+    total_target = validation.get("total_target") or [750, 900]
+    detail = "; ".join(str(w) for w in warnings)
+    summary = (
+        f"WORD COUNT WARNING — the AI draft totals {total} words "
+        f"against a {total_target[0]}-{total_target[1]} target for "
+        f"a 3-page double-spaced 12-point paper. Section drift: "
+        f"{detail} Adjust before submitting — the editor's section "
+        f"navigator shows live word counts per section."
+    )
+    nodes: list[dict[str, Any]] = [_paragraph(f"[[BOB: {summary}]]")]
+    lines: list[str] = [f"[[BOB: {summary}]]", ""]
+    return nodes, lines
+
+
 def midpoint_to_editor(
     narratives: dict[str, str],
+    *,
+    word_validation: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], str]:
     """
     Builds the editor content for a generated midpoint paper.
@@ -258,9 +293,19 @@ def midpoint_to_editor(
     projection. The four sections become H1 headings with the generated
     prose as paragraphs; the Roles and Next Steps sections each carry a
     trailing [[BOB: …]] callout.
+
+    word_validation (May 25 2026): when supplied AND the validation
+    failed (any section or the total outside its target range), a
+    [[BOB: WORD COUNT WARNING — …]] callout is prepended to the
+    document so the user sees the drift at the top of the editor
+    rather than discovering it at submission time.
     """
     doc_content: list[dict] = []
     text_lines: list[str] = []
+    warn_nodes, warn_lines = _word_count_warning_block(
+        word_validation or {})
+    doc_content.extend(warn_nodes)
+    text_lines.extend(warn_lines)
     for heading, key, callout in _MIDPOINT_SECTIONS:
         nodes, lines = _section_blocks(
             heading, narratives.get(key, ""), callout)
