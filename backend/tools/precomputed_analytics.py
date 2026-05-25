@@ -333,6 +333,76 @@ def validate_analytics_payload(payload: dict) -> dict[str, Any]:
     }
 
 
+def _log_table_rows_diagnostic(
+    table_kind: str, rows: list[dict], required_fields: tuple[str, ...],
+    data_hash: str | None,
+) -> dict[str, Any]:
+    """Per-row diagnostic on what was written for factor_loadings /
+    regime_conditional. Emits one log line PER ROW so a Render log scan
+    after the warm can answer 'did this strategy land' field-by-field
+    without parsing the full payload. Returns an aggregate summary
+    dict for the parent log line.
+
+    For each row:
+      - present: fields that are present AND non-null
+      - null: fields present but value is None
+      - missing: fields the validator requires but the row does not have
+
+    INFO level on a clean row, WARNING on a row with any missing or null
+    field, so a `level >= warning` alert filter catches incomplete rows
+    without flooding on healthy refreshes.
+    """
+    # Rebind locally so structlog.testing.capture_logs() in tests can
+    # intercept (May 25 2026 CI fix). The module-level `log` is a
+    # cached BoundLoggerLazyProxy that binds to whatever processors
+    # were configured at first-use time — under structlog's default
+    # cache_logger_on_first_use=True (set in logger.configure_logging),
+    # a logger bound before capture_logs() takes effect cannot be
+    # re-captured. A fresh proxy inside the function binds to the
+    # CURRENT config (LogCapture under capture_logs), so events flow.
+    log = structlog.get_logger(__name__)
+    summary: dict[str, int] = {
+        "n_rows": len(rows), "n_complete": 0, "n_with_nulls": 0,
+        "n_with_missing": 0,
+    }
+    short_hash = data_hash[:8] if data_hash else None
+    for row in rows:
+        if not isinstance(row, dict):
+            log.warning(f"precomputed_{table_kind}_row_invalid_type",
+                        data_hash=short_hash, row_type=type(row).__name__)
+            continue
+        strategy = row.get("strategy", "<unnamed>")
+        present: list[str] = []
+        nulls: list[str] = []
+        missing: list[str] = []
+        for f in required_fields:
+            if f not in row:
+                missing.append(f)
+            elif row[f] is None:
+                nulls.append(f)
+            else:
+                present.append(f)
+        if missing:
+            summary["n_with_missing"] += 1
+        elif nulls:
+            summary["n_with_nulls"] += 1
+        else:
+            summary["n_complete"] += 1
+        level = "warning" if (missing or nulls) else "info"
+        getattr(log, level)(
+            f"precomputed_{table_kind}_row_written",
+            data_hash=short_hash, strategy=strategy,
+            n_present=len(present), n_null=len(nulls),
+            n_missing=len(missing),
+            # Field names — explicit so the log scan can grep for
+            # 'mkt_rf_significant missing' without payload inspection.
+            present=present if level == "warning" else None,
+            null_fields=nulls or None,
+            missing_fields=missing or None,
+        )
+    return summary
+
+
 async def refresh_academic_analytics(data_hash: str) -> None:
     """Computes the /api/v1/analytics/academic payload and writes it
     to analytics_metrics_cache under metric_kind='academic_analytics'.
@@ -350,7 +420,23 @@ async def refresh_academic_analytics(data_hash: str) -> None:
     _incomplete at WARNING level so a Render alert can fire; the row
     is still written so the next QA audit has SOMETHING to read, with
     the gap clearly documented in `_completeness`.
+
+    May 25 2026 — per-row write diagnostics. The factor_loadings and
+    regime_conditional tables drive AN01 / AN04; when those checks
+    stay WARN after a warm cycle, a Render log scan needs to answer
+    'which strategies landed, which fields were null, which were
+    missing' without inspecting the JSONB payload by hand. Each refresh
+    now emits one log line per table-row (level upgrades to WARNING
+    on any null/missing field) plus a single aggregate summary line
+    per refresh, so the trail of a degraded AN01/AN04 verdict reads
+    end-to-end in the Render log.
     """
+    # See _log_table_rows_diagnostic for the rebind rationale —
+    # capture_logs() in tests can't intercept a pre-cached proxy.
+    log = structlog.get_logger(__name__)
+    short_hash = data_hash[:8] if data_hash else None
+    log.info("precomputed_academic_analytics_started",
+             data_hash=short_hash)
     try:
         import pandas as pd
         from tools.cache import (
@@ -362,7 +448,25 @@ async def refresh_academic_analytics(data_hash: str) -> None:
         monthly = await get_monthly_returns()
         strategies = await get_latest_strategy_cache()
         ff = await get_ff_factors()
+
+        # Upstream-input visibility — explicit before we abort or
+        # compute. A zero strategies count is the canonical cause of
+        # empty AN01/AN04 outputs; logging it here ties the refresh
+        # to the strategy cache state on the SAME line.
+        log.info(
+            "precomputed_academic_analytics_inputs",
+            data_hash=short_hash,
+            n_monthly_dates=len(monthly.get("dates") or []) if monthly else 0,
+            n_strategies=len(strategies or {}),
+            n_ff_rows=len(ff or []),
+        )
         if not monthly or not strategies:
+            log.warning(
+                "precomputed_academic_analytics_skipped_empty_inputs",
+                data_hash=short_hash,
+                monthly_present=bool(monthly),
+                strategies_present=bool(strategies),
+            )
             return
 
         idx = pd.to_datetime(monthly["dates"])
@@ -379,6 +483,43 @@ async def refresh_academic_analytics(data_hash: str) -> None:
         if not bench_series.empty:
             asset_series["BENCHMARK"] = bench_series
 
+        # Compute each AN01/AN04 reduction in its own try/except so a
+        # downstream failure (regression solver, regime split) is
+        # caught with explicit context rather than swallowed by the
+        # outer handler — the parent log can't say WHICH reduction
+        # crashed without this finer grain.
+        factor_loadings_rows: list[dict] = []
+        try:
+            factor_loadings_rows = an.factor_loadings(strategies, ff or [])
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "precomputed_factor_loadings_compute_failed",
+                data_hash=short_hash, exc_type=type(exc).__name__,
+                error=str(exc),
+            )
+        regime_conditional_rows: list[dict] = []
+        try:
+            regime_conditional_rows = an.regime_conditional_performance(
+                strategies, rf)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "precomputed_regime_conditional_compute_failed",
+                data_hash=short_hash, exc_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+        # Per-row diagnostics for the two AN01/AN04 tables — explicit
+        # field-by-field visibility so a Render log scan can answer
+        # 'which strategies landed' without inspecting the payload.
+        fl_summary = _log_table_rows_diagnostic(
+            "factor_loadings", factor_loadings_rows,
+            _FACTOR_LOADING_REQUIRED_FIELDS, data_hash,
+        )
+        rc_summary = _log_table_rows_diagnostic(
+            "regime_conditional", regime_conditional_rows,
+            _REGIME_CONDITIONAL_REQUIRED_FIELDS, data_hash,
+        )
+
         payload = {
             "available": True,
             "study_period": {
@@ -392,10 +533,9 @@ async def refresh_academic_analytics(data_hash: str) -> None:
                 equity, ig, hy, window=12),
             "rolling_excess_return": an.rolling_excess_return(
                 strategies, window=12),
-            "regime_conditional": an.regime_conditional_performance(
-                strategies, rf),
+            "regime_conditional": regime_conditional_rows,
             "drawdown_comparison": an.drawdown_comparison(strategies),
-            "factor_loadings": an.factor_loadings(strategies, ff or []),
+            "factor_loadings": factor_loadings_rows,
             "strategy_metadata": STRATEGY_METADATA,
         }
         # Validate BEFORE writing — the verdict travels with the row.
@@ -404,7 +544,7 @@ async def refresh_academic_analytics(data_hash: str) -> None:
         if not completeness["complete"]:
             log.warning(
                 "precomputed_academic_analytics_incomplete",
-                data_hash=data_hash[:8] if data_hash else None,
+                data_hash=short_hash,
                 factor_loadings_complete=completeness["factor_loadings"]["complete"],
                 regime_conditional_complete=completeness["regime_conditional"]["complete"],
                 factor_loadings_gaps=completeness["factor_loadings"]["invalid_rows"][:3],
@@ -412,8 +552,23 @@ async def refresh_academic_analytics(data_hash: str) -> None:
             )
         await set_metric(data_hash, "academic_analytics", payload,
                          source="refresh_academic_analytics")
+        # Final write summary — the single line a log scan grep can use
+        # to confirm a refresh COMPLETED and how clean the output was.
+        log.info(
+            "precomputed_academic_analytics_written",
+            data_hash=short_hash,
+            complete=completeness["complete"],
+            factor_loadings=fl_summary,
+            regime_conditional=rc_summary,
+        )
     except Exception as exc:  # noqa: BLE001
+        # Include exc_type + the module/function context so a Render
+        # log scan can locate the failure source from the line alone
+        # (the prior single-line warning logged only str(exc), which
+        # was often ambiguous between solver and write-side errors).
         log.warning("precomputed_academic_analytics_failed",
+                    data_hash=short_hash,
+                    exc_type=type(exc).__name__,
                     error=str(exc))
 
 
@@ -427,7 +582,19 @@ async def refresh_transition_matrix(data_hash: str) -> None:
     Each row also carries `_completeness` with the per-row sums so a
     consumer (the AN04 deterministic check) can verify the invariant
     without recomputing.
+
+    May 25 2026 — per-stage diagnostics. AN04 reads BOTH the
+    regime_conditional table (factor analytics) AND this transition
+    matrix; logging the HMM fit, the matrix shape, and the per-regime
+    row sums on every refresh makes a degraded AN04 verdict
+    debuggable from the Render log alone.
     """
+    # See _log_table_rows_diagnostic for the rebind rationale —
+    # capture_logs() in tests can't intercept a pre-cached proxy.
+    log = structlog.get_logger(__name__)
+    short_hash = data_hash[:8] if data_hash else None
+    log.info("precomputed_transition_matrix_started",
+             data_hash=short_hash)
     try:
         import pandas as pd
         from tools.cache import get_monthly_returns
@@ -436,6 +603,10 @@ async def refresh_transition_matrix(data_hash: str) -> None:
 
         monthly = await get_monthly_returns()
         if not monthly:
+            log.warning(
+                "precomputed_transition_matrix_skipped_empty_monthly",
+                data_hash=short_hash,
+            )
             return
         idx = pd.to_datetime(monthly["dates"])
         equity = pd.Series(monthly["equity"], index=idx)
@@ -445,9 +616,16 @@ async def refresh_transition_matrix(data_hash: str) -> None:
             hmm = classify_hmm_regime(equity)
             labelled = hmm.get("labelled_series") if isinstance(hmm, dict) else None
         except Exception as exc:  # noqa: BLE001
-            log.warning("transition_matrix_hmm_failed", error=str(exc))
+            log.warning("transition_matrix_hmm_failed",
+                        data_hash=short_hash,
+                        exc_type=type(exc).__name__, error=str(exc))
             labelled = None
         if labelled is None or (hasattr(labelled, "empty") and labelled.empty):
+            log.warning(
+                "precomputed_transition_matrix_skipped_empty_hmm",
+                data_hash=short_hash,
+                labelled_is_none=labelled is None,
+            )
             return
         if not isinstance(labelled, pd.Series):
             labelled = pd.Series(labelled)
@@ -463,14 +641,28 @@ async def refresh_transition_matrix(data_hash: str) -> None:
         if not completeness["complete"]:
             log.warning(
                 "precomputed_transition_matrix_incomplete",
-                data_hash=data_hash[:8] if data_hash else None,
+                data_hash=short_hash,
                 row_sums=completeness["row_sums"],
                 invalid_rows=completeness["invalid_rows"],
             )
         await set_metric(data_hash, "transition_matrix", payload,
                          source="refresh_transition_matrix")
+        # Final write summary — explicit per-regime row sums so a
+        # log scan can confirm the matrix landed AND that every
+        # originating regime has a well-formed (sums-to-1.0 or 0.0)
+        # row without inspecting the JSONB payload.
+        log.info(
+            "precomputed_transition_matrix_written",
+            data_hash=short_hash,
+            complete=completeness["complete"],
+            n_months=int(len(labelled)),
+            row_sums=completeness["row_sums"],
+            missing_regimes=completeness.get("missing_regimes") or None,
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("precomputed_transition_matrix_failed",
+                    data_hash=short_hash,
+                    exc_type=type(exc).__name__,
                     error=str(exc))
 
 

@@ -67,6 +67,18 @@ COUNCIL_CHARTS: tuple[str, ...] = (
 # document's claims against the visual evidence. Adds drawdown_periods
 # and the significance journey so claims about strategy robustness can
 # be cross-checked.
+#
+# May 25 2026 — sensitivity + risk_return added. The chart-capture audit
+# surfaced that the snapshot pipeline rendered both to disk on every
+# data-hash change but no agent surface read them. Adding them here so
+# the review arbiter sees:
+#   - sensitivity: the parameter-sweep robustness check that backs the
+#     'is the strategy fragile under parameter perturbation?' question
+#     the rubric scores.
+#   - risk_return: the cross-strategy risk-return scatter that lets the
+#     arbiter verify strategy positioning claims (the dot for a strategy
+#     the document calls 'low-volatility' must actually sit in the
+#     low-volatility region of the plot).
 ACADEMIC_REVIEW_CHARTS: tuple[str, ...] = (
     "rolling_correlation",
     "cumulative_returns",
@@ -75,6 +87,8 @@ ACADEMIC_REVIEW_CHARTS: tuple[str, ...] = (
     "drawdown_periods",
     "significance_journey",
     "oos_performance",
+    "sensitivity",
+    "risk_return",
 )
 
 # ── Scope categories — drive the per-chart caption sentence ──────────────────

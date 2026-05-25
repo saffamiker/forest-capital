@@ -196,6 +196,13 @@ export function FindingRow({ f }: { f: AuditFinding }) {
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [ackError, setAckError] = useState<string | null>(null)
+  // Migration 044 — the reviewer's email and the ack timestamp.
+  // Surfaced in the "Acknowledged" row so the team can see WHO
+  // reviewed each disclosure and WHEN, matching the "Reviewed by X
+  // on Y" line the audit PDF renders. Held in local state so a
+  // save updates the row without a panel reload.
+  const [resolvedBy, setResolvedBy] = useState<string | null>(f.resolved_by ?? null)
+  const [resolvedAt, setResolvedAt] = useState<string | null>(f.resolved_at ?? null)
   // Workstream A — auto_acknowledged distinguishes a carried ack
   // from a freshly-typed one. The badge label changes from
   // "Acknowledged" to "Auto-acknowledged" when the carry pass
@@ -230,10 +237,17 @@ export function FindingRow({ f }: { f: AuditFinding }) {
     setSaving(true)
     setAckError(null)
     try {
-      await axios.post(`/api/v1/audit/findings/${f.id}/resolve`,
+      // The resolve endpoint returns the updated finding row, which
+      // carries the freshly-stamped resolved_by + resolved_at. Read
+      // them off the response so the "Acknowledged on … by …" line
+      // renders immediately, without waiting for a panel reload.
+      const res = await axios.post<AuditFinding>(
+        `/api/v1/audit/findings/${f.id}/resolve`,
         { resolution_note: draft.trim() })
       setResolved(true)
       setNote(draft.trim())
+      setResolvedBy(res.data.resolved_by ?? null)
+      setResolvedAt(res.data.resolved_at ?? null)
       // A manual Save endorses the ack — the server clears the
       // auto_acknowledged flag and the local label flips from
       // "Auto-acknowledged" to "Acknowledged".
@@ -264,6 +278,8 @@ export function FindingRow({ f }: { f: AuditFinding }) {
       setEditing(false)
       setRevokeOpen(false)
       setAutoAck(false)
+      setResolvedBy(null)
+      setResolvedAt(null)
     } catch {
       setRevokeError('Could not revoke the acknowledgement — please retry.')
     } finally {
@@ -326,6 +342,24 @@ export function FindingRow({ f }: { f: AuditFinding }) {
                     <CheckCircle2 className="w-3 h-3" />{' '}
                     {autoAck ? 'Auto-acknowledged' : 'Acknowledged'}
                   </div>
+                  {/* Migration 044 — when the audit was acknowledged
+                      and by whom. Renders "on <date> by <email>" when
+                      both are known; falls back gracefully when one
+                      is missing (auto-carry rows pre-migration may
+                      have resolved_by="auto_carry" but no timestamp). */}
+                  {(resolvedAt || resolvedBy) && (
+                    <div
+                      data-testid={`audit-ack-meta-${f.id}`}
+                      className="text-2xs text-muted">
+                      Reviewed
+                      {resolvedAt
+                        ? <> on {new Date(resolvedAt).toLocaleDateString(
+                            undefined,
+                            { year: 'numeric', month: 'short', day: 'numeric' })}</>
+                        : null}
+                      {resolvedBy ? <> by {resolvedBy}</> : null}
+                    </div>
+                  )}
                   {autoAck && (
                     <div className="text-2xs text-muted italic
                                     leading-relaxed">

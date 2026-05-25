@@ -178,8 +178,12 @@ describe('RiskContributionBar — equal-weight + tangency toggle', () => {
       })
     })
 
-  it('disables the tangency toggle when optimizer did not converge',
+  it('disables the tangency toggle when the optimizer produced no weights',
     async () => {
+      // No tangency_weights in the payload — disabled state, with a
+      // tooltip naming the cause (cvxpy unavailable / solver crash).
+      // Distinct from the all-negative-excess fallback, which DOES
+      // produce weights (min-variance) and keeps the toggle clickable.
       mockedAxios.get = vi.fn().mockImplementation((url: string) => {
         if (url.includes('/risk-contribution')) {
           return Promise.resolve({ data: {
@@ -198,8 +202,45 @@ describe('RiskContributionBar — equal-weight + tangency toggle', () => {
         screen.getByTestId('risk-contribution-bar')).toBeInTheDocument())
       const tangencyBtn = screen.getByTestId('risk-contribution-scheme-tangency')
       expect(tangencyBtn).toBeDisabled()
-      expect(tangencyBtn.getAttribute('title')).toContain('did not converge')
+      // The tooltip names the SPECIFIC cause — the optimizer didn't
+      // ship weights at all (cvxpy / solver). The min-variance
+      // fallback path has its own distinct tooltip on a clickable
+      // toggle, exercised by the test below.
+      const title = tangencyBtn.getAttribute('title') ?? ''
+      expect(title.toLowerCase()).toContain('optimizer')
+      expect(title.toLowerCase()).toContain('tangency weights')
     })
+
+  it('enables the tangency toggle with a min-variance relabel when '
+     + 'Sharpe maximisation was infeasible', async () => {
+    // tangency_fallback_to_min_variance=true means max_sharpe_optimize
+    // fell back internally — weights are present (min-variance) and
+    // the toggle stays clickable, but the label changes so the user
+    // never reads 'max Sharpe' over min-variance numbers.
+    mockedAxios.get = vi.fn().mockImplementation((url: string) => {
+      if (url.includes('/risk-contribution')) {
+        return Promise.resolve({ data: {
+          labels: ['A', 'B'],
+          mctr_equal_weight: [0.10, 0.20],
+          pct_risk_contribution_equal: [40, 60],
+          mctr_tangency_weight: [0.08, 0.18],
+          pct_risk_contribution_tangency: [30, 70],
+          tangency_weights: [0.40, 0.60],
+          tangency_fallback_to_min_variance: true,
+        } })
+      }
+      return Promise.resolve({ data: {} })
+    })
+    render(<RiskContributionBar />)
+    await waitFor(() => expect(
+      screen.getByTestId('risk-contribution-bar')).toBeInTheDocument())
+    const tangencyBtn = screen.getByTestId('risk-contribution-scheme-tangency')
+    // Clickable — the weights exist, just under a different name.
+    expect(tangencyBtn).not.toBeDisabled()
+    // Relabeled — never claims 'max Sharpe' over min-variance numbers.
+    expect(tangencyBtn.textContent).toMatch(/Min variance/i)
+    expect(tangencyBtn.textContent).not.toMatch(/max Sharpe/i)
+  })
 })
 
 

@@ -173,9 +173,10 @@ export function CorrelationHeatmap() {
               size="md" />
           </h2>
           <p className="text-xs text-muted mt-0.5">
-            Pairwise Pearson correlation across the ten strategies and the
-            benchmark. Diverging blue-red scale; diagonal in grey is
-            self-correlation (always 1.00).
+            Pairwise Pearson correlation of monthly returns across the
+            ten strategies and the benchmark, computed over the full
+            study period. Diverging blue-red scale; diagonal in grey
+            is self-correlation (always 1.00).
           </p>
         </div>
         {/* Period toggle — three buttons. The active one carries the

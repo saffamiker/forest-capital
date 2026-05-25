@@ -102,6 +102,14 @@ export interface RiskContributionPayload extends CachedFields {
   mctr_tangency_weight: number[] | null
   pct_risk_contribution_tangency: number[] | null
   tangency_weights: number[] | null
+  /** May 25 2026 — true when max_sharpe_optimize fell back to
+   *  min_variance because every strategy's excess return was
+   *  non-positive (Sharpe maximisation was infeasible). The weights
+   *  in the response are then min-variance weights; the frontend
+   *  relabels the toggle so the user isn't told 'max Sharpe' when the
+   *  numbers are min-variance. Optional for backward compatibility
+   *  with cached payloads written before the field shipped. */
+  tangency_fallback_to_min_variance?: boolean
 }
 
 // 7. Return distribution ─────────────────────────────────────────────────────

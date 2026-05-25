@@ -151,10 +151,12 @@ export function CaptureScatter() {
               size="md" />
           </h2>
           <p className="text-xs text-muted mt-0.5">
-            Each point is one strategy's up-market vs down-market capture of
-            the benchmark return. Upper-left (high up, low down) is the
-            ideal diversifier; the 45° line is symmetric capture.
-            Benchmark anchors at (100, 100) by definition.
+            Up- and down-market capture — each strategy's mean monthly
+            return in up-vs-down BENCHMARK months, divided by the
+            BENCHMARK mean in the same months. Computed from monthly
+            returns over the full study period. Upper-left (high up,
+            low down) is the ideal diversifier; the 45° line is
+            symmetric capture; benchmark anchors at (100, 100).
           </p>
         </div>
         <div className="flex gap-1 shrink-0"

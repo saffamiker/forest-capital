@@ -36,6 +36,16 @@ const SCHEME_LABEL: Record<WeightScheme, string> = {
   tangency: 'Tangency (max Sharpe)',
 }
 
+// When max_sharpe_optimize falls back to min_variance (all-negative
+// excess returns case), the backend still ships tangency_weights but
+// they are min-variance weights. Relabel the toggle so the user
+// reads the numbers correctly rather than mistaking min-variance for
+// max-Sharpe.
+const SCHEME_LABEL_FALLBACK: Record<WeightScheme, string> = {
+  equal:    'Equal weight',
+  tangency: 'Min variance (Sharpe infeasible)',
+}
+
 
 function fmtPct(v: number | null | undefined, digits = 1): string {
   if (v === null || v === undefined || Number.isNaN(v)) return '—'
@@ -49,10 +59,20 @@ export function RiskContributionBar() {
 
   const tangencyAvailable = !!(data?.pct_risk_contribution_tangency
     && data.tangency_weights)
+  // Tangency was computed but the optimizer fell back to min_variance
+  // because every strategy's excess return was non-positive. The
+  // weights are still valid; only the label changes.
+  const tangencyIsFallback = !!data?.tangency_fallback_to_min_variance
 
   // If tangency is missing, force the toggle back to equal.
   const activeScheme: WeightScheme = scheme === 'tangency' && !tangencyAvailable
     ? 'equal' : scheme
+
+  // Pick the label set once per render — relabel the tangency button
+  // when its weights are a min-variance fallback so the toggle never
+  // reads 'max Sharpe' over min-variance numbers.
+  const labels = tangencyIsFallback
+    ? SCHEME_LABEL_FALLBACK : SCHEME_LABEL
 
   const rows = useMemo(() => {
     if (!data || !Array.isArray(data.labels)) return []
@@ -124,17 +144,36 @@ export function RiskContributionBar() {
               size="md" />
           </h2>
           <p className="text-xs text-muted mt-0.5">
-            What percentage of portfolio risk each strategy contributes.
-            A bar wider than its capital share is a risk concentrator;
-            narrower is a diversifier. The {activeScheme === 'equal'
+            What percentage of portfolio risk each strategy contributes,
+            computed from the strategy-return covariance matrix over
+            the full study period. A bar wider than its capital share
+            is a risk concentrator; narrower is a diversifier. The {activeScheme === 'equal'
               ? '1/N equal-weight'
-              : 'optimizer tangency'} reference is the dashed grey line.
+              : tangencyIsFallback
+                ? 'min-variance (Sharpe infeasible)'
+                : 'optimizer tangency'} reference is the dashed grey line.
           </p>
         </div>
         <div className="flex gap-1 shrink-0"
              data-testid="risk-contribution-scheme-toggle">
           {(['equal', 'tangency'] as WeightScheme[]).map((p) => {
             const disabled = p === 'tangency' && !tangencyAvailable
+            // Disabled-state tooltip explains the SPECIFIC reason — a
+            // cvxpy / solver failure (the optimizer never returned
+            // weights at all), distinct from the all-negative-excess
+            // fallback (which produces min-variance weights and a
+            // RELABELED-but-still-clickable Tangency toggle).
+            const tooltip = disabled
+              ? 'Optimizer could not produce tangency weights (cvxpy '
+                + 'unavailable or solver error). The all-negative-excess '
+                + 'case falls back to min-variance instead, in which '
+                + 'case the toggle is enabled and relabeled.'
+              : (p === 'tangency' && tangencyIsFallback
+                ? 'Sharpe maximisation was infeasible — every '
+                  + "strategy's excess return is non-positive. The "
+                  + 'weights shown are min-variance weights (the '
+                  + 'next-best long-only mix).'
+                : undefined)
             return (
               <button
                 key={p}
@@ -142,9 +181,7 @@ export function RiskContributionBar() {
                 onClick={() => !disabled && setScheme(p)}
                 disabled={disabled}
                 data-testid={`risk-contribution-scheme-${p}`}
-                title={disabled
-                  ? 'Optimizer did not converge — tangency unavailable'
-                  : undefined}
+                title={tooltip}
                 className={`text-xs px-2.5 py-1 rounded border transition-colors ${
                   activeScheme === p
                     ? 'border-electric bg-electric/10 text-electric'
@@ -152,7 +189,7 @@ export function RiskContributionBar() {
                       ? 'border-border/40 text-muted/40 cursor-not-allowed'
                       : 'border-border text-muted hover:text-white hover:border-border/80'
                 }`}>
-                {SCHEME_LABEL[p]}
+                {labels[p]}
               </button>
             )
           })}

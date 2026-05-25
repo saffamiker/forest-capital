@@ -439,6 +439,165 @@ async def get_latest_audit_run() -> dict[str, Any] | None:
     return await get_audit_run(int(runs[0]["id"]))
 
 
+# ── IN01 submission-window attestation ────────────────────────────────────────
+#
+# The IN01 methodology check (Statistical audit attestation) used to be a
+# redundant tautology — it mirrored all_gates_required, so PASS/FAIL flipped
+# together with that check. Repurposed May 25 2026 (per user spec) to a
+# submission-window attestation: IN01 passes ONLY if a project team member
+# manually triggered a full QA audit on or after the submission window
+# opened. This gives the executive brief and presentation a meaningful
+# claim — the team ran the audit themselves, not the system on cache-warm
+# fire, AND within the window leading up to the deliverable.
+
+IN01_SUBMISSION_WINDOW_OPENS = "2026-05-25T00:00:00+00:00"
+# Trigger sources that count as a team-driven manual run. 'manual' is the
+# Run Full QA / Run Full Audit button on the QA tab; 'pre_submission' is
+# the Pre-Submission Audit button. The system-driven triggers
+# ('data_ingestion', 'startup', 'scheduled', 'demo') do NOT satisfy IN01
+# because they fire automatically — they aren't an act of team attestation.
+_IN01_MANUAL_TRIGGERS: tuple[str, ...] = ("manual", "pre_submission")
+
+
+async def compute_in01_attestation() -> dict[str, Any]:
+    """Returns the IN01 attestation payload the QA methodology agent
+    surfaces under check_id 'IN01' (key 'audit_integration').
+
+    Verdict logic:
+      PASS — a team-member email ran a manual or pre_submission audit
+             on or after IN01_SUBMISSION_WINDOW_OPENS.
+      FAIL — no such run exists (no manual runs at all, last manual
+             run predates the window, or last manual run was triggered
+             by a non-team email — e.g. a developer testing locally).
+
+    A DB outage returns FAIL with an explicit 'database unavailable'
+    evidence string; the audit's overall verdict surfaces this rather
+    than silently passing.
+
+    The function lives here (not in agents/qa_agent.py) because the
+    QA agent is synchronous and this helper is async — the caller in
+    main.py runs it before invoking QAAgent.run_audit and passes the
+    result in via the new audit_attestation argument.
+    """
+    from config import PROJECT_TEAM_EMAILS
+
+    team_emails = list(PROJECT_TEAM_EMAILS)
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return {
+                "status": "FAIL",
+                "evidence": (
+                    "Database unavailable — could not verify whether a "
+                    "team member ran a manual full QA audit within the "
+                    "submission window. Re-check after the database is "
+                    "reachable."
+                ),
+            }
+        async with AsyncSessionLocal() as session:
+            # Search for a qualifying manual run by a team member,
+            # newest first. A match settles the attestation as PASS.
+            qualifying = await session.execute(text(
+                "SELECT id, triggered_by, triggered_at, "
+                "       triggered_by_email "
+                "FROM audit_runs "
+                "WHERE triggered_by = ANY(:trig) "
+                "  AND triggered_by_email = ANY(:emails) "
+                "  AND triggered_at >= :window "
+                "  AND status IN ('complete', 'partial') "
+                "ORDER BY triggered_at DESC LIMIT 1"
+            ), {"trig": list(_IN01_MANUAL_TRIGGERS),
+                "emails": team_emails,
+                "window": IN01_SUBMISSION_WINDOW_OPENS})
+            row = qualifying.fetchone()
+            if row:
+                return {
+                    "status": "PASS",
+                    "evidence": (
+                        f"Manual {row[1]} audit triggered by {row[3]} "
+                        f"on {_iso(row[2])} — within the submission "
+                        f"window opening {IN01_SUBMISSION_WINDOW_OPENS[:10]}. "
+                        f"The team's attestation that the full QA audit "
+                        f"was run by a project member, not the system "
+                        f"on cache-warm fire."
+                    ),
+                    "triggered_by": row[1],
+                    "triggered_by_email": row[3],
+                    "triggered_at": _iso(row[2]),
+                }
+
+            # No qualifying run — locate the most recent manual run of
+            # ANY age so the FAIL evidence is specific about WHY the
+            # attestation does not pass.
+            fallback = await session.execute(text(
+                "SELECT id, triggered_by, triggered_at, "
+                "       triggered_by_email "
+                "FROM audit_runs "
+                "WHERE triggered_by = ANY(:trig) "
+                "ORDER BY triggered_at DESC LIMIT 1"
+            ), {"trig": list(_IN01_MANUAL_TRIGGERS)})
+            recent = fallback.fetchone()
+        if recent is None:
+            return {
+                "status": "FAIL",
+                "evidence": (
+                    "No manual QA audit has been triggered by any user "
+                    "in the audit history. A project team member must "
+                    "click 'Run Full QA' (or Pre-Submission Audit) "
+                    "before the executive brief and presentation are "
+                    "submission-ready — the audit must be the team's "
+                    "act, not a system trigger."
+                ),
+            }
+        email = recent[3] or "<unknown>"
+        triggered_at = _iso(recent[2])
+        # Three distinct WHY clauses so the failure mode is legible:
+        # before-window, non-team-email, or both.
+        before_window = recent[2] is None or triggered_at < IN01_SUBMISSION_WINDOW_OPENS
+        non_team = email not in team_emails
+        if before_window and non_team:
+            why = (
+                f"the last manual audit was by {email} on {triggered_at}, "
+                f"which is both before the submission window opens "
+                f"({IN01_SUBMISSION_WINDOW_OPENS[:10]}) AND was not "
+                f"triggered by a project team member"
+            )
+        elif before_window:
+            why = (
+                f"the last manual audit by {email} was on {triggered_at}, "
+                f"before the submission window opens "
+                f"({IN01_SUBMISSION_WINDOW_OPENS[:10]})"
+            )
+        else:
+            why = (
+                f"the last manual audit by {email} was not triggered by "
+                f"a project team member; system-triggered or developer "
+                f"runs do not count as a team attestation"
+            )
+        return {
+            "status": "FAIL",
+            "evidence": (
+                f"IN01 attestation failed — {why}. A project team "
+                f"member must trigger a fresh full QA audit before the "
+                f"executive brief and presentation are submission-ready."
+            ),
+            "last_manual_run_at": triggered_at,
+            "last_manual_run_by": email,
+            "last_manual_trigger": recent[1],
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("in01_attestation_query_failed", error=str(exc))
+        return {
+            "status": "FAIL",
+            "evidence": (
+                f"Could not verify a team-driven manual audit run "
+                f"(query error: {exc}). Re-run the audit so the "
+                f"attestation lookup can complete."
+            ),
+        }
+
+
 # ── Orchestration ─────────────────────────────────────────────────────────────
 
 def _tally(findings: list[dict[str, Any]]) -> dict[str, int]:
