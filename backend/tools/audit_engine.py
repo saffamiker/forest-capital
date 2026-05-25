@@ -13,6 +13,7 @@ a run as the downloadable text report for the Analytical Appendix.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -451,6 +452,15 @@ async def get_latest_audit_run() -> dict[str, Any] | None:
 # fire, AND within the window leading up to the deliverable.
 
 IN01_SUBMISSION_WINDOW_OPENS = "2026-05-25T00:00:00+00:00"
+# Parsed once at module load — asyncpg's bound-parameter validator does
+# NOT coerce strings to timestamptz on the client side; passing the ISO
+# string as the :window parameter raises asyncpg.DataError. The string
+# form stays around because two evidence-line consumers use
+# IN01_SUBMISSION_WINDOW_OPENS[:10] for display (e.g. "2026-05-25"),
+# so converting the constant to a datetime would break those lines —
+# keep both forms, use the right one at each call site.
+_IN01_SUBMISSION_WINDOW_OPENS_DT: datetime = datetime.fromisoformat(
+    IN01_SUBMISSION_WINDOW_OPENS)
 # Trigger sources that count as a team-driven manual run. 'manual' is the
 # Run Full QA / Run Full Audit button on the QA tab; 'pre_submission' is
 # the Pre-Submission Audit button. The system-driven triggers
@@ -509,7 +519,9 @@ async def compute_in01_attestation() -> dict[str, Any]:
                 "ORDER BY triggered_at DESC LIMIT 1"
             ), {"trig": list(_IN01_MANUAL_TRIGGERS),
                 "emails": team_emails,
-                "window": IN01_SUBMISSION_WINDOW_OPENS})
+                # asyncpg requires a datetime here — the column is
+                # timestamptz and the driver does not cast strings.
+                "window": _IN01_SUBMISSION_WINDOW_OPENS_DT})
             row = qualifying.fetchone()
             if row:
                 return {
