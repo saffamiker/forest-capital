@@ -196,6 +196,12 @@ export function FindingRow({ f }: { f: AuditFinding }) {
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [ackError, setAckError] = useState<string | null>(null)
+  // Workstream F — revoke disclosure with a confirmation modal.
+  // The /unresolve endpoint already exists; the modal is added so a
+  // revoke is never one-click destructive of a recorded disclosure.
+  const [revokeOpen, setRevokeOpen] = useState(false)
+  const [revoking, setRevoking] = useState(false)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
 
   const isWarn = f.status === 'warning'
   // Acknowledged-WARN UI rollup (May 28 2026 addendum). When a WARN
@@ -226,6 +232,27 @@ export function FindingRow({ f }: { f: AuditFinding }) {
       setAckError('Could not save the acknowledgement.')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const revokeAck = async () => {
+    setRevoking(true)
+    setRevokeError(null)
+    try {
+      await axios.post(`/api/v1/audit/findings/${f.id}/unresolve`)
+      // Clear the local UI state — the row reverts to its
+      // pre-acknowledgement view. The report-readiness gate
+      // (workstream C) re-evaluates on next load because the row's
+      // resolved flag is back to false on the server.
+      setResolved(false)
+      setNote('')
+      setDraft('')
+      setEditing(false)
+      setRevokeOpen(false)
+    } catch {
+      setRevokeError('Could not revoke the acknowledgement — please retry.')
+    } finally {
+      setRevoking(false)
     }
   }
 
@@ -281,19 +308,30 @@ export function FindingRow({ f }: { f: AuditFinding }) {
                   {note && (
                     <div className="text-slate-300 leading-relaxed">{note}</div>
                   )}
-                  {/* Edit disclosure — reopens the inline editor
-                      pre-populated with the existing note. The resolve
-                      endpoint upserts (the UPDATE replaces note +
-                      resolved_by + resolved_at) so a second POST
-                      refreshes the row in place. Label kept aligned
-                      with the methodology surface's "Edit disclosure"
-                      button so both surfaces feel consistent. */}
-                  <button type="button"
-                    onClick={() => { setDraft(note); setEditing(true) }}
-                    data-testid={`audit-edit-disclosure-${f.id}`}
-                    className="text-electric hover:underline">
-                    Edit disclosure
-                  </button>
+                  {/* Edit / Revoke — Edit reopens the inline editor
+                      pre-populated with the existing note; Revoke
+                      removes the acknowledgement entirely via the
+                      /unresolve endpoint (after confirming through
+                      the modal below). The resolve endpoint upserts
+                      so a second Save UPDATEs in place; Revoke
+                      clears the row's resolved flag and resolved_by
+                      / resolved_at columns so the report-readiness
+                      gate (workstream C) sees the WARN as
+                      unreviewed again on next load. */}
+                  <div className="flex items-center gap-3">
+                    <button type="button"
+                      onClick={() => { setDraft(note); setEditing(true) }}
+                      data-testid={`audit-edit-disclosure-${f.id}`}
+                      className="text-electric hover:underline">
+                      Edit disclosure
+                    </button>
+                    <button type="button"
+                      onClick={() => { setRevokeError(null); setRevokeOpen(true) }}
+                      data-testid={`audit-revoke-disclosure-${f.id}`}
+                      className="text-danger hover:underline">
+                      Revoke disclosure
+                    </button>
+                  </div>
                 </div>
               )}
               {!resolved && !editing && (
@@ -335,6 +373,69 @@ export function FindingRow({ f }: { f: AuditFinding }) {
               )}
             </div>
           )}
+        </div>
+      )}
+      {revokeOpen && (
+        // Confirmation modal — Revoke is destructive of a recorded
+        // disclosure (the resolution_note is cleared on the server,
+        // and the report-readiness gate counts the WARN as unreviewed
+        // again). The confirm step prevents an accidental click on the
+        // Revoke link from dropping a deliberately-recorded
+        // acknowledgement without any undo.
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center
+                     bg-black/60 p-4"
+          onClick={() => { if (!revoking) setRevokeOpen(false) }}
+          data-testid={`audit-revoke-modal-${f.id}`}>
+          <div className="card p-5 max-w-md w-full space-y-3"
+               onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-white">
+              Revoke this disclosure?
+            </h3>
+            <p className="text-xs text-muted leading-relaxed">
+              This removes the recorded acknowledgement on{' '}
+              <span className="text-slate-200">L{f.layer} · {f.check_name}</span>.
+              The finding will be treated as an unreviewed warning again,
+              and the report-readiness gate will re-evaluate it on the
+              next load. The current disclosure note is shown below for
+              your reference and will be discarded.
+            </p>
+            {note && (
+              <div className="rounded border border-border bg-navy-900
+                              px-3 py-2 text-2xs text-slate-300
+                              leading-relaxed">
+                {note}
+              </div>
+            )}
+            {revokeError && (
+              <p className="text-2xs text-danger" role="status">
+                {revokeError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setRevokeOpen(false)}
+                disabled={revoking}
+                data-testid={`audit-revoke-cancel-${f.id}`}
+                className="px-3 py-1.5 rounded text-xs border border-border
+                           text-muted hover:text-white transition-colors
+                           disabled:opacity-50 disabled:cursor-not-allowed">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void revokeAck()}
+                disabled={revoking}
+                data-testid={`audit-revoke-confirm-${f.id}`}
+                className="px-3 py-1.5 rounded text-xs font-medium
+                           bg-danger/10 border border-danger/40 text-danger
+                           hover:bg-danger/20 transition-colors
+                           disabled:opacity-50 disabled:cursor-not-allowed">
+                {revoking ? 'Revoking…' : 'Revoke disclosure'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -33,6 +33,7 @@ vi.mock('axios')
 const mockedAxios = axios as unknown as {
   get: ReturnType<typeof vi.fn>
   post: ReturnType<typeof vi.fn>
+  delete: ReturnType<typeof vi.fn>
 }
 
 const PASSING_CHECK: QACheck = {
@@ -136,6 +137,9 @@ beforeEach(() => {
   })
   mockedAxios.post = vi.fn().mockResolvedValue({
     data: { ok: true, triage_item_id: 42 },
+  })
+  mockedAxios.delete = vi.fn().mockResolvedValue({
+    data: { ok: true, deleted: true },
   })
 })
 
@@ -620,4 +624,149 @@ describe('QAAuditPanel — Edit Disclosure (Workstream E)', () => {
       ).toBeInTheDocument()
     })
   })
+})
+
+
+describe('QAAuditPanel — Revoke Disclosure (Workstream F)', () => {
+  // After a check is Marked Intentional the team may later determine
+  // the override was premature. Revoke deletes the row via the new
+  // DELETE /api/v1/qa/findings/{check_id}/mark-intentional endpoint,
+  // after a confirmation step so a single click cannot drop the
+  // recorded judgement. The Action Required card re-renders on the
+  // next overrides fetch.
+
+  const seedOverride = (note: string) => {
+    mockedAxios.get = vi.fn().mockResolvedValue({
+      data: {
+        overrides: {
+          [METHODOLOGY_CHECK.check_id]: {
+            marked_at: '2026-05-22T12:00:00Z',
+            marked_by: 'ruurdsm@queens.edu',
+            note,
+            audit_run_hash: null,
+          },
+        },
+      },
+    })
+    useQAStore.setState({
+      result: buildAudit([METHODOLOGY_CHECK]),
+      loading: false,
+    })
+  }
+
+  it('renders a Revoke disclosure button on the override badge', async () => {
+    seedOverride('Original disclosure note for revoke flow.')
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+    const revoke = await screen.findByTestId(
+      `qa-revoke-disclosure-${METHODOLOGY_CHECK.check_id}`)
+    expect(revoke).toBeInTheDocument()
+    expect(revoke.textContent).toMatch(/Revoke disclosure/i)
+  })
+
+  it('opens a confirmation modal showing the current note', async () => {
+    const existing =
+      'SHOWNINMODALTOKEN — recorded disclosure shown in modal.'
+    seedOverride(existing)
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+    fireEvent.click(await screen.findByTestId(
+      `qa-revoke-disclosure-${METHODOLOGY_CHECK.check_id}`))
+
+    // The note appears both in the override badge ("Note: ...") AND
+    // in the modal's reference block. Scope the modal assertion to
+    // the modal node so the two renders don't collide.
+    const modal = screen.getByTestId(
+      `qa-revoke-disclosure-modal-${METHODOLOGY_CHECK.check_id}`)
+    expect(modal).toBeInTheDocument()
+    expect(within(modal).getByText(/SHOWNINMODALTOKEN/))
+      .toBeInTheDocument()
+    // No DELETE fires from opening — confirmation is required.
+    expect(mockedAxios.delete).not.toHaveBeenCalled()
+  })
+
+  it('Cancel dismisses the modal without firing DELETE', async () => {
+    seedOverride('Existing disclosure note.')
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+    fireEvent.click(await screen.findByTestId(
+      `qa-revoke-disclosure-${METHODOLOGY_CHECK.check_id}`))
+    fireEvent.click(screen.getByTestId(
+      `qa-revoke-disclosure-cancel-${METHODOLOGY_CHECK.check_id}`))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId(
+        `qa-revoke-disclosure-modal-${METHODOLOGY_CHECK.check_id}`,
+      )).not.toBeInTheDocument()
+    })
+    expect(mockedAxios.delete).not.toHaveBeenCalled()
+  })
+
+  it('Confirm fires DELETE on the methodology endpoint', async () => {
+    seedOverride('About to be revoked.')
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+    fireEvent.click(await screen.findByTestId(
+      `qa-revoke-disclosure-${METHODOLOGY_CHECK.check_id}`))
+    fireEvent.click(screen.getByTestId(
+      `qa-revoke-disclosure-confirm-${METHODOLOGY_CHECK.check_id}`))
+
+    await waitFor(() => {
+      expect(mockedAxios.delete).toHaveBeenCalledWith(
+        `/api/v1/qa/findings/${METHODOLOGY_CHECK.check_id}/mark-intentional`,
+      )
+    })
+  })
+
+  it('after a successful revoke the panel re-fetches overrides and surfaces the Action Required card again',
+    async () => {
+      const fetched: string[] = []
+      mockedAxios.get = vi.fn().mockImplementation(() => {
+        fetched.push('fetch')
+        if (fetched.length === 1) {
+          return Promise.resolve({
+            data: {
+              overrides: {
+                [METHODOLOGY_CHECK.check_id]: {
+                  marked_at: '2026-05-22T12:00:00Z',
+                  marked_by: 'ruurdsm@queens.edu',
+                  note: 'About to be revoked.',
+                  audit_run_hash: null,
+                },
+              },
+            },
+          })
+        }
+        // After revoke — the row is gone server-side.
+        return Promise.resolve({ data: { overrides: {} } })
+      })
+      useQAStore.setState({
+        result: buildAudit([METHODOLOGY_CHECK]),
+        loading: false,
+      })
+      render(<QAAuditPanel />)
+      fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+
+      // Initial overrides fetch.
+      await waitFor(() => expect(fetched.length).toBe(1))
+
+      fireEvent.click(await screen.findByTestId(
+        `qa-revoke-disclosure-${METHODOLOGY_CHECK.check_id}`))
+      fireEvent.click(screen.getByTestId(
+        `qa-revoke-disclosure-confirm-${METHODOLOGY_CHECK.check_id}`))
+
+      // The panel re-queries overrides after a successful revoke.
+      await waitFor(() => expect(fetched.length).toBeGreaterThanOrEqual(2))
+      // The Action Required card is back (the override badge is gone)
+      // — the Mark as Intentional button re-renders because the
+      // override no longer exists.
+      await waitFor(() => {
+        expect(screen.getByTestId(
+          `qa-intentional-${METHODOLOGY_CHECK.check_id}`,
+        )).toBeInTheDocument()
+      })
+      expect(screen.queryByTestId(
+        `qa-intentional-badge-${METHODOLOGY_CHECK.check_id}`,
+      )).toBeNull()
+    })
 })

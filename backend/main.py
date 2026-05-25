@@ -7521,6 +7521,77 @@ async def qa_mark_intentional(
                             detail=f"Mark intentional failed (ref: {ref})")
 
 
+@app.delete("/api/v1/qa/findings/{check_id}/mark-intentional")
+@limiter.limit("30/minute")
+async def qa_revoke_intentional(
+    request: Request,
+    check_id: str,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Revokes a previously-recorded intentional override.
+
+    Workstream F (May 28 2026) — when the team later determines that a
+    finding is not actually intentional after all, this endpoint removes
+    the qa_intentional_overrides row. The QA panel's Confirmed Intentional
+    badge disappears and the original Action Required card re-renders on
+    the next audit read. The report-readiness gate (workstream C) re-
+    evaluates the next time it loads, so a revoked disclosure stops
+    counting as resolved.
+
+    Returns 200 with deleted=true on a successful revoke, 200 with
+    deleted=false when no override existed (idempotent — a revoke on
+    nothing is not an error). 422 on a malformed check_id. 503 if the
+    database is unreachable.
+
+    Project team only — mirrors the gating on mark-intentional.
+    """
+    if not check_id or len(check_id) > 20:
+        raise HTTPException(status_code=422,
+                            detail="check_id must be 1-20 chars")
+    email = session.get("email") or "unknown"
+    try:
+        from sqlalchemy import text as _text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            raise HTTPException(status_code=503,
+                                detail="Database unavailable")
+        async with AsyncSessionLocal() as conn:
+            r = await conn.execute(_text(
+                "DELETE FROM qa_intentional_overrides "
+                "WHERE check_id = :cid "
+                "RETURNING id, marked_by"
+            ), {"cid": check_id})
+            row = r.fetchone()
+            await conn.commit()
+
+        if row is None:
+            # Idempotent — a revoke on nothing is not an error. The
+            # frontend can fire DELETE without first checking that an
+            # override exists.
+            log.info("qa_revoke_intentional_noop",
+                     check_id=check_id, by=email)
+            return {"ok": True, "check_id": check_id, "deleted": False}
+
+        log.info("qa_revoke_intentional_recorded",
+                 check_id=check_id, by=email,
+                 override_id=int(row[0]) if row[0] else None,
+                 was_marked_by=row[1])
+        return {
+            "ok": True,
+            "check_id": check_id,
+            "deleted": True,
+            "revoked_by": email,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("qa_revoke_intentional_failed", ref=ref, error=str(exc))
+        raise HTTPException(status_code=500,
+                            detail=f"Revoke intentional failed (ref: {ref})")
+
+
 @app.get("/api/v1/qa/intentional-overrides")
 @limiter.limit("60/minute")
 async def qa_intentional_overrides_list(

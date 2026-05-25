@@ -4,7 +4,7 @@
  * Focused on the WARN acknowledge/resolve workflow on a finding row.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 
 vi.mock('axios', () => ({ default: { post: vi.fn() } }))
 
@@ -146,4 +146,78 @@ describe('AuditPanel — Edit Disclosure (Workstream E)', () => {
     // The Edit disclosure button is visible again.
     expect(screen.getByTestId('audit-edit-disclosure-5')).toBeInTheDocument()
   })
+})
+
+
+describe('AuditPanel — Revoke Disclosure (Workstream F)', () => {
+  // After a WARN is acknowledged the team may later determine the
+  // disclosure was premature. Revoke deletes the recorded note via
+  // /unresolve, after a confirmation step so a single click cannot
+  // drop a recorded disclosure with no undo. The report-readiness
+  // gate (workstream C) re-evaluates the finding as unreviewed
+  // again because the server-side resolved flag is now false.
+
+  it('an acknowledged finding exposes a Revoke disclosure button', () => {
+    render(<FindingRow f={warnFinding({
+      resolved: true, resolution_note: 'Recorded disclosure entry.',
+    })} />)
+    fireEvent.click(screen.getByText(/Turnover direction/))
+    const revoke = screen.getByTestId('audit-revoke-disclosure-5')
+    expect(revoke).toBeInTheDocument()
+    expect(revoke.textContent).toMatch(/Revoke disclosure/i)
+  })
+
+  it('clicking Revoke opens a confirmation modal showing the current note',
+    () => {
+      const existing = 'SHOWNINMODALTOKEN — recorded disclosure note.'
+      render(<FindingRow f={warnFinding({
+        resolved: true, resolution_note: existing,
+      })} />)
+      fireEvent.click(screen.getByText(/Turnover direction/))
+      fireEvent.click(screen.getByTestId('audit-revoke-disclosure-5'))
+      // Modal mounts and surfaces the current note for reference so
+      // the user is not revoking blind. The note also still shows in
+      // the row beneath the modal — scope the assertion to the modal
+      // so the two renders don't collide.
+      const modal = screen.getByTestId('audit-revoke-modal-5')
+      expect(modal).toBeInTheDocument()
+      expect(within(modal).getByText(/SHOWNINMODALTOKEN/))
+        .toBeInTheDocument()
+      // No POST has fired — confirmation is required.
+      expect(mockedAxios.post).not.toHaveBeenCalled()
+    })
+
+  it('Cancel from the Revoke modal dismisses without firing /unresolve',
+    () => {
+      render(<FindingRow f={warnFinding({
+        resolved: true, resolution_note: 'Existing.',
+      })} />)
+      fireEvent.click(screen.getByText(/Turnover direction/))
+      fireEvent.click(screen.getByTestId('audit-revoke-disclosure-5'))
+      fireEvent.click(screen.getByTestId('audit-revoke-cancel-5'))
+      expect(mockedAxios.post).not.toHaveBeenCalled()
+      // Acknowledged state intact — the Revoke control is still there.
+      expect(screen.getByTestId('audit-revoke-disclosure-5')).toBeInTheDocument()
+      expect(screen.getAllByText('Acknowledged').length).toBeGreaterThan(0)
+    })
+
+  it('Confirm POSTs /unresolve and reverts the row to unreviewed',
+    async () => {
+      render(<FindingRow f={warnFinding({
+        resolved: true, resolution_note: 'About to be revoked.',
+      })} />)
+      fireEvent.click(screen.getByText(/Turnover direction/))
+      fireEvent.click(screen.getByTestId('audit-revoke-disclosure-5'))
+      fireEvent.click(screen.getByTestId('audit-revoke-confirm-5'))
+      await waitFor(() => expect(mockedAxios.post).toHaveBeenCalledWith(
+        '/api/v1/audit/findings/5/unresolve'))
+      // After Revoke the Acknowledge action becomes available again —
+      // the finding is back to its unreviewed state.
+      await waitFor(() => {
+        expect(screen.getByRole('button', { name: 'Acknowledge' }))
+          .toBeInTheDocument()
+      })
+      // The Revoke control is gone — there is nothing left to revoke.
+      expect(screen.queryByTestId('audit-revoke-disclosure-5')).toBeNull()
+    })
 })
