@@ -32,6 +32,7 @@ import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
 import { ReportReadinessBanner } from '../components/ReportReadinessIndicator'
 import SubmissionGuidePanel from '../components/SubmissionGuides'
 import TeamGate from '../components/TeamGate'
+import FloatingSectionNav from '../components/FloatingSectionNav'
 import type { DeliverableType } from '../types/advisor'
 import type { SectionDocType } from '../types/documents'
 
@@ -394,6 +395,11 @@ export default function Reports() {
 
   return (
     <div className="p-4 md:p-6 space-y-6 max-w-screen-xl mx-auto">
+      {/* Floating section navigator (May 25 2026) — same component
+          the QA tab and Regime Analysis use. Auto-discovers the
+          data-section-id markers on the major content panels below
+          and surfaces a click-to-jump TOC on the right edge. */}
+      <FloatingSectionNav pageKey="reports" />
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-xl font-semibold text-white">Reports & Deliverables</h1>
@@ -459,12 +465,20 @@ export default function Reports() {
           before clicking Generate. The DocumentGenerationPanel below
           surfaces the blocking modal when a click is intercepted by
           the gate. */}
-      <ReportReadinessBanner />
+      <div
+        data-section-id="report-readiness"
+        data-section-label="Submission Readiness">
+        <ReportReadinessBanner />
+      </div>
 
       {/* Generate Documents — one-click first-draft .docx / .pptx of the
           three graded deliverables, assembled server-side from real
           platform data. Sits above Team Activity per the spec. */}
-      <DocumentGenerationPanel />
+      <div
+        data-section-id="document-generation"
+        data-section-label="Generate Documents">
+        <DocumentGenerationPanel />
+      </div>
 
       {/* Report Writer — verified-data midpoint paper flow with [BOB]
           callout resolution, AI iteration toolbar, academic review
@@ -474,6 +488,8 @@ export default function Reports() {
         tooltip="The report writer is available to the project team">
         <section
           data-tour="report-writer-entry"
+          data-section-id="report-writer"
+          data-section-label="Report Writer"
           className="card p-4 border-l-4 border-l-electric-blue">
           <div className="flex items-start gap-3">
             <FileText className="w-5 h-5 text-electric-blue flex-shrink-0 mt-0.5" />
@@ -507,7 +523,11 @@ export default function Reports() {
           deliverable and the AI-use narrative, so it leads the page.
           Independent of the deliverables manifest — renders regardless of
           whether the manifest loaded. */}
-      <TeamActivityPanel />
+      <div
+        data-section-id="team-activity"
+        data-section-label="Team Activity">
+        <TeamActivityPanel />
+      </div>
 
       {/* Academic documents moved to Settings (commit 5/7). A muted info
           banner points there; the hash anchor scrolls to the section. */}
@@ -543,7 +563,9 @@ export default function Reports() {
 
       {!loading && manifest && (
         <>
-          <section>
+          <section
+            data-section-id="bob-deliverables"
+            data-section-label="Bob's Deliverables">
             <div className="flex items-baseline gap-3 mb-3">
               <h2 className="text-white font-semibold text-sm">
                 Bob's Deliverables
@@ -582,7 +604,9 @@ export default function Reports() {
             </div>
           </section>
 
-          <section>
+          <section
+            data-section-id="molly-deliverables"
+            data-section-label="Molly's Deliverables">
             <div className="flex items-baseline gap-3 mb-3">
               <h2 className="text-white font-semibold text-sm">
                 Molly's Deliverables

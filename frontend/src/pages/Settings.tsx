@@ -27,6 +27,7 @@ import AcademicDocumentsPanel from '../components/AcademicDocumentsPanel'
 import UserManagementPanel from '../components/UserManagementPanel'
 import WarmAnalyticsCacheButton from '../components/admin/WarmAnalyticsCacheButton'
 import { TestResultsSection, TestAdminSections } from '../components/TestRunnerSettings'
+import FloatingSectionNav from '../components/FloatingSectionNav'
 import TeamGate from '../components/TeamGate'
 import { useIsTeamMember, useIsSysadmin, useCanAccessTestPanel } from '../hooks/usePermissions'
 
@@ -40,8 +41,16 @@ interface SettingsSectionProps {
 function SettingsSection({ id, title, description, children }: SettingsSectionProps) {
   // scroll-mt keeps the heading clear of the fixed 56px nav bar when a
   // hash anchor scrolls the section to the top of the viewport.
+  // data-section-id/label feed the FloatingSectionNav mounted on
+  // this page (May 25 2026) — clicking a nav entry scrolls to this
+  // section, and the IntersectionObserver highlights the active row
+  // as the user scrolls through the page.
   return (
-    <section id={id} className="scroll-mt-20">
+    <section
+      id={id}
+      data-section-id={id}
+      data-section-label={title}
+      className="scroll-mt-20">
       <h2 className="text-base font-semibold text-white">{title}</h2>
       <p className="text-xs text-muted mt-0.5">{description}</p>
       <div className="border-t border-border mt-3 pt-4">{children}</div>
@@ -472,6 +481,12 @@ export default function Settings() {
 
   return (
     <div className="p-4 md:p-6 max-w-screen-md mx-auto space-y-8">
+      {/* Floating section navigator (May 25 2026) — same component
+          the QA tab and Regime Analysis use. Auto-discovers sections
+          via the data-section-id attributes the SettingsSection
+          helper now emits. Suppresses itself on a page with fewer
+          than three discovered sections. */}
+      <FloatingSectionNav pageKey="settings" />
       <div>
         <h1 className="text-xl font-semibold text-white">Settings</h1>
         <p className="text-sm text-muted mt-1">
