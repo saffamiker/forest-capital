@@ -5,6 +5,7 @@ Dev mode  → magic link URL printed to terminal (no email sent).
 Prod mode → magic link sent via SendGrid.
 """
 from __future__ import annotations
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
