@@ -6736,12 +6736,37 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
             log.info("qa_audit_running",
                      strategy_hash=qa_hash[:8] if qa_hash else "unknown")
 
+            # AN01 / AN04 pre-flight (May 24 2026). Fetch the
+            # Carhart loadings and transition matrix rows from
+            # analytics_metrics_cache BEFORE the deterministic checks
+            # run; trigger refresh on miss/incomplete. The QA audit
+            # should never WARN on data the platform could have
+            # computed itself.
+            try:
+                from tools.precomputed_analytics import (
+                    ensure_qa_data_complete,
+                )
+                analytics_cache = await ensure_qa_data_complete(qa_hash)
+                if analytics_cache.get("refresh_triggered"):
+                    log.info(
+                        "qa_preflight_refreshed",
+                        triggered=analytics_cache["refresh_triggered"],
+                        completeness=analytics_cache["completeness"],
+                    )
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("qa_preflight_error", error=str(_exc))
+                analytics_cache = None
+
             # Seed the per-request usage bucket before the QA
             # agent's call_claude invocations so their token usage
             # is captured.
             start_usage_capture()
             qa = QAAgent()
-            audit = qa.run_audit(strategy_results, run_full_checklist=True)
+            audit = qa.run_audit(
+                strategy_results,
+                run_full_checklist=True,
+                analytics_cache=analytics_cache,
+            )
 
             # Persist the full audit to qa_results_cache so the next
             # /api/qa/audit call within the TTL window short-circuits
