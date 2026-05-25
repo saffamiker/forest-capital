@@ -120,8 +120,10 @@ function mountTabs() {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  // Default mocks for the other three tabs/sections so a click into
-  // them does not throw. Each branch is overridable per test.
+  // Default mocks for every tab/section so a click into any tab does
+  // not throw. Each branch is overridable per test.
+  // May 24 2026 — added /team-progress (the new default tab in the
+  // UAT shared-visibility view).
   mockedAxios.get = vi.fn().mockImplementation((url: string) => {
     if (url === '/api/v1/testing/issue-tracker') {
       return Promise.resolve({ data: { issues: SAMPLE } })
@@ -134,6 +136,14 @@ beforeEach(() => {
     }
     if (url === '/api/v1/testing/triage') {
       return Promise.resolve({ data: { reports: [] } })
+    }
+    if (url === '/api/v1/testing/team-progress') {
+      return Promise.resolve({ data: {
+        team_emails: [], members: {},
+      }})
+    }
+    if (url === '/api/v1/testing/suggestions/by-failure') {
+      return Promise.resolve({ data: { by_failure: {} } })
     }
     return Promise.reject(new Error(`Unexpected GET: ${url}`))
   })
@@ -151,9 +161,11 @@ async function openTracker() {
 // ── Tabs ─────────────────────────────────────────────────────────────────────
 
 describe('Failure Reports tabs', () => {
-  it('renders three tabs: Failure Reports, Feedback Backlog, Issue Tracker',
+  it('renders four tabs: Team Progress, Failure Reports, Feedback Backlog, Issue Tracker',
     () => {
       mountTabs()
+      expect(screen.getByRole('button', { name: /team progress/i }))
+        .toBeInTheDocument()
       expect(screen.getByRole('button', { name: /failure reports/i }))
         .toBeInTheDocument()
       expect(screen.getByRole('button', { name: /feedback backlog/i }))
@@ -162,10 +174,12 @@ describe('Failure Reports tabs', () => {
         .toBeInTheDocument()
     })
 
-  it('defaults to the Failure Reports tab', () => {
+  it('defaults to the Team Progress tab', () => {
+    // May 24 2026 — UAT shared visibility made Team Progress the
+    // default tab so opening Test Administration immediately shows
+    // who's where in their UAT pass.
     mountTabs()
-    // The Failure Reports description copy is visible by default.
-    expect(screen.getByText(/every failed step across all testers/i))
+    expect(screen.getByText(/each team member's uat progress in real time/i))
       .toBeInTheDocument()
     // The Issue Tracker description is NOT yet.
     expect(screen.queryByText(/lifecycle of every reported failure/i))

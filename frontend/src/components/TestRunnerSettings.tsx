@@ -20,7 +20,7 @@ import {
 import axios from 'axios'
 import {
   Check, X, SkipForward, Circle, RefreshCw, Download, AlertTriangle,
-  Loader2, ChevronDown, ChevronRight, ExternalLink, Search,
+  Loader2, ChevronDown, ChevronRight, ExternalLink, Search, Activity,
 } from 'lucide-react'
 import { TEST_SCRIPTS, getTestScript } from '../constants/testScripts'
 import { startTestRun } from '../lib/testRunnerBus'
@@ -31,6 +31,7 @@ import {
   type PRSuggestion,
 } from './SuggestedResolutions'
 import { useIsSysadmin } from '../hooks/usePermissions'
+import { TeamProgressBlock } from './TeamProgressBlock'
 
 type StepResult = 'pass' | 'fail' | 'skip'
 
@@ -2116,8 +2117,15 @@ export function TestResultsSection() {
 // content lives in its own component, mounted only when active so a
 // tab switch never refetches the others' data unnecessarily.
 function FailureFeedbackTabs() {
-  type Tab = 'failures' | 'feedback' | 'tracker'
-  const [tab, setTab] = useState<Tab>('failures')
+  // May 24 2026 — UAT shared visibility (the user's "PRIORITY" ask
+  // after PR #131 closed UAT #119). The Team Progress tab is now the
+  // FIRST tab and the default view: when Michael or Bob or Molly opens
+  // Test Administration they see who is where in their UAT pass before
+  // they see the failure backlog. Polls /team-progress every 15s so a
+  // fresh check-off surfaces in the next polling window across every
+  // logged-in viewer.
+  type Tab = 'team' | 'failures' | 'feedback' | 'tracker'
+  const [tab, setTab] = useState<Tab>('team')
 
   const tabButton = (key: Tab, label: string, icon: React.ReactNode) => (
     <button key={key} type="button" onClick={() => setTab(key)}
@@ -2134,6 +2142,8 @@ function FailureFeedbackTabs() {
   return (
     <div>
       <div className="flex items-center gap-1 border-b border-border">
+        {tabButton('team', 'Team Progress',
+          <Activity className="w-3.5 h-3.5 text-success" />)}
         {tabButton('failures', 'Failure Reports',
           <AlertTriangle className="w-3.5 h-3.5 text-danger" />)}
         {tabButton('feedback', 'Feedback Backlog', null)}
@@ -2141,6 +2151,16 @@ function FailureFeedbackTabs() {
           <Search className="w-3.5 h-3.5 text-electric" />)}
       </div>
       <div className="pt-3">
+        {tab === 'team' && (
+          <div>
+            <p className="text-2xs text-muted mb-2">
+              Each team member's UAT progress in real time — read-only,
+              no one can attest a step for another tester. Polls every
+              15 seconds.
+            </p>
+            <TeamProgressBlock />
+          </div>
+        )}
         {tab === 'failures' && (
           <div>
             <p className="text-2xs text-muted mb-2">

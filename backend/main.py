@@ -5019,6 +5019,30 @@ async def testing_summary(session: dict = Depends(require_team_member)):
     return {"summary": await get_summary(email)}
 
 
+@app.get("/api/v1/testing/team-progress")
+async def testing_team_progress(
+    session: dict = Depends(require_permission("view_uat_status")),
+):
+    """Shared UAT progress across every team member — backs the
+    Settings → UAT Team Progress dashboard (May 24 2026).
+
+    Permission: view_uat_status (carried by team_member and sysadmin
+    per the UAT #119 split). READ-ONLY; the frontend cannot attest
+    steps for another tester through this route — only
+    /api/v1/testing/results (require_team_member, scoped to the
+    caller's own email) accepts attestations.
+
+    Real-time: the frontend polls every 15s. The response is small
+    (per-user per-script step-id lists + 4 scalar fields) so the
+    cost is bounded; one round-trip per 15s per logged-in viewer.
+
+    Fail-open: a DB outage returns the team list with empty progress
+    so the frontend renders a per-member card at 0%, never a blank.
+    """
+    from tools.test_runner import get_team_progress
+    return await get_team_progress()
+
+
 @app.get("/api/v1/testing/failures")
 async def testing_failures(
     session: dict = Depends(require_permission("view_uat_status")),

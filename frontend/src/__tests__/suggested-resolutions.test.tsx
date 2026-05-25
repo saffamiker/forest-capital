@@ -361,6 +361,15 @@ describe('Failure Reports row badge', () => {
       if (url === '/api/v1/testing/issue-tracker') {
         return Promise.resolve({ data: { issues: [] } })
       }
+      // May 24 2026 — UAT shared visibility added a Team Progress
+      // tab that's the new default in TestAdminSections. The
+      // row-badge tests below click into "Failure Reports" so they
+      // need this mocked or the initial render rejects.
+      if (url === '/api/v1/testing/team-progress') {
+        return Promise.resolve({ data: {
+          team_emails: [], members: {},
+        } })
+      }
       return Promise.reject(new Error(`Unexpected GET: ${url}`))
     })
   })
@@ -368,7 +377,10 @@ describe('Failure Reports row badge', () => {
   it('renders the "Fix available — review" badge on a matched failure',
     async () => {
       mountTabs()
-      // Failure Reports tab is the default; wait for it to load.
+      // May 24 2026 — Team Progress is now the default tab; click
+      // into Failure Reports to reach the row-badge surface.
+      fireEvent.click(screen.getByRole('button',
+        { name: /failure reports/i }))
       await waitFor(() => expect(
         screen.getByText(/fix available — review/i)).toBeInTheDocument())
     })
@@ -376,6 +388,8 @@ describe('Failure Reports row badge', () => {
   it('does not render the badge on a failure without a suggestion',
     async () => {
       mountTabs()
+      fireEvent.click(screen.getByRole('button',
+        { name: /failure reports/i }))
       // Wait for both failures to render.
       await waitFor(() =>
         expect(screen.getByText('Markdown not rendering.'))
@@ -387,6 +401,8 @@ describe('Failure Reports row badge', () => {
 
   it('clicking the badge opens the scoped modal', async () => {
     mountTabs()
+    fireEvent.click(screen.getByRole('button',
+      { name: /failure reports/i }))
     await waitFor(() => expect(
       screen.getByText(/fix available — review/i)).toBeInTheDocument())
     fireEvent.click(screen.getByText(/fix available — review/i))

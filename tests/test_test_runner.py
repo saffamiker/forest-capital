@@ -129,6 +129,34 @@ class TestTestRunnerContract:
         assert client.get("/api/v1/testing/triage/latest",
                          headers=TEAM_HEADERS).status_code == 403
 
+    def test_team_progress_open_to_team_member(self):
+        # UAT shared visibility (May 24 2026) — view_uat_status gates
+        # the team-progress endpoint, so every team_member + sysadmin
+        # reads it, but a viewer (Dr. Panttser) is 403'd.
+        assert client.get("/api/v1/testing/team-progress",
+                          headers=ADMIN_HEADERS).status_code == 200
+        assert client.get("/api/v1/testing/team-progress",
+                          headers=TEAM_HEADERS).status_code == 200
+        assert client.get("/api/v1/testing/team-progress",
+                          headers=NON_TEAM_HEADERS).status_code == 403
+
+    def test_team_progress_response_shape(self):
+        # Every team member appears in the response even with no
+        # attestations — the dashboard renders a card per member,
+        # not a blank panel. The fail-open path returns the seeded
+        # team list when no DB is reachable so this test passes in CI.
+        resp = client.get("/api/v1/testing/team-progress",
+                          headers=ADMIN_HEADERS)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "team_emails" in body and isinstance(body["team_emails"], list)
+        assert "members" in body and isinstance(body["members"], dict)
+        assert "ruurdsm@queens.edu" in body["members"]
+        sample = body["members"]["ruurdsm@queens.edu"]
+        for k in ("email", "display_name", "scripts", "failure_count",
+                  "last_activity_at", "currently_testing"):
+            assert k in sample
+
     def test_results_endpoint_rejects_non_team(self):
         # An authenticated non-team user (Dr. Panttser) is gated out.
         resp = client.post("/api/v1/testing/results",
