@@ -63,7 +63,13 @@ _INTERACTION_TYPES = {"council", "academic_review", "qa", "document_upload",
                       # midpoint submission against the FNA 670 rubric.
                       # Defense Prep generates anticipated panel Q&A
                       # against the team's OWN current draft.
-                      "peer_review", "defense_prep"}
+                      "peer_review", "defense_prep",
+                      # ── May 25 2026 — rubric review on a draft. ──
+                      # The Writing Assistant panel's "Review Against
+                      # Rubric" button — a fast Gemini single-call pass
+                      # against the FNA 670 midpoint rubric. Distinct
+                      # from academic_review (the full council pass).
+                      "rubric_review"}
 _SESSION_TYPES = {"analytical", "testing"}
 
 
@@ -264,6 +270,50 @@ async def log_agent_interaction(
     except Exception as exc:  # noqa: BLE001
         log.warning("agent_interaction_insert_failed", error=str(exc))
         return False
+
+
+async def get_latest_academic_review_for_draft(
+    draft_id: int,
+) -> dict | None:
+    """
+    Returns the most recent academic_review row for this draft id, or
+    None when no row exists. Reads metadata->>'draft_id' against the
+    JSONB column with the int cast to a string (JSON has no integer
+    distinction). Fail-open — a database error returns None and the
+    caller treats the draft as having no review yet.
+
+    Used by the editor's status endpoint to render the auto-fired
+    review's score in the header on draft load.
+    """
+    if not _DB_AVAILABLE or not draft_id:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(
+                text(
+                    "SELECT user_email, timestamp, metadata, "
+                    " response_summary "
+                    "FROM agent_interactions "
+                    "WHERE interaction_type = 'academic_review' "
+                    "  AND metadata->>'draft_id' = :did "
+                    "ORDER BY timestamp DESC LIMIT 1"
+                ),
+                {"did": str(draft_id)},
+            )
+            found = row.fetchone()
+            if not found:
+                return None
+            return {
+                "user_email":       found[0],
+                "timestamp":        found[1].isoformat() if found[1] else None,
+                "metadata":         found[2] or {},
+                "response_summary": found[3],
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("get_latest_academic_review_for_draft_failed",
+                    draft_id=draft_id, error=str(exc))
+        return None
 
 
 # ── Writes — commits ──────────────────────────────────────────────────────────

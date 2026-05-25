@@ -3221,6 +3221,350 @@ async def editor_chat(
     return {"response": reply}
 
 
+# ── Rubric Review (May 25 2026) ──────────────────────────────────────────────
+#
+# Sends the current midpoint paper draft to Gemini with the full FNA 670
+# midpoint rubric. Returns a structured verdict — per-section pass/fail
+# against the rubric criteria, specific optional edits with reasoning,
+# and an overall readiness verdict. Read-only: the endpoint never
+# modifies the draft — it surfaces suggestions inline in the Writing
+# Assistant panel for the user to apply (or ignore) manually.
+#
+# Distinct from the Academic Review council pass: that endpoint runs
+# every council peer + the arbiter and is expensive. This endpoint is
+# a single fast Gemini call against an explicit rubric prompt — useful
+# for the quick "where am I against the rubric" check the user wants
+# before committing to a full review.
+
+_MIDPOINT_RUBRIC_PROMPT = (
+    "You are reviewing a graduate-finance midpoint paper against the "
+    "FNA 670 rubric. The paper is 3 pages, double-spaced, 12-point font, "
+    "750-900 words TOTAL, organised into four sections:\n"
+    "\n"
+    "  1. DATA AND METHODOLOGY (1 page, 235-285 words)\n"
+    "     - Identifies data sources and study period\n"
+    "     - Names the portfolio constraints (long-only, fully invested, "
+    "no cash, quarterly rebalancing)\n"
+    "     - Distinguishes static vs dynamic strategies\n"
+    "     - Names the Carhart four-factor attribution model\n"
+    "     - APA style, past tense, third person\n"
+    "\n"
+    "  2. PRELIMINARY RESULTS AND DIAGNOSTICS (1 page, 235-285 words)\n"
+    "     - INTERPRETS the results (does not merely list numbers)\n"
+    "     - Discusses the 2022 equity-bond correlation break explicitly\n"
+    "     - References summary statistics and regime-conditional "
+    "performance with specific values\n"
+    "     - Connects findings back to the research question\n"
+    "\n"
+    "  3. ROLES AND DIVISION OF LABOR (0.5 page, 110-135 words)\n"
+    "     - States each team member's role\n"
+    "     - Attributes documented contributions (commits, sessions, "
+    "documents)\n"
+    "     - Factual, no invented contributions\n"
+    "\n"
+    "  4. NEXT STEPS AND OPEN QUESTIONS (0.5 page, 110-135 words)\n"
+    "     - Forward-looking, not retrospective\n"
+    "     - Names specific areas for further investigation\n"
+    "     - Reflects the team's analytical priorities\n"
+    "\n"
+    "Return a structured JSON response with EXACTLY this shape — no "
+    "additional fields, no preamble:\n"
+    "\n"
+    "{\n"
+    '  "sections": {\n'
+    '    "methodology":  {"verdict": "pass" | "fail",\n'
+    '                     "reasoning": "1-3 sentences naming which '
+    'criteria were met and which were not"},\n'
+    '    "results":      {"verdict": "pass" | "fail", "reasoning": "..."},\n'
+    '    "roles":        {"verdict": "pass" | "fail", "reasoning": "..."},\n'
+    '    "next_steps":   {"verdict": "pass" | "fail", "reasoning": "..."}\n'
+    "  },\n"
+    '  "edits": [\n'
+    '    {"section": "methodology|results|roles|next_steps",\n'
+    '     "suggestion": "specific change to consider",\n'
+    '     "reasoning": "why this would strengthen the section"}\n'
+    "  ],\n"
+    '  "overall": {\n'
+    '    "verdict": "ready" | "needs_work" | "not_ready",\n'
+    '    "reasoning": "2-4 sentences summarising readiness"\n'
+    "  }\n"
+    "}\n"
+    "\n"
+    "VERDICT semantics:\n"
+    "  - section 'pass' — the section meets the rubric criteria. Minor "
+    "wordsmithing is fine; the substance is there.\n"
+    "  - section 'fail' — a substantive rubric criterion is unmet "
+    "(missing required content, wrong tense, no interpretation in "
+    "results, etc.). Be honest, not generous.\n"
+    "  - overall 'ready' — all four sections pass and the paper reads "
+    "cleanly as a 3-page midpoint draft.\n"
+    "  - overall 'needs_work' — sections substantially correct but "
+    "specific edits would strengthen the submission.\n"
+    "  - overall 'not_ready' — one or more sections fail; the draft is "
+    "not yet at submission quality.\n"
+    "\n"
+    "EDITS — provide 3-6 specific optional suggestions ordered by "
+    "impact. Each must name a section, a concrete change, and the "
+    "rubric reason. These are SUGGESTIONS — the team will choose what "
+    "to apply.\n"
+    "\n"
+    "Respond ONLY with the JSON object. No markdown fences, no preamble."
+)
+
+
+def _parse_rubric_review(raw: str) -> dict[str, object] | None:
+    """Best-effort JSON parse on a Gemini response. Strips ``` fences
+    and any preamble before / after the {…} block. Returns None on
+    unparseable input — the endpoint then falls back to a friendly
+    error rather than a 500.
+    """
+    import json as _json
+    text = (raw or "").strip()
+    # Strip ```json fences if Gemini ignored the no-fence instruction.
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+    # Extract the outermost {…} block if there is any preamble.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        return _json.loads(text[start:end + 1])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _rubric_review_unavailable_payload(reason: str) -> dict[str, object]:
+    """Used by the test env path AND the no-Gemini-key / parse-failure
+    fall-throughs. Returns a payload that renders cleanly in the UI
+    without claiming a pass/fail verdict the model didn't produce."""
+    return {
+        "sections": {
+            "methodology": {"verdict": "fail", "reasoning": reason},
+            "results":     {"verdict": "fail", "reasoning": reason},
+            "roles":       {"verdict": "fail", "reasoning": reason},
+            "next_steps":  {"verdict": "fail", "reasoning": reason},
+        },
+        "edits": [],
+        "overall": {"verdict": "not_ready", "reasoning": reason},
+        "unavailable": True,
+    }
+
+
+@app.post("/api/v1/documents/drafts/{draft_id}/rubric-review")
+@limiter.limit("10/hour")
+async def rubric_review(
+    draft_id: int, request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Sends the current draft to Gemini with the midpoint paper rubric
+    and returns a structured per-section verdict + suggested edits.
+    Read-only — never modifies the draft. The Writing Assistant panel
+    surfaces the verdict inline so the user can decide which edits to
+    apply manually.
+
+    Scoped to midpoint_paper drafts — other document types (executive
+    brief, presentation deck/script) have their own rubrics not yet
+    encoded here.
+    """
+    import asyncio
+
+    from tools.editor_drafts import get_draft
+    draft = await get_draft(draft_id)
+    if draft is None or draft.get("owner_email") != session.get("email"):
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    if draft.get("document_type") != "midpoint_paper":
+        raise HTTPException(
+            status_code=422,
+            detail="Rubric review is only available for midpoint paper "
+                   "drafts.")
+
+    content_text = (draft.get("content_text") or "").strip()
+    if not content_text:
+        return _rubric_review_unavailable_payload(
+            "The draft is empty — write some content before requesting "
+            "a rubric review.")
+
+    if ENVIRONMENT == "test":
+        # Deterministic shape so the frontend test can pin the render
+        # without hitting Gemini. Mirrors the structured response a
+        # real run would produce.
+        return {
+            "sections": {
+                "methodology": {"verdict": "pass",
+                                "reasoning": "Methodology rubric criteria met."},
+                "results":     {"verdict": "fail",
+                                "reasoning": "Results lack explicit "
+                                             "interpretation."},
+                "roles":       {"verdict": "pass",
+                                "reasoning": "Roles attributed factually."},
+                "next_steps":  {"verdict": "pass",
+                                "reasoning": "Forward-looking and specific."},
+            },
+            "edits": [
+                {"section": "results",
+                 "suggestion": "Add one sentence interpreting the "
+                               "post-2022 Sharpe gap.",
+                 "reasoning": "Rubric requires interpretation, not "
+                              "listing."},
+            ],
+            "overall": {"verdict": "needs_work",
+                        "reasoning": "Three sections pass; results "
+                                     "needs interpretation."},
+        }
+
+    if not os.getenv("GOOGLE_API_KEY"):
+        return _rubric_review_unavailable_payload(
+            "Rubric review is configured to run on Gemini but the "
+            "GOOGLE_API_KEY env var is not set.")
+
+    user_message = (
+        "Review the following midpoint paper draft against the rubric. "
+        "The draft text is the four sections concatenated in order; the "
+        "[[BOB: …]] markers are placeholders that the user will resolve "
+        "before submission (treat them as 'work in progress' rather "
+        "than rubric failures, but note when a placeholder is the only "
+        "content for a required topic).\n\n"
+        f"---\n{content_text[:12000]}\n---\n\n"
+        "Respond with the JSON object specified in the instructions. "
+        "No preamble, no markdown fences."
+    )
+
+    from agents.usage import start_usage_capture
+    start_usage_capture()
+    try:
+        from agents.base import GEMINI_MODEL, call_gemini
+        raw = await asyncio.to_thread(
+            call_gemini, GEMINI_MODEL,
+            _MIDPOINT_RUBRIC_PROMPT, user_message,
+            trigger="rubric_review",
+        )
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("rubric_review_failed",
+                  ref=ref, error=str(exc), draft_id=draft_id)
+        return _rubric_review_unavailable_payload(
+            f"Gemini call failed (ref: {ref}). Retry in a moment.")
+
+    parsed = _parse_rubric_review(raw or "")
+    if parsed is None or "sections" not in parsed or "overall" not in parsed:
+        log.warning("rubric_review_parse_failed",
+                    draft_id=draft_id, raw_head=(raw or "")[:200])
+        return _rubric_review_unavailable_payload(
+            "The rubric review came back in an unexpected format. "
+            "Retry — Gemini occasionally drops the JSON shape.")
+
+    _log_interaction_bg(
+        request, session, "rubric_review",
+        question_text=f"Rubric review for draft {draft_id}",
+        response_summary=(parsed.get("overall") or {}).get(
+            "reasoning", "")[:500],
+        metadata={"draft_id": draft_id,
+                  "overall_verdict": (parsed.get("overall") or {}).get("verdict")})
+    return parsed
+
+
+# ── Auto-fired Academic Review status for a draft (May 25 2026) ───────────────
+#
+# After midpoint or executive-brief generation, an Academic Review
+# fires in the background and writes its parsed score into
+# agent_interactions.metadata.draft_id. The editor reads this
+# endpoint on draft load (and polls while it reads `running`) to
+# render the header score pill and, for midpoint, the advisory
+# banner when the score lands below 6.0.
+
+@app.get("/api/v1/documents/drafts/{draft_id}/academic-review-status")
+async def get_draft_academic_review_status(
+    draft_id: int, session: dict = Depends(require_team_member),
+):
+    """
+    Returns the latest auto-fired Academic Review score for a draft:
+      {
+        status:           "complete" | "running" | "missing",
+        score:            float | None,        # 0-10
+        rating:           str | None,          # Strong | Developing | Needs Work
+        advisory:         bool,                # midpoint + score < 6.0
+        document_type:    str,                 # midpoint_paper | executive_brief
+        section_ratings:  dict,                # {section_key: rating}
+        run_at:           ISO timestamp | None,
+        threshold:        6.0,                 # the midpoint advisory cutoff
+      }
+
+    "missing" — no auto-review has landed yet for this draft. The
+    generation flow always schedules one, so this means either the
+    background task is still in flight (the editor polls) or it
+    silently failed (the editor stops polling after a few attempts).
+    "running" mirrors "missing" today — the placeholder gives us
+    room to wire a heartbeat row later without changing the wire
+    format.
+
+    404 if the draft does not exist or the caller is not the owner.
+    """
+    from tools.editor_drafts import get_draft
+    from tools.academic_review_score import ADVISORY_THRESHOLD
+
+    draft = await get_draft(draft_id)
+    if draft is None or draft.get("owner_email") != session.get("email"):
+        raise HTTPException(status_code=404, detail="Draft not found.")
+
+    document_type = draft.get("document_type") or ""
+    empty = {
+        "status":          "missing",
+        "score":           None,
+        "rating":          None,
+        "advisory":        False,
+        "document_type":   document_type,
+        "section_ratings": {},
+        "run_at":          None,
+        "threshold":       ADVISORY_THRESHOLD,
+    }
+
+    # Auto-review only fires for these two document types. A deck
+    # or script draft has no review to surface; return the empty
+    # shape so the frontend can hide the indicator cleanly.
+    if document_type not in ("midpoint_paper", "executive_brief"):
+        return empty
+
+    try:
+        from tools.activity_log import get_latest_academic_review_for_draft
+        latest = await get_latest_academic_review_for_draft(draft_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_review_status_read_failed",
+                    draft_id=draft_id, error=str(exc))
+        return empty
+
+    if latest is None:
+        return empty
+
+    meta = latest.get("metadata") or {}
+    score = meta.get("score")
+    # Advisory is computed off the live score and the document type —
+    # don't trust a stale `advisory` field in the metadata in case the
+    # threshold ever moves. The threshold is the same source of truth
+    # the frontend reads from this response.
+    advisory = (
+        document_type == "midpoint_paper"
+        and isinstance(score, (int, float))
+        and score < ADVISORY_THRESHOLD
+    )
+    return {
+        "status":          "complete",
+        "score":           score,
+        "rating":          meta.get("overall_rating"),
+        "advisory":        advisory,
+        "document_type":   document_type,
+        "section_ratings": meta.get("section_ratings") or {},
+        "run_at":          latest.get("timestamp"),
+        "threshold":       ADVISORY_THRESHOLD,
+    }
+
+
 @app.post("/api/v1/documents/script/generate")
 @limiter.limit("6/minute")
 async def generate_presentation_script(
@@ -7928,44 +8272,26 @@ _PPTX_MEDIA = ("application/vnd.openxmlformats-officedocument."
 # are split by the section they belong in; the Academic Review arbiter
 # scores the same set (agents/academic_review.py).
 _MIDPOINT_S1_KEY_FINDINGS = (
-    "\n\nKEY FINDINGS — Section 1 must state each of these disclosures "
-    "explicitly:\n"
-    "(a) The 2022 equity-IG correlation regime break — the equity-IG "
-    "correlation shifted from approximately -0.05 (pre-2022) to +0.61 "
-    "(post-2022), a structural break in the diversification assumption "
-    "underlying traditional fixed-income allocation. Introduce it here as "
-    "the central finding of the project; it is developed in the Results "
-    "section.\n"
-    "(b) Shorter return histories — five strategies start later than the "
-    "2002-07 study period because of initialisation lookback windows: "
-    "MIN_VARIANCE, BLACK_LITTERMAN and MAX_SHARPE_ROLLING begin "
-    "approximately 2005-07 (36-month window), MOMENTUM_ROTATION "
-    "approximately 2003-07 (12-month window), and REGIME_SWITCHING "
-    "approximately 2002-10 (3-month window). Their comparative metrics "
-    "cover their actual data period, not the full 2002-2026 study "
-    "period.\n"
-    "(c) Independent statistical audit — every metric in the project was "
-    "independently recomputed from raw data by a separate AI model "
-    "(Claude Opus) with no access to the platform's intermediate "
-    "calculations; the audit found zero critical failures across 59 "
-    "checks, and the full audit report is included as an analytical "
-    "appendix. Cite this as evidence of analytical rigour.\n"
-    "(d) Data provenance — investment-grade bond data uses an LQD-to-BND "
-    "splice (LQD pre-2007, BND 2007 onward); high-yield data uses the "
-    "BAMLHYH0A0HYM2TRIV total-return index through December 2025, "
-    "extended via the HYG ETF proxy (approximately 0.04% per month "
-    "tracking error — a documented source change) from January 2026; the "
-    "risk-free rate uses the FRED DTB3 monthly series throughout; the "
-    "monthly series auto-extends from the historical baseline using live "
-    "market-data feeds.\n\n"
-    "METHODOLOGY HIGHLIGHTS — name each of these explicitly: the Carhart "
-    "four-factor model (four factors, MOM included — not a generic "
-    "three-factor model); the time-varying DTB3 risk-free rate (not a "
-    "fixed 4.5%); the Probabilistic Sharpe Ratio with 95% confidence "
-    "intervals; the Deflated Sharpe Ratio (correcting for ten trials "
-    "across ten strategies); the Benjamini-Hochberg FDR correction at "
-    "q < 0.005; and true one-way portfolio turnover from the "
-    "drift-inclusive weight schedule."
+    # May 25 2026 — TIGHTENED. The prior block was 306 prompt words
+    # covering 4 findings + 6 methodology highlights; against a
+    # 250-300 word output target the model was forced to bloat to
+    # mention everything. One sentence per finding, the three most
+    # distinctive methodology highlights only.
+    "\n\nKEY FINDINGS — introduce each in one sentence:\n"
+    "(a) The 2022 equity-IG correlation broke from roughly -0.05 to "
+    "+0.61 — the central finding of the project, developed in Results.\n"
+    "(b) Five strategies (MIN_VARIANCE, BLACK_LITTERMAN, "
+    "MAX_SHARPE_ROLLING, MOMENTUM_ROTATION, REGIME_SWITCHING) start "
+    "later than the 2002-07 study period because of lookback windows; "
+    "their metrics cover actual data periods.\n"
+    "(c) Every metric was independently recomputed by a separate AI "
+    "model (Claude Opus) with zero critical failures across 59 checks.\n"
+    "(d) Data: equity (SPY monthly), investment-grade (LQD-to-BND "
+    "splice), high-yield (BAMLHYH0A0HYM2TRIV through 2025; HYG ETF "
+    "proxy thereafter), risk-free (FRED DTB3).\n\n"
+    "METHODOLOGY HIGHLIGHTS — name explicitly: Carhart four-factor "
+    "attribution (MOM included), Benjamini-Hochberg FDR correction at "
+    "q < 0.005, and true one-way drift-inclusive portfolio turnover."
 )
 # Verification caveats appended to the document-section task prompts.
 # CAVEAT 2 — every external citation is preceded by a [[VERIFY CITATION]]
@@ -8010,29 +8336,29 @@ def _apply_draft_caveats(specs: list[dict]) -> list[dict]:
 
 
 _MIDPOINT_S2_KEY_FINDINGS = (
-    "\n\nKEY FINDINGS — present these in this order, the correlation "
-    "break FIRST:\n"
-    "(1) The 2022 correlation regime break is the central finding and "
-    "MUST be the first result discussed: the equity-IG correlation "
-    "shifted from approximately -0.05 (pre-2022) to +0.61 (post-2022) — "
-    "quote the pre/post values from the provided correlation_pre_post "
-    "data — and connect it to the divergence in strategy performance.\n"
-    "(2) Regime Switching is the only strategy that demonstrably adapts "
-    "to the post-2022 correlation environment; cite its post-2022 Sharpe "
-    "(approximately 0.2483) against the benchmark's post-2022 Sharpe, "
-    "using the actual values in the regime_conditional data.\n"
-    "(3) The FDR result — after Benjamini-Hochberg FDR correction across "
-    "all ten strategies (q < 0.005) no strategy achieves significance at "
-    "the corrected level; raw p-values range from 0.008 to 1.000. Frame "
-    "this as methodological honesty — preliminary evidence of "
-    "economically meaningful performance, NOT a failure and NOT a "
-    "positive significance claim.\n"
-    "(4) The efficient-frontier tangency portfolio concentrates "
-    "approximately 95.6% in high-yield bonds, reflecting HY's realised "
-    "risk-adjusted performance over the sample period. Disclose this "
-    "explicitly as a concentration risk that is sensitive to the "
-    "realised HY Sharpe and is not a strategic allocation recommendation "
-    "without out-of-sample validation."
+    # May 25 2026 — TRIMMED to the four most impactful themes per user
+    # spec (regime break, best Sharpe, OOS validation, diversification
+    # benefit). Dropped the FDR-correction and efficient-frontier
+    # concentration findings — interesting but secondary, and pushing
+    # the section above its 250-300 word target. One sentence per
+    # finding maximum.
+    "\n\nKEY FINDINGS — present these in this order, ONE SENTENCE EACH:\n"
+    "(1) Regime break: the equity-IG correlation shifted from "
+    "approximately -0.05 (pre-2022) to +0.61 (post-2022) — quote the "
+    "pre/post values from the correlation_pre_post data and connect to "
+    "the divergence in strategy performance.\n"
+    "(2) Best Sharpe: Regime Switching delivered the highest full-period "
+    "risk-adjusted return (approximately 0.63 vs the benchmark's 0.52) "
+    "by adapting to the correlation break — cite the actual values from "
+    "the summary_statistics data.\n"
+    "(3) OOS validation: in the post-2022 holdout window Regime "
+    "Switching's Sharpe (approximately 0.2483) materially exceeded the "
+    "benchmark's, confirming the result is not an in-sample artefact — "
+    "cite the regime_conditional data.\n"
+    "(4) Diversification benefit: static 60/40 underperformed in the "
+    "post-break period because the IG correlation flip removed the "
+    "diversification cushion; the dynamic regime-aware strategies "
+    "preserved it."
 )
 
 
@@ -8137,7 +8463,9 @@ async def _editor_export(editor_draft_id: int) -> Response:
 _generation_bg_tasks: set = set()
 
 
-async def _require_report_ready() -> None:
+async def _require_report_ready(
+    exclude_methodology_check_ids: set[str] | None = None,
+) -> None:
     """
     Workstream C report gate (May 28 2026). Raises 422 with a structured
     detail when either audit surface has unreviewed blocking items.
@@ -8148,13 +8476,21 @@ async def _require_report_ready() -> None:
     and shows them in a blocking modal so the user can navigate back to
     the audit panel and act on each.
 
+    exclude_methodology_check_ids (May 25 2026) — passed through to
+    compute_readiness so per-document advisory rules can downgrade a
+    specific methodology check. Midpoint generation passes {"IN02"} so
+    Academic Review completeness is advisory (the score is shown in the
+    editor instead of blocking generation); other deliverables keep the
+    full set of blockers.
+
     Fail-open: the readiness module returns empty lists on any read
     error, so a database outage or an empty audit history reports
     is_ready=true and the gate does not block.
     """
     from tools.report_readiness import compute_readiness, summarise_blockers
 
-    readiness = await compute_readiness()
+    readiness = await compute_readiness(
+        exclude_methodology_check_ids=exclude_methodology_check_ids)
     if readiness.get("is_ready"):
         return
     raise HTTPException(
@@ -8201,6 +8537,126 @@ def _start_generation_job(
         content={"job_id": job["job_id"], "status": "pending"})
 
 
+# ── Auto-fire Academic Review on generation (May 25 2026) ─────────────────────
+#
+# When a midpoint paper or executive brief generation completes, we
+# kick off a full Academic Review against the freshly-created editor
+# draft on a fire-and-forget background task. The review's score is
+# parsed (tools.academic_review_score) and stored in the interaction
+# row's metadata.draft_id field; the editor's status endpoint reads
+# it on draft load and renders the header pill + advisory banner.
+#
+# Latency: the full review fan-out (peers + arbiter via the harness)
+# takes ~60-90s. We deliberately schedule it AFTER the generation job
+# completes so the user sees the draft immediately; the score appears
+# in the editor when the background task finishes. The frontend polls
+# the status endpoint while it reads `running`.
+#
+# Fail-open: any review failure logs and skips — the draft is still
+# usable, the editor simply doesn't show a score.
+
+# Module-level set so spawned auto-fire tasks aren't GC'd mid-run.
+_AUTO_REVIEW_TASKS: set = set()
+
+
+async def _run_auto_academic_review(
+    draft_id: int, document_type: str, owner_email: str,
+) -> None:
+    """Runs an Academic Review against the draft and persists the
+    parsed score into agent_interactions.metadata so the editor can
+    surface it. Synchronous-style flow: gather context → peer fan-out
+    → arbiter → parse → log. Every step is wrapped — a failure logs
+    and the function returns cleanly without raising."""
+    import asyncio
+    try:
+        from agents.academic_review import (
+            gather_review_context, run_peer_fan_out, run_arbiter_with_harness,
+        )
+        from agents.harness import (
+            start_harness_capture, collect_harness_metrics,
+        )
+        from agents.usage import start_usage_capture
+        from tools.academic_review_score import compute_review_score
+        from tools.activity_log import log_agent_interaction
+
+        start_harness_capture()
+        start_usage_capture()
+        ctx = await gather_review_context(reviewer_email=owner_email)
+        context_block = ctx["context_block"]
+        multi_user = ctx.get("multi_user_activity", False)
+        n_strategies = ctx["analytics"].get("strategy_count")
+        peer_responses = await run_peer_fan_out(
+            context_block, multi_user, n_strategies)
+        arbiter_text = await asyncio.to_thread(
+            run_arbiter_with_harness, context_block, peer_responses,
+            multi_user, False, n_strategies)
+        scored = compute_review_score(arbiter_text)
+        agents = list(peer_responses.keys()) + ["academic_advisor"]
+        metadata: dict[str, Any] = {
+            "draft_id": draft_id,
+            "document_type": document_type,
+            "automatic": True,
+            "advisory": document_type == "midpoint_paper",
+            "score": scored["score"],
+            "overall_rating": scored["rating"],
+            "section_ratings": scored["section_ratings"],
+            "sections_rated": scored["sections_rated"],
+        }
+        harness_meta = collect_harness_metrics()
+        if harness_meta:
+            metadata["harness"] = harness_meta
+        await log_agent_interaction(
+            user_email=owner_email,
+            session_id=None,
+            session_type="analytical",
+            interaction_type="academic_review",
+            agents_involved=agents,
+            response_summary=arbiter_text,
+            metadata=metadata,
+        )
+        log.info(
+            "auto_academic_review_complete",
+            draft_id=draft_id, document_type=document_type,
+            score=scored["score"], rating=scored["rating"],
+            advisory=metadata["advisory"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "auto_academic_review_failed",
+            draft_id=draft_id, document_type=document_type,
+            error=str(exc))
+
+
+def _schedule_auto_academic_review(
+    draft_id: int | None, document_type: str, owner_email: str,
+) -> None:
+    """Fire-and-forget — never raises, never blocks the caller.
+
+    Skips entirely in the test environment (the review path makes
+    real Anthropic calls, and the contract tests check the endpoint
+    shape, not the review wiring). Otherwise spawns a task on the
+    loop and stashes a strong reference so the GC doesn't reclaim
+    the coroutine mid-run."""
+    import asyncio
+    if not draft_id:
+        return
+    if os.getenv("ENVIRONMENT") == "test":
+        return
+    if document_type not in ("midpoint_paper", "executive_brief"):
+        return
+    try:
+        task = asyncio.create_task(
+            _run_auto_academic_review(draft_id, document_type, owner_email))
+        _AUTO_REVIEW_TASKS.add(task)
+        task.add_done_callback(_AUTO_REVIEW_TASKS.discard)
+    except RuntimeError:
+        # No running loop — we are off-loop and cannot schedule. The
+        # auto-fire is best-effort; the user can still trigger the
+        # Council Academic Review manually from the panel.
+        log.warning("auto_academic_review_no_loop",
+                    draft_id=draft_id, document_type=document_type)
+
+
 async def _generate_async(
     job_id: str, document_type: str, session: dict, request: Request,
 ) -> None:
@@ -8242,6 +8698,11 @@ async def _generate_async(
         request, session, "export", agents_involved=["academic_writer"],
         response_summary=f"{document_type} generated",
         metadata={"deliverable": document_type, "draft_id": draft_id})
+    # Auto-fire Academic Review against the new draft so the editor
+    # shows a readiness score on first open. Non-blocking — the
+    # generation job is already complete by the time we get here.
+    _schedule_auto_academic_review(
+        draft_id, document_type, session["email"])
 
 
 @app.post("/api/v1/export/midpoint-paper")
@@ -8265,8 +8726,123 @@ async def export_midpoint_paper(
         # Editor exports are a faithful render of what the author has
         # already saved; the gate runs only on fresh AI generation.
         return await _editor_export(int(editor_draft_id))
-    await _require_report_ready()
+    # IN02 (Academic Review complete) is advisory for the midpoint
+    # paper — the auto-fired review post-generation produces a score
+    # surfaced in the editor header, with an amber banner below 6.0.
+    # Other blockers (statistical FAIL, methodology FAIL on anything
+    # else) still gate generation.
+    await _require_report_ready(exclude_methodology_check_ids={"IN02"})
     return _start_generation_job("midpoint_paper", session, request)
+
+
+# ── Midpoint word-count validation (May 25 2026) ──────────────────────────────
+#
+# The midpoint paper is 3 pages double-spaced 12pt — roughly 750-900 words
+# total. The four sections have their own targets (per the user spec):
+#   methodology  250-300 words
+#   results      250-300 words
+#   roles        125-150 words
+#   next_steps   125-150 words
+# Each task prompt names its target, but the harness retries up to a
+# quality threshold rather than a length one — so a generated section can
+# still drift outside its range. This validator scores the post-generation
+# narratives, surfaces section-by-section warnings into the editor draft
+# (so the user sees the problem before submitting), and logs a structured
+# warning so a Render scan reports drift over time.
+
+# Per-section word targets (May 25 2026 — shaved 15 from each end of
+# every section to leave room for the empirical-citation overhead
+# (4 findings × ~15-25 words per inline citation ≈ 60-100 words).
+# The total stays at 750-900 — the paper's physical-length constraint
+# — and the gap between section sums (690-840) and the total (750-900)
+# is precisely where the citation overhead lives. A paper whose
+# sections hit the floor + carries 60-100 words of citations lands at
+# the total floor; the validator accepts that as valid because both
+# the section and total checks pass independently.
+_MIDPOINT_WORD_TARGETS: dict[str, tuple[int, int]] = {
+    "methodology":  (235, 285),
+    "results":      (235, 285),
+    "roles":        (110, 135),
+    "next_steps":   (110, 135),
+}
+_MIDPOINT_TOTAL_TARGET = (750, 900)
+
+
+def _count_words(text: str) -> int:
+    """Whitespace-split word count — same convention Word's status bar
+    uses. [[VERIFY: …]] / [[BOB: …]] markers count as words; they are
+    written by the AI and will be resolved by the user before
+    submission, so counting them keeps the post-resolution count
+    realistic rather than systematically over-counting."""
+    if not text:
+        return 0
+    return len([w for w in text.split() if w.strip()])
+
+
+def _validate_midpoint_word_counts(
+    narratives: dict[str, str],
+) -> dict[str, object]:
+    """Returns a structured validation result for a generated midpoint
+    paper's narratives. Used to (a) log a warning when generation lands
+    out-of-range, and (b) inject a banner into the editor draft so the
+    user sees the discrepancy on first open. Always returns a usable
+    dict — never raises on missing keys.
+
+    Shape:
+      { valid: bool,
+        total_words: int,
+        total_target: (lo, hi),
+        sections: {
+          key: { words, target: (lo, hi), in_range, label }
+        },
+        warnings: [ "Methodology 220 words is below the 250-300 target.",
+                    "Total 670 words is below the 750-900 target.", ... ],
+      }
+    """
+    section_labels = {
+        "methodology": "Data and Methodology",
+        "results":     "Preliminary Results and Diagnostics",
+        "roles":       "Roles and Division of Labor",
+        "next_steps":  "Next Steps and Open Questions",
+    }
+    sections: dict[str, dict[str, object]] = {}
+    warnings_list: list[str] = []
+    total_words = 0
+    for key, (lo, hi) in _MIDPOINT_WORD_TARGETS.items():
+        text = narratives.get(key) or ""
+        words = _count_words(text)
+        total_words += words
+        in_range = lo <= words <= hi
+        label = section_labels.get(key, key)
+        sections[key] = {
+            "words": words,
+            "target": [lo, hi],
+            "in_range": in_range,
+            "label": label,
+        }
+        if not in_range:
+            direction = "below" if words < lo else "above"
+            warnings_list.append(
+                f"{label} ran {words} words — {direction} the "
+                f"{lo}-{hi} target."
+            )
+    total_lo, total_hi = _MIDPOINT_TOTAL_TARGET
+    total_in_range = total_lo <= total_words <= total_hi
+    if not total_in_range:
+        direction = "below" if total_words < total_lo else "above"
+        warnings_list.append(
+            f"Total ran {total_words} words — {direction} the "
+            f"{total_lo}-{total_hi} target for a 3-page double-spaced "
+            f"paper."
+        )
+    valid = total_in_range and all(s["in_range"] for s in sections.values())
+    return {
+        "valid": valid,
+        "total_words": total_words,
+        "total_target": [total_lo, total_hi],
+        "sections": sections,
+        "warnings": warnings_list,
+    }
 
 
 async def _generate_midpoint_document(
@@ -8312,8 +8888,16 @@ async def _generate_midpoint_document(
              "agent_id": "midpoint_methodology",
              "task": (
                  "Write the Data and Methodology section of a graduate "
-                 "finance midpoint paper — about 250 words, APA style, past "
-                 "tense, third person. Cover the data sources (aligned "
+                 "finance midpoint paper. TARGET LENGTH: 235-285 words "
+                 "of prose (this is a 3-page double-spaced 12-point "
+                 "paper; the section must land in that range — under "
+                 "235 is too thin, over 285 squeezes the other three "
+                 "sections; the 15-word headroom from a 250-300 target "
+                 "absorbs the empirical-citation overhead — each inline "
+                 "(Author, Year) citation adds 15-25 words to the "
+                 "section's actual length). APA style, past tense, "
+                 "third person. "
+                 "Cover the data sources (aligned "
                  "monthly returns for equity, investment-grade and high-yield "
                  "bonds; Carhart factor series), the study period, the "
                  "portfolio constraints (long-only, fully invested, no cash, "
@@ -8346,7 +8930,12 @@ async def _generate_midpoint_document(
                          "them, then regenerate this paper."),
              "agent_id": "midpoint_results",
              "task": (
-                 "Write the Preliminary Results section — about 250 words. "
+                 "Write the Preliminary Results section. TARGET LENGTH: "
+                 "235-285 words of prose (under 235 is too thin; over "
+                 "285 leaves no room for Roles and Next Steps; the "
+                 "15-word headroom from a 250-300 target absorbs "
+                 "empirical-citation overhead — each inline (Author, "
+                 "Year) citation adds 15-25 words). "
                  "Interpret the summary statistics and the regime-conditional "
                  "performance; do not merely list numbers. You MUST explicitly "
                  "discuss the 2022 equity-bond correlation break and what the "
@@ -8374,8 +8963,11 @@ async def _generate_midpoint_document(
                          "regenerate; meanwhile describe the roles directly."),
              "agent_id": "midpoint_roles",
              "task": (
-                 "Write the Roles and Division of Labor section — about 150 "
-                 "words, APA style, past tense, third person. Use ONLY the "
+                 "Write the Roles and Division of Labor section. "
+                 "TARGET LENGTH: 110-135 words (this is a shorter "
+                 "section — keep it tight; citations are rarely needed "
+                 "here so the headroom is for the prose itself). "
+                 "APA style, past tense, third person. Use ONLY the "
                  "team_activity_summary data provided. State each team "
                  "member's role and attribute their documented platform "
                  "activity — commits, council sessions run, academic review "
@@ -8393,8 +8985,12 @@ async def _generate_midpoint_document(
                          "as planned work."),
              "agent_id": "midpoint_next_steps",
              "task": (
-                 "Write the Next Steps and Open Questions section — about 150 "
-                 "words. Convert the supplied Academic Review verdict — its "
+                 "Write the Next Steps and Open Questions section. "
+                 "TARGET LENGTH: 110-135 words (keep it tight — the "
+                 "section closes the paper and shouldn't bloat; "
+                 "citations are rare here, so the headroom is for "
+                 "actual next-steps content). "
+                 "Convert the supplied Academic Review verdict — its "
                  "Priority Areas for Further Investigation and any Developing "
                  "or Needs Work ratings — into a forward-looking next-steps "
                  "narrative."),
@@ -8404,6 +9000,29 @@ async def _generate_midpoint_document(
         narratives = await _generate_narratives(
             _apply_draft_caveats(specs),
             n_strategies=len(data.get("strategy_results") or {}))
+
+        # Word-count validation (May 25 2026). Three pages double-spaced
+        # 12pt is ~750-900 words; each section has its own target. If
+        # any section or the total drifts outside the range, log a
+        # structured warning AND surface it as a banner in the editor
+        # draft so the user sees it before submitting.
+        word_validation = _validate_midpoint_word_counts(narratives)
+        if not word_validation["valid"]:
+            log.warning(
+                "midpoint_word_count_validation_failed",
+                total_words=word_validation["total_words"],
+                section_words={
+                    k: v["words"]
+                    for k, v in word_validation["sections"].items()
+                },
+                warnings=word_validation["warnings"],
+            )
+        else:
+            log.info(
+                "midpoint_word_count_validation_passed",
+                total_words=word_validation["total_words"],
+            )
+
         docx_bytes = await asyncio.to_thread(build_midpoint_paper, data, narratives)
 
         # Load the generated content into an editor draft so the frontend
@@ -8414,7 +9033,10 @@ async def _generate_midpoint_document(
         try:
             from tools.editor_content import midpoint_to_editor
             from tools.editor_drafts import create_draft
-            content_json, content_text = midpoint_to_editor(narratives)
+            content_json, content_text = midpoint_to_editor(
+                narratives,
+                word_validation=word_validation,
+            )
             draft = await create_draft(
                 "midpoint_paper", email,
                 f"Midpoint Paper — {date.today().isoformat()}",

@@ -359,11 +359,32 @@ export default function QAHub() {
     setAuditPhase('running')
     setAuditRun(null)
 
+    // Safety timeout — if qaReload() never settles (network hang, a
+    // stuck pending promise) the button would otherwise stay disabled
+    // forever because fullRunActive = (method=='running' || audit=='running').
+    // Six minutes mirrors AUDIT_POLL_MAX × AUDIT_POLL_MS for the
+    // statistical audit side; the user's symptom 'button is sometimes
+    // unresponsive' often traces to a prior run whose methodology
+    // promise never resolved cleanly. After the timeout the phase
+    // flips to 'error' so the button is clickable again — the user
+    // can retry rather than being permanently stuck.
+    const methodTimeout = setTimeout(() => {
+      if (useQAStore.getState().loading) {
+        setMethodPhase('error')
+      }
+    }, 6 * 60 * 1000)
+
     // Methodology — qaStore.reload() re-runs the checklist; QAAuditPanel
     // reads the same store and updates on its own.
     void qaReload()
-      .then(() => setMethodPhase(useQAStore.getState().error ? 'error' : 'done'))
-      .catch(() => setMethodPhase('error'))
+      .then(() => {
+        clearTimeout(methodTimeout)
+        setMethodPhase(useQAStore.getState().error ? 'error' : 'done')
+      })
+      .catch(() => {
+        clearTimeout(methodTimeout)
+        setMethodPhase('error')
+      })
 
     // Statistical audit — fire, then poll the latest run until it settles.
     // A demo run forces a fresh audit regardless of cache currency and is
@@ -475,13 +496,24 @@ export default function QAHub() {
               <Presentation className="w-4 h-4" /> Presentation View
             </button>
           </TeamGate>
-          <TeamGate permission="manage_users">
+          {/* May 25 2026 — gate widened from manage_users to team_member
+              to match the backend's actual permission requirements
+              (POST /api/qa/audit is auth-only; POST /api/v1/audit/run
+              is team_member-gated). With manage_users every non-
+              sysadmin team member saw a disabled button that silently
+              swallowed clicks — looked unresponsive, blocked AN01/AN04
+              from being triggered in-app. The button always fires BOTH
+              endpoints (qaReload() + audit/run) so a single click
+              produces the unified verdict on both surfaces. */}
+          <TeamGate permission="team_member">
             <button
               type="button"
               onClick={() => runFullQA(false)}
               disabled={fullRunActive}
+              data-testid="qa-hub-run-full-qa"
               className={`flex items-center gap-1.5 px-3 py-2 rounded text-sm
-                         font-medium transition-colors disabled:opacity-50 ${
+                         font-medium transition-colors disabled:opacity-50
+                         disabled:cursor-not-allowed ${
                 isCurrent
                   ? 'border border-border text-muted hover:bg-navy-700'
                   : 'bg-electric/10 border border-electric/30 text-electric '
@@ -641,7 +673,16 @@ export default function QAHub() {
         {reportError && (
           <p className="text-2xs text-danger">{reportError}</p>
         )}
-        <QAAuditPanel />
+        {/* Pass the unified runner down so the inline "Re-run audit"
+            button inside QAAuditPanel fires BOTH endpoints (methodology
+            + statistical audit) rather than only the methodology
+            checklist. isReRunning carries the full-run state so the
+            panel can show its existing results with a "Running…"
+            overlay rather than appearing static during the audit. */}
+        <QAAuditPanel
+          onFullRerun={() => runFullQA(false)}
+          isFullRunActive={fullRunActive}
+        />
       </section>
 
       {/* Section 2 — Statistical Audit (full panel: team only). */}
@@ -657,7 +698,31 @@ export default function QAHub() {
             cross-platform consistency.
           </p>
         </div>
-        {isTeam ? <AuditPanel key={auditRefreshKey} /> : <AuditViewerSummary />}
+        {/* Wrap AuditPanel in a relative container so an overlay
+            spinner can layer over the existing results during a
+            full-run — the user sees an immediate "Running…" pulse
+            rather than stale results with no feedback. The opacity-60
+            on the inner panel reads as "this is being refreshed". */}
+        {isTeam ? (
+          <div className="relative">
+            <div className={
+              fullRunActive ? 'opacity-60 pointer-events-none' : ''
+            }>
+              <AuditPanel key={auditRefreshKey} />
+            </div>
+            {fullRunActive && (
+              <div
+                data-testid="audit-panel-running-overlay"
+                className="absolute top-3 right-3 flex items-center gap-1.5
+                           px-3 py-1.5 rounded text-xs font-medium
+                           bg-electric/15 border border-electric/40
+                           text-electric shadow-lg z-10">
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Re-running statistical audit…
+              </div>
+            )}
+          </div>
+        ) : <AuditViewerSummary />}
       </section>
 
       {/* Section 3 — Academic Review (read-visible / team-write-gated).

@@ -182,6 +182,45 @@ describe('QAHub — smart audit caching', () => {
   })
 })
 
+
+// ── Run Full QA visibility (May 25 2026) — gate widened to team_member.
+// The prior manage_users gate blocked every non-sysadmin team member
+// from triggering AN01/AN04 in-app; the backend's actual permission
+// requirements are auth-only for /api/qa/audit and team_member for
+// /api/v1/audit/run, so manage_users was unnecessarily tight.
+describe('QAHub — Run Full QA gate', () => {
+  it('is accessible to any team_member account (not sysadmin-only)', () => {
+    // TEAM_PERMS = ['view_analytics', 'ask_council', 'team_member',
+    //               'generate_documents', 'export_package'] — no
+    // manage_users. Under the prior gate this button would render
+    // disabled / unresponsive for these users.
+    withPerms(TEAM_PERMS, <QAHub />)
+    const btn = screen.getByTestId('qa-hub-run-full-qa')
+    expect(btn).toBeInTheDocument()
+    expect(btn).not.toBeDisabled()
+  })
+})
+
+
+// ── Re-run overlay (May 25 2026) — the user reported "no visible
+// feedback" when an audit was triggered. The QAHub now overlays a
+// "Re-running statistical audit…" badge on the AuditPanel container
+// the moment fullRunActive becomes true, so the user has immediate
+// confirmation rather than seeing stale results.
+describe('QAHub — running-state overlay', () => {
+  it('shows the statistical-audit re-running overlay on click', () => {
+    withPerms(TEAM_PERMS, <QAHub />)
+    // Before the click — no overlay.
+    expect(screen.queryByTestId('audit-panel-running-overlay'))
+      .toBeNull()
+    fireEvent.click(screen.getByTestId('qa-hub-run-full-qa'))
+    // After the click — overlay appears immediately because
+    // auditPhase flips to 'running' synchronously.
+    expect(screen.getByTestId('audit-panel-running-overlay'))
+      .toBeInTheDocument()
+  })
+})
+
 describe('QAHub — Presentation View certificate', () => {
   it('renders the certificate with all three status boxes', async () => {
     withPerms(TEAM_PERMS, <QAHub />)

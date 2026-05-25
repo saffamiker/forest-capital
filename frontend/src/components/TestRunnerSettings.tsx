@@ -19,7 +19,8 @@ import {
 } from 'react'
 import axios from 'axios'
 import {
-  Check, X, SkipForward, Circle, RefreshCw, Download, AlertTriangle,
+  Check, X, Circle, RefreshCw, Download, AlertTriangle,
+  AlertCircle,
   Loader2, ChevronDown, ChevronRight, ExternalLink, Search, Activity,
 } from 'lucide-react'
 import { TEST_SCRIPTS, getTestScript } from '../constants/testScripts'
@@ -31,23 +32,8 @@ import {
   type PRSuggestion,
 } from './SuggestedResolutions'
 import { useIsSysadmin } from '../hooks/usePermissions'
+import { useAuth } from '../App'
 import { TeamProgressBlock } from './TeamProgressBlock'
-
-type StepResult = 'pass' | 'fail' | 'skip'
-
-interface ResultRow {
-  script_id: string
-  step_id: string
-  result: StepResult
-  severity: string | null
-  failure_description: string | null
-  screenshot_paths: string[]
-  attested_at: string | null
-  overridden: boolean
-  resolved_at: string | null
-  resolution_note: string | null
-  low_quality: boolean
-}
 
 interface FailureRow {
   id: number
@@ -128,110 +114,325 @@ const stepTitle = (scriptId: string, stepId: string): string =>
 
 // ── Test Results — per-script progress for the current user ───────────────────
 
+// ── UAT Team Progress (May 25 2026 rework) ────────────────────────────────────
+//
+// The Settings page's Test Results block was previously the LOGGED-IN
+// USER's personal checklist. Reworked to show one section per team
+// member (Michael / Bob / Molly) so every team member sees the full
+// roster's UAT state — own section editable (Re-test buttons live),
+// other members' sections read-only.
+//
+// Backend: GET /api/v1/testing/team-progress now carries
+// step_attested_at (per-step ISO timestamps) and step_failure_description
+// (failure text on failed steps) alongside the existing
+// passed/failed/skipped/retest lists, so the per-step Status + Timestamp
+// can be rendered without a second network call.
+
+// Four canonical statuses per the user spec.
+type StepStatus = 'pass' | 'fail' | 'retest' | 'not_tested'
+
+interface TeamScriptProgress {
+  passed: string[]
+  failed: string[]
+  skipped: string[]
+  retest: string[]
+  last_attested_at: string | null
+  step_attested_at?: Record<string, string | null>
+  step_failure_description?: Record<string, string>
+}
+
+interface TeamMemberProgress {
+  email: string
+  display_name: string
+  scripts: Record<string, TeamScriptProgress>
+  failure_count: number
+  last_activity_at: string | null
+}
+
+interface TeamProgressResponse {
+  team_emails: string[]
+  members: Record<string, TeamMemberProgress>
+}
+
+// Canonical display order — engineering / analyst / presenter.
+const MEMBER_DISPLAY_ORDER = [
+  'ruurdsm@queens.edu',
+  'thaob@queens.edu',
+  'murdockm@queens.edu',
+]
+
+// Scripts each team email is the primary owner of. The shared
+// 'all' script appears under EVERY member regardless (per user
+// spec — "the shared 'All Testers' section duplicated into each
+// person's block").
+const PRIMARY_BUCKET_BY_EMAIL: Record<string, string> = {
+  'ruurdsm@queens.edu':  'michael',
+  'thaob@queens.edu':    'bob',
+  'murdockm@queens.edu': 'molly',
+}
+
+function scriptsForMember(email: string) {
+  const bucket = PRIMARY_BUCKET_BY_EMAIL[email.toLowerCase()]
+  return TEST_SCRIPTS.filter((s) =>
+    s.assignedTo === 'all' || s.assignedTo === bucket)
+}
+
+function classifyStep(
+  stepId: string, progress: TeamScriptProgress | undefined,
+): StepStatus {
+  if (!progress) return 'not_tested'
+  if (progress.passed.includes(stepId)) return 'pass'
+  if (progress.failed.includes(stepId)) return 'fail'
+  if (progress.retest.includes(stepId)) return 'retest'
+  // Skipped (no-test) AND absent both fall under the user's
+  // "Not Tested" status per the four-status taxonomy.
+  return 'not_tested'
+}
+
+function formatTimestamp(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  if (!Number.isFinite(d.getTime())) return ''
+  return d.toLocaleString(undefined, {
+    year: 'numeric', month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  })
+}
+
+const STATUS_PRESENTATION: Record<StepStatus, {
+  label: string
+  Icon: typeof Check
+  colour: string
+}> = {
+  pass:       { label: 'Pass',              Icon: Check,       colour: 'text-success' },
+  fail:       { label: 'Fail',              Icon: X,           colour: 'text-danger' },
+  retest:     { label: 'Ready for Re-test', Icon: RefreshCw,   colour: 'text-warning' },
+  not_tested: { label: 'Not Tested',        Icon: Circle,      colour: 'text-muted' },
+}
+
+
+function MemberSection({
+  member, isSelf,
+}: { member: TeamMemberProgress; isSelf: boolean }) {
+  const scripts = scriptsForMember(member.email)
+  // Aggregate overall counts so the member header carries a
+  // 'X / Y steps passed' summary the user can scan at a glance.
+  const totalSteps = scripts.reduce((n, s) => n + s.steps.length, 0)
+  const passedSteps = scripts.reduce((n, s) => {
+    const p = member.scripts[s.id]
+    return n + (p ? p.passed.length : 0)
+  }, 0)
+  const pct = totalSteps > 0 ? Math.round((passedSteps / totalSteps) * 100) : 0
+
+  return (
+    <div
+      className="card p-4 space-y-3"
+      data-testid={`uat-member-section-${member.email}`}
+      data-self={isSelf ? 'true' : 'false'}>
+      <div className="flex items-baseline justify-between gap-3 flex-wrap">
+        <div className="min-w-0">
+          <h3 className="text-white text-base font-semibold flex items-center gap-2">
+            {member.display_name}
+            {isSelf && (
+              <span className="text-2xs px-1.5 py-0.5 rounded border
+                               border-electric/40 bg-electric/10 text-electric
+                               font-medium"
+                    data-testid="uat-member-you-tag">
+                You
+              </span>
+            )}
+            {!isSelf && (
+              <span className="text-2xs px-1.5 py-0.5 rounded border
+                               border-border text-muted font-medium"
+                    title="Read-only — only the team member can attest their own steps"
+                    data-testid="uat-member-readonly-tag">
+                Read-only
+              </span>
+            )}
+          </h3>
+          <p className="text-2xs text-muted mt-0.5">{member.email}</p>
+        </div>
+        <div className="text-right">
+          <div className="text-lg font-mono font-bold text-white">{pct}%</div>
+          <div className="text-2xs text-muted">
+            {passedSteps} / {totalSteps} steps passed
+          </div>
+        </div>
+      </div>
+      <div className="h-1.5 rounded-full bg-navy-700 overflow-hidden">
+        <div className="h-full bg-electric rounded-full"
+             style={{ width: `${pct}%` }} />
+      </div>
+
+      <div className="space-y-3">
+        {scripts.map((script) => {
+          const progress = member.scripts[script.id]
+          const stepTimestamps = progress?.step_attested_at ?? {}
+          const failureDescriptions = progress?.step_failure_description ?? {}
+          const scriptPassed = progress?.passed.length ?? 0
+          const scriptTotal = script.steps.length
+
+          return (
+            <div key={script.id}
+                 className="rounded border border-border bg-navy-900 p-3"
+                 data-testid={`uat-script-${member.email}-${script.id}`}>
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <h4 className="text-sm text-white font-medium">{script.title}</h4>
+                <span className="text-2xs text-muted">
+                  {scriptPassed} / {scriptTotal} passed
+                </span>
+              </div>
+              <ul className="space-y-1">
+                {script.steps.map((step) => {
+                  const status = classifyStep(step.id, progress)
+                  const { Icon, colour, label } = STATUS_PRESENTATION[status]
+                  const ts = stepTimestamps[step.id] ?? null
+                  const failureText = status === 'fail'
+                    ? failureDescriptions[step.id] : null
+                  return (
+                    <li key={step.id}
+                        className="text-2xs"
+                        data-testid={`uat-step-${member.email}-${step.id}`}
+                        data-status={status}>
+                      <div className="flex items-start gap-2">
+                        <Icon className={`w-3 h-3 shrink-0 mt-0.5 ${colour}`} />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-slate-300">{step.title}</span>
+                            <span className={`text-2xs ${colour}`}>
+                              {label}
+                            </span>
+                          </div>
+                          <div className="text-muted text-2xs mt-0.5">
+                            {ts ? formatTimestamp(ts) : (
+                              <span className="italic">Not tested</span>
+                            )}
+                          </div>
+                        </div>
+                        {/* Action buttons render ONLY for the
+                            logged-in user's own section — the user's
+                            spec: "Bob and Molly see their own section
+                            plus read-only views of the others". */}
+                        {isSelf && status === 'fail' && (
+                          <button type="button"
+                            onClick={() => startTestRun({
+                              scriptId: script.id, stepId: step.id })}
+                            data-testid={`uat-retest-${step.id}`}
+                            className="text-electric hover:underline shrink-0">
+                            Re-test
+                          </button>
+                        )}
+                        {isSelf && status === 'retest' && (
+                          <button type="button"
+                            onClick={() => startTestRun({
+                              scriptId: script.id, stepId: step.id })}
+                            data-testid={`uat-resolved-retest-${step.id}`}
+                            className="text-warning hover:underline shrink-0">
+                            Re-test
+                          </button>
+                        )}
+                        {isSelf && status === 'not_tested' && (
+                          <button type="button"
+                            onClick={() => startTestRun({
+                              scriptId: script.id, stepId: step.id })}
+                            data-testid={`uat-start-${step.id}`}
+                            className="text-electric hover:underline shrink-0">
+                            Test now
+                          </button>
+                        )}
+                      </div>
+                      {failureText && (
+                        <p className="ml-5 mt-0.5 text-muted italic">
+                          {failureText}
+                        </p>
+                      )}
+                    </li>
+                  )
+                })}
+              </ul>
+              {isSelf && (
+                <div className="mt-2.5 flex flex-wrap gap-2">
+                  <button type="button"
+                    onClick={() => {
+                      const rows = script.steps.map((s) => {
+                        const status = classifyStep(s.id, progress)
+                        return [
+                          s.title,
+                          STATUS_PRESENTATION[status].label,
+                          stepTimestamps[s.id] ?? '',
+                        ]
+                      })
+                      download(csvBlob(
+                        ['Step', 'Status', 'Most recent timestamp'], rows),
+                        `attestation-${member.email}-${script.id}.csv`)
+                    }}
+                    className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                               border border-border text-slate-300 hover:bg-navy-700">
+                    <Download className="w-3 h-3" /> Download attestation
+                  </button>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+
 function TestResultsBlock() {
-  const [results, setResults] = useState<Record<string, ResultRow[]>>({})
+  const { session } = useAuth()
+  const ownEmail = (session?.email || '').toLowerCase()
+  const [data, setData] = useState<TeamProgressResponse | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(() => {
-    setLoading(true)
-    axios.get<{ results: Record<string, ResultRow[]> }>('/api/v1/testing/results')
-      .then((res) => setResults(res.data.results ?? {}))
-      .catch(() => setResults({}))
+    axios.get<TeamProgressResponse>('/api/v1/testing/team-progress')
+      .then((res) => { setData(res.data); setError(null) })
+      .catch(() => setError('Could not load team UAT progress.'))
       .finally(() => setLoading(false))
   }, [])
-  useEffect(load, [load])
+
+  // Initial fetch + 15s polling — a teammate's fresh check-off
+  // surfaces within one polling window. Mirrors TeamProgressBlock's
+  // cadence (the existing Team Administration view).
+  useEffect(() => {
+    load()
+    const id = setInterval(load, 15_000)
+    return () => clearInterval(id)
+  }, [load])
 
   if (loading) {
     return <p className="text-xs text-muted flex items-center gap-1.5">
-      <Loader2 className="w-3 h-3 animate-spin" /> Loading test results…</p>
+      <Loader2 className="w-3 h-3 animate-spin" /> Loading team UAT progress…</p>
   }
+  if (error || !data) {
+    return (
+      <div className="rounded border border-danger/30 bg-danger/5 p-3
+                      text-xs text-danger flex items-center gap-2">
+        <AlertCircle className="w-4 h-4" />
+        {error || 'No team UAT progress data.'}
+      </div>
+    )
+  }
+
+  const ordered = MEMBER_DISPLAY_ORDER
+    .filter((em) => data.members[em])
+    .map((em) => data.members[em])
 
   return (
     <div className="space-y-5">
-      {TEST_SCRIPTS.map((script) => {
-        const rows = results[script.id] ?? []
-        const byStep = new Map(rows.map((r) => [r.step_id, r]))
-        const attested = script.steps.filter((s) => {
-          const r = byStep.get(s.id)
-          return r && r.resolved_at == null
-        }).length
-        const total = script.steps.length
-        const failedRows = rows.filter(
-          (r) => r.result === 'fail' && r.resolved_at == null)
-        const pct = total ? Math.round((attested / total) * 100) : 0
-
-        return (
-          <div key={script.id} className="card p-3">
-            <div className="flex items-center justify-between gap-3">
-              <h3 className="text-white text-base font-medium">{script.title}</h3>
-              <span className="text-2xs text-muted">{attested}/{total} steps</span>
-            </div>
-            <div className="mt-1.5 h-1.5 rounded-full bg-navy-700 overflow-hidden">
-              <div className="h-full bg-electric rounded-full"
-                   style={{ width: `${pct}%` }} />
-            </div>
-
-            <div className="mt-2.5 space-y-1">
-              {script.steps.map((s) => {
-                const r = byStep.get(s.id)
-                const pending = !r || r.resolved_at != null
-                return (
-                  <div key={s.id} className="text-2xs">
-                    <div className="flex items-center gap-2">
-                      {pending ? <Circle className="w-3 h-3 text-muted shrink-0" />
-                        : r!.result === 'pass'
-                          ? <Check className="w-3 h-3 text-success shrink-0" />
-                          : r!.result === 'fail'
-                            ? <X className="w-3 h-3 text-danger shrink-0" />
-                            : <SkipForward className="w-3 h-3 text-muted shrink-0" />}
-                      <span className="text-slate-300 flex-1">{s.title}</span>
-                      {r?.resolved_at != null && (
-                        <span className="text-warning">Resolved — re-test</span>
-                      )}
-                      {!pending && r!.result === 'fail' && (
-                        <button type="button"
-                          onClick={() => startTestRun({ scriptId: script.id, stepId: s.id })}
-                          className="text-electric hover:underline">
-                          Re-test
-                        </button>
-                      )}
-                    </div>
-                    {r && r.result === 'fail' && r.failure_description && (
-                      <p className="ml-5 text-muted italic mt-0.5">
-                        {r.failure_description}
-                        {r.low_quality && ' ⚠'}
-                      </p>
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-
-            <div className="mt-2.5 flex flex-wrap gap-2">
-              {failedRows.length > 0 && (
-                <button type="button"
-                  onClick={() => startTestRun({
-                    scriptId: script.id, stepId: failedRows[0].step_id })}
-                  className="flex items-center gap-1 text-2xs px-2 py-1 rounded
-                             border border-border text-slate-300 hover:bg-navy-700">
-                  <RefreshCw className="w-3 h-3" /> Re-test Failed Steps
-                </button>
-              )}
-              <button type="button"
-                onClick={() => download(csvBlob(
-                  ['Step', 'Result', 'Severity', 'Attested at', 'Overridden'],
-                  rows.map((r) => [stepTitle(r.script_id, r.step_id), r.result,
-                    r.severity ?? '', r.attested_at ?? '',
-                    r.overridden ? 'yes' : 'no'])),
-                  `attestation-${script.id}.csv`)}
-                className="flex items-center gap-1 text-2xs px-2 py-1 rounded
-                           border border-border text-slate-300 hover:bg-navy-700">
-                <Download className="w-3 h-3" /> Download Attestation
-              </button>
-            </div>
-          </div>
-        )
-      })}
+      <p className="text-2xs text-muted">
+        Every team member's UAT checklist — own section is interactive,
+        others are read-only. Polls every 15s.
+      </p>
+      {ordered.map((m) => (
+        <MemberSection key={m.email}
+                       member={m}
+                       isSelf={m.email.toLowerCase() === ownEmail} />
+      ))}
     </div>
   )
 }
