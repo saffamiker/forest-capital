@@ -271,12 +271,29 @@ export default function AcademicReviewButton() {
 
       {/* Arbiter verdict — overall ratings + top priority callout +
           rubric sections. The block renders as soon as EITHER the
-          top-level ratings have streamed in or at least one rubric
-          section is parsed; previously it gated on sections.length > 0
-          alone, which left the verdict blank during the first second of
-          streaming. */}
+          top-level ratings have streamed in OR at least one rubric
+          section is parsed OR the stream is done and we have
+          non-trivial arbiter text (the defensive-render path —
+          see below).
+
+          UAT 2026-05-24 (#75) added the third condition. The
+          symptom was "verdict populates but no headings nor
+          badges appear — appears as plain text": parseVerdict
+          returned zero sections AND no overall ratings on a
+          verdict whose heading format the parser didn't
+          recognise, so the structured block never rendered. The
+          first two parser-tolerance fixes in academicVerdict.ts
+          (accept `## N.` AND `### N.` headings, accept multiple
+          Rating: formats) cover most cases; this defensive
+          render is the last-line guarantee: if parsing somehow
+          still produces nothing, render the raw arbiter text
+          through Markdown so headings/strong/lists at least
+          show up styled rather than appearing as a wall of plain
+          text with literal `###` and `**` characters. */}
       {(phase === 'streaming' || phase === 'done')
-        && (sections.length > 0 || overall) && (
+        && (sections.length > 0
+            || overall
+            || (phase === 'done' && arbiterText.trim().length > 200)) && (
         <div className="card p-4" style={{ borderLeft: '3px solid #f59e0b' }}>
           <div className="flex items-center gap-2 mb-3">
             <GraduationCap className="w-4 h-4 text-warning" />
@@ -288,17 +305,36 @@ export default function AcademicReviewButton() {
           {overall && <OverallRatingsBlock overall={overall} />}
           {topPriority && <TopPriorityCallout text={topPriority} />}
 
-          <div className="space-y-4">
-            {sections.map((s, i) => (
-              <div key={i}>
-                <div className="flex items-center gap-2 flex-wrap">
-                  <h4 className="text-white font-medium text-sm">{s.heading}</h4>
-                  <RatingBadge rating={s.rating} />
+          {sections.length > 0 ? (
+            <div className="space-y-4">
+              {sections.map((s, i) => (
+                <div key={i}>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h4 className="text-white font-medium text-sm">{s.heading}</h4>
+                    <RatingBadge rating={s.rating} />
+                  </div>
+                  {s.body && <Markdown content={s.body} className="mt-1" />}
                 </div>
-                {s.body && <Markdown content={s.body} className="mt-1" />}
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          ) : phase === 'done' && arbiterText.trim().length > 200 ? (
+            // Defensive fallback (UAT #75) — parser produced no
+            // sections but the stream completed with substantive
+            // text. Render through Markdown so headings, strong
+            // and lists are at least styled. A small note on top
+            // explains why the structured rendering didn't fire
+            // so a reviewer doesn't think the verdict is missing
+            // its rubric ratings.
+            <div data-testid="academic-verdict-fallback">
+              <p className="text-2xs text-muted italic mb-3">
+                Verdict structure could not be parsed — rendering raw
+                markdown. The rating badges may not appear if the
+                arbiter used an unrecognised heading format; the
+                content below is the complete verdict text.
+              </p>
+              <Markdown content={arbiterText} />
+            </div>
+          ) : null}
 
           {/* PART 4 — Macro citations summary. When the arbiter
               referenced any signal from the current digest with a

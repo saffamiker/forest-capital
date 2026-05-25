@@ -94,7 +94,16 @@ export function parseOverallRatings(text: string): OverallRatings | null {
  * produced the plain-text appearance Molly reported.
  */
 export function parseVerdict(text: string): ParsedVerdict {
-  const parts = text.split(/^### /m).map((s) => s.trim())
+  // UAT 2026-05-24 (#75) — split on EITHER `### N.` OR `## N.` so a
+  // verdict where the model dropped to two-hash headings (or
+  // mixed two/three-hash) still parses. The prior strict
+  // `^### ` split returned zero sections on any such variation
+  // and the verdict block rendered as plain text with no
+  // headings or badges. Anchored to the section-number prefix
+  // (`\d+\.`) so a `## ` heading inside a section body — e.g.
+  // an arbiter that uses `## Why this rating` as a sub-heading
+  // — doesn't start a spurious new section.
+  const parts = text.split(/^#{2,3}\s+(?=\d+\.)/m).map((s) => s.trim())
   let overall: OverallRatings | null = null
   let sectionParts: string[]
 
@@ -115,7 +124,20 @@ export function parseVerdict(text: string): ParsedVerdict {
     let rating: Rating | null = null
     const body: string[] = []
     for (const ln of lines.slice(1)) {
-      const m = ln.match(/^\*\*Rating:\*\*\s*(.+?)\s*$/)
+      // UAT 2026-05-24 (#75) — three forms accepted:
+      //   `**Rating:** X`   — canonical (colon INSIDE bold, no
+      //                       trailing colon outside)
+      //   `**Rating**: X`   — colon outside the bold
+      //   `Rating: X`       — no bold at all
+      // The prior single-regex form required a colon AFTER the
+      // bold close, which rejected the canonical form and left
+      // the rating un-parsed → no badge + the rating line bled
+      // into the body. Three explicit alternatives keep the
+      // matcher correct on every form.
+      const m =
+        ln.match(/^\s*\*\*\s*Rating\s*:\s*\*\*\s*(.+?)\s*$/i)
+        || ln.match(/^\s*\*\*\s*Rating\s*\*\*\s*:\s*(.+?)\s*$/i)
+        || ln.match(/^\s*Rating\s*:\s*(.+?)\s*$/i)
       if (m && rating === null) {
         rating = m[1].trim()
         continue
