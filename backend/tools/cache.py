@@ -369,9 +369,38 @@ async def set_strategy_cache(
     """
     Upserts strategy results into the cache.  Called after recomputation
     so the next restart returns instantly.
+
+    May 28 2026 — empty-results guard. AN01 (factor_loadings) and AN04
+    (regime_conditional) read this cache and produce empty downstream
+    payloads when every strategy has empty `monthly_returns` (the
+    fallback path's signature). A backtester run that returned only
+    mock fallbacks should not overwrite a known-good cache row — the
+    prior row stays in place and the broken run's symptoms are
+    visible in the strategies_fallback_summary log line. The guard
+    fires only when EVERY strategy has an empty (or missing)
+    monthly_returns array — a partial fallback (one or two strategies
+    broken) still writes through, because the downstream analytics
+    correctly skip empty-series strategies row by row.
     """
     if not _DB_AVAILABLE:
         return
+    # Empty-results guard — refuse to overwrite a known-good cache row
+    # with a run where every strategy is a fallback.
+    if results:
+        total = len(results)
+        empties = sum(
+            1 for r in results.values()
+            if not (r or {}).get("monthly_returns")
+        )
+        if empties == total:
+            log.warning(
+                "strategy_cache_write_refused_all_empty",
+                strategy_hash=strategy_hash,
+                n_strategies=total,
+                reason="every strategy has empty monthly_returns; "
+                       "preserving the prior known-good cache row",
+            )
+            return
     try:
         from sqlalchemy import text
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]

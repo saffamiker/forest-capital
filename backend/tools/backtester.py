@@ -1193,6 +1193,7 @@ def run_all_strategies(history: dict) -> dict[str, dict]:
 
     results: dict[str, dict] = {}
     mock_lookup = {s["strategy_name"]: s for s in MOCK_STRATEGIES}
+    fallback_strategies: list[str] = []   # tracks which fell back this run
 
     for key, name, runner in strategy_runners:
         try:
@@ -1201,13 +1202,48 @@ def run_all_strategies(history: dict) -> dict[str, dict]:
             # identifier so the frontend STRATEGY_COLORS map and tile lookups
             # (which key by e.g. "BENCHMARK", "CLASSIC_60_40") can match.
             r["strategy_name"] = key
+            # May 28 2026 — guarantee the monthly_returns key on every
+            # result. Some strategy runners (e.g. run_min_variance) have
+            # their own internal error path that returns a dict with an
+            # `error` key but no monthly_returns; without this setdefault
+            # the cached results_json would carry strategies with
+            # key-missing monthly_returns and downstream factor_loadings
+            # + regime_conditional silently skip them. The explicit
+            # `monthly_returns: []` makes the "no return data" state
+            # legible and matches the outer-fallback path below.
+            r.setdefault("monthly_returns", [])
             results[key] = r
+            # Track internal-error strategies (returned a dict with an
+            # `error` key rather than raising) in the same fallback
+            # summary so a Render alert sees both outer-exception
+            # fallbacks AND inner-error fallbacks uniformly.
+            if r.get("error"):
+                fallback_strategies.append(key)
         except Exception as exc:
             log.warning("strategy_failed", strategy=name, error=str(exc))
             fallback = dict(mock_lookup.get(name, {"strategy_name": key, "sharpe_ratio": 0.0}))
             fallback["strategy_name"] = key
             fallback["error"] = str(exc)
+            # Explicit empty monthly_returns on every fallback (mirror
+            # of the success-path setdefault above) so the field is
+            # always present, never key-missing.
+            fallback["monthly_returns"] = []
             results[key] = fallback
+            fallback_strategies.append(key)
+
+    # May 28 2026 — visibility on fallback density. AN01 (factor_loadings)
+    # and AN04 (regime_conditional) read from results_json and produce
+    # empty downstream payloads when every strategy is a mock fallback
+    # (no monthly_returns to regress / split). A single
+    # strategies_fallback_summary log line groups the run's fallback
+    # set so a Render alert can fire when fallbacks exceed a healthy
+    # threshold instead of every failure being a per-strategy
+    # strategy_failed line lost in the noise.
+    if fallback_strategies:
+        log.warning("strategies_fallback_summary",
+                    n_fallback=len(fallback_strategies),
+                    n_total=len(strategy_runners),
+                    fallback_strategies=fallback_strategies)
 
     # ── FDR correction across all strategies (requires full universe) ─────────
     # Tier 1 gate 2: Benjamini-Hochberg FDR at q < 0.005.
