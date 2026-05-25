@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import numbers
 from typing import Any
 
 import structlog
@@ -75,6 +77,20 @@ async def get_metric(data_hash: str, metric_kind: str) -> dict[str, Any] | None:
         return None
 
 
+# Underscore-prefixed keys the get_metric path attaches at READ time
+# (computed_at / data_hash / stale annotations). These must be stripped
+# before write so a read-then-write round-trip doesn't persist them.
+# Every OTHER underscore key — most importantly _completeness, which
+# the validator writes and the QA audit's AN01 / AN04 checks read back
+# — must survive the write. Stripping it (the previous indiscriminate
+# strip-all-underscore behaviour, May 25 2026 bug) made the read-side
+# completeness verdict permanently False; AN01 and AN04 WARNed even
+# when the analytics tables landed structurally complete.
+_EPHEMERAL_PAYLOAD_KEYS: frozenset[str] = frozenset({
+    "_computed_at", "_data_hash", "_stale",
+})
+
+
 async def set_metric(
     data_hash: str,
     metric_kind: str,
@@ -88,16 +104,18 @@ async def set_metric(
     a re-fire of the refresh hook within the same data_hash window
     refreshes the row rather than failing.
 
-    Strips internal underscore-prefixed keys before writing so a
-    payload that was already read once (with _computed_at attached)
-    can round-trip cleanly.
+    Strips only the ephemeral underscore-prefixed keys the read path
+    attaches at runtime (see _EPHEMERAL_PAYLOAD_KEYS). Persistent
+    underscore keys — _completeness in particular — are preserved so
+    the validator's verdict travels with the row.
     """
     try:
         from sqlalchemy import text
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return
-        clean = {k: v for k, v in payload.items() if not k.startswith("_")}
+        clean = {k: v for k, v in payload.items()
+                 if k not in _EPHEMERAL_PAYLOAD_KEYS}
         async with AsyncSessionLocal() as session:
             await session.execute(text(
                 "INSERT INTO analytics_metrics_cache "
@@ -188,6 +206,13 @@ _FACTOR_LOADING_REQUIRED_FIELDS: tuple[str, ...] = (
     "alpha_annualized", "r_squared",
     "mkt_rf_significant", "smb_significant", "hml_significant",
     "alpha_significant",
+    # May 25 2026 — mom_significant was previously a validator-only
+    # extra check; the per-row diagnostic missed it because it iterates
+    # _FACTOR_LOADING_REQUIRED_FIELDS, so a row with a missing
+    # mom_significant flag logged as "11/11 present" while the validator
+    # marked it invalid. Moving the field into the canonical required
+    # list keeps the diagnostic and the validator in agreement.
+    "mom_significant",
 )
 _REGIME_CONDITIONAL_REQUIRED_FIELDS: tuple[str, ...] = (
     "strategy", "pre_2022_sharpe", "post_2022_sharpe",
@@ -218,12 +243,18 @@ def _validate_factor_loadings(rows: list[dict]) -> dict[str, Any]:
     invalid: list[dict] = []
     for r in rows:
         missing = [f for f in _FACTOR_LOADING_REQUIRED_FIELDS if f not in r]
-        # MOM may be None (three-factor fallback), but the field itself
-        # must exist alongside its significance flag.
-        if "mom" not in r or "mom_significant" not in r:
-            missing.append("mom_or_mom_significant")
+        # r_squared range check — must be a real number in [0, 1].
+        # isinstance(r2, (int, float)) excludes numpy.float64 on some
+        # interpreter / numpy combinations because numpy's scalar
+        # types aren't subclasses of Python's built-in float (NEP 51).
+        # The validator runs against rows the analytics layer just
+        # produced from statsmodels, so numpy scalars are the rule,
+        # not the exception. Accept any Real number; reject NaN /
+        # ±inf via math.isfinite.
         r2 = r.get("r_squared")
-        if not isinstance(r2, (int, float)) or not 0.0 <= r2 <= 1.0:
+        is_real_number = isinstance(r2, numbers.Real) and not isinstance(r2, bool)
+        if not is_real_number or not math.isfinite(float(r2)) \
+                or not 0.0 <= float(r2) <= 1.0:
             missing.append(f"r_squared_out_of_range:{r2}")
         if missing:
             invalid.append({"strategy": r.get("strategy"), "missing": missing})
