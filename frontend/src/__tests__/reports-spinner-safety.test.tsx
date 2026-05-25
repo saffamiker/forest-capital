@@ -20,7 +20,7 @@
  * resolves must NOT leave the spinner alive past 10 seconds.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, waitFor, act } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import axios from 'axios'
 import Reports from '../pages/Reports'
@@ -154,16 +154,14 @@ describe('Reports stuck-spinner safety net', () => {
       })
     })
 
-  it('emits a diagnostic console.info on manifest mount',
-    async () => {
-      const infoSpy = vi.spyOn(console, 'info')
-      stubAxios('resolve')
-      renderReports()
-      await waitFor(() =>
-        expect(infoSpy).toHaveBeenCalledWith(
-          expect.stringContaining('manifest fetch starting'),
-        ))
-    })
+  // The "emits a diagnostic console.info on manifest mount" test was
+  // removed alongside the diagnostic itself — those console.info /
+  // console.warn lines shipped to investigate the production stuck-
+  // spinner; once the safety-net + clearTimeout path landed they
+  // were no longer load-bearing. The remaining tests cover the
+  // user-visible safety contract (spinner clears, timer registers,
+  // timer is cleaned up on unmount) without depending on Render-
+  // console output.
 
   it('the 10s safety timer is registered on mount', async () => {
     // The safety net is implemented as setTimeout(10000). We verify

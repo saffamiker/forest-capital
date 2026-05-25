@@ -283,27 +283,16 @@ export default function Reports() {
   useEffect(() => {
     let cancelled = false
     // UAT 2026-05-24 — Reports tab showed a permanent spinner with
-    // no network activity (only PostHog + status polls visible in the
-    // Network tab). Diagnosis: setLoading(false) IS in .finally() so
-    // it should always clear, but the user reported the spinner
-    // surviving the mount. Hardened with three diagnostic guards
-    // below:
-    //   (1) console.info on mount + on resolution so a future
-    //       silent-stuck repro shows exactly where the cycle stalled.
-    //   (2) 10s safety timeout — forces loading=false + surfaces an
-    //       explicit error if the request never resolves. A spinner
-    //       must never outlive an actually-in-flight network call.
-    //   (3) Error display surface now shows the SAFETY-NET message
-    //       distinctly from a real axios failure so a reader of the
-    //       Render console can grep the cause.
-    console.info('[Reports] manifest fetch starting')
+    // no network activity. Hardened with a 10s safety net that forces
+    // loading=false + surfaces an explicit error if the request never
+    // resolves. A spinner must never outlive an actually-in-flight
+    // network call. The diagnostic console.info / console.warn lines
+    // that originally rode along were removed once the safety-net +
+    // clearTimeout path proved out — they were investigation aids,
+    // not production telemetry, and the safety net's setError surface
+    // is what the user sees if the GET stalls.
     const safetyTimer = setTimeout(() => {
       if (!cancelled) {
-        console.warn(
-          '[Reports] manifest fetch did not resolve within 10s — '
-          + 'clearing spinner. Check Network tab; the GET may have '
-          + 'been blocked, deduped, or never fired.',
-        )
         setError(
           'Reports manifest did not load within 10 seconds. '
           + 'Refresh the page; if it persists, check the Network '
@@ -316,8 +305,6 @@ export default function Reports() {
     void axios.get<ManifestResponse>('/api/reports/manifest')
       .then((res) => {
         if (cancelled) return
-        console.info('[Reports] manifest fetch resolved',
-          { hasData: !!res.data })
         setManifest(res.data)
       })
       .catch((err) => {
@@ -325,7 +312,6 @@ export default function Reports() {
         const msg = axios.isAxiosError(err)
           ? (err.response?.data?.detail ?? err.message)
           : 'Failed to load reports manifest'
-        console.warn('[Reports] manifest fetch failed', { error: msg })
         setError(String(msg))
       })
       .finally(() => {
