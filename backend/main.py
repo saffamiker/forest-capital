@@ -5887,6 +5887,38 @@ async def audit_unresolve_finding(
     return finding
 
 
+@app.get("/api/v1/report/readiness")
+async def report_readiness(
+    session: dict = Depends(require_auth),
+):
+    """
+    Workstream C report-readiness verdict (May 28 2026).
+
+    Returns the platform's combined verdict on whether either audit
+    surface has unreviewed blocking items that should prevent the
+    team from generating a graded submission. The same logic is run
+    by the generation-endpoint gate (_require_report_ready) — this
+    GET surfaces the verdict to the frontend so the Reports page can
+    show a readiness indicator and a blocking modal that names every
+    outstanding item.
+
+    Shape:
+      {
+        is_ready: bool,
+        blocking_count: int,
+        statistical: { unreviewed_warnings, unreviewed_failures },
+        methodology: { unresolved_warnings, unresolved_failures },
+        checked_at: ISO timestamp
+      }
+
+    Auth: any authenticated user — the readiness verdict is a project
+    record visible to viewers, not a sysadmin-private surface.
+    """
+    from tools.report_readiness import compute_readiness
+
+    return await compute_readiness()
+
+
 @app.post("/api/v1/cache/invalidate")
 async def cache_invalidate(
     session: dict = Depends(require_permission("manage_users")),
@@ -8085,6 +8117,43 @@ async def _editor_export(editor_draft_id: int) -> Response:
 _generation_bg_tasks: set = set()
 
 
+async def _require_report_ready() -> None:
+    """
+    Workstream C report gate (May 28 2026). Raises 422 with a structured
+    detail when either audit surface has unreviewed blocking items.
+
+    A 422 is the right status here — the request is well-formed, but it
+    asks the platform to publish a deliverable that the audit subsystem
+    has flagged as not-yet-reviewed. The frontend reads detail.blockers
+    and shows them in a blocking modal so the user can navigate back to
+    the audit panel and act on each.
+
+    Fail-open: the readiness module returns empty lists on any read
+    error, so a database outage or an empty audit history reports
+    is_ready=true and the gate does not block.
+    """
+    from tools.report_readiness import compute_readiness, summarise_blockers
+
+    readiness = await compute_readiness()
+    if readiness.get("is_ready"):
+        return
+    raise HTTPException(
+        status_code=422,
+        detail={
+            "error": "report_not_ready",
+            "message": (
+                f"{readiness.get('blocking_count', 0)} audit item"
+                f"{'s' if readiness.get('blocking_count') != 1 else ''} "
+                "must be reviewed or revoked before a report can be "
+                "generated."),
+            "blocking_count": readiness.get("blocking_count", 0),
+            "blockers": summarise_blockers(readiness),
+            "statistical": readiness.get("statistical"),
+            "methodology": readiness.get("methodology"),
+        },
+    )
+
+
 def _start_generation_job(
     document_type: str, session: dict, request: Request,
 ) -> JSONResponse:
@@ -8173,7 +8242,10 @@ async def export_midpoint_paper(
     """
     editor_draft_id = (body or {}).get("editor_draft_id")
     if editor_draft_id:
+        # Editor exports are a faithful render of what the author has
+        # already saved; the gate runs only on fresh AI generation.
         return await _editor_export(int(editor_draft_id))
+    await _require_report_ready()
     return _start_generation_job("midpoint_paper", session, request)
 
 
@@ -8358,6 +8430,7 @@ async def export_executive_brief(
     editor_draft_id = (body or {}).get("editor_draft_id")
     if editor_draft_id:
         return await _editor_export(int(editor_draft_id))
+    await _require_report_ready()
     return _start_generation_job("executive_brief", session, request)
 
 
@@ -8517,6 +8590,7 @@ async def export_presentation_deck(
     editor_draft_id = (body or {}).get("editor_draft_id")
     if editor_draft_id:
         return await _editor_export(int(editor_draft_id))
+    await _require_report_ready()
     return _start_generation_job("presentation_deck", session, request)
 
 

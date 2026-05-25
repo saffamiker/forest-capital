@@ -29,6 +29,7 @@ import AdvisorPanel from '../components/AdvisorPanel'
 import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
+import { ReportReadinessBanner } from '../components/ReportReadinessIndicator'
 import SubmissionGuidePanel from '../components/SubmissionGuides'
 import TeamGate from '../components/TeamGate'
 import type { DeliverableType } from '../types/advisor'
@@ -451,6 +452,14 @@ export default function Reports() {
           <span>Loading deliverables…</span>
         </div>
       )}
+
+      {/* Workstream C — Report readiness banner. Reads
+          /api/v1/report/readiness and renders the verdict at the top
+          of the generation surface so the team sees blocker state
+          before clicking Generate. The DocumentGenerationPanel below
+          surfaces the blocking modal when a click is intercepted by
+          the gate. */}
+      <ReportReadinessBanner />
 
       {/* Generate Documents — one-click first-draft .docx / .pptx of the
           three graded deliverables, assembled server-side from real

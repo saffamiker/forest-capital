@@ -22,6 +22,9 @@ import {
   useGenerationJobs, trackJob, cancelJob, dismissJob, loadExistingJobs,
   jobForType, type GenJob,
 } from '../lib/generationJobs'
+import {
+  ReportBlockingModal, useReportReadinessGate,
+} from './ReportReadinessIndicator'
 
 interface DocSpec {
   id: string
@@ -98,6 +101,16 @@ export default function DocumentGenerationPanel() {
     useState<Record<string, string>>(readGeneratedAt)
   // Job ids whose completion has already been written to "last generated".
   const recorded = useRef<Set<string>>(new Set())
+  // Workstream C report gate. The hook loads /api/v1/report/readiness
+  // on mount; clicking Generate while is_ready is false opens the
+  // blocking modal instead of firing the POST. The server-side gate
+  // (_require_report_ready) is the source of truth — when it fires
+  // a 422 the modal also opens from the response detail (defence in
+  // depth against a stale `is_ready` value).
+  const readinessGate = useReportReadinessGate()
+  const [blockingModal, setBlockingModal] = useState<{
+    open: boolean; blockers: string[]; message?: string
+  }>({ open: false, blockers: [] })
 
   // On mount, resume polling any in-progress jobs and surface recently
   // completed ones (e.g. generation finished while the user was away).
@@ -124,6 +137,16 @@ export default function DocumentGenerationPanel() {
   }, [jobs])
 
   const handleGenerate = async (doc: DocSpec) => {
+    // Client-side gate — open the blocking modal without firing the
+    // POST when readiness is known-blocked. is_ready === null means
+    // "unknown" (endpoint failed or not loaded yet); fall through to
+    // the POST and let the server gate decide.
+    if (readinessGate.is_ready === false) {
+      setBlockingModal({
+        open: true, blockers: readinessGate.blockerLabels,
+      })
+      return
+    }
     setPostingId(doc.id)
     setErrors((prev) => {
       const next = { ...prev }
@@ -138,10 +161,33 @@ export default function DocumentGenerationPanel() {
         status: 'pending', draft_id: null, download_url: null, error: null,
       })
     } catch (err) {
+      // Defence in depth — the server gate may fire a 422 with a
+      // structured report_not_ready detail even when the frontend
+      // thought we were ready (stale store). Render the modal from
+      // the response payload in that case so the user still sees
+      // the canonical blocker list.
+      if (axios.isAxiosError(err) && err.response?.status === 422) {
+        const data = err.response.data as {
+          detail?: {
+            error?: string; message?: string; blockers?: string[]
+          }
+        }
+        if (data?.detail?.error === 'report_not_ready') {
+          setBlockingModal({
+            open: true,
+            blockers: data.detail.blockers ?? [],
+            ...(data.detail.message ? { message: data.detail.message } : {}),
+          })
+          // Refresh the readiness store so the banner matches the
+          // server's authoritative state from this 422.
+          void readinessGate.reload()
+          return
+        }
+      }
       let msg = 'Generation failed. Please try again.'
       if (axios.isAxiosError(err)) {
         const detail = (err.response?.data as { detail?: string })?.detail
-        msg = detail || err.message
+        msg = (typeof detail === 'string' ? detail : '') || err.message
       }
       setErrors((prev) => ({ ...prev, [doc.id]: msg }))
     } finally {
@@ -314,6 +360,12 @@ export default function DocumentGenerationPanel() {
         an <strong className="text-warning">AI DRAFT — REQUIRES HUMAN REVIEW</strong>{' '}
         banner. Verify every figure before submitting.
       </p>
+      <ReportBlockingModal
+        open={blockingModal.open}
+        onClose={() => setBlockingModal({ open: false, blockers: [] })}
+        blockers={blockingModal.blockers}
+        {...(blockingModal.message ? { message: blockingModal.message } : {})}
+      />
     </section>
   )
 }
