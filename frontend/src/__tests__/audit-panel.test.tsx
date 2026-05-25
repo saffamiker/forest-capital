@@ -79,6 +79,52 @@ describe('AuditPanel — WARN acknowledge workflow', () => {
     expect(screen.getAllByText('Acknowledged').length).toBeGreaterThan(0)
   })
 
+  it('renders the reviewer + timestamp under an Acknowledged WARN', () => {
+    // The migration-044 columns carry the WHO and WHEN of an
+    // acknowledgement; the row must surface both so the team can
+    // see what was reviewed and when without having to read the
+    // PDF disclosures appendix.
+    render(<FindingRow f={warnFinding({
+      resolved: true,
+      resolution_note: 'Reviewed and accepted.',
+      resolved_by: 'ruurdsm@queens.edu',
+      resolved_at: '2026-05-25T17:30:00Z',
+    })} />)
+    fireEvent.click(screen.getByText(/Turnover direction/))
+    const meta = screen.getByTestId('audit-ack-meta-5')
+    expect(meta.textContent).toMatch(/Reviewed/)
+    expect(meta.textContent).toMatch(/ruurdsm@queens.edu/)
+    // Date is rendered through toLocaleDateString — assert the
+    // year (locale-stable across CI runners) is present.
+    expect(meta.textContent).toMatch(/2026/)
+  })
+
+  it('renders the timestamp returned by the resolve endpoint after a fresh save',
+    async () => {
+      // The endpoint returns the full updated finding; the panel reads
+      // resolved_by + resolved_at off the response so the meta line
+      // appears immediately, without waiting for a parent reload.
+      mockedAxios.post.mockResolvedValueOnce({
+        data: {
+          ...warnFinding({ resolved: true,
+            resolution_note: 'Accepted as a documented limitation.' }),
+          resolved_by: 'ruurdsm@queens.edu',
+          resolved_at: '2026-05-25T17:30:00Z',
+        },
+      })
+      render(<FindingRow f={warnFinding()} />)
+      fireEvent.click(screen.getByText(/Turnover direction/))
+      fireEvent.click(screen.getByRole('button', { name: 'Acknowledge' }))
+      fireEvent.change(
+        screen.getByPlaceholderText(/Describe how you have addressed/),
+        { target: { value: 'Accepted as a documented limitation.' } })
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Save acknowledgement' }))
+      const meta = await screen.findByTestId('audit-ack-meta-5')
+      expect(meta.textContent).toMatch(/Reviewed/)
+      expect(meta.textContent).toMatch(/ruurdsm@queens.edu/)
+    })
+
   it('does not offer Acknowledge on a non-WARN finding', () => {
     render(<FindingRow f={warnFinding({ status: 'pass' })} />)
     // A passing finding with no detail is not expandable / has no action.
