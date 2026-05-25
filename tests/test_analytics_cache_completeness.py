@@ -255,6 +255,10 @@ class TestRefreshAllDispatch:
 
         async def _stub_academic(h):
             called.append("academic")
+        async def _stub_transition(h):
+            called.append("transition_matrix")
+        async def _stub_frontier(h):
+            called.append("efficient_frontier")
         async def _stub_div(h):
             called.append("diversification")
         async def _stub_sens(h):
@@ -265,6 +269,9 @@ class TestRefreshAllDispatch:
             called.append("strategy_characterisations")
 
         monkeypatch.setattr(pa, "refresh_academic_analytics", _stub_academic)
+        # AN04 (May 24 2026) — transition matrix is its own refresh.
+        monkeypatch.setattr(pa, "refresh_transition_matrix", _stub_transition)
+        monkeypatch.setattr(pa, "refresh_efficient_frontier", _stub_frontier)
         monkeypatch.setattr(pa, "refresh_diversification_metrics", _stub_div)
         monkeypatch.setattr(pa, "refresh_sensitivity", _stub_sens)
         monkeypatch.setattr(pa, "refresh_risk_free_rate_config", _stub_rf)
@@ -286,5 +293,6 @@ class TestRefreshAllDispatch:
         # it pulls them directly from the same upstream sources, not
         # from the cache.
         assert called == [
-            "academic", "diversification", "sensitivity",
-            "rf_config", "strategy_characterisations"]
+            "academic", "transition_matrix", "efficient_frontier",
+            "diversification", "sensitivity", "rf_config",
+            "strategy_characterisations"]
