@@ -34,6 +34,7 @@ import {
   CheckCircle, AlertCircle, Loader2, Play, Circle,
   ExternalLink, Search, X, ShieldCheck, Lock,
 } from 'lucide-react'
+import { Step1ExportButtons } from './Step1ExportButtons'
 
 export type StepStatus =
   | 'idle'
@@ -468,10 +469,26 @@ function StepRow({
       {/* Inline detail expansion. Renders only when the step has a
           terminal status (complete / warning / failed) AND its
           payload carries something to show. Click the View details
-          chevron to expand; click again to collapse. */}
+          chevron to expand; click again to collapse.
+          STEP 1 ONLY (May 24 2026): CSV + JSON export buttons render
+          inline beside View details. The exported staged-findings
+          payload drives the citation R&D loop — manual search-query
+          experiments before patterns get encoded as Step 2 prompt
+          templates. Frontend-only — the payload is already in
+          result.payload.findings from the stage-findings response. */}
       {result && (status === 'complete' || status === 'warning'
         || status === 'failed') && _hasDetail(number, result) ? (
-        <StepDetailToggle number={number} result={result} />
+        <div className="flex items-center flex-wrap">
+          <StepDetailToggle number={number} result={result} />
+          {number === 1 && (
+            <Step1ExportButtons
+              findings={
+                ((result.payload as Record<string, unknown> | undefined)
+                  ?.['findings'] as Array<Record<string, unknown>>) || []
+              }
+            />
+          )}
+        </div>
       ) : null}
     </li>
   )
