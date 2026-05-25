@@ -146,6 +146,28 @@ def _timestamp() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _format_resolved_at(value: Any) -> str:
+    """Renders a resolved_at value as YYYY-MM-DD HH:MM UTC. Accepts a
+    datetime, an ISO string, or None — returns '—' for anything that
+    cannot be parsed so the PDF row stays well-formed regardless of
+    legacy data or fixtures."""
+    if value is None:
+        return "—"
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    text = str(value).strip()
+    if not text:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if not dt.tzinfo:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return text
+
+
 def _render(story: list, title: str) -> bytes:
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -323,6 +345,83 @@ def build_statistical_audit_pdf(run: dict[str, Any]) -> bytes:
                     f'</font> — Response: '
                     f'{_esc(f.get("resolution_note") or "(no note)")}',
                     s["detail"]))
+    story.append(PageBreak())
+
+    # ── Warnings and Disclosures ─────────────────────────────────────────
+    # A consolidated disclosure section — every WARN finding from any
+    # layer, with full metadata + the team's reviewer / timestamp /
+    # note where the finding has been acknowledged. For the Analytical
+    # Appendix this is the durable record of what was flagged and how
+    # it was reviewed, separate from the layer-by-layer findings list
+    # above (which preserves the audit's own ordering for traceability).
+    warn_findings = []
+    for key in ("layer_1", "layer_2", "layer_3"):
+        for f in findings.get(key) or []:
+            if _status_label(f.get("status")) == "WARN":
+                warn_findings.append(f)
+    story.append(Paragraph("Warnings and Disclosures", s["h1"]))
+    story.append(_rule())
+    if not warn_findings:
+        story.append(Paragraph(
+            "This audit produced no warnings. No disclosures are required "
+            "for this run.", s["body"]))
+    else:
+        reviewed = sum(1 for f in warn_findings if f.get("resolved"))
+        story.append(Paragraph(
+            f"This audit produced {len(warn_findings)} warning"
+            f"{'s' if len(warn_findings) != 1 else ''}; "
+            f"{reviewed} reviewed, {len(warn_findings) - reviewed} "
+            f"awaiting team review. A reviewed warning carries the "
+            f"team's recorded disclosure and the reviewer's identity "
+            f"so the rationale travels with this document.",
+            s["body"]))
+        story.append(Spacer(1, 0.1 * inch))
+        for f in warn_findings:
+            strat = (f" · {_esc(f.get('strategy'))}"
+                     if f.get("strategy") else "")
+            story.append(Paragraph(
+                f"{_bullet(f.get('status'))} "
+                f"Layer {_esc(f.get('layer'))} — "
+                f"{_esc(f.get('check_name'))} · "
+                f"{_esc(f.get('metric'))}{strat}&nbsp;&nbsp;"
+                f"{_verdict_tag(f.get('status'))}", s["finding"]))
+            if f.get("platform_value") is not None:
+                story.append(Paragraph(
+                    f"Platform value: {_esc(f.get('platform_value'))}",
+                    s["detail"]))
+            if f.get("auditor_value") is not None:
+                story.append(Paragraph(
+                    f"Auditor value: {_esc(f.get('auditor_value'))}",
+                    s["detail"]))
+            if f.get("discrepancy"):
+                story.append(Paragraph(
+                    f"Discrepancy: {_esc(f.get('discrepancy'))}",
+                    s["detail"]))
+            if f.get("severity"):
+                story.append(Paragraph(
+                    f"Severity: {_esc(f.get('severity'))}", s["detail"]))
+            if f.get("resolved"):
+                # An auto-carried ack is labelled distinctly so the
+                # grader can see what the team reviewed in THIS audit
+                # vs. what was carried forward unchanged from a prior
+                # ack via the audit_acknowledgements table.
+                label = ("Auto-acknowledged"
+                         if f.get("auto_acknowledged") else "Reviewed")
+                by = _esc(f.get("resolved_by") or "—")
+                when = _esc(_format_resolved_at(f.get("resolved_at")))
+                note = _esc(f.get("resolution_note") or "(no note)")
+                story.append(Paragraph(
+                    f'<font color="{_GREEN.hexval()}"><b>{label}</b></font>'
+                    f' — Reviewed by: {by} · Reviewed at: {when}',
+                    s["detail"]))
+                story.append(Paragraph(
+                    f"Disclosure: {note}", s["detail"]))
+            else:
+                story.append(Paragraph(
+                    f'<font color="{_AMBER.hexval()}"><b>Awaiting team '
+                    f'review</b></font> — no disclosure recorded yet.',
+                    s["detail"]))
+            story.append(Spacer(1, 0.05 * inch))
     story.append(PageBreak())
 
     # ── Final page — data provenance ──

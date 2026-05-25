@@ -5866,7 +5866,8 @@ async def audit_resolve_finding(
     if not note:
         raise HTTPException(
             status_code=422, detail="A resolution note is required.")
-    finding = await resolve_finding(finding_id, True, note)
+    finding = await resolve_finding(
+        finding_id, True, note, resolved_by=session["email"])
     if finding is None:
         raise HTTPException(status_code=404, detail="Audit finding not found.")
     return finding
@@ -5879,7 +5880,8 @@ async def audit_unresolve_finding(
 ):
     """Clears the acknowledgement on an audit finding. Project team only."""
     from tools.audit_engine import resolve_finding
-    finding = await resolve_finding(finding_id, False, None)
+    finding = await resolve_finding(
+        finding_id, False, None, resolved_by=None)
     if finding is None:
         raise HTTPException(status_code=404, detail="Audit finding not found.")
     return finding

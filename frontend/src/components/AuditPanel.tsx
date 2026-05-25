@@ -29,6 +29,13 @@ interface AuditFinding {
   auditor_reasoning: string | null
   resolved?: boolean
   resolution_note?: string | null
+  // Migration 044 — reviewer email and timestamp captured on ack.
+  // The PDF disclosures section renders these under each reviewed
+  // warning; auto_acknowledged distinguishes a carried ack from a
+  // freshly-typed one. All optional — older rows have NULL / false.
+  resolved_by?: string | null
+  resolved_at?: string | null
+  auto_acknowledged?: boolean
 }
 
 // A demo run (the QA tab's "Run Live Demo" button) is marked 🎯 in the
