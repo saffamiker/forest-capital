@@ -163,7 +163,11 @@ class TestExplainerHaikuFallbackTokenCap:
 
         captured = {}
 
-        def fake_call_claude(model, system_prompt, user_message, max_tokens):
+        def fake_call_claude(model, system_prompt, user_message, max_tokens,
+                             **_kwargs):
+            # **_kwargs absorbs the trigger / hash_gate telemetry kwargs
+            # added in PR-LLM-1. The test asserts the max_tokens promotion
+            # contract; trigger/hash_gate are not relevant here.
             captured["max_tokens"] = max_tokens
             return "{}"
 

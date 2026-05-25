@@ -390,7 +390,8 @@ class AcademicWriter:
 
         try:
             text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
-                               max_tokens=800, tools=[WEB_SEARCH_TOOL])
+                               max_tokens=800, tools=[WEB_SEARCH_TOOL],
+                               trigger="academic_writer:methodology")
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_methodology_error", error=str(exc))
@@ -444,7 +445,8 @@ class AcademicWriter:
 
         try:
             text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
-                               max_tokens=1024, tools=[WEB_SEARCH_TOOL])
+                               max_tokens=1024, tools=[WEB_SEARCH_TOOL],
+                               trigger="academic_writer:results")
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_results_error", error=str(exc))
@@ -486,7 +488,8 @@ class AcademicWriter:
 
         try:
             text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
-                               max_tokens=512, tools=[WEB_SEARCH_TOOL])
+                               max_tokens=512, tools=[WEB_SEARCH_TOOL],
+                               trigger="academic_writer:discussion")
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_discussion_error", error=str(exc))
@@ -508,7 +511,8 @@ class AcademicWriter:
 
         try:
             text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
-                               max_tokens=300)
+                               max_tokens=300,
+                               trigger="academic_writer:abstract")
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_abstract_error", error=str(exc))

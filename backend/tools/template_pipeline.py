@@ -1321,6 +1321,7 @@ def _run_citation_pass(
             # evidence fields without truncating the JSON mid-write.
             max_tokens=800,
             tools=[web_search_tool],
+            trigger=f"template_pipeline:citation_pass_{pass_index}",
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("citation_pass_call_failed",

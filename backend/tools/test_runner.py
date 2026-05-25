@@ -1091,7 +1091,8 @@ def quality_check(
     try:
         from agents.base import SONNET_MODEL, call_claude
         parsed = _parse_json(call_claude(
-            SONNET_MODEL, _QUALITY_SYSTEM, user_message, max_tokens=400))
+            SONNET_MODEL, _QUALITY_SYSTEM, user_message, max_tokens=400,
+            trigger="test_runner:quality_check"))
         overall = float(parsed.get("overall", 10.0))
         passed = bool(parsed.get("passed", overall >= 7.0))
         return {
@@ -1152,7 +1153,8 @@ def categorize_feedback(
     try:
         from agents.base import SONNET_MODEL, call_claude
         parsed = _parse_json(call_claude(
-            SONNET_MODEL, _CATEGORIZE_SYSTEM, user_message, max_tokens=400))
+            SONNET_MODEL, _CATEGORIZE_SYSTEM, user_message, max_tokens=400,
+            trigger="test_runner:categorize_feedback"))
         tags = parsed.get("tags")
         conf = parsed.get("ai_confidence")
         return {

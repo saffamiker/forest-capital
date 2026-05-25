@@ -93,7 +93,8 @@ def _llm_paragraph(slide: dict[str, Any], writer=None) -> str:
         f"Plain prose ready to be read aloud."
     )
     try:
-        text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=400)
+        text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message,
+                           max_tokens=400, trigger="script_writer:slide_paragraph")
         return text.replace("AI DRAFT — REQUIRES HUMAN REVIEW", "").strip()
     except Exception:
         return _fallback_paragraph(slide)

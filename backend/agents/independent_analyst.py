@@ -103,7 +103,8 @@ class IndependentAnalyst:
                 f"EVIDENCE:\n{evidence}"
             )
 
-            challenge_text = call_gemini(GEMINI_MODEL, system_instruction, prompt)
+            challenge_text = call_gemini(GEMINI_MODEL, system_instruction, prompt,
+                                         trigger="council_gemini_dissent")
 
             log.info("gemini_analyst_completed", response_len=len(challenge_text))
             return self._parse_challenge(challenge_text, strategy_results)

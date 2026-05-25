@@ -4825,7 +4825,8 @@ async def council_explainer_followup(
             # token-by-token reveal. The SSE framing is preserved so
             # the frontend's stream reader works uniformly.
             full_text = call_claude(
-                OPUS_MODEL, system_prompt, user_message, max_tokens=600)
+                OPUS_MODEL, system_prompt, user_message, max_tokens=600,
+                trigger="council_followup")
         except Exception as exc:  # noqa: BLE001
             log.warning("council_followup_failed", error=str(exc))
             full_text = ("The CIO follow-up is unavailable right now. "
@@ -6941,7 +6942,8 @@ async def qa_ask(
             from agents.base import call_claude, OPUS_MODEL
             from agents.qa_agent import _SYSTEM_PROMPT as QA_SYSTEM_PROMPT
 
-            answer = call_claude(OPUS_MODEL, QA_SYSTEM_PROMPT, body.question)
+            answer = call_claude(OPUS_MODEL, QA_SYSTEM_PROMPT, body.question,
+                                 trigger="qa_ask")
             return {"question": body.question, "answer": answer, "verdict": "PASS"}
         except Exception as exc:
             log.error("qa_ask_error", error=str(exc))
@@ -10110,6 +10112,7 @@ async def document_assistant(
 
         suggestion = call_gemini(
             GEMINI_MODEL, _GEMINI_ASSISTANT_SYSTEM_PROMPT, prompt,
+            trigger="document_assistant",
         ).strip()
 
         return {

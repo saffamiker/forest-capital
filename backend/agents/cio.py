@@ -564,7 +564,8 @@ class CIO:
         try:
             return call_claude(
                 OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000,
-                visual_context=self._build_visual_context())
+                visual_context=self._build_visual_context(),
+                trigger="council_cio_draft_consensus")
         except Exception as exc:
             log.error("cio_draft_error", error=str(exc))
             # Fallback draft from specialist summaries
@@ -704,6 +705,7 @@ class CIO:
             synthesis_text = call_claude(
                 OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000,
                 visual_context=self._build_visual_context(),
+                trigger="council_cio_synthesis",
             )
         except Exception as exc:
             log.error("cio_synthesis_error", error=str(exc))

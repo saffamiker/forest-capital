@@ -541,7 +541,8 @@ def _call_gemini_peer(system_prompt: str, user_message: str) -> str:
     if _is_test_env() or not api_key:
         return _mock_peer_review(_PEER_AGENTS["independent_analyst"])
     from agents.base import call_gemini
-    return call_gemini(GEMINI_MODEL, system_prompt, user_message)
+    return call_gemini(GEMINI_MODEL, system_prompt, user_message,
+                       trigger="academic_review_peer:gemini")
 
 
 def _call_grok_peer(system_prompt: str, user_message: str) -> str:
@@ -606,7 +607,8 @@ def run_peer_agent(
         if meta["kind"] == "claude":
             return call_claude(PEER_MODEL, system_prompt, prompt,
                                max_tokens=PEER_MAX_TOKENS,
-                               visual_context=visual_context)
+                               visual_context=visual_context,
+                               trigger="academic_review_peer:claude")
         if meta["kind"] == "gemini":
             return _call_gemini_peer(system_prompt, prompt)
         if meta["kind"] == "grok":
@@ -1087,7 +1089,8 @@ def run_arbiter_with_harness(
     def _generate(prompt: str) -> str:
         return call_claude(ARBITER_MODEL, advisor_prompt, prompt,
                            max_tokens=ARBITER_MAX_TOKENS,
-                           visual_context=visual_context)
+                           visual_context=visual_context,
+                           trigger="academic_review_arbiter")
 
     try:
         harness = GeneratorEvaluatorHarness()

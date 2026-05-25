@@ -360,7 +360,8 @@ def harness_narrative(
             generator_fn=lambda prompt: call_claude(
                 SONNET_MODEL, _SYSTEM_PROMPT, prompt, max_tokens=max_tokens,
                 tools=[WEB_SEARCH_TOOL],
-                visual_context=visual_context),
+                visual_context=visual_context,
+                trigger="document_export_narrative"),
             evaluator_prompt=academic_review_peer_evaluator_prompt("academic writer"),
             # Audience-aware second pass — every document section
             # (midpoint paper, executive brief, deck narrative) is also

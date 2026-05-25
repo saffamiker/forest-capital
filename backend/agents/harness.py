@@ -279,8 +279,16 @@ class GeneratorEvaluatorHarness:
                 f"CONTEXT (reference material the response should be "
                 f"consistent with):\n{context}"
             )
+            # PR-LLM-1 (May 25 2026). trigger="harness_evaluator" so
+            # this call shows up grouped in Render logs — the
+            # evaluator fires on EVERY harness run across the council,
+            # academic review, QA, and document generation, with no
+            # caching of identical (response, criteria) tuples. The
+            # single biggest leak surface in the codebase and the
+            # first target of PR-LLM-2 (evaluator-level cache).
             raw = call_claude(self.evaluator_model, evaluator_prompt,
-                              user_message, max_tokens=600)
+                              user_message, max_tokens=600,
+                              trigger="harness_evaluator")
             parsed = json.loads(_strip_fences(raw))
             score = float(parsed.get("overall", _PASSTHROUGH_SCORE))
             feedback = str(parsed.get("feedback", "") or "")

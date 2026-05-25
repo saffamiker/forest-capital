@@ -501,7 +501,8 @@ def _generate_triage_report(
 
         def _generate(prompt: str) -> str:
             return call_claude(SONNET_MODEL, _TRIAGE_SYSTEM_PROMPT, prompt,
-                               max_tokens=4000)
+                               max_tokens=4000,
+                               trigger="triage_engine")
 
         harness = GeneratorEvaluatorHarness()
         result = harness.run(

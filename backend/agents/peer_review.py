@@ -545,6 +545,7 @@ def run_peer_review_with_harness(context_block: str) -> str:
             system_prompt=sys_prompt,
             user_message=prompt,
             max_tokens=2200,
+            trigger="peer_review_assistant",
         )
 
     harness = GeneratorEvaluatorHarness(
@@ -578,6 +579,7 @@ def run_defense_prep_with_harness(context_block: str) -> str:
             system_prompt=sys_prompt,
             user_message=prompt,
             max_tokens=2400,
+            trigger="defense_prep",
         )
 
     harness = GeneratorEvaluatorHarness(

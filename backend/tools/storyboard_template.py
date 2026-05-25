@@ -295,7 +295,8 @@ def _writer_enriched_note(
         f"Tier 1 gates; best Sharpe strategy is {ctx['best_strategy']}."
     )
 
-    text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=200)
+    text = call_claude(SONNET_MODEL, _SYSTEM_PROMPT, user_message,
+                       max_tokens=200, trigger="storyboard_template:speaker_note")
     # Strip the "AI DRAFT" banner the writer prepends to every output —
     # it lives in the document header, not in every speaker note.
     return text.replace("AI DRAFT — REQUIRES HUMAN REVIEW", "").strip()
