@@ -6971,7 +6971,31 @@ async def qa_export(request: Request, session: dict = Depends(require_auth)):
         except Exception as exc:
             log.error("qa_export_error", error=str(exc))
             audit = MOCK_QA_AUDIT
-    pdf = build_methodology_audit_pdf(audit)
+    # Intentional-design overrides (May 28 2026 hotfix). Fetch any
+    # qa_intentional_overrides rows so build_methodology_audit_pdf
+    # can render the team's recorded disclosure under each check.
+    # Fail-open: a DB miss / read error leaves overrides empty and
+    # the PDF renders without the disclosure lines rather than 500.
+    overrides_map: dict[str, dict] = {}
+    if ENVIRONMENT != "test":
+        try:
+            from sqlalchemy import text as _text
+            from database import AsyncSessionLocal
+            if AsyncSessionLocal is not None:
+                async with AsyncSessionLocal() as conn:
+                    rows = await conn.execute(_text(
+                        "SELECT check_id, note, marked_by, marked_at "
+                        "FROM qa_intentional_overrides"))
+                    for row in rows.fetchall():
+                        overrides_map[row[0]] = {
+                            "check_id": row[0],
+                            "note":     row[1],
+                            "marked_by": row[2],
+                            "marked_at": row[3].isoformat() if row[3] else None,
+                        }
+        except Exception as exc:  # noqa: BLE001
+            log.warning("qa_export_overrides_read_failed", error=str(exc))
+    pdf = build_methodology_audit_pdf(audit, overrides=overrides_map)
     filename = f"forest_capital_methodology_audit_{date.today().isoformat()}.pdf"
     return Response(
         content=pdf,
@@ -7320,8 +7344,23 @@ class QAFlagForFixRequest(__import__("pydantic").BaseModel):
 
 
 class QAMarkIntentionalRequest(__import__("pydantic").BaseModel):
-    """POST body for the Mark as Intentional endpoint."""
-    note: str | None = None
+    """POST body for the Mark as Intentional endpoint.
+
+    May 28 2026 hotfix: `note` is now REQUIRED with a 20-character
+    minimum. The previous shape (`note: str | None = None`) accepted
+    a single-click confirmation from the UI where the body sent
+    `{note: check.finding}` — the AI-generated check description
+    became the disclosure note. That is not a disclosure; it is a
+    rephrasing of the warning. The new gate forces the team to type
+    a real reason before the override is recorded.
+
+    Pydantic min_length=20 produces an automatic 422 with the
+    standard validation-error body when the client submits a shorter
+    note — no extra handler logic needed. Stale frontends that still
+    send `{note: check.finding}` will fail loudly with 422 rather
+    than silently recording the AI text.
+    """
+    note: str = __import__("pydantic").Field(..., min_length=20)
     audit_run_hash: str | None = None
 
 
