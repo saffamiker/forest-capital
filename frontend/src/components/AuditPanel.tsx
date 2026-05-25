@@ -29,6 +29,13 @@ interface AuditFinding {
   auditor_reasoning: string | null
   resolved?: boolean
   resolution_note?: string | null
+  // Migration 044 — reviewer email and timestamp captured on ack.
+  // The PDF disclosures section renders these under each reviewed
+  // warning; auto_acknowledged distinguishes a carried ack from a
+  // freshly-typed one. All optional — older rows have NULL / false.
+  resolved_by?: string | null
+  resolved_at?: string | null
+  auto_acknowledged?: boolean
 }
 
 // A demo run (the QA tab's "Run Live Demo" button) is marked 🎯 in the
@@ -189,6 +196,19 @@ export function FindingRow({ f }: { f: AuditFinding }) {
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [ackError, setAckError] = useState<string | null>(null)
+  // Workstream A — auto_acknowledged distinguishes a carried ack
+  // from a freshly-typed one. The badge label changes from
+  // "Acknowledged" to "Auto-acknowledged" when the carry pass
+  // applied the row; a manual edit (Save acknowledgement) below
+  // clears the flag on the server because the team has now
+  // explicitly endorsed the ack themselves.
+  const [autoAck, setAutoAck] = useState(Boolean(f.auto_acknowledged))
+  // Workstream F — revoke disclosure with a confirmation modal.
+  // The /unresolve endpoint already exists; the modal is added so a
+  // revoke is never one-click destructive of a recorded disclosure.
+  const [revokeOpen, setRevokeOpen] = useState(false)
+  const [revoking, setRevoking] = useState(false)
+  const [revokeError, setRevokeError] = useState<string | null>(null)
 
   const isWarn = f.status === 'warning'
   // Acknowledged-WARN UI rollup (May 28 2026 addendum). When a WARN
@@ -214,11 +234,40 @@ export function FindingRow({ f }: { f: AuditFinding }) {
         { resolution_note: draft.trim() })
       setResolved(true)
       setNote(draft.trim())
+      // A manual Save endorses the ack — the server clears the
+      // auto_acknowledged flag and the local label flips from
+      // "Auto-acknowledged" to "Acknowledged".
+      setAutoAck(false)
       setEditing(false)
     } catch {
       setAckError('Could not save the acknowledgement.')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const revokeAck = async () => {
+    setRevoking(true)
+    setRevokeError(null)
+    try {
+      await axios.post(`/api/v1/audit/findings/${f.id}/unresolve`)
+      // Clear the local UI state — the row reverts to its
+      // pre-acknowledgement view. The report-readiness gate
+      // (workstream C) re-evaluates on next load because the row's
+      // resolved flag is back to false on the server. The
+      // audit_acknowledgements row for this check_id is marked
+      // superseded server-side so a revoked ack is not silently
+      // carried forward by the next re-run.
+      setResolved(false)
+      setNote('')
+      setDraft('')
+      setEditing(false)
+      setRevokeOpen(false)
+      setAutoAck(false)
+    } catch {
+      setRevokeError('Could not revoke the acknowledgement — please retry.')
+    } finally {
+      setRevoking(false)
     }
   }
 
@@ -234,9 +283,14 @@ export function FindingRow({ f }: { f: AuditFinding }) {
           <span className="text-xs text-white">
             L{f.layer} · {f.check_name}
             {resolved && (
-              <span className="ml-1.5 inline-flex items-center gap-0.5
-                               text-2xs text-success align-middle">
-                <CheckCircle2 className="w-3 h-3" /> Acknowledged
+              <span
+                data-testid={
+                  autoAck ? `audit-auto-ack-badge-${f.id}`
+                          : `audit-ack-badge-${f.id}`}
+                className="ml-1.5 inline-flex items-center gap-0.5
+                           text-2xs text-success align-middle">
+                <CheckCircle2 className="w-3 h-3" />{' '}
+                {autoAck ? 'Auto-acknowledged' : 'Acknowledged'}
               </span>
             )}
           </span>
@@ -269,16 +323,45 @@ export function FindingRow({ f }: { f: AuditFinding }) {
               {resolved && !editing && (
                 <div className="space-y-1">
                   <div className="flex items-center gap-1 text-success">
-                    <CheckCircle2 className="w-3 h-3" /> Acknowledged
+                    <CheckCircle2 className="w-3 h-3" />{' '}
+                    {autoAck ? 'Auto-acknowledged' : 'Acknowledged'}
                   </div>
+                  {autoAck && (
+                    <div className="text-2xs text-muted italic
+                                    leading-relaxed">
+                      Carried from a prior review — the underlying
+                      value has not materially changed since the
+                      original acknowledgement. Edit or Revoke to
+                      replace the carried disclosure.
+                    </div>
+                  )}
                   {note && (
                     <div className="text-slate-300 leading-relaxed">{note}</div>
                   )}
-                  <button type="button"
-                    onClick={() => { setDraft(note); setEditing(true) }}
-                    className="text-electric hover:underline">
-                    Edit
-                  </button>
+                  {/* Edit / Revoke — Edit reopens the inline editor
+                      pre-populated with the existing note; Revoke
+                      removes the acknowledgement entirely via the
+                      /unresolve endpoint (after confirming through
+                      the modal below). The resolve endpoint upserts
+                      so a second Save UPDATEs in place; Revoke
+                      clears the row's resolved flag and resolved_by
+                      / resolved_at columns so the report-readiness
+                      gate (workstream C) sees the WARN as
+                      unreviewed again on next load. */}
+                  <div className="flex items-center gap-3">
+                    <button type="button"
+                      onClick={() => { setDraft(note); setEditing(true) }}
+                      data-testid={`audit-edit-disclosure-${f.id}`}
+                      className="text-electric hover:underline">
+                      Edit disclosure
+                    </button>
+                    <button type="button"
+                      onClick={() => { setRevokeError(null); setRevokeOpen(true) }}
+                      data-testid={`audit-revoke-disclosure-${f.id}`}
+                      className="text-danger hover:underline">
+                      Revoke disclosure
+                    </button>
+                  </div>
                 </div>
               )}
               {!resolved && !editing && (
@@ -320,6 +403,69 @@ export function FindingRow({ f }: { f: AuditFinding }) {
               )}
             </div>
           )}
+        </div>
+      )}
+      {revokeOpen && (
+        // Confirmation modal — Revoke is destructive of a recorded
+        // disclosure (the resolution_note is cleared on the server,
+        // and the report-readiness gate counts the WARN as unreviewed
+        // again). The confirm step prevents an accidental click on the
+        // Revoke link from dropping a deliberately-recorded
+        // acknowledgement without any undo.
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center
+                     bg-black/60 p-4"
+          onClick={() => { if (!revoking) setRevokeOpen(false) }}
+          data-testid={`audit-revoke-modal-${f.id}`}>
+          <div className="card p-5 max-w-md w-full space-y-3"
+               onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-white">
+              Revoke this disclosure?
+            </h3>
+            <p className="text-xs text-muted leading-relaxed">
+              This removes the recorded acknowledgement on{' '}
+              <span className="text-slate-200">L{f.layer} · {f.check_name}</span>.
+              The finding will be treated as an unreviewed warning again,
+              and the report-readiness gate will re-evaluate it on the
+              next load. The current disclosure note is shown below for
+              your reference and will be discarded.
+            </p>
+            {note && (
+              <div className="rounded border border-border bg-navy-900
+                              px-3 py-2 text-2xs text-slate-300
+                              leading-relaxed">
+                {note}
+              </div>
+            )}
+            {revokeError && (
+              <p className="text-2xs text-danger" role="status">
+                {revokeError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setRevokeOpen(false)}
+                disabled={revoking}
+                data-testid={`audit-revoke-cancel-${f.id}`}
+                className="px-3 py-1.5 rounded text-xs border border-border
+                           text-muted hover:text-white transition-colors
+                           disabled:opacity-50 disabled:cursor-not-allowed">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void revokeAck()}
+                disabled={revoking}
+                data-testid={`audit-revoke-confirm-${f.id}`}
+                className="px-3 py-1.5 rounded text-xs font-medium
+                           bg-danger/10 border border-danger/40 text-danger
+                           hover:bg-danger/20 transition-colors
+                           disabled:opacity-50 disabled:cursor-not-allowed">
+                {revoking ? 'Revoking…' : 'Revoke disclosure'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -947,6 +947,264 @@ class TestAuditPdfLayerStatus:
         assert "ACKNOTETOKEN" in text
 
 
+class TestStatisticalAuditPdfDisclosures:
+    """
+    Workstream B — every WARN finding surfaces in a dedicated Warnings
+    and Disclosures section with full metadata, and a reviewed WARN
+    carries the reviewer's email + timestamp + note. The team-recorded
+    disclosure must travel with the PDF so the Analytical Appendix
+    records who reviewed what and when.
+    """
+
+    def test_section_header_renders_when_warnings_exist(self):
+        from tools.audit_pdf import build_statistical_audit_pdf
+        finding = make_finding(2, "Sharpe verification", "sharpe_ratio",
+                               "warning", "warning",
+                               strategy="REGIME_SWITCHING")
+        pdf = build_statistical_audit_pdf(_audit_run_fixture(
+            findings={"layer_1": [], "layer_2": [finding], "layer_3": []}))
+        text = _pdf_text(pdf)
+        assert "Warnings and Disclosures" in text
+
+    def test_section_renders_full_metadata_per_warning(self):
+        from tools.audit_pdf import build_statistical_audit_pdf
+        finding = make_finding(
+            2, "DSRMETRICTOKEN check", "deflated_sharpe",
+            "warning", "warning", strategy="MOMENTUM_ROTATION",
+            platform_value="PLATVALTOKEN", auditor_value="AUDITVALTOKEN",
+            discrepancy="0.4% relative")
+        pdf = build_statistical_audit_pdf(_audit_run_fixture(
+            findings={"layer_1": [], "layer_2": [finding], "layer_3": []}))
+        text = _pdf_text(pdf)
+        # Layer, check name, metric, strategy, platform value, auditor
+        # value, and discrepancy all appear in the disclosures section.
+        assert "DSRMETRICTOKEN" in text
+        assert "MOMENTUM_ROTATION" in text
+        assert "PLATVALTOKEN" in text
+        assert "AUDITVALTOKEN" in text
+        assert "0.4%" in text
+
+    def test_reviewed_warning_shows_reviewer_email_and_timestamp(self):
+        from tools.audit_pdf import build_statistical_audit_pdf
+        finding = make_finding(3, "Consistency check", "cagr",
+                               "warning", "warning")
+        finding["resolved"] = True
+        finding["resolution_note"] = "DISCLOSURENOTETOKEN accepted as documented"
+        finding["resolved_by"] = "REVIEWEREMAILTOKEN@queens.edu"
+        finding["resolved_at"] = "2026-05-25T10:42:00+00:00"
+        pdf = build_statistical_audit_pdf(_audit_run_fixture(
+            findings={"layer_1": [], "layer_2": [], "layer_3": [finding]}))
+        text = _pdf_text(pdf)
+        # Reviewer email, formatted timestamp date, and the disclosure
+        # note all appear; "Reviewed" labels the entry (a freshly-typed
+        # ack, not an auto-carried one).
+        assert "Reviewed" in text
+        assert "REVIEWEREMAILTOKEN" in text
+        assert "2026-05-25" in text
+        assert "DISCLOSURENOTETOKEN" in text
+
+    def test_unreviewed_warning_shows_awaiting_team_review(self):
+        from tools.audit_pdf import build_statistical_audit_pdf
+        finding = make_finding(2, "Untouched warning", "alpha",
+                               "warning", "warning")
+        # Default — resolved is False, no reviewer recorded.
+        pdf = build_statistical_audit_pdf(_audit_run_fixture(
+            findings={"layer_1": [], "layer_2": [finding], "layer_3": []}))
+        text = _pdf_text(pdf)
+        assert "Awaiting team review" in text
+
+    def test_auto_acknowledged_label_distinguishes_a_carried_ack(self):
+        from tools.audit_pdf import build_statistical_audit_pdf
+        finding = make_finding(3, "Auto-carried check", "sharpe_ci",
+                               "warning", "warning")
+        finding["resolved"] = True
+        finding["resolution_note"] = "AUTOCARRIEDTOKEN reused note"
+        finding["resolved_by"] = "auto_carry"
+        finding["resolved_at"] = "2026-05-25T09:00:00+00:00"
+        finding["auto_acknowledged"] = True
+        pdf = build_statistical_audit_pdf(_audit_run_fixture(
+            findings={"layer_1": [], "layer_2": [], "layer_3": [finding]}))
+        text = _pdf_text(pdf)
+        # An auto-acknowledged ack is labelled distinctly so the grader
+        # can tell what was reviewed THIS audit vs. what was carried.
+        assert "Auto-acknowledged" in text
+        assert "AUTOCARRIEDTOKEN" in text
+
+    def test_empty_warnings_section_says_no_disclosures_required(self):
+        from tools.audit_pdf import build_statistical_audit_pdf
+        pass_finding = make_finding(1, "Benchmark CAGR", "cagr",
+                                    "pass", "info")
+        pdf = build_statistical_audit_pdf(_audit_run_fixture(
+            findings={"layer_1": [pass_finding], "layer_2": [],
+                      "layer_3": []}))
+        text = _pdf_text(pdf)
+        assert "Warnings and Disclosures" in text
+        # A clean audit declares no disclosures are required, rather
+        # than rendering an empty list.
+        assert "no disclosures are required" in text.lower() or \
+               "no warnings" in text.lower()
+
+    def test_warnings_section_counts_reviewed_vs_awaiting(self):
+        from tools.audit_pdf import build_statistical_audit_pdf
+        reviewed = make_finding(2, "Reviewed", "sharpe", "warning", "warning")
+        reviewed["resolved"] = True
+        reviewed["resolution_note"] = "accepted"
+        reviewed["resolved_by"] = "bob@queens.edu"
+        reviewed["resolved_at"] = "2026-05-25T08:00:00+00:00"
+        pending = make_finding(3, "Pending", "alpha", "warning", "warning")
+        pdf = build_statistical_audit_pdf(_audit_run_fixture(
+            findings={"layer_1": [], "layer_2": [reviewed],
+                      "layer_3": [pending]}))
+        text = _pdf_text(pdf).lower()
+        # Summary line names the totals so a grader skimming the
+        # disclosures sees the review state at a glance.
+        assert "2 warning" in text
+        assert "1 reviewed" in text
+        assert "1 awaiting" in text
+
+
+class TestFormatResolvedAt:
+    """The PDF must accept whatever the database hands back — a
+    datetime object, an ISO string, or NULL — and render the same
+    YYYY-MM-DD HH:MM UTC line for each."""
+
+    def test_none_renders_as_dash(self):
+        from tools.audit_pdf import _format_resolved_at
+        assert _format_resolved_at(None) == "—"
+
+    def test_iso_string_renders_in_utc(self):
+        from tools.audit_pdf import _format_resolved_at
+        out = _format_resolved_at("2026-05-25T10:42:00+00:00")
+        assert "2026-05-25" in out
+        assert "UTC" in out
+
+    def test_naive_datetime_assumed_utc(self):
+        from datetime import datetime
+
+        from tools.audit_pdf import _format_resolved_at
+        out = _format_resolved_at(datetime(2026, 5, 25, 10, 42))
+        assert "2026-05-25" in out
+        assert "10:42" in out
+        assert "UTC" in out
+
+    def test_unparseable_falls_back_to_raw_string(self):
+        from tools.audit_pdf import _format_resolved_at
+        # The PDF row stays well-formed even if the database returns
+        # an unexpected value — the column is still rendered, not
+        # silently dropped.
+        assert _format_resolved_at("just yesterday") == "just yesterday"
+
+
+class TestResolveFindingPersistence:
+    """Workstream B — resolve_finding stores the reviewer's email and
+    timestamp, and unresolve clears both. Requires a live database;
+    skipped under the test-environment NullPool when no database is
+    reachable."""
+
+    def test_resolve_records_reviewer_and_unresolve_clears(self):
+        if not _db_ready():
+            pytest.skip("no live database")
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        from tools.audit_engine import resolve_finding
+
+        async def _seed() -> tuple[int, int]:
+            async with AsyncSessionLocal() as s:
+                r = await s.execute(text(
+                    "INSERT INTO audit_runs (triggered_by, status) "
+                    "VALUES ('manual', 'complete') RETURNING id"))
+                run_id = r.fetchone()[0]
+                fr = await s.execute(text(
+                    "INSERT INTO audit_findings (audit_run_id, layer, "
+                    "check_name, metric, severity, status) VALUES "
+                    "(:rid, 3, 'Turnover', 'true_turnover', 'warning', "
+                    "'warning') RETURNING id"), {"rid": run_id})
+                finding_id = fr.fetchone()[0]
+                await s.commit()
+            return run_id, finding_id
+
+        async def _read(fid: int) -> dict[str, Any]:
+            from tools.audit_engine import get_audit_run
+
+            async with AsyncSessionLocal() as s:
+                r = await s.execute(text(
+                    "SELECT audit_run_id FROM audit_findings WHERE id = :id"),
+                    {"id": fid})
+                run_id = r.fetchone()[0]
+            run = await get_audit_run(run_id)
+            assert run is not None
+            for layer_findings in run["findings"].values():
+                for f in layer_findings:
+                    if f["id"] == fid:
+                        return f
+            raise AssertionError("seeded finding not found")
+
+        run_id, finding_id = asyncio.run(_seed())
+        try:
+            # Resolve — reviewer email captured, resolved_at set.
+            asyncio.run(resolve_finding(
+                finding_id, True, "accepted as documented limitation",
+                resolved_by="bob@queens.edu"))
+            after_resolve = asyncio.run(_read(finding_id))
+            assert after_resolve["resolved"] is True
+            assert after_resolve["resolved_by"] == "bob@queens.edu"
+            assert after_resolve["resolved_at"] is not None
+
+            # Unresolve — every ack field cleared.
+            asyncio.run(resolve_finding(
+                finding_id, False, None, resolved_by=None))
+            after_unresolve = asyncio.run(_read(finding_id))
+            assert after_unresolve["resolved"] is False
+            assert after_unresolve["resolved_by"] is None
+            assert after_unresolve["resolved_at"] is None
+            assert after_unresolve["resolution_note"] is None
+        finally:
+            async def _clean() -> None:
+                async with AsyncSessionLocal() as s:
+                    await s.execute(text(
+                        "DELETE FROM audit_runs WHERE id = :id"),
+                        {"id": run_id})
+                    await s.commit()
+            asyncio.run(_clean())
+
+
+class TestFindingRowBackwardCompat:
+    """Workstream B — _finding_row tolerates a short row (the older
+    14-column SELECT) so a caller that hasn't been re-migrated to the
+    new column set still gets a well-formed dict."""
+
+    def test_short_row_returns_defaults_for_new_fields(self):
+        from tools.audit_engine import _finding_row
+
+        # 15 fields — the pre-migration row shape.
+        short_row = (
+            42, 2, "old check", "cagr", "EQUITY", "warning", "warning",
+            "0.1", "0.1", "", None, None, "", False, None,
+        )
+        out = _finding_row(short_row)
+        assert out["id"] == 42
+        # The new fields default safely when the SELECT predates them.
+        assert out["resolved_by"] is None
+        assert out["resolved_at"] is None
+        assert out["auto_acknowledged"] is False
+
+    def test_full_row_carries_through_new_fields(self):
+        from datetime import datetime, timezone
+
+        from tools.audit_engine import _finding_row
+        when = datetime(2026, 5, 25, 10, 42, tzinfo=timezone.utc)
+        full_row = (
+            42, 2, "new check", "cagr", "EQUITY", "warning", "warning",
+            "0.1", "0.1", "", None, None, "", True,
+            "accepted", "bob@queens.edu", when, True,
+        )
+        out = _finding_row(full_row)
+        assert out["resolved_by"] == "bob@queens.edu"
+        assert out["resolved_at"] == when
+        assert out["auto_acknowledged"] is True
+
+
 class TestWarnAcknowledgeEndpoints:
     RESOLVE = "/api/v1/audit/findings/{}/resolve"
     UNRESOLVE = "/api/v1/audit/findings/{}/unresolve"

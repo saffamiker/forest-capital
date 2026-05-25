@@ -51,11 +51,32 @@ test.describe('App navigation', () => {
   })
 
   test('health endpoint is reachable', async ({ request }) => {
+    // Render restarts take ~2 minutes on deploy. The default timeout is
+    // too short to survive the deploy window, and a single transient 502
+    // can fail CI while the production app is in fact healthy. Three
+    // attempts with a 5-second backoff and a 30-second per-request timeout
+    // cover the deploy window without masking a real outage.
     const apiUrl =
       process.env.API_URL ?? 'https://forest-capital.onrender.com'
-    const response = await request.get(`${apiUrl}/api/health`)
-    expect(response.status()).toBe(200)
-    const json = await response.json()
-    expect(json).toHaveProperty('status')
+    const maxAttempts = 3
+    const backoffMs = 5000
+    let lastError: unknown = null
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        const response = await request.get(`${apiUrl}/api/health`, {
+          timeout: 30000,
+        })
+        expect(response.status()).toBe(200)
+        const json = await response.json()
+        expect(json).toHaveProperty('status')
+        return
+      } catch (err) {
+        lastError = err
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, backoffMs))
+        }
+      }
+    }
+    throw lastError
   })
 })

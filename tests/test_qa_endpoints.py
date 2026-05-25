@@ -45,6 +45,43 @@ def _auth_headers() -> dict:
     return {"X-API-Key": MASTER_API_KEY}
 
 
+_db_ready_cache: bool | None = None
+
+
+def _db_ready() -> bool:
+    """True when a live PostgreSQL with the qa_intentional_overrides
+    table is reachable. Mirrors the probe pattern in tests/test_audit.py
+    — `AsyncSessionLocal is not None` alone is not enough; the engine
+    object exists on import even when the database is unreachable.
+    Probe with an actual SELECT so a DB-less CI environment skips
+    cleanly instead of crashing on the first query."""
+    global _db_ready_cache
+    if _db_ready_cache is not None:
+        return _db_ready_cache
+    try:
+        import asyncio
+
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal, engine
+        if AsyncSessionLocal is None:
+            _db_ready_cache = False
+            return False
+
+        async def _probe() -> bool:
+            if engine is not None:
+                await engine.dispose()
+            async with AsyncSessionLocal() as s:
+                await s.execute(text(
+                    "SELECT 1 FROM qa_intentional_overrides LIMIT 1"))
+            return True
+
+        _db_ready_cache = asyncio.run(_probe())
+    except Exception:  # noqa: BLE001
+        _db_ready_cache = False
+    return _db_ready_cache
+
+
 @pytest.fixture
 def client() -> TestClient:
     from main import app  # noqa: WPS433
@@ -273,6 +310,123 @@ class TestQAIntentionalOverridesList:
         body = r.json()
         assert "overrides" in body
         assert isinstance(body["overrides"], dict)
+
+
+class TestQARevokeIntentional:
+    """DELETE /api/v1/qa/findings/{check_id}/mark-intentional — Workstream
+    F (May 28 2026). Revokes a previously-recorded intentional override
+    so the QA panel re-renders the Action Required card. Idempotent
+    by design: a revoke on nothing returns 200 deleted=false rather
+    than 404 so the frontend never has to pre-check the row exists."""
+
+    def test_rejects_unauthenticated(self, client: TestClient):
+        r = client.delete("/api/v1/qa/findings/P03/mark-intentional")
+        assert r.status_code == 401
+
+    def test_rejects_oversized_check_id_with_422(self, client: TestClient):
+        # 21-char check_id — over the 20-char gate.
+        r = client.delete(
+            "/api/v1/qa/findings/" + "X" * 21 + "/mark-intentional",
+            headers=_auth_headers(),
+        )
+        assert r.status_code == 422
+        assert "check_id" in r.json().get("detail", "").lower()
+
+    def test_rejects_empty_check_id(self, client: TestClient):
+        # Empty path segment — FastAPI returns 404 / 422 before the
+        # handler. Either means "did not reach the handler".
+        r = client.delete(
+            "/api/v1/qa/findings//mark-intentional",
+            headers=_auth_headers(),
+        )
+        assert r.status_code in (404, 422)
+
+    def test_team_member_request_does_not_401_403_422(
+        self, client: TestClient,
+    ):
+        # The master API key bypasses team_member gating (developer
+        # role). The endpoint accepts the request — the DB-touching
+        # path may 500/503 in the no-Postgres test env or 200 with
+        # deleted=false against the live DB. The auth + validation
+        # contract is what's pinned here.
+        r = client.delete(
+            "/api/v1/qa/findings/P03/mark-intentional",
+            headers=_auth_headers(),
+        )
+        assert r.status_code not in (401, 403, 422)
+
+    def test_round_trip_mark_then_revoke_then_revoke(
+        self, client: TestClient,
+    ):
+        """End-to-end revoke flow against a live database. POST mark-
+        intentional, confirm the row appears in /intentional-overrides,
+        DELETE to revoke, confirm the row is gone, then DELETE again
+        — the second call must return deleted=false (idempotent), not
+        404 or 500.
+
+        Live-DB only — skipped in CI where the database is unreachable.
+        The previous `AsyncSessionLocal is None` gate was not strict
+        enough; an unreachable database still leaves AsyncSessionLocal
+        bound (the engine object is created at import), so the SELECT
+        below would have crashed in CI rather than skipped. _db_ready
+        runs an actual SELECT against qa_intentional_overrides."""
+        if not _db_ready():
+            pytest.skip("no live database")
+        from sqlalchemy import text as _text
+
+        from database import AsyncSessionLocal
+
+        check_id = "TESTREV01"
+        note = "Workstream F round-trip revoke test note."
+
+        async def _exists() -> bool:
+            async with AsyncSessionLocal() as conn:
+                r = await conn.execute(_text(
+                    "SELECT 1 FROM qa_intentional_overrides "
+                    "WHERE check_id = :cid"), {"cid": check_id})
+                return r.fetchone() is not None
+
+        async def _cleanup() -> None:
+            async with AsyncSessionLocal() as conn:
+                await conn.execute(_text(
+                    "DELETE FROM qa_intentional_overrides "
+                    "WHERE check_id = :cid"), {"cid": check_id})
+                await conn.commit()
+
+        import asyncio
+        asyncio.run(_cleanup())
+
+        try:
+            # 1. Mark intentional — row appears.
+            r = client.post(
+                f"/api/v1/qa/findings/{check_id}/mark-intentional",
+                headers=_auth_headers(),
+                json={"note": note},
+            )
+            assert r.status_code == 200, r.text
+            assert asyncio.run(_exists()) is True
+
+            # 2. Revoke — row removed, response carries deleted=true.
+            r = client.delete(
+                f"/api/v1/qa/findings/{check_id}/mark-intentional",
+                headers=_auth_headers(),
+            )
+            assert r.status_code == 200
+            body = r.json()
+            assert body.get("deleted") is True
+            assert body.get("check_id") == check_id
+            assert asyncio.run(_exists()) is False
+
+            # 3. Revoke again — idempotent, deleted=false.
+            r = client.delete(
+                f"/api/v1/qa/findings/{check_id}/mark-intentional",
+                headers=_auth_headers(),
+            )
+            assert r.status_code == 200
+            body = r.json()
+            assert body.get("deleted") is False
+        finally:
+            asyncio.run(_cleanup())
 
 
 class TestMigration027Loads:

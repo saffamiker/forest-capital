@@ -320,7 +320,8 @@ async def get_audit_run(run_id: int) -> dict[str, Any] | None:
                 "SELECT id, layer, check_name, metric, strategy, severity, "
                 "status, platform_value, auditor_value, discrepancy, "
                 "formula_used, raw_inputs_hash, auditor_reasoning, "
-                "resolved, resolution_note FROM audit_findings "
+                "resolved, resolution_note, resolved_by, resolved_at, "
+                "auto_acknowledged FROM audit_findings "
                 "WHERE audit_run_id = :id ORDER BY layer, id"), {"id": run_id})
             findings = [_finding_row(r) for r in rows.fetchall()]
         out = _run_row(found)
@@ -336,17 +337,28 @@ async def get_audit_run(run_id: int) -> dict[str, Any] | None:
 
 
 def _finding_row(r: Any) -> dict[str, Any]:
+    # resolved_by, resolved_at, auto_acknowledged were added by
+    # migration 044. Older rows have NULL / false for these; the
+    # PDF disclosures section renders missing values as a dash.
     return {
         "id": r[0], "layer": r[1], "check_name": r[2], "metric": r[3],
         "strategy": r[4], "severity": r[5], "status": r[6],
         "platform_value": r[7], "auditor_value": r[8], "discrepancy": r[9],
         "formula_used": r[10], "raw_inputs_hash": r[11],
         "auditor_reasoning": r[12], "resolved": r[13], "resolution_note": r[14],
+        "resolved_by": r[15] if len(r) > 15 else None,
+        "resolved_at": r[16] if len(r) > 16 else None,
+        "auto_acknowledged": bool(r[17]) if len(r) > 17 and r[17] is not None
+                              else False,
     }
 
 
 async def resolve_finding(
-    finding_id: int, resolved: bool, note: str | None,
+    finding_id: int,
+    resolved: bool,
+    note: str | None,
+    *,
+    resolved_by: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Sets or clears the acknowledgement on an audit finding — the WARN
@@ -354,6 +366,19 @@ async def resolve_finding(
     not a correction: the run's overall verdict is unchanged. Returns the
     updated finding, or None when the finding is absent or on a database
     error (fail-open).
+
+    resolved_by — the reviewer's email. Stored on the row so the PDF
+    disclosures section can render "Reviewed by [email] on [date]"
+    under each disclosed warning. When clearing the acknowledgement
+    (resolved=False) the column is set back to NULL alongside
+    resolution_note and resolved_at — the row reverts to its
+    pre-review state.
+
+    Workstream A — a successful ack also writes an audit_acknowledgements
+    row so the next re-run's carry pass (tools/audit_carry.apply_carry)
+    can re-apply this review against an equivalent future finding. A
+    successful unresolve marks the row superseded so a revoked ack is
+    not silently carried forward.
     """
     try:
         from sqlalchemy import text
@@ -364,20 +389,46 @@ async def resolve_finding(
         async with AsyncSessionLocal() as session:
             result = await session.execute(text(
                 "UPDATE audit_findings SET resolved = :r, "
-                "resolution_note = :n WHERE id = :id "
+                "resolution_note = :n, resolved_by = :by, "
+                "resolved_at = CASE WHEN :r THEN now() ELSE NULL END, "
+                "auto_acknowledged = CASE WHEN :r THEN false "
+                "                         ELSE auto_acknowledged END "
+                "WHERE id = :id "
                 "RETURNING id, layer, check_name, metric, strategy, "
                 "severity, status, platform_value, auditor_value, "
                 "discrepancy, formula_used, raw_inputs_hash, "
-                "auditor_reasoning, resolved, resolution_note"),
+                "auditor_reasoning, resolved, resolution_note, "
+                "resolved_by, resolved_at, auto_acknowledged"),
                 {"r": resolved, "n": note if resolved else None,
+                 "by": resolved_by if resolved else None,
                  "id": finding_id})
             row = result.fetchone()
             await session.commit()
-            return _finding_row(row) if row else None
+            if not row:
+                return None
+            finding = _finding_row(row)
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_resolve_finding_failed",
                     finding_id=finding_id, error=str(exc))
         return None
+
+    # Persist the carry record outside the primary UPDATE's session so
+    # a write failure here cannot roll back the audit_findings change.
+    try:
+        from tools.audit_carry import (
+            record_acknowledgement, supersede_acknowledgement,
+        )
+        if resolved and note and resolved_by:
+            await record_acknowledgement(
+                finding, note, acknowledged_by=resolved_by)
+        elif not resolved:
+            # Revoke — supersede the unsuperseded ack for this check_id.
+            await supersede_acknowledgement(finding)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_carry_record_failed",
+                    finding_id=finding_id, error=str(exc))
+
+    return finding
 
 
 async def get_latest_audit_run() -> dict[str, Any] | None:
@@ -436,6 +487,20 @@ async def _execute_audit(run_id: int) -> None:
                           "3": l3["status"]}
         all_findings = l1["findings"] + l2["findings"] + l3["findings"]
         await _store_findings(run_id, all_findings)
+        # Workstream A — apply auto-carry of prior acks against the
+        # newly-stored findings. Each WARN whose check_id has a
+        # prior unsuperseded ack AND whose value has not materially
+        # changed (within 0.5%) is resolved automatically; the
+        # finding row's auto_acknowledged flag distinguishes a
+        # carried ack from a fresh team-typed one in the UI and PDF.
+        # Failures inside the carry pass log and swallow — the audit
+        # itself remains valid.
+        try:
+            from tools.audit_carry import apply_carry
+            await apply_carry(run_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("audit_carry_pass_failed",
+                        run_id=run_id, error=str(exc))
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_execute_failed", run_id=run_id, error=str(exc))
         status = "failed"
