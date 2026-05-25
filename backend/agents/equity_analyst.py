@@ -18,6 +18,7 @@ from agents.base import (
     CITATION_INSTRUCTION,
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
+    STRUCTURE_INSTRUCTION,
     SONNET_MODEL,
     VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
@@ -76,6 +77,8 @@ transitions, the magnitude of the divergences — and tie those visual features 
 to the strategy metrics in the DATA block.
 
 {VISUAL_REASONING_RULES}
+
+{STRUCTURE_INSTRUCTION}
 
 {GLOBAL_AGENT_RULE}
 
@@ -163,7 +166,8 @@ class EquityAnalyst:
                 generator_fn=lambda p: call_claude(
                     SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500,
                     tools=[WEB_SEARCH_TOOL],
-                    visual_context=visual_context),
+                    visual_context=visual_context,
+                    trigger="council_specialist:equity_analyst"),
                 evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
                 generator_prompt=user_message,
                 context=str(context)[:4000],

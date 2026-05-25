@@ -20,7 +20,8 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
-import { X, Copy, Loader2, AlertTriangle } from 'lucide-react'
+import { Copy, Loader2, AlertTriangle } from 'lucide-react'
+import { ModalCloseButton } from './ModalControls'
 
 import { useGlossaryStore } from '../stores/glossaryStore'
 
@@ -132,14 +133,10 @@ export default function PersonaModal({
               <p className="text-muted text-2xs font-mono mt-0.5">{persona.model}</p>
             )}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-muted hover:text-white p-1 rounded"
-            aria-label="Close persona modal"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <ModalCloseButton
+            onClose={onClose}
+            ariaLabel="Close persona modal"
+          />
         </header>
 
         {/* Tabs */}

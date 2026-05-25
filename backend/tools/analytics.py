@@ -20,6 +20,30 @@ import pandas as pd
 # The 2022 Fed hiking cycle is when the equity-bond correlation flipped
 # positive — the project's central finding. Pre/post-2022 splits and the
 # rolling-correlation regime marker all key off this date.
+#
+# CONVENTION (UAT L2 boundary-date audit, May 24 2026):
+# 2022-01-01 is the boundary date applied UNIFORMLY across every
+# component that splits at the regime break. The convention is:
+#
+#   pre_2022  = every observation whose timestamp is STRICTLY LESS THAN
+#               2022-01-01 (i.e., everything dated 2021-12-31 or earlier).
+#   post_2022 = every observation whose timestamp is GREATER THAN OR
+#               EQUAL TO 2022-01-01 (i.e., everything dated 2022-01-01
+#               or later — January 2022's month-end of 2022-01-31 is
+#               firmly in POST).
+#
+# This rule is applied at the OBSERVATION-TIMESTAMP level — every
+# component that consumes the regime break uses `index < REGIME_BREAK`
+# vs `index >= REGIME_BREAK` against the relevant series index. For
+# rolling-window metrics (12-month rolling correlation) the rule is
+# applied to the ROLLING-VALUE timestamp, not to each contributing
+# observation: the rolling correlation value dated 2022-01-31 reflects
+# the 12-month window ending on that date (Feb 2021 → Jan 2022 inclusive)
+# and is classified as POST because 2022-01-31 >= 2022-01-01. The first
+# 11 post-2022 rolling values therefore carry pre-2022 history in their
+# lookback windows by construction; this is intentional and documented
+# in the auditor formula spec so independent recomputation produces the
+# same boundary classification.
 REGIME_BREAK = pd.Timestamp("2022-01-01")
 
 # Monthly → annual. All return series in this project are monthly.

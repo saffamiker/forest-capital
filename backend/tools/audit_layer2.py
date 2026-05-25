@@ -72,10 +72,20 @@ def _extract_json(text: str) -> dict[str, Any] | None:
 
 def _call_auditor(user_message: str) -> str:
     """One Opus auditor call. Synchronous — the caller fans groups out
-    with asyncio.to_thread."""
+    with asyncio.to_thread.
+
+    trigger="statistical_audit_layer2" so the llm_call log line names
+    the most expensive call in the codebase (30-50K tokens per call ×
+    five task groups per audit run) for direct cost attribution.
+    hash_gate=True because audit_engine.run_full_audit() runs an
+    is_audit_current() check BEFORE firing the auditor — every
+    auditor call has already passed the gate when it reaches here.
+    """
     from agents.base import OPUS_MODEL, call_claude
     return call_claude(OPUS_MODEL, _AUDITOR_SYSTEM, user_message,
-                        max_tokens=_AUDITOR_MAX_TOKENS)
+                        max_tokens=_AUDITOR_MAX_TOKENS,
+                        trigger="statistical_audit_layer2",
+                        hash_gate=True)
 
 
 def _checks_to_findings(

@@ -346,6 +346,17 @@ class AcademicWriter:
         When team_activity is supplied it is included so the section can
         ground any Roles / Division-of-Labor prose in real engagement data.
         """
+        # Pre-drafted disclosure paragraphs for AN01 (Carhart) and AN04
+        # (regime split + transition matrix). The QA audit uses the same
+        # verification language; including the disclosures here ensures
+        # the Analytical Appendix's Methodology section can cite them
+        # verbatim or paraphrase from a single source of truth.
+        try:
+            from agents.qa_agent import analytical_appendix_disclosures
+            an_disclosures = analytical_appendix_disclosures()
+        except Exception:  # noqa: BLE001
+            an_disclosures = {}
+
         payload: dict[str, Any] = {
             "data_sources": data_sources,
             "strategies": strategies,
@@ -356,6 +367,7 @@ class AcademicWriter:
             "n_strategies": len(strategies),
             "walk_forward_train": 36,
             "walk_forward_test": 12,
+            "analytics_disclosures": an_disclosures,
         }
         if team_activity:
             payload["team_activity"] = team_activity
@@ -367,13 +379,19 @@ class AcademicWriter:
             "statistical framework (p-thresholds, FDR, DSR, CPCV, block bootstrap). "
             "Cite from references_available, and use web_search to find and "
             "verify external sources for the key findings (see EXTERNAL "
-            "CITATIONS in your instructions). ~400 words.\n\n"
+            "CITATIONS in your instructions). "
+            "Incorporate analytics_disclosures verbatim where they describe a "
+            "validation the QA audit performs — they are the canonical "
+            "language for the Carhart four-factor regression (AN01) and the "
+            "2022 regime split + transition matrix consistency check (AN04). "
+            "~500 words.\n\n"
             f"DATA:\n{context}"
         )
 
         try:
             text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
-                               max_tokens=800, tools=[WEB_SEARCH_TOOL])
+                               max_tokens=800, tools=[WEB_SEARCH_TOOL],
+                               trigger="academic_writer:methodology")
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_methodology_error", error=str(exc))
@@ -427,7 +445,8 @@ class AcademicWriter:
 
         try:
             text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
-                               max_tokens=1024, tools=[WEB_SEARCH_TOOL])
+                               max_tokens=1024, tools=[WEB_SEARCH_TOOL],
+                               trigger="academic_writer:results")
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_results_error", error=str(exc))
@@ -469,7 +488,8 @@ class AcademicWriter:
 
         try:
             text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
-                               max_tokens=512, tools=[WEB_SEARCH_TOOL])
+                               max_tokens=512, tools=[WEB_SEARCH_TOOL],
+                               trigger="academic_writer:discussion")
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_discussion_error", error=str(exc))
@@ -491,7 +511,8 @@ class AcademicWriter:
 
         try:
             text = call_claude(SONNET_MODEL, _writer_system_prompt(), user_message,
-                               max_tokens=300)
+                               max_tokens=300,
+                               trigger="academic_writer:abstract")
             return _AI_DRAFT_BANNER + text
         except Exception as exc:
             log.error("academic_writer_abstract_error", error=str(exc))

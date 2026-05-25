@@ -190,7 +190,14 @@ async function _fetchAll(
     retry_after_ms?: number
   }>(
     '/api/v1/analytics/academic',
-    { timeout: 30000 },
+    // UAT 2026-05-27 P0 — cold Render instance can take 35-45s
+    // to populate strategy_results_cache on the first request
+    // (run_all_strategies on the request thread). The previous
+    // 30s ceiling tipped these requests over into "Load failed"
+    // even though the backend was about to succeed. The auto-warm
+    // backend fix lands alongside this; the timeout bump is the
+    // belt-and-braces mitigation for any subsequent cold boot.
+    { timeout: 60000 },
   ).then(
     (res) => ({
       cumulative: res.data.cumulative_returns ?? null,
@@ -224,7 +231,14 @@ async function _fetchAll(
   }>(
     '/api/optimize/weights',
     { method: 'MAX_SHARPE' },
-    { timeout: 30000 },
+    // UAT 2026-05-27 P0 — same cold-Render rationale as the
+    // cumulative-returns request above. The optimizer endpoint
+    // already has a warming-flag fast path for a cold cache,
+    // but the cumulative request can still take 35-45s on
+    // first compute and the dashboard renders them as a pair
+    // (Promise.all). Aligning the timeouts keeps the pair
+    // surviving the same cold boot.
+    { timeout: 60000 },
   ).then(
     (res) => ({
       frontier: res.data.efficient_frontier ?? null,

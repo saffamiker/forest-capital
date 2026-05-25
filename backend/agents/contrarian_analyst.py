@@ -147,11 +147,30 @@ class ContrarianAnalyst:
             challenge_text = data["choices"][0]["message"]["content"]
             # Token-usage capture — OpenAI-shape usage block. No-op unless
             # an endpoint started a capture; never breaks the response.
+            usage = data.get("usage") or {}
+            in_tokens = usage.get("prompt_tokens", 0) or 0
+            out_tokens = usage.get("completion_tokens", 0) or 0
             try:
                 from agents.usage import record_usage
-                usage = data.get("usage") or {}
-                record_usage("grok", usage.get("prompt_tokens", 0),
-                             usage.get("completion_tokens", 0))
+                record_usage("grok", in_tokens, out_tokens)
+            except Exception:  # noqa: BLE001
+                pass
+            # Per-call structured log (PR-LLM-1, May 25 2026). Grok
+            # bypasses call_claude (OpenAI-compatible HTTP, not the
+            # Anthropic SDK) so emit here. hash_gate=False — every
+            # Grok call is council-driven and shares the same gate
+            # state as the upstream council request (none today).
+            try:
+                from agents.llm_log import log_llm_call
+                log_llm_call(
+                    function="contrarian_analyst.challenge",
+                    model=xai.model,
+                    trigger="council_grok_dissent",
+                    input_tokens=in_tokens,
+                    output_tokens=out_tokens,
+                    hash_gate=False,
+                    provider=xai.provider,
+                )
             except Exception:  # noqa: BLE001
                 pass
             log.info(

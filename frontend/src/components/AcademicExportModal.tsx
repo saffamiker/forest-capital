@@ -15,7 +15,8 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
-import { X, Check, Loader2, Download, AlertTriangle } from 'lucide-react'
+import { Check, Loader2, Download, AlertTriangle } from 'lucide-react'
+import { ModalCloseButton } from './ModalControls'
 import {
   CumulativeReturnChart, RollingCorrelationChart, RollingExcessReturnChart,
   SensitivityAnalysis,
@@ -237,10 +238,7 @@ export default function AcademicExportModal({ onClose }: { onClose: () => void }
               </p>
             </div>
             {(done || error) && (
-              <button type="button" onClick={onClose} aria-label="Close"
-                      className="text-muted hover:text-white shrink-0">
-                <X className="w-4 h-4" />
-              </button>
+              <ModalCloseButton onClose={onClose} className="shrink-0" />
             )}
           </div>
 

@@ -46,6 +46,7 @@ import axios from 'axios'
 import {
   AlertCircle, ChevronLeft, ChevronRight, ExternalLink, X,
 } from 'lucide-react'
+import { ModalCloseButton } from './ModalControls'
 
 import { getTestScript } from '../constants/testScripts'
 import { isValidFixReference } from './TestRunnerSettings'
@@ -403,10 +404,7 @@ export function SuggestionReviewModal({
               </span>
             )}
           </h2>
-          <button type="button" onClick={onClose} aria-label="Close"
-                  className="text-muted hover:text-white">
-            <X className="w-4 h-4" />
-          </button>
+          <ModalCloseButton onClose={onClose} />
         </div>
 
         <div className="px-4 py-3 space-y-4 overflow-y-auto flex-1">

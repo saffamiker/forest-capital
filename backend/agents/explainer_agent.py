@@ -221,7 +221,8 @@ def _call_llm(system_prompt: str, user_message: str, max_tokens: int = 800) -> s
     # Haiku fallback — generous token cap so JSON responses complete fully.
     fallback_tokens = max(max_tokens, HAIKU_FALLBACK_MAX_TOKENS)
     try:
-        return call_claude(HAIKU_MODEL, system_prompt, user_message, fallback_tokens)
+        return call_claude(HAIKU_MODEL, system_prompt, user_message, fallback_tokens,
+                           trigger="explainer:haiku_fallback")
     except Exception as exc:
         # Both providers are down. Logged symmetrically with the Grok path
         # above so the failure surface is consistent; re-raised so the

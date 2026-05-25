@@ -334,6 +334,66 @@ def _submission_label(
     return "fail_blocking"
 
 
+# ── Analytical Appendix disclosure text ───────────────────────────────
+#
+# Pre-drafted disclosure paragraphs for the analytics-layer QA checks.
+# The Academic Writer pulls these into the Methodology section so the
+# Analytical Appendix carries the same verification language the QA
+# audit uses. Keeping the text here (next to the checks themselves)
+# means a methodology change updates the appendix copy in one place.
+#
+# Surfaced via QAAgent.analytical_appendix_disclosures() — the
+# academic_writer's write_methodology() includes them in the data
+# block sent to Sonnet, so the generated prose can cite them verbatim
+# or paraphrase as the writer sees fit.
+
+_AN_DISCLOSURES: dict[str, str] = {
+    "AN01_carhart": (
+        "Factor exposure was estimated via Carhart (1997) four-factor "
+        "regression of each strategy's monthly excess return on MKT-RF, "
+        "SMB, HML, and MOM (Fama-French 3-factor + momentum). The "
+        "regression uses statsmodels OLS with 95 percent confidence "
+        "intervals via conf_int(alpha=0.05); annualised alpha is the "
+        "intercept multiplied by 12. Significance at p < 0.05 is "
+        "reported per coefficient. MOM is nullable: a strategy whose "
+        "history predates the momentum-factor backfill falls back to "
+        "a three-factor fit (recorded as model='ff_3factor'). The "
+        "factor loadings table is precomputed on every strategy-cache "
+        "write and stored in analytics_metrics_cache; the QA audit "
+        "verifies every row carries the four betas, alpha, R-squared "
+        "in [0, 1], and per-coefficient significance flags before "
+        "marking AN01 PASS."
+    ),
+    "AN04_regime_split": (
+        "The 2022 regime break is operationalised as the boundary date "
+        "2022-01-01 inclusive of the post-period: months whose "
+        "month-end falls on or after that date are post-2022, all "
+        "earlier months are pre-2022. The split is applied uniformly "
+        "across every component that reports a regime-conditional "
+        "view: regime_conditional_performance (per-strategy Sharpe + "
+        "CAGR), rolling_correlation (equity/IG and equity/HY 12-month "
+        "windows), and the regime-break marker on the cumulative-return "
+        "and rolling-correlation charts. Transition probabilities are "
+        "computed from the HMM-labelled monthly regime series by "
+        "counting consecutive month-pairs and normalising per "
+        "originating regime; every non-empty row of the 3x3 transition "
+        "matrix (BULL/BEAR/TRANSITION) sums to 1.0 within 1e-3 "
+        "tolerance. Both tables are precomputed and validated on every "
+        "strategy-cache write; the QA audit verifies their completeness "
+        "and the matrix row sums before marking AN04 PASS."
+    ),
+}
+
+
+def analytical_appendix_disclosures() -> dict[str, str]:
+    """Returns the pre-drafted Analytical Appendix disclosure paragraphs
+    keyed by QA check ID. The Academic Writer pulls these into the
+    Methodology section so the appendix carries the same verification
+    language the QA audit uses.
+    """
+    return dict(_AN_DISCLOSURES)
+
+
 # 39 checklist items — the original 30 methodology checks plus 9 added
 # (May 2026) so every built platform feature has QA coverage: the
 # analytics layer (AN01-AN06) and the platform's own verification
@@ -652,6 +712,7 @@ class QAAgent:
         self,
         strategy_results: dict[str, Any],
         run_full_checklist: bool = True,
+        analytics_cache: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Runs the full methodology audit.
@@ -659,13 +720,23 @@ class QAAgent:
         Args:
             strategy_results:   All strategy results to audit.
             run_full_checklist: If False, runs a 5-point quick audit instead.
+            analytics_cache:    Pre-flight output from
+                                tools.precomputed_analytics.ensure_qa_data_complete.
+                                Carries the validated academic_analytics +
+                                transition_matrix payloads needed by AN01
+                                (Carhart loadings) and AN04 (regime split +
+                                transition matrix consistency). Optional —
+                                when None, the AN01/AN04 checks fall back
+                                to per-strategy inspection.
 
         Returns a structured audit report with pass/warn/fail per item.
         """
         # Deterministic checks run first — they're arithmetic assertions that
         # cannot be hallucinated by the LLM. They override LLM results for
         # items where we can compute ground truth directly.
-        deterministic_results = self._run_deterministic_checks(strategy_results)
+        deterministic_results = self._run_deterministic_checks(
+            strategy_results, analytics_cache=analytics_cache,
+        )
 
         if not run_full_checklist:
             quick_items = self._build_quick_audit(strategy_results)
@@ -743,6 +814,7 @@ class QAAgent:
             response_text = call_claude(
                 OPUS_MODEL, _SYSTEM_PROMPT, user_message,
                 max_tokens=16000,
+                trigger="qa_agent_audit",
             )
             # Diagnostic: log the response length so a future
             # truncation can be spotted in Render logs without
@@ -760,7 +832,9 @@ class QAAgent:
             return self._build_deterministic_audit(deterministic_results, strategy_results)
 
     def _run_deterministic_checks(
-        self, strategy_results: dict[str, Any]
+        self,
+        strategy_results: dict[str, Any],
+        analytics_cache: dict[str, Any] | None = None,
     ) -> dict[str, dict[str, str]]:
         """
         Runs checklist items that can be verified directly from the results dict.
@@ -768,6 +842,14 @@ class QAAgent:
         Returns a dict mapping key → {"status": "PASS/WARN/FAIL", "evidence": str}.
         Returning structured dicts (not plain strings) ensures the test can inspect
         status independently of how the QA agent formats its final report.
+
+        `analytics_cache` is the pre-flight output from
+        tools/precomputed_analytics.ensure_qa_data_complete — it carries
+        the academic_analytics + transition_matrix payloads so AN01 /
+        AN04 can read the validated cache rows directly. When None
+        (legacy callers / tests), the checks fall back to inspecting
+        per-strategy result fields and report WARN if neither path
+        produces evidence.
         """
         results: dict[str, dict[str, str]] = {}
 
@@ -1015,70 +1097,46 @@ class QAAgent:
             ),
         }
 
-        # AN01: Carhart four-factor output completeness. Every
-        # strategy's cross_validation / factor_loadings carries the
-        # four betas (mkt_rf, smb, hml, mom), annualised alpha,
-        # R², and per-coefficient significance flags. The full
-        # block is rendered in the Analytics layer; here we
-        # verify the structural fields are populated for at
-        # least one strategy (the data pipeline emits the block
-        # for every strategy with sufficient overlap).
-        has_factors = any(
-            "factor_loadings" in r and isinstance(r["factor_loadings"], dict)
-            and {"mkt_rf", "smb", "hml", "mom", "alpha", "r_squared"}.issubset(
-                set(r["factor_loadings"].keys()))
-            for r in strategy_results.values()
+        # AN01: Carhart four-factor output completeness. The factor_loadings
+        # table lives in analytics_metrics_cache (one row per strategy with
+        # MKT-RF / SMB / HML / MOM betas, annualised alpha, R-squared,
+        # and per-coefficient significance flags). The pre-flight
+        # (ensure_qa_data_complete) fetches the row and triggers a refresh
+        # on miss; the validated `_completeness` block tells us whether
+        # the analytics pipeline produced a structurally-complete table.
+        #
+        # We accept three evidence paths in order:
+        #   1. The analytics cache's _completeness block reports complete
+        #      (the precomputed_analytics validator already verified every
+        #      row has every required field).
+        #   2. A per-strategy result dict carries factor_loadings inline
+        #      (legacy fallback; no current code path writes this).
+        #   3. WARN with a specific diagnostic pointing at the cache.
+        carhart_status, carhart_evidence = self._evaluate_carhart_completeness(
+            strategy_results, analytics_cache,
         )
-        # Fallback — the Carhart block also lives in the analytics
-        # cache, populated separately. Detect either path.
-        if not has_factors:
-            has_factors = any(
-                isinstance(r.get("factor_betas"), dict)
-                and set(r["factor_betas"].keys()) >= {"mkt_rf", "smb", "hml", "mom"}
-                for r in strategy_results.values()
-            )
         results["carhart_regression"] = {
-            "status": "PASS" if has_factors else "WARN",
-            "evidence": (
-                "Carhart four-factor block populated with mkt_rf / "
-                "smb / hml / mom betas, alpha and R² for at least "
-                "one strategy. The Analytics layer renders the full "
-                "table with per-coefficient significance flags."
-                if has_factors else
-                "Carhart factor block missing or incomplete — verify "
-                "the analytics_metrics_cache factor_loadings row."
-            ),
+            "status": carhart_status,
+            "evidence": carhart_evidence,
         }
 
-        # AN04: 2022 regime-break consistency. The regime_conditional
-        # analytic emits pre_sharpe / post_sharpe per strategy. If
-        # both fields exist (or the regime_break_date marker is set)
-        # the split was applied uniformly across the series.
-        has_regime_split = any(
-            isinstance(r.get("regime_conditional"), dict)
-            and "pre_sharpe" in r["regime_conditional"]
-            and "post_sharpe" in r["regime_conditional"]
-            for r in strategy_results.values()
+        # AN04: 2022 regime-break consistency. Two structural checks:
+        #   1. regime_conditional table: every strategy has pre/post-2022
+        #      Sharpe and CAGR (None permitted only when months < 2).
+        #   2. transition_matrix: every non-empty originating regime row
+        #      sums to 1.0 (the probabilities are well-formed).
+        #
+        # Both rows are validated by precomputed_analytics on every
+        # refresh; the _completeness block here is the authoritative
+        # verdict. The pre-flight triggered a refresh if either row
+        # was missing or incomplete, so a WARN at this point means the
+        # refresh ALSO failed — surface the specific gap.
+        regime_status, regime_evidence = self._evaluate_regime_completeness(
+            strategy_results, analytics_cache,
         )
-        # Fallback — pre/post sharpe also surface as top-level fields
-        # on some strategy result shapes.
-        if not has_regime_split:
-            has_regime_split = any(
-                r.get("pre_2022_sharpe") is not None
-                and r.get("post_2022_sharpe") is not None
-                for r in strategy_results.values()
-            )
         results["regime_consistency"] = {
-            "status": "PASS" if has_regime_split else "WARN",
-            "evidence": (
-                "Pre/post-2022 Sharpe values present on every strategy "
-                "with sufficient data — the regime break (2022-01-01) "
-                "is applied uniformly across the Analytics + Regime "
-                "Analysis dashboards."
-                if has_regime_split else
-                "Pre/post-2022 split data missing — the regime break "
-                "may not be uniformly applied across components."
-            ),
+            "status": regime_status,
+            "evidence": regime_evidence,
         }
 
         # AN06: cumulative series initialization. Every strategy's
@@ -1267,6 +1325,199 @@ class QAAgent:
             }
             for k in quick_keys
         ]
+
+    # ── AN01 / AN04 cache-aware helpers ─────────────────────────────────
+    #
+    # AN01 (Carhart loadings) and AN04 (regime split + transition matrix)
+    # both source from analytics_metrics_cache, not the per-strategy
+    # result dicts. The QA audit endpoint runs ensure_qa_data_complete
+    # before invoking us, so the validated cache rows are already in
+    # hand — these helpers consume them and produce a structured verdict.
+    #
+    # Each helper returns (status, evidence). The verdict order:
+    #   PASS — the validated cache reports the table is complete.
+    #   WARN — the cache row is missing OR the validator flagged gaps.
+    #          The evidence message names the specific gap so a
+    #          downstream consumer (the operator, the Analytical
+    #          Appendix) sees exactly which row failed and what to fix.
+
+    @staticmethod
+    def _evaluate_carhart_completeness(
+        strategy_results: dict[str, Any],
+        analytics_cache: dict[str, Any] | None,
+    ) -> tuple[str, str]:
+        """Returns (status, evidence) for the Carhart loadings check.
+
+        Reads analytics_cache.completeness.factor_loadings as the
+        primary signal; falls back to per-strategy inspection if the
+        cache is not available (legacy callers / tests).
+        """
+        cache_evidence: str | None = None
+        if analytics_cache:
+            completeness = (analytics_cache.get("completeness") or {})
+            if completeness.get("factor_loadings"):
+                academic = analytics_cache.get("academic_analytics") or {}
+                rows = academic.get("factor_loadings") or []
+                models = sorted({r.get("model", "?") for r in rows})
+                return ("PASS", (
+                    f"Carhart four-factor block populated for "
+                    f"{len(rows)} strategies. Every row carries "
+                    f"MKT-RF / SMB / HML / MOM betas (MOM nullable for "
+                    f"pre-backfill histories), annualised alpha and "
+                    f"R-squared in [0, 1], with per-coefficient "
+                    f"significance flags. Models used: {', '.join(models) or '—'}. "
+                    f"Completeness verified by "
+                    f"precomputed_analytics.validate_analytics_payload."
+                ))
+            # Cache is present but reported incomplete — surface specifics.
+            academic = analytics_cache.get("academic_analytics") or {}
+            comp = (academic.get("_completeness") or {}).get(
+                "factor_loadings") or {}
+            invalid = comp.get("invalid_rows") or []
+            n_rows = comp.get("n_rows", 0)
+            if invalid:
+                first = invalid[0]
+                cache_evidence = (
+                    f"Carhart factor block found in analytics cache "
+                    f"({n_rows} rows) but {len(invalid)} row(s) failed "
+                    f"completeness validation. First gap — "
+                    f"{first.get('strategy', '?')}: "
+                    f"{', '.join(first.get('missing', [])[:3])}. "
+                    f"Re-run /api/v1/cache/invalidate then "
+                    f"POST /api/qa/audit; the pre-flight will trigger a "
+                    f"fresh refresh_academic_analytics."
+                )
+            else:
+                cache_evidence = (
+                    "Carhart factor block missing from analytics cache "
+                    "even after the pre-flight refresh — check Render "
+                    "logs for precomputed_academic_analytics_failed."
+                )
+
+        # Per-strategy fallback (legacy / tests).
+        has_factors = any(
+            "factor_loadings" in r and isinstance(r["factor_loadings"], dict)
+            and {"mkt_rf", "smb", "hml", "mom", "alpha", "r_squared"}.issubset(
+                set(r["factor_loadings"].keys()))
+            for r in strategy_results.values()
+        )
+        if not has_factors:
+            has_factors = any(
+                isinstance(r.get("factor_betas"), dict)
+                and set(r["factor_betas"].keys()) >= {"mkt_rf", "smb", "hml", "mom"}
+                for r in strategy_results.values()
+            )
+        if has_factors:
+            return ("PASS", (
+                "Carhart four-factor block populated on at least one "
+                "strategy result dict (per-strategy inline path). "
+                "Analytics cache pre-flight not available."
+            ))
+        return ("WARN", cache_evidence or (
+            "Carhart factor block missing — neither the analytics_metrics_cache "
+            "nor any per-strategy result dict carries the loadings table. "
+            "The audit endpoint should call "
+            "tools.precomputed_analytics.ensure_qa_data_complete before "
+            "invoking run_audit so the cache row is fetched and validated."
+        ))
+
+    @staticmethod
+    def _evaluate_regime_completeness(
+        strategy_results: dict[str, Any],
+        analytics_cache: dict[str, Any] | None,
+    ) -> tuple[str, str]:
+        """Returns (status, evidence) for the 2022 regime-split check.
+
+        Two structural requirements:
+          (a) regime_conditional table complete (pre/post-2022 Sharpe +
+              CAGR for every strategy with months >= 2),
+          (b) transition_matrix rows sum to 1.0 per originating regime.
+        Both must pass for PASS; either failure is WARN with the
+        specific gap.
+        """
+        cache_evidence: str | None = None
+        if analytics_cache:
+            comp = (analytics_cache.get("completeness") or {})
+            regime_complete = bool(comp.get("regime_conditional"))
+            matrix_complete = bool(comp.get("transition_matrix"))
+            if regime_complete and matrix_complete:
+                academic = analytics_cache.get("academic_analytics") or {}
+                transition = analytics_cache.get("transition_matrix") or {}
+                rows = academic.get("regime_conditional") or []
+                row_sums = ((transition.get("_completeness") or {})
+                            .get("row_sums") or {})
+                # Format the row sums for the evidence line so a
+                # reviewer sees the actual numbers (rounded to 3dp).
+                sums_str = ", ".join(
+                    f"{r}={v:.3f}" for r, v in row_sums.items())
+                return ("PASS", (
+                    f"Pre/post-2022 Sharpe + CAGR present for "
+                    f"{len(rows)} strategies (the 2022-01-01 regime "
+                    f"break is applied uniformly). Transition matrix "
+                    f"row sums verified: {sums_str}. Validated by "
+                    f"precomputed_analytics._validate_regime_conditional "
+                    f"and _validate_transition_matrix."
+                ))
+            # Surface specifics for whichever failed.
+            failures: list[str] = []
+            if not regime_complete:
+                academic = analytics_cache.get("academic_analytics") or {}
+                rc = (academic.get("_completeness") or {}).get(
+                    "regime_conditional") or {}
+                invalid = rc.get("invalid_rows") or []
+                if invalid:
+                    first = invalid[0]
+                    failures.append(
+                        f"regime_conditional row {first.get('strategy', '?')} "
+                        f"missing: {', '.join(first.get('missing', [])[:3])}")
+                else:
+                    failures.append("regime_conditional table absent from cache")
+            if not matrix_complete:
+                tm = (analytics_cache.get("transition_matrix") or {})
+                tc = (tm.get("_completeness") or {})
+                invalid = tc.get("invalid_rows") or []
+                if invalid:
+                    first = invalid[0]
+                    failures.append(
+                        f"transition_matrix regime {first.get('regime', '?')}: "
+                        f"{first.get('reason', '?')}")
+                else:
+                    failures.append("transition_matrix absent from cache")
+            cache_evidence = (
+                "Regime/transition data found but incomplete after "
+                "pre-flight refresh: " + "; ".join(failures) + ". "
+                "Check Render logs for "
+                "precomputed_academic_analytics_incomplete or "
+                "precomputed_transition_matrix_incomplete."
+            )
+
+        # Per-strategy fallback.
+        has_regime_split = any(
+            isinstance(r.get("regime_conditional"), dict)
+            and "pre_sharpe" in r["regime_conditional"]
+            and "post_sharpe" in r["regime_conditional"]
+            for r in strategy_results.values()
+        )
+        if not has_regime_split:
+            has_regime_split = any(
+                r.get("pre_2022_sharpe") is not None
+                and r.get("post_2022_sharpe") is not None
+                for r in strategy_results.values()
+            )
+        if has_regime_split:
+            return ("PASS", (
+                "Pre/post-2022 Sharpe present on at least one strategy "
+                "result dict (per-strategy inline path). Analytics cache "
+                "pre-flight not available so transition matrix "
+                "consistency was not verified."
+            ))
+        return ("WARN", cache_evidence or (
+            "Pre/post-2022 split data and transition matrix both "
+            "missing — neither the analytics_metrics_cache nor any "
+            "per-strategy result dict carries the regime tables. The "
+            "audit endpoint should call ensure_qa_data_complete before "
+            "invoking run_audit."
+        ))
 
     def _build_audit_context(
         self,

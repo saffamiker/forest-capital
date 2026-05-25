@@ -20,6 +20,7 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    STRUCTURE_INSTRUCTION,
     VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
     build_agent_response,
@@ -75,6 +76,8 @@ evidence for factor exposures that may flag overfitting (e.g. a strategy \
 loading heavily on a single factor inflates idiosyncratic risk).
 
 {VISUAL_REASONING_RULES}
+
+{STRUCTURE_INSTRUCTION}
 
 {GLOBAL_AGENT_RULE}
 
@@ -151,7 +154,8 @@ class RiskManager:
                 generator_fn=lambda p: call_claude(
                     SONNET_MODEL, _SYSTEM_PROMPT, p, max_tokens=1500,
                     tools=[WEB_SEARCH_TOOL],
-                    visual_context=visual_context),
+                    visual_context=visual_context,
+                    trigger="council_specialist:risk_manager"),
                 evaluator_prompt=council_evaluator_prompt(_EVALUATOR_QUESTION),
                 generator_prompt=user_message,
                 context=str(context)[:4000],

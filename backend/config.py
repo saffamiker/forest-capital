@@ -215,6 +215,16 @@ PERMISSIONS = {
     # the Settings section; clicking through to the data tables
     # makes its own request which the backend gates separately.
     "access_test_panel":  "Open the Test Administration settings section",
+    # May 24 2026 (UAT issue #119) — read-only UAT status. The
+    # three list endpoints (failures / issue-tracker / feedback)
+    # serve this permission; team_member carries it so Bob and
+    # Molly see real-time UAT progress in Settings → Test
+    # Administration. Resolution / triage / suggestion-approve
+    # endpoints remain manage_users / view_admin gated, so a
+    # team_member can READ but cannot MUTATE — the frontend hides
+    # the action buttons for non-sysadmin users so a team_member
+    # never sees an admin control that would 403.
+    "view_uat_status":    "View UAT failures, issue tracker, and feedback (read-only)",
 }
 
 ROLE_PRESETS = {
@@ -228,7 +238,7 @@ ROLE_PRESETS = {
     # stay view_admin-gated and remain sysadmin-only.
     "team_member": ["view_analytics", "ask_council", "team_member",
                     "generate_documents", "export_package",
-                    "access_test_panel"],
+                    "access_test_panel", "view_uat_status"],
     "sysadmin":    list(PERMISSIONS.keys()),
 }
 
@@ -292,7 +302,7 @@ TOUR_VERSION = 2
 # none), the script's steps need re-attestation and a login notification
 # surfaces. Increment by 1 whenever a test script's steps change
 # materially, and bump the matching `version` field in testScripts.ts.
-TEST_SCRIPT_VERSION = 2
+TEST_SCRIPT_VERSION = 3
 
 # ── AI TOKEN COSTS ────────────────────────────────────────────────────────────
 # Per-token USD rates used to estimate the cost of every AI agent call.

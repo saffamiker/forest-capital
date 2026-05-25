@@ -3,9 +3,9 @@ import { useLocation } from 'react-router-dom'
 import { Bot, TrendingUp, AlertTriangle, Loader2, Send, BookOpen, X, RotateCw } from 'lucide-react'
 import DisagreementHeatmap from './DisagreementHeatmap'
 import PersonaModal from './PersonaModal'
-import AcademicReviewButton from './AcademicReviewButton'
+// AcademicReviewButton moved to the QA Audit page (May 28 2026) —
+// see frontend/src/components/AcademicReviewSection.tsx.
 import Markdown from './Markdown'
-import TeamGate from './TeamGate'
 import type { AgentMessage } from '../types/agents'
 import { useCouncilStore } from '../stores/councilStore'
 import { trackFeature } from '../lib/activityLogger'
@@ -360,13 +360,11 @@ export default function CouncilDebate() {
         </div>
       )}
 
-      {/* Academic Review — a secondary council action that evaluates the
-          project's analytics, findings and deliverables against the
-          uploaded project requirements. A team feature; the Ask Council
-          input above stays open to every authenticated user. */}
-      <TeamGate block tooltip="Academic Review is available to the project team">
-        <AcademicReviewButton />
-      </TeamGate>
+      {/* Academic Review relocated to the QA Audit page on May 28 2026.
+          The section now sits alongside the Methodology Review and
+          Statistical Audit — its natural peer set as the third
+          quality / validation surface. The Council screen keeps its
+          original purpose: the Ask Council input above. */}
 
       {/* Council failure — a failed query previously left a blank screen
           (the empty state is gated on `!result`, and an errored run sets

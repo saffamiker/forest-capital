@@ -99,6 +99,23 @@ You have received detailed analyses from four specialists (equity, fixed income,
 risk, quantitative backtesting). Synthesise their findings into a final \
 recommendation — do not repeat their analysis, reference it and build on it.
 
+ANSWER THE QUESTION ASKED. If the user asks "which strategies do you recommend?", \
+produce a strategy recommendation. If the user asks "what questions might a peer \
+reviewer ask about our methodology?" — produce a list of anticipated reviewer \
+questions, NOT a strategy ranking. If the user asks "how should we frame this \
+finding for Forest Capital?" — produce framing guidance, NOT a Tier 1 gate \
+assessment. The 7-step strategy-recommendation template is for STRATEGY questions \
+only; meta / methodology / framing questions need a response that directly \
+addresses the meta question.
+
+STRUCTURE EVERY RESPONSE WITH MARKDOWN. Use `### ` for top-level section \
+headings within your response (e.g. `### Recommendation`, `### Key risks`, \
+`### Anticipated reviewer questions`). Use `**bold**` for the most load-bearing \
+phrases (the actual recommended strategy name, the specific risk, the \
+dual-dissenter caveat). Use bullet lists where appropriate. A wall of \
+unstructured prose reads as unfinished — every council response must be \
+scannable.
+
 VISUAL CONTEXT — you may receive chart snapshots alongside the prompt: \
 rolling_correlation, cumulative_returns, regime_signals, \
 regime_conditional_returns, factor_loadings, rolling_excess_return. Use \
@@ -547,7 +564,8 @@ class CIO:
         try:
             return call_claude(
                 OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000,
-                visual_context=self._build_visual_context())
+                visual_context=self._build_visual_context(),
+                trigger="council_cio_draft_consensus")
         except Exception as exc:
             log.error("cio_draft_error", error=str(exc))
             # Fallback draft from specialist summaries
@@ -611,37 +629,74 @@ class CIO:
             default=str,
         )
 
-        # May 24 2026 (ID 217) — every council response must directly
-        # answer the user's question. The previous synthesis prompt
-        # just asked for a generic FINAL RECOMMENDATION, so the
-        # response read disconnected from whatever the user asked.
-        # The query is now surfaced at the TOP of the prompt with an
-        # explicit "answer this question" instruction; the
-        # specialist reports are the evidence base, not the
-        # question.
+        # UAT 2026-05-24 (#76/#77) — the prompt had a single 7-step
+        # response template that forced a strategy-recommendation
+        # shape even when the user asked a meta / methodology
+        # question. A query like "what questions might a peer
+        # reviewer ask about our regime analysis methodology?"
+        # produced a generic Tier-1-gates ranking instead of a list
+        # of anticipated reviewer questions.
+        #
+        # The prompt now BRANCHES on query type:
+        #
+        #   META QUESTIONS — peer-reviewer anticipation, presentation
+        #     framing, written-report scope, methodology defence,
+        #     stakeholder Q&A prep. The response is the actual
+        #     anticipated questions / framing / defence, NOT a
+        #     strategy ranking. The numbered structure is replaced
+        #     with a markdown-headings response keyed on the
+        #     question's substance.
+        #
+        #   STRATEGY QUESTIONS — recommend / compare / evaluate /
+        #     diversification arguments / what-to-pick. The 7-step
+        #     structure applies. Tier 1 gates are required.
+        #
+        # The CIO chooses which branch by reading the query. The
+        # branch instruction is explicit so the model doesn't drift.
+        # Both branches still REQUIRE: anchored to numbers, engages
+        # with Gemini + Grok objections, names dual-dissenter
+        # concerns as hard caveats.
         query_line = (
             f"USER QUESTION: {query.strip()}\n\n"
-            "Answer the user question above directly, using the "
-            "specialist reports and the data below as evidence. "
-            "Anchor every claim to a number from the data. If the "
-            "question is meta or methodology-oriented (peer-reviewer "
-            "anticipation, presentation framing, written-report "
-            "scope), answer in those terms — do not produce a "
-            "generic strategy recommendation when the user asked "
-            "something specific.\n\n"
+            "BEFORE WRITING ANYTHING — classify the question.\n\n"
+            "It is a META QUESTION if it asks about anticipated "
+            "reviewer questions, panel Q&A prep, methodology "
+            "defence, presentation framing, written-report scope, "
+            "or how to talk about the work to a stakeholder.\n\n"
+            "It is a STRATEGY QUESTION if it asks to recommend / "
+            "compare / evaluate strategies, whether diversification "
+            "worked, which strategy to pick, or which strategies "
+            "pass which gates.\n\n"
+            "For a META question — produce the actual anticipated "
+            "questions / framing / defence the user asked for, "
+            "using markdown ### headings keyed on each anticipated "
+            "question or framing point. Cite specific numbers from "
+            "the data as supporting evidence for each point. Do "
+            "NOT produce a generic strategy ranking; do NOT use "
+            "the 7-step template below.\n\n"
+            "For a STRATEGY question — use the numbered template "
+            "below.\n\n"
         ) if query and query.strip() else ""
         user_message = (
             f"{query_line}"
             "You have reviewed four specialist reports and received TWO independent "
             "challenges — Gemini (blind spots) and Grok (stress test). "
-            "Now produce the FINAL RECOMMENDATION. Required:\n"
+            "When the question is STRATEGY-flavoured, produce the "
+            "FINAL RECOMMENDATION with these required elements:\n"
             "1. Engage with each of Gemini's objections — rebut or acknowledge.\n"
             "2. Engage with each of Grok's stress-test objections — rebut or acknowledge.\n"
             "3. Explicitly flag any concern raised by BOTH dissenters as a hard caveat.\n"
             "4. State which strategies you recommend and why (Tier 1 gates required).\n"
             "5. State which strategies you do NOT recommend and why.\n"
             "6. Give one primary recommendation with highest conviction.\n"
-            "7. State the key risk that could invalidate this recommendation.\n"
+            "7. State the key risk that could invalidate this recommendation.\n\n"
+            "For BOTH branches — anchor every claim to a number from "
+            "the data, engage with Gemini + Grok objections (3 above "
+            "applies to a meta response too — a dual-dissenter "
+            "concern is a methodology weakness a reviewer will "
+            "likely catch), and use markdown ### section headings "
+            "so the response renders with structure not as a wall "
+            "of prose.\n\n"
             "Use only the numbers in the data provided.\n\n"
             f"DATA:\n{context}"
         )
@@ -650,6 +705,7 @@ class CIO:
             synthesis_text = call_claude(
                 OPUS_MODEL, _SYSTEM_PROMPT, user_message, max_tokens=2000,
                 visual_context=self._build_visual_context(),
+                trigger="council_cio_synthesis",
             )
         except Exception as exc:
             log.error("cio_synthesis_error", error=str(exc))

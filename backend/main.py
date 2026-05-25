@@ -297,6 +297,36 @@ async def lifespan(app: FastAPI):
             except Exception as exc:  # noqa: BLE001
                 log.warning("analytics_cache_auto_warm_schedule_failed",
                             error=str(exc))
+
+        # PR-MODEL-1 (May 27 2026) — model availability check. Pings
+        # every chain's primary; on 404, advances the chain and
+        # pings the next entry. This is the SAME fallback chain
+        # call_claude / call_gemini consult at call time, so a model
+        # the startup check detected as deprecated is silently
+        # routed past for every request that follows. Fires in a
+        # background task so the lifespan handler does not block on
+        # the SDK round-trips (~1-3s each, larger on cold provider
+        # endpoints). Fail-open per chain.
+        if not _is_test_env:
+            try:
+                from agents.models import check_model_availability
+
+                async def _model_check_task() -> None:
+                    # 5s delay so the first user request is already
+                    # being served before the check fires — the
+                    # availability check itself never queues behind
+                    # a real request thanks to the model resolver,
+                    # but a deferred ping keeps cold-boot logs tidy.
+                    await asyncio.sleep(5.0)
+                    summary = await check_model_availability()
+                    log.info("model_availability_check_complete",
+                             summary=summary)
+
+                asyncio.create_task(_model_check_task())
+                log.info("model_availability_check_scheduled")
+            except Exception as exc:  # noqa: BLE001
+                log.warning("model_availability_check_schedule_failed",
+                            error=str(exc))
     yield
     log.info("forest_capital_shutdown")
 
@@ -518,6 +548,16 @@ async def get_me(session: dict = Depends(require_auth)):
 
 @app.get("/api/health")
 async def health():
+    # May 24 2026 — surface RENDER_GIT_COMMIT so deployment status is
+    # verifiable WITHOUT the master API key. The dashboard-timeout
+    # investigation kept hitting "is Render on the latest commit?"
+    # as the unverifiable first question; exposing the short SHA on
+    # /health closes that gap. Render injects RENDER_GIT_COMMIT
+    # automatically on every build (full 40-char SHA); a local dev
+    # run has no value set, in which case "dev" surfaces. The branch
+    # name (RENDER_GIT_BRANCH) is included so a deploy from a
+    # feature branch is obviously identified.
+    commit = os.getenv("RENDER_GIT_COMMIT", "dev")
     return {
         "status": "ok",
         "sprint": "4",
@@ -525,6 +565,9 @@ async def health():
         "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
         "gemini": bool(os.getenv("GOOGLE_API_KEY")),
         "cache": True,
+        "commit": commit[:7] if commit != "dev" else "dev",
+        "commit_full": commit,
+        "branch": os.getenv("RENDER_GIT_BRANCH") or "dev",
     }
 
 
@@ -4812,7 +4855,8 @@ async def council_explainer_followup(
             # token-by-token reveal. The SSE framing is preserved so
             # the frontend's stream reader works uniformly.
             full_text = call_claude(
-                OPUS_MODEL, system_prompt, user_message, max_tokens=600)
+                OPUS_MODEL, system_prompt, user_message, max_tokens=600,
+                trigger="council_followup")
         except Exception as exc:  # noqa: BLE001
             log.warning("council_followup_failed", error=str(exc))
             full_text = ("The CIO follow-up is unavailable right now. "
@@ -5006,19 +5050,49 @@ async def testing_summary(session: dict = Depends(require_team_member)):
     return {"summary": await get_summary(email)}
 
 
+@app.get("/api/v1/testing/team-progress")
+async def testing_team_progress(
+    session: dict = Depends(require_permission("view_uat_status")),
+):
+    """Shared UAT progress across every team member — backs the
+    Settings → UAT Team Progress dashboard (May 24 2026).
+
+    Permission: view_uat_status (carried by team_member and sysadmin
+    per the UAT #119 split). READ-ONLY; the frontend cannot attest
+    steps for another tester through this route — only
+    /api/v1/testing/results (require_team_member, scoped to the
+    caller's own email) accepts attestations.
+
+    Real-time: the frontend polls every 15s. The response is small
+    (per-user per-script step-id lists + 4 scalar fields) so the
+    cost is bounded; one round-trip per 15s per logged-in viewer.
+
+    Fail-open: a DB outage returns the team list with empty progress
+    so the frontend renders a per-member card at 0%, never a blank.
+    """
+    from tools.test_runner import get_team_progress
+    return await get_team_progress()
+
+
 @app.get("/api/v1/testing/failures")
 async def testing_failures(
-    session: dict = Depends(require_permission("view_admin")),
+    session: dict = Depends(require_permission("view_uat_status")),
 ):
-    """Every failed step across all testers, severity-sorted. Requires the
-    view_admin permission."""
+    """Every failed step across all testers, severity-sorted.
+
+    May 24 2026 (UAT #119) — relaxed from view_admin to view_uat_status
+    so Bob and Molly can see real-time UAT progress without admin
+    access. The endpoint is read-only; mutation endpoints (resolve,
+    suggestions/approve, triage) remain manage_users / view_admin-
+    gated so a team_member cannot act on a row, only see it.
+    """
     from tools.test_runner import get_all_failures
     return {"failures": await get_all_failures()}
 
 
 @app.get("/api/v1/testing/issue-tracker")
 async def testing_issue_tracker(
-    session: dict = Depends(require_permission("view_admin")),
+    session: dict = Depends(require_permission("view_uat_status")),
 ):
     """
     Issue Tracker view — every row that has ever failed, with a
@@ -5029,7 +5103,9 @@ async def testing_issue_tracker(
 
     Filtering, sorting and column projection live on the frontend
     — the endpoint returns the full row set and the UI shapes it.
-    Requires view_admin (the existing Failure Reports access rule).
+
+    May 24 2026 (UAT #119) — relaxed from view_admin to view_uat_status
+    so team_member sees the same read-only tracker every admin sees.
     """
     from tools.test_runner import get_issue_tracker_rows
     return {"issues": await get_issue_tracker_rows()}
@@ -5331,10 +5407,14 @@ async def testing_get_feedback(
     category: str | None = None, severity: str | None = None,
     effort: str | None = None, status: str | None = None,
     user_email: str | None = None,
-    session: dict = Depends(require_permission("view_admin")),
+    session: dict = Depends(require_permission("view_uat_status")),
 ):
-    """All tester feedback, newest first, with optional filters. Requires
-    the view_admin permission."""
+    """All tester feedback, newest first, with optional filters.
+
+    May 24 2026 (UAT #119) — relaxed from view_admin to view_uat_status.
+    Team members READ the backlog; the resolve action below remains
+    view_admin so only an admin can change a feedback row's status.
+    """
     from tools.test_runner import get_all_feedback
     feedback = await get_all_feedback({
         "category": category, "severity": severity, "effort": effort,
@@ -6357,7 +6437,19 @@ async def explain_terms(
         try:
             from agents.explainer_agent import ExplainerAgent
             explainer = ExplainerAgent()
-            return explainer.explain_terms(body.get("council_output", {}))
+            # UAT 2026-05-27 P0 — Render logs showed every concurrent
+            # dashboard request queuing behind explainer_grok_completed
+            # events and draining together (39s + 24s clusters). Root
+            # cause: explain_terms calls _call_llm → _call_grok which
+            # uses httpx.Client (SYNC) inside an async endpoint. The
+            # blocking POST stalls the event loop for 24-39s and
+            # starves every other coroutine. Same fix pattern as
+            # PR #122 (get_full_history_async) and #126 (optimizer
+            # solver) — push the sync call into a worker thread.
+            import asyncio
+            return await asyncio.to_thread(
+                explainer.explain_terms,
+                body.get("council_output", {}))
         except Exception as exc:
             log.error("explain_terms_error", error=str(exc))
     return {}
@@ -6375,7 +6467,14 @@ async def explain_parameter(
         try:
             from agents.explainer_agent import ExplainerAgent
             explainer = ExplainerAgent()
-            return explainer.explain_parameter(
+            # UAT 2026-05-27 P0 — sync Grok HTTP blocks the event
+            # loop. Wrap in asyncio.to_thread; see explain_terms
+            # above for the full diagnosis. asyncio.to_thread
+            # supports kwargs, so the keyword call shape is
+            # preserved verbatim.
+            import asyncio
+            return await asyncio.to_thread(
+                explainer.explain_parameter,
                 parameter=body.get("parameter", ""),
                 value=body.get("value"),
                 current_results=body.get("current_results", {}),
@@ -6397,7 +6496,11 @@ async def explain_chart(
         try:
             from agents.explainer_agent import ExplainerAgent
             explainer = ExplainerAgent()
-            return explainer.explain_chart(
+            # UAT 2026-05-27 P0 — sync Grok HTTP blocks the event
+            # loop. See explain_terms above for the full diagnosis.
+            import asyncio
+            return await asyncio.to_thread(
+                explainer.explain_chart,
                 chart_id=body.get("chart_id", ""),
                 chart_type=body.get("chart_type", ""),
                 chart_data=body.get("chart_data"),
@@ -6420,7 +6523,12 @@ async def explain_qa(
         try:
             from agents.explainer_agent import ExplainerAgent
             explainer = ExplainerAgent()
-            return explainer.explain_qa(body.get("audit_results", []))
+            # UAT 2026-05-27 P0 — sync Grok HTTP blocks the event
+            # loop. See explain_terms above for the full diagnosis.
+            import asyncio
+            return await asyncio.to_thread(
+                explainer.explain_qa,
+                body.get("audit_results", []))
         except Exception as exc:
             log.error("explain_qa_error", error=str(exc))
     return {}
@@ -6665,26 +6773,35 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
             AUDIT_TIER_FULL = 99
             QA_MIN_INTERVAL_SECONDS = 5 * 60
 
-            # Stable hash computed from the cached strategy_results so
-            # the audit is keyed against the data block it verified.
-            # Mirrors the hash computation in _current_strategy_hash so
-            # the QA endpoints all agree on what "current data" means.
+            # ── HASH = the canonical strategy_results_cache hash ──────
+            #
+            # UAT staleness bug (May 24 2026). Three write paths
+            # computed three different hashes for the same underlying
+            # data:
+            #   (a) /api/backtest/compare wrote strategy_results_cache
+            #       with `str(monthly.index[-1].date())` → "2025-12-31"
+            #   (b) _current_strategy_hash used `str(monthly.index[-1])`
+            #       → "2025-12-31 00:00:00" (Timestamp str form)
+            #   (c) this endpoint READ `monthly[-1].get("date")` from a
+            #       LIST-of-pairs payload that is NEVER a dict, falling
+            #       through to "unknown" every time.
+            # is_audit_current() compared (a) against the qa_results_cache
+            # hash written via (c) — never matched, so the methodology
+            # audit ALWAYS read as "stale" right after a successful run.
+            #
+            # FIX — pull the canonical hash from strategy_results_cache
+            # via get_latest_strategy_hash(). That's the SAME value
+            # is_audit_current() reads back on the strategy side, so the
+            # two halves of the comparison are guaranteed to match by
+            # construction when the audit verified the latest data.
             try:
-                first_row = next(iter(strategy_results.values()))
-                monthly = first_row.get("monthly_returns") or []
-                n_rows = len(monthly)
-                last_date = (
-                    monthly[-1].get("date", "unknown")
-                    if monthly and isinstance(monthly[-1], dict)
-                    else "unknown"
-                )
-                qa_hash = _compute_data_hash(
-                    n_rows, last_date, n_strategies=len(strategy_results)
-                )
+                from tools.cache import get_latest_strategy_hash
+                qa_hash = await get_latest_strategy_hash()
             except Exception as _exc:  # noqa: BLE001
-                # If the hash can't be computed, fall through to a real
-                # run — the audit is the safer default than skipping.
-                log.info("qa_audit_hash_compute_failed", error=str(_exc))
+                # If the canonical hash read fails (DB outage) fall
+                # through to a real run — the audit is the safer
+                # default than skipping.
+                log.info("qa_audit_hash_read_failed", error=str(_exc))
                 qa_hash = None
 
             from datetime import datetime, timezone
@@ -6736,12 +6853,37 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
             log.info("qa_audit_running",
                      strategy_hash=qa_hash[:8] if qa_hash else "unknown")
 
+            # AN01 / AN04 pre-flight (May 24 2026). Fetch the
+            # Carhart loadings and transition matrix rows from
+            # analytics_metrics_cache BEFORE the deterministic checks
+            # run; trigger refresh on miss/incomplete. The QA audit
+            # should never WARN on data the platform could have
+            # computed itself.
+            try:
+                from tools.precomputed_analytics import (
+                    ensure_qa_data_complete,
+                )
+                analytics_cache = await ensure_qa_data_complete(qa_hash)
+                if analytics_cache.get("refresh_triggered"):
+                    log.info(
+                        "qa_preflight_refreshed",
+                        triggered=analytics_cache["refresh_triggered"],
+                        completeness=analytics_cache["completeness"],
+                    )
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("qa_preflight_error", error=str(_exc))
+                analytics_cache = None
+
             # Seed the per-request usage bucket before the QA
             # agent's call_claude invocations so their token usage
             # is captured.
             start_usage_capture()
             qa = QAAgent()
-            audit = qa.run_audit(strategy_results, run_full_checklist=True)
+            audit = qa.run_audit(
+                strategy_results,
+                run_full_checklist=True,
+                analytics_cache=analytics_cache,
+            )
 
             # Persist the full audit to qa_results_cache so the next
             # /api/qa/audit call within the TTL window short-circuits
@@ -6829,7 +6971,31 @@ async def qa_export(request: Request, session: dict = Depends(require_auth)):
         except Exception as exc:
             log.error("qa_export_error", error=str(exc))
             audit = MOCK_QA_AUDIT
-    pdf = build_methodology_audit_pdf(audit)
+    # Intentional-design overrides (May 28 2026 hotfix). Fetch any
+    # qa_intentional_overrides rows so build_methodology_audit_pdf
+    # can render the team's recorded disclosure under each check.
+    # Fail-open: a DB miss / read error leaves overrides empty and
+    # the PDF renders without the disclosure lines rather than 500.
+    overrides_map: dict[str, dict] = {}
+    if ENVIRONMENT != "test":
+        try:
+            from sqlalchemy import text as _text
+            from database import AsyncSessionLocal
+            if AsyncSessionLocal is not None:
+                async with AsyncSessionLocal() as conn:
+                    rows = await conn.execute(_text(
+                        "SELECT check_id, note, marked_by, marked_at "
+                        "FROM qa_intentional_overrides"))
+                    for row in rows.fetchall():
+                        overrides_map[row[0]] = {
+                            "check_id": row[0],
+                            "note":     row[1],
+                            "marked_by": row[2],
+                            "marked_at": row[3].isoformat() if row[3] else None,
+                        }
+        except Exception as exc:  # noqa: BLE001
+            log.warning("qa_export_overrides_read_failed", error=str(exc))
+    pdf = build_methodology_audit_pdf(audit, overrides=overrides_map)
     filename = f"forest_capital_methodology_audit_{date.today().isoformat()}.pdf"
     return Response(
         content=pdf,
@@ -6867,7 +7033,8 @@ async def qa_ask(
             from agents.base import call_claude, OPUS_MODEL
             from agents.qa_agent import _SYSTEM_PROMPT as QA_SYSTEM_PROMPT
 
-            answer = call_claude(OPUS_MODEL, QA_SYSTEM_PROMPT, body.question)
+            answer = call_claude(OPUS_MODEL, QA_SYSTEM_PROMPT, body.question,
+                                 trigger="qa_ask")
             return {"question": body.question, "answer": answer, "verdict": "PASS"}
         except Exception as exc:
             log.error("qa_ask_error", error=str(exc))
@@ -6894,24 +7061,30 @@ async def qa_ask(
 
 async def _current_strategy_hash() -> tuple[str, dict[str, dict] | None]:
     """
-    Computes the current strategy_hash and returns it alongside cached
-    strategy_results (when present). Shared by every QA endpoint so a
-    single hash computation can serve both the status read and any
-    tier trigger that follows.
-    """
-    from tools.data_fetcher import get_full_history_async
-    from tools.cache import get_strategy_cache, _compute_data_hash
+    Returns the canonical strategy_hash and the cached strategy_results
+    for it (when present). Shared by every QA endpoint so a single hash
+    value can serve both the status read and any tier trigger that
+    follows.
 
-    # OFF-LOOP — _current_strategy_hash is called from qa_status, which
-    # the dashboard polls every 30s. A sync get_full_history() here
-    # blocked the loop on every poll; in the 2026-05-24 timeout cluster
-    # the QA poll was visible alongside the dashboard fan-out.
-    history = await get_full_history_async()
-    monthly = history.get("equity_monthly")
-    n_rows = len(monthly) if monthly is not None else 0
-    last_date = str(monthly.index[-1]) if monthly is not None and len(monthly) > 0 else "unknown"
-    strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
-    cached = await get_strategy_cache(strategy_hash)
+    UAT staleness fix (May 24 2026) — uses get_latest_strategy_hash()
+    as the canonical source. Previously this helper recomputed the
+    hash with `str(monthly.index[-1])` (no `.date()` call), which
+    produced a different value from /api/backtest/compare's
+    `str(monthly.index[-1].date())`. The two never agreed, so the
+    methodology audit's qa_results_cache row never matched the
+    strategy_results_cache row it audited — is_audit_current()
+    reported stale forever. Reading the canonical value from
+    strategy_results_cache guarantees the comparison succeeds when
+    the audit verified the latest data.
+
+    Returns ("", None) when there is no strategy_results_cache row
+    yet — same shape as the previous helper, so existing callers
+    continue to work.
+    """
+    from tools.cache import get_strategy_cache, get_latest_strategy_hash
+
+    strategy_hash = await get_latest_strategy_hash() or ""
+    cached = await get_strategy_cache(strategy_hash) if strategy_hash else None
     return strategy_hash, cached
 
 
@@ -7171,8 +7344,23 @@ class QAFlagForFixRequest(__import__("pydantic").BaseModel):
 
 
 class QAMarkIntentionalRequest(__import__("pydantic").BaseModel):
-    """POST body for the Mark as Intentional endpoint."""
-    note: str | None = None
+    """POST body for the Mark as Intentional endpoint.
+
+    May 28 2026 hotfix: `note` is now REQUIRED with a 20-character
+    minimum. The previous shape (`note: str | None = None`) accepted
+    a single-click confirmation from the UI where the body sent
+    `{note: check.finding}` — the AI-generated check description
+    became the disclosure note. That is not a disclosure; it is a
+    rephrasing of the warning. The new gate forces the team to type
+    a real reason before the override is recorded.
+
+    Pydantic min_length=20 produces an automatic 422 with the
+    standard validation-error body when the client submits a shorter
+    note — no extra handler logic needed. Stale frontends that still
+    send `{note: check.finding}` will fail loudly with 422 rather
+    than silently recording the AI text.
+    """
+    note: str = __import__("pydantic").Field(..., min_length=20)
     audit_run_hash: str | None = None
 
 
@@ -10036,6 +10224,7 @@ async def document_assistant(
 
         suggestion = call_gemini(
             GEMINI_MODEL, _GEMINI_ASSISTANT_SYSTEM_PROMPT, prompt,
+            trigger="document_assistant",
         ).strip()
 
         return {

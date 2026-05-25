@@ -135,9 +135,40 @@ function relTime(iso: string | null): string {
   return `${Math.round(hrs / 24)}d ago`
 }
 
-function overallStatus(r: AuditRun): { label: string; cls: string } {
-  if (r.failed > 0) return { label: 'FAIL ❌', cls: 'text-danger' }
-  if (r.warnings > 0) return { label: 'WARN ⚠️', cls: 'text-warning' }
+/**
+ * overallStatus — derives the run's headline badge from the run row
+ * plus its findings (May 24 2026 update).
+ *
+ * Four-state spec from UAT feedback: the original badge stayed
+ * amber WARN forever once a warning landed, even after every
+ * warning had been acknowledged in the panel. That left a green
+ * "you have something to do" indicator that never went away.
+ *
+ *   failed > 0                                  → WARN amber
+ *     (a true Layer 2 recomputation mismatch — genuine blocker,
+ *     surfaced amber per spec; the detail line below the badge
+ *     still shows "X failures · Y warnings" so the breakdown is
+ *     not lost.)
+ *   failed = 0, warnings > 0, all acknowledged  → READY green ✓
+ *     (every warning has a recorded acknowledgement note — an
+ *     explicit signal that warnings were seen and assessed.)
+ *   failed = 0, warnings > 0, any unacknowledged → WARN amber
+ *   failed = 0, warnings = 0                    → PASS green
+ *
+ * Findings are required to compute READY because the AuditRun row
+ * only carries an aggregate `warnings` count, not the per-finding
+ * resolution state.
+ */
+export function overallStatus(r: AuditRun, findings: AuditFinding[]):
+  { label: string; cls: string } {
+  if (r.failed > 0) return { label: 'WARN ⚠️', cls: 'text-warning' }
+  if (r.warnings > 0) {
+    const warns = findings.filter((f) => f.status === 'warning')
+    const allAcked = warns.length > 0
+      && warns.every((f) => Boolean(f.resolved))
+    if (allAcked) return { label: 'READY ✓', cls: 'text-success' }
+    return { label: 'WARN ⚠️', cls: 'text-warning' }
+  }
   return { label: 'PASS ✅', cls: 'text-success' }
 }
 
@@ -160,8 +191,17 @@ export function FindingRow({ f }: { f: AuditFinding }) {
   const [ackError, setAckError] = useState<string | null>(null)
 
   const isWarn = f.status === 'warning'
+  // Acknowledged-WARN UI rollup (May 28 2026 addendum). When a WARN
+  // has a recorded resolution_note, render the row dot green instead
+  // of amber so reviewers can see at a glance which warnings have
+  // been reviewed. The underlying audit_findings.status stays
+  // 'warning' — the green dot is a UI signal of review, not a claim
+  // that the verdict changed. PDF and downstream consumers still
+  // see the honest WARN verdict with the note attached.
+  const isAcknowledged = isWarn && resolved && note.trim().length > 0
   const dot = f.status === 'fail' ? 'bg-danger'
-    : isWarn ? 'bg-warning' : 'bg-success'
+    : isAcknowledged ? 'bg-success'
+      : isWarn ? 'bg-warning' : 'bg-success'
   // A WARN finding is always expandable so its acknowledge control is
   // reachable even when it carries no platform value or reasoning.
   const expandable = Boolean(f.auditor_reasoning || f.platform_value || isWarn)
@@ -458,14 +498,32 @@ export default function AuditPanel() {
                 Last audit {relTime(latest.triggered_at)}
               </span>
               <span className={`text-sm font-semibold ${
-                overallStatus(latest).cls}`}>
+                overallStatus(latest, findings).cls}`}>
                 {latest.status === 'running'
-                  ? 'Running…' : overallStatus(latest).label}
+                  ? 'Running…' : overallStatus(latest, findings).label}
               </span>
             </div>
+            {/* Header counter — May 28 2026 addendum: surface the
+                acknowledged-warning count inline so a reviewer can
+                see at a glance whether every warning has had a
+                disclosure recorded. The `findings` list is the
+                authoritative source (each item carries .resolved +
+                .resolution_note); the run-level `warnings` field
+                is the total without breakdown. */}
             <div className="text-2xs text-muted mt-1">
               {latest.total_checks} checks · {latest.passed} passed ·{' '}
-              {latest.warnings} warnings · {latest.failed} failures ·{' '}
+              {latest.warnings} warnings
+              {(() => {
+                const ackCount = findings.filter(
+                  (x) => x.status === 'warning'
+                    && Boolean(x.resolved)
+                    && Boolean(x.resolution_note),
+                ).length
+                return ackCount > 0
+                  ? ` (${ackCount} acknowledged)`
+                  : ''
+              })()}
+              {' '}· {latest.failed} failures ·{' '}
               triggered by {triggerLabel(latest.triggered_by)}
             </div>
             {/* Per-layer progress */}
@@ -520,8 +578,13 @@ export default function AuditPanel() {
                       <span className="text-2xs text-white">
                         {relTime(r.triggered_at)} · {triggerLabel(r.triggered_by)}
                         {' '}·{' '}
-                        <span className={overallStatus(r).cls}>
-                          {overallStatus(r).label}
+                        {/* History rows don't load findings — pass []
+                            so READY can't be claimed without the per-
+                            finding ack state. The badge stays WARN for
+                            any past run with warnings, even if every
+                            warning was acknowledged after the fact. */}
+                        <span className={overallStatus(r, []).cls}>
+                          {overallStatus(r, []).label}
                         </span>
                       </span>
                       <button

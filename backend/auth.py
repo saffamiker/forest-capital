@@ -5,6 +5,7 @@ Dev mode  → magic link URL printed to terminal (no email sent).
 Prod mode → magic link sent via SendGrid.
 """
 from __future__ import annotations
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -197,6 +198,87 @@ def invalidate_session(token: str) -> None:
 
 # ── Magic link delivery ───────────────────────────────────────────────────────
 
+# PLATFORM_URL (imported from config) is the single source of truth for
+# the logo asset URLs the email embeds. May 27 2026 rebrand: the
+# platform now lives at analyticsdesk.app (Vercel-hosted), with
+# frontend/public/assets/logos/{mccoll.jpeg,queens.png} served at
+# /assets/logos/. Override via the PLATFORM_URL env var if a staging
+# deploy needs different logo URLs in its outbound emails.
+
+MAGIC_LINK_SUBJECT = "Your Analytics Desk login link"
+
+
+def build_magic_link_email(
+    magic_url: str,
+    expiry_minutes: int = MAGIC_LINK_EXPIRY_MINUTES,
+    *,
+    platform_url: str = PLATFORM_URL,
+) -> tuple[str, str]:
+    """
+    Builds the (subject, html_body) of the magic-link email. Pure — no
+    I/O — so it is unit-testable. Mirrors build_welcome_email's shape.
+
+    EMAIL-SAFE HTML conventions enforced here:
+      - Inline styles only. <style> blocks are stripped by Gmail and
+        the Outlook desktop clients.
+      - Logos are embedded via hosted https:// URLs (mccoll.jpeg,
+        queens.png on the Vercel public-assets path), NOT CID
+        attachments. The user spec was explicit: CID renders
+        inconsistently across clients (Outlook in particular often
+        shows a broken-image icon for CID attachments).
+      - Logos carry explicit width / height attributes — several
+        clients ignore CSS dimensions on <img> and would otherwise
+        render at full intrinsic size.
+      - The button is a coloured <a> with padding (Outlook strips
+        many <button> styles; a styled anchor is the standard
+        email-client-safe approach).
+    """
+    logo_base = f"{platform_url}/assets/logos"
+    html = (
+        f'<div style="font-family:-apple-system,BlinkMacSystemFont,'
+        f"'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;"
+        f'padding:32px 24px;color:#0a0e1a;background:#ffffff">'
+        # ── Header: two institutional logos + headline ────────────
+        f'<div style="text-align:center;margin-bottom:24px">'
+        f'<div style="margin-bottom:16px">'
+        f'<img src="{logo_base}/mccoll.jpeg" alt="McColl School of Business"'
+        f' width="120" height="auto" style="height:auto;max-height:56px;'
+        f'vertical-align:middle;margin:0 12px" />'
+        f'<img src="{logo_base}/queens.png" alt="Queens University of Charlotte"'
+        f' width="120" height="auto" style="height:auto;max-height:56px;'
+        f'vertical-align:middle;margin:0 12px" />'
+        f'</div>'
+        f'<h1 style="margin:8px 0 4px 0;font-size:20px;font-weight:600;'
+        f'color:#0a0e1a">Portfolio Intelligence System</h1>'
+        f'<p style="margin:0;font-size:13px;color:#64748b">'
+        f'McColl School of Business · Queens University of Charlotte</p>'
+        f'</div>'
+        # ── Body copy + call-to-action button ─────────────────────
+        f'<p style="font-size:15px;line-height:1.5;margin:24px 0 16px 0">'
+        f'Click below to log in. This link expires in {expiry_minutes} minutes.'
+        f'</p>'
+        f'<p style="text-align:center;margin:24px 0">'
+        f'<a href="{magic_url}" '
+        f'style="background:#3b82f6;color:#ffffff;padding:14px 32px;'
+        f'text-decoration:none;border-radius:6px;display:inline-block;'
+        f'font-weight:500;font-size:15px">Log In</a>'
+        f'</p>'
+        f'<p style="color:#64748b;font-size:12px;line-height:1.5;'
+        f'margin:24px 0 0 0">'
+        f'If you did not request this link, you can safely ignore this email.'
+        f'</p>'
+        # ── Footer ────────────────────────────────────────────────
+        f'<hr style="border:none;border-top:1px solid #e5e7eb;'
+        f'margin:32px 0 16px 0" />'
+        f'<p style="text-align:center;color:#94a3b8;font-size:11px;'
+        f'margin:0">MSFA FNA 670 · '
+        f'<a href="{platform_url}" style="color:#94a3b8;'
+        f'text-decoration:none">analyticsdesk.app</a></p>'
+        f'</div>'
+    )
+    return MAGIC_LINK_SUBJECT, html
+
+
 async def send_magic_link(email: str, token: str) -> None:
     magic_url = f"{FRONTEND_URL}/auth/verify?token={token}"
 
@@ -214,29 +296,13 @@ async def send_magic_link(email: str, token: str) -> None:
     try:
         import sendgrid
         from sendgrid.helpers.mail import Mail
-        import os
 
-        html = f"""
-        <div style="font-family:sans-serif;max-width:500px;margin:0 auto">
-          <h2 style="color:#0a0e1a">Forest Capital Portfolio Intelligence System</h2>
-          <p>Click below to log in. This link expires in {MAGIC_LINK_EXPIRY_MINUTES} minutes.</p>
-          <p>
-            <a href="{magic_url}"
-               style="background:#3b82f6;color:#fff;padding:12px 28px;
-                      text-decoration:none;border-radius:6px;display:inline-block">
-              Log In
-            </a>
-          </p>
-          <p style="color:#666;font-size:12px">
-            If you did not request this link, you can safely ignore this email.
-          </p>
-        </div>
-        """
+        subject, html = build_magic_link_email(magic_url)
         sg = sendgrid.SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
         message = Mail(
             from_email=os.getenv("SENDGRID_FROM_EMAIL", "noreply@queens.edu"),
             to_emails=email,
-            subject="Forest Capital — Your Login Link",
+            subject=subject,
             html_content=html,
         )
         resp = sg.send(message)

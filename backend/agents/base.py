@@ -40,6 +40,24 @@ SCOPE_ENFORCEMENT = (
     "off-topic content in any way."
 )
 
+
+# UAT 2026-05-24 (#76/#77) — every council response needs to read as a
+# structured analyst note, not a wall of prose. This block is injected
+# at the end of every specialist + dissenter + CIO prompt so the
+# rendered output carries headings + emphasis the frontend Markdown
+# component can style. The user reported that even thorough responses
+# read as "plain text" because they lacked visible structure.
+STRUCTURE_INSTRUCTION = (
+    "STRUCTURE YOUR RESPONSE WITH MARKDOWN. Use `### ` for top-level "
+    "section headings within your response (e.g. `### Key finding`, "
+    "`### Supporting evidence`, `### Caveat`). Use `**bold**` for the "
+    "most load-bearing phrases — the specific strategy, the specific "
+    "number, the specific risk. Use bullet lists where the content is "
+    "list-shaped. A wall of unstructured prose looks unfinished to a "
+    "sophisticated reader; every response must be scannable in 5 "
+    "seconds and readable in detail in 60."
+)
+
 # Cross-cutting visual-reasoning rules. Embedded in every prompt of an
 # agent that may receive chart snapshots (the council specialists, the
 # CIO, the Academic Review peers/arbiter, and the Academic Writer).
@@ -72,17 +90,28 @@ VISUAL_REASONING_RULES = (
     "disagree, prefer the number and flag the discrepancy."
 )
 
-# Model-name constants — the single source of truth for every model
-# string. Sonnet for specialist analysts; Opus for CIO and QA; Haiku for
-# the Explainer. GEMINI_MODEL is the non-Claude dissenter model — kept
-# here too so every model string the codebase references lives in one place.
-SONNET_MODEL = "claude-sonnet-4-6"
-OPUS_MODEL = "claude-opus-4-7"
-HAIKU_MODEL = "claude-haiku-4-5-20251001"
-# gemini-1.5-pro was retired; gemini-2.0-flash is the current GA model.
-# The Gemini SDK was also migrated — google-generativeai (deprecated) →
-# google-genai. See call_gemini below.
-GEMINI_MODEL = "gemini-2.0-flash"
+# Model-name constants — re-exported from agents/models.py so every
+# caller in the codebase keeps the existing `from agents.base import
+# SONNET_MODEL` import shape. The chain definitions and the
+# self-healing fallback logic live in agents/models.py (PR-MODEL-1,
+# May 27 2026).
+#
+# These constants are the PRIMARY (first chain entry) for each logical
+# model. call_claude / call_gemini below resolve the CURRENT active
+# model through agents.models.resolve_active() on every call, so a
+# chain that has fallen back to a successor model is honoured even
+# when the caller still passes the original primary string.
+from agents.models import SONNET, OPUS, HAIKU, GEMINI  # noqa: E402
+
+SONNET_MODEL = SONNET.primary       # "claude-sonnet-4-6"
+OPUS_MODEL = OPUS.primary           # "claude-opus-4-7"
+HAIKU_MODEL = HAIKU.primary         # "claude-haiku-4-5-20251001"
+# Gemini: rebrand of May 27 2026. gemini-2.0-flash 404'd in production;
+# the chain (gemini-2.5-flash → gemini-2.0-flash-exp →
+# gemini-1.5-flash-latest) is defined in agents/models.py and the
+# active model is resolved per call so a future deprecation is absorbed
+# without a code change.
+GEMINI_MODEL = GEMINI.primary       # "gemini-2.5-flash"
 
 # Token budget per call — protects credits from runaway prompts.
 MAX_INPUT_TOKENS = 2048
@@ -175,6 +204,8 @@ def call_claude(
     *,
     visual_context: list[dict] | None = None,
     strategy_ids: list[str] | None = None,
+    trigger: str = "unspecified",
+    hash_gate: bool = False,
 ) -> str:
     """
     Thin wrapper around the Anthropic messages API.
@@ -196,6 +227,15 @@ def call_claude(
     content and is bitwise-identical to the pre-vision code path —
     every existing caller that does not opt in keeps its previous
     behaviour.
+
+    trigger / hash_gate — keyword-only OPTIONAL telemetry. The post-
+    response llm_call structured log line carries the caller-supplied
+    trigger label (e.g. "council_specialist:equity_analyst",
+    "harness_evaluator") and a hash_gate boolean saying whether a
+    data_hash / TTL comparison ran BEFORE this call fired. Defaults
+    keep un-labeled call sites grep-able ("trigger:unspecified",
+    "hash_gate:false") so leak surfaces are visible in Render logs
+    without any behavioural change.
 
     EVALUATOR GUARD. The harness's _evaluate() (agents/harness.py)
     MUST NOT pass visual_context — evaluators score text quality, and
@@ -229,8 +269,16 @@ def call_claude(
         ]
     else:
         content = user_message
+    # PR-MODEL-1 (May 27 2026) — resolve the CURRENT active model via
+    # agents/models.py. The caller passes a primary string (e.g.
+    # SONNET_MODEL); resolve_active() returns the same string when the
+    # chain hasn't fallen back, or the next-in-chain model when an
+    # earlier call advanced it. The chain advances atomically across
+    # threads, so concurrent calls converge on the same active model.
+    from agents.models import resolve_active, report_failure, is_model_not_found
+    active_model = resolve_active(model)
     kwargs: dict[str, Any] = {
-        "model": model,
+        "model": active_model,
         "max_tokens": max_tokens,
         "system": _with_strategy_context(
             _with_analytics_context(
@@ -242,19 +290,57 @@ def call_claude(
     }
     if tools:
         kwargs["tools"] = tools
-    message = client.messages.create(**kwargs)
+    # 404 / NotFoundError retry loop. On a provider-side model
+    # deprecation, advance the chain and retry once with the new
+    # active. Exhausting the chain re-raises the original error so
+    # the caller's existing except-block fires exactly as before.
+    while True:
+        try:
+            message = client.messages.create(**kwargs)
+            break
+        except Exception as exc:  # noqa: BLE001
+            if not is_model_not_found(exc):
+                raise
+            new_active = report_failure(active_model, reason="404")
+            if new_active is None:
+                raise
+            # Loop continues — retry with the new active model.
+            active_model = new_active
+            kwargs["model"] = active_model
     # Token-usage capture — a no-op unless an endpoint started a capture.
+    # Records the ACTIVE model (post-fallback), so cost attribution is
+    # accurate when a chain has advanced to a successor model.
     try:
         from agents.usage import record_usage
-        record_usage(model, message.usage.input_tokens,
+        record_usage(active_model, message.usage.input_tokens,
                      message.usage.output_tokens)
         # Web-search requests carry a small per-search surcharge on top of
         # the token cost. They are logged (not token-priced) so a search-
         # heavy call is visible in the Render logs alongside cost tracking.
         n_searches = _web_search_count(message)
         if n_searches:
-            log.info("web_search_used", model=model, n_searches=n_searches)
+            log.info("web_search_used", model=active_model,
+                     n_searches=n_searches)
     except Exception:  # noqa: BLE001 — cost telemetry must never break a call
+        pass
+    # Per-call structured log (PR-LLM-1, May 25 2026). Single emit point
+    # so every leak path looks identical in Render logs regardless of
+    # which call site fired the request. extra fields: web search count
+    # so a search-heavy call is visible alongside the token spend.
+    # model = active_model so the log reflects what was actually sent
+    # to the SDK after any chain fallback (PR-MODEL-1).
+    try:
+        from agents.llm_log import log_llm_call
+        log_llm_call(
+            function="call_claude",
+            model=active_model,
+            trigger=trigger,
+            input_tokens=getattr(message.usage, "input_tokens", 0),
+            output_tokens=getattr(message.usage, "output_tokens", 0),
+            hash_gate=hash_gate,
+            n_searches=_web_search_count(message),
+        )
+    except Exception:  # noqa: BLE001 — telemetry must never break a call
         pass
     return _extract_text(message)
 
@@ -413,7 +499,14 @@ def _with_macro_context(system_prompt: str) -> str:
         return system_prompt
 
 
-def call_gemini(model: str, system_prompt: str, user_message: str) -> str:
+def call_gemini(
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    *,
+    trigger: str = "unspecified",
+    hash_gate: bool = False,
+) -> str:
     """
     Thin wrapper around the google-genai SDK — the single Gemini call
     convention for the codebase.
@@ -426,25 +519,71 @@ def call_gemini(model: str, system_prompt: str, user_message: str) -> str:
 
     The SDK is imported lazily so the test environment — which mocks every
     Gemini path before reaching here — never needs the package installed.
+
+    trigger / hash_gate — keyword-only OPTIONAL telemetry. Mirrors
+    call_claude's contract (see PR-LLM-1, May 25 2026): the post-
+    response llm_call structured log carries both fields so every
+    Gemini call site is queryable in Render logs by the same shape as
+    every Anthropic call site.
     """
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY", ""))
-    response = client.models.generate_content(
-        model=model,
-        contents=user_message,
-        config=types.GenerateContentConfig(system_instruction=system_prompt),
-    )
+
+    # PR-MODEL-1 (May 27 2026) — resolve the active model via the
+    # central chain and retry on 404. Triggered by gemini-2.0-flash
+    # 404-ing in production after Google deprecated it; the new
+    # primary is gemini-2.5-flash, with gemini-2.0-flash-exp and
+    # gemini-1.5-flash-latest as automatic fallbacks. See
+    # agents/models.py for the chain.
+    from agents.models import resolve_active, report_failure, is_model_not_found
+    active_model = resolve_active(model)
+    while True:
+        try:
+            response = client.models.generate_content(
+                model=active_model,
+                contents=user_message,
+                config=types.GenerateContentConfig(
+                    system_instruction=system_prompt),
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            if not is_model_not_found(exc):
+                raise
+            new_active = report_failure(active_model, reason="404")
+            if new_active is None:
+                raise
+            active_model = new_active
+    in_tokens = 0
+    out_tokens = 0
+    um = getattr(response, "usage_metadata", None)
+    if um is not None:
+        in_tokens = getattr(um, "prompt_token_count", 0) or 0
+        out_tokens = getattr(um, "candidates_token_count", 0) or 0
     # Token-usage capture — a no-op unless an endpoint started a capture.
+    # Records the active model (post-fallback) so cost attribution
+    # reflects what the SDK actually billed.
     try:
         from agents.usage import record_usage
-        um = getattr(response, "usage_metadata", None)
         if um is not None:
-            record_usage(model,
-                         getattr(um, "prompt_token_count", 0),
-                         getattr(um, "candidates_token_count", 0))
+            record_usage(active_model, in_tokens, out_tokens)
     except Exception:  # noqa: BLE001 — cost telemetry must never break a call
+        pass
+    # Per-call structured log — same shape as call_claude. model =
+    # active_model so the log reflects what was actually sent to the
+    # SDK after any chain fallback.
+    try:
+        from agents.llm_log import log_llm_call
+        log_llm_call(
+            function="call_gemini",
+            model=active_model,
+            trigger=trigger,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            hash_gate=hash_gate,
+        )
+    except Exception:  # noqa: BLE001
         pass
     return response.text or ""
 

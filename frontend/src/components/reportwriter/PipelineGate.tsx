@@ -32,8 +32,10 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   CheckCircle, AlertCircle, Loader2, Play, Circle,
-  ExternalLink, Search, X, ShieldCheck, Lock,
+  ExternalLink, Search, ShieldCheck, Lock,
 } from 'lucide-react'
+import { Step1ExportButtons } from './Step1ExportButtons'
+import { ModalCloseButton, KeyboardHint } from '../ModalControls'
 
 export type StepStatus =
   | 'idle'
@@ -468,10 +470,26 @@ function StepRow({
       {/* Inline detail expansion. Renders only when the step has a
           terminal status (complete / warning / failed) AND its
           payload carries something to show. Click the View details
-          chevron to expand; click again to collapse. */}
+          chevron to expand; click again to collapse.
+          STEP 1 ONLY (May 24 2026): CSV + JSON export buttons render
+          inline beside View details. The exported staged-findings
+          payload drives the citation R&D loop — manual search-query
+          experiments before patterns get encoded as Step 2 prompt
+          templates. Frontend-only — the payload is already in
+          result.payload.findings from the stage-findings response. */}
       {result && (status === 'complete' || status === 'warning'
         || status === 'failed') && _hasDetail(number, result) ? (
-        <StepDetailToggle number={number} result={result} />
+        <div className="flex items-center flex-wrap">
+          <StepDetailToggle number={number} result={result} />
+          {number === 1 && (
+            <Step1ExportButtons
+              findings={
+                ((result.payload as Record<string, unknown> | undefined)
+                  ?.['findings'] as Array<Record<string, unknown>>) || []
+              }
+            />
+          )}
+        </div>
       ) : null}
     </li>
   )
@@ -610,15 +628,16 @@ function StepDetailModal({
           </div>
           <div className="flex items-center gap-2">
             <Pill text={status} kind={statusKind} />
-            <button
-              type="button"
-              onClick={onClose}
-              data-testid={`pipeline-step-${number}-modal-close`}
-              aria-label="Close details"
-              className="text-text-muted hover:text-text-primary
-                         transition-colors p-1">
-              <X className="w-4 h-4" />
-            </button>
+            {/* Visible close button — 44×44 touch target on mobile,
+                32×32 on desktop. Replaces a tight p-1 button that
+                was hard to tap on a phone. The Esc handler is owned
+                by this modal's useEffect and remains in place — the
+                button is the PRIMARY close affordance. */}
+            <ModalCloseButton
+              onClose={onClose}
+              ariaLabel="Close details"
+              testId={`pipeline-step-${number}-modal-close`}
+            />
           </div>
         </header>
 
@@ -634,11 +653,14 @@ function StepDetailModal({
           </div>
         </div>
 
-        {/* Footer — elapsed time on the right; help cue on the left */}
+        {/* Footer — elapsed time on the right; keyboard hint on the
+            left. The hint is DESKTOP-ONLY (hidden md:inline) so a
+            mobile user never sees the misleading "Press Esc"
+            prompt. Esc still works on desktop. */}
         <footer className="flex items-center justify-between gap-2
                             px-4 py-2 border-t border-navy-700 shrink-0
                             text-2xs text-text-muted">
-          <span>Press Esc to close</span>
+          <KeyboardHint hint="Press Esc to close" />
           {ms !== undefined ? (
             <span>elapsed {Math.round(ms)} ms</span>
           ) : null}

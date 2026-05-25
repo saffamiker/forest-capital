@@ -18,7 +18,8 @@
  */
 import { useEffect, useState } from 'react'
 import axios from 'axios'
-import { Sparkles, X, GraduationCap } from 'lucide-react'
+import { Sparkles, GraduationCap } from 'lucide-react'
+import { ModalCloseButton } from './ModalControls'
 import type { ChangelogEntry, UnseenChangelogResponse } from '../types/changelog'
 import { startTour } from '../lib/tourBus'
 
@@ -94,14 +95,7 @@ export default function WhatsNewModal() {
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={close}
-            aria-label="Close"
-            className="text-muted hover:text-white shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <ModalCloseButton onClose={close} className="shrink-0" />
         </div>
 
         {/* Entry list */}

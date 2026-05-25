@@ -84,6 +84,45 @@ def test_health_environment_field_is_string():
     assert isinstance(response.json()["environment"], str)
 
 
+# ── Deployment hash visibility (May 24 2026) ─────────────────────────────────
+#
+# Render injects RENDER_GIT_COMMIT on every build. Exposing the short
+# SHA on /api/health closes the verification gap the dashboard-timeout
+# investigation hit — "is Render on the latest commit?" is now
+# answerable without the master API key.
+
+def test_health_carries_commit_field():
+    response = client.get("/api/health")
+    assert "commit" in response.json()
+
+def test_health_carries_commit_full_field():
+    response = client.get("/api/health")
+    assert "commit_full" in response.json()
+
+def test_health_carries_branch_field():
+    response = client.get("/api/health")
+    assert "branch" in response.json()
+
+def test_health_commit_defaults_to_dev_outside_render(monkeypatch):
+    # Local dev (no Render env vars) surfaces the literal "dev" so the
+    # frontend never renders an empty / null commit.
+    monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+    response = client.get("/api/health")
+    body = response.json()
+    assert body["commit"] == "dev"
+    assert body["commit_full"] == "dev"
+
+def test_health_commit_short_is_seven_chars_on_render(monkeypatch):
+    # On Render the var carries a full 40-char SHA; we serve the
+    # short form on `commit` and keep the full string on
+    # `commit_full` so a copy-paste matches `git show <sha>` exactly.
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "abcdef1234567890abcdef1234567890abcdef12")
+    response = client.get("/api/health")
+    body = response.json()
+    assert body["commit"] == "abcdef1"
+    assert body["commit_full"] == "abcdef1234567890abcdef1234567890abcdef12"
+
+
 # ── Auth endpoints (no auth required) ────────────────────────────────────────
 
 def test_request_magic_link_known_email_returns_200():

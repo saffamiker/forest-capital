@@ -438,18 +438,34 @@ function ActionButtons({
     }
   }
 
-  const onMarkIntentional = async () => {
+  // Mark-as-Intentional disclosure modal (May 28 2026 hotfix). The
+  // previous direct-click path sent the AI-generated check.finding
+  // as the "disclosure note" — strictly a rephrasing of the warning,
+  // not a documented team decision. The modal now requires a
+  // 20-character user-typed note before the endpoint fires. The
+  // backend mirrors the gate (Pydantic min_length=20) so a stale
+  // frontend cannot bypass it.
+  const [intentModalOpen, setIntentModalOpen] = useState(false)
+  const [intentNote, setIntentNote] = useState('')
+  const MIN_NOTE_LEN = 20
+
+  const openIntentModal = () => {
+    setIntentNote('')
+    setIntentModalOpen(true)
+  }
+
+  const submitIntent = async () => {
+    if (intentNote.trim().length < MIN_NOTE_LEN) return
     setMarking(true)
     try {
       await axios.post(
         `/api/v1/qa/findings/${check.check_id}/mark-intentional`,
-        // Note is the check finding so the audit trail captures
-        // what the team reviewed when they confirmed intentional.
-        { note: check.finding ?? null },
+        { note: intentNote.trim() },
       )
       showToast(
         `${check.check_id} marked as intentional · recorded in the `
         + `audit trail`)
+      setIntentModalOpen(false)
       // Tell the parent so the panel re-fetches /overrides and the
       // badge swaps to "Confirmed intentional" without a page reload.
       onIntentionalMarked?.()
@@ -500,7 +516,7 @@ function ActionButtons({
         {action === 'methodology_decision' && (
           <button
             type="button"
-            onClick={() => void onMarkIntentional()}
+            onClick={openIntentModal}
             disabled={marking}
             data-testid={`qa-intentional-${check.check_id}`}
             className="inline-flex items-center gap-1.5 px-2.5 py-1
@@ -559,6 +575,72 @@ function ActionButtons({
       {toast && (
         <div className="text-2xs text-muted italic" role="status">
           {toast}
+        </div>
+      )}
+
+      {/* Disclosure modal — Mark as Intentional now requires a real
+          team-written note. The backend's QAMarkIntentionalRequest
+          enforces min_length=20 too, so a stale frontend cannot
+          bypass the gate. Same modal pattern as the Run Live Demo
+          confirm in QAHub.tsx. */}
+      {intentModalOpen && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center
+                     bg-black/60 p-4"
+          onClick={() => { if (!marking) setIntentModalOpen(false) }}
+          data-testid={`qa-intentional-modal-${check.check_id}`}>
+          <div className="card p-5 max-w-md w-full space-y-3"
+               onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-white">
+              Mark as Intentional
+            </h3>
+            <p className="text-xs text-muted leading-relaxed">
+              Document why this finding is an intentional design
+              choice. This note will appear in the audit report.
+            </p>
+            <textarea
+              data-testid={`qa-intentional-note-${check.check_id}`}
+              value={intentNote}
+              onChange={(e) => setIntentNote(e.target.value)}
+              disabled={marking}
+              rows={5}
+              minLength={MIN_NOTE_LEN}
+              placeholder="Describe the intentional design decision and why it is acceptable..."
+              className="w-full rounded border border-border bg-navy-900
+                         text-xs text-slate-200 placeholder-muted p-2.5
+                         focus:outline-none focus:border-electric
+                         disabled:opacity-60 disabled:cursor-not-allowed
+                         leading-relaxed resize-none"
+            />
+            <div className="flex items-center justify-between text-2xs">
+              <span className="text-muted">
+                {intentNote.trim().length} / {MIN_NOTE_LEN} characters minimum
+              </span>
+            </div>
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setIntentModalOpen(false)}
+                disabled={marking}
+                data-testid={`qa-intentional-cancel-${check.check_id}`}
+                className="px-3 py-1.5 rounded text-xs border border-border
+                           text-muted hover:text-white transition-colors
+                           disabled:opacity-50 disabled:cursor-not-allowed">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitIntent()}
+                disabled={marking || intentNote.trim().length < MIN_NOTE_LEN}
+                data-testid={`qa-intentional-confirm-${check.check_id}`}
+                className="px-3 py-1.5 rounded text-xs font-medium
+                           bg-success/10 border border-success/40 text-success
+                           hover:bg-success/20 transition-colors
+                           disabled:opacity-50 disabled:cursor-not-allowed">
+                {marking ? 'Recording…' : 'Confirm'}
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

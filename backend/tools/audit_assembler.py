@@ -125,13 +125,31 @@ FORMULA_SPECIFICATIONS: dict[str, str] = {
     ),
     "rolling_correlation": (
         "12-month rolling Pearson correlation of the monthly return "
-        "series; the pre/post-2022 averages split the rolling series at "
-        f"{REGIME_BREAK_DATE}."
+        "series. The pre/post-2022 split rule is applied to the ROLLING "
+        "VALUE TIMESTAMP, not to each contributing observation in the "
+        "12-month lookback window:\n"
+        f"  pre_2022_avg = mean(rolling_corr[t]) for every t < {REGIME_BREAK_DATE}.\n"
+        f"  post_2022_avg = mean(rolling_corr[t]) for every t >= {REGIME_BREAK_DATE}.\n"
+        "The first 11 post-2022 rolling values (timestamps 2022-01-31 "
+        "through 2022-11-30) carry pre-2022 history in their lookback "
+        "windows by construction — this is the documented platform "
+        "convention. Drop any NaN rolling values from both averages "
+        "(the first 11 rolling values from the start of the series have "
+        "no window). Apply this rule exactly; the platform applies it "
+        "the same way."
     ),
     "regime_split": (
-        f"Split at {REGIME_BREAK_DATE}: the pre-2022 sub-period is every "
-        "month strictly before that date; the post-2022 sub-period is "
-        "every month on or after it."
+        f"Split at {REGIME_BREAK_DATE} applied UNIFORMLY across every "
+        "component (regime_conditional_performance, rolling_correlation, "
+        "chart markers, audit comparisons). The rule:\n"
+        f"  pre_2022 = every observation whose timestamp is strictly "
+        f"less than {REGIME_BREAK_DATE} (i.e., 2021-12-31 or earlier).\n"
+        f"  post_2022 = every observation whose timestamp is greater "
+        f"than or equal to {REGIME_BREAK_DATE} (i.e., 2022-01-01 or "
+        f"later — January 2022 month-end 2022-01-31 is in POST).\n"
+        "Apply at the observation-timestamp level for point-in-time "
+        "metrics (Sharpe, CAGR) and at the rolling-value-timestamp "
+        "level for rolling-window metrics."
     ),
     "efficient_frontier": (
         "scipy SLSQP target-return sweep on the three-asset monthly "

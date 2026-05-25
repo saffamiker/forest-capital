@@ -63,18 +63,99 @@ class TestTestRunnerContract:
         assert client.post("/api/v1/testing/quality-check",
                             json={"type": "feedback"}).status_code == 401
 
-    def test_failures_view_is_admin_only(self):
-        # The admin reaches it; a non-admin team member is forbidden.
+    def test_failures_view_open_to_team_member(self):
+        # UAT #119 (May 24 2026) — relaxed from view_admin to
+        # view_uat_status. Both admin and team_member READ the failures
+        # list; non-team users (a viewer) are still gated out because
+        # they lack view_uat_status. Mutation endpoints (resolve below)
+        # remain sysadmin-only.
         assert client.get("/api/v1/testing/failures",
                           headers=ADMIN_HEADERS).status_code == 200
         assert client.get("/api/v1/testing/failures",
-                          headers=TEAM_HEADERS).status_code == 403
+                          headers=TEAM_HEADERS).status_code == 200
+        assert client.get("/api/v1/testing/failures",
+                          headers=NON_TEAM_HEADERS).status_code == 403
 
-    def test_feedback_view_is_admin_only(self):
+    def test_feedback_view_open_to_team_member(self):
+        # UAT #119 — same relaxation. team_member READS, viewer is
+        # rejected because the viewer preset does not carry
+        # view_uat_status.
         assert client.get("/api/v1/testing/feedback",
                           headers=ADMIN_HEADERS).status_code == 200
         assert client.get("/api/v1/testing/feedback",
+                          headers=TEAM_HEADERS).status_code == 200
+        assert client.get("/api/v1/testing/feedback",
+                          headers=NON_TEAM_HEADERS).status_code == 403
+
+    def test_issue_tracker_open_to_team_member(self):
+        # UAT #119 — the third read endpoint. Same gate.
+        assert client.get("/api/v1/testing/issue-tracker",
+                          headers=ADMIN_HEADERS).status_code == 200
+        assert client.get("/api/v1/testing/issue-tracker",
+                          headers=TEAM_HEADERS).status_code == 200
+        assert client.get("/api/v1/testing/issue-tracker",
+                          headers=NON_TEAM_HEADERS).status_code == 403
+
+    def test_feedback_resolve_remains_admin_only(self):
+        # The READ endpoint above was relaxed; the mutation endpoint
+        # stays view_admin-gated so a team_member cannot change a
+        # feedback row's status. The frontend hides the editable
+        # status select for non-sysadmin, but the backend gate is the
+        # authoritative guarantee.
+        resp = client.post(
+            "/api/v1/testing/feedback/9999/resolve",
+            json={"status": "noted"}, headers=TEAM_HEADERS)
+        assert resp.status_code == 403
+
+    def test_failure_resolve_remains_sysadmin_only(self):
+        # Mark Resolved on a failure row is sysadmin-gated; UAT #119
+        # did not change this. A team_member POST is rejected at the
+        # permission layer (before any business logic runs).
+        resp = client.post(
+            "/api/v1/testing/failures/9999/resolve",
+            json={"resolution_type": "no_bug_detected",
+                  "resolution_note": "test"},
+            headers=TEAM_HEADERS)
+        assert resp.status_code == 403
+
+    def test_triage_endpoints_remain_sysadmin_only(self):
+        # Triage is fundamentally an admin workflow — the frontend
+        # hides the entire block for non-sysadmin; the backend gates
+        # confirm a team_member POST or GET is rejected.
+        assert client.post("/api/v1/testing/triage",
                           headers=TEAM_HEADERS).status_code == 403
+        assert client.get("/api/v1/testing/triage",
+                         headers=TEAM_HEADERS).status_code == 403
+        assert client.get("/api/v1/testing/triage/latest",
+                         headers=TEAM_HEADERS).status_code == 403
+
+    def test_team_progress_open_to_team_member(self):
+        # UAT shared visibility (May 24 2026) — view_uat_status gates
+        # the team-progress endpoint, so every team_member + sysadmin
+        # reads it, but a viewer (Dr. Panttser) is 403'd.
+        assert client.get("/api/v1/testing/team-progress",
+                          headers=ADMIN_HEADERS).status_code == 200
+        assert client.get("/api/v1/testing/team-progress",
+                          headers=TEAM_HEADERS).status_code == 200
+        assert client.get("/api/v1/testing/team-progress",
+                          headers=NON_TEAM_HEADERS).status_code == 403
+
+    def test_team_progress_response_shape(self):
+        # Every team member appears in the response even with no
+        # attestations — the dashboard renders a card per member,
+        # not a blank panel. The fail-open path returns the seeded
+        # team list when no DB is reachable so this test passes in CI.
+        resp = client.get("/api/v1/testing/team-progress",
+                          headers=ADMIN_HEADERS)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "team_emails" in body and isinstance(body["team_emails"], list)
+        assert "members" in body and isinstance(body["members"], dict)
+        assert "ruurdsm@queens.edu" in body["members"]
+        sample = body["members"]["ruurdsm@queens.edu"]
+        for k in ("email", "display_name", "scripts", "failure_count",
+                  "last_activity_at", "currently_testing"):
+            assert k in sample
 
     def test_results_endpoint_rejects_non_team(self):
         # An authenticated non-team user (Dr. Panttser) is gated out.

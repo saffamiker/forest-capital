@@ -53,14 +53,48 @@ describe('LoginPage', () => {
     expect(button).not.toBeDisabled()
   })
 
-  it('renders institution branding', () => {
+  it('renders the Forest Capital institutional lockup image', () => {
+    // May 24 2026 rebrand — the text wordmark was replaced by the
+    // official hexagon-and-wordmark image. The alt text identifies
+    // the brand for screen readers; the testid pins the surface.
     renderLogin()
-    expect(screen.getAllByText(/forest capital/i).length).toBeGreaterThan(0)
+    const lockup = screen.getByTestId('login-forest-capital-lockup')
+    const img = lockup.querySelector('img')
+    expect(img).toBeInTheDocument()
+    expect(img?.getAttribute('alt')).toMatch(/forest capital/i)
+    expect(img?.getAttribute('src')).toBe('/assets/logos/forest-capital.jpg')
   })
 
-  it('renders MSFA practicum footer', () => {
+  it('renders the academic-context subtitle (FNA 670 + McColl)', () => {
     renderLogin()
-    expect(screen.getByText(/MSFA FNA 670/)).toBeInTheDocument()
+    expect(screen.getByText(/McColl School of Business · FNA 670/i))
+      .toBeInTheDocument()
+  })
+
+  it('renders the Queens + McColl institutional lockup row', () => {
+    renderLogin()
+    const row = screen.getByTestId('login-institutional-lockup')
+    const imgs = row.querySelectorAll('img')
+    // Two side-by-side institutional marks above the sign-in card.
+    expect(imgs.length).toBe(2)
+    const srcs = Array.from(imgs).map((i) => i.getAttribute('src'))
+    expect(srcs).toContain('/assets/logos/queens.png')
+    expect(srcs).toContain('/assets/logos/mccoll.jpeg')
+    // Both alt texts identify the institution for screen readers.
+    const alts = Array.from(imgs).map((i) => i.getAttribute('alt') ?? '')
+    expect(alts.some((a) => /queens/i.test(a))).toBe(true)
+    expect(alts.some((a) => /mccoll/i.test(a))).toBe(true)
+  })
+
+  it('renders the updated MSFA institutional footer', () => {
+    // The footer carries the full attribution string per the
+    // brand-uplift spec. A regression on this exact wording would
+    // mis-attribute the platform — pin every component.
+    renderLogin()
+    const footer = screen.getByTestId('login-footer')
+    expect(footer.textContent).toContain('MSFA FNA 670')
+    expect(footer.textContent).toContain('Queens University of Charlotte')
+    expect(footer.textContent).toContain('McColl School of Business')
   })
 
   // ── Approved email — status: "sent" ────────────────────────────────────────

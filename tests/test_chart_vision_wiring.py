@@ -81,7 +81,10 @@ def _capture_call_claude(monkeypatch, target_module: str):
     captured: list[dict] = []
 
     def _fake(model, system_prompt, user_message, max_tokens=1024,
-              tools=None, *, visual_context=None):
+              tools=None, *, visual_context=None, **_kwargs):
+        # **_kwargs absorbs the trigger / hash_gate telemetry kwargs
+        # added in PR-LLM-1. These tests assert on the visual_context
+        # wiring contract; the telemetry kwargs are orthogonal.
         captured.append({
             "model": model,
             "max_tokens": max_tokens,
@@ -200,7 +203,10 @@ class TestHarnessEvaluatorOmitsVisualContext:
         captured: list[dict] = []
 
         def _fake(model, system_prompt, user_message, max_tokens=1024,
-                  tools=None, *, visual_context=None):
+                  tools=None, *, visual_context=None, **_kwargs):
+            # **_kwargs absorbs the trigger / hash_gate telemetry kwargs
+            # added in PR-LLM-1. The contract this test pins is the
+            # visual_context omission for evaluator calls.
             captured.append({"visual_context": visual_context,
                               "user_message_type": type(user_message).__name__})
             return '{"overall": 9.0, "feedback": ""}'

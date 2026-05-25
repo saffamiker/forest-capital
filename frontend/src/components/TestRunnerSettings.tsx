@@ -20,7 +20,7 @@ import {
 import axios from 'axios'
 import {
   Check, X, SkipForward, Circle, RefreshCw, Download, AlertTriangle,
-  Loader2, ChevronDown, ChevronRight, ExternalLink, Search,
+  Loader2, ChevronDown, ChevronRight, ExternalLink, Search, Activity,
 } from 'lucide-react'
 import { TEST_SCRIPTS, getTestScript } from '../constants/testScripts'
 import { startTestRun } from '../lib/testRunnerBus'
@@ -30,6 +30,8 @@ import {
   SuggestionsBanner, SuggestionReviewModal,
   type PRSuggestion,
 } from './SuggestedResolutions'
+import { useIsSysadmin } from '../hooks/usePermissions'
+import { TeamProgressBlock } from './TeamProgressBlock'
 
 type StepResult = 'pass' | 'fail' | 'skip'
 
@@ -503,6 +505,13 @@ export function ResolutionModal({
 
 
 function FailureReportsBlock() {
+  // May 24 2026 (UAT #119) — team_member READS the failures list via
+  // view_uat_status; the mutation surfaces (Mark Resolved, Suggested
+  // Resolutions banner + row badges) are sysadmin-only. We hide them
+  // for non-sysadmin so a team_member never sees an admin control
+  // that would 403 on click.
+  const isSysadmin = useIsSysadmin()
+
   const [failures, setFailures] = useState<FailureRow[]>([])
   const [loading, setLoading] = useState(true)
   const [resolvingFailure, setResolvingFailure] = useState<FailureRow | null>(null)
@@ -512,7 +521,9 @@ function FailureReportsBlock() {
   // this level so it can be opened from the banner (full queue) OR
   // from the row badge (scoped to one failure_id). refreshKey bumps
   // every time a card is actioned so the banner re-fetches and the
-  // row badges below refresh.
+  // row badges below refresh. Sysadmin-only — the by-failure fetch
+  // is skipped for non-sysadmin so the request never 403s and the
+  // row badges never render for them.
   const [reviewingSuggestions, setReviewingSuggestions] =
     useState<PRSuggestion[] | null>(null)
   const [scopedFailureId, setScopedFailureId] = useState<number | null>(null)
@@ -531,7 +542,11 @@ function FailureReportsBlock() {
 
   // Fetch the per-failure pending-suggestion counts so the row badges
   // know which rows to mark. Re-fetched whenever a card is actioned.
+  // Sysadmin-only: the underlying endpoint is sysadmin-gated and the
+  // row badge is a sysadmin action surface, so skip the fetch entirely
+  // when the user lacks the permission.
   const loadSuggestionCounts = useCallback(() => {
+    if (!isSysadmin) return
     axios.get<{ by_failure: Record<string, number> }>(
       '/api/v1/testing/suggestions/by-failure')
       .then((res) => {
@@ -542,7 +557,7 @@ function FailureReportsBlock() {
         setPendingByFailure(map)
       })
       .catch(() => setPendingByFailure({}))
-  }, [])
+  }, [isSysadmin])
   useEffect(loadSuggestionCounts, [loadSuggestionCounts, suggestionRefreshKey])
 
   const toggleExpanded = (id: number) => {
@@ -555,8 +570,10 @@ function FailureReportsBlock() {
 
   // Row-badge click: open the modal scoped to this failure's
   // suggestion(s). Fetches the full list (cheap) and the modal
-  // filters by scopedFailureId.
+  // filters by scopedFailureId. Sysadmin-only — the endpoint is
+  // sysadmin-gated.
   const openSuggestionsForFailure = async (failureId: number) => {
+    if (!isSysadmin) return
     try {
       const r = await axios.get<{ suggestions: PRSuggestion[] }>(
         '/api/v1/testing/suggestions')
@@ -578,13 +595,17 @@ function FailureReportsBlock() {
       {/* Suggested Resolutions banner (Commit 4/7). Hidden when no
           pending suggestions exist; renders inline at the top of the
           Failure Reports tab when one or more PRs reference an open
-          failure via the "Resolves failure #N" convention. */}
-      <SuggestionsBanner
-        onReview={(s) => {
-          setReviewingSuggestions(s)
-          setScopedFailureId(null)
-        }}
-        refreshKey={suggestionRefreshKey} />
+          failure via the "Resolves failure #N" convention. Sysadmin-
+          only — the resolution review is a sysadmin workflow and the
+          underlying suggestions endpoint is sysadmin-gated. */}
+      {isSysadmin && (
+        <SuggestionsBanner
+          onReview={(s) => {
+            setReviewingSuggestions(s)
+            setScopedFailureId(null)
+          }}
+          refreshKey={suggestionRefreshKey} />
+      )}
 
       <button type="button"
         onClick={() => download(csvBlob(
@@ -641,8 +662,12 @@ function FailureReportsBlock() {
                   {/* Suggested Resolutions row badge (Commit 5/7). Only
                       surfaces on Open failures that have a pending
                       suggestion queued by the PR webhook. Clicking
-                      opens the review modal scoped to this failure. */}
-                  {!isResolved && pendingByFailure[f.id] && (
+                      opens the review modal scoped to this failure.
+                      Sysadmin-only — pendingByFailure is empty for
+                      non-sysadmin users (the fetch is skipped), but
+                      gate explicitly so a future change to that fetch
+                      doesn't accidentally surface the badge. */}
+                  {isSysadmin && !isResolved && pendingByFailure[f.id] && (
                     <button type="button"
                       onClick={() => void openSuggestionsForFailure(f.id)}
                       className="inline-flex items-center gap-1 px-1.5
@@ -685,13 +710,17 @@ function FailureReportsBlock() {
                     ? <ChevronDown className="w-3.5 h-3.5" />
                     : <ChevronRight className="w-3.5 h-3.5" />}
                 </button>
-              ) : (
+              ) : isSysadmin ? (
+                /* UAT #119 — Mark Resolved is a mutation
+                   (POST /failures/{id}/resolve, require_sysadmin).
+                   Team members READ the open failure but cannot act
+                   on it; the action button is hidden for them. */
                 <button type="button"
                   onClick={() => setResolvingFailure(f)}
                   className="text-2xs text-electric hover:underline shrink-0">
                   Mark Resolved
                 </button>
-              )}
+              ) : null}
             </div>
             {isResolved && isExpanded && <ResolutionCard f={f} />}
           </div>
@@ -733,6 +762,13 @@ function FailureReportsBlock() {
 const FB_STATUSES = ['new', 'noted', 'planned', 'wont_do', 'resolved']
 
 function FeedbackBacklogBlock() {
+  // UAT #119 — team_member READS the feedback backlog via
+  // view_uat_status. The status select + resolution note are the
+  // mutation surface (POST /feedback/{id}/resolve, view_admin) and
+  // are hidden for non-sysadmin so a team_member sees the row's
+  // current status but cannot change it.
+  const isSysadmin = useIsSysadmin()
+
   const [feedback, setFeedback] = useState<FeedbackRow[]>([])
   const [loading, setLoading] = useState(true)
   const [linkFilter, setLinkFilter] = useState<'all' | 'step' | 'free'>('all')
@@ -900,22 +936,45 @@ function FeedbackBacklogBlock() {
               )}
             </div>
           </div>
-          {/* Status control */}
+          {/* Status control. Sysadmin: an editable select +
+              resolution note field. Team member: read-only status
+              badge (the data is visible, the action is not). */}
           <div className="mt-2 flex flex-wrap items-center gap-2">
-            <select value={f.status}
-              onChange={(e) => void updateStatus(f.id, e.target.value)}
-              className="rounded border border-border bg-navy-800 px-1.5 py-0.5
-                         text-2xs text-white">
-              {FB_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-            {(f.status === 'resolved' || f.status === 'wont_do') && (
-              <input
-                value={notes[f.id] ?? f.resolution_note ?? ''}
-                onChange={(e) => setNotes((n) => ({ ...n, [f.id]: e.target.value }))}
-                onBlur={() => void updateStatus(f.id, f.status)}
-                placeholder="Resolution note"
-                className="flex-1 rounded border border-border bg-navy-800
-                           px-2 py-0.5 text-2xs text-white" />
+            {isSysadmin ? (
+              <>
+                <select value={f.status}
+                  onChange={(e) => void updateStatus(f.id, e.target.value)}
+                  className="rounded border border-border bg-navy-800 px-1.5 py-0.5
+                             text-2xs text-white">
+                  {FB_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+                </select>
+                {(f.status === 'resolved' || f.status === 'wont_do') && (
+                  <input
+                    value={notes[f.id] ?? f.resolution_note ?? ''}
+                    onChange={(e) => setNotes((n) => ({ ...n, [f.id]: e.target.value }))}
+                    onBlur={() => void updateStatus(f.id, f.status)}
+                    placeholder="Resolution note"
+                    className="flex-1 rounded border border-border bg-navy-800
+                               px-2 py-0.5 text-2xs text-white" />
+                )}
+              </>
+            ) : (
+              <>
+                <span className="text-2xs uppercase tracking-wide text-muted">
+                  Status:
+                </span>
+                <span className="text-2xs px-1.5 py-0.5 rounded bg-navy-800
+                                 border border-border text-slate-200">
+                  {f.status}
+                </span>
+                {(f.status === 'resolved' || f.status === 'wont_do')
+                    && f.resolution_note && (
+                  <span className="text-2xs text-slate-300 italic flex-1
+                                   min-w-0 truncate">
+                    “{f.resolution_note}”
+                  </span>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -2058,8 +2117,15 @@ export function TestResultsSection() {
 // content lives in its own component, mounted only when active so a
 // tab switch never refetches the others' data unnecessarily.
 function FailureFeedbackTabs() {
-  type Tab = 'failures' | 'feedback' | 'tracker'
-  const [tab, setTab] = useState<Tab>('failures')
+  // May 24 2026 — UAT shared visibility (the user's "PRIORITY" ask
+  // after PR #131 closed UAT #119). The Team Progress tab is now the
+  // FIRST tab and the default view: when Michael or Bob or Molly opens
+  // Test Administration they see who is where in their UAT pass before
+  // they see the failure backlog. Polls /team-progress every 15s so a
+  // fresh check-off surfaces in the next polling window across every
+  // logged-in viewer.
+  type Tab = 'team' | 'failures' | 'feedback' | 'tracker'
+  const [tab, setTab] = useState<Tab>('team')
 
   const tabButton = (key: Tab, label: string, icon: React.ReactNode) => (
     <button key={key} type="button" onClick={() => setTab(key)}
@@ -2076,6 +2142,8 @@ function FailureFeedbackTabs() {
   return (
     <div>
       <div className="flex items-center gap-1 border-b border-border">
+        {tabButton('team', 'Team Progress',
+          <Activity className="w-3.5 h-3.5 text-success" />)}
         {tabButton('failures', 'Failure Reports',
           <AlertTriangle className="w-3.5 h-3.5 text-danger" />)}
         {tabButton('feedback', 'Feedback Backlog', null)}
@@ -2083,6 +2151,16 @@ function FailureFeedbackTabs() {
           <Search className="w-3.5 h-3.5 text-electric" />)}
       </div>
       <div className="pt-3">
+        {tab === 'team' && (
+          <div>
+            <p className="text-2xs text-muted mb-2">
+              Each team member's UAT progress in real time — read-only,
+              no one can attest a step for another tester. Polls every
+              15 seconds.
+            </p>
+            <TeamProgressBlock />
+          </div>
+        )}
         {tab === 'failures' && (
           <div>
             <p className="text-2xs text-muted mb-2">
@@ -2117,20 +2195,28 @@ function FailureFeedbackTabs() {
 
 
 export function TestAdminSections() {
+  // UAT #119 — Triage Reports stays sysadmin-only (the GET / POST
+  // triage endpoints are sysadmin-gated and the workflow itself is
+  // admin-only). A team_member opens this Settings section to see
+  // Failure Reports + Feedback Backlog in READ mode; Triage Reports
+  // disappears for them.
+  const isSysadmin = useIsSysadmin()
   return (
     <div className="space-y-6">
       <FailureFeedbackTabs />
-      <div>
-        <h3 className="text-base font-semibold text-white flex items-center gap-1.5">
-          <Search className="w-3.5 h-3.5 text-electric" />
-          Triage Reports
-        </h3>
-        <p className="text-2xs text-muted mt-0.5 mb-2">
-          AI triage of the backlog into immediate actions, quick wins and
-          patterns — with GitHub issues for the urgent items.
-        </p>
-        <TriageReportsBlock />
-      </div>
+      {isSysadmin && (
+        <div>
+          <h3 className="text-base font-semibold text-white flex items-center gap-1.5">
+            <Search className="w-3.5 h-3.5 text-electric" />
+            Triage Reports
+          </h3>
+          <p className="text-2xs text-muted mt-0.5 mb-2">
+            AI triage of the backlog into immediate actions, quick wins and
+            patterns — with GitHub issues for the urgent items.
+          </p>
+          <TriageReportsBlock />
+        </div>
+      )}
     </div>
   )
 }

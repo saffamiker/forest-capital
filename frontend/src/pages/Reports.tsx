@@ -282,8 +282,31 @@ export default function Reports() {
 
   useEffect(() => {
     let cancelled = false
+    // UAT 2026-05-24 — Reports tab showed a permanent spinner with
+    // no network activity. Hardened with a 10s safety net that forces
+    // loading=false + surfaces an explicit error if the request never
+    // resolves. A spinner must never outlive an actually-in-flight
+    // network call. The diagnostic console.info / console.warn lines
+    // that originally rode along were removed once the safety-net +
+    // clearTimeout path proved out — they were investigation aids,
+    // not production telemetry, and the safety net's setError surface
+    // is what the user sees if the GET stalls.
+    const safetyTimer = setTimeout(() => {
+      if (!cancelled) {
+        setError(
+          'Reports manifest did not load within 10 seconds. '
+          + 'Refresh the page; if it persists, check the Network '
+          + 'tab for the /api/reports/manifest request.',
+        )
+        setLoading(false)
+      }
+    }, 10_000)
+
     void axios.get<ManifestResponse>('/api/reports/manifest')
-      .then((res) => { if (!cancelled) setManifest(res.data) })
+      .then((res) => {
+        if (cancelled) return
+        setManifest(res.data)
+      })
       .catch((err) => {
         if (cancelled) return
         const msg = axios.isAxiosError(err)
@@ -291,8 +314,15 @@ export default function Reports() {
           : 'Failed to load reports manifest'
         setError(String(msg))
       })
-      .finally(() => { if (!cancelled) setLoading(false) })
-    return () => { cancelled = true }
+      .finally(() => {
+        if (cancelled) return
+        clearTimeout(safetyTimer)
+        setLoading(false)
+      })
+    return () => {
+      cancelled = true
+      clearTimeout(safetyTimer)
+    }
   }, [])
 
   const handleAdvisor = (card: ReportCard) => {
@@ -412,7 +442,14 @@ export default function Reports() {
       )}
 
       {loading && (
-        <div className="card p-8 text-center text-muted text-sm">Loading deliverables…</div>
+        <div
+          className="card p-8 text-center text-muted text-sm flex
+                     items-center justify-center gap-2"
+          data-testid="reports-loading-state"
+        >
+          <Loader2 className="w-4 h-4 animate-spin" />
+          <span>Loading deliverables…</span>
+        </div>
       )}
 
       {/* Generate Documents — one-click first-draft .docx / .pptx of the

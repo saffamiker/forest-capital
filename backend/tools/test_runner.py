@@ -366,6 +366,191 @@ async def get_unseen(user_email: str) -> dict[str, Any]:
         return {"test_script_version": TEST_SCRIPT_VERSION, "scripts": {}}
 
 
+async def get_team_progress() -> dict[str, Any]:
+    """
+    Aggregates every team member's attested results into a shared-view
+    payload — backs the Settings → UAT Team Progress dashboard. Real-time
+    is achieved by the frontend polling this endpoint every 15s; the
+    underlying read is a single GROUP BY against test_results so the
+    DB cost is bounded and the response stays small.
+
+    SHAPE — returns one entry per team email, regardless of whether the
+    user has attested any steps yet (so a team member who has not yet
+    started still appears in the dashboard at 0%):
+
+      {
+        "team_emails": ["ruurdsm@queens.edu", "thaob@queens.edu",
+                        "murdockm@queens.edu"],
+        "members": {
+          "thaob@queens.edu": {
+            "email":             "thaob@queens.edu",
+            "display_name":      "Bob Thao",
+            "scripts": {
+              "all_testers_v1": {
+                "passed":  [step_id, ...],
+                "failed":  [step_id, ...],
+                "skipped": [step_id, ...],
+                "retest":  [step_id, ...],   # resolved fail, no
+                                              # newer attestation, not
+                                              # wont_fix
+                "last_attested_at": "2026-05-24T16:42:11+00:00",
+              },
+              ...
+            },
+            "failure_count": 4,
+            "last_activity_at":  "2026-05-24T16:42:11+00:00",
+            "currently_testing": false,
+          },
+          ...
+        }
+      }
+
+    READ MODEL — three light queries, each in its own session so a
+    failure on one degrades that section to empty rather than blowing
+    the whole response:
+
+      1. test_results — GROUP BY (user_email, script_id, step_id) for
+         status classification. The latest row per (user, script, step)
+         wins; resolution columns flag retest state.
+      2. test_results filter result='fail' AND resolved_at IS NULL —
+         per-user failure_count.
+      3. session_events filter event_type='page_view' AND session_type=
+         'testing' WITHIN the last 5 minutes — currently_testing flag.
+
+    PERMISSION — call site (the /api/v1/testing/team-progress endpoint)
+    gates on view_uat_status so Bob and Molly read team progress
+    without sysadmin rights. The response is read-only: a viewer or
+    team_member never sees another tester's attestation surface, only
+    the aggregate.
+
+    FAIL-OPEN — a DB error returns the members map populated from the
+    config team list with empty scripts dicts so the frontend always
+    renders a card per member, never a blank panel.
+    """
+    from config import PROJECT_TEAM_EMAILS, SYSADMIN_EMAILS
+    from datetime import datetime, timezone, timedelta
+    # The union of the team emails + every sysadmin — Michael is the
+    # sysadmin and his attestations count as test data the same way
+    # Bob's and Molly's do.
+    emails = sorted(
+        {e.lower() for e in PROJECT_TEAM_EMAILS}
+        | {e.lower() for e in SYSADMIN_EMAILS}
+    )
+    # Display name lookup — resolve from platform_users when reachable,
+    # fall back to the local-part of the email so the dashboard always
+    # shows something human-readable.
+    display_names: dict[str, str] = {}
+    try:
+        from tools.platform_users import list_all_users
+        for user in (await list_all_users()):
+            em = (user.get("email") or "").lower()
+            if em in emails and user.get("display_name"):
+                display_names[em] = user["display_name"]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("team_progress_display_names_failed", error=str(exc))
+
+    members: dict[str, dict[str, Any]] = {
+        em: {
+            "email": em,
+            "display_name": display_names.get(em) or em.split("@")[0],
+            "scripts": {},
+            "failure_count": 0,
+            "last_activity_at": None,
+            "currently_testing": False,
+        }
+        for em in emails
+    }
+
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return {"team_emails": emails, "members": members}
+        async with AsyncSessionLocal() as session:
+            # Query 1 — latest row per (user_email, script_id, step_id).
+            # The frontend tells Pass / Fail / Pending / Re-test from
+            # (result, resolved_at, resolution_type). A resolved failure
+            # that's not 'wont_fix' is Re-test; an unresolved failure is
+            # Fail; a pass is Pass; absence (frontend computes) is Pending.
+            rows = await session.execute(text("""
+                SELECT DISTINCT ON (user_email, script_id, step_id)
+                  user_email, script_id, step_id, result, attested_at,
+                  resolved_at, resolution_type
+                FROM test_results
+                WHERE lower(user_email) = ANY(:emails)
+                ORDER BY user_email, script_id, step_id,
+                         attested_at DESC NULLS LAST
+            """), {"emails": emails})
+            for (user_email, script_id, step_id, result,
+                 attested_at, resolved_at, resolution_type) in rows.fetchall():
+                em = (user_email or "").lower()
+                if em not in members:
+                    continue
+                scripts = members[em]["scripts"]
+                bucket = scripts.setdefault(script_id, {
+                    "passed": [], "failed": [], "skipped": [],
+                    "retest": [], "last_attested_at": None,
+                })
+                # Classification mirrors compute_issue_status:
+                #   resolved + not wont_fix + result was fail → Re-test
+                #   resolved + wont_fix → close out as Pass for progress
+                #   not resolved + result=fail → Fail (open)
+                #   not resolved + result=pass → Pass
+                #   not resolved + result=skip → Skip
+                if resolved_at is not None and resolution_type != "wont_fix":
+                    bucket["retest"].append(step_id)
+                elif result == "pass" or resolution_type == "wont_fix":
+                    bucket["passed"].append(step_id)
+                elif result == "fail":
+                    bucket["failed"].append(step_id)
+                else:
+                    bucket["skipped"].append(step_id)
+                iso = _iso(attested_at)
+                bucket["last_attested_at"] = _max_iso(
+                    bucket["last_attested_at"], iso)
+                members[em]["last_activity_at"] = _max_iso(
+                    members[em]["last_activity_at"], iso)
+
+        # Query 2 — open-failure count per user (the Failure Reports
+        # card filter: result='fail' AND resolved_at IS NULL).
+        async with AsyncSessionLocal() as session:
+            rows = await session.execute(text("""
+                SELECT lower(user_email), COUNT(*)
+                FROM test_results
+                WHERE lower(user_email) = ANY(:emails)
+                  AND result = 'fail' AND resolved_at IS NULL
+                GROUP BY lower(user_email)
+            """), {"emails": emails})
+            for em, count in rows.fetchall():
+                if em in members:
+                    members[em]["failure_count"] = int(count)
+
+        # Query 3 — currently_testing flag. A user is "currently
+        # testing" if their latest session_events row within the last
+        # 5 minutes carried session_type='testing'. 5 minutes is the
+        # frontend's debounce window; outside it the green pill
+        # silently expires. The query takes the MAX(created_at) per
+        # user and inspects that row's session_type.
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=5)
+        async with AsyncSessionLocal() as session:
+            rows = await session.execute(text("""
+                SELECT DISTINCT ON (lower(user_email))
+                  lower(user_email), session_type, created_at
+                FROM session_events
+                WHERE lower(user_email) = ANY(:emails)
+                  AND created_at >= :cutoff
+                  AND event_type = 'page_view'
+                ORDER BY lower(user_email), created_at DESC
+            """), {"emails": emails, "cutoff": cutoff})
+            for em, session_type, _ in rows.fetchall():
+                if em in members and session_type == "testing":
+                    members[em]["currently_testing"] = True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("team_progress_read_failed", error=str(exc))
+
+    return {"team_emails": emails, "members": members}
+
+
 async def get_all_failures() -> list[dict[str, Any]]:
     """Every failed step across all testers — admin failure-reports view.
 
@@ -906,7 +1091,8 @@ def quality_check(
     try:
         from agents.base import SONNET_MODEL, call_claude
         parsed = _parse_json(call_claude(
-            SONNET_MODEL, _QUALITY_SYSTEM, user_message, max_tokens=400))
+            SONNET_MODEL, _QUALITY_SYSTEM, user_message, max_tokens=400,
+            trigger="test_runner:quality_check"))
         overall = float(parsed.get("overall", 10.0))
         passed = bool(parsed.get("passed", overall >= 7.0))
         return {
@@ -967,7 +1153,8 @@ def categorize_feedback(
     try:
         from agents.base import SONNET_MODEL, call_claude
         parsed = _parse_json(call_claude(
-            SONNET_MODEL, _CATEGORIZE_SYSTEM, user_message, max_tokens=400))
+            SONNET_MODEL, _CATEGORIZE_SYSTEM, user_message, max_tokens=400,
+            trigger="test_runner:categorize_feedback"))
         tags = parsed.get("tags")
         conf = parsed.get("ai_confidence")
         return {
