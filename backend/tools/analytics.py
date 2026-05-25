@@ -14,6 +14,8 @@ DB-touching entry point (assemble_academic_analytics) lives in main.py.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -314,6 +316,40 @@ def rolling_correlation(
 
 # ── 3. Regime-conditional performance ─────────────────────────────────────────
 
+def _safe_sharpe(r: pd.Series, rf: pd.Series | None) -> float | None:
+    """_sharpe wrapper that converts NaN to None instead of letting it
+    leak into the cached row.
+
+    _sharpe's mean/std arithmetic can produce NaN when the sub-period
+    series is all-NaN — pandas' mean()/std() default skipna=True, but
+    a fully-NaN series still returns NaN. round(nan, 4) is nan; nan
+    serialised to JSONB causes the validator to mark the row invalid
+    with "pre_2022_sharpe_unexpectedly_null" because months stays
+    >= 2 while sharpe lands as null. Returning None explicitly when
+    the result is non-finite preserves the diagnostic — the validator
+    still flags the row as incomplete, but the failure mode is
+    legible (the upstream couldn't compute a Sharpe) rather than
+    cryptic (NaN drift through JSON).
+    """
+    if len(r) < 2:
+        return None
+    value = _sharpe(r, rf)
+    if not math.isfinite(value):
+        return None
+    return round(value, 4)
+
+
+def _safe_cagr(r: pd.Series) -> float | None:
+    """_cagr companion to _safe_sharpe — guards against NaN drift the
+    same way (a NaN cagr would corrupt the cached row too)."""
+    if len(r) == 0:
+        return None
+    value = _cagr(r)
+    if not math.isfinite(value):
+        return None
+    return round(value, 4)
+
+
 def regime_conditional_performance(
     strategy_results: dict[str, dict],
     rf: pd.Series | None,
@@ -323,20 +359,33 @@ def regime_conditional_performance(
     reports Sharpe + CAGR for each sub-period. Sorted by post-2022 Sharpe
     descending — this is the central finding table: which strategies held
     up once equity-bond diversification stopped working.
+
+    Sharpe / CAGR go through _safe_sharpe / _safe_cagr so a NaN-producing
+    edge case (a sub-period that is entirely NaN after rf-alignment, or
+    a degenerate cumulative product) falls back to None — the validator
+    can then flag the row cleanly rather than swallowing NaN into JSONB.
     """
     rows: list[dict] = []
     for name, res in strategy_results.items():
         series = _pairs_to_series(res.get("monthly_returns") or [])
         if series.empty:
             continue
+        # Drop NaN BEFORE the regime split so a strategy whose backtester
+        # emitted NaN early-month markers (lookback-window stubs) doesn't
+        # poison the Sharpe / CAGR arithmetic. _pairs_to_series already
+        # casts every value via float(), so a NaN here was emitted as
+        # an explicit float('nan') by the producer.
+        series = series.dropna()
+        if series.empty:
+            continue
         pre = series[series.index < REGIME_BREAK]
         post = series[series.index >= REGIME_BREAK]
         rows.append({
             "strategy":         res.get("strategy_name") or name,
-            "pre_2022_sharpe":  round(_sharpe(pre, rf), 4) if len(pre) >= 2 else None,
-            "post_2022_sharpe": round(_sharpe(post, rf), 4) if len(post) >= 2 else None,
-            "pre_2022_cagr":    round(_cagr(pre), 4) if len(pre) else None,
-            "post_2022_cagr":   round(_cagr(post), 4) if len(post) else None,
+            "pre_2022_sharpe":  _safe_sharpe(pre, rf),
+            "post_2022_sharpe": _safe_sharpe(post, rf),
+            "pre_2022_cagr":    _safe_cagr(pre),
+            "post_2022_cagr":   _safe_cagr(post),
             "pre_2022_months":  int(len(pre)),
             "post_2022_months": int(len(post)),
         })
