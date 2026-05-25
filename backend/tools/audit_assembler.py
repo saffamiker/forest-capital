@@ -329,6 +329,50 @@ async def assemble_audit_payload() -> dict[str, Any]:
         n_months = len(idx)
         rf_annual = round(float(rf.mean()) * 12, 6) if n_months else 0.0
 
+        # ── Frontier-aligned subset (May 25 2026 fix) ────────────────
+        # refresh_efficient_frontier builds its mu vector and cov
+        # matrix from a pd.DataFrame({EQUITY, IG, HY}).dropna(), so the
+        # cached max-Sharpe point's (sigma, mu) are computed over a
+        # subset of months where ALL THREE columns are non-NaN. If
+        # any month has a NaN in any column (extension lag, partial
+        # backfill), it drops out of the frontier sample.
+        #
+        # The auditor was previously handed the RAW arrays (with NaN),
+        # so its recomputation of mu @ w averaged over a different
+        # period and reported the platform's (sigma, mu) as inconsistent
+        # with the weights even though the platform's own arithmetic
+        # was internally consistent.
+        #
+        # Build the SAME aligned subset here, surface it under
+        # platform_computed.efficient_frontier.aligned_returns, and
+        # the frontier prompt sends THOSE arrays — not the raw ones —
+        # so both sides agree on the sample.
+        ef_frame = pd.DataFrame(
+            {"EQUITY": equity, "IG": ig, "HY": hy, "rf": rf},
+            index=idx,
+        ).dropna()
+        rf_annual_aligned = (
+            round(float(ef_frame["rf"].mean()) * 12, 6)
+            if not ef_frame.empty else 0.0
+        )
+        aligned_returns = {
+            "equity": [round(float(v), 6) for v in ef_frame["EQUITY"]],
+            "ig":     [round(float(v), 6) for v in ef_frame["IG"]],
+            "hy":     [round(float(v), 6) for v in ef_frame["HY"]],
+            "rf":     [round(float(v), 6) for v in ef_frame["rf"]],
+            "dates":  [str(d.date()) for d in ef_frame.index],
+            "n_obs":  int(len(ef_frame)),
+            "rf_annual": rf_annual_aligned,
+        }
+        dropped_n = n_months - len(ef_frame)
+        if dropped_n > 0:
+            log.info(
+                "audit_frontier_alignment_dropped_rows",
+                full_months=n_months,
+                aligned_months=len(ef_frame),
+                dropped=dropped_n,
+            )
+
         benchmark = strategies.get("BENCHMARK", {})
         bench_series = an._pairs_to_series(benchmark.get("monthly_returns") or [])
         asset_series = {"EQUITY": equity, "IG": ig, "HY": hy}
@@ -386,7 +430,13 @@ async def assemble_audit_payload() -> dict[str, Any]:
                 an.regime_conditional_performance(strategies, rf), "strategy"),
             "factor_loadings": _list_to_dict(
                 an.factor_loadings(strategies, ff or []), "strategy"),
-            "efficient_frontier": {"max_sharpe_point": ef_max_sharpe},
+            "efficient_frontier": {
+                "max_sharpe_point": ef_max_sharpe,
+                # The aligned subset the frontier was actually computed
+                # against. The auditor recomputes from THESE arrays so
+                # mu @ w lands on the same sample the platform used.
+                "aligned_returns": aligned_returns,
+            },
             "turnover": {
                 name: s.get("true_turnover")
                 for name, s in strategies.items()

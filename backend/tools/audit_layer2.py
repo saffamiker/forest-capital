@@ -248,14 +248,47 @@ def _factor_prompt(
 
 def _frontier_prompt(payload: dict) -> str:
     specs = payload["formula_specifications"]
-    raw = payload["raw_data"]["asset_returns"]
+    # Use the aligned subset the platform's frontier was actually
+    # computed against — refresh_efficient_frontier builds its mu / cov
+    # from pd.DataFrame({EQUITY, IG, HY}).dropna(), and the auditor must
+    # average over the SAME sample for mu @ w to match. Falls back to
+    # the raw asset_returns block if the aligned key is missing (legacy
+    # payloads predating May 25 2026).
+    ef_block = payload["platform_computed"].get("efficient_frontier") or {}
+    aligned = ef_block.get("aligned_returns") or {}
+    if aligned:
+        equity_arr = aligned.get("equity") or []
+        ig_arr     = aligned.get("ig") or []
+        hy_arr     = aligned.get("hy") or []
+        rf_annual  = aligned.get("rf_annual",
+                                 payload["metadata"]["risk_free_rate"]["value"])
+        sample_note = (
+            f"Sample: {aligned.get('n_obs', len(equity_arr))} months "
+            f"after aligning the three series (rows dropped where any "
+            f"of EQUITY / IG / HY is NaN) — this is the SAME subset "
+            f"the platform's mu and cov were computed over, so mu @ w "
+            f"and sqrt(w · cov · w) MUST be evaluated on these arrays "
+            f"to match the platform's report."
+        )
+    else:
+        raw = payload["raw_data"]["asset_returns"]
+        equity_arr = raw.get("equity") or []
+        ig_arr     = raw.get("ig") or []
+        hy_arr     = raw.get("hy") or []
+        rf_annual  = payload["metadata"]["risk_free_rate"]["value"]
+        sample_note = (
+            "Sample: full monthly arrays from market_data_monthly "
+            "(legacy payload without an aligned subset)."
+        )
     return (
         "Independently verify the efficient-frontier max-Sharpe point.\n\n"
-        f"Equity monthly returns: {raw.get('equity')}\n"
-        f"IG monthly returns: {raw.get('ig')}\n"
-        f"HY monthly returns: {raw.get('hy')}\n"
-        f"Annualised risk-free rate: {payload['metadata']['risk_free_rate']['value']}\n\n"
-        f"Platform max-Sharpe point: {json.dumps(payload['platform_computed']['efficient_frontier'])}\n\n"
+        f"Equity monthly returns: {equity_arr}\n"
+        f"IG monthly returns: {ig_arr}\n"
+        f"HY monthly returns: {hy_arr}\n"
+        f"Annualised risk-free rate: {rf_annual}\n\n"
+        f"{sample_note}\n\n"
+        f"Platform max-Sharpe point: "
+        f"{json.dumps({'max_sharpe_point': ef_block.get('max_sharpe_point')})}\n\n"
         f"Formula: {specs['efficient_frontier']}\n\n"
         "Find the tangency (max-Sharpe) portfolio and compare sigma, mu "
         "and the weights. Return ONLY JSON: "
