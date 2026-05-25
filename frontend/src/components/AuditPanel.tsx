@@ -135,9 +135,40 @@ function relTime(iso: string | null): string {
   return `${Math.round(hrs / 24)}d ago`
 }
 
-function overallStatus(r: AuditRun): { label: string; cls: string } {
-  if (r.failed > 0) return { label: 'FAIL ❌', cls: 'text-danger' }
-  if (r.warnings > 0) return { label: 'WARN ⚠️', cls: 'text-warning' }
+/**
+ * overallStatus — derives the run's headline badge from the run row
+ * plus its findings (May 24 2026 update).
+ *
+ * Four-state spec from UAT feedback: the original badge stayed
+ * amber WARN forever once a warning landed, even after every
+ * warning had been acknowledged in the panel. That left a green
+ * "you have something to do" indicator that never went away.
+ *
+ *   failed > 0                                  → WARN amber
+ *     (a true Layer 2 recomputation mismatch — genuine blocker,
+ *     surfaced amber per spec; the detail line below the badge
+ *     still shows "X failures · Y warnings" so the breakdown is
+ *     not lost.)
+ *   failed = 0, warnings > 0, all acknowledged  → READY green ✓
+ *     (every warning has a recorded acknowledgement note — an
+ *     explicit signal that warnings were seen and assessed.)
+ *   failed = 0, warnings > 0, any unacknowledged → WARN amber
+ *   failed = 0, warnings = 0                    → PASS green
+ *
+ * Findings are required to compute READY because the AuditRun row
+ * only carries an aggregate `warnings` count, not the per-finding
+ * resolution state.
+ */
+export function overallStatus(r: AuditRun, findings: AuditFinding[]):
+  { label: string; cls: string } {
+  if (r.failed > 0) return { label: 'WARN ⚠️', cls: 'text-warning' }
+  if (r.warnings > 0) {
+    const warns = findings.filter((f) => f.status === 'warning')
+    const allAcked = warns.length > 0
+      && warns.every((f) => Boolean(f.resolved))
+    if (allAcked) return { label: 'READY ✓', cls: 'text-success' }
+    return { label: 'WARN ⚠️', cls: 'text-warning' }
+  }
   return { label: 'PASS ✅', cls: 'text-success' }
 }
 
@@ -458,9 +489,9 @@ export default function AuditPanel() {
                 Last audit {relTime(latest.triggered_at)}
               </span>
               <span className={`text-sm font-semibold ${
-                overallStatus(latest).cls}`}>
+                overallStatus(latest, findings).cls}`}>
                 {latest.status === 'running'
-                  ? 'Running…' : overallStatus(latest).label}
+                  ? 'Running…' : overallStatus(latest, findings).label}
               </span>
             </div>
             <div className="text-2xs text-muted mt-1">
@@ -520,8 +551,13 @@ export default function AuditPanel() {
                       <span className="text-2xs text-white">
                         {relTime(r.triggered_at)} · {triggerLabel(r.triggered_by)}
                         {' '}·{' '}
-                        <span className={overallStatus(r).cls}>
-                          {overallStatus(r).label}
+                        {/* History rows don't load findings — pass []
+                            so READY can't be claimed without the per-
+                            finding ack state. The badge stays WARN for
+                            any past run with warnings, even if every
+                            warning was acknowledged after the fact. */}
+                        <span className={overallStatus(r, []).cls}>
+                          {overallStatus(r, []).label}
                         </span>
                       </span>
                       <button
