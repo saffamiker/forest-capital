@@ -133,7 +133,11 @@ describe('regimeStore.load()', () => {
 
 
 describe('qaStore.load()', () => {
-  it('fetches once on first load, no-ops on subsequent loads', async () => {
+  it('fetches once on first load with force=false, no-ops on subsequent loads', async () => {
+    // load() is the cache-friendly first-visit path — it passes
+    // force=false so the backend serves a hash-matched cached audit
+    // when one exists. The bypass is reserved for the manual
+    // Re-run / Run Full QA path (see reload-force test below).
     mockedAxios.post = vi.fn().mockResolvedValue({ data: {
       checks_passed: 25, checks_warned: 2, checks_failed: 0,
       summary: '', items: [], verdict: 'WARN', checks_total: 27,
@@ -142,7 +146,29 @@ describe('qaStore.load()', () => {
     await act(async () => { await result.current.load() })
     await act(async () => { await result.current.load() })   // simulates QA tab re-mount
     expect(mockedAxios.post).toHaveBeenCalledTimes(1)
-    expect(mockedAxios.post).toHaveBeenCalledWith('/api/qa/audit')
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      '/api/qa/audit', { force: false })
+  })
+
+  it('reload() forces the bypass — the Run Full QA button path', async () => {
+    // The QAHub's Run Full QA button calls qaReload() with no
+    // argument; reload defaults to force=true so the backend
+    // bypasses both the hash gate and the min-interval gate.
+    // Without this, a cached audit predating an Academic Review
+    // run would keep returning stale IN02 = WARN forever.
+    mockedAxios.post = vi.fn().mockResolvedValue({ data: {
+      checks_passed: 25, checks_warned: 2, checks_failed: 0,
+      summary: '', items: [], verdict: 'WARN', checks_total: 27,
+    }})
+    const { result } = renderHook(() => useQAStore())
+    await act(async () => { await result.current.load() })
+    await act(async () => { await result.current.reload() })
+    // Two calls — the load (cache-friendly) and the reload (force).
+    expect(mockedAxios.post).toHaveBeenCalledTimes(2)
+    expect(mockedAxios.post).toHaveBeenNthCalledWith(
+      1, '/api/qa/audit', { force: false })
+    expect(mockedAxios.post).toHaveBeenNthCalledWith(
+      2, '/api/qa/audit', { force: true })
   })
 
   it('stores audit result with derived status after a successful load', async () => {

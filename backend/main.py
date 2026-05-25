@@ -7032,9 +7032,139 @@ async def advisor_citations(
 
 # ── QA ────────────────────────────────────────────────────────────────────────
 
+# ── AN01 / AN04 raw-state diagnostic logger (May 25 2026) ────────────────────
+#
+# When the methodology audit fires and AN01 (Carhart loadings) or AN04
+# (regime split + transition matrix) come back WARN/FAIL, the operator
+# needs the upstream field values to diagnose. precomputed_analytics
+# already logs per-row diagnostics at REFRESH time; this helper logs
+# the cached field values at AUDIT time, so a forced re-run that
+# DOESN'T trigger a refresh still surfaces the data the checks read.
+#
+# Three structured log lines per call:
+#   qa_audit_an01_state — first 3 factor_loadings rows (alpha, mom,
+#                         significance flags, r_squared)
+#   qa_audit_an04_regime_state — first 3 regime_conditional rows
+#                         (pre/post 2022 sharpe + months)
+#   qa_audit_an04_transition_state — transition matrix row sums per
+#                         regime (the row-sum invariant AN04 checks)
+
+def _log_an01_an04_raw_state(
+    analytics_cache: dict | None, qa_hash: str | None, *, forced: bool,
+) -> None:
+    """Emits the three AN01/AN04 diagnostic log lines named above.
+
+    Fail-open — a malformed payload (any missing key) shrinks the line
+    to None/empty rather than raising. The point is visibility; a log
+    line throwing during diagnosis would defeat the purpose.
+    """
+    short_hash = qa_hash[:8] if qa_hash else None
+    cache = analytics_cache or {}
+    refresh_triggered = list(cache.get("refresh_triggered") or [])
+    completeness = cache.get("completeness") or {}
+    academic = cache.get("academic_analytics") or {}
+    transition = cache.get("transition_matrix") or {}
+
+    # AN01 — Carhart factor loadings. Project a compact, diagnostic
+    # view of the first three rows so the operator can see whether
+    # the upstream regression actually populated the fields the AN01
+    # deterministic check reads (significance flags + alpha annualised
+    # + r_squared). Three rows fits one Render log line; the full
+    # payload is in analytics_metrics_cache for a deeper dive.
+    fl_rows = academic.get("factor_loadings") or []
+    fl_sample: list[dict] = []
+    for r in fl_rows[:3]:
+        if not isinstance(r, dict):
+            continue
+        fl_sample.append({
+            "strategy":             r.get("strategy"),
+            "alpha_annualized":     r.get("alpha_annualized"),
+            "alpha_significant":    r.get("alpha_significant"),
+            "mkt_rf":               r.get("mkt_rf"),
+            "mkt_rf_significant":   r.get("mkt_rf_significant"),
+            "smb_significant":      r.get("smb_significant"),
+            "hml_significant":      r.get("hml_significant"),
+            "mom":                  r.get("mom"),
+            "mom_significant":      r.get("mom_significant"),
+            "r_squared":            r.get("r_squared"),
+        })
+    log.info(
+        "qa_audit_an01_state",
+        strategy_hash=short_hash,
+        forced=forced,
+        factor_loadings_complete=bool(completeness.get("factor_loadings")),
+        factor_loadings_refreshed=("academic_analytics" in refresh_triggered),
+        factor_loadings_row_count=len(fl_rows),
+        factor_loadings_sample=fl_sample,
+    )
+
+    # AN04 — regime-conditional Sharpe table (pre/post 2022 split).
+    # The AN04 deterministic check verifies every strategy carries a
+    # non-null Sharpe in both periods (with the months ≥ 2 carve-out).
+    rc_rows = academic.get("regime_conditional") or []
+    rc_sample: list[dict] = []
+    for r in rc_rows[:3]:
+        if not isinstance(r, dict):
+            continue
+        rc_sample.append({
+            "strategy":          r.get("strategy"),
+            "pre_2022_sharpe":   r.get("pre_2022_sharpe"),
+            "post_2022_sharpe":  r.get("post_2022_sharpe"),
+            "pre_2022_months":   r.get("pre_2022_months"),
+            "post_2022_months":  r.get("post_2022_months"),
+        })
+    log.info(
+        "qa_audit_an04_regime_state",
+        strategy_hash=short_hash,
+        forced=forced,
+        regime_conditional_complete=bool(
+            completeness.get("regime_conditional")),
+        regime_conditional_refreshed=(
+            "academic_analytics" in refresh_triggered),
+        regime_conditional_row_count=len(rc_rows),
+        regime_conditional_sample=rc_sample,
+    )
+
+    # AN04 — transition matrix. AN04 reads BOTH the regime split AND
+    # the 3x3 matrix; the matrix row sums are the invariant that
+    # surfaces a data error (a non-empty row that does NOT sum to 1.0
+    # is malformed). Log the row sums and the matrix shape so a
+    # missing regime or a degenerate row stands out in the log.
+    matrix = transition if isinstance(transition, dict) else {}
+    # The matrix payload is keyed by originating regime; sum each
+    # row defensively in case the validator's row_sums field is
+    # missing on an older payload shape.
+    row_sums: dict[str, float] = {}
+    for regime in ("BULL", "BEAR", "TRANSITION"):
+        row = matrix.get(regime)
+        if isinstance(row, dict):
+            try:
+                row_sums[regime] = round(
+                    sum(float(v) for v in row.values()), 6)
+            except (TypeError, ValueError):
+                row_sums[regime] = float("nan")
+    log.info(
+        "qa_audit_an04_transition_state",
+        strategy_hash=short_hash,
+        forced=forced,
+        transition_matrix_complete=bool(
+            completeness.get("transition_matrix")),
+        transition_matrix_refreshed=(
+            "transition_matrix" in refresh_triggered),
+        transition_matrix_row_sums=row_sums,
+        transition_matrix_keys=sorted(
+            k for k in matrix.keys()
+            if k in ("BULL", "BEAR", "TRANSITION")),
+    )
+
+
 @app.post("/api/qa/audit")
 @limiter.limit("10/minute")
-async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
+async def qa_audit(
+    request: Request,
+    body: dict | None = None,
+    session: dict = Depends(require_sysadmin),
+):
     """
     Runs the full QA methodology audit against real strategy results.
 
@@ -7045,6 +7175,16 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
     Per-type guard: rejected with 409 only when another methodology
     audit is already in progress — a statistical audit never blocks it
     (tools/qa_guard.py).
+
+    Body: {"force": bool} — when True (May 25 2026), bypasses BOTH the
+    hash gate and the min-interval gate so the audit re-runs even when
+    the strategy data is unchanged. The 'Run Full QA' / 'Re-run audit'
+    buttons always pass force=true because a manual click means "I
+    want fresh checks now" — without it, an IN02 (Academic Review
+    complete) change is invisible to a cached audit because the cache
+    is keyed on strategy_hash and an Academic Review run does not
+    change that hash. Background polling and the first QA-tab load
+    pass force=false so they continue to benefit from the cache.
     """
     from tools.qa_guard import (
         QA_BUSY_MESSAGE_METHODOLOGY, begin_methodology, end_methodology,
@@ -7056,9 +7196,17 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
         raise HTTPException(status_code=409,
                             detail=QA_BUSY_MESSAGE_METHODOLOGY)
 
+    force = bool((body or {}).get("force"))
+
     begin_methodology()
     try:
         if ENVIRONMENT == "test":
+            if force:
+                # Tag the response so the contract test can verify
+                # force was plumbed through to the bypass call site.
+                # The shape is otherwise bit-identical to the cached
+                # mock — additive field only.
+                return {**MOCK_QA_AUDIT, "forced": True}
             return MOCK_QA_AUDIT
 
         # Hotfix May 23 2026: this handler used to swallow every
@@ -7187,8 +7335,11 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
             # Gate 1 — hash gate. Same data → cached audit verdict
             # stands. expires_at filtering inside get_latest_qa
             # discards a row past its TTL so a freshly-changed dataset
-            # never reuses a verdict tied to old data.
-            if qa_hash:
+            # never reuses a verdict tied to old data. Bypassed when
+            # the caller passes force=true — a manual re-run after
+            # an Academic Review (IN02 dependency) must re-evaluate
+            # the checklist even when strategy_hash is unchanged.
+            if qa_hash and not force:
                 cached_audit = await get_latest_qa(
                     qa_hash, min_tier=AUDIT_TIER_FULL)
                 if cached_audit and isinstance(cached_audit.get("checklist"), dict):
@@ -7204,32 +7355,35 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
             # has an edge case (e.g. the strategy_results shape
             # changed and the hash diverged without the data
             # changing). Returns the most recent verdict regardless
-            # of which hash it ran against.
-            most_recent = await get_most_recent_qa_run(
-                min_tier=AUDIT_TIER_FULL)
-            if most_recent and most_recent.get("run_at"):
-                try:
-                    run_at = datetime.fromisoformat(
-                        most_recent["run_at"].replace("Z", "+00:00"))
-                    age_seconds = (datetime.now(timezone.utc)
-                                   - run_at).total_seconds()
-                    if (age_seconds < QA_MIN_INTERVAL_SECONDS
-                            and isinstance(most_recent.get("checklist"), dict)):
-                        log.info(
-                            "qa_audit_skipped_interval",
-                            age_seconds=int(age_seconds),
-                            min_interval_seconds=QA_MIN_INTERVAL_SECONDS,
-                            cached_strategy_hash=str(
-                                most_recent.get("strategy_hash", ""))[:8],
-                            current_strategy_hash=(
-                                qa_hash[:8] if qa_hash else "unknown"),
-                        )
-                        return most_recent["checklist"]
-                except (ValueError, AttributeError):
-                    pass  # malformed run_at — fall through to real run
+            # of which hash it ran against. Bypassed by force=true
+            # for the same reason gate 1 is.
+            if not force:
+                most_recent = await get_most_recent_qa_run(
+                    min_tier=AUDIT_TIER_FULL)
+                if most_recent and most_recent.get("run_at"):
+                    try:
+                        run_at = datetime.fromisoformat(
+                            most_recent["run_at"].replace("Z", "+00:00"))
+                        age_seconds = (datetime.now(timezone.utc)
+                                       - run_at).total_seconds()
+                        if (age_seconds < QA_MIN_INTERVAL_SECONDS
+                                and isinstance(most_recent.get("checklist"), dict)):
+                            log.info(
+                                "qa_audit_skipped_interval",
+                                age_seconds=int(age_seconds),
+                                min_interval_seconds=QA_MIN_INTERVAL_SECONDS,
+                                cached_strategy_hash=str(
+                                    most_recent.get("strategy_hash", ""))[:8],
+                                current_strategy_hash=(
+                                    qa_hash[:8] if qa_hash else "unknown"),
+                            )
+                            return most_recent["checklist"]
+                    except (ValueError, AttributeError):
+                        pass  # malformed run_at — fall through to real run
 
             log.info("qa_audit_running",
-                     strategy_hash=qa_hash[:8] if qa_hash else "unknown")
+                     strategy_hash=qa_hash[:8] if qa_hash else "unknown",
+                     forced=force)
 
             # AN01 / AN04 pre-flight (May 24 2026). Fetch the
             # Carhart loadings and transition matrix rows from
@@ -7237,6 +7391,14 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
             # run; trigger refresh on miss/incomplete. The QA audit
             # should never WARN on data the platform could have
             # computed itself.
+            #
+            # May 25 2026 — raw-field diagnostics. After the pre-flight
+            # settles (refreshed or not), emit a single log line per
+            # check naming the actual row count and the per-row
+            # field shape the AN01 / AN04 deterministic checks will
+            # read. If those checks then return WARN/FAIL the operator
+            # has the upstream data shape on the same line, without
+            # inspecting the JSONB payload by hand.
             try:
                 from tools.precomputed_analytics import (
                     ensure_qa_data_complete,
@@ -7248,6 +7410,7 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
                         triggered=analytics_cache["refresh_triggered"],
                         completeness=analytics_cache["completeness"],
                     )
+                _log_an01_an04_raw_state(analytics_cache, qa_hash, forced=force)
             except Exception as _exc:  # noqa: BLE001
                 log.warning("qa_preflight_error", error=str(_exc))
                 analytics_cache = None
