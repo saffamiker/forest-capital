@@ -25,6 +25,18 @@ const TRACKING_NOTE =
   + 'here, not elsewhere. Your activity log is part of the project '
   + 'evidence. Make it count.'
 
+// May 28 2026 — shared audit-gate callout. The report-readiness gate
+// (workstream C) refuses to generate a midpoint paper, executive brief,
+// or final presentation deck while any audit WARN finding is
+// unreviewed. Both guides surface this at the top so the team sees
+// the gate before the first Generate click rather than after a 422.
+const AUDIT_GATE_NOTE =
+  'Before generating any report: navigate to the QA Audit tab and '
+  + 'ensure every WARN finding is either Acknowledged or Marked as '
+  + 'Intentional with a disclosure note. The Generate button will '
+  + 'return a blocking modal listing any outstanding items if this '
+  + 'step is skipped.'
+
 interface Step {
   step: string
   detail?: string[]
@@ -62,6 +74,17 @@ const GUIDES: Guide[] = [
       { step: 'Open the Reports screen and find Generate Documents.' },
       { step: 'Generate the Midpoint Submission Paper.' },
       {
+        // May 28 2026 — audit body summary + appendix awareness.
+        step: 'Verify the audit content in the generated paper.',
+        detail: [
+          'The generated midpoint paper includes a Quality Assurance '
+            + 'paragraph in the methodology section and a full Audit '
+            + 'Disclosure Appendix at the end. Both are assembled '
+            + 'automatically from live audit data — verify the counts '
+            + 'are correct before submitting.',
+        ],
+      },
+      {
         step: 'Generate and open your draft in the editor.',
         detail: ['Click Open in Editor after generation.'],
       },
@@ -77,16 +100,55 @@ const GUIDES: Guide[] = [
         ],
       },
       {
-        step: 'Run Academic Review from inside the editor.',
+        // May 28 2026 — Academic Review primary location is now the QA
+        // Audit page (PR #152). The editor's Writing Assistant panel
+        // still surfaces an inline trigger but is no longer canonical.
+        step: 'Run Academic Review from the QA Audit page (primary).',
         detail: [
-          'Click Run Academic Review in the Writing Assistant panel.',
+          'Navigate to the QA Audit tab — the Academic Review panel is '
+            + 'the canonical location.',
+          'The editor Writing Assistant panel also surfaces an inline '
+            + 'Run Academic Review trigger as a convenience.',
           'Read every section verdict; improve the Needs Work sections.',
           'Re-run until no section shows Needs Work.',
         ],
       },
       {
+        // May 28 2026 — QA Audit disclosure workflow. The report-
+        // readiness gate (workstream C) refuses to generate while any
+        // WARN is unreviewed; the team must clear every finding here.
+        step: 'QA Audit review: clear every audit warning.',
+        detail: [
+          'Navigate to the QA Audit tab.',
+          'Acknowledge or Mark as Intentional every WARN finding with '
+            + 'a disclosure note of at least 20 characters.',
+          'All findings must show green before the report gate clears.',
+          'Use Edit to update a note, Revoke to restart a decision.',
+        ],
+      },
+      {
         step: 'Save a named version.',
         detail: ['Click Save Version and label it "Final submission".'],
+      },
+      {
+        // May 28 2026 — verify the audit appendix carries the team's
+        // reviewed disclosures BEFORE the final export. An empty
+        // appendix means the QA Audit review step was skipped; the
+        // team should return to the audit tab.
+        step: 'Verify the Audit Disclosure Appendix.',
+        detail: [
+          'Open the generated document and scroll to the Audit '
+            + 'Disclosure Appendix at the end.',
+          'Confirm it carries the team\'s reviewed disclosures — '
+            + 'reviewer email, timestamp, and note for every '
+            + 'acknowledged warning.',
+          'If the appendix is empty, return to QA Audit and complete '
+            + 'the disclosure review.',
+          'Statistical audit PDF: download from the QA Audit panel '
+            + 'and include it in the Analytical Appendix submission. '
+            + 'It carries a Warnings and Disclosures section listing '
+            + 'every WARN with reviewer identity, timestamp, and note.',
+        ],
       },
       { step: 'Export DOCX and submit the midpoint paper by May 27th.' },
       // ── Executive brief (July 1st) ─────────────────────────────────
@@ -101,14 +163,20 @@ const GUIDES: Guide[] = [
         step: 'Work through your Executive Brief.',
         detail: [
           'Complete every BOB callout.',
-          'Run Academic Review from inside the editor.',
+          'Run Academic Review from the QA Audit page (canonical) — '
+            + 'the editor Writing Assistant still surfaces an inline '
+            + 'trigger as a convenience.',
           'Re-run until no Needs Work sections remain.',
+          'Clear every WARN finding on the QA Audit tab before the '
+            + 'final export — the gate applies to the brief too.',
         ],
       },
       {
         step: 'Save and export.',
         detail: [
           'Save a named version labelled "Final submission".',
+          'Verify the Audit Disclosure Appendix at the end of the '
+            + 'document carries the team\'s reviewed disclosures.',
           'Export to DOCX and submit by July 1st.',
         ],
       },
@@ -148,8 +216,36 @@ const GUIDES: Guide[] = [
           'Time yourself — aim for 20-25 minutes.',
         ],
       },
+      // May 28 2026 — Academic Review now runs BEFORE the final
+      // PPTX export. The previous order ran Academic Review AFTER
+      // export, which meant submitting a deck the team had not yet
+      // improved against the review verdict. The Academic Review
+      // panel is on the QA Audit page (PR #152); the deck editor's
+      // Writing Assistant also surfaces an inline trigger.
+      {
+        step: 'Run Academic Review against the final deck.',
+        detail: [
+          'Navigate to the QA Audit page — the Academic Review panel '
+            + 'is the canonical location.',
+          'Read every section verdict; revise the deck for any Needs '
+            + 'Work sections before exporting.',
+          'Re-run until the verdict is satisfactory — the review '
+            + 'verdict should inform the final deck, not follow it.',
+        ],
+      },
+      {
+        // May 28 2026 — QA Audit disclosure workflow before export.
+        // Same disclosure gate applies to the presentation deck;
+        // the team must clear every WARN before the gate clears.
+        step: 'QA Audit review: clear every audit warning.',
+        detail: [
+          'Navigate to the QA Audit tab.',
+          'Acknowledge or Mark as Intentional every WARN finding '
+            + 'with a disclosure note of at least 20 characters.',
+          'All findings must show green before the report gate clears.',
+        ],
+      },
       { step: 'Export PPTX for the July 1st submission.' },
-      { step: 'Run Academic Review against the final deck.' },
       {
         step: 'Assign speakers to slides.',
         detail: [
@@ -179,10 +275,17 @@ const GUIDES: Guide[] = [
         ],
       },
       {
-        step: 'Export scripts.',
+        // May 28 2026 — per-speaker DOCX export emphasised. Both
+        // exports are available from the script editor header.
+        step: 'Export per-speaker scripts.',
         detail: [
-          'Click [Export: {Name}] for each speaker’s individual script.',
-          'Click [Export Master Script] for the full team version.',
+          'Click [Export Master Script] for the full team version — '
+            + 'every section in one document with stable per-speaker '
+            + 'colour coding.',
+          'Click [Export: {Name}] for each speaker\'s individual '
+            + 'script — only their sections, with slide numbers and '
+            + 'titles retained for cross-reference.',
+          'Both exports are available from the script editor header.',
         ],
       },
     ],
@@ -280,6 +383,17 @@ function GuideCard({ guide }: { guide: Guide }) {
 
       {open && (
         <div className="mt-3 space-y-3">
+          {/* May 28 2026 — shared audit-gate callout. The report-
+              readiness gate intercepts every Generate click; this
+              callout surfaces the gate to the user BEFORE the first
+              attempt rather than after a 422. Rendered on both
+              guides. */}
+          <div data-testid="submission-guide-audit-gate-callout"
+            className="rounded border border-danger/40 bg-danger/10
+                       px-3 py-2 text-xs text-red-100/90">
+            <strong className="text-red-100">Audit gate.</strong>{' '}
+            {AUDIT_GATE_NOTE}
+          </div>
           <div className="rounded border border-warning/40 bg-warning/10
                           px-3 py-2 text-xs text-amber-100/90">
             {TRACKING_NOTE}

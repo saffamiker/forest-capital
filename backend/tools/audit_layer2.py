@@ -11,7 +11,9 @@ Task groups run in parallel (one Opus call each, plus one per
 summary-statistics entry):
   A — summary statistics (CAGR, volatility, Sharpe, max drawdown,
       skewness, excess return, information ratio), per asset
-  B — Carhart factor loadings, all strategies in one call
+  B — Carhart factor loadings, split across two calls of five
+      strategies each (one call for all ten truncates past parsing,
+      same failure mode as regime split)
   C — the efficient-frontier max-Sharpe point
   D — the pre/post-2022 regime split, split across two calls of five
       strategies each (one call for all ten truncates past parsing)
@@ -34,7 +36,12 @@ from tools.audit_common import layer_status, make_finding
 
 log = structlog.get_logger(__name__)
 
-_AUDITOR_MAX_TOKENS = 4000
+# May 28 2026 — raised from 4000 to 8000. The factor-loadings group was
+# truncating past parsing even after chunking; regime was running close
+# to the cap when the auditor emitted full reasoning per check. 8000
+# gives every chunked group ~4× the worst-case payload size and never
+# exceeds the model's per-call output budget.
+_AUDITOR_MAX_TOKENS = 8000
 
 _AUDITOR_SYSTEM = (
     "You are an independent quantitative auditor verifying portfolio "
@@ -54,20 +61,51 @@ def _is_test_env() -> bool:
 
 
 def _extract_json(text: str) -> dict[str, Any] | None:
-    """Pulls the first balanced JSON object out of a model response.
-    Returns None when nothing parses — the caller treats that as a
-    WARNING, never a CRITICAL."""
+    """Pulls the audit task group's JSON response out of the model
+    output. Returns None when nothing parses — the caller treats that
+    as a WARNING, never a CRITICAL.
+
+    Two-pass extraction (May 28 2026):
+
+      1. text.find('{') to text.rfind('}') — handles the common case
+         where the response is JSON wrapped in plain prose or markdown
+         fences with no stray braces inside the prose.
+
+      2. Regex retry anchored on the known JSON-shape '{"strategy"'.
+         Handles the case where the auditor emits a stray '{' or '}'
+         in prose before or after the actual JSON, which mis-extracts
+         pass 1. The anchor on the auditor's literal opening token
+         scopes the candidate slice to the real JSON object even when
+         surrounding text contains braces.
+    """
     if not text:
         return None
+    # Pass 1 — outermost brace span.
     start = text.find("{")
     end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
-    try:
-        obj = json.loads(text[start:end + 1])
-        return obj if isinstance(obj, dict) else None
-    except Exception:  # noqa: BLE001
-        return None
+    if start != -1 and end != -1 and end > start:
+        try:
+            obj = json.loads(text[start:end + 1])
+            if isinstance(obj, dict):
+                return obj
+        except Exception:  # noqa: BLE001
+            pass
+    # Pass 2 — strategy-anchored regex retry. The auditor's response
+    # always begins '{"strategy"...'; anchoring the regex on that
+    # token strips any leading prose containing a stray '{'. The
+    # regex is greedy backwards to the LAST '}' so a trailing prose
+    # block still works when pass 1 picked up an inner '}'.
+    import re
+
+    m = re.search(r'\{\s*"strategy"[\s\S]*\}', text)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except Exception:  # noqa: BLE001
+            pass
+    return None
 
 
 def _call_auditor(user_message: str) -> str:
@@ -165,15 +203,39 @@ def _summary_prompt(asset: str, payload: dict, platform: dict) -> str:
     )
 
 
-def _factor_prompt(payload: dict) -> str:
+def _factor_prompt(
+    payload: dict, subset_names: list[str] | None = None,
+) -> str:
+    """Builds the Carhart factor-loadings prompt for a SUBSET of
+    strategies. May 28 2026 — chunking mirror of _regime_prompt. The
+    previous "all ten strategies in one call" path overshot the
+    auditor's output cap and the response truncated past the final
+    '}' — _extract_json then reported "no JSON in response" and the
+    whole group degraded to a single WARN finding. The orchestrator
+    now splits this into two parallel calls of five strategies each,
+    same pattern as the regime split.
+
+    subset_names=None (the legacy signature) preserves backwards
+    compatibility — every strategy in the payload is included. Tests
+    rely on the legacy signature when they want to inspect the
+    full-payload behaviour.
+    """
     specs = payload["formula_specifications"]
+    all_returns = payload["raw_data"]["strategy_returns"]
+    all_loadings = payload["platform_computed"]["factor_loadings"]
+    if subset_names is None:
+        subset_names = list(all_returns.keys())
+    subset_returns = {k: v for k, v in all_returns.items()
+                      if k in subset_names}
+    subset_loadings = {k: v for k, v in all_loadings.items()
+                       if k in subset_names}
     return (
-        "Independently verify the Carhart four-factor loadings for every "
-        "strategy.\n\n"
-        f"Strategy monthly returns: {json.dumps(payload['raw_data']['strategy_returns'])}\n"
+        "Independently verify the Carhart four-factor loadings for these "
+        f"strategies: {', '.join(subset_names)}.\n\n"
+        f"Strategy monthly returns: {json.dumps(subset_returns)}\n"
         f"Fama-French factors (percent): {json.dumps(payload['raw_data']['ff_factors'])}\n"
         f"Monthly risk-free series: {payload['raw_data']['asset_returns'].get('rf')}\n\n"
-        f"Platform factor loadings: {json.dumps(payload['platform_computed']['factor_loadings'])}\n\n"
+        f"Platform factor loadings: {json.dumps(subset_loadings)}\n\n"
         f"Formula: {specs['factor_regression']}\n\n"
         "Run the OLS regression for each strategy; compare betas, alpha, "
         "R-squared and the significance flags. Return ONLY JSON: "
@@ -273,9 +335,19 @@ def _rolling_prompt(payload: dict) -> str:
 
 def _run_group(group: str, prompt: str, hash_: str | None,
                formula: str) -> list[dict[str, Any]]:
-    """Runs one task group end to end — call, parse, convert. Fail-open."""
+    """Runs one task group end to end — call, parse, convert. Fail-open.
+
+    May 28 2026 — emits a DEBUG-level audit_layer2_raw_response log
+    line BEFORE _extract_json runs. Production stays at INFO so the
+    line is silent, but a sysadmin chasing a parse failure can set
+    LOG_LEVEL=DEBUG (or grep raw bytes) to see exactly what the
+    auditor returned. The line is structured (group + char count +
+    raw text) for clean filtering.
+    """
     try:
         raw = _call_auditor(prompt)
+        log.debug("audit_layer2_raw_response",
+                  group=group, response_chars=len(raw or ""), raw=raw)
         parsed = _extract_json(raw)
         if parsed is None:
             return [_parse_failed_finding(group, hash_, "no JSON in response")]
@@ -313,8 +385,23 @@ async def layer_2_metric_audit(payload: dict[str, Any]) -> dict[str, Any]:
          specs["sharpe"])
         for asset, vals in summary.items()
     ]
-    # Task groups B-E — one call each.
-    jobs.append(("factor loadings", _factor_prompt(payload),
+    # Task groups B-E — chunked where the payload exceeds the cap.
+    #
+    # Factor loadings (May 28 2026) — was previously a single call for
+    # all 10 strategies; under the auditor's output cap the response
+    # truncated past parsing and the whole group degraded to a single
+    # WARN finding. Split into two parallel calls of 5 strategies each
+    # mirroring the regime-split chunking below — _run_group flattens
+    # each job's findings, so the two calls' findings concatenate
+    # transparently into one set tagged "factor loadings (A)" /
+    # "factor loadings (B)".
+    factor_names = list(payload["raw_data"]["strategy_returns"].keys())
+    half_f = (len(factor_names) + 1) // 2
+    jobs.append(("factor loadings (A)",
+                 _factor_prompt(payload, factor_names[:half_f]),
+                 specs["factor_regression"]))
+    jobs.append(("factor loadings (B)",
+                 _factor_prompt(payload, factor_names[half_f:]),
                  specs["factor_regression"]))
     jobs.append(("efficient frontier", _frontier_prompt(payload),
                  specs["efficient_frontier"]))

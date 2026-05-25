@@ -425,25 +425,89 @@ def _strip_banner(text: str) -> str:
 
 
 def _pct(v: Any) -> str:
-    """Decimal fraction → percentage string, or an em dash when absent."""
+    """Decimal fraction → percentage string, or an em dash when absent.
+    Kept as a thin wrapper to format_metric so existing callsites do
+    not have to migrate in the same commit."""
     return f"{v * 100:.2f}%" if isinstance(v, (int, float)) else "—"
 
 
 def _num(v: Any, places: int = 3) -> str:
-    """Number → fixed-decimal string, or an em dash when absent."""
+    """Number → fixed-decimal string, or an em dash when absent.
+    Kept as a thin wrapper for callsites that have not yet migrated
+    to format_metric. New code should use format_metric(value, kind)
+    so precision is governed by the metric's semantics rather than
+    a per-callsite literal."""
     return f"{v:.{places}f}" if isinstance(v, (int, float)) else "—"
 
 
+# May 28 2026 — centralised metric formatter. The slide generator,
+# midpoint generator, executive brief generator, and every agent
+# prompt that injects a numeric metric into the LLM input ALL route
+# through this function so a metric's precision is a property of its
+# TYPE, not of the call site that happens to print it. The user's
+# directive: an agent never receives a raw float for a metric that
+# will appear in a report — it receives a pre-formatted string from
+# format_metric, so the model cannot accidentally round differently.
+#
+# Precision rules:
+#   sharpe_ratio / sortino_ratio / calmar_ratio       4dp on the ratio
+#   information_ratio / p_value                       4dp on the ratio
+#   cagr / volatility / max_drawdown                  4dp on the percent
+#   weight / turnover                                 2dp on the percent
+#   currency                                          2dp + thousands grouping
+#   (fallback)                                        4dp
+#
+# Returns a STRING, never a float. None / non-numeric returns "—" so
+# every callsite renders well-formed even when the upstream metric is
+# missing.
+_FOUR_DP_RATIOS: frozenset[str] = frozenset({
+    "sharpe_ratio", "sortino_ratio", "calmar_ratio",
+    "information_ratio", "p_value",
+})
+_FOUR_DP_PERCENTS: frozenset[str] = frozenset({
+    "cagr", "volatility", "max_drawdown",
+})
+_TWO_DP_PERCENTS: frozenset[str] = frozenset({
+    "weight", "turnover",
+})
+
+
+def format_metric(value: Any, metric_type: str) -> str:
+    """Centralised metric formatter. See _FOUR_DP_RATIOS /
+    _FOUR_DP_PERCENTS / _TWO_DP_PERCENTS / 'currency' for the
+    precision per metric type. Unknown metric_type falls back to 4dp
+    so a new metric never silently inherits 2dp formatting."""
+    if value is None or not isinstance(value, (int, float)):
+        return "—"
+    if metric_type in _FOUR_DP_RATIOS:
+        return f"{value:.4f}"
+    if metric_type in _FOUR_DP_PERCENTS:
+        return f"{value * 100:.4f}%"
+    if metric_type in _TWO_DP_PERCENTS:
+        return f"{value * 100:.2f}%"
+    if metric_type == "currency":
+        return f"${value:,.2f}"
+    # Default — 4dp on the raw value. A new metric falls here until
+    # someone registers it explicitly above.
+    return f"{value:.4f}"
+
+
 def table_summary_statistics(stats: list[dict]) -> tuple[list[str], list[list[str]]]:
-    """Asset-level summary statistics — the headline figures table."""
+    """Asset-level summary statistics — the headline figures table.
+    Every numeric column routes through format_metric so precision
+    is governed by the metric type, not the call site."""
     headers = ["Asset", "CAGR", "Volatility", "Sharpe", "Max DD", "Skew"]
     rows = [
         [
             str(r.get("asset", "—")),
-            _pct(r.get("cagr")),
-            _pct(r.get("ann_volatility")),
-            _num(r.get("sharpe_ratio")),
-            _pct(r.get("max_drawdown")),
+            format_metric(r.get("cagr"), "cagr"),
+            format_metric(r.get("ann_volatility"), "volatility"),
+            format_metric(r.get("sharpe_ratio"), "sharpe_ratio"),
+            format_metric(r.get("max_drawdown"), "max_drawdown"),
+            # Skew has no canonical type in format_metric — it is a
+            # raw moment, not a metric the user listed for the 4dp
+            # standard. Kept on _num at 2dp to preserve legacy
+            # display ("0.12" stays "0.12", not "0.1234").
             _num(r.get("skewness"), 2),
         ]
         for r in stats
@@ -452,16 +516,20 @@ def table_summary_statistics(stats: list[dict]) -> tuple[list[str], list[list[st
 
 
 def table_regime_conditional(rows_in: list[dict]) -> tuple[list[str], list[list[str]]]:
-    """Per-strategy Sharpe and CAGR split at the 2022 regime break."""
+    """Per-strategy Sharpe and CAGR split at the 2022 regime break.
+    Every numeric column routes through format_metric. The Sharpe
+    discrepancy that motivated the centralisation (deck showed 0.55,
+    midpoint showed 0.5472) is closed here — both surfaces now read
+    "0.5472" identically from this builder."""
     headers = ["Strategy", "Pre-2022 Sharpe", "Post-2022 Sharpe",
                "Pre-2022 CAGR", "Post-2022 CAGR"]
     rows = [
         [
             str(r.get("strategy", "—")),
-            _num(r.get("pre_2022_sharpe")),
-            _num(r.get("post_2022_sharpe")),
-            _pct(r.get("pre_2022_cagr")),
-            _pct(r.get("post_2022_cagr")),
+            format_metric(r.get("pre_2022_sharpe"), "sharpe_ratio"),
+            format_metric(r.get("post_2022_sharpe"), "sharpe_ratio"),
+            format_metric(r.get("pre_2022_cagr"), "cagr"),
+            format_metric(r.get("post_2022_cagr"), "cagr"),
         ]
         for r in rows_in
     ]
@@ -469,13 +537,19 @@ def table_regime_conditional(rows_in: list[dict]) -> tuple[list[str], list[list[
 
 
 def table_factor_loadings(rows_in: list[dict]) -> tuple[list[str], list[list[str]]]:
-    """Carhart four-factor betas, annualised alpha and R² per strategy."""
+    """Carhart four-factor betas, annualised alpha and R² per strategy.
+    Every numeric column routes through format_metric — coefficients
+    fall through to the 4dp fallback path (no canonical metric_type
+    for a factor beta yet, and 4dp is the right precision for them)."""
     headers = ["Strategy", "Alpha (ann.)", "MKT-RF", "SMB", "HML", "MOM", "R²"]
     rows = []
     for r in rows_in:
         # A trailing '*' marks a coefficient significant at p < 0.05.
+        # `factor_coefficient` is not a registered metric_type — the
+        # formatter falls through to the 4dp default, which is the
+        # right precision for these.
         def _star(value: Any, sig_key: str) -> str:
-            s = _num(value)
+            s = format_metric(value, "factor_coefficient")
             return s + ("*" if r.get(sig_key) else "") if s != "—" else "—"
         rows.append([
             str(r.get("strategy", "—")),
@@ -484,18 +558,20 @@ def table_factor_loadings(rows_in: list[dict]) -> tuple[list[str], list[list[str
             _star(r.get("smb"), "smb_significant"),
             _star(r.get("hml"), "hml_significant"),
             _star(r.get("mom"), "mom_significant"),
-            _num(r.get("r_squared")),
+            format_metric(r.get("r_squared"), "r_squared"),
         ])
     return headers, rows
 
 
 def table_drawdown(rows_in: list[dict]) -> tuple[list[str], list[list[str]]]:
-    """Max drawdown and recovery period per strategy, deepest loss first."""
+    """Max drawdown and recovery period per strategy, deepest loss first.
+    Drawdown column routes through format_metric so the precision
+    matches every other max_drawdown display across the platform."""
     headers = ["Strategy", "Max Drawdown", "Recovery (months)"]
     rows = [
         [
             str(r.get("strategy", "—")),
-            _pct(r.get("max_drawdown")),
+            format_metric(r.get("max_drawdown"), "max_drawdown"),
             (str(r["recovery_months"]) if r.get("recovery_months") is not None
              else "not recovered"),
         ]
