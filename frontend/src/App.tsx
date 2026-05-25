@@ -48,6 +48,7 @@ import { BrandProvider } from './context/BrandContext'
 import { UIProvider } from './context/UIContext'
 import { SessionProvider } from './context/SessionContext'
 import { trackLogout } from './lib/activityLogger'
+import { Analytics } from '@vercel/analytics/react'
 
 // ── Auth context ──────────────────────────────────────────────────────────────
 
@@ -346,6 +347,7 @@ export default function App() {
           </UIProvider>
         </BrandProvider>
       </SessionProvider>
+      <Analytics />
     </AuthProvider>
   )
 }
