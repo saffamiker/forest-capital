@@ -425,13 +425,71 @@ def _strip_banner(text: str) -> str:
 
 
 def _pct(v: Any) -> str:
-    """Decimal fraction → percentage string, or an em dash when absent."""
+    """Decimal fraction → percentage string, or an em dash when absent.
+    Kept as a thin wrapper to format_metric so existing callsites do
+    not have to migrate in the same commit."""
     return f"{v * 100:.2f}%" if isinstance(v, (int, float)) else "—"
 
 
 def _num(v: Any, places: int = 3) -> str:
-    """Number → fixed-decimal string, or an em dash when absent."""
+    """Number → fixed-decimal string, or an em dash when absent.
+    Kept as a thin wrapper for callsites that have not yet migrated
+    to format_metric. New code should use format_metric(value, kind)
+    so precision is governed by the metric's semantics rather than
+    a per-callsite literal."""
     return f"{v:.{places}f}" if isinstance(v, (int, float)) else "—"
+
+
+# May 28 2026 — centralised metric formatter. The slide generator,
+# midpoint generator, executive brief generator, and every agent
+# prompt that injects a numeric metric into the LLM input ALL route
+# through this function so a metric's precision is a property of its
+# TYPE, not of the call site that happens to print it. The user's
+# directive: an agent never receives a raw float for a metric that
+# will appear in a report — it receives a pre-formatted string from
+# format_metric, so the model cannot accidentally round differently.
+#
+# Precision rules:
+#   sharpe_ratio / sortino_ratio / calmar_ratio       4dp on the ratio
+#   information_ratio / p_value                       4dp on the ratio
+#   cagr / volatility / max_drawdown                  4dp on the percent
+#   weight / turnover                                 2dp on the percent
+#   currency                                          2dp + thousands grouping
+#   (fallback)                                        4dp
+#
+# Returns a STRING, never a float. None / non-numeric returns "—" so
+# every callsite renders well-formed even when the upstream metric is
+# missing.
+_FOUR_DP_RATIOS: frozenset[str] = frozenset({
+    "sharpe_ratio", "sortino_ratio", "calmar_ratio",
+    "information_ratio", "p_value",
+})
+_FOUR_DP_PERCENTS: frozenset[str] = frozenset({
+    "cagr", "volatility", "max_drawdown",
+})
+_TWO_DP_PERCENTS: frozenset[str] = frozenset({
+    "weight", "turnover",
+})
+
+
+def format_metric(value: Any, metric_type: str) -> str:
+    """Centralised metric formatter. See _FOUR_DP_RATIOS /
+    _FOUR_DP_PERCENTS / _TWO_DP_PERCENTS / 'currency' for the
+    precision per metric type. Unknown metric_type falls back to 4dp
+    so a new metric never silently inherits 2dp formatting."""
+    if value is None or not isinstance(value, (int, float)):
+        return "—"
+    if metric_type in _FOUR_DP_RATIOS:
+        return f"{value:.4f}"
+    if metric_type in _FOUR_DP_PERCENTS:
+        return f"{value * 100:.4f}%"
+    if metric_type in _TWO_DP_PERCENTS:
+        return f"{value * 100:.2f}%"
+    if metric_type == "currency":
+        return f"${value:,.2f}"
+    # Default — 4dp on the raw value. A new metric falls here until
+    # someone registers it explicitly above.
+    return f"{value:.4f}"
 
 
 def table_summary_statistics(stats: list[dict]) -> tuple[list[str], list[list[str]]]:
