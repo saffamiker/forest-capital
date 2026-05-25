@@ -196,19 +196,110 @@ async def auto_warm_analytics(
     return _STATE
 
 
+def _strategy_cache_is_healthy(cached: dict | None) -> bool:
+    """True when the strategy_results_cache row is usable input for
+    AN01 / AN04. Healthy = the row exists AND every strategy carries
+    a non-empty monthly_returns list. A partial-fallback row (e.g.
+    one real strategy, nine with empty monthly_returns) is NOT
+    healthy — AN01 / AN04 read the row and produce empty downstream
+    tables because the empty-series strategies get skipped.
+
+    Co-located here (not in tools/cache) so the warm's health rule
+    is visible alongside the warm itself; the rule may evolve
+    independently of the cache's read/write API.
+    """
+    if not cached:
+        return False
+    for r in cached.values():
+        mr = (r or {}).get("monthly_returns")
+        if not isinstance(mr, list) or not mr:
+            return False
+    return True
+
+
 async def _default_warm_fn() -> dict[str, bool]:
-    """Default warm implementation — calls refresh_all_analytics and
-    verifies the two key rows landed in analytics_metrics_cache.
+    """Default warm implementation — verifies strategy_results_cache
+    is usable, runs the backtester if not, then refreshes analytics
+    and confirms the two key rows landed in analytics_metrics_cache.
+
+    May 28 2026 — strategy_results_cache repopulation. The previous
+    implementation ran refresh_all_analytics against whatever was in
+    strategy_results_cache, even if the row was a partial-fallback
+    (one real strategy, others with empty monthly_returns). In that
+    state AN01 (factor_loadings) and AN04 (regime_conditional) read
+    the row, skipped every empty-series strategy, and produced
+    empty downstream tables. The warm now proactively reruns
+    run_all_strategies when the cache row is not healthy, so the
+    analytics refresh runs against fresh strategy data.
+
+    The backtester rerun is wrapped in its own try/except so a
+    transient pipeline failure (FRED outage, yfinance hiccup) does
+    not block the analytics refresh — refresh_all_analytics will
+    still run against whatever the cache currently holds.
 
     Returns a `landed` dict so the WarmState records WHICH rows
     succeeded — a partial success (academic landed but frontier
     didn't) is informative for debugging.
     """
-    from tools.cache import get_latest_strategy_hash
+    import asyncio
+
+    from tools.cache import (
+        get_latest_strategy_cache, get_latest_strategy_hash,
+        set_strategy_cache, _compute_data_hash,
+    )
     from tools.precomputed_analytics import (
         get_metric as get_precomputed,
         refresh_all_analytics,
     )
+
+    # ── Strategy-cache health check ───────────────────────────────────
+    latest = await get_latest_strategy_cache()
+    n_strategies = len(latest or {})
+    healthy = _strategy_cache_is_healthy(latest)
+    log.info("analytics_cache_warm_strategy_check",
+             n_strategies=n_strategies, healthy=healthy)
+
+    if not healthy:
+        # Rerun the backtester so the analytics refresh below reads
+        # fresh strategy results instead of a partial-fallback row.
+        try:
+            from tools.data_fetcher import get_full_history_async
+            from tools.backtester import run_all_strategies
+
+            history = await get_full_history_async()
+            monthly = history.get("equity_monthly")
+            n_rows = len(monthly) if monthly is not None else 0
+            last_date = (
+                str(monthly.index[-1].date())
+                if monthly is not None and len(monthly) > 0
+                else "unknown"
+            )
+            strategy_hash = _compute_data_hash(
+                n_rows, last_date, n_strategies=10)
+
+            # run_all_strategies is sync and CPU-bound — push to a
+            # worker thread so the event loop stays free for any
+            # concurrent request handling during the cold-boot warm.
+            results_dict = await asyncio.to_thread(
+                run_all_strategies, history)
+            await set_strategy_cache(
+                strategy_hash, results_dict, n_observations=n_rows)
+            log.info(
+                "analytics_cache_warm_backtester_complete",
+                strategy_hash=strategy_hash[:8],
+                n_strategies=len(results_dict),
+                n_observations=n_rows,
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "analytics_cache_warm_backtester_failed",
+                error=str(exc),
+            )
+            # Fall through — refresh_all_analytics still runs against
+            # whatever's in the cache, even if stale. AN01 / AN04
+            # may stay empty but the analytics layer is not blocked.
+
+    # ── Analytics refresh ─────────────────────────────────────────────
     latest_hash = await get_latest_strategy_hash()
     await refresh_all_analytics(latest_hash or "")
     sentinel = latest_hash or "BOOT-WARM"
