@@ -63,7 +63,13 @@ _INTERACTION_TYPES = {"council", "academic_review", "qa", "document_upload",
                       # midpoint submission against the FNA 670 rubric.
                       # Defense Prep generates anticipated panel Q&A
                       # against the team's OWN current draft.
-                      "peer_review", "defense_prep"}
+                      "peer_review", "defense_prep",
+                      # ── May 25 2026 — rubric review on a draft. ──
+                      # The Writing Assistant panel's "Review Against
+                      # Rubric" button — a fast Gemini single-call pass
+                      # against the FNA 670 midpoint rubric. Distinct
+                      # from academic_review (the full council pass).
+                      "rubric_review"}
 _SESSION_TYPES = {"analytical", "testing"}
 
 

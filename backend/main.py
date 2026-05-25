@@ -3221,6 +3221,255 @@ async def editor_chat(
     return {"response": reply}
 
 
+# ── Rubric Review (May 25 2026) ──────────────────────────────────────────────
+#
+# Sends the current midpoint paper draft to Gemini with the full FNA 670
+# midpoint rubric. Returns a structured verdict — per-section pass/fail
+# against the rubric criteria, specific optional edits with reasoning,
+# and an overall readiness verdict. Read-only: the endpoint never
+# modifies the draft — it surfaces suggestions inline in the Writing
+# Assistant panel for the user to apply (or ignore) manually.
+#
+# Distinct from the Academic Review council pass: that endpoint runs
+# every council peer + the arbiter and is expensive. This endpoint is
+# a single fast Gemini call against an explicit rubric prompt — useful
+# for the quick "where am I against the rubric" check the user wants
+# before committing to a full review.
+
+_MIDPOINT_RUBRIC_PROMPT = (
+    "You are reviewing a graduate-finance midpoint paper against the "
+    "FNA 670 rubric. The paper is 3 pages, double-spaced, 12-point font, "
+    "750-900 words TOTAL, organised into four sections:\n"
+    "\n"
+    "  1. DATA AND METHODOLOGY (1 page, 235-285 words)\n"
+    "     - Identifies data sources and study period\n"
+    "     - Names the portfolio constraints (long-only, fully invested, "
+    "no cash, quarterly rebalancing)\n"
+    "     - Distinguishes static vs dynamic strategies\n"
+    "     - Names the Carhart four-factor attribution model\n"
+    "     - APA style, past tense, third person\n"
+    "\n"
+    "  2. PRELIMINARY RESULTS AND DIAGNOSTICS (1 page, 235-285 words)\n"
+    "     - INTERPRETS the results (does not merely list numbers)\n"
+    "     - Discusses the 2022 equity-bond correlation break explicitly\n"
+    "     - References summary statistics and regime-conditional "
+    "performance with specific values\n"
+    "     - Connects findings back to the research question\n"
+    "\n"
+    "  3. ROLES AND DIVISION OF LABOR (0.5 page, 110-135 words)\n"
+    "     - States each team member's role\n"
+    "     - Attributes documented contributions (commits, sessions, "
+    "documents)\n"
+    "     - Factual, no invented contributions\n"
+    "\n"
+    "  4. NEXT STEPS AND OPEN QUESTIONS (0.5 page, 110-135 words)\n"
+    "     - Forward-looking, not retrospective\n"
+    "     - Names specific areas for further investigation\n"
+    "     - Reflects the team's analytical priorities\n"
+    "\n"
+    "Return a structured JSON response with EXACTLY this shape — no "
+    "additional fields, no preamble:\n"
+    "\n"
+    "{\n"
+    '  "sections": {\n'
+    '    "methodology":  {"verdict": "pass" | "fail",\n'
+    '                     "reasoning": "1-3 sentences naming which '
+    'criteria were met and which were not"},\n'
+    '    "results":      {"verdict": "pass" | "fail", "reasoning": "..."},\n'
+    '    "roles":        {"verdict": "pass" | "fail", "reasoning": "..."},\n'
+    '    "next_steps":   {"verdict": "pass" | "fail", "reasoning": "..."}\n'
+    "  },\n"
+    '  "edits": [\n'
+    '    {"section": "methodology|results|roles|next_steps",\n'
+    '     "suggestion": "specific change to consider",\n'
+    '     "reasoning": "why this would strengthen the section"}\n'
+    "  ],\n"
+    '  "overall": {\n'
+    '    "verdict": "ready" | "needs_work" | "not_ready",\n'
+    '    "reasoning": "2-4 sentences summarising readiness"\n'
+    "  }\n"
+    "}\n"
+    "\n"
+    "VERDICT semantics:\n"
+    "  - section 'pass' — the section meets the rubric criteria. Minor "
+    "wordsmithing is fine; the substance is there.\n"
+    "  - section 'fail' — a substantive rubric criterion is unmet "
+    "(missing required content, wrong tense, no interpretation in "
+    "results, etc.). Be honest, not generous.\n"
+    "  - overall 'ready' — all four sections pass and the paper reads "
+    "cleanly as a 3-page midpoint draft.\n"
+    "  - overall 'needs_work' — sections substantially correct but "
+    "specific edits would strengthen the submission.\n"
+    "  - overall 'not_ready' — one or more sections fail; the draft is "
+    "not yet at submission quality.\n"
+    "\n"
+    "EDITS — provide 3-6 specific optional suggestions ordered by "
+    "impact. Each must name a section, a concrete change, and the "
+    "rubric reason. These are SUGGESTIONS — the team will choose what "
+    "to apply.\n"
+    "\n"
+    "Respond ONLY with the JSON object. No markdown fences, no preamble."
+)
+
+
+def _parse_rubric_review(raw: str) -> dict[str, object] | None:
+    """Best-effort JSON parse on a Gemini response. Strips ``` fences
+    and any preamble before / after the {…} block. Returns None on
+    unparseable input — the endpoint then falls back to a friendly
+    error rather than a 500.
+    """
+    import json as _json
+    text = (raw or "").strip()
+    # Strip ```json fences if Gemini ignored the no-fence instruction.
+    if text.startswith("```"):
+        first_nl = text.find("\n")
+        if first_nl != -1:
+            text = text[first_nl + 1:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+    # Extract the outermost {…} block if there is any preamble.
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end <= start:
+        return None
+    try:
+        return _json.loads(text[start:end + 1])
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _rubric_review_unavailable_payload(reason: str) -> dict[str, object]:
+    """Used by the test env path AND the no-Gemini-key / parse-failure
+    fall-throughs. Returns a payload that renders cleanly in the UI
+    without claiming a pass/fail verdict the model didn't produce."""
+    return {
+        "sections": {
+            "methodology": {"verdict": "fail", "reasoning": reason},
+            "results":     {"verdict": "fail", "reasoning": reason},
+            "roles":       {"verdict": "fail", "reasoning": reason},
+            "next_steps":  {"verdict": "fail", "reasoning": reason},
+        },
+        "edits": [],
+        "overall": {"verdict": "not_ready", "reasoning": reason},
+        "unavailable": True,
+    }
+
+
+@app.post("/api/v1/documents/drafts/{draft_id}/rubric-review")
+@limiter.limit("10/hour")
+async def rubric_review(
+    draft_id: int, request: Request,
+    session: dict = Depends(require_team_member),
+):
+    """
+    Sends the current draft to Gemini with the midpoint paper rubric
+    and returns a structured per-section verdict + suggested edits.
+    Read-only — never modifies the draft. The Writing Assistant panel
+    surfaces the verdict inline so the user can decide which edits to
+    apply manually.
+
+    Scoped to midpoint_paper drafts — other document types (executive
+    brief, presentation deck/script) have their own rubrics not yet
+    encoded here.
+    """
+    import asyncio
+
+    from tools.editor_drafts import get_draft
+    draft = await get_draft(draft_id)
+    if draft is None or draft.get("owner_email") != session.get("email"):
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    if draft.get("document_type") != "midpoint_paper":
+        raise HTTPException(
+            status_code=422,
+            detail="Rubric review is only available for midpoint paper "
+                   "drafts.")
+
+    content_text = (draft.get("content_text") or "").strip()
+    if not content_text:
+        return _rubric_review_unavailable_payload(
+            "The draft is empty — write some content before requesting "
+            "a rubric review.")
+
+    if ENVIRONMENT == "test":
+        # Deterministic shape so the frontend test can pin the render
+        # without hitting Gemini. Mirrors the structured response a
+        # real run would produce.
+        return {
+            "sections": {
+                "methodology": {"verdict": "pass",
+                                "reasoning": "Methodology rubric criteria met."},
+                "results":     {"verdict": "fail",
+                                "reasoning": "Results lack explicit "
+                                             "interpretation."},
+                "roles":       {"verdict": "pass",
+                                "reasoning": "Roles attributed factually."},
+                "next_steps":  {"verdict": "pass",
+                                "reasoning": "Forward-looking and specific."},
+            },
+            "edits": [
+                {"section": "results",
+                 "suggestion": "Add one sentence interpreting the "
+                               "post-2022 Sharpe gap.",
+                 "reasoning": "Rubric requires interpretation, not "
+                              "listing."},
+            ],
+            "overall": {"verdict": "needs_work",
+                        "reasoning": "Three sections pass; results "
+                                     "needs interpretation."},
+        }
+
+    if not os.getenv("GOOGLE_API_KEY"):
+        return _rubric_review_unavailable_payload(
+            "Rubric review is configured to run on Gemini but the "
+            "GOOGLE_API_KEY env var is not set.")
+
+    user_message = (
+        "Review the following midpoint paper draft against the rubric. "
+        "The draft text is the four sections concatenated in order; the "
+        "[[BOB: …]] markers are placeholders that the user will resolve "
+        "before submission (treat them as 'work in progress' rather "
+        "than rubric failures, but note when a placeholder is the only "
+        "content for a required topic).\n\n"
+        f"---\n{content_text[:12000]}\n---\n\n"
+        "Respond with the JSON object specified in the instructions. "
+        "No preamble, no markdown fences."
+    )
+
+    from agents.usage import start_usage_capture
+    start_usage_capture()
+    try:
+        from agents.base import GEMINI_MODEL, call_gemini
+        raw = await asyncio.to_thread(
+            call_gemini, GEMINI_MODEL,
+            _MIDPOINT_RUBRIC_PROMPT, user_message,
+            trigger="rubric_review",
+        )
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("rubric_review_failed",
+                  ref=ref, error=str(exc), draft_id=draft_id)
+        return _rubric_review_unavailable_payload(
+            f"Gemini call failed (ref: {ref}). Retry in a moment.")
+
+    parsed = _parse_rubric_review(raw or "")
+    if parsed is None or "sections" not in parsed or "overall" not in parsed:
+        log.warning("rubric_review_parse_failed",
+                    draft_id=draft_id, raw_head=(raw or "")[:200])
+        return _rubric_review_unavailable_payload(
+            "The rubric review came back in an unexpected format. "
+            "Retry — Gemini occasionally drops the JSON shape.")
+
+    _log_interaction_bg(
+        request, session, "rubric_review",
+        question_text=f"Rubric review for draft {draft_id}",
+        response_summary=(parsed.get("overall") or {}).get(
+            "reasoning", "")[:500],
+        metadata={"draft_id": draft_id,
+                  "overall_verdict": (parsed.get("overall") or {}).get("verdict")})
+    return parsed
+
+
 @app.post("/api/v1/documents/script/generate")
 @limiter.limit("6/minute")
 async def generate_presentation_script(
