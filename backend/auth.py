@@ -279,6 +279,82 @@ def build_magic_link_email(
     return MAGIC_LINK_SUBJECT, html
 
 
+def _sendgrid_error_detail(exc: BaseException) -> dict[str, object]:
+    """Extracts the full SendGrid error detail from an exception so the
+    caller can spread it into a structlog event. SendGrid raises
+    python_http_client.exceptions.HTTPError (and subclasses like
+    UnauthorizedError, ForbiddenError) — each carries:
+
+      .status_code  — HTTP status integer
+      .body         — the raw response body bytes; SendGrid's API
+                      returns JSON with an `errors` array describing
+                      WHY the call failed (e.g. invalid API key,
+                      unverified sender, suspended account). The body
+                      is the single most useful field for triage and
+                      was previously lost — str(exc) renders only
+                      'HTTP Error 401: Unauthorized' or similar.
+      .headers      — response headers (dict-like); usually safe to
+                      log but capped at a small size to prevent floods.
+
+    Defensive on every field: an exception that is NOT an HTTPError
+    (e.g. a connection error, a TypeError raised before the HTTP
+    round-trip) returns only error_type + error_message — never raises.
+
+    Body and headers are truncated to a sensible cap (2000 chars body,
+    50 header entries) so a misbehaving SendGrid response cannot flood
+    the log stream.
+    """
+    detail: dict[str, object] = {
+        "error_type": type(exc).__name__,
+        "error_message": str(exc),
+    }
+
+    def _safe_attr(name):
+        """getattr through a try/except — a malformed exception with
+        a @property that raises on access (or any other descriptor
+        side-effect) must NOT poison the log helper."""
+        try:
+            return getattr(exc, name, None)
+        except Exception:  # noqa: BLE001
+            return None
+
+    # SendGrid's HTTPError carries .status_code / .body / .headers.
+    status = _safe_attr("status_code")
+    if status is not None:
+        detail["sendgrid_status"] = status
+    raw_body = _safe_attr("body")
+    if raw_body is not None:
+        # body may be bytes or str depending on SDK version. Decode
+        # bytes leniently so we never raise on an undecodable byte.
+        if isinstance(raw_body, bytes):
+            body_text = raw_body.decode("utf-8", errors="replace")
+        else:
+            body_text = str(raw_body)
+        if len(body_text) > 2000:
+            body_text = body_text[:2000] + "…(truncated)"
+        detail["sendgrid_body"] = body_text
+        # Best-effort parse — SendGrid returns JSON with an `errors`
+        # array. Surface the structured field separately so a log
+        # filter can pivot on it without parsing the body string.
+        try:
+            import json as _json
+            parsed = _json.loads(body_text)
+            if isinstance(parsed, dict) and "errors" in parsed:
+                detail["sendgrid_errors"] = parsed["errors"]
+        except Exception:  # noqa: BLE001
+            pass  # body wasn't JSON or wasn't the expected shape
+    raw_headers = _safe_attr("headers")
+    if raw_headers is not None:
+        try:
+            # Cap at 50 entries — the canonical SendGrid response
+            # carries ~10-15 headers, so 50 is generous but bounded.
+            items = list(raw_headers.items())[:50]
+            detail["sendgrid_headers"] = {str(k): str(v) for k, v in items}
+        except Exception:  # noqa: BLE001
+            pass
+    return detail
+
+
 async def send_magic_link(email: str, token: str) -> None:
     magic_url = f"{FRONTEND_URL}/auth/verify?token={token}"
 
@@ -308,7 +384,14 @@ async def send_magic_link(email: str, token: str) -> None:
         resp = sg.send(message)
         log.info("magic_link_sent", email=email, status=resp.status_code)
     except Exception as exc:
-        log.error("magic_link_send_failed", email=email, error=str(exc))
+        # Surface the full SendGrid response — body / status / errors
+        # array — so a 401 / 403 from SendGrid can be triaged from the
+        # Render log alone (invalid API key, unverified sender,
+        # suspended account each return a different errors[] body).
+        log.error("magic_link_send_failed",
+                  email=email,
+                  error=str(exc),
+                  **_sendgrid_error_detail(exc))
         raise HTTPException(status_code=500, detail="Failed to send magic link email.")
 
 
@@ -460,7 +543,12 @@ async def send_welcome_email(
     except Exception as exc:  # noqa: BLE001
         # Fail-open — the user is already created; a delivery failure is
         # logged for the operator but never raised into the response.
-        log.error("welcome_email_send_failed", email=email, error=str(exc))
+        # Same SendGrid-detail enrichment as the magic-link send path
+        # so a 401 / 403 here is debuggable from the Render log alone.
+        log.error("welcome_email_send_failed",
+                  email=email,
+                  error=str(exc),
+                  **_sendgrid_error_detail(exc))
         return False
 
 
