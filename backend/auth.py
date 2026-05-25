@@ -2,7 +2,13 @@
 Magic-link authentication with JWT session tokens.
 
 Dev mode  → magic link URL printed to terminal (no email sent).
-Prod mode → magic link sent via SendGrid.
+Prod mode → magic link sent via Resend.
+
+May 25 2026 — swapped from SendGrid to Resend. Same email templates
+(build_magic_link_email / build_welcome_email are unchanged), but the
+underlying SDK and the API key env var change:
+  SENDGRID_API_KEY  → RESEND_API_KEY
+  SENDGRID_FROM_EMAIL → RESEND_FROM_EMAIL
 """
 from __future__ import annotations
 import os
@@ -279,30 +285,37 @@ def build_magic_link_email(
     return MAGIC_LINK_SUBJECT, html
 
 
-def _sendgrid_error_detail(exc: BaseException) -> dict[str, object]:
-    """Extracts the full SendGrid error detail from an exception so the
-    caller can spread it into a structlog event. SendGrid raises
-    python_http_client.exceptions.HTTPError (and subclasses like
-    UnauthorizedError, ForbiddenError) — each carries:
+def _resend_error_detail(exc: BaseException) -> dict[str, object]:
+    """Extracts the full Resend error detail from an exception so the
+    caller can spread it into a structlog event. Resend raises
+    resend.exceptions.ResendError (and subclasses like
+    InvalidApiKeyError, RateLimitError, ApplicationError,
+    ValidationError) — each carries structured fields directly on the
+    exception rather than a raw response body. Verified against the
+    installed resend>=2.0.0 SDK; signature:
 
-      .status_code  — HTTP status integer
-      .body         — the raw response body bytes; SendGrid's API
-                      returns JSON with an `errors` array describing
-                      WHY the call failed (e.g. invalid API key,
-                      unverified sender, suspended account). The body
-                      is the single most useful field for triage and
-                      was previously lost — str(exc) renders only
-                      'HTTP Error 401: Unauthorized' or similar.
-      .headers      — response headers (dict-like); usually safe to
-                      log but capped at a small size to prevent floods.
+      .code               — Resend error code. Stored as int for HTTP-
+                            level errors (e.g. 401 for an invalid API
+                            key) and str for domain-level codes (e.g.
+                            'validation_error'). The PRIMARY field for
+                            triage — different 401 root causes get
+                            distinct values here.
+      .error_type         — Resend's own taxonomy string (e.g.
+                            'invalid_api_key', 'rate_limit_exceeded',
+                            'missing_required_field'). Distinct from
+                            the Python exception class name surfaced
+                            at the top of the dict.
+      .message            — Human-readable description.
+      .suggested_action   — One-line hint at how to fix the underlying
+                            issue. Set on the base class; subclasses
+                            may leave it empty.
+      .headers            — Response headers dict (or None) — useful
+                            for X-Trace-Id-style correlation back to
+                            Resend's dashboard.
 
-    Defensive on every field: an exception that is NOT an HTTPError
-    (e.g. a connection error, a TypeError raised before the HTTP
-    round-trip) returns only error_type + error_message — never raises.
-
-    Body and headers are truncated to a sensible cap (2000 chars body,
-    50 header entries) so a misbehaving SendGrid response cannot flood
-    the log stream.
+    Defensive on every field: an exception that is NOT a ResendError
+    (e.g. a connection error, a TypeError raised before the HTTP round
+    -trip) returns only error_type + error_message — never raises.
     """
     detail: dict[str, object] = {
         "error_type": type(exc).__name__,
@@ -318,41 +331,39 @@ def _sendgrid_error_detail(exc: BaseException) -> dict[str, object]:
         except Exception:  # noqa: BLE001
             return None
 
-    # SendGrid's HTTPError carries .status_code / .body / .headers.
-    status = _safe_attr("status_code")
-    if status is not None:
-        detail["sendgrid_status"] = status
-    raw_body = _safe_attr("body")
-    if raw_body is not None:
-        # body may be bytes or str depending on SDK version. Decode
-        # bytes leniently so we never raise on an undecodable byte.
-        if isinstance(raw_body, bytes):
-            body_text = raw_body.decode("utf-8", errors="replace")
-        else:
-            body_text = str(raw_body)
-        if len(body_text) > 2000:
-            body_text = body_text[:2000] + "…(truncated)"
-        detail["sendgrid_body"] = body_text
-        # Best-effort parse — SendGrid returns JSON with an `errors`
-        # array. Surface the structured field separately so a log
-        # filter can pivot on it without parsing the body string.
-        try:
-            import json as _json
-            parsed = _json.loads(body_text)
-            if isinstance(parsed, dict) and "errors" in parsed:
-                detail["sendgrid_errors"] = parsed["errors"]
-        except Exception:  # noqa: BLE001
-            pass  # body wasn't JSON or wasn't the expected shape
+    # Resend's structured fields. Each is optional — surface whichever
+    # the exception carries.
+    for field_name in ("code", "message", "suggested_action", "error_type"):
+        value = _safe_attr(field_name)
+        if value is None:
+            continue
+        # Skip empty-string defaults (subclasses leave suggested_action
+        # as "") to keep the log line clean.
+        if isinstance(value, str) and not value:
+            continue
+        # Truncate strings at a sensible cap so a misbehaving error
+        # message can't flood the log stream.
+        if isinstance(value, str) and len(value) > 2000:
+            value = value[:2000] + "…(truncated)"
+        detail[f"resend_{field_name}"] = value
+
     raw_headers = _safe_attr("headers")
     if raw_headers is not None:
         try:
-            # Cap at 50 entries — the canonical SendGrid response
-            # carries ~10-15 headers, so 50 is generous but bounded.
+            # Cap at 50 entries — a misbehaving response can't flood.
             items = list(raw_headers.items())[:50]
-            detail["sendgrid_headers"] = {str(k): str(v) for k, v in items}
+            detail["resend_headers"] = {str(k): str(v) for k, v in items}
         except Exception:  # noqa: BLE001
             pass
     return detail
+
+
+# Backwards-compatibility alias — older tests import _sendgrid_error_detail
+# and the SendGrid-to-Resend swap landed in a single commit. Removing
+# the symbol would break any in-flight tests that import it explicitly;
+# the alias lets the swap roll out cleanly without a bridging commit.
+# The new name is canonical from this point forward.
+_sendgrid_error_detail = _resend_error_detail
 
 
 async def send_magic_link(email: str, token: str) -> None:
@@ -368,30 +379,38 @@ async def send_magic_link(email: str, token: str) -> None:
         log.info("magic_link_dev_printed", email=email, environment=ENVIRONMENT)
         return
 
-    # Production: send via SendGrid
+    # Production: send via Resend
     try:
-        import sendgrid
-        from sendgrid.helpers.mail import Mail
+        import resend
 
         subject, html = build_magic_link_email(magic_url)
-        sg = sendgrid.SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
-        message = Mail(
-            from_email=os.getenv("SENDGRID_FROM_EMAIL", "noreply@queens.edu"),
-            to_emails=email,
-            subject=subject,
-            html_content=html,
-        )
-        resp = sg.send(message)
-        log.info("magic_link_sent", email=email, status=resp.status_code)
+        # Resend reads its API key off the module-level attribute on
+        # every call — setting it inside the try makes the read happen
+        # under the exception handler so a missing env var surfaces
+        # cleanly in magic_link_send_failed rather than as an uncaught
+        # AttributeError at import time.
+        resend.api_key = os.environ.get("RESEND_API_KEY")
+        params: dict = {
+            "from": os.environ.get("RESEND_FROM_EMAIL", "noreply@analyticsdesk.app"),
+            "to": [email],
+            "subject": subject,
+            "html": html,
+        }
+        result = resend.Emails.send(params)
+        # On success Resend returns a dict carrying the message id —
+        # log it so a downstream deliverability question can be tied
+        # back to this send attempt.
+        log.info("magic_link_sent", email=email,
+                 message_id=(result or {}).get("id"))
     except Exception as exc:
-        # Surface the full SendGrid response — body / status / errors
-        # array — so a 401 / 403 from SendGrid can be triaged from the
-        # Render log alone (invalid API key, unverified sender,
-        # suspended account each return a different errors[] body).
+        # Surface the full Resend response — code / message /
+        # suggested_action / status — so a 401 / 403 from Resend can be
+        # triaged from the Render log alone (invalid API key, restricted
+        # key scope, unverified sender each return a distinct `code`).
         log.error("magic_link_send_failed",
                   email=email,
                   error=str(exc),
-                  **_sendgrid_error_detail(exc))
+                  **_resend_error_detail(exc))
         raise HTTPException(status_code=500, detail="Failed to send magic link email.")
 
 
@@ -527,28 +546,32 @@ async def send_welcome_email(
     try:
         import os
 
-        import sendgrid
-        from sendgrid.helpers.mail import Mail
+        import resend
 
-        sg = sendgrid.SendGridAPIClient(api_key=os.getenv("SENDGRID_API_KEY"))
-        message = Mail(
-            from_email=os.getenv("SENDGRID_FROM_EMAIL", "noreply@queens.edu"),
-            to_emails=email,
-            subject=subject,
-            plain_text_content=body,
-        )
-        resp = sg.send(message)
-        log.info("welcome_email_sent", email=email, status=resp.status_code)
+        resend.api_key = os.environ.get("RESEND_API_KEY")
+        params: dict = {
+            "from": os.environ.get("RESEND_FROM_EMAIL", "noreply@analyticsdesk.app"),
+            "to": [email],
+            "subject": subject,
+            # Welcome email is plain text — Resend accepts `text` as the
+            # plain-text body field (the parallel to SendGrid's
+            # plain_text_content). Either text or html is required;
+            # both can be set when an HTML alternative ships too.
+            "text": body,
+        }
+        result = resend.Emails.send(params)
+        log.info("welcome_email_sent", email=email,
+                 message_id=(result or {}).get("id"))
         return True
     except Exception as exc:  # noqa: BLE001
-        # Fail-open — the user is already created; a delivery failure is
-        # logged for the operator but never raised into the response.
-        # Same SendGrid-detail enrichment as the magic-link send path
-        # so a 401 / 403 here is debuggable from the Render log alone.
+        # Fail-open — the user is already created; a delivery failure
+        # is logged for the operator but never raised into the response.
+        # Same Resend-detail enrichment as the magic-link send path so
+        # a 401 / 403 here is debuggable from the Render log alone.
         log.error("welcome_email_send_failed",
                   email=email,
                   error=str(exc),
-                  **_sendgrid_error_detail(exc))
+                  **_resend_error_detail(exc))
         return False
 
 

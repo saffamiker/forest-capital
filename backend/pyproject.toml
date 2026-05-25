@@ -27,7 +27,7 @@ module = [
   "cvxpy.*",
   "arch.*",
   "structlog.*",
-  "sendgrid.*",
+  "resend.*",
   "slowapi.*",
   "itsdangerous.*",
   "reportlab.*",
