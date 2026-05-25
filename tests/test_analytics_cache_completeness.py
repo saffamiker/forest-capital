@@ -181,6 +181,108 @@ class TestRefreshSensitivity:
         assert captured["payload"]["available"] is True
         assert "strategies" in captured["payload"]
 
+    def test_pandas_series_history_does_not_raise(self, monkeypatch):
+        """Regression — May 28 2026. Production history contains
+        pandas Series objects, not lists. The previous gate read
+        `if not history.get("equity_monthly")` which raises
+        ValueError("The truth value of a Series is ambiguous")
+        on a populated Series. The fix gates on `is None or .empty`
+        so a real Series passes through. This test pins that path."""
+        import asyncio
+        import pandas as pd
+        from tools import precomputed_analytics as pa
+
+        captured: dict = {}
+
+        async def _fake_set_metric(data_hash, metric_kind, payload,
+                                   *, source=None):
+            captured["wrote"] = True
+
+        def _fake_history():
+            # The shape data_fetcher.get_full_history actually returns
+            # — a dict of pd.Series, not lists. THIS is the input that
+            # used to blow up.
+            idx = pd.date_range("2024-01-31", periods=24, freq="ME")
+            return {
+                "equity_monthly": pd.Series(
+                    [0.01] * 24, index=idx, name="equity_return"),
+                "ig_monthly": pd.Series([0.002] * 24, index=idx),
+                "hy_monthly": pd.Series([0.005] * 24, index=idx),
+            }
+
+        def _fake_compute(history):
+            return {"strategies": [{"strategy": "STUB", "points": []}]}
+
+        monkeypatch.setattr(pa, "set_metric", _fake_set_metric)
+        monkeypatch.setattr("tools.data_fetcher.get_full_history",
+                            _fake_history)
+        monkeypatch.setattr("tools.sensitivity.compute_sensitivity",
+                            _fake_compute)
+        # Must not raise. Before the fix this raised
+        # ValueError("The truth value of a Series is ambiguous...")
+        # which the outer except caught + logged as
+        # precomputed_sensitivity_failed on every startup.
+        asyncio.run(pa.refresh_sensitivity("test_hash"))
+        assert captured.get("wrote") is True
+
+    def test_empty_pandas_series_history_skips_silently(self, monkeypatch):
+        """An empty pd.Series (a population edge case the gate should
+        treat the same as a missing series) must still silent-skip
+        rather than fall through to compute_sensitivity."""
+        import asyncio
+        import pandas as pd
+        from tools import precomputed_analytics as pa
+
+        wrote = {"called": False}
+
+        async def _fake_set_metric(*args, **kwargs):
+            wrote["called"] = True
+
+        def _fake_history():
+            return {"equity_monthly": pd.Series([], dtype=float)}
+
+        compute_called = {"called": False}
+
+        def _fake_compute(history):
+            compute_called["called"] = True
+            return {}
+
+        monkeypatch.setattr(pa, "set_metric", _fake_set_metric)
+        monkeypatch.setattr("tools.data_fetcher.get_full_history",
+                            _fake_history)
+        monkeypatch.setattr("tools.sensitivity.compute_sensitivity",
+                            _fake_compute)
+
+        asyncio.run(pa.refresh_sensitivity("test_hash"))
+        # No compute, no write — silent skip.
+        assert compute_called["called"] is False
+        assert wrote["called"] is False
+
+    def test_missing_equity_monthly_key_skips_silently(self, monkeypatch):
+        """A history dict that's populated but lacks the
+        equity_monthly key (a partial pipeline result) should also
+        skip cleanly — equity_monthly is None, the `is None` arm
+        of the gate catches it."""
+        import asyncio
+        from tools import precomputed_analytics as pa
+
+        wrote = {"called": False}
+
+        async def _fake_set_metric(*args, **kwargs):
+            wrote["called"] = True
+
+        def _fake_history():
+            # Truthy dict, but no equity_monthly key — history.get
+            # returns None.
+            return {"some_other_key": "value"}
+
+        monkeypatch.setattr(pa, "set_metric", _fake_set_metric)
+        monkeypatch.setattr("tools.data_fetcher.get_full_history",
+                            _fake_history)
+
+        asyncio.run(pa.refresh_sensitivity("test_hash"))
+        assert wrote["called"] is False
+
 
 # ── F4 — refresh_risk_free_rate_config ────────────────────────────────────────
 

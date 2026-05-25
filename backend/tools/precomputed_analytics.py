@@ -639,7 +639,19 @@ async def refresh_sensitivity(data_hash: str) -> None:
         from tools.sensitivity import compute_sensitivity
 
         history = get_full_history()
-        if not history or not history.get("equity_monthly"):
+        if not history:
+            log.info("precomputed_sensitivity_no_history")
+            return
+        # `not series` raises ValueError on a populated pd.Series
+        # ("The truth value of a Series is ambiguous"). The old gate
+        # `not history.get("equity_monthly")` had this exact shape and
+        # blew up on every cold startup, blanking the sensitivity
+        # precompute until the next data ingestion's downstream refresh
+        # masked it. len() is unambiguous on pd.Series AND on the list
+        # shape some tests stub the history with, so it handles every
+        # caller cleanly. (May 28 2026.)
+        equity_monthly = history.get("equity_monthly")
+        if equity_monthly is None or len(equity_monthly) == 0:
             log.info("precomputed_sensitivity_no_history")
             return
         result = compute_sensitivity(history)
