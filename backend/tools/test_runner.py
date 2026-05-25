@@ -475,14 +475,15 @@ async def get_team_progress() -> dict[str, Any]:
             rows = await session.execute(text("""
                 SELECT DISTINCT ON (user_email, script_id, step_id)
                   user_email, script_id, step_id, result, attested_at,
-                  resolved_at, resolution_type
+                  resolved_at, resolution_type, failure_description
                 FROM test_results
                 WHERE lower(user_email) = ANY(:emails)
                 ORDER BY user_email, script_id, step_id,
                          attested_at DESC NULLS LAST
             """), {"emails": emails})
             for (user_email, script_id, step_id, result,
-                 attested_at, resolved_at, resolution_type) in rows.fetchall():
+                 attested_at, resolved_at, resolution_type,
+                 failure_description) in rows.fetchall():
                 em = (user_email or "").lower()
                 if em not in members:
                     continue
@@ -490,6 +491,14 @@ async def get_team_progress() -> dict[str, Any]:
                 bucket = scripts.setdefault(script_id, {
                     "passed": [], "failed": [], "skipped": [],
                     "retest": [], "last_attested_at": None,
+                    # May 25 2026 — per-step timestamps + descriptions
+                    # so the per-team-member UAT view on Settings can
+                    # render the timestamp alongside each step status.
+                    # The existing passed/failed/skipped/retest lists
+                    # carry classification; this map carries the WHEN
+                    # for each step that has any attestation row at all.
+                    "step_attested_at": {},
+                    "step_failure_description": {},
                 })
                 # Classification mirrors compute_issue_status:
                 #   resolved + not wont_fix + result was fail → Re-test
@@ -506,6 +515,14 @@ async def get_team_progress() -> dict[str, Any]:
                 else:
                     bucket["skipped"].append(step_id)
                 iso = _iso(attested_at)
+                bucket["step_attested_at"][step_id] = iso
+                # Surface the failure description so the read-only
+                # per-team-member view can show WHY a step failed
+                # without making another network call. Only stored
+                # for failed steps to keep the payload small.
+                if result == "fail" and failure_description:
+                    bucket["step_failure_description"][step_id] = (
+                        failure_description)
                 bucket["last_attested_at"] = _max_iso(
                     bucket["last_attested_at"], iso)
                 members[em]["last_activity_at"] = _max_iso(
