@@ -6908,6 +6908,17 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
                 log.warning("qa_preflight_error", error=str(_exc))
                 analytics_cache = None
 
+            # IN01 submission-window attestation (May 25 2026). Async
+            # query so the sync run_audit can read the verdict without
+            # spawning a nested event loop. A query failure surfaces
+            # as a FAIL verdict in the audit, not an endpoint 500.
+            try:
+                from tools.audit_engine import compute_in01_attestation
+                audit_attestation = await compute_in01_attestation()
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("qa_in01_attestation_error", error=str(_exc))
+                audit_attestation = None
+
             # Seed the per-request usage bucket before the QA
             # agent's call_claude invocations so their token usage
             # is captured.
@@ -6917,6 +6928,7 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
                 strategy_results,
                 run_full_checklist=True,
                 analytics_cache=analytics_cache,
+                audit_attestation=audit_attestation,
             )
 
             # Persist the full audit to qa_results_cache so the next
@@ -6997,10 +7009,18 @@ async def qa_export(request: Request, session: dict = Depends(require_auth)):
             from tools.data_fetcher import get_full_history_async
             from tools.backtester import run_all_strategies
             from agents.qa_agent import QAAgent
+            from tools.audit_engine import compute_in01_attestation
             history = await get_full_history_async()
             strategy_results = await asyncio.to_thread(run_all_strategies, history)
+            # IN01 attestation — same async-then-pass pattern as the
+            # /api/qa/audit endpoint. The PDF export's IN01 row reflects
+            # the submission-window verdict.
+            attestation = await compute_in01_attestation()
             audit = await asyncio.to_thread(
-                lambda: QAAgent().run_audit(strategy_results, run_full_checklist=True)
+                lambda: QAAgent().run_audit(
+                    strategy_results, run_full_checklist=True,
+                    audit_attestation=attestation,
+                )
             )
         except Exception as exc:
             log.error("qa_export_error", error=str(exc))

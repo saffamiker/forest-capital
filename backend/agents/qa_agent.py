@@ -500,9 +500,13 @@ _CHECKLIST_ITEMS: list[dict[str, str]] = [
                     "equity series; shorter dynamic series begin at their lookback-adjusted "
                     "start dates", "key": "cumulative_returns"},
     # PLATFORM INTEGRATION (3) — the platform's own verification subsystems
-    {"check_id": "IN01", "category": "INTEGRATION", "check": "Statistical audit clean",
-     "description": "A statistical audit run exists with no outstanding FAIL findings; the "
-                    "Layer 1 raw-data and Layer 3 consistency checks passed", "key": "audit_integration"},
+    {"check_id": "IN01", "category": "INTEGRATION",
+     "check": "Submission-window audit attestation",
+     "description": "A project team member (ruurdsm / thaob / murdockm @queens.edu) "
+                    "triggered a manual or pre-submission full QA audit on or after "
+                    "2026-05-25. Confirms the team ran the audit themselves within "
+                    "the submission window, not the system on cache-warm fire",
+     "key": "audit_integration"},
     {"check_id": "IN02", "category": "INTEGRATION", "check": "Academic Review complete",
      "description": "The latest Academic Review carries all five rated sections, and Data "
                     "Sufficiency and Methodology is not rated Needs Work", "key": "academic_review"},
@@ -713,6 +717,7 @@ class QAAgent:
         strategy_results: dict[str, Any],
         run_full_checklist: bool = True,
         analytics_cache: dict[str, Any] | None = None,
+        audit_attestation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Runs the full methodology audit.
@@ -728,6 +733,13 @@ class QAAgent:
                                 transition matrix consistency). Optional —
                                 when None, the AN01/AN04 checks fall back
                                 to per-strategy inspection.
+            audit_attestation:  Pre-computed IN01 attestation payload from
+                                tools.audit_engine.compute_in01_attestation —
+                                {status, evidence, ...}. The caller computes
+                                this async-side before invoking run_audit
+                                (which is sync). When None, the IN01 check
+                                falls back to "could not verify" FAIL with
+                                an explicit "no attestation provided" note.
 
         Returns a structured audit report with pass/warn/fail per item.
         """
@@ -736,6 +748,7 @@ class QAAgent:
         # items where we can compute ground truth directly.
         deterministic_results = self._run_deterministic_checks(
             strategy_results, analytics_cache=analytics_cache,
+            audit_attestation=audit_attestation,
         )
 
         if not run_full_checklist:
@@ -835,6 +848,7 @@ class QAAgent:
         self,
         strategy_results: dict[str, Any],
         analytics_cache: dict[str, Any] | None = None,
+        audit_attestation: dict[str, Any] | None = None,
     ) -> dict[str, dict[str, str]]:
         """
         Runs checklist items that can be verified directly from the results dict.
@@ -1179,26 +1193,44 @@ class QAAgent:
             ),
         }
 
-        # IN01: statistical audit clean. The statistical-audit
-        # subsystem is a separate three-layer Opus recomputation; for
-        # the methodology audit we cannot reach into it directly
-        # without a database round-trip. We mark this PASS when the
-        # is_significant flags are internally consistent (a strategy
-        # with is_significant=True has all five Tier 1 gate p-values
-        # populated, matching all_gates_required above). This is the
-        # SAME invariant Layer 1 of the statistical audit checks, so
-        # methodology + statistical agree.
-        results["audit_integration"] = {
-            "status": results["all_gates_required"]["status"],
-            "evidence": (
-                "Methodology checks confirm the statistical audit's "
-                "Tier 1 gate invariant: every significant strategy "
-                "has all five p-value fields populated. The "
-                "independent statistical audit (Layer 1/2/3) is "
-                "rerun via the QA tab and produces zero FAIL "
-                "findings when this invariant holds."
-            ),
-        }
+        # IN01: submission-window audit attestation (May 25 2026,
+        # repurposed from the prior staleness-check tautology). PASS
+        # only when a project team member triggered a manual or
+        # pre_submission full QA audit on or after the submission
+        # window opens (IN01_SUBMISSION_WINDOW_OPENS = 2026-05-25).
+        # FAIL otherwise — gives the executive brief and presentation
+        # a meaningful attestation that the team ran the audit
+        # themselves within the submission window, not the system on
+        # cache-warm fire.
+        #
+        # The async query lives in tools.audit_engine.compute_in01_
+        # attestation; the caller (main.py) runs it before invoking
+        # run_audit and passes the result in via audit_attestation.
+        # A None payload (legacy callers / tests) reads as FAIL with
+        # an explicit "no attestation provided" note so the test gap
+        # surfaces in the report rather than silently passing.
+        if audit_attestation and isinstance(audit_attestation, dict):
+            results["audit_integration"] = {
+                "status": audit_attestation.get("status", "FAIL"),
+                "evidence": audit_attestation.get(
+                    "evidence",
+                    "Attestation payload was provided but carried no "
+                    "evidence — treating as FAIL until the caller "
+                    "computes a verdict."),
+            }
+        else:
+            results["audit_integration"] = {
+                "status": "FAIL",
+                "evidence": (
+                    "No IN01 submission-window attestation was "
+                    "supplied to the audit run. A project team member "
+                    "must trigger a manual full QA audit (via the QA "
+                    "tab) on or after the submission window opens "
+                    "(2026-05-25); the audit endpoint computes the "
+                    "attestation before invoking the methodology "
+                    "checklist."
+                ),
+            }
 
         # IN02: Academic Review complete (five rated sections). The
         # academic_review surface is opt-in (Bob clicks the panel
