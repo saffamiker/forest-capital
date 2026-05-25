@@ -15,7 +15,7 @@
  */
 import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
-import { X, Check, Loader2, Download, AlertTriangle } from 'lucide-react'
+import { Check, Loader2, Download, AlertTriangle } from 'lucide-react'
 import { ModalCloseButton } from './ModalControls'
 import {
   CumulativeReturnChart, RollingCorrelationChart, RollingExcessReturnChart,

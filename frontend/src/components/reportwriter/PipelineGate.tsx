@@ -32,7 +32,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   CheckCircle, AlertCircle, Loader2, Play, Circle,
-  ExternalLink, Search, X, ShieldCheck, Lock,
+  ExternalLink, Search, ShieldCheck, Lock,
 } from 'lucide-react'
 import { Step1ExportButtons } from './Step1ExportButtons'
 import { ModalCloseButton, KeyboardHint } from '../ModalControls'

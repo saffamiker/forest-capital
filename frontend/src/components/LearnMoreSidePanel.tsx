@@ -16,7 +16,7 @@
  * populated.
  */
 import { useEffect, useState } from 'react'
-import { X, BookOpen, ExternalLink } from 'lucide-react'
+import { BookOpen, ExternalLink } from 'lucide-react'
 import { ModalCloseButton } from './ModalControls'
 import type { GlossaryTerm } from '../types/glossary'
 import { loadReferences, findReferenceFor, type Reference } from '../lib/references'

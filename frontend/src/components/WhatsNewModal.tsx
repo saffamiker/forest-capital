@@ -18,7 +18,7 @@
  */
 import { useEffect, useState } from 'react'
 import axios from 'axios'
-import { Sparkles, X, GraduationCap } from 'lucide-react'
+import { Sparkles, GraduationCap } from 'lucide-react'
 import { ModalCloseButton } from './ModalControls'
 import type { ChangelogEntry, UnseenChangelogResponse } from '../types/changelog'
 import { startTour } from '../lib/tourBus'

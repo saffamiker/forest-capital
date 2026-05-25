@@ -13,7 +13,6 @@
  * dedupes; one fetch covers the modal and the in-row tag both).
  */
 import { useEffect } from 'react'
-import { X } from 'lucide-react'
 import { ModalCloseButton } from './ModalControls'
 import { PortfolioProfilePanel } from './PortfolioProfilePanel'
 

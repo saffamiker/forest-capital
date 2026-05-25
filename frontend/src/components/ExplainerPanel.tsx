@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { X, Loader2, Users, Send, MessageCircle } from 'lucide-react'
+import { Loader2, Users, Send, MessageCircle } from 'lucide-react'
 import Markdown from './Markdown'
 import { ModalCloseButton } from './ModalControls'
 import {

@@ -20,7 +20,7 @@
  */
 import { useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
-import { X, Copy, Loader2, AlertTriangle } from 'lucide-react'
+import { Copy, Loader2, AlertTriangle } from 'lucide-react'
 import { ModalCloseButton } from './ModalControls'
 
 import { useGlossaryStore } from '../stores/glossaryStore'
