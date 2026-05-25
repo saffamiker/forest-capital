@@ -247,6 +247,131 @@ interface IntentionalOverride {
   audit_run_hash: string | null
 }
 
+// Workstream E (May 28 2026) — Edit disclosure control. When a check
+// has been Marked Intentional, the team needs to refine the note
+// without losing the existing entry. The control reopens the same
+// disclosure modal pre-populated with the override's current note;
+// the mark-intentional endpoint upserts (ON CONFLICT DO UPDATE) so a
+// second POST updates the row in place — no new route required. The
+// modal mirrors the Mark-as-Intentional pattern in ActionButtons (20-
+// character minimum, char counter, Confirm-disabled-below-threshold)
+// so editing and creating feel identical to the user.
+function EditDisclosureControl({
+  checkId, currentNote, onSaved,
+}: {
+  checkId: string
+  currentNote: string
+  onSaved?: () => void
+}) {
+  const MIN_NOTE_LEN = 20
+  const [open, setOpen] = useState(false)
+  const [note, setNote] = useState(currentNote)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  // Pre-populate every time the modal is reopened — if the parent
+  // refreshes the override (e.g. after another tab saved), the user
+  // sees the latest note when reopening rather than a stale draft.
+  const openModal = () => {
+    setNote(currentNote)
+    setError(null)
+    setOpen(true)
+  }
+
+  const submit = async () => {
+    if (note.trim().length < MIN_NOTE_LEN) return
+    setSaving(true)
+    setError(null)
+    try {
+      await axios.post(
+        `/api/v1/qa/findings/${checkId}/mark-intentional`,
+        { note: note.trim() })
+      setOpen(false)
+      onSaved?.()
+    } catch {
+      setError('Could not save — please retry.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        onClick={openModal}
+        data-testid={`qa-edit-disclosure-${checkId}`}
+        className="text-2xs text-electric hover:underline mt-1.5">
+        Edit disclosure
+      </button>
+      {open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center
+                     bg-black/60 p-4"
+          onClick={() => { if (!saving) setOpen(false) }}
+          data-testid={`qa-edit-disclosure-modal-${checkId}`}>
+          <div className="card p-5 max-w-md w-full space-y-3"
+               onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-sm font-semibold text-white">
+              Edit Disclosure
+            </h3>
+            <p className="text-xs text-muted leading-relaxed">
+              Update the team's recorded rationale for marking this
+              finding intentional. The new note replaces the existing
+              entry in the audit trail.
+            </p>
+            <textarea
+              data-testid={`qa-edit-disclosure-note-${checkId}`}
+              value={note}
+              onChange={(e) => setNote(e.target.value)}
+              disabled={saving}
+              rows={5}
+              minLength={MIN_NOTE_LEN}
+              placeholder="Describe the intentional design decision and why it is acceptable..."
+              className="w-full rounded border border-border bg-navy-900
+                         text-xs text-slate-200 placeholder-muted p-2.5
+                         focus:outline-none focus:border-electric
+                         disabled:opacity-60 disabled:cursor-not-allowed
+                         leading-relaxed resize-none"
+            />
+            <div className="flex items-center justify-between text-2xs">
+              <span className="text-muted">
+                {note.trim().length} / {MIN_NOTE_LEN} characters minimum
+              </span>
+            </div>
+            {error && (
+              <p className="text-2xs text-danger" role="status">{error}</p>
+            )}
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                disabled={saving}
+                data-testid={`qa-edit-disclosure-cancel-${checkId}`}
+                className="px-3 py-1.5 rounded text-xs border border-border
+                           text-muted hover:text-white transition-colors
+                           disabled:opacity-50 disabled:cursor-not-allowed">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void submit()}
+                disabled={saving || note.trim().length < MIN_NOTE_LEN}
+                data-testid={`qa-edit-disclosure-confirm-${checkId}`}
+                className="px-3 py-1.5 rounded text-xs font-medium
+                           bg-success/10 border border-success/40 text-success
+                           hover:bg-success/20 transition-colors
+                           disabled:opacity-50 disabled:cursor-not-allowed">
+                {saving ? 'Saving…' : 'Save changes'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 function ActionCard({
   check, onReRun, isReRunning, override, onIntentionalMarked,
 }: {
@@ -317,6 +442,16 @@ function ActionCard({
                 Note: {override.note}
               </p>
             )}
+            {/* Edit disclosure — reopens the same modal pattern as
+                Mark as Intentional, pre-populated with the existing
+                note. The mark-intentional endpoint upserts on
+                check_id so a second POST UPDATEs in place. */}
+            <EditDisclosureControl
+              checkId={check.check_id}
+              currentNote={override.note ?? ''}
+              {...(onIntentionalMarked
+                ? { onSaved: onIntentionalMarked } : {})}
+            />
           </div>
         </div>
       </div>

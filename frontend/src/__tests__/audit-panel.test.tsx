@@ -82,3 +82,68 @@ describe('AuditPanel — WARN acknowledge workflow', () => {
     expect(screen.queryByRole('button', { name: 'Acknowledge' })).toBeNull()
   })
 })
+
+
+describe('AuditPanel — Edit Disclosure (Workstream E)', () => {
+  // After a WARN is acknowledged the team needs to refine the note
+  // without losing the existing entry. The inline editor is reopened
+  // pre-populated with the current note; saving POSTs the same
+  // /resolve endpoint, which UPDATEs the row in place — no new
+  // route is required because the endpoint already upserts.
+
+  it('an acknowledged finding exposes an Edit disclosure button', () => {
+    render(<FindingRow f={warnFinding({
+      resolved: true, resolution_note: 'Initial disclosure entry.',
+    })} />)
+    fireEvent.click(screen.getByText(/Turnover direction/))
+    const edit = screen.getByTestId('audit-edit-disclosure-5')
+    expect(edit).toBeInTheDocument()
+    expect(edit.textContent).toMatch(/Edit disclosure/i)
+  })
+
+  it('clicking Edit disclosure pre-populates the editor with the existing note',
+    () => {
+      const existing = 'PRESEEDTOKEN — original recorded disclosure.'
+      render(<FindingRow f={warnFinding({
+        resolved: true, resolution_note: existing,
+      })} />)
+      fireEvent.click(screen.getByText(/Turnover direction/))
+      fireEvent.click(screen.getByTestId('audit-edit-disclosure-5'))
+      // The inline editor opens with the textarea pre-populated.
+      const textarea = screen.getByPlaceholderText(
+        /Describe how you have addressed/,
+      ) as HTMLTextAreaElement
+      expect(textarea.value).toBe(existing)
+    })
+
+  it('Save after Edit POSTs the upsert endpoint with the refined note',
+    async () => {
+      render(<FindingRow f={warnFinding({
+        resolved: true, resolution_note: 'Original note.',
+      })} />)
+      fireEvent.click(screen.getByText(/Turnover direction/))
+      fireEvent.click(screen.getByTestId('audit-edit-disclosure-5'))
+      const refined = 'EDITEDTOKEN — refined after team review.'
+      fireEvent.change(
+        screen.getByPlaceholderText(/Describe how you have addressed/),
+        { target: { value: refined } })
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Save acknowledgement' }))
+      await waitFor(() => expect(mockedAxios.post).toHaveBeenCalledWith(
+        '/api/v1/audit/findings/5/resolve',
+        { resolution_note: refined }))
+    })
+
+  it('Cancel from Edit dismisses without firing a POST', () => {
+    render(<FindingRow f={warnFinding({
+      resolved: true, resolution_note: 'Existing note.',
+    })} />)
+    fireEvent.click(screen.getByText(/Turnover direction/))
+    fireEvent.click(screen.getByTestId('audit-edit-disclosure-5'))
+    // Cancel returns to the read-only acknowledged view.
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(mockedAxios.post).not.toHaveBeenCalled()
+    // The Edit disclosure button is visible again.
+    expect(screen.getByTestId('audit-edit-disclosure-5')).toBeInTheDocument()
+  })
+})

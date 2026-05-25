@@ -281,10 +281,18 @@ export function FindingRow({ f }: { f: AuditFinding }) {
                   {note && (
                     <div className="text-slate-300 leading-relaxed">{note}</div>
                   )}
+                  {/* Edit disclosure — reopens the inline editor
+                      pre-populated with the existing note. The resolve
+                      endpoint upserts (the UPDATE replaces note +
+                      resolved_by + resolved_at) so a second POST
+                      refreshes the row in place. Label kept aligned
+                      with the methodology surface's "Edit disclosure"
+                      button so both surfaces feel consistent. */}
                   <button type="button"
                     onClick={() => { setDraft(note); setEditing(true) }}
+                    data-testid={`audit-edit-disclosure-${f.id}`}
                     className="text-electric hover:underline">
-                    Edit
+                    Edit disclosure
                   </button>
                 </div>
               )}

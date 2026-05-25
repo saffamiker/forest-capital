@@ -436,3 +436,188 @@ describe('QAAuditPanel — Action Required card variants', () => {
     ).toBeNull()
   })
 })
+
+
+describe('QAAuditPanel — Edit Disclosure (Workstream E)', () => {
+  // After a check has been Marked Intentional the override badge
+  // shows the team's recorded note. The Edit disclosure control
+  // reopens the same modal pattern pre-populated with the existing
+  // note so the team can refine the disclosure without losing it.
+  // The mark-intentional endpoint upserts (ON CONFLICT DO UPDATE) so
+  // a second POST UPDATEs the row in place — no new route needed.
+
+  const seedOverride = (note: string) => {
+    mockedAxios.get = vi.fn().mockResolvedValue({
+      data: {
+        overrides: {
+          [METHODOLOGY_CHECK.check_id]: {
+            marked_at: '2026-05-22T12:00:00Z',
+            marked_by: 'ruurdsm@queens.edu',
+            note,
+            audit_run_hash: null,
+          },
+        },
+      },
+    })
+    useQAStore.setState({
+      result: buildAudit([METHODOLOGY_CHECK]),
+      loading: false,
+    })
+  }
+
+  it('renders an Edit disclosure button on the override badge', async () => {
+    seedOverride('Original disclosure note about the methodology.')
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+    const edit = await screen.findByTestId(
+      `qa-edit-disclosure-${METHODOLOGY_CHECK.check_id}`)
+    expect(edit).toBeInTheDocument()
+    expect(edit.textContent).toMatch(/Edit disclosure/i)
+  })
+
+  it('opens a modal pre-populated with the existing note', async () => {
+    const existingNote =
+      'PRESEEDTOKEN — the cost capture is intentional methodology.'
+    seedOverride(existingNote)
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+    fireEvent.click(await screen.findByTestId(
+      `qa-edit-disclosure-${METHODOLOGY_CHECK.check_id}`))
+
+    // The modal opens with the textarea pre-populated.
+    const textarea = await screen.findByTestId(
+      `qa-edit-disclosure-note-${METHODOLOGY_CHECK.check_id}`,
+    ) as HTMLTextAreaElement
+    expect(textarea.value).toBe(existingNote)
+    // The modal is mounted.
+    expect(screen.getByTestId(
+      `qa-edit-disclosure-modal-${METHODOLOGY_CHECK.check_id}`,
+    )).toBeInTheDocument()
+    // No POST fires just from opening — the user must Confirm.
+    expect(mockedAxios.post).not.toHaveBeenCalled()
+  })
+
+  it('enforces the 20-char minimum on Save', async () => {
+    seedOverride('The original 20+ character note for the override.')
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+    fireEvent.click(await screen.findByTestId(
+      `qa-edit-disclosure-${METHODOLOGY_CHECK.check_id}`))
+
+    const textarea = await screen.findByTestId(
+      `qa-edit-disclosure-note-${METHODOLOGY_CHECK.check_id}`)
+    const confirm = screen.getByTestId(
+      `qa-edit-disclosure-confirm-${METHODOLOGY_CHECK.check_id}`)
+    // Drop below 20 chars — Save disables.
+    fireEvent.change(textarea, { target: { value: 'too short' } })
+    expect(confirm).toBeDisabled()
+    // Back above the threshold — Save enables.
+    fireEvent.change(textarea, {
+      target: { value: 'Long enough refined disclosure note here.' },
+    })
+    expect(confirm).not.toBeDisabled()
+  })
+
+  it('Save posts to the upsert endpoint with the edited note', async () => {
+    seedOverride('Original note that needs refinement.')
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+    fireEvent.click(await screen.findByTestId(
+      `qa-edit-disclosure-${METHODOLOGY_CHECK.check_id}`))
+
+    const textarea = await screen.findByTestId(
+      `qa-edit-disclosure-note-${METHODOLOGY_CHECK.check_id}`)
+    const editedNote =
+      'EDITEDTOKEN — refined disclosure after team review session.'
+    fireEvent.change(textarea, { target: { value: editedNote } })
+
+    fireEvent.click(screen.getByTestId(
+      `qa-edit-disclosure-confirm-${METHODOLOGY_CHECK.check_id}`))
+
+    await waitFor(() => {
+      // The upsert endpoint is the same Mark-as-Intentional route —
+      // no new endpoint is required for editing because the backend
+      // already does ON CONFLICT (check_id) DO UPDATE.
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        `/api/v1/qa/findings/${METHODOLOGY_CHECK.check_id}/mark-intentional`,
+        expect.objectContaining({ note: editedNote }),
+      )
+    })
+  })
+
+  it('Cancel dismisses the modal without firing a POST', async () => {
+    seedOverride('Existing note for cancellation test.')
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+    fireEvent.click(await screen.findByTestId(
+      `qa-edit-disclosure-${METHODOLOGY_CHECK.check_id}`))
+
+    expect(screen.getByTestId(
+      `qa-edit-disclosure-modal-${METHODOLOGY_CHECK.check_id}`,
+    )).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId(
+      `qa-edit-disclosure-cancel-${METHODOLOGY_CHECK.check_id}`))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId(
+        `qa-edit-disclosure-modal-${METHODOLOGY_CHECK.check_id}`,
+      )).not.toBeInTheDocument()
+    })
+    // No POST was made — Cancel is a pure dismiss.
+    expect(mockedAxios.post).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the overrides list after a successful Save', async () => {
+    seedOverride('Original note before editing.')
+    // First fetch returns the original note. After Save, the panel
+    // re-queries /overrides — the second fetch returns the edited
+    // note so the badge surfaces the new value immediately.
+    const fetched: string[] = []
+    mockedAxios.get = vi.fn().mockImplementation(() => {
+      fetched.push('fetch')
+      return Promise.resolve({
+        data: {
+          overrides: {
+            [METHODOLOGY_CHECK.check_id]: {
+              marked_at: '2026-05-22T12:00:00Z',
+              marked_by: 'ruurdsm@queens.edu',
+              note: fetched.length === 1
+                ? 'Original note before editing.'
+                : 'REFRESHEDNOTETOKEN — confirmed refresh after edit.',
+              audit_run_hash: null,
+            },
+          },
+        },
+      })
+    })
+    useQAStore.setState({
+      result: buildAudit([METHODOLOGY_CHECK]),
+      loading: false,
+    })
+    render(<QAAuditPanel />)
+    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+
+    // Initial fetch is the override mount.
+    await waitFor(() => expect(fetched.length).toBe(1))
+
+    fireEvent.click(await screen.findByTestId(
+      `qa-edit-disclosure-${METHODOLOGY_CHECK.check_id}`))
+    const textarea = await screen.findByTestId(
+      `qa-edit-disclosure-note-${METHODOLOGY_CHECK.check_id}`)
+    fireEvent.change(textarea, {
+      target: { value: 'Edited note exceeding twenty characters.' },
+    })
+    fireEvent.click(screen.getByTestId(
+      `qa-edit-disclosure-confirm-${METHODOLOGY_CHECK.check_id}`))
+
+    // After Save the panel re-queries overrides — the second fetch
+    // surfaces the refreshed note in the badge.
+    await waitFor(() => expect(fetched.length).toBeGreaterThanOrEqual(2))
+    await waitFor(() => {
+      expect(
+        screen.getByText(/REFRESHEDNOTETOKEN/),
+      ).toBeInTheDocument()
+    })
+  })
+})
