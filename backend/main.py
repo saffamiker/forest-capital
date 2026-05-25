@@ -6407,7 +6407,19 @@ async def explain_terms(
         try:
             from agents.explainer_agent import ExplainerAgent
             explainer = ExplainerAgent()
-            return explainer.explain_terms(body.get("council_output", {}))
+            # UAT 2026-05-27 P0 — Render logs showed every concurrent
+            # dashboard request queuing behind explainer_grok_completed
+            # events and draining together (39s + 24s clusters). Root
+            # cause: explain_terms calls _call_llm → _call_grok which
+            # uses httpx.Client (SYNC) inside an async endpoint. The
+            # blocking POST stalls the event loop for 24-39s and
+            # starves every other coroutine. Same fix pattern as
+            # PR #122 (get_full_history_async) and #126 (optimizer
+            # solver) — push the sync call into a worker thread.
+            import asyncio
+            return await asyncio.to_thread(
+                explainer.explain_terms,
+                body.get("council_output", {}))
         except Exception as exc:
             log.error("explain_terms_error", error=str(exc))
     return {}
@@ -6425,7 +6437,14 @@ async def explain_parameter(
         try:
             from agents.explainer_agent import ExplainerAgent
             explainer = ExplainerAgent()
-            return explainer.explain_parameter(
+            # UAT 2026-05-27 P0 — sync Grok HTTP blocks the event
+            # loop. Wrap in asyncio.to_thread; see explain_terms
+            # above for the full diagnosis. asyncio.to_thread
+            # supports kwargs, so the keyword call shape is
+            # preserved verbatim.
+            import asyncio
+            return await asyncio.to_thread(
+                explainer.explain_parameter,
                 parameter=body.get("parameter", ""),
                 value=body.get("value"),
                 current_results=body.get("current_results", {}),
@@ -6447,7 +6466,11 @@ async def explain_chart(
         try:
             from agents.explainer_agent import ExplainerAgent
             explainer = ExplainerAgent()
-            return explainer.explain_chart(
+            # UAT 2026-05-27 P0 — sync Grok HTTP blocks the event
+            # loop. See explain_terms above for the full diagnosis.
+            import asyncio
+            return await asyncio.to_thread(
+                explainer.explain_chart,
                 chart_id=body.get("chart_id", ""),
                 chart_type=body.get("chart_type", ""),
                 chart_data=body.get("chart_data"),
@@ -6470,7 +6493,12 @@ async def explain_qa(
         try:
             from agents.explainer_agent import ExplainerAgent
             explainer = ExplainerAgent()
-            return explainer.explain_qa(body.get("audit_results", []))
+            # UAT 2026-05-27 P0 — sync Grok HTTP blocks the event
+            # loop. See explain_terms above for the full diagnosis.
+            import asyncio
+            return await asyncio.to_thread(
+                explainer.explain_qa,
+                body.get("audit_results", []))
         except Exception as exc:
             log.error("explain_qa_error", error=str(exc))
     return {}
