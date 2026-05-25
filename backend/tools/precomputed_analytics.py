@@ -352,6 +352,15 @@ def _log_table_rows_diagnostic(
     field, so a `level >= warning` alert filter catches incomplete rows
     without flooding on healthy refreshes.
     """
+    # Rebind locally so structlog.testing.capture_logs() in tests can
+    # intercept (May 25 2026 CI fix). The module-level `log` is a
+    # cached BoundLoggerLazyProxy that binds to whatever processors
+    # were configured at first-use time — under structlog's default
+    # cache_logger_on_first_use=True (set in logger.configure_logging),
+    # a logger bound before capture_logs() takes effect cannot be
+    # re-captured. A fresh proxy inside the function binds to the
+    # CURRENT config (LogCapture under capture_logs), so events flow.
+    log = structlog.get_logger(__name__)
     summary: dict[str, int] = {
         "n_rows": len(rows), "n_complete": 0, "n_with_nulls": 0,
         "n_with_missing": 0,
@@ -422,6 +431,9 @@ async def refresh_academic_analytics(data_hash: str) -> None:
     per refresh, so the trail of a degraded AN01/AN04 verdict reads
     end-to-end in the Render log.
     """
+    # See _log_table_rows_diagnostic for the rebind rationale —
+    # capture_logs() in tests can't intercept a pre-cached proxy.
+    log = structlog.get_logger(__name__)
     short_hash = data_hash[:8] if data_hash else None
     log.info("precomputed_academic_analytics_started",
              data_hash=short_hash)
@@ -577,6 +589,9 @@ async def refresh_transition_matrix(data_hash: str) -> None:
     row sums on every refresh makes a degraded AN04 verdict
     debuggable from the Render log alone.
     """
+    # See _log_table_rows_diagnostic for the rebind rationale —
+    # capture_logs() in tests can't intercept a pre-cached proxy.
+    log = structlog.get_logger(__name__)
     short_hash = data_hash[:8] if data_hash else None
     log.info("precomputed_transition_matrix_started",
              data_hash=short_hash)
