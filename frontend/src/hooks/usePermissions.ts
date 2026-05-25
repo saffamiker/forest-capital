@@ -39,11 +39,23 @@ export function useCanExport(): boolean {
 }
 
 /** May 24 2026 (#275 follow-up) — narrow permission that opens the
- *  Test Administration settings section. The underlying admin-only
- *  API routes (failures / feedback / issue-tracker) still gate on
- *  view_admin and remain sysadmin-only; team_members see the
- *  Settings section but each API request gets its own server-side
- *  check. */
+ *  Test Administration settings section. Paired with view_uat_status
+ *  (below) which controls whether the data tables actually populate
+ *  for the signed-in user. */
 export function useCanAccessTestPanel(): boolean {
   return useHasPermission('access_test_panel')
+}
+
+/** May 24 2026 (UAT #119) — read-only UAT status. team_member carries
+ *  this so Bob and Molly see real-time UAT progress (failure reports,
+ *  issue tracker, feedback backlog) without admin rights. Action
+ *  buttons (resolve failure, resolve feedback, trigger triage, approve
+ *  suggestion) are still sysadmin-only and gated on useIsSysadmin
+ *  separately in the components — a team_member sees the data,
+ *  never the controls.
+ *
+ *  This is the "view" side of the split that closes UAT #119; the
+ *  "manage" side stays on useIsSysadmin (manage_users). */
+export function useCanViewUatStatus(): boolean {
+  return useHasPermission('view_uat_status')
 }

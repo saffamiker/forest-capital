@@ -23,6 +23,24 @@ import {
   SuggestionsBanner, SuggestionReviewModal, type PRSuggestion,
 } from '../components/SuggestedResolutions'
 import { TestAdminSections } from '../components/TestRunnerSettings'
+import { AuthContext } from '../App'
+
+/** Mounts TestAdminSections with sysadmin permissions — the suggested-
+ *  resolutions surface (banner, row badge, review modal) is admin-only
+ *  (UAT #119 split). The wrapper is required because TestAdminSections
+ *  now reads from AuthContext via useIsSysadmin. */
+const SYSADMIN_AUTH = {
+  session: {
+    token: 't', email: 'ruurdsm@queens.edu',
+    permissions: [
+      'view_analytics', 'ask_council', 'team_member',
+      'generate_documents', 'export_package',
+      'view_admin', 'manage_users',
+      'access_test_panel', 'view_uat_status',
+    ],
+  },
+  isVerifying: false, login: vi.fn(), logout: vi.fn(),
+}
 
 const mockedAxios = vi.mocked(axios, true)
 
@@ -295,7 +313,11 @@ describe('SuggestionReviewModal — pagination and scoping', () => {
 
 describe('Failure Reports row badge', () => {
   function mountTabs() {
-    return render(<TestAdminSections />)
+    return render(
+      <AuthContext.Provider value={SYSADMIN_AUTH}>
+        <TestAdminSections />
+      </AuthContext.Provider>,
+    )
   }
 
   beforeEach(() => {

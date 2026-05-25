@@ -141,18 +141,25 @@ class TestGetIssueTrackerFailOpen:
 class TestIssueTrackerEndpoint:
     URL = "/api/v1/testing/issue-tracker"
 
-    def test_view_admin_admits_the_sysadmin(self):
+    def test_admits_the_sysadmin(self):
         r = client.get(self.URL, headers=SYSADMIN)
         assert r.status_code == 200
         body = r.json()
         assert "issues" in body
         assert isinstance(body["issues"], list)
 
-    def test_view_admin_rejects_a_viewer(self):
+    def test_rejects_a_viewer(self):
+        # The viewer preset does NOT carry view_uat_status (the new
+        # gate) — view_analytics + ask_council only.
         assert client.get(self.URL, headers=VIEWER).status_code == 403
 
-    def test_view_admin_rejects_a_team_member(self):
-        assert client.get(self.URL, headers=TEAM).status_code == 403
+    def test_admits_a_team_member(self):
+        # UAT #119 (May 24 2026) — the endpoint was relaxed from
+        # view_admin to view_uat_status. A team_member READS the
+        # tracker so Bob and Molly see real-time UAT progress; the
+        # mutation endpoints (resolve, suggestions/approve) remain
+        # sysadmin-only.
+        assert client.get(self.URL, headers=TEAM).status_code == 200
 
     def test_unauthenticated_is_401(self):
         assert client.get(self.URL).status_code == 401
