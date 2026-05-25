@@ -27,7 +27,9 @@ beforeEach(() => {
     writable: true,
   })
 })
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 
 const SAMPLE_FINDINGS = [
