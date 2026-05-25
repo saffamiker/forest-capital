@@ -48,7 +48,11 @@ interface QAState {
   loaded: boolean
 
   load: () => Promise<void>    // no-op if already loaded — used on tab mount
-  reload: () => Promise<void>  // force re-run — used by the "Re-run audit" button
+  // Force re-run — used by the "Re-run audit" button. force defaults to
+  // true: a manual click means "give me fresh checks now", bypassing
+  // both the backend hash gate and the min-interval cache. load() calls
+  // reload(false) so the first tab visit benefits from a cached audit.
+  reload: (force?: boolean) => Promise<void>
   pollStatus: () => Promise<void>  // refreshes tieredStatus from /api/v1/qa/status
   triggerTier1: () => Promise<void> // POST /api/v1/qa/run — sync Tier 1 + async Tier 2
   triggerFullReview: () => Promise<void> // POST /api/v1/qa/full-review — Opus Tier 3
@@ -115,15 +119,22 @@ export const useQAStore = create<QAState>((set, get) => ({
 
   load: async () => {
     // Skip if already loaded or in flight — the invariant that makes the QA tab
-    // instant when revisited after the first run.
+    // instant when revisited after the first run. Cached-friendly: passes
+    // force=false so the backend serves the hash-matched audit if one exists.
     if (get().loaded || get().loading) return
-    await get().reload()
+    await get().reload(false)
   },
 
-  reload: async () => {
+  reload: async (force = true) => {
+    // force defaults to true — a direct reload() call is a manual
+    // re-run. The backend's hash gate is keyed on strategy_hash, so
+    // an IN02 (Academic Review) change is invisible to a cached
+    // audit without this bypass. load() is the only caller that
+    // passes force=false (first tab visit, cache-friendly).
     set({ loading: true, error: null })
     try {
-      const res = await axios.post<QAAuditResult>('/api/qa/audit')
+      const res = await axios.post<QAAuditResult>(
+        '/api/qa/audit', { force })
       set({
         result: res.data,
         status: deriveStatus(res.data),
