@@ -18,6 +18,7 @@ from agents.base import (
     CITATION_INSTRUCTION,
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
+    STRUCTURE_INSTRUCTION,
     SONNET_MODEL,
     VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
@@ -76,6 +77,8 @@ transitions, the magnitude of the divergences — and tie those visual features 
 to the strategy metrics in the DATA block.
 
 {VISUAL_REASONING_RULES}
+
+{STRUCTURE_INSTRUCTION}
 
 {GLOBAL_AGENT_RULE}
 

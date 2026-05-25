@@ -20,6 +20,7 @@ from agents.base import (
     GLOBAL_AGENT_RULE,
     SCOPE_ENFORCEMENT,
     SONNET_MODEL,
+    STRUCTURE_INSTRUCTION,
     VISUAL_REASONING_RULES,
     WEB_SEARCH_TOOL,
     build_agent_response,
@@ -79,6 +80,8 @@ regime_conditional_returns to show how strategies with different bond \
 weights diverged through the break.
 
 {VISUAL_REASONING_RULES}
+
+{STRUCTURE_INSTRUCTION}
 
 {GLOBAL_AGENT_RULE}
 
