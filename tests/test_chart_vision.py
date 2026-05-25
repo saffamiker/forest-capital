@@ -159,6 +159,17 @@ class TestChartSets:
         from tools.chart_vision import ACADEMIC_REVIEW_CHARTS
         assert "significance_journey" in ACADEMIC_REVIEW_CHARTS
 
+    def test_academic_review_charts_includes_sensitivity_and_risk_return(self):
+        """May 25 2026 — sensitivity (robustness check) + risk_return
+        (cross-strategy positioning) added so the arbiter can verify
+        the rubric criteria 'is the strategy fragile under parameter
+        perturbation' and the document's risk-return positioning
+        claims. A regression that drops either silently shrinks the
+        arbiter's evidence base; pin them here."""
+        from tools.chart_vision import ACADEMIC_REVIEW_CHARTS
+        assert "sensitivity" in ACADEMIC_REVIEW_CHARTS
+        assert "risk_return" in ACADEMIC_REVIEW_CHARTS
+
     def test_document_generation_charts_includes_drawdown_and_regime(self):
         from tools.chart_vision import DOCUMENT_GENERATION_CHARTS
         for k in ("rolling_correlation", "regime_signals",
