@@ -2,9 +2,9 @@
 tests/test_magic_link_email.py — pins the May 27 2026 rebrand of
 the magic-link email template (Analytics Desk + McColl + Queens).
 
-Builder is pure: it does not touch SendGrid. send_magic_link()'s
-production path consumes the builder's output verbatim, so a
-builder regression here would land in the inbox.
+Builder is pure: it does not touch the email provider. send_magic_link()'s
+production path (Resend as of May 25 2026) consumes the builder's output
+verbatim, so a builder regression here would land in the inbox.
 """
 from __future__ import annotations
 
