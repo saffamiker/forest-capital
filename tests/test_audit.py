@@ -251,6 +251,66 @@ class TestLayer1:
                   if f["check_name"] == "Weight constraints"]
         assert weight and weight[0]["status"] != "fail"
 
+    # ── Return-series-length: expected-vs-actual disclosure (UAT L1) ──
+    #
+    # The series-length check WARNs when any strategy is shorter than
+    # the asset history. The warning's platform_value lists actual AND
+    # expected (asset_months - documented lookback) per strategy, plus
+    # an UNEXPECTED GAPS section when the actual length is shorter than
+    # the lookback alone predicts. These tests pin both shapes.
+
+    def test_series_length_short_dynamic_strategies_are_named_with_expected(
+        self,
+    ):
+        # A dynamic strategy shorter than the asset series by EXACTLY
+        # its documented lookback is "as designed" — the platform_value
+        # must say so explicitly.
+        payload = _clean_payload()
+        n_assets = len(payload["raw_data"]["asset_returns"]["equity"])
+        # REGIME_SWITCHING has a 3-month lookback per _EXPECTED_LOOKBACK_MONTHS.
+        payload["raw_data"]["strategy_returns"] = {
+            "BENCHMARK": [0.0075] * n_assets,
+            "REGIME_SWITCHING": [0.0075] * (n_assets - 3),
+        }
+        result = layer_1_raw_data_audit(payload)
+        sl = [f for f in result["findings"]
+              if f["check_name"] == "Return series length"]
+        assert sl and sl[0]["status"] == "warning"
+        pv = sl[0].get("platform_value", "")
+        assert "REGIME_SWITCHING" in pv
+        assert "actual=" in pv and "expected=" in pv
+        # The "as designed" tag fires when the gap is zero.
+        assert "as designed" in pv
+
+    def test_series_length_unexpected_gap_is_flagged(self):
+        # MOMENTUM_ROTATION has a 12-month lookback. If it actually
+        # starts 18 months in, the gap is +6 months — investigate.
+        payload = _clean_payload()
+        n_assets = len(payload["raw_data"]["asset_returns"]["equity"])
+        payload["raw_data"]["strategy_returns"] = {
+            "BENCHMARK": [0.0075] * n_assets,
+            "MOMENTUM_ROTATION": [0.0075] * (n_assets - 18),
+        }
+        result = layer_1_raw_data_audit(payload)
+        sl = [f for f in result["findings"]
+              if f["check_name"] == "Return series length"]
+        assert sl and sl[0]["status"] == "warning"
+        pv = sl[0].get("platform_value", "")
+        # The platform value names the gap explicitly with a sign.
+        assert "gap +6" in pv
+        # The reasoning text includes the UNEXPECTED GAPS disclosure
+        # with the specific strategy and gap.
+        reasoning = sl[0].get("auditor_reasoning", "")
+        assert "UNEXPECTED GAPS" in reasoning
+        assert "MOMENTUM_ROTATION" in reasoning
+
+    def test_series_length_all_match_passes(self):
+        # Every strategy = asset series length → PASS, not WARN.
+        result = layer_1_raw_data_audit(_clean_payload())
+        sl = [f for f in result["findings"]
+              if f["check_name"] == "Return series length"]
+        assert sl and sl[0]["status"] == "pass"
+
 
 # ── Layer 3 ───────────────────────────────────────────────────────────────────
 

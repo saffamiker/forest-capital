@@ -39,6 +39,22 @@ _RETURN_SERIES_NOTE = (
     "date to 2025-12-31, not the full 2002-07-31 study period."
 )
 
+# Per-strategy expected lookback window in months. Sourced from the
+# backtester (BACKTESTER lookback constants) — when a strategy is added
+# or its lookback changes, this map must be updated in lockstep so the
+# audit warning's expected-vs-actual comparison stays accurate. A
+# strategy missing from this map defaults to 0 (no lookback, expected
+# length equals n_assets) — that's the right answer for every static
+# strategy (BENCHMARK, CLASSIC_60_40, RISK_PARITY, EQUAL_WEIGHT,
+# VOL_TARGETING) so no entry is needed for them.
+_EXPECTED_LOOKBACK_MONTHS: dict[str, int] = {
+    "REGIME_SWITCHING":    3,
+    "MOMENTUM_ROTATION":   12,
+    "MIN_VARIANCE":        36,
+    "BLACK_LITTERMAN":     36,
+    "MAX_SHARPE_ROLLING":  36,
+}
+
 
 def _total_return(series: list[float]) -> float:
     """Cumulative total return of a monthly series — product of (1+r) - 1."""
@@ -233,13 +249,59 @@ def layer_1_raw_data_audit(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         # A strategy series shorter than the asset series is expected —
         # the dynamic strategies consume a lookback window before they
-        # produce their first return.
-        short = {name: len(s) for name, s in strategy_returns.items()
-                 if len(s) < n_assets}
-        if short:
+        # produce their first return. For every shorter series we
+        # compute the EXPECTED length (asset months minus the strategy's
+        # documented lookback) and the GAP between expected and actual.
+        # A non-zero gap means the strategy started later than its
+        # lookback alone would predict — usually because a downstream
+        # input (e.g. ff_factors_monthly's MOM column) was unavailable
+        # for the first few months. We surface every gap explicitly so
+        # the audit report names exactly what shifted, instead of just
+        # listing the actual length and leaving the reader to guess.
+        short_rows: list[str] = []
+        unexpected_gaps: list[str] = []
+        for name, s in strategy_returns.items():
+            actual = len(s)
+            if actual >= n_assets:
+                continue
+            lookback = _EXPECTED_LOOKBACK_MONTHS.get(name, 0)
+            expected = max(n_assets - lookback, 0)
+            gap = expected - actual
+            if gap == 0:
+                short_rows.append(
+                    f"{name}: actual={actual}, expected={expected} "
+                    f"(lookback={lookback}mo) — as designed")
+            else:
+                # Gap > 0: started later than the lookback predicts.
+                # Gap < 0: longer than expected (shouldn't happen, but
+                # log it so we notice).
+                gap_sign = "+" if gap > 0 else ""
+                short_rows.append(
+                    f"{name}: actual={actual}, expected={expected} "
+                    f"(lookback={lookback}mo, gap {gap_sign}{gap})")
+                if abs(gap) > 0:
+                    unexpected_gaps.append(f"{name} ({gap_sign}{gap})")
+        if short_rows:
+            note = _RETURN_SERIES_NOTE
+            if unexpected_gaps:
+                # Surface the unexpected-gap detail in BOTH the platform
+                # value and the auditor reasoning so a reviewer sees it
+                # at a glance.
+                note = (
+                    f"{_RETURN_SERIES_NOTE} UNEXPECTED GAPS DETECTED on "
+                    f"{', '.join(unexpected_gaps)} — these strategies "
+                    f"started later than their lookback window predicts. "
+                    f"Usually means a downstream input (e.g. ff_factors_"
+                    f"monthly MOM column, FRED rate series) was "
+                    f"unavailable for the first few months. Investigate "
+                    f"if the gap is material; otherwise document as a "
+                    f"data-source caveat in the Analytical Appendix."
+                )
             f("Return series length", "series_length", "warning", "info",
-              platform_value=f"asset months={n_assets}; shorter: {short}",
-              auditor_reasoning=_RETURN_SERIES_NOTE)
+              platform_value=(
+                  f"asset months={n_assets}; per-strategy "
+                  f"(actual / expected): " + "; ".join(short_rows)),
+              auditor_reasoning=note)
         else:
             f("Return series length", "series_length", "pass", "info",
               platform_value=f"all series = {n_assets} months",
