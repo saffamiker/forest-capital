@@ -239,6 +239,7 @@ def _call_writer_sync(
                 "submission-ready document. Do NOT summarise or "
                 "outline — write the actual paper."),
             max_tokens=max_tokens,
+            trigger="report_generator:full_draft",
         )
         return (raw or "").strip() or _writer_unavailable_draft()
     except Exception as exc:  # noqa: BLE001
@@ -946,6 +947,7 @@ def _iterate_sync(
             system_prompt=_ITERATION_SYSTEM,
             user_message=user_message,
             max_tokens=600,
+            trigger="report_generator:iterate_text",
         )
         return (raw or "").strip() or selection
     except Exception as exc:  # noqa: BLE001
@@ -1479,6 +1481,7 @@ def _review_sync(
             system_prompt=_REVIEW_SYSTEM,
             user_message=user_message,
             max_tokens=2000,
+            trigger="report_generator:review",
         )
         parsed = _parse_review_json(raw)
         if parsed is None:

@@ -413,6 +413,24 @@ def generate_digest(
             {"input_tokens": 0, "output_tokens": 0, "model": SONNET_MODEL,
              "n_searches": 0, "n_fetches": 0},
         )
+    # Per-call structured log (PR-LLM-1, May 25 2026). The research
+    # digest bypasses call_claude (web_search + web_fetch tool loop)
+    # so emit here directly. hash_gate=False today — the daily
+    # trigger fires regardless of market_data_monthly freshness;
+    # adding that gate is PR-LLM-4. Emit fires whether or not the
+    # downstream parse succeeds: tokens were consumed either way.
+    try:
+        from agents.llm_log import log_llm_call
+        log_llm_call(
+            function="research_agent.generate_digest",
+            model=SONNET_MODEL,
+            trigger="research_digest",
+            input_tokens=getattr(response.usage, "input_tokens", 0),
+            output_tokens=getattr(response.usage, "output_tokens", 0),
+            hash_gate=False,
+        )
+    except Exception:  # noqa: BLE001 — telemetry must never break a call
+        pass
 
     text, sources, fetched_urls = _extract_text_sources_and_fetches(response)
     verified_urls = {s["url"] for s in sources if s.get("url")}

@@ -193,6 +193,8 @@ def call_claude(
     *,
     visual_context: list[dict] | None = None,
     strategy_ids: list[str] | None = None,
+    trigger: str = "unspecified",
+    hash_gate: bool = False,
 ) -> str:
     """
     Thin wrapper around the Anthropic messages API.
@@ -214,6 +216,15 @@ def call_claude(
     content and is bitwise-identical to the pre-vision code path —
     every existing caller that does not opt in keeps its previous
     behaviour.
+
+    trigger / hash_gate — keyword-only OPTIONAL telemetry. The post-
+    response llm_call structured log line carries the caller-supplied
+    trigger label (e.g. "council_specialist:equity_analyst",
+    "harness_evaluator") and a hash_gate boolean saying whether a
+    data_hash / TTL comparison ran BEFORE this call fired. Defaults
+    keep un-labeled call sites grep-able ("trigger:unspecified",
+    "hash_gate:false") so leak surfaces are visible in Render logs
+    without any behavioural change.
 
     EVALUATOR GUARD. The harness's _evaluate() (agents/harness.py)
     MUST NOT pass visual_context — evaluators score text quality, and
@@ -273,6 +284,23 @@ def call_claude(
         if n_searches:
             log.info("web_search_used", model=model, n_searches=n_searches)
     except Exception:  # noqa: BLE001 — cost telemetry must never break a call
+        pass
+    # Per-call structured log (PR-LLM-1, May 25 2026). Single emit point
+    # so every leak path looks identical in Render logs regardless of
+    # which call site fired the request. extra fields: web search count
+    # so a search-heavy call is visible alongside the token spend.
+    try:
+        from agents.llm_log import log_llm_call
+        log_llm_call(
+            function="call_claude",
+            model=model,
+            trigger=trigger,
+            input_tokens=getattr(message.usage, "input_tokens", 0),
+            output_tokens=getattr(message.usage, "output_tokens", 0),
+            hash_gate=hash_gate,
+            n_searches=_web_search_count(message),
+        )
+    except Exception:  # noqa: BLE001 — telemetry must never break a call
         pass
     return _extract_text(message)
 
@@ -431,7 +459,14 @@ def _with_macro_context(system_prompt: str) -> str:
         return system_prompt
 
 
-def call_gemini(model: str, system_prompt: str, user_message: str) -> str:
+def call_gemini(
+    model: str,
+    system_prompt: str,
+    user_message: str,
+    *,
+    trigger: str = "unspecified",
+    hash_gate: bool = False,
+) -> str:
     """
     Thin wrapper around the google-genai SDK — the single Gemini call
     convention for the codebase.
@@ -444,6 +479,12 @@ def call_gemini(model: str, system_prompt: str, user_message: str) -> str:
 
     The SDK is imported lazily so the test environment — which mocks every
     Gemini path before reaching here — never needs the package installed.
+
+    trigger / hash_gate — keyword-only OPTIONAL telemetry. Mirrors
+    call_claude's contract (see PR-LLM-1, May 25 2026): the post-
+    response llm_call structured log carries both fields so every
+    Gemini call site is queryable in Render logs by the same shape as
+    every Anthropic call site.
     """
     from google import genai
     from google.genai import types
@@ -454,15 +495,31 @@ def call_gemini(model: str, system_prompt: str, user_message: str) -> str:
         contents=user_message,
         config=types.GenerateContentConfig(system_instruction=system_prompt),
     )
+    in_tokens = 0
+    out_tokens = 0
+    um = getattr(response, "usage_metadata", None)
+    if um is not None:
+        in_tokens = getattr(um, "prompt_token_count", 0) or 0
+        out_tokens = getattr(um, "candidates_token_count", 0) or 0
     # Token-usage capture — a no-op unless an endpoint started a capture.
     try:
         from agents.usage import record_usage
-        um = getattr(response, "usage_metadata", None)
         if um is not None:
-            record_usage(model,
-                         getattr(um, "prompt_token_count", 0),
-                         getattr(um, "candidates_token_count", 0))
+            record_usage(model, in_tokens, out_tokens)
     except Exception:  # noqa: BLE001 — cost telemetry must never break a call
+        pass
+    # Per-call structured log — same shape as call_claude.
+    try:
+        from agents.llm_log import log_llm_call
+        log_llm_call(
+            function="call_gemini",
+            model=model,
+            trigger=trigger,
+            input_tokens=in_tokens,
+            output_tokens=out_tokens,
+            hash_gate=hash_gate,
+        )
+    except Exception:  # noqa: BLE001
         pass
     return response.text or ""
 

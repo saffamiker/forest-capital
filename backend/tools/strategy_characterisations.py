@@ -559,6 +559,7 @@ def generate_characterisation_text(
             system_prompt=_SYSTEM_PROMPT,
             user_message=user_msg,
             max_tokens=1024,
+            trigger="strategy_characterisation",
         )
         parsed = _parse_model_json(raw)
         if not parsed:

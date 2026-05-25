@@ -814,6 +814,7 @@ class QAAgent:
             response_text = call_claude(
                 OPUS_MODEL, _SYSTEM_PROMPT, user_message,
                 max_tokens=16000,
+                trigger="qa_agent_audit",
             )
             # Diagnostic: log the response length so a future
             # truncation can be spotted in Render logs without

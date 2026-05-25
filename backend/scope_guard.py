@@ -181,6 +181,23 @@ class ScopeGuard:
                 system=_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": query}],
             )
+            # Per-call structured log (PR-LLM-1, May 25 2026). Scope
+            # guard fires on every council/QA query as a FastAPI
+            # dependency. Cheap Haiku (~1K tokens) but high frequency.
+            # hash_gate=False — no caching of identical queries; a
+            # rapid double-click triggers two classifier calls.
+            try:
+                from agents.llm_log import log_llm_call
+                log_llm_call(
+                    function="scope_guard.check",
+                    model=_CLASSIFIER_MODEL,
+                    trigger="scope_guard",
+                    input_tokens=getattr(message.usage, "input_tokens", 0),
+                    output_tokens=getattr(message.usage, "output_tokens", 0),
+                    hash_gate=False,
+                )
+            except Exception:  # noqa: BLE001
+                pass
             raw = message.content[0].text.strip()
 
             # Strip markdown code fences if Haiku wraps its JSON response.

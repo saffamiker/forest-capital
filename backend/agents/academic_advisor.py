@@ -306,6 +306,26 @@ def _call_advisor_with_web_tools(
     text, sources, fetched_urls = _extract_text_sources_and_fetches(response)
     parsed = _parse_json_response(text)
 
+    # Per-call structured log (PR-LLM-1, May 25 2026). The advisor
+    # bypasses call_claude (own web_search tool loop) so emit here.
+    # hash_gate=False: every advisor request is a user-initiated
+    # WebSocket question with no caching of identical query+context
+    # tuples — re-asking the same question re-runs the LLM.
+    try:
+        from agents.llm_log import log_llm_call
+        log_llm_call(
+            function="academic_advisor.respond",
+            model=SONNET_MODEL,
+            trigger="academic_advisor",
+            input_tokens=getattr(response.usage, "input_tokens", 0),
+            output_tokens=getattr(response.usage, "output_tokens", 0),
+            hash_gate=False,
+            n_searches=len(sources),
+            n_fetches=len(fetched_urls),
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
     usage = {
         "input_tokens":  getattr(response.usage, "input_tokens", 0),
         "output_tokens": getattr(response.usage, "output_tokens", 0),

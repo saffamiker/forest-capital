@@ -207,7 +207,8 @@ def _run_harness(
     harness = GeneratorEvaluatorHarness()
     result = harness.run(
         generator_fn=lambda prompt: call_claude(
-            SONNET_MODEL, _SYSTEM_PROMPT, prompt, max_tokens=6000),
+            SONNET_MODEL, _SYSTEM_PROMPT, prompt, max_tokens=6000,
+            trigger="script_generation"),
         evaluator_prompt=presentation_script_evaluator_prompt(),
         generator_prompt=user_prompt,
         context=user_prompt,
