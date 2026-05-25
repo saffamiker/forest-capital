@@ -160,6 +160,23 @@ export default function DocumentEditor() {
   const [assistantPrefill, setAssistantPrefill] =
     useState<{ text: string; nonce: number } | null>(null)
 
+  // Academic Review status — populated by the auto-fired review the
+  // generation endpoint schedules on its way out. Shape mirrors
+  // GET /api/v1/documents/drafts/{id}/academic-review-status. The
+  // editor polls while status reads "missing" so a fresh draft picks
+  // up its score the moment the background task lands. See the
+  // Auto-fire Academic Review block in main.py for the producer side.
+  const [reviewStatus, setReviewStatus] = useState<{
+    status: 'complete' | 'running' | 'missing'
+    score: number | null
+    rating: string | null
+    advisory: boolean
+    document_type: string
+    section_ratings: Record<string, string>
+    run_at: string | null
+    threshold: number
+  } | null>(null)
+
   const dirtyRef = useRef(false)
   // Initial marker total per section heading — the progress denominator.
   const markerBaseline = useRef<Record<string, number>>({})
@@ -196,6 +213,40 @@ export default function DocumentEditor() {
   }, [id])
 
   useEffect(() => { void loadDraft() }, [loadDraft])
+
+  // Academic Review status — fetched once on draft load, then polled
+  // every 20 seconds while the auto-fired review is still in flight.
+  // We give up after a few polls (the review backend always completes
+  // OR silently fails; either way the editor stops asking). Poll only
+  // for the two document types that schedule an auto-review.
+  useEffect(() => {
+    if (!draft) return
+    if (draft.document_type !== 'midpoint_paper'
+        && draft.document_type !== 'executive_brief') {
+      setReviewStatus(null)
+      return
+    }
+    let cancelled = false
+    let attempts = 0
+    const MAX_POLLS = 15  // ~5 minutes at the 20s cadence
+    const fetchStatus = async () => {
+      try {
+        const r = await axios.get(
+          `/api/v1/documents/drafts/${id}/academic-review-status`)
+        if (cancelled) return
+        setReviewStatus(r.data)
+        if (r.data?.status === 'complete') return  // stop polling
+        attempts += 1
+        if (attempts >= MAX_POLLS) return
+        window.setTimeout(() => { void fetchStatus() }, 20000)
+      } catch {
+        // Endpoint failures are quiet — the editor falls back to "no
+        // score" rather than showing an error chrome.
+      }
+    }
+    void fetchStatus()
+    return () => { cancelled = true }
+  }, [id, draft])
 
   // Auto-save — every 30 seconds while dirty.
   const save = useCallback(async () => {
@@ -502,6 +553,23 @@ export default function DocumentEditor() {
         {AI_DRAFT_BANNER}
       </div>
 
+      {/* Auto-fired Academic Review advisory banner — midpoint only,
+          score below 6.0. Renders above the header so it's seen the
+          moment the draft opens. The score and threshold come from
+          the same payload the header pill reads. */}
+      {reviewStatus?.status === 'complete'
+        && reviewStatus.document_type === 'midpoint_paper'
+        && reviewStatus.advisory
+        && typeof reviewStatus.score === 'number' && (
+        <div data-testid="review-advisory-banner"
+          className="bg-warning/15 text-warning border-b border-warning/40
+                     px-3 py-2 text-xs">
+          Academic Review flagged concerns with this draft
+          (score: {reviewStatus.score.toFixed(1)}/10).
+          Review the findings in the Council before submitting.
+        </div>
+      )}
+
       {/* Header bar */}
       <div className="flex items-center justify-between gap-3 px-3 py-2
                       border-b border-border">
@@ -516,6 +584,41 @@ export default function DocumentEditor() {
                            shrink-0 hidden sm:inline">
             {draft.document_type.replace('_', ' ')}
           </span>
+          {/* Academic Review score pill — small green when ≥ 6.0,
+              amber when below. Shown only when a review has landed;
+              while the auto-fire is still running we show a quiet
+              "Reviewing…" placeholder so the user knows it's coming. */}
+          {reviewStatus && (reviewStatus.document_type === 'midpoint_paper'
+              || reviewStatus.document_type === 'executive_brief') && (
+            reviewStatus.status === 'complete'
+              && typeof reviewStatus.score === 'number' ? (
+              <span
+                data-testid="review-score-pill"
+                data-advisory={reviewStatus.advisory ? 'true' : 'false'}
+                title={
+                  reviewStatus.rating
+                    ? `Academic Review: ${reviewStatus.rating}`
+                    : 'Academic Review score'
+                }
+                className={
+                  'text-2xs px-2 py-0.5 rounded-full border shrink-0 ' +
+                  (reviewStatus.advisory
+                    ? 'bg-warning/10 text-warning border-warning/40'
+                    : 'bg-success/10 text-success border-success/40')
+                }
+              >
+                Review {reviewStatus.score.toFixed(1)}/10
+              </span>
+            ) : (
+              <span
+                data-testid="review-score-pending"
+                className="text-2xs px-2 py-0.5 rounded-full
+                           bg-muted/10 text-muted border border-muted/30
+                           shrink-0">
+                Reviewing…
+              </span>
+            )
+          )}
         </div>
         <div className="flex items-center gap-2">
           <span className="text-2xs text-muted">

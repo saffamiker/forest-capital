@@ -313,10 +313,12 @@ class TestGenerationGate:
         # Patch compute_readiness inside report_readiness AND inside the
         # import-bound reference used by _require_report_ready. The
         # gate does a local import so patching the module attribute
-        # is enough.
+        # is enough. The kwarg is accepted-and-ignored — the blocker
+        # used here is P03, not IN02, so the midpoint exclusion does
+        # not change the outcome.
         from tools import report_readiness
 
-        async def _blocked():
+        async def _blocked(exclude_methodology_check_ids=None):
             return {
                 "is_ready": False,
                 "blocking_count": 2,
@@ -400,7 +402,7 @@ class TestGenerationGate:
         responds 202 (job_id) and not 422."""
         from tools import report_readiness
 
-        async def _ready():
+        async def _ready(exclude_methodology_check_ids=None):
             return {
                 "is_ready": True, "blocking_count": 0,
                 "statistical": {"unreviewed_warnings": [],
@@ -415,3 +417,179 @@ class TestGenerationGate:
                         headers=_auth_headers(), json={})
         # 202 on success — the job is created and scheduled.
         assert r.status_code == 202
+
+
+# ── IN02 advisory carve-out (May 25 2026) ────────────────────────────────────
+#
+# The midpoint paper generation passes exclude_methodology_check_ids=
+# {"IN02"} so Academic Review completeness is advisory for that
+# document type only — the auto-fired review produces a score
+# surfaced in the editor instead of blocking generation. The exec
+# brief and the deck retain the full set of blockers.
+
+class TestComputeReadinessExcludesMethodologyCheckIds:
+    """The exclude_methodology_check_ids parameter strips matching
+    rows from the methodology blockers BEFORE the blocking_count is
+    computed. Tests use the real compute_readiness against monkey-
+    patched _methodology_blocking / _statistical_blocking so the
+    filter logic is exercised end-to-end."""
+
+    def test_in02_warning_excluded_when_in_the_set(self, monkeypatch):
+        import asyncio
+        from tools import report_readiness
+
+        async def _stat():
+            return {"unreviewed_warnings": [], "unreviewed_failures": []}
+
+        async def _meth():
+            return {
+                "unresolved_warnings": [{
+                    "check_id": "IN02", "check": "Academic Review complete",
+                    "description": "...", "category": "INTEGRATION",
+                    "status": "WARN"}],
+                "unresolved_failures": [],
+            }
+
+        monkeypatch.setattr(report_readiness, "_statistical_blocking", _stat)
+        monkeypatch.setattr(report_readiness, "_methodology_blocking", _meth)
+        # Without the exclusion: IN02 blocks.
+        baseline = asyncio.run(report_readiness.compute_readiness())
+        assert baseline["is_ready"] is False
+        assert baseline["blocking_count"] == 1
+        # With IN02 excluded: not_ready becomes ready.
+        filtered = asyncio.run(report_readiness.compute_readiness(
+            exclude_methodology_check_ids={"IN02"}))
+        assert filtered["is_ready"] is True
+        assert filtered["blocking_count"] == 0
+        # The detail also drops IN02 from the methodology lists.
+        assert filtered["methodology"]["unresolved_warnings"] == []
+
+    def test_other_methodology_blockers_still_block(self, monkeypatch):
+        """Non-IN02 methodology blockers must remain when IN02 is the
+        only exclusion. A P03 FAIL must still 422 the midpoint."""
+        import asyncio
+        from tools import report_readiness
+
+        async def _stat():
+            return {"unreviewed_warnings": [], "unreviewed_failures": []}
+
+        async def _meth():
+            return {
+                "unresolved_warnings": [{
+                    "check_id": "IN02", "check": "Academic Review complete",
+                    "description": "...", "category": "INTEGRATION",
+                    "status": "WARN"}],
+                "unresolved_failures": [{
+                    "check_id": "P03",
+                    "check": "Transaction costs applied",
+                    "description": "...", "category": "PORTFOLIO_MECHANICS",
+                    "status": "FAIL"}],
+            }
+
+        monkeypatch.setattr(report_readiness, "_statistical_blocking", _stat)
+        monkeypatch.setattr(report_readiness, "_methodology_blocking", _meth)
+        out = asyncio.run(report_readiness.compute_readiness(
+            exclude_methodology_check_ids={"IN02"}))
+        assert out["is_ready"] is False
+        assert out["blocking_count"] == 1  # P03 still blocks
+        cids = {it.get("check_id")
+                for it in out["methodology"]["unresolved_failures"]}
+        assert cids == {"P03"}
+
+    def test_statistical_blockers_are_unaffected_by_methodology_exclusion(
+        self, monkeypatch,
+    ):
+        """The exclusion filter applies only to the methodology list —
+        a statistical FAIL is never filtered out by passing IN02 to
+        the methodology exclusion set."""
+        import asyncio
+        from tools import report_readiness
+
+        async def _stat():
+            return {
+                "unreviewed_warnings": [],
+                "unreviewed_failures": [{
+                    "finding_id": 1, "layer": 2,
+                    "check_name": "STATFAIL",
+                    "metric": "sharpe_ratio", "strategy": "BENCHMARK",
+                    "status": "FAIL", "discrepancy": "5%"}],
+            }
+
+        async def _meth():
+            return {
+                "unresolved_warnings": [{
+                    "check_id": "IN02", "check": "Academic Review complete",
+                    "description": "...", "category": "INTEGRATION",
+                    "status": "WARN"}],
+                "unresolved_failures": [],
+            }
+
+        monkeypatch.setattr(report_readiness, "_statistical_blocking", _stat)
+        monkeypatch.setattr(report_readiness, "_methodology_blocking", _meth)
+        out = asyncio.run(report_readiness.compute_readiness(
+            exclude_methodology_check_ids={"IN02"}))
+        assert out["is_ready"] is False
+        assert out["blocking_count"] == 1  # statistical FAIL stands
+
+
+class TestMidpointIN02CarveOutEndpoint:
+    """End-to-end gate contract: a pure-IN02 methodology blocker no
+    longer 422s the midpoint endpoint, but still 422s the executive
+    brief. Same monkeypatch pattern as TestGenerationGate so the
+    contract is read against the real gate, not a mock of it."""
+
+    def _seed_in02_only(self, monkeypatch) -> None:
+        # The midpoint path will pass exclude_methodology_check_ids=
+        # {"IN02"} to compute_readiness; the patched function must
+        # honour that. We patch compute_readiness directly to a
+        # version that respects the exclusion and reports the same
+        # shape compute_readiness emits.
+        from tools import report_readiness
+
+        async def _verdict(exclude_methodology_check_ids=None):
+            warns = [{
+                "check_id": "IN02", "check": "Academic Review complete",
+                "description": "...", "category": "INTEGRATION",
+                "status": "WARN"}]
+            excl = exclude_methodology_check_ids or set()
+            kept = [it for it in warns if it["check_id"] not in excl]
+            blocking_count = len(kept)
+            return {
+                "is_ready": blocking_count == 0,
+                "blocking_count": blocking_count,
+                "statistical": {"unreviewed_warnings": [],
+                                "unreviewed_failures": []},
+                "methodology": {"unresolved_warnings": kept,
+                                "unresolved_failures": []},
+                "checked_at": "2026-05-25T00:00:00+00:00",
+            }
+
+        monkeypatch.setattr(report_readiness, "compute_readiness", _verdict)
+
+    def test_midpoint_skips_in02_block(
+        self, monkeypatch, client: TestClient,
+    ):
+        self._seed_in02_only(monkeypatch)
+        r = client.post("/api/v1/export/midpoint-paper",
+                        headers=_auth_headers(), json={})
+        # 202 — the gate accepts because IN02 is advisory for midpoint.
+        assert r.status_code == 202
+
+    def test_executive_brief_still_blocked_by_in02(
+        self, monkeypatch, client: TestClient,
+    ):
+        self._seed_in02_only(monkeypatch)
+        r = client.post("/api/v1/export/executive-brief",
+                        headers=_auth_headers(), json={})
+        # 422 — IN02 is still a hard gate for the executive brief.
+        assert r.status_code == 422
+        assert r.json()["detail"]["error"] == "report_not_ready"
+
+    def test_presentation_deck_still_blocked_by_in02(
+        self, monkeypatch, client: TestClient,
+    ):
+        """Deck behaviour matches the exec brief — IN02 still gates."""
+        self._seed_in02_only(monkeypatch)
+        r = client.post("/api/v1/export/presentation-deck",
+                        headers=_auth_headers(), json={})
+        assert r.status_code == 422

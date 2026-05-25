@@ -3470,6 +3470,101 @@ async def rubric_review(
     return parsed
 
 
+# ── Auto-fired Academic Review status for a draft (May 25 2026) ───────────────
+#
+# After midpoint or executive-brief generation, an Academic Review
+# fires in the background and writes its parsed score into
+# agent_interactions.metadata.draft_id. The editor reads this
+# endpoint on draft load (and polls while it reads `running`) to
+# render the header score pill and, for midpoint, the advisory
+# banner when the score lands below 6.0.
+
+@app.get("/api/v1/documents/drafts/{draft_id}/academic-review-status")
+async def get_draft_academic_review_status(
+    draft_id: int, session: dict = Depends(require_team_member),
+):
+    """
+    Returns the latest auto-fired Academic Review score for a draft:
+      {
+        status:           "complete" | "running" | "missing",
+        score:            float | None,        # 0-10
+        rating:           str | None,          # Strong | Developing | Needs Work
+        advisory:         bool,                # midpoint + score < 6.0
+        document_type:    str,                 # midpoint_paper | executive_brief
+        section_ratings:  dict,                # {section_key: rating}
+        run_at:           ISO timestamp | None,
+        threshold:        6.0,                 # the midpoint advisory cutoff
+      }
+
+    "missing" — no auto-review has landed yet for this draft. The
+    generation flow always schedules one, so this means either the
+    background task is still in flight (the editor polls) or it
+    silently failed (the editor stops polling after a few attempts).
+    "running" mirrors "missing" today — the placeholder gives us
+    room to wire a heartbeat row later without changing the wire
+    format.
+
+    404 if the draft does not exist or the caller is not the owner.
+    """
+    from tools.editor_drafts import get_draft
+    from tools.academic_review_score import ADVISORY_THRESHOLD
+
+    draft = await get_draft(draft_id)
+    if draft is None or draft.get("owner_email") != session.get("email"):
+        raise HTTPException(status_code=404, detail="Draft not found.")
+
+    document_type = draft.get("document_type") or ""
+    empty = {
+        "status":          "missing",
+        "score":           None,
+        "rating":          None,
+        "advisory":        False,
+        "document_type":   document_type,
+        "section_ratings": {},
+        "run_at":          None,
+        "threshold":       ADVISORY_THRESHOLD,
+    }
+
+    # Auto-review only fires for these two document types. A deck
+    # or script draft has no review to surface; return the empty
+    # shape so the frontend can hide the indicator cleanly.
+    if document_type not in ("midpoint_paper", "executive_brief"):
+        return empty
+
+    try:
+        from tools.activity_log import get_latest_academic_review_for_draft
+        latest = await get_latest_academic_review_for_draft(draft_id)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_review_status_read_failed",
+                    draft_id=draft_id, error=str(exc))
+        return empty
+
+    if latest is None:
+        return empty
+
+    meta = latest.get("metadata") or {}
+    score = meta.get("score")
+    # Advisory is computed off the live score and the document type —
+    # don't trust a stale `advisory` field in the metadata in case the
+    # threshold ever moves. The threshold is the same source of truth
+    # the frontend reads from this response.
+    advisory = (
+        document_type == "midpoint_paper"
+        and isinstance(score, (int, float))
+        and score < ADVISORY_THRESHOLD
+    )
+    return {
+        "status":          "complete",
+        "score":           score,
+        "rating":          meta.get("overall_rating"),
+        "advisory":        advisory,
+        "document_type":   document_type,
+        "section_ratings": meta.get("section_ratings") or {},
+        "run_at":          latest.get("timestamp"),
+        "threshold":       ADVISORY_THRESHOLD,
+    }
+
+
 @app.post("/api/v1/documents/script/generate")
 @limiter.limit("6/minute")
 async def generate_presentation_script(
@@ -8368,7 +8463,9 @@ async def _editor_export(editor_draft_id: int) -> Response:
 _generation_bg_tasks: set = set()
 
 
-async def _require_report_ready() -> None:
+async def _require_report_ready(
+    exclude_methodology_check_ids: set[str] | None = None,
+) -> None:
     """
     Workstream C report gate (May 28 2026). Raises 422 with a structured
     detail when either audit surface has unreviewed blocking items.
@@ -8379,13 +8476,21 @@ async def _require_report_ready() -> None:
     and shows them in a blocking modal so the user can navigate back to
     the audit panel and act on each.
 
+    exclude_methodology_check_ids (May 25 2026) — passed through to
+    compute_readiness so per-document advisory rules can downgrade a
+    specific methodology check. Midpoint generation passes {"IN02"} so
+    Academic Review completeness is advisory (the score is shown in the
+    editor instead of blocking generation); other deliverables keep the
+    full set of blockers.
+
     Fail-open: the readiness module returns empty lists on any read
     error, so a database outage or an empty audit history reports
     is_ready=true and the gate does not block.
     """
     from tools.report_readiness import compute_readiness, summarise_blockers
 
-    readiness = await compute_readiness()
+    readiness = await compute_readiness(
+        exclude_methodology_check_ids=exclude_methodology_check_ids)
     if readiness.get("is_ready"):
         return
     raise HTTPException(
@@ -8432,6 +8537,126 @@ def _start_generation_job(
         content={"job_id": job["job_id"], "status": "pending"})
 
 
+# ── Auto-fire Academic Review on generation (May 25 2026) ─────────────────────
+#
+# When a midpoint paper or executive brief generation completes, we
+# kick off a full Academic Review against the freshly-created editor
+# draft on a fire-and-forget background task. The review's score is
+# parsed (tools.academic_review_score) and stored in the interaction
+# row's metadata.draft_id field; the editor's status endpoint reads
+# it on draft load and renders the header pill + advisory banner.
+#
+# Latency: the full review fan-out (peers + arbiter via the harness)
+# takes ~60-90s. We deliberately schedule it AFTER the generation job
+# completes so the user sees the draft immediately; the score appears
+# in the editor when the background task finishes. The frontend polls
+# the status endpoint while it reads `running`.
+#
+# Fail-open: any review failure logs and skips — the draft is still
+# usable, the editor simply doesn't show a score.
+
+# Module-level set so spawned auto-fire tasks aren't GC'd mid-run.
+_AUTO_REVIEW_TASKS: set = set()
+
+
+async def _run_auto_academic_review(
+    draft_id: int, document_type: str, owner_email: str,
+) -> None:
+    """Runs an Academic Review against the draft and persists the
+    parsed score into agent_interactions.metadata so the editor can
+    surface it. Synchronous-style flow: gather context → peer fan-out
+    → arbiter → parse → log. Every step is wrapped — a failure logs
+    and the function returns cleanly without raising."""
+    import asyncio
+    try:
+        from agents.academic_review import (
+            gather_review_context, run_peer_fan_out, run_arbiter_with_harness,
+        )
+        from agents.harness import (
+            start_harness_capture, collect_harness_metrics,
+        )
+        from agents.usage import start_usage_capture
+        from tools.academic_review_score import compute_review_score
+        from tools.activity_log import log_agent_interaction
+
+        start_harness_capture()
+        start_usage_capture()
+        ctx = await gather_review_context(reviewer_email=owner_email)
+        context_block = ctx["context_block"]
+        multi_user = ctx.get("multi_user_activity", False)
+        n_strategies = ctx["analytics"].get("strategy_count")
+        peer_responses = await run_peer_fan_out(
+            context_block, multi_user, n_strategies)
+        arbiter_text = await asyncio.to_thread(
+            run_arbiter_with_harness, context_block, peer_responses,
+            multi_user, False, n_strategies)
+        scored = compute_review_score(arbiter_text)
+        agents = list(peer_responses.keys()) + ["academic_advisor"]
+        metadata: dict[str, Any] = {
+            "draft_id": draft_id,
+            "document_type": document_type,
+            "automatic": True,
+            "advisory": document_type == "midpoint_paper",
+            "score": scored["score"],
+            "overall_rating": scored["rating"],
+            "section_ratings": scored["section_ratings"],
+            "sections_rated": scored["sections_rated"],
+        }
+        harness_meta = collect_harness_metrics()
+        if harness_meta:
+            metadata["harness"] = harness_meta
+        await log_agent_interaction(
+            user_email=owner_email,
+            session_id=None,
+            session_type="analytical",
+            interaction_type="academic_review",
+            agents_involved=agents,
+            response_summary=arbiter_text,
+            metadata=metadata,
+        )
+        log.info(
+            "auto_academic_review_complete",
+            draft_id=draft_id, document_type=document_type,
+            score=scored["score"], rating=scored["rating"],
+            advisory=metadata["advisory"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "auto_academic_review_failed",
+            draft_id=draft_id, document_type=document_type,
+            error=str(exc))
+
+
+def _schedule_auto_academic_review(
+    draft_id: int | None, document_type: str, owner_email: str,
+) -> None:
+    """Fire-and-forget — never raises, never blocks the caller.
+
+    Skips entirely in the test environment (the review path makes
+    real Anthropic calls, and the contract tests check the endpoint
+    shape, not the review wiring). Otherwise spawns a task on the
+    loop and stashes a strong reference so the GC doesn't reclaim
+    the coroutine mid-run."""
+    import asyncio
+    if not draft_id:
+        return
+    if os.getenv("ENVIRONMENT") == "test":
+        return
+    if document_type not in ("midpoint_paper", "executive_brief"):
+        return
+    try:
+        task = asyncio.create_task(
+            _run_auto_academic_review(draft_id, document_type, owner_email))
+        _AUTO_REVIEW_TASKS.add(task)
+        task.add_done_callback(_AUTO_REVIEW_TASKS.discard)
+    except RuntimeError:
+        # No running loop — we are off-loop and cannot schedule. The
+        # auto-fire is best-effort; the user can still trigger the
+        # Council Academic Review manually from the panel.
+        log.warning("auto_academic_review_no_loop",
+                    draft_id=draft_id, document_type=document_type)
+
+
 async def _generate_async(
     job_id: str, document_type: str, session: dict, request: Request,
 ) -> None:
@@ -8473,6 +8698,11 @@ async def _generate_async(
         request, session, "export", agents_involved=["academic_writer"],
         response_summary=f"{document_type} generated",
         metadata={"deliverable": document_type, "draft_id": draft_id})
+    # Auto-fire Academic Review against the new draft so the editor
+    # shows a readiness score on first open. Non-blocking — the
+    # generation job is already complete by the time we get here.
+    _schedule_auto_academic_review(
+        draft_id, document_type, session["email"])
 
 
 @app.post("/api/v1/export/midpoint-paper")
@@ -8496,7 +8726,12 @@ async def export_midpoint_paper(
         # Editor exports are a faithful render of what the author has
         # already saved; the gate runs only on fresh AI generation.
         return await _editor_export(int(editor_draft_id))
-    await _require_report_ready()
+    # IN02 (Academic Review complete) is advisory for the midpoint
+    # paper — the auto-fired review post-generation produces a score
+    # surfaced in the editor header, with an amber banner below 6.0.
+    # Other blockers (statistical FAIL, methodology FAIL on anything
+    # else) still gate generation.
+    await _require_report_ready(exclude_methodology_check_ids={"IN02"})
     return _start_generation_job("midpoint_paper", session, request)
 
 

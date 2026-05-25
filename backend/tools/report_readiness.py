@@ -189,15 +189,38 @@ async def _methodology_blocking() -> dict[str, list[dict[str, Any]]]:
         return empty
 
 
-async def compute_readiness() -> dict[str, Any]:
+async def compute_readiness(
+    exclude_methodology_check_ids: set[str] | None = None,
+) -> dict[str, Any]:
     """
     The single readiness verdict. Combines the statistical and
     methodology blockers and counts them. Used by:
       - GET /api/v1/report/readiness — the frontend readiness indicator
       - _require_report_ready() — the generation-endpoint gate
+
+    exclude_methodology_check_ids — the per-document advisory escape
+    hatch (May 25 2026). Midpoint generation passes {"IN02"} so the
+    Academic Review complete check is downgraded to advisory for that
+    document type only; an IN02 WARN/FAIL still blocks the executive
+    brief and the presentation deck. Filtered findings are removed
+    from the methodology lists so they do not surface in the 422
+    detail either — the user is told only about items that still
+    block, not items that are intentionally being treated as advisory.
     """
     statistical = await _statistical_blocking()
     methodology = await _methodology_blocking()
+    if exclude_methodology_check_ids:
+        excl = exclude_methodology_check_ids
+        methodology = {
+            "unresolved_warnings": [
+                it for it in methodology["unresolved_warnings"]
+                if it.get("check_id") not in excl
+            ],
+            "unresolved_failures": [
+                it for it in methodology["unresolved_failures"]
+                if it.get("check_id") not in excl
+            ],
+        }
     blocking_count = (
         len(statistical["unreviewed_warnings"])
         + len(statistical["unreviewed_failures"])
