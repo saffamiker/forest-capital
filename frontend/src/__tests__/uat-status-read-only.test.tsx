@@ -71,6 +71,12 @@ function mockTestingApis() {
     if (url === '/api/v1/testing/triage') {
       return Promise.resolve({ data: { reports: [] } })
     }
+    // May 24 2026 — Team Progress is the new default tab.
+    if (url === '/api/v1/testing/team-progress') {
+      return Promise.resolve({ data: {
+        team_emails: [], members: {},
+      } })
+    }
     return Promise.resolve({ data: {} })
   })
 }
@@ -91,6 +97,16 @@ function renderAdminPanel(permissions: string[]) {
   )
 }
 
+// Team Progress is the default tab now (May 24 2026). Tests that
+// assert against the Failure Reports content need to click into that
+// tab first. The Failure Reports tab button is labeled exactly
+// "Failure Reports".
+async function openFailureReports() {
+  const tab = await screen.findByRole('button',
+    { name: /^Failure Reports$/i })
+  tab.click()
+}
+
 describe('UAT #119 — Test Administration visibility split', () => {
   beforeEach(() => { mockTestingApis() })
   afterEach(() => { vi.restoreAllMocks() })
@@ -104,6 +120,7 @@ describe('UAT #119 — Test Administration visibility split', () => {
 
     it('sees the failure rows', async () => {
       renderAdminPanel(teamPerms)
+      await openFailureReports()
       await waitFor(() => {
         expect(screen.getByText('Open failure for assertion')).toBeInTheDocument()
         expect(screen.getByText('Resolved failure for assertion')).toBeInTheDocument()
@@ -112,6 +129,7 @@ describe('UAT #119 — Test Administration visibility split', () => {
 
     it('does NOT see the Mark Resolved button on an open failure', async () => {
       renderAdminPanel(teamPerms)
+      await openFailureReports()
       await screen.findByText('Open failure for assertion')
       // The Mark Resolved button is hidden for a non-sysadmin team_member.
       expect(screen.queryByRole('button', { name: /Mark Resolved/i }))
@@ -120,6 +138,7 @@ describe('UAT #119 — Test Administration visibility split', () => {
 
     it('does NOT see the Triage Reports admin block', async () => {
       renderAdminPanel(teamPerms)
+      await openFailureReports()
       await screen.findByText('Open failure for assertion')
       expect(screen.queryByText('Triage Reports')).not.toBeInTheDocument()
     })
@@ -151,6 +170,7 @@ describe('UAT #119 — Test Administration visibility split', () => {
 
     it('sees the Mark Resolved button on an open failure', async () => {
       renderAdminPanel(sysadminPerms)
+      await openFailureReports()
       await screen.findByText('Open failure for assertion')
       expect(screen.getByRole('button', { name: /Mark Resolved/i }))
         .toBeInTheDocument()
@@ -158,6 +178,7 @@ describe('UAT #119 — Test Administration visibility split', () => {
 
     it('sees the Triage Reports admin block', async () => {
       renderAdminPanel(sysadminPerms)
+      await openFailureReports()
       await screen.findByText('Open failure for assertion')
       expect(screen.getByText('Triage Reports')).toBeInTheDocument()
     })
