@@ -41,9 +41,14 @@ function stubAxios(manifestBehaviour: 'never' | 'resolve' | 'reject') {
   mockedAxios.get = vi.fn().mockImplementation((url: string) => {
     if (url === '/api/reports/manifest') {
       if (manifestBehaviour === 'resolve') {
+        // Reports.tsx renders manifest.owner_bob.map(...) and
+        // manifest.owner_molly.map(...) — the shape MUST include
+        // both arrays or the component crashes on render.
         return Promise.resolve({ data: {
           summary: { open_failures: 0, retest_pending: 0 },
           deliverables: [],
+          owner_bob: [],
+          owner_molly: [],
         } })
       }
       if (manifestBehaviour === 'reject') {
@@ -53,6 +58,34 @@ function stubAxios(manifestBehaviour: 'never' | 'resolve' | 'reject') {
       // the production bug shape: the GET was queued but no response
       // ever came back.
       return new Promise(() => { /* never */ })
+    }
+    if (url === '/api/v1/activity/summary') {
+      // TeamActivityPanel.SummaryPanel reads per_member.length AND
+      // commits.this_week — both must be present-shaped here. The
+      // default empty-object stub from below would crash the panel
+      // on render.
+      return Promise.resolve({ data: {
+        per_member: [],
+        commits: { total: 0, this_week: 0, by_author: {} },
+        most_active_agents: [],
+        last_academic_review: null,
+        total_interactions: 0,
+        analytical_sessions_only: true,
+      } })
+    }
+    if (url === '/api/v1/activity/cost-summary') {
+      return Promise.resolve({ data: {
+        total_cost_usd: 0,
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_interactions: 0,
+        by_member: [],
+        by_type: [],
+        analytical_sessions_only: true,
+      } })
+    }
+    if (url === '/api/v1/activity/team') {
+      return Promise.resolve({ data: { events: [], has_more: false } })
     }
     return Promise.resolve({ data: {} })
   })
