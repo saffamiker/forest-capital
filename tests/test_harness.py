@@ -25,12 +25,29 @@ os.environ.setdefault(
     "ruurdsm@queens.edu,thaob@queens.edu,murdockm@queens.edu,panttserk@queens.edu",
 )
 
+import pytest  # noqa: E402
+
 from main import app  # noqa: E402
 from auth import generate_session_token  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 client = TestClient(app)
 SESSION_HEADERS = {"X-API-Key": generate_session_token("ruurdsm@queens.edu")}
+
+
+# PR-LLM-2 (May 28 2026) — the evaluator cache is process-wide. Every
+# test in this file resets it before running so a verdict cached by an
+# earlier test does not bleed into a later one. The PMSecondaryEvaluator
+# tests use `lambda p: "the response"` generators that re-emit the same
+# response on every retry — without this reset, the second retry's
+# evaluator call would hit the previous run's cache and skip the
+# expected LLM call.
+@pytest.fixture(autouse=True)
+def _reset_evaluator_cache():
+    from agents.harness import reset_evaluator_cache_for_tests
+    reset_evaluator_cache_for_tests()
+    yield
+    reset_evaluator_cache_for_tests()
 
 
 def _score(overall: float, feedback: str = "needs work") -> str:
@@ -163,6 +180,147 @@ class TestHarnessUnit:
             result = harness.run(gen, "EVAL", "TASK", "context", "test_agent")
         # Passthrough (8.0) clears the threshold — review proceeds.
         assert result.final_score == 8.0
+
+
+# ── Evaluator cache (PR-LLM-2, May 28 2026) ─────────────────────────────────
+
+class TestEvaluatorCache:
+    """The evaluator caches (model, rubric, response, context) → (score,
+    feedback) so repeated calls with identical inputs skip the LLM
+    call entirely. Process-wide LRU, cap 256, reset_for_tests helper."""
+
+    def setup_method(self):
+        """Each case starts with a clean cache."""
+        from agents.harness import reset_evaluator_cache_for_tests
+        reset_evaluator_cache_for_tests()
+
+    def test_identical_inputs_hit_the_cache(self):
+        from agents.harness import GeneratorEvaluatorHarness
+
+        # Two harness runs against the SAME generator output → the
+        # evaluator inputs are identical → the second harness run's
+        # _evaluate should be a cache hit.
+        def gen(prompt: str) -> str:
+            return "identical response text"
+
+        call_count = [0]
+
+        def fake_call_claude(*args, **kwargs):
+            call_count[0] += 1
+            return _score(8.5, feedback="good")
+
+        with patch("agents.harness.call_claude",
+                   side_effect=fake_call_claude):
+            harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=0)
+            r1 = harness.run(gen, "EVAL", "TASK", "context", "test_agent")
+            r2 = harness.run(gen, "EVAL", "TASK", "context", "test_agent")
+
+        # Same score on both — the cached verdict was reused.
+        assert r1.final_score == 8.5
+        assert r2.final_score == 8.5
+        # Two harness runs but only ONE evaluator LLM call (cache
+        # hit on the second).
+        assert call_count[0] == 1
+
+    def test_different_response_misses_cache(self):
+        from agents.harness import GeneratorEvaluatorHarness
+
+        outputs = iter(["response A", "response B"])
+
+        def gen(prompt: str) -> str:
+            return next(outputs)
+
+        call_count = [0]
+
+        def fake_call_claude(*args, **kwargs):
+            call_count[0] += 1
+            return _score(7.5, feedback="ok")
+
+        with patch("agents.harness.call_claude",
+                   side_effect=fake_call_claude):
+            harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=0)
+            harness.run(gen, "EVAL", "TASK", "context", "test_agent")
+            harness.run(gen, "EVAL", "TASK", "context", "test_agent")
+
+        # Different responses → different cache keys → two LLM calls.
+        assert call_count[0] == 2
+
+    def test_different_rubric_misses_cache(self):
+        from agents.harness import GeneratorEvaluatorHarness
+
+        def gen(prompt: str) -> str:
+            return "same response text"
+
+        call_count = [0]
+
+        def fake_call_claude(*args, **kwargs):
+            call_count[0] += 1
+            return _score(8.0)
+
+        with patch("agents.harness.call_claude",
+                   side_effect=fake_call_claude):
+            harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=0)
+            # Same response + context, DIFFERENT evaluator prompts → two calls.
+            harness.run(gen, "RUBRIC A", "TASK", "ctx", "agent")
+            harness.run(gen, "RUBRIC B", "TASK", "ctx", "agent")
+
+        assert call_count[0] == 2
+
+    def test_parse_failure_is_not_cached(self):
+        """A passthrough score from a parse failure should NOT pollute
+        the cache. A subsequent identical-input request must still
+        attempt to parse fresh, in case the model now returns a
+        well-formed response."""
+        from agents.harness import GeneratorEvaluatorHarness
+
+        def gen(prompt: str) -> str:
+            return "the response"
+
+        # First two calls return malformed JSON (passthrough), then
+        # a third returns valid JSON. If the parse failure had been
+        # cached, the third request would have used the passthrough
+        # and never actually called the evaluator a third time.
+        outputs = iter([
+            "malformed", "malformed",        # first harness run
+            _score(9.0),                     # second harness run
+        ])
+
+        def fake_call_claude(*args, **kwargs):
+            return next(outputs)
+
+        with patch("agents.harness.call_claude",
+                   side_effect=fake_call_claude):
+            harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=0)
+            r1 = harness.run(gen, "EVAL", "TASK", "ctx", "agent")
+            r2 = harness.run(gen, "EVAL", "TASK", "ctx", "agent")
+
+        # First was passthrough (parse failed twice), second
+        # successfully parsed 9.0 — proving the passthrough was NOT
+        # cached.
+        assert r1.final_score == 8.0
+        assert r2.final_score == 9.0
+
+    def test_lru_eviction_drops_oldest_entry(self):
+        """The cache is bounded at _EVALUATOR_CACHE_MAX_SIZE. Past
+        that, the least-recently-used entry is evicted."""
+        from agents.harness import (
+            _evaluator_cache, _evaluator_cache_get, _evaluator_cache_set,
+            _EVALUATOR_CACHE_MAX_SIZE, reset_evaluator_cache_for_tests,
+        )
+
+        reset_evaluator_cache_for_tests()
+        # Fill the cache to capacity.
+        for i in range(_EVALUATOR_CACHE_MAX_SIZE):
+            _evaluator_cache_set(f"key_{i}", (float(i), ""))
+        # The oldest entry is still present.
+        assert _evaluator_cache_get("key_0") is not None
+        # Adding ONE more triggers eviction. Re-fetching key_0
+        # touched its LRU position, so key_1 is the oldest now.
+        _evaluator_cache_set("key_new", (99.0, ""))
+        assert len(_evaluator_cache) == _EVALUATOR_CACHE_MAX_SIZE
+        # key_1 is the LRU after we touched key_0 above.
+        assert _evaluator_cache_get("key_1") is None
+        assert _evaluator_cache_get("key_new") == (99.0, "")
 
     def test_generator_exception_returns_best_earlier_response(self):
         from agents.harness import GeneratorEvaluatorHarness

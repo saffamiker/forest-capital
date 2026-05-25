@@ -30,7 +30,9 @@ FAIL-OPEN. The harness never makes output worse than no harness:
 """
 from __future__ import annotations
 
+import hashlib
 import json
+from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Callable
@@ -50,6 +52,61 @@ from agents.base import call_claude
 # Score assumed when the evaluator itself fails — above any threshold, so
 # an evaluator outage never blocks or downgrades the primary response.
 _PASSTHROUGH_SCORE = 8.0
+
+# PR-LLM-2 (May 28 2026) — evaluator result cache. The evaluator fires
+# on every harness run across the council, academic review, QA, and
+# document generation. Many of those runs feed the SAME response into
+# the SAME rubric (e.g. a partial-failure retry that regenerates the
+# same text, or a back-to-back review against an unchanged draft). A
+# process-wide LRU keyed by sha256((model, rubric, response, context))
+# skips the LLM call entirely when the inputs collide.
+#
+# Sizing — 256 entries comfortably covers a single review session's
+# unique evaluator calls (typically 20-40) with headroom for several
+# concurrent sessions. Above the cap the oldest entry is evicted.
+#
+# Process-wide — the cache is reset on every restart. That's
+# deliberate: a model version change or rubric edit takes effect on
+# the next deploy without a manual cache clear.
+#
+# Test helper — reset_evaluator_cache_for_tests() empties the cache
+# so each test runs against a clean state.
+_EVALUATOR_CACHE_MAX_SIZE = 256
+_evaluator_cache: "OrderedDict[str, tuple[float, str]]" = OrderedDict()
+
+
+def _evaluator_cache_key(
+    model: str, rubric: str, response: str, context: str,
+) -> str:
+    """sha256 over (model || rubric || response || context). The four
+    inputs are joined with a null byte so a partial prefix collision
+    across two fields cannot accidentally hash to the same key."""
+    blob = "\x00".join((model, rubric, response, context)).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def _evaluator_cache_get(key: str) -> tuple[float, str] | None:
+    """LRU read — move the entry to the end so the next eviction sweep
+    drops the least-recently-used row."""
+    if key not in _evaluator_cache:
+        return None
+    _evaluator_cache.move_to_end(key)
+    return _evaluator_cache[key]
+
+
+def _evaluator_cache_set(key: str, value: tuple[float, str]) -> None:
+    """LRU write — drop the oldest entry once the cap is reached."""
+    _evaluator_cache[key] = value
+    _evaluator_cache.move_to_end(key)
+    while len(_evaluator_cache) > _EVALUATOR_CACHE_MAX_SIZE:
+        _evaluator_cache.popitem(last=False)
+
+
+def reset_evaluator_cache_for_tests() -> None:
+    """Empties the evaluator cache. Test-only helper — production code
+    paths never call this; tests use it to start each case with a
+    known-clean cache state."""
+    _evaluator_cache.clear()
 
 # Per-request capture of harness runs, for the Team Activity metrics.
 # A ContextVar holding a shared list: the endpoint seeds it, and every
@@ -299,6 +356,18 @@ class GeneratorEvaluatorHarness:
             f"consistent with):\n{context}"
         )
 
+        # PR-LLM-2 cache check. Identical (model, rubric, response,
+        # context) tuples skip the LLM call entirely — the cached
+        # (score, feedback) is returned. A cache hit is the cheapest
+        # possible evaluator outcome: no tokens, no latency.
+        cache_key = _evaluator_cache_key(
+            self.evaluator_model, evaluator_prompt, response, context)
+        cached = _evaluator_cache_get(cache_key)
+        if cached is not None:
+            log.info("harness_evaluator_cache_hit",
+                     cache_size=len(_evaluator_cache))
+            return cached
+
         def _attempt(max_tokens: int) -> tuple[float, str] | None:
             """Returns (score, feedback) on a successful parse, else
             None — the caller decides whether to retry or fall back."""
@@ -324,6 +393,12 @@ class GeneratorEvaluatorHarness:
         try:
             result = _attempt(max_tokens=600)
             if result is not None:
+                # Cache successful parses ONLY — the passthrough score
+                # for a parse failure is not a real verdict and should
+                # not pollute the cache.
+                _evaluator_cache_set(cache_key, result)
+                log.info("harness_evaluator_cache_miss_stored",
+                         cache_size=len(_evaluator_cache))
                 return result
             # First parse failed — most likely truncation past the
             # closing '}'. Retry ONCE with a higher token budget.
@@ -331,13 +406,19 @@ class GeneratorEvaluatorHarness:
                      retry_max_tokens=1500)
             result = _attempt(max_tokens=1500)
             if result is not None:
+                _evaluator_cache_set(cache_key, result)
+                log.info("harness_evaluator_cache_miss_stored",
+                         cache_size=len(_evaluator_cache))
                 return result
-            # Both attempts failed parsing — passthrough score.
+            # Both attempts failed parsing — passthrough score, NOT
+            # cached (a future identical-input request still tries
+            # to parse fresh).
             log.warning("harness_evaluator_both_attempts_failed")
             return _PASSTHROUGH_SCORE, ""
         except Exception as exc:  # noqa: BLE001
             # Non-parse errors (network, auth, etc.) — passthrough so
             # the review session never hard-fails on the evaluator.
+            # Also NOT cached.
             log.warning("harness_evaluator_failed", error=str(exc))
             return _PASSTHROUGH_SCORE, ""
 
