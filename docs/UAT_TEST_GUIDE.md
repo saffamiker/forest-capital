@@ -105,12 +105,21 @@ role-specific section.
 - [ ] Submitting a question returns responses from multiple agents.
 - [ ] Agent responses render as formatted markdown (not raw `*` and `#`
       characters).
-- [ ] The Academic Review button is visually prominent (an amber card).
-- [ ] Clicking Academic Review starts the review session.
+
+### QA Audit (Academic Review)
+
+- [ ] The QA Audit page loads.
+- [ ] The Academic Review panel is visible on the QA Audit page.
+- [ ] The Run Academic Review button is visually prominent (an amber
+      card) and visible to team_member or higher.
+- [ ] Clicking Run Academic Review starts the review session.
 - [ ] The loading state shows "Consulting the council…".
 - [ ] The verdict renders with section headings and rating badges
       (Strong / Developing / Needs Work).
 - [ ] The peer responses accordion is expandable.
+- [ ] Navigate away and back — the verdict is preserved (Zustand cache
+      survives navigation).
+- [ ] A Cancel button is visible during a run.
 
 ### Reports
 
@@ -219,12 +228,16 @@ role-specific section.
       pill is still present (it tracks the audit, not the route).
 - [ ] On the **Statistical Audit** panel, find a finding with status
       **WARN**.
-- [ ] Click **[Acknowledge]** on the WARN finding — verify a textarea
-      opens for the resolution note.
-- [ ] Enter a brief resolution note ("Reviewed; accepted as a documented
-      limitation") and click **[Save acknowledgement]**.
-- [ ] Verify the saved finding now shows an **Acknowledged** badge and
-      the resolution note renders below the evidence.
+- [ ] Click **[Acknowledge]** on the WARN finding — verify a modal opens
+      with a textarea and a character counter.
+- [ ] Attempt to confirm with fewer than 20 characters — verify the
+      Confirm button is disabled.
+- [ ] Enter a valid resolution note (≥20 characters, e.g. "Reviewed and
+      accepted as a documented limitation") — verify Confirm becomes
+      enabled.
+- [ ] Click Confirm — verify the saved finding now shows a green
+      **Acknowledged** badge and the resolution note renders below the
+      evidence.
 - [ ] Click **[Download Audit Report]** to export the PDF.
 - [ ] Open the PDF and verify the resolution note appears on the WARN
       finding's row — the acknowledgement carries into the export.
@@ -249,6 +262,73 @@ role-specific section.
 - [ ] Production startup would fail if `SECRET_KEY` is unset (verify the
       `config.py` fail-fast logic).
 
+### Macro Research dashboard widget
+
+- [ ] Navigate to the Dashboard.
+- [ ] Verify the **Macro Research** widget is visible.
+- [ ] Verify the digest panel renders with the signals list and category
+      pills.
+- [ ] Click a source URL on one of the signals — verify it opens
+      correctly in a new tab.
+- [ ] Verify the stale warning appears if the digest is more than 24
+      hours old.
+- [ ] Verify the **Generated at** timestamp is visible.
+
+### Macro Run Now — sysadmin gate
+
+- [ ] Verify the **[Run Now]** button is visible to sysadmin on the
+      Macro Research widget.
+- [ ] Click **[Run Now]** — verify the digest regenerates.
+- [ ] Log out and log back in as a team_member account.
+- [ ] Verify the **[Run Now]** button is **not** visible to the
+      team_member (hook-gated `useIsSysadmin()`).
+
+### Academic Review — new location
+
+- [ ] Navigate to the **QA Audit** page.
+- [ ] Verify the Academic Review panel is visible on the QA Audit page.
+- [ ] Verify the **Run Academic Review** button is visible to sysadmin.
+- [ ] Click **Run Academic Review**.
+- [ ] Navigate away and back — verify the verdict is preserved (Zustand
+      cache).
+- [ ] Verify the **Cancel** button is visible during the run.
+
+### Mark-as-Intentional — disclosure modal
+
+- [ ] Navigate to the **QA Audit** page.
+- [ ] Find a **WARN** check on the methodology checklist.
+- [ ] Click **[Mark as Intentional]** — verify a modal opens with a
+      required textarea and a character counter.
+- [ ] Attempt to confirm with fewer than 20 characters — verify the
+      Confirm button is disabled.
+- [ ] Enter a valid disclosure note (≥20 characters) — verify Confirm
+      becomes enabled.
+- [ ] Click Confirm — verify the finding now shows a green
+      **Intentional** badge.
+
+### Methodology audit PDF — intentional design rendering
+
+- [ ] After marking a methodology finding as intentional (with a note),
+      download the methodology audit PDF.
+- [ ] Verify a green **"Intentional design: [note]"** line appears under
+      the relevant check in the PDF.
+
+### Disclosure note — server enforcement
+
+- [ ] Send a Mark-as-Intentional API request with a 19-character note —
+      verify the response is **422**.
+- [ ] Send a Mark-as-Intentional API request with a 20-character note —
+      verify the response is **200**.
+
+### Self-healing model fallback
+
+- [ ] Submit any Council query.
+- [ ] Verify the response returns successfully — the fallback chain is
+      transparent to the user (Gemini 2.0 → Gemini 2.5 on 404, then the
+      next provider in the chain).
+- [ ] Check the platform logs or the model indicator on the response
+      for the active provider.
+
 ---
 
 ## Section 3: Bob Thao — Written Deliverables and Council Workflow
@@ -268,9 +348,12 @@ deliverables lead.*
 - [ ] Click "Ask the Council about this" from an explainer — verify the
       question pre-populates correctly on the Council screen.
 
-### Academic Review
+### Academic Review (QA Audit page, team_member-gated)
 
-- [ ] Navigate to Council and click Academic Review (the amber button).
+- [ ] Navigate to the **QA Audit** page.
+- [ ] Verify the Academic Review panel and the **Run Academic Review**
+      button are visible to your team_member account.
+- [ ] Click **Run Academic Review** (the amber button).
 - [ ] Wait for the full verdict (this may take 30–45 seconds).
 - [ ] Verify the verdict has all five sections: Data Sufficiency /
       Requirements Alignment / Deliverable Quality / Priority Investigation /
@@ -279,6 +362,8 @@ deliverables lead.*
 - [ ] The Priority Areas are specific and numbered.
 - [ ] The Overall Readiness section gives a clear, honest assessment.
 - [ ] The peer responses accordion shows multiple agent perspectives.
+- [ ] Navigate away and back — verify the verdict is preserved (Zustand
+      cache survives navigation).
 
 > **Why this matters for your workflow:** the midpoint paper's "Next Steps"
 > section is generated from the most recent Academic Review verdict. Run a
@@ -394,6 +479,12 @@ away from Reports never cancels the run.
 - [ ] Upload a test `.md` file and verify it appears in the list.
 - [ ] Delete the test file.
 - [ ] Verify the Reports-screen annotation links correctly to Settings.
+
+### Magic link — rebranded subject
+
+- [ ] Request a magic link from the login page using your Queens email.
+- [ ] Open the resulting email — verify the subject line reads
+      **"Your Analytics Desk login link"**.
 
 ---
 
