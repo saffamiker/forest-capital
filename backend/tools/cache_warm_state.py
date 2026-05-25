@@ -256,6 +256,59 @@ def _strategy_cache_is_healthy(cached: dict | None) -> bool:
     return True
 
 
+def _analytics_downstream_is_healthy(payload: dict | None) -> bool:
+    """True when the analytics_metrics_cache `academic_analytics`
+    payload is EXHAUSTIVELY validated against the same rule the
+    academic-audit pre-flight applies. The rule lives in one place —
+    tools/precomputed_analytics.validate_analytics_payload — and
+    checks every field AN01 (Carhart regression → factor_loadings)
+    and AN04 (regime_conditional) consume:
+
+      factor_loadings required per row:
+        strategy, mkt_rf, smb, hml, mom, alpha_annualized,
+        r_squared in [0, 1], plus the four _significant flags +
+        mom_significant. A three-factor fallback row still must
+        carry mom and mom_significant (null permitted).
+
+      regime_conditional required per row:
+        strategy, pre_2022_sharpe, post_2022_sharpe, pre_2022_cagr,
+        post_2022_cagr, pre_2022_months, post_2022_months. A null
+        Sharpe is permitted ONLY when its months counterpart is
+        below 2 — anything else flags as incomplete.
+
+    Calling the same validator the audit pre-flight uses guarantees
+    the warm's decision rule never drifts from the audit's
+    completeness rule — they share one source of truth.
+
+    Fast path: trust the `_completeness` block already attached to
+    the payload by refresh_academic_analytics; an incomplete block
+    means the row was written but flagged structurally bad, so the
+    warm reruns. Slow path: re-validate when the block is missing
+    (an older payload written before the validator shipped).
+    """
+    if not payload:
+        return False
+    # The validated rule is the AND of "every required factor-loadings
+    # field is present" AND "every required regime-conditional field
+    # is present". Empty / missing keys on either side are unhealthy.
+    completeness = payload.get("_completeness")
+    if isinstance(completeness, dict):
+        return bool(completeness.get("complete", False))
+    # No _completeness block — re-validate so an older row written
+    # before the validator shipped still gets the exhaustive check.
+    try:
+        from tools.precomputed_analytics import validate_analytics_payload
+        verdict = validate_analytics_payload(payload)
+        return bool(verdict.get("complete", False))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("analytics_downstream_validation_failed",
+                    error=str(exc))
+        # Fail-open: a validator error treats the row as unhealthy so
+        # the warm reruns. Better to over-refresh than to leave the
+        # AN01 / AN04 outputs stuck on a row we can't verify.
+        return False
+
+
 async def _default_warm_fn() -> dict[str, bool]:
     """Default warm implementation — verifies strategy_results_cache
     is usable, runs the backtester if not, then refreshes analytics
@@ -270,6 +323,14 @@ async def _default_warm_fn() -> dict[str, bool]:
     empty downstream tables. The warm now proactively reruns
     run_all_strategies when the cache row is not healthy, so the
     analytics refresh runs against fresh strategy data.
+
+    May 25 2026 hotfix — also reruns when the analytics_metrics_cache
+    academic_analytics payload is missing factor_loadings or
+    regime_conditional (the AN01 / AN04 inputs). The strategy-cache
+    check above guarantees fresh INPUT; the downstream check verifies
+    the OUTPUT actually landed. A cache that satisfies the input
+    check but has a stale / incomplete analytics row still triggers
+    the rerun.
 
     The backtester rerun is wrapped in its own try/except so a
     transient pipeline failure (FRED outage, yfinance hiccup) does
@@ -288,15 +349,31 @@ async def _default_warm_fn() -> dict[str, bool]:
     )
     from tools.precomputed_analytics import (
         get_metric as get_precomputed,
+        get_latest_metric,
         refresh_all_analytics,
     )
 
     # ── Strategy-cache health check ───────────────────────────────────
     latest = await get_latest_strategy_cache()
     n_strategies = len(latest or {})
-    healthy = _strategy_cache_is_healthy(latest)
+    strategy_healthy = _strategy_cache_is_healthy(latest)
+
+    # ── Downstream analytics-cache health check ───────────────────────
+    # AN01 (Carhart regression → factor_loadings) and AN04
+    # (regime_conditional) are computed by refresh_academic_analytics
+    # and stored in analytics_metrics_cache under metric_kind
+    # 'academic_analytics'. Verify both are present and non-empty in
+    # the most recent row; a stale or partial row triggers a rerun
+    # even when the upstream strategy cache happens to look complete.
+    latest_analytics = await get_latest_metric("academic_analytics")
+    analytics_healthy = _analytics_downstream_is_healthy(latest_analytics)
+
+    healthy = strategy_healthy and analytics_healthy
     log.info("analytics_cache_warm_strategy_check",
-             n_strategies=n_strategies, healthy=healthy)
+             n_strategies=n_strategies,
+             strategy_healthy=strategy_healthy,
+             analytics_healthy=analytics_healthy,
+             healthy=healthy)
 
     if not healthy:
         # Rerun the backtester so the analytics refresh below reads
