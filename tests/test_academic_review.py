@@ -83,6 +83,53 @@ def test_context_assembly_handles_missing_document_types_gracefully():
         assert label in block
 
 
+# ── 2b. Team role division context (May 28 2026) ──────────────────────────────
+#
+# The arbiter (and peers) must read role-division framing alongside
+# the team-activity counts so the verdict does not misread Michael's
+# front-loaded engineering as analytical disengagement.
+
+def test_context_block_carries_team_role_division_context():
+    from agents.academic_review import (
+        build_review_context_block, group_documents_by_type,
+    )
+    grouped = group_documents_by_type([])
+    block = build_review_context_block(
+        {"strategy_count": 0, "performance_range": None,
+         "risk_free_rate": None, "analytics_components": []},
+        grouped,
+    )
+    # Section header + every named team member + the engagement guidance.
+    assert "TEAM ROLE DIVISION CONTEXT" in block
+    assert "Michael Ruurds is the platform engineer" in block
+    assert "Bob Thao owns analytical interpretation" in block
+    assert "Molly Murdock owns" in block
+    assert "role-appropriate contributions" in block
+    assert "unresolved [[BOB]] markers" in block
+    assert "engineering commit disparity" in block
+
+
+def test_team_role_context_appears_before_team_engagement():
+    # The role framing must be read by the arbiter BEFORE the raw
+    # activity counts — otherwise the verdict could anchor on the
+    # numbers and miss the framing.
+    from agents.academic_review import (
+        build_review_context_block, group_documents_by_type,
+    )
+    grouped = group_documents_by_type([])
+    team_activity = {"per_member": []}
+    block = build_review_context_block(
+        {"strategy_count": 0, "performance_range": None,
+         "risk_free_rate": None, "analytics_components": []},
+        grouped, team_activity=team_activity,
+        team_members=[("bob@queens.edu", "Bob Thao")],
+    )
+    role_idx = block.find("TEAM ROLE DIVISION CONTEXT")
+    engagement_idx = block.find("TEAM ENGAGEMENT")
+    assert role_idx != -1 and engagement_idx != -1
+    assert role_idx < engagement_idx
+
+
 # ── 3. Peer fan-out invokes all non-arbiter agents ────────────────────────────
 
 def test_peer_fan_out_invokes_all_non_arbiter_agents():

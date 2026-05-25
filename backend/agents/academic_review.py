@@ -159,6 +159,30 @@ def group_documents_by_type(docs: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
+# May 28 2026 — team role division context. Prepended to the team-
+# engagement block in the arbiter (and peer) context so the verdict
+# evaluates each member's contributions against role-appropriate
+# expectations rather than raw commit / interaction counts. Michael's
+# front-loaded platform engineering should NOT be read as analytical
+# disengagement; Bob's analytical writing and Molly's presentation
+# work are the genuine analytical surfaces to assess.
+_TEAM_ROLE_CONTEXT_LINES: list[str] = [
+    "",
+    "TEAM ROLE DIVISION CONTEXT",
+    "Michael Ruurds is the platform engineer — commit count and QA "
+    "activity reflect front-loaded engineering work, not analytical "
+    "disengagement. Bob Thao owns analytical interpretation, written "
+    "deliverables, and Council engagement. Molly Murdock owns "
+    "presentation, visualisation, and rehearsal. Engagement metrics "
+    "should be evaluated against role-appropriate contributions, not "
+    "raw commit counts.",
+    "",
+    "When assessing team engagement, flag genuine analytical gaps "
+    "(e.g. unresolved [[BOB]] markers, missing interpretation "
+    "sections) rather than engineering commit disparity.",
+]
+
+
 def format_team_activity_block(
     team_activity: dict[str, Any] | None,
     team_members: list[tuple[str, str]] | None = None,
@@ -310,6 +334,14 @@ def build_review_context_block(
             if len(text) > _DOC_CHAR_CAP:
                 text = text[:_DOC_CHAR_CAP] + "\n…[document truncated for review]"
             lines.append(f"\n[{label}: {d.get('name', 'document')}]\n{text}")
+
+    # — Team role division context (May 28 2026) —
+    # Prepended to the engagement block so the verdict reads the role
+    # framing BEFORE the raw activity counts. Always present, even
+    # when team_activity is empty — the role context still informs
+    # how the verdict frames Bob's analytical surfaces and Michael's
+    # engineering work for the BOB-callout review in section 4.
+    lines.extend(_TEAM_ROLE_CONTEXT_LINES)
 
     # — Team engagement —
     lines.extend(format_team_activity_block(team_activity, team_members))
