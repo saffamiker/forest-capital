@@ -17,6 +17,7 @@
  */
 import { useEffect, useState } from 'react'
 import { X, BookOpen, ExternalLink } from 'lucide-react'
+import { ModalCloseButton } from './ModalControls'
 import type { GlossaryTerm } from '../types/glossary'
 import { loadReferences, findReferenceFor, type Reference } from '../lib/references'
 
@@ -68,14 +69,10 @@ export default function LearnMoreSidePanel({ term, entry, onClose }: Props) {
             <BookOpen className="w-4 h-4 text-electric" />
             <h2 className="text-white font-semibold text-sm">{term.replace(/_/g, ' ')}</h2>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="text-muted hover:text-white p-1 rounded hover:bg-navy-700 transition-colors"
-            aria-label="Close"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <ModalCloseButton
+            onClose={onClose}
+            className="hover:bg-navy-700"
+          />
         </header>
 
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5 text-sm leading-relaxed">

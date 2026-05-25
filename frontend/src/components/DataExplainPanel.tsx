@@ -15,6 +15,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import { X, Loader2, Sparkles, Users } from 'lucide-react'
+import { ModalCloseButton } from './ModalControls'
 import Markdown from './Markdown'
 
 interface DataExplainPanelProps {
@@ -152,14 +153,11 @@ export default function DataExplainPanel({
               </div>
             )}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close data explanation"
-            className="text-muted hover:text-white shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <ModalCloseButton
+            onClose={onClose}
+            ariaLabel="Close data explanation"
+            className="shrink-0"
+          />
         </header>
 
         {/* break-words + overflow-wrap-anywhere stop long unbroken

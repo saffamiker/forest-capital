@@ -35,6 +35,7 @@ import {
   ExternalLink, Search, X, ShieldCheck, Lock,
 } from 'lucide-react'
 import { Step1ExportButtons } from './Step1ExportButtons'
+import { ModalCloseButton, KeyboardHint } from '../ModalControls'
 
 export type StepStatus =
   | 'idle'
@@ -627,15 +628,16 @@ function StepDetailModal({
           </div>
           <div className="flex items-center gap-2">
             <Pill text={status} kind={statusKind} />
-            <button
-              type="button"
-              onClick={onClose}
-              data-testid={`pipeline-step-${number}-modal-close`}
-              aria-label="Close details"
-              className="text-text-muted hover:text-text-primary
-                         transition-colors p-1">
-              <X className="w-4 h-4" />
-            </button>
+            {/* Visible close button — 44×44 touch target on mobile,
+                32×32 on desktop. Replaces a tight p-1 button that
+                was hard to tap on a phone. The Esc handler is owned
+                by this modal's useEffect and remains in place — the
+                button is the PRIMARY close affordance. */}
+            <ModalCloseButton
+              onClose={onClose}
+              ariaLabel="Close details"
+              testId={`pipeline-step-${number}-modal-close`}
+            />
           </div>
         </header>
 
@@ -651,11 +653,14 @@ function StepDetailModal({
           </div>
         </div>
 
-        {/* Footer — elapsed time on the right; help cue on the left */}
+        {/* Footer — elapsed time on the right; keyboard hint on the
+            left. The hint is DESKTOP-ONLY (hidden md:inline) so a
+            mobile user never sees the misleading "Press Esc"
+            prompt. Esc still works on desktop. */}
         <footer className="flex items-center justify-between gap-2
                             px-4 py-2 border-t border-navy-700 shrink-0
                             text-2xs text-text-muted">
-          <span>Press Esc to close</span>
+          <KeyboardHint hint="Press Esc to close" />
           {ms !== undefined ? (
             <span>elapsed {Math.round(ms)} ms</span>
           ) : null}

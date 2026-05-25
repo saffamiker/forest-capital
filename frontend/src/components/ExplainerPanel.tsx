@@ -13,6 +13,7 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import { X, Loader2, Users, Send, MessageCircle } from 'lucide-react'
 import Markdown from './Markdown'
+import { ModalCloseButton } from './ModalControls'
 import {
   renderWithMacroCitations,
   extractMacroCategories,
@@ -264,14 +265,11 @@ export default function ExplainerPanel({
               </div>
             )}
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close explainer"
-            className="text-muted hover:text-white shrink-0"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <ModalCloseButton
+            onClose={onClose}
+            ariaLabel="Close explainer"
+            className="shrink-0"
+          />
         </header>
 
         {/* break-words + overflow-wrap-anywhere stop long unbroken

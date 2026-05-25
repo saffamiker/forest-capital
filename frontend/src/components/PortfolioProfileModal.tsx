@@ -14,6 +14,7 @@
  */
 import { useEffect } from 'react'
 import { X } from 'lucide-react'
+import { ModalCloseButton } from './ModalControls'
 import { PortfolioProfilePanel } from './PortfolioProfilePanel'
 
 
@@ -73,17 +74,11 @@ export function PortfolioProfileModal({
           <h2 className="text-white font-semibold text-sm">
             {displayName} — Portfolio Profile
           </h2>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Close"
-            data-testid="portfolio-profile-modal-close"
-            className="flex items-center justify-center w-9 h-9
-                        rounded text-muted hover:text-white
-                        hover:bg-navy-700 transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <ModalCloseButton
+            onClose={onClose}
+            testId="portfolio-profile-modal-close"
+            className="hover:bg-navy-700"
+          />
         </div>
         <div className="p-4">
           <PortfolioProfilePanel
