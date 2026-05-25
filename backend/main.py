@@ -518,6 +518,16 @@ async def get_me(session: dict = Depends(require_auth)):
 
 @app.get("/api/health")
 async def health():
+    # May 24 2026 — surface RENDER_GIT_COMMIT so deployment status is
+    # verifiable WITHOUT the master API key. The dashboard-timeout
+    # investigation kept hitting "is Render on the latest commit?"
+    # as the unverifiable first question; exposing the short SHA on
+    # /health closes that gap. Render injects RENDER_GIT_COMMIT
+    # automatically on every build (full 40-char SHA); a local dev
+    # run has no value set, in which case "dev" surfaces. The branch
+    # name (RENDER_GIT_BRANCH) is included so a deploy from a
+    # feature branch is obviously identified.
+    commit = os.getenv("RENDER_GIT_COMMIT", "dev")
     return {
         "status": "ok",
         "sprint": "4",
@@ -525,6 +535,9 @@ async def health():
         "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
         "gemini": bool(os.getenv("GOOGLE_API_KEY")),
         "cache": True,
+        "commit": commit[:7] if commit != "dev" else "dev",
+        "commit_full": commit,
+        "branch": os.getenv("RENDER_GIT_BRANCH") or "dev",
     }
 
 
