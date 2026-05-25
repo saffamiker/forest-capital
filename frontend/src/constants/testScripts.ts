@@ -37,7 +37,7 @@ export interface TestScript {
 // v2 (May 22 2026) — adds the report-writer editor flow + macro research +
 // explainer CIO follow-up + diversification chart steps to all three
 // scripts; adds QA audit / failure / issue tracker steps to Molly's script.
-export const TEST_SCRIPT_VERSION = 2
+export const TEST_SCRIPT_VERSION = 3
 
 const allTesters: TestScript = {
   id: 'all_testers_v1',
@@ -408,9 +408,25 @@ const allTesters: TestScript = {
     {
       id: 'feedback_id_column', route: '/settings', target: null,
       title: 'Feedback backlog ID column',
-      instruction: 'In Settings → Test Administration → Feedback Backlog, '
-        + 'check the table columns.',
-      expectedResult: 'There is an ID column showing the feedback row id.',
+      // UAT 2026-05-24 (#119) — clarified the permission scope.
+      // The Test Administration section header is visible to anyone
+      // with `access_test_panel` (team_member + sysadmin role
+      // presets carry it). The data INSIDE — failures table,
+      // feedback backlog, issue tracker — is gated on view_admin
+      // (sysadmin only). A team_member sees the section heading
+      // and an empty-state / 403 message inside; a sysadmin sees
+      // the full data including the ID column.
+      instruction: 'In Settings → Test Administration → Feedback '
+        + 'Backlog, check the table columns. If you are signed in '
+        + 'as a team_member (Bob, Molly) you can open the section '
+        + 'but the data is sysadmin-only — pass this step if you '
+        + 'see the section header. If you are signed in as the '
+        + 'sysadmin (Michael), confirm the table carries an ID '
+        + 'column showing each feedback row id.',
+      expectedResult: 'Sysadmin: there is an ID column showing the '
+        + 'feedback row id. Team-member: the Test Administration '
+        + 'section header is visible (data shows an empty / 403 '
+        + 'state — sysadmin-only by design).',
       allowSkip: true,
     },
   ],
@@ -432,18 +448,38 @@ const michael: TestScript = {
     },
     {
       id: 'an_six_components', route: '/analytics', target: '[data-tour="analytics-header"]',
-      title: 'All six analytics components render',
-      instruction: 'Scroll through the Analytics page.',
-      expectedResult: 'Cumulative returns, rolling correlation, rolling '
-        + 'excess return, regime-conditional table, drawdown comparison '
-        + 'and factor loadings all render.',
+      title: 'Analytics components render',
+      instruction: 'Scroll through the Analytics page. The page now '
+        + 'carries the original six plus the diversification suite '
+        + '(Item 8) — fourteen components in total. Confirm each is '
+        + 'present and rendering data, not blank.',
+      // UAT 2026-05-24 (#118) — the prior list named six. The page
+      // has 14 components since the Item 8 diversification suite +
+      // sensitivity analysis + strategy methodology panel landed.
+      // Return Distribution and Marginal Contribution to Risk
+      // (MCTR) — both flagged as missing from the test — are now
+      // explicitly listed.
+      expectedResult: 'All fourteen Analytics components render with '
+        + 'data: (1) summary statistics, (2) cumulative returns, '
+        + '(3) rolling correlation, (4) rolling excess return, '
+        + '(5) regime-conditional table, (6) drawdown comparison, '
+        + '(7) drawdown duration, (8) tail risk (VaR / CVaR), '
+        + '(9) up/down capture scatter, (10) crisis performance, '
+        + '(11) marginal contribution to risk (MCTR), '
+        + '(12) return distribution + normality, '
+        + '(13) Carhart factor loadings, (14) parameter '
+        + 'sensitivity. Strategy Methodology panel sits below the '
+        + 'fourteen as a reference (not counted in the 14).',
       allowSkip: true,
     },
     {
       id: 'an_study_period', route: '/analytics', target: null,
       title: 'Study period',
       instruction: 'Find the study-period line on the Analytics page.',
-      expectedResult: 'It shows the live study period (Jul 2002 to the most recent ingested month — 286 months on Render now).',
+      expectedResult: 'It shows the live study period in MM-DD-YYYY '
+        + 'format (e.g. "07-31-2002 → 04-30-2026") with the current '
+        + 'month count (286 or higher on Render — the pipeline '
+        + 'auto-extends each time a calendar month closes).',
       allowSkip: true,
     },
     {
