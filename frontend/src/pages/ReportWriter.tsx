@@ -1573,7 +1573,10 @@ interface StepSummary {
   payload?: Record<string, unknown>
 }
 
-const STEP_ACTIONS: Record<number, (templateId: string) => Promise<StepSummary>> = {
+// Exported so the per-step runner contract (in particular Step 4's
+// audit-lookup reshape) can be exercised directly by Vitest without
+// mounting the whole ReportWriter component tree.
+export const STEP_ACTIONS: Record<number, (templateId: string) => Promise<StepSummary>> = {
   // Step 1 — Stage Findings (no body needed — backend uses the latest cache).
   1: async () => {
     const res = await axios.post<{
@@ -1657,30 +1660,70 @@ const STEP_ACTIONS: Record<number, (templateId: string) => Promise<StepSummary>>
   // generation until the user clicks the "Run QA Audit" button
   // surfaced in the Step 4 detail panel.
   4: async () => {
+    // UAT 2026-05-24 — Step 4 always said "no audit on record"
+    // even when a completed audit existed. Cause: the endpoint
+    // returns {run, is_current, statistical_current, qa_current, ...}
+    // but Step 4 read flat fields off res.data (statistical_status
+    // etc.) that the endpoint never returns, so the !status branch
+    // always tripped.
+    //
+    // Fix: read res.data.run.* (the actual AuditRun row) and reshape
+    // into the legacy flat field names the detail panel expects.
+    // The detail-panel contract (statistical_status / passed /
+    // failed / warning / run_at pills) is unchanged.
+    interface AuditRunRow {
+      status?: string | null
+      layer_1_status?: string | null
+      layer_2_status?: string | null
+      layer_3_status?: string | null
+      passed?: number
+      failed?: number
+      warnings?: number    // plural in the API
+      completed_at?: string | null
+    }
+    interface LatestResponse {
+      run?: AuditRunRow | null
+      is_current?: boolean
+      statistical_current?: boolean
+      qa_current?: boolean
+    }
     try {
-      const res = await axios.get<{
-        statistical_status?: string | null;
-        qa_status?: string | null;
-        total_checks?: number; failed_checks?: number;
-        run_at?: string; passed?: number; warning?: number; failed?: number;
-        layer1_status?: string; layer2_status?: string; layer3_status?: string;
-      }>('/api/v1/audit/runs/latest')
-      const status = res.data.statistical_status
-      if (!status) {
+      const res = await axios.get<LatestResponse>(
+        '/api/v1/audit/runs/latest')
+      const run = res.data.run ?? null
+      if (!run || !run.status) {
+        // Truly no audit on record — null run or a row with no status
+        // (a brand-new run still in 'running' wouldn't have completed
+        // a verdict yet).
         return {
           status: 'warning',
           message: 'No audit on record — run QA Audit before generation',
-          payload: { ...res.data, _no_audit: true } as Record<string, unknown>,
+          payload: { _no_audit: true } as Record<string, unknown>,
         }
       }
+      // Reshape run.* into the flat field names the detail panel
+      // renders. The `warning` rename (run.warnings → payload.warning)
+      // is intentional — the detail panel reads payload['warning']
+      // singular; renaming here keeps the panel + its tests stable.
+      const reshaped: Record<string, unknown> = {
+        statistical_status: run.status,
+        layer1_status: run.layer_1_status,
+        layer2_status: run.layer_2_status,
+        layer3_status: run.layer_3_status,
+        passed: run.passed,
+        failed: run.failed,
+        warning: run.warnings,
+        run_at: run.completed_at,
+        is_current: res.data.is_current,
+      }
       return {
-        status: status === 'pass' ? 'complete' : 'warning',
-        message: `Statistical audit: ${status}`,
-        payload: res.data as Record<string, unknown>,
+        status: run.status === 'pass' ? 'complete' : 'warning',
+        message: `Statistical audit: ${run.status}`,
+        payload: reshaped,
       }
     } catch (err) {
       // A 404 is also "no audit on record yet" — treat the same
-      // way as the null-status case above (warning + _no_audit).
+      // way as the null-run case above (warning + _no_audit).
       if (axios.isAxiosError(err) && err.response?.status === 404) {
         return {
           status: 'warning',
