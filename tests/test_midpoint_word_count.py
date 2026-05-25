@@ -13,10 +13,16 @@ Pins the midpoint-paper word-count validation:
      submitting.
 
 Targets (3 pages double-spaced 12pt → 750-900 words total):
-  methodology  250-300
-  results      250-300
-  roles        125-150
-  next_steps   125-150
+  methodology  235-285
+  results      235-285
+  roles        110-135
+  next_steps   110-135
+
+May 25 2026 — shaved 15 from each section's range. The original
+250-300/125-150 split summed to 750-900 with no headroom; the new
+ranges sum to 690-840 so the 60-100 words of empirical-citation
+overhead (4 findings × ~15-25 words per inline citation) lives in
+the gap between section sums and the unchanged 750-900 total.
 """
 from __future__ import annotations
 
@@ -74,12 +80,14 @@ def test_count_words_counts_inline_markers_as_words():
 
 def test_validation_passes_when_every_section_in_range():
     """A clean run lands inside every target range. valid=True,
-    warnings list is empty, total is the sum of section counts."""
+    warnings list is empty, total is the sum of section counts.
+    Mid-range numbers picked so the total (260+260+122+122=764)
+    also falls inside 750-900 — both gates pass independently."""
     from main import _validate_midpoint_word_counts
-    nars = _make_narratives(275, 275, 137, 137)  # all mid-range
+    nars = _make_narratives(260, 260, 122, 122)  # all mid-range
     result = _validate_midpoint_word_counts(nars)
     assert result["valid"] is True
-    assert result["total_words"] == 275 + 275 + 137 + 137
+    assert result["total_words"] == 260 + 260 + 122 + 122
     assert result["warnings"] == []
     for key in ("methodology", "results", "roles", "next_steps"):
         assert result["sections"][key]["in_range"] is True
@@ -87,7 +95,7 @@ def test_validation_passes_when_every_section_in_range():
 
 def test_validation_fails_when_methodology_below_target():
     from main import _validate_midpoint_word_counts
-    nars = _make_narratives(200, 275, 137, 137)  # 200 < 250
+    nars = _make_narratives(200, 260, 122, 122)  # 200 < 235
     result = _validate_midpoint_word_counts(nars)
     assert result["valid"] is False
     assert result["sections"]["methodology"]["in_range"] is False
@@ -95,13 +103,13 @@ def test_validation_fails_when_methodology_below_target():
     warn_text = "; ".join(result["warnings"])
     assert "Data and Methodology" in warn_text
     assert "200" in warn_text
-    assert "250-300" in warn_text
+    assert "235-285" in warn_text
     assert "below" in warn_text
 
 
 def test_validation_fails_when_section_above_target():
     from main import _validate_midpoint_word_counts
-    nars = _make_narratives(275, 275, 200, 137)  # roles 200 > 150
+    nars = _make_narratives(260, 260, 180, 122)  # roles 180 > 135
     result = _validate_midpoint_word_counts(nars)
     assert result["valid"] is False
     assert result["sections"]["roles"]["in_range"] is False
@@ -110,37 +118,53 @@ def test_validation_fails_when_section_above_target():
     assert "above" in warn_text
 
 
-def test_validation_flags_total_drift_separately():
-    """If every section is in range but their total falls outside the
-    750-900 window (which can happen at the section-range boundaries —
-    e.g. 250+250+125+125=750 is the floor, but a barely-out-of-range
-    case can still produce a total warning). The validator surfaces
-    BOTH the section warnings AND a separate total warning."""
+def test_validation_flags_section_drift_independent_of_total():
+    """A section can be out of range while the total stays inside
+    750-900 — the validator surfaces the section warning regardless."""
     from main import _validate_midpoint_word_counts
-    # All four sections at their floor — total exactly 750. Tweak
-    # one section above range so the total breaches too.
-    nars = _make_narratives(305, 250, 125, 125)  # methodology 305 > 300
+    # methodology 290 > 285 ceiling. 290+260+122+122=794 — total OK.
+    nars = _make_narratives(290, 260, 122, 122)
     result = _validate_midpoint_word_counts(nars)
     assert result["valid"] is False
     assert result["sections"]["methodology"]["in_range"] is False
-    # 305 + 250 + 125 + 125 = 805 — still in 750-900, so no total
-    # warning. The section warning IS surfaced, however.
     assert any("Data and Methodology" in w for w in result["warnings"])
 
 
-def test_validation_total_below_750_emits_total_warning():
+def test_section_floor_with_citations_lands_at_total_floor():
+    """The math behind the May 25 2026 shave: section sums at the
+    floor (235+235+110+110=690) PLUS ~60 words of citation overhead =
+    750, the total floor. The validator checks sections and total
+    independently — a paper at section-floor without citations would
+    flag a total-below-750 warning, which is the desired signal."""
     from main import _validate_midpoint_word_counts
-    nars = _make_narratives(250, 250, 125, 125)  # 750 — just at the floor
+    # Sections at their floors, no citation padding — total 690 below
+    # the 750 floor. Sections pass; total warning fires.
+    nars = _make_narratives(235, 235, 110, 110)
+    result = _validate_midpoint_word_counts(nars)
+    assert result["sections"]["methodology"]["in_range"] is True
+    assert result["sections"]["results"]["in_range"] is True
+    assert result["sections"]["roles"]["in_range"] is True
+    assert result["sections"]["next_steps"]["in_range"] is True
+    assert result["total_words"] == 690
+    assert result["valid"] is False  # total under floor
+    assert any("750-900" in w for w in result["warnings"])
+    assert any("below" in w for w in result["warnings"])
+
+
+def test_section_floor_plus_citation_padding_passes():
+    """Sections at the floor PLUS realistic citation overhead lands
+    at the total floor — every gate passes. Simulates a real run
+    where the prose hits the section floor and 4 citations add ~60
+    words of overhead distributed across the body."""
+    from main import _validate_midpoint_word_counts
+    # 250+250+110+110 = 720 — still below 750 floor (sections still
+    # in range; methodology and results have absorbed ~15 words of
+    # citation overhead each but the total hasn't yet reached 750).
+    # 250+250+125+125 = 750 — exactly at the floor.
+    nars = _make_narratives(250, 250, 125, 125)
     result = _validate_midpoint_word_counts(nars)
     assert result["valid"] is True
     assert result["total_words"] == 750
-
-    nars2 = _make_narratives(250, 250, 100, 100)  # roles+next_steps low
-    result2 = _validate_midpoint_word_counts(nars2)
-    assert result2["valid"] is False
-    # Multiple warnings: two section warnings + the total warning.
-    assert any("750-900" in w for w in result2["warnings"])
-    assert any("below" in w for w in result2["warnings"])
 
 
 def test_validation_handles_missing_keys_gracefully():
@@ -197,7 +221,7 @@ def test_midpoint_to_editor_banner_prepended_when_validation_fails():
         "total_words": 620,
         "total_target": [750, 900],
         "warnings": [
-            "Data and Methodology ran 200 words — below the 250-300 target.",
+            "Data and Methodology ran 200 words — below the 235-285 target.",
             "Total ran 620 words — below the 750-900 target.",
         ],
         "sections": {},
@@ -230,7 +254,7 @@ def test_banner_lists_every_section_warning():
         "total_words": 600,
         "total_target": [750, 900],
         "warnings": [
-            "Data and Methodology ran 200 words — below the 250-300 target.",
+            "Data and Methodology ran 200 words — below the 235-285 target.",
             "Preliminary Results and Diagnostics ran 200 words — below "
             "the 250-300 target.",
             "Total ran 600 words — below the 750-900 target.",

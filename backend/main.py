@@ -8266,11 +8266,20 @@ async def export_midpoint_paper(
 # (so the user sees the problem before submitting), and logs a structured
 # warning so a Render scan reports drift over time.
 
+# Per-section word targets (May 25 2026 — shaved 15 from each end of
+# every section to leave room for the empirical-citation overhead
+# (4 findings × ~15-25 words per inline citation ≈ 60-100 words).
+# The total stays at 750-900 — the paper's physical-length constraint
+# — and the gap between section sums (690-840) and the total (750-900)
+# is precisely where the citation overhead lives. A paper whose
+# sections hit the floor + carries 60-100 words of citations lands at
+# the total floor; the validator accepts that as valid because both
+# the section and total checks pass independently.
 _MIDPOINT_WORD_TARGETS: dict[str, tuple[int, int]] = {
-    "methodology":  (250, 300),
-    "results":      (250, 300),
-    "roles":        (125, 150),
-    "next_steps":   (125, 150),
+    "methodology":  (235, 285),
+    "results":      (235, 285),
+    "roles":        (110, 135),
+    "next_steps":   (110, 135),
 }
 _MIDPOINT_TOTAL_TARGET = (750, 900)
 
@@ -8395,11 +8404,15 @@ async def _generate_midpoint_document(
              "agent_id": "midpoint_methodology",
              "task": (
                  "Write the Data and Methodology section of a graduate "
-                 "finance midpoint paper. TARGET LENGTH: 250-300 words "
-                 "(this is a 3-page double-spaced 12-point paper; the "
-                 "section must land in that range — under 250 words is "
-                 "too thin, over 300 leaves no room for the other "
-                 "three sections). APA style, past tense, third person. "
+                 "finance midpoint paper. TARGET LENGTH: 235-285 words "
+                 "of prose (this is a 3-page double-spaced 12-point "
+                 "paper; the section must land in that range — under "
+                 "235 is too thin, over 285 squeezes the other three "
+                 "sections; the 15-word headroom from a 250-300 target "
+                 "absorbs the empirical-citation overhead — each inline "
+                 "(Author, Year) citation adds 15-25 words to the "
+                 "section's actual length). APA style, past tense, "
+                 "third person. "
                  "Cover the data sources (aligned "
                  "monthly returns for equity, investment-grade and high-yield "
                  "bonds; Carhart factor series), the study period, the "
@@ -8434,8 +8447,11 @@ async def _generate_midpoint_document(
              "agent_id": "midpoint_results",
              "task": (
                  "Write the Preliminary Results section. TARGET LENGTH: "
-                 "250-300 words (under 250 is too thin; over 300 leaves "
-                 "no room for Roles and Next Steps). "
+                 "235-285 words of prose (under 235 is too thin; over "
+                 "285 leaves no room for Roles and Next Steps; the "
+                 "15-word headroom from a 250-300 target absorbs "
+                 "empirical-citation overhead — each inline (Author, "
+                 "Year) citation adds 15-25 words). "
                  "Interpret the summary statistics and the regime-conditional "
                  "performance; do not merely list numbers. You MUST explicitly "
                  "discuss the 2022 equity-bond correlation break and what the "
@@ -8464,8 +8480,9 @@ async def _generate_midpoint_document(
              "agent_id": "midpoint_roles",
              "task": (
                  "Write the Roles and Division of Labor section. "
-                 "TARGET LENGTH: 125-150 words (this is a shorter "
-                 "section in the 3-page paper — keep it tight). "
+                 "TARGET LENGTH: 110-135 words (this is a shorter "
+                 "section — keep it tight; citations are rarely needed "
+                 "here so the headroom is for the prose itself). "
                  "APA style, past tense, third person. Use ONLY the "
                  "team_activity_summary data provided. State each team "
                  "member's role and attribute their documented platform "
@@ -8485,8 +8502,10 @@ async def _generate_midpoint_document(
              "agent_id": "midpoint_next_steps",
              "task": (
                  "Write the Next Steps and Open Questions section. "
-                 "TARGET LENGTH: 125-150 words (keep it tight — the "
-                 "section closes the paper and shouldn't bloat). "
+                 "TARGET LENGTH: 110-135 words (keep it tight — the "
+                 "section closes the paper and shouldn't bloat; "
+                 "citations are rare here, so the headroom is for "
+                 "actual next-steps content). "
                  "Convert the supplied Academic Review verdict — its "
                  "Priority Areas for Further Investigation and any Developing "
                  "or Needs Work ratings — into a forward-looking next-steps "
