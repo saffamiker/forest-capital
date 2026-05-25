@@ -6715,26 +6715,35 @@ async def qa_audit(request: Request, session: dict = Depends(require_sysadmin)):
             AUDIT_TIER_FULL = 99
             QA_MIN_INTERVAL_SECONDS = 5 * 60
 
-            # Stable hash computed from the cached strategy_results so
-            # the audit is keyed against the data block it verified.
-            # Mirrors the hash computation in _current_strategy_hash so
-            # the QA endpoints all agree on what "current data" means.
+            # ── HASH = the canonical strategy_results_cache hash ──────
+            #
+            # UAT staleness bug (May 24 2026). Three write paths
+            # computed three different hashes for the same underlying
+            # data:
+            #   (a) /api/backtest/compare wrote strategy_results_cache
+            #       with `str(monthly.index[-1].date())` → "2025-12-31"
+            #   (b) _current_strategy_hash used `str(monthly.index[-1])`
+            #       → "2025-12-31 00:00:00" (Timestamp str form)
+            #   (c) this endpoint READ `monthly[-1].get("date")` from a
+            #       LIST-of-pairs payload that is NEVER a dict, falling
+            #       through to "unknown" every time.
+            # is_audit_current() compared (a) against the qa_results_cache
+            # hash written via (c) — never matched, so the methodology
+            # audit ALWAYS read as "stale" right after a successful run.
+            #
+            # FIX — pull the canonical hash from strategy_results_cache
+            # via get_latest_strategy_hash(). That's the SAME value
+            # is_audit_current() reads back on the strategy side, so the
+            # two halves of the comparison are guaranteed to match by
+            # construction when the audit verified the latest data.
             try:
-                first_row = next(iter(strategy_results.values()))
-                monthly = first_row.get("monthly_returns") or []
-                n_rows = len(monthly)
-                last_date = (
-                    monthly[-1].get("date", "unknown")
-                    if monthly and isinstance(monthly[-1], dict)
-                    else "unknown"
-                )
-                qa_hash = _compute_data_hash(
-                    n_rows, last_date, n_strategies=len(strategy_results)
-                )
+                from tools.cache import get_latest_strategy_hash
+                qa_hash = await get_latest_strategy_hash()
             except Exception as _exc:  # noqa: BLE001
-                # If the hash can't be computed, fall through to a real
-                # run — the audit is the safer default than skipping.
-                log.info("qa_audit_hash_compute_failed", error=str(_exc))
+                # If the canonical hash read fails (DB outage) fall
+                # through to a real run — the audit is the safer
+                # default than skipping.
+                log.info("qa_audit_hash_read_failed", error=str(_exc))
                 qa_hash = None
 
             from datetime import datetime, timezone
@@ -6970,24 +6979,30 @@ async def qa_ask(
 
 async def _current_strategy_hash() -> tuple[str, dict[str, dict] | None]:
     """
-    Computes the current strategy_hash and returns it alongside cached
-    strategy_results (when present). Shared by every QA endpoint so a
-    single hash computation can serve both the status read and any
-    tier trigger that follows.
-    """
-    from tools.data_fetcher import get_full_history_async
-    from tools.cache import get_strategy_cache, _compute_data_hash
+    Returns the canonical strategy_hash and the cached strategy_results
+    for it (when present). Shared by every QA endpoint so a single hash
+    value can serve both the status read and any tier trigger that
+    follows.
 
-    # OFF-LOOP — _current_strategy_hash is called from qa_status, which
-    # the dashboard polls every 30s. A sync get_full_history() here
-    # blocked the loop on every poll; in the 2026-05-24 timeout cluster
-    # the QA poll was visible alongside the dashboard fan-out.
-    history = await get_full_history_async()
-    monthly = history.get("equity_monthly")
-    n_rows = len(monthly) if monthly is not None else 0
-    last_date = str(monthly.index[-1]) if monthly is not None and len(monthly) > 0 else "unknown"
-    strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
-    cached = await get_strategy_cache(strategy_hash)
+    UAT staleness fix (May 24 2026) — uses get_latest_strategy_hash()
+    as the canonical source. Previously this helper recomputed the
+    hash with `str(monthly.index[-1])` (no `.date()` call), which
+    produced a different value from /api/backtest/compare's
+    `str(monthly.index[-1].date())`. The two never agreed, so the
+    methodology audit's qa_results_cache row never matched the
+    strategy_results_cache row it audited — is_audit_current()
+    reported stale forever. Reading the canonical value from
+    strategy_results_cache guarantees the comparison succeeds when
+    the audit verified the latest data.
+
+    Returns ("", None) when there is no strategy_results_cache row
+    yet — same shape as the previous helper, so existing callers
+    continue to work.
+    """
+    from tools.cache import get_strategy_cache, get_latest_strategy_hash
+
+    strategy_hash = await get_latest_strategy_hash() or ""
+    cached = await get_strategy_cache(strategy_hash) if strategy_hash else None
     return strategy_hash, cached
 
 
