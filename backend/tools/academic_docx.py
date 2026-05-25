@@ -404,6 +404,110 @@ def _ai_draft_notice(doc: Document) -> None:
 
 # ── Deliverable builders ──────────────────────────────────────────────────────
 
+def _add_audit_disclosure_appendix(
+    doc: Document, disclosures: dict[str, Any] | None,
+) -> None:
+    """
+    Workstream D — appends the Audit Disclosure Appendix to a report.
+    Renders three blocks deterministically (no AI):
+
+      - Headline paragraph naming the two audit runs and their verdicts.
+      - Acknowledged statistical warnings table (Layer · Check ·
+        Reviewed by · Reviewed at · Note).
+      - Intentional methodology overrides table (Check · Category ·
+        Marked by · Marked at · Note).
+
+    `disclosures` is the gather_audit_disclosures() output; None is
+    treated as "no audit on record" and the appendix renders a single
+    explanatory paragraph in place of the tables. This keeps the
+    appendix structurally complete even when the audit subsystem has
+    no history.
+    """
+    from tools.audit_summary import (
+        acknowledged_statistical_rows, intentional_methodology_rows,
+    )
+
+    _add_heading(doc, "Audit Disclosure Appendix")
+
+    if not disclosures or not disclosures.get("available"):
+        _add_body(doc, (
+            "No platform audit was on record at the time of generation. "
+            "The team should run the platform's statistical audit and "
+            "methodology review before submission so this appendix "
+            "carries the audit verdict and any reviewed warnings. The "
+            "report-readiness gate is fail-open in this state — a future "
+            "draft generated against a populated audit history will "
+            "carry the full disclosure record here."
+        ))
+        return
+
+    stat = disclosures.get("statistical") or {}
+    meth = disclosures.get("methodology") or {}
+
+    stat_line = ""
+    if stat.get("present"):
+        stat_line = (
+            f"Statistical audit (run #{stat.get('run_id')}, completed "
+            f"{stat.get('completed_at') or '—'}): "
+            f"{int(stat.get('total') or 0)} checks · "
+            f"{int(stat.get('passed') or 0)} passed · "
+            f"{int(stat.get('warnings') or 0)} warnings · "
+            f"{int(stat.get('failures') or 0)} failures."
+        )
+    meth_line = ""
+    if meth.get("present"):
+        verdict = meth.get("verdict") or "—"
+        meth_line = (
+            f"Methodology review ({verdict}, run "
+            f"{meth.get('run_at') or '—'}): "
+            f"{int(meth.get('total') or 0)} checks · "
+            f"{int(meth.get('passed') or 0)} passed · "
+            f"{int(meth.get('warnings') or 0)} warnings · "
+            f"{int(meth.get('failures') or 0)} failures."
+        )
+    headline_parts = [
+        "This appendix records the disclosure rationale for every "
+        "audit warning the team reviewed prior to generating this "
+        "report. The platform refused to generate the document while "
+        "any warning was unreviewed, so the records below represent the "
+        "team's complete response to the audit findings on file.",
+    ]
+    if stat_line:
+        headline_parts.append(stat_line)
+    if meth_line:
+        headline_parts.append(meth_line)
+    _add_body(doc, "\n\n".join(headline_parts))
+
+    # ── Statistical disclosures ───────────────────────────────────────
+    stat_rows = acknowledged_statistical_rows(disclosures)
+    _add_heading(doc, "Statistical Audit — Acknowledged Warnings", size=12)
+    if not stat_rows:
+        _add_body(doc, (
+            "The statistical audit surfaced no warnings requiring "
+            "acknowledgement in this run."))
+    else:
+        _add_table(
+            doc, "Table A1. Acknowledged statistical warnings.",
+            ["Layer", "Check", "Reviewed by", "Reviewed at", "Note"],
+            stat_rows,
+        )
+
+    # ── Methodology disclosures ───────────────────────────────────────
+    meth_rows = intentional_methodology_rows(disclosures)
+    _add_heading(doc, "Methodology Review — Intentional Disclosures",
+                 size=12)
+    if not meth_rows:
+        _add_body(doc, (
+            "No methodology checks were marked as intentional in this "
+            "run."))
+    else:
+        _add_table(
+            doc, "Table A2. Methodology checks marked intentional.",
+            ["Check", "Category", "Marked by", "Marked at", "Note"],
+            meth_rows,
+        )
+
+
 def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> bytes:
     """
     The three-page midpoint submission. Four sections per the FNA 670
@@ -463,6 +567,13 @@ def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> by
     note_run.font.size = Pt(9)
     _set_run_color(note_run, "#64748b")
 
+    # Workstream D — Audit Disclosure Appendix at the end of the body,
+    # before the submission checklist. The report-readiness gate
+    # (workstream C) guarantees every WARN has been reviewed before
+    # this code runs, so the appendix records the team's complete
+    # disclosure response.
+    _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
+
     _add_submission_checklist(doc)
 
     buf = BytesIO()
@@ -500,11 +611,26 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
 
     _add_heading(doc, "Executive Summary")
     _add_body(doc, narratives.get("exec_summary", "[DATA PENDING]"))
+    # Workstream D — one-line audit-readiness sentence appended to the
+    # AI-generated Executive Summary so an investment-audience reader
+    # sees the audit verdict without having to flip to the appendix.
+    # Deterministic — never AI-generated, identical across runs against
+    # the same audit state.
+    from tools.audit_summary import audit_summary_sentence
+    audit_line = audit_summary_sentence(data.get("audit_disclosures") or {})
+    if audit_line:
+        _add_body(doc, audit_line)
     _add_callout(doc, _BRIEF_SUMMARY_CALLOUT_TITLE,
                  _BRIEF_SUMMARY_CALLOUT_LINES)
 
     _add_heading(doc, "Methodology Overview")
     _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
+    # Workstream D — body paragraph framing the audit subsystem's
+    # role in the methodology. Same deterministic source.
+    from tools.audit_summary import audit_body_paragraph
+    audit_para = audit_body_paragraph(data.get("audit_disclosures") or {})
+    if audit_para:
+        _add_body(doc, audit_para)
 
     _add_heading(doc, "Key Findings and Insights")
 
@@ -539,6 +665,11 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
     _add_body(doc, narratives.get("recommendations", "[DATA PENDING]"))
     _add_callout(doc, _BRIEF_RECOMMENDATIONS_CALLOUT_TITLE,
                  _BRIEF_RECOMMENDATIONS_CALLOUT_LINES)
+
+    # Workstream D — Audit Disclosure Appendix. Mirrors the midpoint
+    # paper's appendix so the same disclosure record travels with both
+    # graded deliverables.
+    _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
 
     _add_submission_checklist(doc)
 

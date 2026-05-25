@@ -68,6 +68,11 @@ async def gather_document_data() -> dict[str, Any]:
         "team_summary": {},
         "last_review_text": None,
         "academic_docs": [],
+        # Workstream D — audit-disclosures bundle the report builders
+        # consume. Empty here; populated below for non-test environments.
+        # The builders fall through to a "no audit on record" disclosure
+        # paragraph if this stays empty.
+        "audit_disclosures": None,
     }
 
     # The test environment has no warmed caches and no API key — return
@@ -151,6 +156,19 @@ async def gather_document_data() -> dict[str, Any]:
         bundle["last_review_text"] = await _last_academic_review_verdict()
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_export_review_read_failed", error=str(exc))
+
+    # ── Audit disclosures — populates the Workstream D appendix and the
+    #    executive brief's audit summary sentence + body paragraph. Reads
+    #    the latest statistical audit + methodology QA + intentional
+    #    overrides; fail-open inside the helper so a bad read leaves
+    #    audit_disclosures=None and the builders surface a "no audit on
+    #    record" disclosure block. ─────────────────────────────────────────
+    try:
+        from tools.audit_summary import gather_audit_disclosures
+        bundle["audit_disclosures"] = await gather_audit_disclosures()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_export_audit_disclosures_failed",
+                    error=str(exc))
 
     # ── Uploaded requirements / rubric documents ───────────────────────────
     try:
