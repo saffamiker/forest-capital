@@ -316,28 +316,84 @@ describe('QAAuditPanel — Action Required card variants', () => {
     })
   })
 
-  it('Mark as Intentional POSTs to the mark-intentional endpoint', async () => {
-    useQAStore.setState({
-      result: buildAudit([METHODOLOGY_CHECK]),
-      loading: false,
-    })
-    render(<QAAuditPanel />)
-    fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
-    fireEvent.click(
-      screen.getByTestId(`qa-intentional-${METHODOLOGY_CHECK.check_id}`))
+  it('Mark as Intentional POSTs the user-typed disclosure note via modal',
+    async () => {
+      // May 28 2026 hotfix: the action is now a modal flow. Clicking
+      // the button OPENS the modal; the POST fires only after the
+      // user types a 20+ char disclosure note and clicks Confirm.
+      // The previous "single click sends check.finding as the note"
+      // path is gone — the backend enforces min_length=20 too.
+      useQAStore.setState({
+        result: buildAudit([METHODOLOGY_CHECK]),
+        loading: false,
+      })
+      render(<QAAuditPanel />)
+      fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+      fireEvent.click(
+        screen.getByTestId(`qa-intentional-${METHODOLOGY_CHECK.check_id}`))
 
-    await waitFor(() => {
-      expect(mockedAxios.post).toHaveBeenCalledWith(
-        `/api/v1/qa/findings/${METHODOLOGY_CHECK.check_id}/mark-intentional`,
-        expect.objectContaining({ note: METHODOLOGY_CHECK.finding }),
-      )
+      // The modal opens with a Confirm button disabled until the
+      // textarea reaches the 20-char minimum.
+      const textarea = await screen.findByTestId(
+        `qa-intentional-note-${METHODOLOGY_CHECK.check_id}`)
+      const confirm = screen.getByTestId(
+        `qa-intentional-confirm-${METHODOLOGY_CHECK.check_id}`)
+      expect(confirm).toBeDisabled()
+
+      // Short note keeps Confirm disabled.
+      fireEvent.change(textarea, { target: { value: 'too short' } })
+      expect(confirm).toBeDisabled()
+
+      // A 20+ char note unlocks Confirm.
+      const realDisclosure =
+        'Reviewed by Bob — this finding reflects intentional methodology.'
+      fireEvent.change(textarea, { target: { value: realDisclosure } })
+      expect(confirm).not.toBeDisabled()
+
+      fireEvent.click(confirm)
+
+      await waitFor(() => {
+        expect(mockedAxios.post).toHaveBeenCalledWith(
+          `/api/v1/qa/findings/${METHODOLOGY_CHECK.check_id}/mark-intentional`,
+          expect.objectContaining({ note: realDisclosure }),
+        )
+      })
+      await waitFor(() => {
+        expect(
+          screen.getByText(/marked as intentional/i),
+        ).toBeInTheDocument()
+      })
     })
-    await waitFor(() => {
-      expect(
-        screen.getByText(/marked as intentional/i),
-      ).toBeInTheDocument()
+
+  it('Mark as Intentional modal opens on click and Cancel closes it',
+    async () => {
+      // Defence-in-depth check that the button no longer fires a POST
+      // directly — clicking it must produce the modal, and the
+      // Cancel button must close it without any network call.
+      useQAStore.setState({
+        result: buildAudit([METHODOLOGY_CHECK]),
+        loading: false,
+      })
+      render(<QAAuditPanel />)
+      fireEvent.click(screen.getByText(METHODOLOGY_CHECK.description))
+      fireEvent.click(
+        screen.getByTestId(`qa-intentional-${METHODOLOGY_CHECK.check_id}`))
+      // Modal is now mounted.
+      expect(screen.getByTestId(
+        `qa-intentional-modal-${METHODOLOGY_CHECK.check_id}`,
+      )).toBeInTheDocument()
+      // No POST fired yet.
+      expect(mockedAxios.post).not.toHaveBeenCalled()
+      // Cancel dismisses without firing.
+      fireEvent.click(screen.getByTestId(
+        `qa-intentional-cancel-${METHODOLOGY_CHECK.check_id}`))
+      await waitFor(() => {
+        expect(screen.queryByTestId(
+          `qa-intentional-modal-${METHODOLOGY_CHECK.check_id}`,
+        )).not.toBeInTheDocument()
+      })
+      expect(mockedAxios.post).not.toHaveBeenCalled()
     })
-  })
 
   it('renders the Confirmed Intentional badge when an override exists', async () => {
     mockedAxios.get = vi.fn().mockResolvedValue({

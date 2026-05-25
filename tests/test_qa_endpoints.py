@@ -171,12 +171,18 @@ class TestQAFlagForFix:
 
 class TestQAMarkIntentional:
     """POST /api/v1/qa/findings/{check_id}/mark-intentional — same
-    contract surface as flag-for-fix above."""
+    contract surface as flag-for-fix above. Disclosure gate (May
+    28 2026 hotfix): note must be at least 20 characters; the
+    Pydantic schema enforces this with 422 on short / missing."""
+
+    # A 20+ char note that satisfies the disclosure gate, reused by
+    # the non-422 cases below.
+    _VALID_NOTE = "Reviewed by Bob — accepted as project methodology."
 
     def test_rejects_unauthenticated(self, client: TestClient):
         r = client.post(
             "/api/v1/qa/findings/P03/mark-intentional",
-            json={"note": "intentional"},
+            json={"note": self._VALID_NOTE},
         )
         assert r.status_code == 401
 
@@ -187,7 +193,7 @@ class TestQAMarkIntentional:
         r = client.post(
             "/api/v1/qa/findings//mark-intentional",
             headers=_auth_headers(),
-            json={"note": "test"},
+            json={"note": self._VALID_NOTE},
         )
         assert r.status_code in (404, 422)
 
@@ -195,7 +201,55 @@ class TestQAMarkIntentional:
         r = client.post(
             "/api/v1/qa/findings/P03/mark-intentional",
             headers=_auth_headers(),
-            json={"note": "Reviewed; intentional double-sided capture."},
+            json={"note": self._VALID_NOTE},
+        )
+        assert r.status_code not in (401, 403, 422)
+
+    # ── Disclosure gate (May 28 2026 hotfix) ────────────────────────
+
+    def test_rejects_missing_note_with_422(self, client: TestClient):
+        # No `note` field at all. Pydantic's required-field check
+        # fires before the length check; both return 422.
+        r = client.post(
+            "/api/v1/qa/findings/P03/mark-intentional",
+            headers=_auth_headers(),
+            json={},
+        )
+        assert r.status_code == 422
+
+    def test_rejects_empty_string_note_with_422(self, client: TestClient):
+        r = client.post(
+            "/api/v1/qa/findings/P03/mark-intentional",
+            headers=_auth_headers(),
+            json={"note": ""},
+        )
+        assert r.status_code == 422
+
+    def test_rejects_short_note_under_20_chars_with_422(
+        self, client: TestClient,
+    ):
+        # 19 chars — one short of the gate. This is the EXACT case
+        # the hotfix must catch: a stale frontend that sent the
+        # AI-generated check.finding as the "note" should be rejected
+        # rather than silently recorded as a disclosure.
+        nineteen_char_note = "Too short — 19 c..."
+        assert len(nineteen_char_note) == 19   # sanity
+        r = client.post(
+            "/api/v1/qa/findings/P03/mark-intentional",
+            headers=_auth_headers(),
+            json={"note": nineteen_char_note},
+        )
+        assert r.status_code == 422
+
+    def test_accepts_exactly_20_char_note(self, client: TestClient):
+        # 20 chars is the boundary — should pass. Pydantic's
+        # min_length is INCLUSIVE.
+        twenty_char_note = "Exactly twenty chars"
+        assert len(twenty_char_note) == 20   # sanity
+        r = client.post(
+            "/api/v1/qa/findings/P03/mark-intentional",
+            headers=_auth_headers(),
+            json={"note": twenty_char_note},
         )
         assert r.status_code not in (401, 403, 422)
 

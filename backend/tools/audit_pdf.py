@@ -376,13 +376,24 @@ _CATEGORY_LABELS = {
 }
 
 
-def build_methodology_audit_pdf(audit: dict[str, Any]) -> bytes:
+def build_methodology_audit_pdf(
+    audit: dict[str, Any],
+    overrides: dict[str, dict[str, Any]] | None = None,
+) -> bytes:
     """
     Renders a QAAgent.run_audit() report dict as the Methodology Audit
     Report PDF.
+
+    May 28 2026 — `overrides` accepts a {check_id → row} map sourced
+    from qa_intentional_overrides. When a check has an override on
+    file, the PDF emits a green "Intentional design: [note]" line
+    under the check's evidence so the team's recorded disclosure
+    travels with the document. None (the default) preserves
+    pre-hotfix rendering for callers that don't pass overrides.
     """
     s = _styles()
     items = audit.get("items") or []
+    overrides = overrides or {}
     # Per-check filtering — split the QA analysis into per-check sections
     # by check-id header, identical to the UI. Each check then shows ONLY
     # its own section, never the whole raw_analysis blob.
@@ -504,5 +515,17 @@ def build_methodology_audit_pdf(audit: dict[str, Any]) -> bytes:
             if fix and "analysis section above" not in fix:
                 story.append(Paragraph(
                     f"<b>Fix:</b> {_esc(fix)}", s["detail"]))
+            # Intentional-design disclosure (May 28 2026 hotfix). When
+            # a check has an entry in qa_intentional_overrides the
+            # team has recorded a reason this finding is acceptable;
+            # the note must travel with the PDF so Dr. Panttser sees
+            # every disclosure. Render green inline, mirroring the
+            # statistical audit PDF's "Acknowledged: <note>" pattern.
+            ov = overrides.get(cid) if cid else None
+            if ov and ov.get("note"):
+                story.append(Paragraph(
+                    f'<font color="{_GREEN.hexval()}"><b>Intentional '
+                    f'design</b></font>: {_esc(ov.get("note"))}',
+                    s["detail"]))
 
     return _render(story, "Forest Capital — Methodology Audit Report")
