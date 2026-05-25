@@ -139,10 +139,12 @@ export function CrisisPerformanceTable() {
               size="md" />
           </h2>
           <p className="text-xs text-muted mt-0.5">
-            Performance through five named market events. Each cell shows
-            window CAGR, max drawdown (DD), and Sharpe ratio (Sh). Partial
-            windows (where the strategy started after the crisis began) are
-            flagged with a ⚠ indicator.
+            Window CAGR, max drawdown (DD), and Sharpe ratio (Sh) per
+            strategy across five named crisis windows (GFC, COVID,
+            2022 rate-hike cycle, dot-com, taper tantrum). Computed
+            from each strategy's monthly returns restricted to the
+            event window. Partial windows (where the strategy started
+            after the event began) are flagged ⚠.
           </p>
         </div>
         <div className="shrink-0">

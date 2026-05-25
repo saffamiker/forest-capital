@@ -462,7 +462,7 @@ export function RollingExcessReturnChart(
       sectionId="rolling-excess-return"
       infoKey="rolling_excess_return"
       theme={theme}
-      subtitle={`${data.window_months}-month rolling total return of each strategy minus the 100% equity benchmark. Above zero is outperformance, below zero is underperformance.`}
+      subtitle={`${data.window_months}-month rolling total return of each strategy minus the BENCHMARK (100% equity) — computed from monthly returns as a trailing window over the full study period. Above zero is outperformance, below zero is underperformance.`}
       dataExplain={{ currentValue:
         `${data.window_months}-month rolling excess return vs the 100% `
         + `equity benchmark for ${data.strategies.length} strategies across `
@@ -535,7 +535,7 @@ export function RollingCorrelationChart(
       tourId="rolling-correlation"
       infoKey="rolling_correlation_chart"
       theme={theme}
-      subtitle={`${data.window_months}-month rolling correlation. The 2022 hiking cycle is where equity-bond diversification broke down.`}
+      subtitle={`${data.window_months}-month rolling Pearson correlation between monthly equity returns (S&P 500) and bond returns — IG (BND) and HY (BAMLHYH0A0HYM2TRIV). The 2022 hiking cycle is where equity-bond diversification broke down.`}
       dataExplain={{ currentValue:
         `Equity-IG rolling correlation: pre-2022 avg ${avg(data.pre_2022.equity_ig)}, `
         + `post-2022 avg ${avg(data.post_2022.equity_ig)}. Equity-HY: pre `
@@ -611,7 +611,7 @@ function RegimeConditionalTable({ rows }: { rows: RegimeRow[] }) {
       sectionId="regime-conditional"
       tourId="regime-conditional"
       infoKey="regime_conditional_table"
-      subtitle="Each strategy split at the 2022 break. Sorted by post-2022 Sharpe — which strategies held up once diversification stopped working."
+      subtitle="Each strategy's monthly returns split at the 2022 regime break (boundary 2022-01-01) — pre- and post-period Sharpe and CAGR. Sorted by post-2022 Sharpe — which strategies held up once diversification stopped working."
       dataExplain={{ currentValue:
         'Sharpe and CAGR by strategy, split at the 2022 break — '
         + rows.map((r) =>
@@ -656,7 +656,7 @@ function DrawdownComparisonTable({ rows }: { rows: DrawdownRow[] }) {
       title="Drawdown Comparison"
       sectionId="drawdown"
       infoKey="drawdown_table"
-      subtitle="Max peak-to-trough loss and months to a new equity high. Sorted by max drawdown — deepest loss first."
+      subtitle="Max peak-to-trough loss and months to a new equity high, computed from each strategy's monthly returns over the full study period. Sorted by max drawdown — deepest loss first."
       dataExplain={{ currentValue:
         'Max drawdown and recovery by strategy — '
         + rows.map((r) =>
@@ -1024,7 +1024,7 @@ export function SensitivityAnalysis(
       sectionId="sensitivity"
       infoKey="sensitivity_analysis"
       theme={theme}
-      subtitle="How sensitive is each dynamic strategy's risk-adjusted performance to its key parameter? The vertical line marks the current setting."
+      subtitle="How sensitive is each dynamic strategy's Sharpe ratio to its key parameter — a ±20% sweep around the current setting (~23 full backtests per strategy, monthly returns over the full study period). The vertical line marks the current setting."
       {...(strategies.length > 0
         ? { dataExplain: { currentValue:
             `Sharpe-ratio sensitivity to the key parameter for `

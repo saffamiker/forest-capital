@@ -100,12 +100,14 @@ export function DistributionTable() {
             size="md" />
         </h2>
         <p className="text-xs text-muted mt-0.5">
-          Moments and shape diagnostics of the monthly return distribution.
-          Negative skewness = fatter left tail (downside-asymmetric).
-          Positive excess kurtosis = fatter tails than normal (Sharpe
-          understates the risk). Jarque-Bera p &lt; 0.05 rejects normality
-          — those strategies are marked, and their Sharpe should be
-          read alongside the tail-risk view above.
+          Skewness, excess kurtosis, and the Jarque-Bera normality
+          test computed from each strategy's monthly returns over
+          the full study period. Negative skewness = fatter left
+          tail (downside-asymmetric). Positive excess kurtosis =
+          fatter tails than normal (Sharpe understates the risk).
+          Jarque-Bera p &lt; 0.05 rejects normality — those strategies
+          are marked and their Sharpe should be read alongside the
+          tail-risk view above.
         </p>
         {anyNonNormal && (
           <p className="text-2xs text-warning mt-2 inline-flex items-center gap-1">

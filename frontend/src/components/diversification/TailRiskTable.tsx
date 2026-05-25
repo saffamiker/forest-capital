@@ -96,11 +96,14 @@ export function TailRiskTable() {
               size="md" />
           </h2>
           <p className="text-xs text-muted mt-0.5">
-            Historical-simulation Value-at-Risk and Conditional VaR at the 95% and
-            99% confidence levels, monthly and annualized. CVaR (Expected
-            Shortfall) is the average loss in the tail beyond VaR — the
-            conservative read of a strategy's bear-case month / year. Worst-third
-            on CVaR&nbsp;99% annual is tinted amber.
+            Historical-simulation Value-at-Risk and Conditional VaR
+            at the 95% and 99% confidence levels — computed as the
+            empirical 5%/1% quantiles of each strategy's monthly
+            returns over the full study period (no parametric
+            assumption). Both monthly and annualised. CVaR (Expected
+            Shortfall) is the mean of returns in the tail beyond VaR —
+            the conservative read of a bear-case month / year.
+            Worst-third on CVaR&nbsp;99% annual is tinted amber.
           </p>
         </div>
         <div className="shrink-0">

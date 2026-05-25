@@ -144,9 +144,10 @@ export function RiskContributionBar() {
               size="md" />
           </h2>
           <p className="text-xs text-muted mt-0.5">
-            What percentage of portfolio risk each strategy contributes.
-            A bar wider than its capital share is a risk concentrator;
-            narrower is a diversifier. The {activeScheme === 'equal'
+            What percentage of portfolio risk each strategy contributes,
+            computed from the strategy-return covariance matrix over
+            the full study period. A bar wider than its capital share
+            is a risk concentrator; narrower is a diversifier. The {activeScheme === 'equal'
               ? '1/N equal-weight'
               : tangencyIsFallback
                 ? 'min-variance (Sharpe infeasible)'

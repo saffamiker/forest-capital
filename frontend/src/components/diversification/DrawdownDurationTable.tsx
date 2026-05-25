@@ -77,10 +77,12 @@ export function DrawdownDurationTable() {
               size="md" />
           </h2>
           <p className="text-xs text-muted mt-0.5">
-            Time spent underwater complements the depth figures elsewhere on
-            this page: a -20% drawdown that recovers in 6 months is a
-            fundamentally different risk profile from one that recovers in 36.
-            Strategies currently in drawdown carry an amber pill.
+            Length of the longest peak-to-trough underwater periods —
+            time-to-recovery — computed from each strategy's monthly
+            returns over the full study period. A -20% drawdown that
+            recovers in 6 months is a fundamentally different risk
+            profile from one that recovers in 36. Strategies
+            currently in drawdown carry an amber pill.
           </p>
           {anyCurrentlyUnderwater && (
             <p className="text-2xs text-warning mt-2 inline-flex items-center gap-1">
