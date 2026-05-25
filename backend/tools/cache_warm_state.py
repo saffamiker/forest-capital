@@ -196,13 +196,40 @@ async def auto_warm_analytics(
     return _STATE
 
 
+def _expected_strategy_ids() -> set[str]:
+    """The canonical strategy id set the warm expects in a healthy
+    strategy_results_cache row. Sourced from strategy_metadata so it
+    stays in lock-step with the backtester's universe — adding or
+    removing a strategy in metadata automatically updates this rule.
+
+    Fail-open: a metadata import error returns an empty set, which
+    makes _strategy_cache_is_healthy fall back to the per-strategy
+    monthly_returns check below (better to skip the rerun than fail
+    the warm entirely).
+    """
+    try:
+        from strategy_metadata import STRATEGY_METADATA
+        return {entry["id"] for entry in STRATEGY_METADATA if entry.get("id")}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("strategy_metadata_import_failed", error=str(exc))
+        return set()
+
+
 def _strategy_cache_is_healthy(cached: dict | None) -> bool:
     """True when the strategy_results_cache row is usable input for
-    AN01 / AN04. Healthy = the row exists AND every strategy carries
-    a non-empty monthly_returns list. A partial-fallback row (e.g.
-    one real strategy, nine with empty monthly_returns) is NOT
-    healthy — AN01 / AN04 read the row and produce empty downstream
-    tables because the empty-series strategies get skipped.
+    AN01 / AN04. Healthy requires THREE conditions:
+
+      1. The row exists.
+      2. Every canonical strategy id (per strategy_metadata, currently
+         10) is present in the row. A single-strategy cache row — e.g.
+         a BENCHMARK-only fallback from a prior cold boot — passes
+         condition 3 but fails this one. The downstream analytics
+         layer needs ALL strategies, not just one.
+      3. Every present strategy carries a non-empty monthly_returns
+         list. A partial-fallback row (one real strategy, nine with
+         empty monthly_returns) is NOT healthy — AN01 / AN04 read the
+         row and produce empty downstream tables because the
+         empty-series strategies get skipped.
 
     Co-located here (not in tools/cache) so the warm's health rule
     is visible alongside the warm itself; the rule may evolve
@@ -210,6 +237,18 @@ def _strategy_cache_is_healthy(cached: dict | None) -> bool:
     """
     if not cached:
         return False
+    # Condition 2 — the row must contain every canonical strategy.
+    # A BENCHMARK-only cache passes the monthly_returns loop below
+    # (one strategy, populated) but cannot drive AN01 / AN04 because
+    # refresh_academic_analytics needs all 10 strategies to populate
+    # the factor_loadings and regime_conditional tables.
+    expected = _expected_strategy_ids()
+    if expected:
+        present = set(cached.keys())
+        if not expected.issubset(present):
+            return False
+    # Condition 3 — every present strategy must carry a non-empty
+    # monthly_returns list.
     for r in cached.values():
         mr = (r or {}).get("monthly_returns")
         if not isinstance(mr, list) or not mr:

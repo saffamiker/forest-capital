@@ -29,10 +29,24 @@ os.environ.setdefault("MASTER_API_KEY", "test-master-key")
 
 # ── Health rule ──────────────────────────────────────────────────────────────
 
+def _all_strategies_with_returns() -> dict[str, dict]:
+    """All 10 canonical strategy ids each with a one-row
+    monthly_returns list — the minimum shape a healthy
+    strategy_results_cache row must carry."""
+    from strategy_metadata import STRATEGY_METADATA
+    return {
+        entry["id"]: {"monthly_returns": [["2024-01-31", 0.01]]}
+        for entry in STRATEGY_METADATA
+    }
+
+
 class TestStrategyCacheHealthRule:
     """The warm calls run_all_strategies when the cache row is NOT
-    healthy. Healthy = the row exists AND every strategy carries a
-    non-empty monthly_returns list."""
+    healthy. Healthy = the row exists AND contains every canonical
+    strategy id AND every strategy carries a non-empty
+    monthly_returns list. A BENCHMARK-only cache (the production
+    symptom that prompted this fix) reads as not healthy because
+    the downstream analytics layer needs all 10 strategies."""
 
     def test_none_cache_is_not_healthy(self):
         from tools.cache_warm_state import _strategy_cache_is_healthy
@@ -44,29 +58,45 @@ class TestStrategyCacheHealthRule:
 
     def test_strategy_with_missing_monthly_returns_is_not_healthy(self):
         from tools.cache_warm_state import _strategy_cache_is_healthy
-        cached = {
-            "BENCHMARK": {"sharpe_ratio": 0.55, "monthly_returns": [
-                ["2024-01-31", 0.01]]},
-            "CLASSIC_60_40": {"sharpe_ratio": 0.0, "error": "boom"},
-        }
+        # Even when all 10 strategies are present, a single broken
+        # monthly_returns entry (the error fallback shape) is unhealthy.
+        cached = _all_strategies_with_returns()
+        cached["CLASSIC_60_40"] = {"sharpe_ratio": 0.0, "error": "boom"}
         assert _strategy_cache_is_healthy(cached) is False
 
     def test_strategy_with_empty_monthly_returns_is_not_healthy(self):
         from tools.cache_warm_state import _strategy_cache_is_healthy
+        cached = _all_strategies_with_returns()
+        cached["CLASSIC_60_40"] = {"sharpe_ratio": 0.0, "monthly_returns": []}
+        assert _strategy_cache_is_healthy(cached) is False
+
+    def test_benchmark_only_row_is_not_healthy(self):
+        """The production symptom: a strategy_results_cache row with
+        only BENCHMARK populated reads as healthy under the prior rule
+        (BENCHMARK has monthly_returns populated). Under the new rule
+        the missing 9 strategies make it unhealthy — the warm reruns
+        run_all_strategies and writes a complete row."""
+        from tools.cache_warm_state import _strategy_cache_is_healthy
         cached = {
-            "BENCHMARK": {"sharpe_ratio": 0.55, "monthly_returns": [
-                ["2024-01-31", 0.01]]},
-            "CLASSIC_60_40": {"sharpe_ratio": 0.0, "monthly_returns": []},
+            "BENCHMARK": {"monthly_returns": [["2024-01-31", 0.01]]},
         }
         assert _strategy_cache_is_healthy(cached) is False
 
-    def test_all_strategies_with_data_is_healthy(self):
+    def test_partial_subset_with_data_is_not_healthy(self):
+        """Two strategies present, both with monthly_returns, but the
+        other 8 are missing entirely. Not healthy — downstream
+        analytics needs ALL canonical strategies."""
         from tools.cache_warm_state import _strategy_cache_is_healthy
         cached = {
             "BENCHMARK": {"monthly_returns": [["2024-01-31", 0.01]]},
             "CLASSIC_60_40": {"monthly_returns": [["2024-01-31", 0.005]]},
         }
-        assert _strategy_cache_is_healthy(cached) is True
+        assert _strategy_cache_is_healthy(cached) is False
+
+    def test_all_canonical_strategies_with_data_is_healthy(self):
+        from tools.cache_warm_state import _strategy_cache_is_healthy
+        assert _strategy_cache_is_healthy(
+            _all_strategies_with_returns()) is True
 
 
 # ── _default_warm_fn behaviour ───────────────────────────────────────────────
@@ -140,18 +170,83 @@ class TestDefaultWarmFnRepopulatesStrategies:
             "set_strategy_cache should have been called to persist the "
             "rerun results.")
 
+    def test_benchmark_only_cache_triggers_backtester_rerun(self):
+        """Regression: the production state after PR #159's first
+        merge — a strategy_results_cache row with only BENCHMARK
+        populated. Under the prior health rule this read as healthy
+        (BENCHMARK has monthly_returns) so the warm skipped the
+        rerun. Under the new rule the missing 9 strategies make it
+        unhealthy and the warm reruns run_all_strategies."""
+        from tools import cache_warm_state
+
+        backtester_called: list[bool] = []
+        set_cache_called: list[bool] = []
+
+        # The exact production shape: BENCHMARK populated, no others.
+        benchmark_only = {
+            "BENCHMARK": {"monthly_returns": [
+                ["2024-01-31", 0.01], ["2024-02-29", 0.02]]},
+        }
+
+        async def _fake_get_latest_strategy_cache():
+            return benchmark_only
+
+        async def _fake_get_latest_strategy_hash():
+            return "abc123"
+
+        async def _fake_set_strategy_cache(*args, **kwargs):
+            set_cache_called.append(True)
+
+        async def _fake_get_full_history_async():
+            import pandas as pd
+            idx = pd.DatetimeIndex(["2024-01-31", "2024-02-29"])
+            return {"equity_monthly": pd.Series([0.01, 0.02], index=idx)}
+
+        def _fake_run_all_strategies(history):
+            backtester_called.append(True)
+            return _all_strategies_with_returns()
+
+        async def _fake_refresh_all_analytics(data_hash):
+            return None
+
+        async def _fake_get_precomputed(data_hash, kind):
+            return {"available": True}
+
+        with patch("tools.cache.get_latest_strategy_cache",
+                   _fake_get_latest_strategy_cache), \
+             patch("tools.cache.get_latest_strategy_hash",
+                   _fake_get_latest_strategy_hash), \
+             patch("tools.cache.set_strategy_cache",
+                   _fake_set_strategy_cache), \
+             patch("tools.data_fetcher.get_full_history_async",
+                   _fake_get_full_history_async), \
+             patch("tools.backtester.run_all_strategies",
+                   _fake_run_all_strategies), \
+             patch("tools.precomputed_analytics.refresh_all_analytics",
+                   _fake_refresh_all_analytics), \
+             patch("tools.precomputed_analytics.get_metric",
+                   _fake_get_precomputed):
+            asyncio.run(cache_warm_state._default_warm_fn())
+
+        assert backtester_called, (
+            "A BENCHMARK-only cache row must trigger run_all_strategies "
+            "— the missing 9 canonical strategies make the row unhealthy "
+            "even though BENCHMARK itself is populated.")
+        assert set_cache_called, (
+            "set_strategy_cache must be called to persist the rerun "
+            "results.")
+
     def test_healthy_cache_skips_backtester_rerun(self):
         from tools import cache_warm_state
 
         backtester_called: list[bool] = []
 
-        # Returned by get_latest_strategy_cache — healthy row.
-        healthy_row = {
-            "BENCHMARK": {"monthly_returns": [
-                ["2024-01-31", 0.01], ["2024-02-29", 0.02]]},
-            "CLASSIC_60_40": {"monthly_returns": [
-                ["2024-01-31", 0.005], ["2024-02-29", 0.01]]},
-        }
+        # Returned by get_latest_strategy_cache — all 10 canonical
+        # strategies present with monthly_returns. Anything less fails
+        # the new "every canonical strategy present" health rule and
+        # would trigger a rerun even when each present strategy is
+        # individually populated.
+        healthy_row = _all_strategies_with_returns()
 
         async def _fake_get_latest_strategy_cache():
             return healthy_row
