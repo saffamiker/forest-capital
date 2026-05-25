@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import QAAuditPanel from '../components/QAAuditPanel'
 import AuditPanel from '../components/AuditPanel'
+import AcademicReviewSection from '../components/AcademicReviewSection'
 import TeamGate from '../components/TeamGate'
 import FloatingSectionNav from '../components/FloatingSectionNav'
 import { useIsTeamMember } from '../hooks/usePermissions'
@@ -657,6 +658,28 @@ export default function QAHub() {
           </p>
         </div>
         {isTeam ? <AuditPanel key={auditRefreshKey} /> : <AuditViewerSummary />}
+      </section>
+
+      {/* Section 3 — Academic Review (read-visible / team-write-gated).
+          Relocated from the Council screen on May 28 2026. The section
+          card + verdict + peer responses are visible to every
+          authenticated user; the Run / Re-run / Cancel buttons are
+          enabled only for team members. State persists across
+          navigation via academicReviewStore (Zustand, in-memory,
+          keyed on the audit data_hash). */}
+      <section
+        className="space-y-3"
+        data-section-id="academic-review"
+        data-section-label="Academic Review">
+        <div>
+          <h2 className="text-base font-semibold text-white">Academic Review</h2>
+          <p className="text-xs text-muted mt-0.5">
+            Five-section peer review of the portfolio research by the
+            Council's academic advisor panel. Read-visible to every
+            authenticated user; the Run / Re-run controls are team-only.
+          </p>
+        </div>
+        <AcademicReviewSection />
       </section>
     </div>
   )
