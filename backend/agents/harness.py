@@ -271,31 +271,73 @@ class GeneratorEvaluatorHarness:
         Scores one response with the evaluator model. Returns
         (overall_score, feedback). On any failure — evaluator error,
         non-JSON output, missing fields — returns the passthrough score
-        (8.0) with no feedback, so a flawed evaluator never blocks.
+        (_PASSTHROUGH_SCORE) with no feedback, so a flawed evaluator
+        never blocks a review session.
+
+        PR-LLM-2 (May 28 2026) — Robust JSON parsing with retry on
+        truncation:
+
+          1. First attempt: call_claude with max_tokens=600. Strip
+             markdown fences, then json.loads. On success, return
+             the score.
+
+          2. If parse fails (typically "Unterminated string" because
+             the response was truncated past the closing '}'): retry
+             ONCE with max_tokens=1500. Strip fences and json.loads
+             again.
+
+          3. If the retry also fails: return _PASSTHROUGH_SCORE with
+             a structured log line naming the parse error and a
+             prefix of the raw response so the failure is debuggable.
+
+        The evaluator MUST NOT hard-fail the review session — every
+        failure path leads to the passthrough score, not an exception.
         """
-        try:
-            user_message = (
-                f"RESPONSE TO EVALUATE:\n{response}\n\n"
-                f"CONTEXT (reference material the response should be "
-                f"consistent with):\n{context}"
-            )
-            # PR-LLM-1 (May 25 2026). trigger="harness_evaluator" so
-            # this call shows up grouped in Render logs — the
-            # evaluator fires on EVERY harness run across the council,
-            # academic review, QA, and document generation, with no
-            # caching of identical (response, criteria) tuples. The
-            # single biggest leak surface in the codebase and the
-            # first target of PR-LLM-2 (evaluator-level cache).
-            raw = call_claude(self.evaluator_model, evaluator_prompt,
-                              user_message, max_tokens=600,
-                              trigger="harness_evaluator")
-            parsed = json.loads(_strip_fences(raw))
+        user_message = (
+            f"RESPONSE TO EVALUATE:\n{response}\n\n"
+            f"CONTEXT (reference material the response should be "
+            f"consistent with):\n{context}"
+        )
+
+        def _attempt(max_tokens: int) -> tuple[float, str] | None:
+            """Returns (score, feedback) on a successful parse, else
+            None — the caller decides whether to retry or fall back."""
+            raw = call_claude(
+                self.evaluator_model, evaluator_prompt, user_message,
+                max_tokens=max_tokens, trigger="harness_evaluator")
+            stripped = _strip_fences(raw)
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                log.warning("harness_evaluator_parse_failed",
+                            error=str(exc),
+                            max_tokens=max_tokens,
+                            response_chars=len(raw or ""),
+                            response_prefix=(raw or "")[:200])
+                return None
             score = float(parsed.get("overall", _PASSTHROUGH_SCORE))
             feedback = str(parsed.get("feedback", "") or "")
-            # Clamp to the valid range — a model can occasionally over/undershoot.
+            # Clamp to the valid range — a model can over/undershoot.
             score = max(0.0, min(10.0, score))
             return score, feedback
+
+        try:
+            result = _attempt(max_tokens=600)
+            if result is not None:
+                return result
+            # First parse failed — most likely truncation past the
+            # closing '}'. Retry ONCE with a higher token budget.
+            log.info("harness_evaluator_retry_with_higher_tokens",
+                     retry_max_tokens=1500)
+            result = _attempt(max_tokens=1500)
+            if result is not None:
+                return result
+            # Both attempts failed parsing — passthrough score.
+            log.warning("harness_evaluator_both_attempts_failed")
+            return _PASSTHROUGH_SCORE, ""
         except Exception as exc:  # noqa: BLE001
+            # Non-parse errors (network, auth, etc.) — passthrough so
+            # the review session never hard-fails on the evaluator.
             log.warning("harness_evaluator_failed", error=str(exc))
             return _PASSTHROUGH_SCORE, ""
 

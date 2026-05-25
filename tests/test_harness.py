@@ -115,6 +115,55 @@ class TestHarnessUnit:
         assert result.final_score == 8.0
         assert result.attempts == 1
 
+    def test_evaluator_truncated_json_retries_with_higher_max_tokens(self):
+        """PR-LLM-2 (May 28 2026) — when the first call returns
+        truncated JSON ("Unterminated string at char N"), the
+        evaluator retries ONCE with max_tokens=1500. If the retry
+        succeeds, the second call's score is used."""
+        from agents.harness import GeneratorEvaluatorHarness
+
+        def gen(prompt: str) -> str:
+            return "the response under evaluation"
+
+        # First call: truncated JSON (no closing quote on "feedback").
+        # Second call: valid JSON with score=8.5.
+        truncated = '{"scores": {}, "overall": 6.0, "feedback": "needs'
+        valid = _score(8.5, feedback="much better")
+        max_tokens_seen: list[int] = []
+
+        def fake_call_claude(model, system, user, **kwargs):
+            max_tokens_seen.append(kwargs.get("max_tokens"))
+            return truncated if len(max_tokens_seen) == 1 else valid
+
+        harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=1)
+        with patch("agents.harness.call_claude",
+                   side_effect=fake_call_claude):
+            result = harness.run(gen, "EVAL", "TASK", "context", "test_agent")
+        # The first call ran at 600; the retry bumped to 1500.
+        assert max_tokens_seen[0] == 600
+        assert max_tokens_seen[1] == 1500
+        # The second call's score landed.
+        assert result.final_score == 8.5
+        # max_retries=1 so we get one generator + the evaluator's
+        # two parse attempts on the same generator output.
+        assert result.attempts == 1
+
+    def test_evaluator_both_attempts_failing_passes_through(self):
+        """If the retry ALSO fails to parse, the evaluator returns
+        the passthrough score — the review session never hard-fails."""
+        from agents.harness import GeneratorEvaluatorHarness
+
+        def gen(prompt: str) -> str:
+            return "the response"
+
+        # Both calls return malformed JSON.
+        with patch("agents.harness.call_claude",
+                   return_value='{"unterminated'):
+            harness = GeneratorEvaluatorHarness(threshold=7.0, max_retries=1)
+            result = harness.run(gen, "EVAL", "TASK", "context", "test_agent")
+        # Passthrough (8.0) clears the threshold — review proceeds.
+        assert result.final_score == 8.0
+
     def test_generator_exception_returns_best_earlier_response(self):
         from agents.harness import GeneratorEvaluatorHarness
         n = [0]

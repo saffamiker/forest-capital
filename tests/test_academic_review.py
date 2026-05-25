@@ -347,11 +347,37 @@ class TestSectionFiveFallback:
         from agents.academic_review import _verdict_has_section_5
         # Script rubric expects "Overall Delivery Readiness".
         delivery = "### 5. Overall Delivery Readiness\n**Rating:** Strong\n"
-        academic = "### 5. Overall Academic Readiness\n**Rating:** Strong\n"
+        # Under PR-LLM-2 (May 28 2026) the detector now accepts ANY
+        # `### 5. Overall <words>` heading — including the academic
+        # rubric's title — because the body content is usable and
+        # the wrong-title rename branch in the fallback handles the
+        # title rewrite downstream. The strict-only check was firing
+        # the fallback every run.
         assert _verdict_has_section_5(delivery, script_review=True) is True
-        # An "Academic Readiness" Section 5 on a script review is the
-        # wrong title for that rubric — detector trips the fallback.
-        assert _verdict_has_section_5(academic, script_review=True) is False
+
+    def test_detector_accepts_overall_variant_titles(self):
+        """PR-LLM-2 (May 28 2026) — the strict-title detector fired
+        the fallback on every review run because the arbiter wrote
+        close-but-not-exact titles like "Overall Readiness" or
+        "Overall Project Readiness". The detector now accepts any
+        `### 5. Overall <words>` heading. The body content is usable
+        as-is; the wrong-title rename branch in the fallback handles
+        the title rewrite downstream when callers reach that path."""
+        from agents.academic_review import _verdict_has_section_5
+        for variant in (
+            "### 5. Overall Readiness\n**Rating:** Strong\n",
+            "### 5. Overall Project Readiness\n**Rating:** Developing\n",
+            "### 5. Overall Verdict\n**Rating:** Needs Work\n",
+            "### 5. Overall Readiness Assessment\n**Rating:** Strong\n",
+        ):
+            assert _verdict_has_section_5(variant, script_review=False) is True
+
+    def test_detector_still_rejects_off_overall_titles(self):
+        # A heading that does NOT start with "Overall" still trips
+        # the fallback — the loosening is bounded.
+        from agents.academic_review import _verdict_has_section_5
+        verdict = "### 5. Final Verdict\n**Rating:** Strong\n"
+        assert _verdict_has_section_5(verdict, script_review=False) is False
 
     def test_fallback_appends_section_5_with_aggregated_rating(self):
         from agents.academic_review import _assemble_section_5_fallback

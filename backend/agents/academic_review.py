@@ -959,33 +959,50 @@ def chunk_arbiter_text(text: str) -> list[str]:
 
 def _verdict_has_section_5(text: str, script_review: bool) -> bool:
     """
-    True when the verdict carries the Section 5 heading the active rubric
-    requires. Both rubrics end with a Section 5 — the written rubric
-    calls it "Overall Academic Readiness" and the script rubric "Overall
-    Delivery Readiness".
+    True when the verdict carries the Section 5 heading the active
+    rubric requires. Both rubrics end with a Section 5 — the written
+    rubric calls it "Overall Academic Readiness" and the script
+    rubric "Overall Delivery Readiness".
 
     UAT 2026-05-24 (#53/#59) — the prior check was
     `expected_title.lower() in text.lower()` which searched the WHOLE
     verdict text for the title. The arbiter sometimes wrote section 5
-    with an off-rubric heading (e.g. "Overall Readiness Assessment")
-    AND mentioned "Overall Academic Readiness" elsewhere in the body
-    of a different section — the loose check passed, the fallback
+    with an off-rubric heading AND mentioned the rubric title in the
+    body of another section — the loose check passed, the fallback
     didn't fire, and the user saw a section 5 with the wrong title or
-    no rating badge. The tightened check requires the rubric-correct
-    title to appear ON the `### 5.` heading line itself.
+    no rating badge.
+
+    PR-LLM-2 (May 28 2026) — the strict-title-only detector was
+    firing the fallback on EVERY review run because the arbiter
+    consistently writes a close-but-not-exact title (e.g. "Overall
+    Readiness", "Overall Project Readiness"). Loosened to accept
+    EITHER the exact rubric title OR any `### 5. Overall <words>`
+    pattern — the latter covers every observed variant so the
+    fallback only fires when section 5 is genuinely absent.
     """
     import re
     expected_title = ("Overall Delivery Readiness" if script_review
                       else "Overall Academic Readiness")
-    # `### 5.` heading line whose text matches the rubric-correct
-    # title. Case-insensitive, multiline. The pattern is anchored to
-    # line start so a `### 5. ` literal embedded mid-sentence in
-    # someone's prose body never matches.
-    pattern = re.compile(
+    # Pass 1: rubric-exact title on the heading line.
+    exact = re.compile(
         r"^\s*###\s*5\.\s*" + re.escape(expected_title),
         re.IGNORECASE | re.MULTILINE,
     )
-    return bool(pattern.search(text))
+    if exact.search(text):
+        return True
+    # Pass 2 (PR-LLM-2): `### 5. Overall <anything>` — covers every
+    # observed model variant ("Overall Readiness", "Overall Project
+    # Readiness", "Overall Verdict", "Overall Readiness Assessment"
+    # etc.). The body content is usable as-is — only the off-rubric
+    # title fired the prior fallback every run. The wrong-title
+    # rename branch in _assemble_section_5_fallback still REPLACES
+    # the title in place if a caller hits that path, so the
+    # rendered output remains rubric-correct downstream.
+    overall_variant = re.compile(
+        r"^\s*###\s*5\.\s*Overall\b",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    return bool(overall_variant.search(text))
 
 
 def _assemble_section_5_fallback(
@@ -1139,10 +1156,25 @@ def run_arbiter_with_harness(
         # ratings. The user sees five sections every time; UAT
         # #128/#125 cannot reappear.
         if not _verdict_has_section_5(result.response, script_review):
+            # PR-LLM-2 (May 28 2026) — diagnostic logging. The previous
+            # log line carried only the length and attempts; future
+            # parser fixes need to see what the model actually wrote.
+            # Capture the trailing 1500 chars (where Section 5 should
+            # appear) plus every `### N.` heading the model emitted
+            # so we can compare expected vs actual structure at a
+            # glance in the Render logs.
+            import re
+
+            headings_found = re.findall(
+                r"^\s*###\s*\d+\.\s*[^\n]+$",
+                result.response, re.MULTILINE)
             log.warning(
                 "academic_review_section_5_fallback_applied",
                 arbiter_chars=len(result.response),
                 attempts=result.attempts,
+                trailing_1500_chars=result.response[-1500:],
+                headings_found=headings_found,
+                script_review=script_review,
             )
             return _assemble_section_5_fallback(
                 result.response, peer_responses, script_review)
