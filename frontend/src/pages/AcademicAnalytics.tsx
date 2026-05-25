@@ -1211,7 +1211,15 @@ export default function AcademicAnalytics() {
   }, [])
 
   return (
-    <div className="p-4 md:p-6 space-y-5">
+    // lg:pr-28 reserves ~112px of right-edge clearance on lg+ screens
+    // for the FloatingSectionNav collapsed pill (anchored at right-0,
+    // ~110px wide with the 'Sections' label). Without it the Sensitivity
+    // Analysis 2-col chart grid extends under the nav tab on lg+, and
+    // the rightmost SensitivityChart (e.g. Regime Switching) reads
+    // half-covered by the floating control. The padding is lg-gated so
+    // mobile / md layouts (where the nav is a bottom drawer, not a
+    // right-edge pill) keep their normal full-width content.
+    <div className="p-4 md:p-6 lg:pr-28 space-y-5">
       <FloatingSectionNav pageKey="academic-analytics" />
       <div>
         <h1 className="text-xl font-semibold text-white" data-tour="analytics-header">Academic Analytics</h1>
