@@ -373,6 +373,12 @@ async def resolve_finding(
     (resolved=False) the column is set back to NULL alongside
     resolution_note and resolved_at — the row reverts to its
     pre-review state.
+
+    Workstream A — a successful ack also writes an audit_acknowledgements
+    row so the next re-run's carry pass (tools/audit_carry.apply_carry)
+    can re-apply this review against an equivalent future finding. A
+    successful unresolve marks the row superseded so a revoked ack is
+    not silently carried forward.
     """
     try:
         from sqlalchemy import text
@@ -384,7 +390,9 @@ async def resolve_finding(
             result = await session.execute(text(
                 "UPDATE audit_findings SET resolved = :r, "
                 "resolution_note = :n, resolved_by = :by, "
-                "resolved_at = CASE WHEN :r THEN now() ELSE NULL END "
+                "resolved_at = CASE WHEN :r THEN now() ELSE NULL END, "
+                "auto_acknowledged = CASE WHEN :r THEN false "
+                "                         ELSE auto_acknowledged END "
                 "WHERE id = :id "
                 "RETURNING id, layer, check_name, metric, strategy, "
                 "severity, status, platform_value, auditor_value, "
@@ -396,11 +404,31 @@ async def resolve_finding(
                  "id": finding_id})
             row = result.fetchone()
             await session.commit()
-            return _finding_row(row) if row else None
+            if not row:
+                return None
+            finding = _finding_row(row)
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_resolve_finding_failed",
                     finding_id=finding_id, error=str(exc))
         return None
+
+    # Persist the carry record outside the primary UPDATE's session so
+    # a write failure here cannot roll back the audit_findings change.
+    try:
+        from tools.audit_carry import (
+            record_acknowledgement, supersede_acknowledgement,
+        )
+        if resolved and note and resolved_by:
+            await record_acknowledgement(
+                finding, note, acknowledged_by=resolved_by)
+        elif not resolved:
+            # Revoke — supersede the unsuperseded ack for this check_id.
+            await supersede_acknowledgement(finding)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_carry_record_failed",
+                    finding_id=finding_id, error=str(exc))
+
+    return finding
 
 
 async def get_latest_audit_run() -> dict[str, Any] | None:
@@ -459,6 +487,20 @@ async def _execute_audit(run_id: int) -> None:
                           "3": l3["status"]}
         all_findings = l1["findings"] + l2["findings"] + l3["findings"]
         await _store_findings(run_id, all_findings)
+        # Workstream A — apply auto-carry of prior acks against the
+        # newly-stored findings. Each WARN whose check_id has a
+        # prior unsuperseded ack AND whose value has not materially
+        # changed (within 0.5%) is resolved automatically; the
+        # finding row's auto_acknowledged flag distinguishes a
+        # carried ack from a fresh team-typed one in the UI and PDF.
+        # Failures inside the carry pass log and swallow — the audit
+        # itself remains valid.
+        try:
+            from tools.audit_carry import apply_carry
+            await apply_carry(run_id)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("audit_carry_pass_failed",
+                        run_id=run_id, error=str(exc))
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_execute_failed", run_id=run_id, error=str(exc))
         status = "failed"

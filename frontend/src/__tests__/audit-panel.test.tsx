@@ -27,6 +27,9 @@ interface RowFinding {
   auditor_reasoning: string | null
   resolved?: boolean
   resolution_note?: string | null
+  resolved_by?: string | null
+  resolved_at?: string | null
+  auto_acknowledged?: boolean
 }
 
 function warnFinding(over: Partial<RowFinding> = {}): RowFinding {
@@ -146,6 +149,82 @@ describe('AuditPanel — Edit Disclosure (Workstream E)', () => {
     // The Edit disclosure button is visible again.
     expect(screen.getByTestId('audit-edit-disclosure-5')).toBeInTheDocument()
   })
+})
+
+
+describe('AuditPanel — Auto-acknowledged badge (Workstream A)', () => {
+  // The carry pass marks audit_findings.auto_acknowledged=true when
+  // it carried a prior ack forward against a value-matched finding.
+  // The badge label must distinguish that carried state from a
+  // freshly-typed acknowledgement so the team can see at a glance
+  // which warnings need re-confirmation.
+
+  it('an auto-acknowledged finding shows the Auto-acknowledged badge',
+    () => {
+      render(<FindingRow f={warnFinding({
+        resolved: true,
+        resolution_note: 'Carried disclosure from prior review.',
+        auto_acknowledged: true,
+      })} />)
+      // Two surfaces — the header chip and the in-panel line. Both
+      // must reflect the carried state.
+      expect(screen.getByTestId('audit-auto-ack-badge-5')).toBeInTheDocument()
+      expect(screen.getAllByText('Auto-acknowledged').length)
+        .toBeGreaterThan(0)
+      // The plain Acknowledged label must NOT appear — it would
+      // suggest the team had re-confirmed the carry.
+      expect(screen.queryByText(/^Acknowledged$/)).toBeNull()
+    })
+
+  it('a manually-acknowledged finding shows the plain Acknowledged badge',
+    () => {
+      render(<FindingRow f={warnFinding({
+        resolved: true,
+        resolution_note: 'Bob reviewed this.',
+        auto_acknowledged: false,
+      })} />)
+      expect(screen.getByTestId('audit-ack-badge-5')).toBeInTheDocument()
+      expect(screen.queryByTestId('audit-auto-ack-badge-5')).toBeNull()
+    })
+
+  it('expanding an auto-acknowledged finding shows the carry explanation',
+    () => {
+      render(<FindingRow f={warnFinding({
+        resolved: true,
+        resolution_note: 'Carried from prior.',
+        auto_acknowledged: true,
+      })} />)
+      fireEvent.click(screen.getByText(/Turnover direction/))
+      // The italic explanation tells the user the value has not
+      // materially changed since the original ack.
+      expect(screen.getByText(/Carried from a prior review/i))
+        .toBeInTheDocument()
+    })
+
+  it('Save after Edit endorses the ack and clears the auto-acknowledged label',
+    async () => {
+      render(<FindingRow f={warnFinding({
+        resolved: true,
+        resolution_note: 'Auto-carried disclosure.',
+        auto_acknowledged: true,
+      })} />)
+      fireEvent.click(screen.getByText(/Turnover direction/))
+      // The header initially shows the Auto-acknowledged badge.
+      expect(screen.getByTestId('audit-auto-ack-badge-5')).toBeInTheDocument()
+      fireEvent.click(screen.getByTestId('audit-edit-disclosure-5'))
+      const refined = 'Bob — re-confirmed after team review.'
+      fireEvent.change(
+        screen.getByPlaceholderText(/Describe how you have addressed/),
+        { target: { value: refined } })
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Save acknowledgement' }))
+      // After Save the badge flips — the team has now endorsed
+      // the ack and it is no longer a carry.
+      await waitFor(() => {
+        expect(screen.getByTestId('audit-ack-badge-5')).toBeInTheDocument()
+      })
+      expect(screen.queryByTestId('audit-auto-ack-badge-5')).toBeNull()
+    })
 })
 
 

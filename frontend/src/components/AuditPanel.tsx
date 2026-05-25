@@ -196,6 +196,13 @@ export function FindingRow({ f }: { f: AuditFinding }) {
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [ackError, setAckError] = useState<string | null>(null)
+  // Workstream A — auto_acknowledged distinguishes a carried ack
+  // from a freshly-typed one. The badge label changes from
+  // "Acknowledged" to "Auto-acknowledged" when the carry pass
+  // applied the row; a manual edit (Save acknowledgement) below
+  // clears the flag on the server because the team has now
+  // explicitly endorsed the ack themselves.
+  const [autoAck, setAutoAck] = useState(Boolean(f.auto_acknowledged))
   // Workstream F — revoke disclosure with a confirmation modal.
   // The /unresolve endpoint already exists; the modal is added so a
   // revoke is never one-click destructive of a recorded disclosure.
@@ -227,6 +234,10 @@ export function FindingRow({ f }: { f: AuditFinding }) {
         { resolution_note: draft.trim() })
       setResolved(true)
       setNote(draft.trim())
+      // A manual Save endorses the ack — the server clears the
+      // auto_acknowledged flag and the local label flips from
+      // "Auto-acknowledged" to "Acknowledged".
+      setAutoAck(false)
       setEditing(false)
     } catch {
       setAckError('Could not save the acknowledgement.')
@@ -243,12 +254,16 @@ export function FindingRow({ f }: { f: AuditFinding }) {
       // Clear the local UI state — the row reverts to its
       // pre-acknowledgement view. The report-readiness gate
       // (workstream C) re-evaluates on next load because the row's
-      // resolved flag is back to false on the server.
+      // resolved flag is back to false on the server. The
+      // audit_acknowledgements row for this check_id is marked
+      // superseded server-side so a revoked ack is not silently
+      // carried forward by the next re-run.
       setResolved(false)
       setNote('')
       setDraft('')
       setEditing(false)
       setRevokeOpen(false)
+      setAutoAck(false)
     } catch {
       setRevokeError('Could not revoke the acknowledgement — please retry.')
     } finally {
@@ -268,9 +283,14 @@ export function FindingRow({ f }: { f: AuditFinding }) {
           <span className="text-xs text-white">
             L{f.layer} · {f.check_name}
             {resolved && (
-              <span className="ml-1.5 inline-flex items-center gap-0.5
-                               text-2xs text-success align-middle">
-                <CheckCircle2 className="w-3 h-3" /> Acknowledged
+              <span
+                data-testid={
+                  autoAck ? `audit-auto-ack-badge-${f.id}`
+                          : `audit-ack-badge-${f.id}`}
+                className="ml-1.5 inline-flex items-center gap-0.5
+                           text-2xs text-success align-middle">
+                <CheckCircle2 className="w-3 h-3" />{' '}
+                {autoAck ? 'Auto-acknowledged' : 'Acknowledged'}
               </span>
             )}
           </span>
@@ -303,8 +323,18 @@ export function FindingRow({ f }: { f: AuditFinding }) {
               {resolved && !editing && (
                 <div className="space-y-1">
                   <div className="flex items-center gap-1 text-success">
-                    <CheckCircle2 className="w-3 h-3" /> Acknowledged
+                    <CheckCircle2 className="w-3 h-3" />{' '}
+                    {autoAck ? 'Auto-acknowledged' : 'Acknowledged'}
                   </div>
+                  {autoAck && (
+                    <div className="text-2xs text-muted italic
+                                    leading-relaxed">
+                      Carried from a prior review — the underlying
+                      value has not materially changed since the
+                      original acknowledgement. Edit or Revoke to
+                      replace the carried disclosure.
+                    </div>
+                  )}
                   {note && (
                     <div className="text-slate-300 leading-relaxed">{note}</div>
                   )}
