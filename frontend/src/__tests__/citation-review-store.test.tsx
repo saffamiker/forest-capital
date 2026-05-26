@@ -91,7 +91,11 @@ function makeFindingsResponse(generationId: number) {
           source: 'audit' as const,
           source_id: 'D04',
           title: 'Strategy return-series coverage',
-          description: 'Splice junction date not exposed.',
+          // Description tokens overlap with each citation
+          // (sharpe/ratio/cvar/risk/measures) so the May-26
+          // relevance filter keeps them visible in the default view.
+          description: (
+            'Sharpe ratio significance, CVaR coherent risk measures.'),
           rank: 'high' as const,
           status: 'warning',
           severity: 'warning',

@@ -140,7 +140,15 @@ function makeFindingsResponse(generationId: number) {
           source: 'audit',
           source_id: 'D04',
           title: 'Strategy return-series coverage',
-          description: null,
+          // Description carries tokens overlapping with the evidence
+          // fixture's citations (cvar_coherent_risk, sharpe_ratio,
+          // momentum_factor) so the May-26 relevance filter keeps
+          // them visible under the default view. Without overlap the
+          // filter would hide them and break the evidence-card
+          // expand tests.
+          description: (
+            'Sharpe ratio, CVaR coherent risk measures, momentum '
+            + 'factor evidence.'),
           rank: 'high',
           status: 'warning',
           severity: 'warning',
