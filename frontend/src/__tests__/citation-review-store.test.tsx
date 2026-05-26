@@ -2,11 +2,12 @@
  * citation-review-store.test.tsx — citation panel persistence
  * across navigation + axios auth (May 23 2026).
  *
- * The store backs both within-session persistence (the Zustand
- * cache survives unmount/remount within the same login) AND
- * authenticated requests — it switched from raw fetch() to axios
- * so the X-API-Key header on axios.defaults.headers.common is
- * attached to every /api/v1/citations request.
+ * Updated May 26 2026 — the redesigned panel now drives off
+ * GET /api/v1/citations/findings/{id} (migration 045). The
+ * legacy GET /api/v1/citations/{id} is still wired through
+ * the store's load() method, which the store-only tests
+ * exercise directly. The panel tests in this file mock the
+ * new findings endpoint.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
@@ -23,20 +24,12 @@ vi.mock('axios')
 const mockedAxios = axios as unknown as {
   get: ReturnType<typeof vi.fn>
   post: ReturnType<typeof vi.fn>
+  delete: ReturnType<typeof vi.fn>
   isAxiosError: (err: unknown) => boolean
 }
 
 
 function makeCitations() {
-  // The three multi-layered sourcing fields (migration 043) are
-  // required on the Citation type since commit 3512b15. Both
-  // entries below set them — the Sharpe Ratio (Sharpe 1994) is a
-  // foundational framework so reads as 'theoretical'; the Acerbi
-  // CVaR paper is a technique / validation reference so reads as
-  // 'methodological'. trust_flag and scoring_rationale stay null
-  // here because the mock represents the pre-multi-layer state of
-  // each row (the new pipeline writes both on insert, but the
-  // store contract serves rows from either pipeline).
   return [
     {
       id: 1, concept_id: 'sharpe_ratio',
@@ -57,6 +50,7 @@ function makeCitations() {
       citation_type: 'theoretical',
       trust_flag: null,
       scoring_rationale: null,
+      matched_finding_ids: [] as number[],
     },
     {
       id: 2, concept_id: 'cvar_coherent_risk',
@@ -77,15 +71,44 @@ function makeCitations() {
       citation_type: 'methodological',
       trust_flag: null,
       scoring_rationale: null,
+      matched_finding_ids: [] as number[],
     },
   ]
 }
 
 
+// Helper — wraps the citations in a single Level-1 finding so the
+// new panel layout has a section under which the citation rows
+// render. Without a finding the redesigned panel renders nothing.
+function makeFindingsResponse(generationId: number) {
+  return {
+    data: {
+      generation_id: generationId,
+      seeded_at: new Date().toISOString(),
+      findings: [
+        {
+          id: 9001,
+          source: 'audit' as const,
+          source_id: 'D04',
+          title: 'Strategy return-series coverage',
+          description: 'Splice junction date not exposed.',
+          rank: 'high' as const,
+          status: 'warning',
+          severity: 'warning',
+          matched_count: 0,
+        },
+      ],
+      citations: makeCitations(),
+    },
+  }
+}
+
+
 beforeEach(() => {
   useCitationReviewStore.getState()._reset()
-  mockedAxios.get = vi.fn()
-  mockedAxios.post = vi.fn()
+  mockedAxios.get    = vi.fn()
+  mockedAxios.post   = vi.fn()
+  mockedAxios.delete = vi.fn()
   mockedAxios.isAxiosError = (err) =>
     !!(err && (err as { isAxiosError?: boolean }).isAxiosError)
 })
@@ -98,9 +121,7 @@ afterEach(() => {
 
 describe('CitationReviewPanel — citations persist across unmount', () => {
   it('does NOT re-fetch when remounted within the stale window', async () => {
-    mockedAxios.get.mockResolvedValueOnce({
-      data: { citations: makeCitations() },
-    })
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
 
     const { unmount } = render(<CitationReviewPanel generationId={42} />)
     await waitFor(() => screen.getByTestId(
@@ -117,18 +138,18 @@ describe('CitationReviewPanel — citations persist across unmount', () => {
   })
 
   it('a different generation_id triggers its own fetch', async () => {
-    mockedAxios.get.mockResolvedValue({
-      data: { citations: makeCitations() },
-    })
+    mockedAxios.get
+      .mockResolvedValueOnce(makeFindingsResponse(42))
+      .mockResolvedValueOnce(makeFindingsResponse(43))
 
     const { rerender } = render(
       <CitationReviewPanel generationId={42} />)
     await waitFor(() => expect(mockedAxios.get).toHaveBeenCalledWith(
-      '/api/v1/citations/42'))
+      '/api/v1/citations/findings/42'))
 
     rerender(<CitationReviewPanel generationId={43} />)
     await waitFor(() => expect(mockedAxios.get).toHaveBeenCalledWith(
-      '/api/v1/citations/43'))
+      '/api/v1/citations/findings/43'))
     expect(mockedAxios.get).toHaveBeenCalledTimes(2)
 
     rerender(<CitationReviewPanel generationId={42} />)
@@ -136,9 +157,7 @@ describe('CitationReviewPanel — citations persist across unmount', () => {
   })
 
   it('no loading flash on remount when cache is warm', async () => {
-    mockedAxios.get.mockResolvedValueOnce({
-      data: { citations: makeCitations() },
-    })
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
 
     const { unmount } = render(<CitationReviewPanel generationId={42} />)
     await waitFor(() => screen.getByTestId(
@@ -155,15 +174,9 @@ describe('CitationReviewPanel — citations persist across unmount', () => {
 
 describe('CitationReviewPanel — manual form toggle persists', () => {
   it('open manual form on row stays open after remount', async () => {
-    mockedAxios.get.mockResolvedValue({
-      data: { citations: makeCitations() },
-    })
+    mockedAxios.get.mockResolvedValue(makeFindingsResponse(42))
 
     const { unmount } = render(<CitationReviewPanel generationId={42} />)
-    // Tiles default to collapsed in the May 23 2026 redesign —
-    // expand the pending tile so the manual-toggle button is in
-    // the DOM. The expansion state ALSO persists through the
-    // store, which is what the second-mount assertion exercises.
     await waitFor(() =>
       screen.getByTestId('citation-toggle-cvar_coherent_risk'))
     fireEvent.click(
@@ -181,9 +194,6 @@ describe('CitationReviewPanel — manual form toggle persists', () => {
 
     unmount()
     render(<CitationReviewPanel generationId={42} />)
-    // The expansion + manual-form open states are both stored —
-    // both must rehydrate on remount so Bob sees the same UI he
-    // left.
     expect(
       screen.getByTestId(
         'citation-manual-author-cvar_coherent_risk'),
@@ -203,7 +213,10 @@ describe('CitationReviewPanel — manual form toggle persists', () => {
 })
 
 
-describe('citationReviewStore — stale-while-revalidate', () => {
+describe('citationReviewStore — stale-while-revalidate (legacy load)', () => {
+  // The legacy load() method against /api/v1/citations/{id} is still
+  // exposed on the store for any caller that wants citations without
+  // findings context. These tests pin its contract.
   it('load is a no-op when cached entry is within the freshness window', async () => {
     mockedAxios.get.mockResolvedValue({
       data: { citations: makeCitations() },
@@ -278,8 +291,129 @@ describe('citationReviewStore — stale-while-revalidate', () => {
     })
     const store = useCitationReviewStore.getState()
     await act(async () => { await store.load(42) })
-    // Verifies the store uses axios (not raw fetch) — the test
-    // would not see the call recorded on mockedAxios.get otherwise.
     expect(mockedAxios.get).toHaveBeenCalledWith('/api/v1/citations/42')
+  })
+})
+
+
+// ── loadFindings — the new endpoint backing the redesigned panel ────────────
+
+
+describe('citationReviewStore — loadFindings', () => {
+  it('GETs /api/v1/citations/findings/{id} and populates both slices', async () => {
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
+    const store = useCitationReviewStore.getState()
+    await act(async () => { await store.loadFindings(42) })
+
+    expect(mockedAxios.get).toHaveBeenCalledWith(
+      '/api/v1/citations/findings/42')
+    const st = useCitationReviewStore.getState()
+    expect(st.findingsByGenerationId[42]?.length).toBe(1)
+    expect(st.citationsByGenerationId[42]?.length).toBe(2)
+  })
+
+  it('is a no-op within the stale window, force=true bypasses it', async () => {
+    mockedAxios.get.mockResolvedValue(makeFindingsResponse(42))
+    const store = useCitationReviewStore.getState()
+
+    await act(async () => { await store.loadFindings(42) })
+    await act(async () => { await store.loadFindings(42) })
+    expect(mockedAxios.get).toHaveBeenCalledTimes(1)
+
+    await act(async () => { await store.loadFindings(42, { force: true }) })
+    expect(mockedAxios.get).toHaveBeenCalledTimes(2)
+  })
+
+  it('records error on a failed fetch', async () => {
+    mockedAxios.get.mockRejectedValueOnce({
+      isAxiosError: true,
+      response: { data: { detail: 'boom' }},
+      message: 'Request failed',
+    })
+    const store = useCitationReviewStore.getState()
+    await act(async () => { await store.loadFindings(42) })
+    expect(
+      useCitationReviewStore.getState()
+        .findingsErrorByGenerationId[42],
+    ).toBe('boom')
+  })
+})
+
+
+// ── toggleMatch — optimistic update + revert on failure ─────────────────────
+
+
+describe('citationReviewStore — toggleMatch', () => {
+  it('POSTs to /match when adding a match, increments matched_count', async () => {
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
+    mockedAxios.post.mockResolvedValueOnce({
+      data: { matched: true },
+    })
+    const store = useCitationReviewStore.getState()
+    await act(async () => { await store.loadFindings(42) })
+    await act(async () => {
+      await store.toggleMatch(42, 1, 9001, false)
+    })
+
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      '/api/v1/citations/match',
+      { citation_id: 1, finding_id: 9001 })
+    const st = useCitationReviewStore.getState()
+    expect(
+      st.citationsByGenerationId[42]?.find((c) => c.id === 1)
+        ?.matched_finding_ids).toEqual([9001])
+    expect(
+      st.findingsByGenerationId[42]?.[0]?.matched_count).toBe(1)
+  })
+
+  it('DELETEs /match when removing a match, decrements matched_count', async () => {
+    // Pre-load with citation 1 already matched to finding 9001.
+    const resp = makeFindingsResponse(42)
+    resp.data.citations[0]!.matched_finding_ids = [9001]
+    resp.data.findings[0]!.matched_count = 1
+    mockedAxios.get.mockResolvedValueOnce(resp)
+    mockedAxios.delete.mockResolvedValueOnce({ data: { removed: true }})
+
+    const store = useCitationReviewStore.getState()
+    await act(async () => { await store.loadFindings(42) })
+    await act(async () => {
+      await store.toggleMatch(42, 1, 9001, true)
+    })
+
+    expect(mockedAxios.delete).toHaveBeenCalledWith(
+      '/api/v1/citations/match',
+      { data: { citation_id: 1, finding_id: 9001 }})
+    const st = useCitationReviewStore.getState()
+    expect(
+      st.citationsByGenerationId[42]?.find((c) => c.id === 1)
+        ?.matched_finding_ids).toEqual([])
+    expect(
+      st.findingsByGenerationId[42]?.[0]?.matched_count).toBe(0)
+  })
+
+  it('reverts optimistic update on POST failure', async () => {
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
+    mockedAxios.post.mockRejectedValueOnce(new Error('network'))
+
+    const store = useCitationReviewStore.getState()
+    await act(async () => { await store.loadFindings(42) })
+
+    let threw = false
+    await act(async () => {
+      try {
+        await store.toggleMatch(42, 1, 9001, false)
+      } catch {
+        threw = true
+      }
+    })
+    expect(threw).toBe(true)
+
+    // matched_count stayed at 0; citation matched_finding_ids stayed empty.
+    const st = useCitationReviewStore.getState()
+    expect(
+      st.citationsByGenerationId[42]?.find((c) => c.id === 1)
+        ?.matched_finding_ids).toEqual([])
+    expect(
+      st.findingsByGenerationId[42]?.[0]?.matched_count).toBe(0)
   })
 })

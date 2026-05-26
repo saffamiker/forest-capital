@@ -1,16 +1,14 @@
 /**
  * citation-review-panel.test.tsx
  *
- * Covers the CitationReviewPanel — the 7-state citation review
- * workflow. The panel fetches /api/v1/citations/<generation_id>,
- * groups citations by state, and renders the four review actions
- * (accept, reject, select alternative, manual add) for items in a
- * needs-review state.
+ * Updated May 26 2026 (migration 045 — Citation Review redesign).
+ * The panel now fetches /api/v1/citations/findings/{generation_id}
+ * and renders a 3-level Finding ▸ Type ▸ Citation hierarchy. Every
+ * test in this file drives that flow.
  *
- * Tests mock axios (the panel + store switched from raw fetch() to
- * axios on May 23 2026 so the X-API-Key session token is attached
- * to every request — fetch() doesn't inherit
- * axios.defaults.headers.common which was causing 401s).
+ * The existing per-row review actions (accept primary / reject /
+ * manual override / select alternative) are unchanged — those
+ * tests still apply, just nested under a finding section.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
@@ -25,16 +23,11 @@ vi.mock('axios')
 const mockedAxios = axios as unknown as {
   get: ReturnType<typeof vi.fn>
   post: ReturnType<typeof vi.fn>
+  delete: ReturnType<typeof vi.fn>
   isAxiosError: (err: unknown) => boolean
 }
 
 
-// Citation fixture covering all the states the panel renders for.
-// Updated May 23 2026 — every entry carries the four evidence
-// fields (migration 039). Primary citations include them so the
-// expanded tile renders extract / rationale / confidence text;
-// alternatives carry them too so the AlternativeCard tests have
-// real per-option evidence to assert against.
 function makeCitations() {
   return [
     {
@@ -49,10 +42,14 @@ function makeCitations() {
       alternatives: [],
       reviewer_email: null, reviewed_at: null, review_action: null,
       formatted: 'Sharpe, W. F. (1994). The Sharpe Ratio.',
-      supporting_extract: 'The Sharpe ratio is the expected return per unit of risk.',
-      selection_rationale: 'Original Sharpe paper on a trusted-domain JSTOR URL.',
+      supporting_extract: 'Expected return per unit of risk.',
+      selection_rationale: 'Original paper on JSTOR.',
       confidence_score: 0.98,
-      finding_supported: 'The Sharpe ratio is the standard risk-adjusted return metric.',
+      finding_supported: 'Sharpe ratio is the standard risk-adjusted metric.',
+      citation_type: 'theoretical',
+      trust_flag: 'verified',
+      scoring_rationale: null,
+      matched_finding_ids: [] as number[],
     },
     {
       id: 2, concept_id: 'cvar_coherent_risk',
@@ -71,18 +68,22 @@ function makeCitations() {
           volume_issue_pages: '2(3), 21-41',
           url: 'https://imf.org/papers/cvar.pdf',
           pass_source: 'pass_2_academic',
-          supporting_extract: 'CVaR is a coherent measure of risk that satisfies the four axioms.',
-          selection_rationale: 'Academic journal on the IMF domain — strong secondary source.',
+          supporting_extract: 'CVaR is a coherent measure of risk.',
+          selection_rationale: 'Academic journal on IMF.',
           confidence_score: 0.75,
-          finding_supported: 'CVaR is a coherent risk measure for downside risk.',
+          finding_supported: 'CVaR is a coherent risk measure.',
         },
       ],
       reviewer_email: null, reviewed_at: null, review_action: null,
       formatted: null,
-      supporting_extract: 'CVaR as a coherent risk measure has four axiomatic properties.',
-      selection_rationale: 'University working paper, off-trusted domain.',
+      supporting_extract: 'CVaR has four axiomatic coherence properties.',
+      selection_rationale: 'University working paper.',
       confidence_score: 0.65,
       finding_supported: 'CVaR is a coherent risk measure for downside risk.',
+      citation_type: 'methodological',
+      trust_flag: null,
+      scoring_rationale: null,
+      matched_finding_ids: [] as number[],
     },
     {
       id: 3, concept_id: 'momentum_factor',
@@ -98,17 +99,47 @@ function makeCitations() {
       selection_rationale: null,
       confidence_score: null,
       finding_supported: null,
+      citation_type: 'empirical',
+      trust_flag: null,
+      scoring_rationale: null,
+      matched_finding_ids: [] as number[],
     },
   ]
 }
 
 
+function makeFindingsResponse(generationId: number, opts?: {
+  citations?: ReturnType<typeof makeCitations>
+  findings?: Array<Record<string, unknown>>
+}) {
+  return {
+    data: {
+      generation_id: generationId,
+      seeded_at: new Date().toISOString(),
+      findings: opts?.findings ?? [
+        {
+          id: 9001,
+          source: 'audit',
+          source_id: 'D04',
+          title: 'Strategy return-series coverage',
+          description: 'Splice junction date not exposed.',
+          rank: 'high',
+          status: 'warning',
+          severity: 'warning',
+          matched_count: 0,
+        },
+      ],
+      citations: opts?.citations ?? makeCitations(),
+    },
+  }
+}
+
+
 beforeEach(() => {
-  // Reset the store between tests so cached citations from one
-  // test do not leak into the next.
   useCitationReviewStore.getState()._reset()
-  mockedAxios.get = vi.fn()
-  mockedAxios.post = vi.fn()
+  mockedAxios.get    = vi.fn()
+  mockedAxios.post   = vi.fn()
+  mockedAxios.delete = vi.fn()
   mockedAxios.isAxiosError = (err) =>
     !!(err && (err as { isAxiosError?: boolean }).isAxiosError)
 })
@@ -125,47 +156,60 @@ describe('CitationReviewPanel — empty state', () => {
       <CitationReviewPanel generationId={null} />)
     expect(container.firstChild).toBeNull()
   })
+
+  it('shows the no-data message when findings and citations are both empty', async () => {
+    mockedAxios.get.mockResolvedValueOnce({
+      data: {
+        generation_id: 42,
+        seeded_at: null,
+        findings: [],
+        citations: [],
+      },
+    })
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() => {
+      expect(screen.getByText(
+        /No findings or citations to review/i)).toBeTruthy()
+    })
+  })
 })
 
 
 describe('CitationReviewPanel — fetch and render', () => {
-  it('fetches citations on mount and groups by state', async () => {
-    mockedAxios.get.mockResolvedValueOnce({
-      data: { citations: makeCitations() },
-    })
-
+  it('GETs the findings endpoint and renders the finding section', async () => {
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
     render(<CitationReviewPanel generationId={42} />)
 
-    await waitFor(() => {
-      // Header shows the needs-review count (pending_review +
-      // not_found = 2).
-      expect(screen.getByText(/2 need.* review/i)).toBeTruthy()
-    })
-
-    // Pending row visible in the needs-review section.
-    expect(screen.getByTestId('citation-row-cvar_coherent_risk'))
-      .toBeTruthy()
-    // Not-found row visible.
-    expect(screen.getByTestId('citation-row-momentum_factor'))
-      .toBeTruthy()
-    // Verified row IS rendered now (as part of the redesign — every
-    // citation is a full tile for transparency), but it lives
-    // inside a closed <details> summary. The verified-bucket
-    // summary line is also shown so the count is visible.
-    expect(screen.getByText(/Verified \(1\)/)).toBeTruthy()
-    expect(screen.getByTestId('citation-row-sharpe_ratio'))
-      .toBeTruthy()
-  })
-
-  it('GETs /api/v1/citations/<gen_id> via axios (auth header attached)', async () => {
-    mockedAxios.get.mockResolvedValueOnce({
-      data: { citations: [] },
-    })
-    render(<CitationReviewPanel generationId={42} />)
     await waitFor(() => {
       expect(mockedAxios.get).toHaveBeenCalledWith(
-        '/api/v1/citations/42')
+        '/api/v1/citations/findings/42')
     })
+    await waitFor(() => {
+      expect(screen.getByTestId('finding-section-9001')).toBeTruthy()
+    })
+    // Header summary chip shows the totals.
+    expect(screen.getByText(/1 finding · 3 citations/)).toBeTruthy()
+    expect(screen.getByText(/1 gap/)).toBeTruthy()
+  })
+
+  it('groups citations by type inside a finding section', async () => {
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
+    render(<CitationReviewPanel generationId={42} />)
+
+    // Three citation rows render — one per fixture citation —
+    // grouped under their respective type sub-headers.
+    await waitFor(() =>
+      screen.getByTestId('citation-row-cvar_coherent_risk'))
+    expect(screen.getByTestId('type-subgroup-9001-theoretical'))
+      .toBeTruthy()
+    expect(screen.getByTestId('type-subgroup-9001-methodological'))
+      .toBeTruthy()
+    expect(screen.getByTestId('type-subgroup-9001-empirical'))
+      .toBeTruthy()
+    expect(screen.getByTestId('citation-row-sharpe_ratio'))
+      .toBeTruthy()
+    expect(screen.getByTestId('citation-row-momentum_factor'))
+      .toBeTruthy()
   })
 
   it('shows error when the fetch fails', async () => {
@@ -177,23 +221,96 @@ describe('CitationReviewPanel — fetch and render', () => {
 
     render(<CitationReviewPanel generationId={42} />)
     await waitFor(() => {
-      // Either the detail or the message is surfaced.
       expect(screen.queryByText(/Server error|status code 500/)).toBeTruthy()
+    })
+  })
+
+  it('renders a gap warning on findings with 0 matched citations', async () => {
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() =>
+      screen.getByTestId('finding-gap-9001'))
+    expect(screen.getByText(
+      /No supporting citations yet/i)).toBeTruthy()
+  })
+
+  it('does not show the no-findings copy when at least one finding is present', async () => {
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() => screen.getByTestId('finding-section-9001'))
+    expect(screen.queryByText(
+      /No high or medium-rank findings/)).toBeNull()
+  })
+})
+
+
+describe('CitationReviewPanel — match checkbox', () => {
+  it('clicking an unticked checkbox POSTs to /citations/match', async () => {
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
+    mockedAxios.post.mockResolvedValueOnce({
+      data: { matched: true },
+    })
+
+    render(<CitationReviewPanel generationId={42} />)
+    const checkbox = await screen.findByTestId(
+      'citation-match-9001-2')
+    expect((checkbox as HTMLInputElement).checked).toBe(false)
+
+    fireEvent.click(checkbox)
+
+    await waitFor(() => {
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        '/api/v1/citations/match',
+        { citation_id: 2, finding_id: 9001 })
+    })
+  })
+
+  it('clicking a ticked checkbox DELETEs from /citations/match', async () => {
+    const cits = makeCitations()
+    cits[1]!.matched_finding_ids = [9001]
+    const findings = [{
+      id: 9001,
+      source: 'audit',
+      source_id: 'D04',
+      title: 'Strategy return-series coverage',
+      description: null,
+      rank: 'high',
+      status: 'warning',
+      severity: 'warning',
+      matched_count: 1,
+    }]
+    mockedAxios.get.mockResolvedValueOnce(
+      makeFindingsResponse(42, { citations: cits, findings }))
+    mockedAxios.delete.mockResolvedValueOnce({
+      data: { removed: true },
+    })
+
+    render(<CitationReviewPanel generationId={42} />)
+    const checkbox = await screen.findByTestId(
+      'citation-match-9001-2')
+    expect((checkbox as HTMLInputElement).checked).toBe(true)
+
+    fireEvent.click(checkbox)
+
+    await waitFor(() => {
+      expect(mockedAxios.delete).toHaveBeenCalledWith(
+        '/api/v1/citations/match',
+        { data: { citation_id: 2, finding_id: 9001 }})
     })
   })
 })
 
 
-describe('CitationReviewPanel — actions', () => {
-  it('accept_untrusted POSTs the right body and updates state', async () => {
+describe('CitationReviewPanel — review actions', () => {
+  it('accept_untrusted POSTs the right body', async () => {
     const cits = makeCitations()
-    mockedAxios.get.mockResolvedValueOnce({
-      data: { citations: cits },
-    })
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      citations: cits,
+    }))
     mockedAxios.post.mockResolvedValueOnce({
       data: {
         citation: {
-          ...cits[1],
+          ...cits[1]!,
           verification_status: 'human_verified',
           reviewer_email: 'bob@queens.edu',
           review_action: 'accept_untrusted',
@@ -202,8 +319,6 @@ describe('CitationReviewPanel — actions', () => {
     })
 
     render(<CitationReviewPanel generationId={42} />)
-    // Tiles default to collapsed (May 23 2026 redesign) — expand
-    // the pending tile so the action buttons render.
     await waitFor(() =>
       screen.getByTestId('citation-toggle-cvar_coherent_risk'))
     fireEvent.click(screen.getByTestId('citation-toggle-cvar_coherent_risk'))
@@ -217,22 +332,17 @@ describe('CitationReviewPanel — actions', () => {
         '/api/v1/citations/2/review',
         { action: 'accept_untrusted' })
     })
-
-    // After accepting, the row moves out of the needs-review bucket.
-    await waitFor(() => {
-      expect(screen.getByText(/1 need.* review/i)).toBeTruthy()
-    })
   })
 
   it('reject POSTs the right body', async () => {
     const cits = makeCitations()
-    mockedAxios.get.mockResolvedValueOnce({
-      data: { citations: cits },
-    })
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      citations: cits,
+    }))
     mockedAxios.post.mockResolvedValueOnce({
       data: {
         citation: {
-          ...cits[2],
+          ...cits[2]!,
           verification_status: 'rejected',
           review_action: 'reject',
         },
@@ -240,7 +350,6 @@ describe('CitationReviewPanel — actions', () => {
     })
 
     render(<CitationReviewPanel generationId={42} />)
-    // Expand the not-found tile first.
     await waitFor(() =>
       screen.getByTestId('citation-toggle-momentum_factor'))
     fireEvent.click(screen.getByTestId('citation-toggle-momentum_factor'))
@@ -258,13 +367,13 @@ describe('CitationReviewPanel — actions', () => {
 
   it('select_alternative POSTs the picked entry', async () => {
     const cits = makeCitations()
-    mockedAxios.get.mockResolvedValueOnce({
-      data: { citations: cits },
-    })
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      citations: cits,
+    }))
     mockedAxios.post.mockResolvedValueOnce({
       data: {
         citation: {
-          ...cits[1],
+          ...cits[1]!,
           verification_status: 'search_selected',
           review_action: 'select_alternative',
         },
@@ -272,13 +381,9 @@ describe('CitationReviewPanel — actions', () => {
     })
 
     render(<CitationReviewPanel generationId={42} />)
-    // Expand the pending tile first so the alternatives render.
     await waitFor(() =>
       screen.getByTestId('citation-toggle-cvar_coherent_risk'))
     fireEvent.click(screen.getByTestId('citation-toggle-cvar_coherent_risk'))
-    // The "Accept this instead" button on the first alternative
-    // card. The new component renders one AlternativeCard per
-    // entry, each with a `citation-accept-alternative` testid.
     const alternativeButtons = await waitFor(() =>
       screen.getAllByTestId('citation-accept-alternative'))
     expect(alternativeButtons.length).toBeGreaterThan(0)
@@ -296,13 +401,13 @@ describe('CitationReviewPanel — actions', () => {
 
   it('manual_add toggles the form and submits the entered citation', async () => {
     const cits = makeCitations()
-    mockedAxios.get.mockResolvedValueOnce({
-      data: { citations: cits },
-    })
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      citations: cits,
+    }))
     mockedAxios.post.mockResolvedValueOnce({
       data: {
         citation: {
-          ...cits[2],
+          ...cits[2]!,
           verification_status: 'manually_added',
           author: 'Jegadeesh, N.', year: '1993',
           title: 'Returns to Buying Winners',
@@ -312,19 +417,15 @@ describe('CitationReviewPanel — actions', () => {
     })
 
     render(<CitationReviewPanel generationId={42} />)
-    // Expand the not-found tile first (collapsed by default in the
-    // May 23 2026 redesign).
     await waitFor(() =>
       screen.getByTestId('citation-toggle-momentum_factor'))
     fireEvent.click(screen.getByTestId('citation-toggle-momentum_factor'))
     await waitFor(() =>
       screen.getByTestId('citation-manual-toggle-momentum_factor'))
 
-    // Open the manual form.
     fireEvent.click(
       screen.getByTestId('citation-manual-toggle-momentum_factor'))
 
-    // Fill the three required fields so submit enables.
     fireEvent.change(
       screen.getByTestId('citation-manual-author-momentum_factor'),
       { target: { value: 'Jegadeesh, N.' }})
@@ -343,23 +444,6 @@ describe('CitationReviewPanel — actions', () => {
       expect(body.manual_citation.author).toBe('Jegadeesh, N.')
       expect(body.manual_citation.year).toBe('1993')
       expect(body.manual_citation.title).toBe('Returns to Buying Winners')
-    })
-  })
-})
-
-
-describe('CitationReviewPanel — header collapse states', () => {
-  it('renders an "All reviewed" badge when no citation needs review', async () => {
-    const allDone = makeCitations().map((c) => ({
-      ...c, verification_status: 'verified',
-    }))
-    mockedAxios.get.mockResolvedValueOnce({
-      data: { citations: allDone },
-    })
-
-    render(<CitationReviewPanel generationId={42} />)
-    await waitFor(() => {
-      expect(screen.getByText(/All reviewed/i)).toBeTruthy()
     })
   })
 })

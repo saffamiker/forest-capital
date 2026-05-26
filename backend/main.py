@@ -1492,6 +1492,128 @@ async def post_citation_review(
     return {"citation": updated}
 
 
+# ── Citation Review redesign — Level 1 findings + matches ────────────────────
+#
+# Three endpoints back the new 3-level hierarchy (Finding > Type >
+# Citation). See backend/tools/citation_findings.py for the seeder
+# + match helpers, migration 045 for the schema, and the design doc
+# (May 26 2026) for the architecture rationale.
+
+@app.get("/api/v1/citations/findings/{generation_id}")
+@limiter.limit("30/minute")
+async def get_citation_findings(
+    request: Request,
+    generation_id: int,
+    session: dict = Depends(require_team_member),
+):
+    """Re-seeds the per-generation findings table from the live
+    statistical-audit + QA-methodology results, then returns the
+    fresh findings list alongside the citation pool with each
+    citation's `matched_finding_ids[]` joined in.
+
+    Per the design doc: implicit re-seed on every panel open.
+    Opening the panel = current analytical state. The team's prior
+    matches survive UNCHANGED findings (UPSERT preserves id); a
+    finding that resolves between sessions and disappears from the
+    seed loses its matches via CASCADE — known limitation, see
+    migration 045's docstring.
+    """
+    from tools.citation_findings import (
+        get_matched_finding_ids_by_citation, seed_findings_for_generation,
+    )
+    from tools.template_pipeline import get_citations_for_generation
+
+    findings = await seed_findings_for_generation(generation_id)
+    citations = await get_citations_for_generation(generation_id) or []
+    matched = await get_matched_finding_ids_by_citation(generation_id)
+
+    # Join matched_finding_ids[] onto each citation. The frontend
+    # uses this to render the checkbox state per (citation, finding)
+    # pair without a second round-trip.
+    for c in citations:
+        c["matched_finding_ids"] = matched.get(int(c.get("id") or 0), [])
+
+    return {
+        "generation_id": int(generation_id),
+        "seeded_at":     (
+            findings[0].get("seeded_at") if findings else None
+        ),
+        "findings":      findings,
+        "citations":     citations,
+    }
+
+
+@app.post("/api/v1/citations/match")
+@limiter.limit("60/minute")
+async def post_citation_match(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Records a citation_finding_matches row. Idempotent — a
+    second call on the same (citation_id, finding_id) refreshes
+    matched_at and matched_by, never errors.
+
+    Body: {citation_id: int, finding_id: int, match_rationale?: str}
+    Returns: {ok, citation_id, finding_id, matched_by, matched_at}
+    422 on missing/invalid ids.
+    """
+    try:
+        cid = int(body.get("citation_id") or 0)
+        fid = int(body.get("finding_id") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail="citation_id and finding_id must be integers")
+    if cid <= 0 or fid <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail="citation_id and finding_id are required")
+    from tools.citation_findings import record_match
+    email = session.get("email") or "unknown"
+    result = await record_match(cid, fid, email)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Match record failed: {result.get('error')}")
+    return result
+
+
+@app.delete("/api/v1/citations/match")
+@limiter.limit("60/minute")
+async def delete_citation_match(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Removes a citation_finding_matches row. Idempotent — deleting
+    a non-existent match returns deleted=false, never 404. Mirrors
+    the QA panel's mark-intentional DELETE semantic so the frontend
+    can fire without first checking that a match exists.
+
+    Body: {citation_id: int, finding_id: int}
+    Returns: {ok, citation_id, finding_id, deleted: bool}
+    """
+    try:
+        cid = int(body.get("citation_id") or 0)
+        fid = int(body.get("finding_id") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail="citation_id and finding_id must be integers")
+    if cid <= 0 or fid <= 0:
+        raise HTTPException(
+            status_code=422,
+            detail="citation_id and finding_id are required")
+    from tools.citation_findings import remove_match
+    result = await remove_match(cid, fid)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Match removal failed: {result.get('error')}")
+    return result
+
+
 @app.post("/api/v1/reports/team-activity")
 @limiter.limit("30/minute")
 async def post_team_activity(

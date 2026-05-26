@@ -1,53 +1,51 @@
 /**
- * CitationReviewPanel — full evidence cards for the 7-state citation
- * machine.
+ * CitationReviewPanel — 3-level Finding ▸ Type ▸ Citation hierarchy.
  *
- * Originally (May 23 2026, item 1) this panel rendered each citation
- * as a compact one-line row with accept / reject / select-alternative
- * buttons. Bob's feedback: every tile should be a complete
- * EVALUATION CARD — finding supported, supporting extract, selection
- * rationale, confidence score, alternatives with their own evidence.
- * Applies to ALL citations (verified included) so a reviewer can see
- * why a verified citation was accepted without action being required.
+ * REDESIGNED May 26 2026 (migration 045 + design doc).
  *
- * Tile interaction model (May 23 2026, item 13):
- *   Collapsed — concept_id, status badge, primary author/title,
- *               confidence badge, expand chevron.
- *   Expanded  — six evidence sections (finding, extract, rationale,
- *               confidence, alternatives, manual override). The
- *               alternatives section renders each ranked option as
- *               its own mini-card with extract / rationale /
- *               confidence + an "Accept this instead" button.
+ * Before: a flat list of citations grouped only by verification_status
+ * (Needs review / Verified / Rejected). The reviewer could see WHICH
+ * citations needed action but not WHICH FINDINGS each citation was
+ * supporting — so a high-priority statistical-audit failure or QA
+ * methodology check with NO supporting citation was invisible.
  *
- * Expand/collapse state persists across navigation via the
- * citationReviewStore (expandedByCitationId map). Manual-entry form
- * toggle persists too — the bug originally fixed in PR #103.
+ * After: the panel surfaces every Level-1 finding (the high+medium-rank
+ * rows from the latest substantive statistical audit and the latest QA
+ * methodology verdict) as a collapsible section. Under each finding,
+ * citations are sub-grouped by citation_type (theoretical / empirical /
+ * methodological / regulatory / data_source / practitioner). The Level-3
+ * citation row carries a checkbox that records the citation→finding
+ * match in the citation_finding_matches table.
  *
- * Promote / demote on swap (May 23 2026, item 13):
- *   When Bob accepts an alternative, the backend promotes the
- *   alternative to primary AND demotes the previous primary into
- *   the alternatives list (marked `pass_source: 'previously_primary'`).
- *   No information is lost — every prior choice is still in the
- *   alternatives bucket and can be re-promoted.
+ * Every citation appears under every finding — checked when matched,
+ * unchecked-and-dimmed otherwise — so the reviewer can recruit any
+ * citation as supporting evidence for any finding without navigating
+ * away from the finding's context. A citation may be matched to
+ * multiple findings (the redesign explicitly supports many-to-many).
  *
- * Limited-alternatives flag (May 23 2026, item 13):
- *   When total options (primary + alternatives) < 3, the tile shows
- *   an amber "Limited alternatives — manual review recommended"
- *   banner so Bob knows the 3-pass search didn't produce a full set.
+ * GAP FLAG: a finding with zero matched citations renders an amber
+ * "no supporting citations yet" warning, surfacing the coverage gap.
  *
- * Verified tiles render the same evidence card with action buttons
- * suppressed — the panel becomes a transparency surface, not just a
- * review queue.
+ * SOFT REFRESH: loadFindings() on the store re-seeds the findings
+ * table on every call from the live audit + QA state, so the panel
+ * always reflects the current analytical findings — not a snapshot
+ * from when citation review was first opened. The team's match work
+ * survives the re-seed (UPSERT on (generation_id, source, source_id)).
+ *
+ * The existing CitationRow / AlternativeCard / EvidenceSection
+ * components are reused unchanged — the per-row review controls
+ * (accept primary / reject / manual override / select alternative)
+ * keep their behaviour. Only the surrounding hierarchy is new.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import axios from 'axios'
 import {
-  AlertCircle, CheckCircle, ChevronDown, ChevronRight,
+  AlertCircle, AlertTriangle, ChevronDown, ChevronRight,
   ExternalLink, Loader2, Info,
 } from 'lucide-react'
 import {
   useCitationReviewStore,
-  type Citation, type CitationAlternative,
+  type Citation, type CitationAlternative, type Finding,
 } from '../../stores/citationReviewStore'
 
 
@@ -81,14 +79,12 @@ const VERIFIED_STATES = new Set([
 const PASS_SOURCE_LABEL: Record<string, string> = {
   'pass_1_off_trusted':     'Pass 1 — off-trusted domain',
   'pass_2_academic':        'Pass 2 — academic',
-  'pass_3_widest':          'Pass 3 — widest publishable',
+  'pass_3_widest':           'Pass 3 — widest publishable',
   'pass_3_off_publishable': 'Pass 3 — off-publishable',
   'previously_primary':     'Previously primary (demoted on swap)',
 }
 
 
-// Per-source explanation of why an alternative ranked below the
-// primary. Pure UI copy derived from pass_source — no backend call.
 const PASS_RANK_REASON: Record<string, string> = {
   'pass_1_off_trusted': (
     'Found in the first pass but on a domain outside the trusted '
@@ -113,8 +109,7 @@ const PASS_RANK_REASON: Record<string, string> = {
 }
 
 
-// Status-badge style per verification_status. Tile-level chip on the
-// collapsed view; same colour scheme as the existing review buckets.
+// Status-badge style per verification_status.
 const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
   verified:         { label: 'Verified',       cls: 'bg-green-500/15 text-green-300' },
   human_verified:   { label: 'Human verified', cls: 'bg-green-500/15 text-green-300' },
@@ -127,16 +122,53 @@ const STATUS_BADGE: Record<string, { label: string; cls: string }> = {
 }
 
 
+// Citation-type display label + colour. Aligned with the six-value
+// taxonomy (migration 045): theoretical | empirical | methodological |
+// regulatory | data_source | practitioner.
+const CITATION_TYPE_STYLES: Record<string, { label: string; cls: string }> = {
+  theoretical: {
+    label: 'Theoretical',
+    cls: 'bg-blue-900/40 text-blue-300 border border-blue-700/40',
+  },
+  empirical: {
+    label: 'Empirical',
+    cls: 'bg-green-900/40 text-green-300 border border-green-700/40',
+  },
+  methodological: {
+    label: 'Methodological',
+    cls: 'bg-purple-900/40 text-purple-300 border border-purple-700/40',
+  },
+  regulatory: {
+    label: 'Regulatory',
+    cls: 'bg-teal-900/40 text-teal-300 border border-teal-700/40',
+  },
+  data_source: {
+    label: 'Data source',
+    cls: 'bg-cyan-900/40 text-cyan-300 border border-cyan-700/40',
+  },
+  practitioner: {
+    label: 'Practitioner',
+    cls: 'bg-amber-900/40 text-amber-300 border border-amber-700/40',
+  },
+}
+
+
+// Display order for the Level-2 type sub-groups. Theory first, then
+// empirical evidence, then method, then regulatory/data context, then
+// practitioner — the order a reviewer would prefer to read a finding's
+// support stack in.
+const CITATION_TYPE_ORDER: readonly string[] = [
+  'theoretical', 'empirical', 'methodological',
+  'regulatory', 'data_source', 'practitioner',
+]
+
+
 function _confidenceLabel(score: number | null | undefined): string {
   if (score === null || score === undefined) return '—'
   return score.toFixed(2)
 }
 
 
-// Confidence-badge colour. Tuned so the eye reads risk-up at a glance:
-// >= 0.85 green, 0.65-0.85 amber, < 0.65 red. Matches the band breakpoints
-// the backend uses (pass_1 trusted ~0.95, pass_2 academic ~0.75, pass_3
-// widest ~0.55).
 function _confidenceCls(score: number | null | undefined): string {
   if (score === null || score === undefined) {
     return 'bg-navy-800 text-text-muted border-navy-700'
@@ -162,52 +194,45 @@ export interface CitationReviewPanelProps {
 export default function CitationReviewPanel({
   generationId, onReviewed,
 }: CitationReviewPanelProps) {
-  // The panel-open toggle is local UI state — fine to reset on
-  // remount. The expensive bits (the citation array, per-row
-  // manual-form toggle, per-tile expand toggle) live in the
-  // Zustand store so they survive navigation.
   const [open, setOpen] = useState(true)
   const [busyId, setBusyId] = useState<number | null>(null)
 
-  // Citation data + per-citation manual-form toggle read from the
-  // store. The store keys everything by generation_id so a paper
-  // with no citations yet and a paper with reviewed citations
-  // coexist correctly. The cached array rehydrates instantly on
-  // remount — no loading flash, no perceived rerun.
   const citations = useCitationReviewStore(
     (s) => (generationId !== null
               ? s.citationsByGenerationId[generationId] ?? []
               : []))
-  const lastFetchedAt = useCitationReviewStore(
+  const findings = useCitationReviewStore(
     (s) => (generationId !== null
-              ? s.lastFetchedAt[generationId]
+              ? s.findingsByGenerationId[generationId] ?? []
+              : []))
+  const lastFindingsAt = useCitationReviewStore(
+    (s) => (generationId !== null
+              ? s.lastFindingsFetchAt[generationId]
               : undefined))
   const error = useCitationReviewStore(
     (s) => (generationId !== null
-              ? s.errorByGenerationId[generationId] ?? null
+              ? s.findingsErrorByGenerationId[generationId] ?? null
               : null))
   const inFlight = useCitationReviewStore(
     (s) => (generationId !== null
-              ? Boolean(s.inFlight[generationId])
+              ? Boolean(s.findingsInFlight[generationId])
               : false))
-  const load = useCitationReviewStore((s) => s.load)
+  const loadFindings = useCitationReviewStore((s) => s.loadFindings)
+  const toggleMatch  = useCitationReviewStore((s) => s.toggleMatch)
   const upsertCitation = useCitationReviewStore((s) => s.upsertCitation)
 
-  // Stale-while-revalidate on mount + every generation_id change.
-  // The store's load() does the freshness check itself, so this
-  // useEffect just fires the call — load() short-circuits when
-  // the cached entry is fresh.
+  // loadFindings() backs the redesigned panel. It also populates the
+  // citations slice (the /findings endpoint returns both in one round
+  // trip), so we don't need the legacy load() call here.
   useEffect(() => {
     if (generationId !== null && generationId !== undefined) {
-      void load(generationId)
+      void loadFindings(generationId)
     }
-  }, [generationId, load])
+  }, [generationId, loadFindings])
 
-  // Only show the loading spinner on a TRULY cold cache (no rows
-  // yet for this generation_id). Once we have data, the soft
-  // refetch happens in the background and the user sees the
-  // cached rows without a flash.
-  const loading = inFlight && citations.length === 0 && !lastFetchedAt
+  const loading =
+    inFlight && findings.length === 0 && citations.length === 0
+    && !lastFindingsAt
 
   const submitReview = useCallback(async (
     citationId: number,
@@ -217,26 +242,18 @@ export default function CitationReviewPanel({
     if (generationId === null || generationId === undefined) return
     setBusyId(citationId)
     try {
-      // Hotfix May 23 2026: axios picks up the X-API-Key header
-      // from axios.defaults.headers.common; raw fetch() did not,
-      // so this endpoint was 401-ing on every action.
       const res = await axios.post<{ citation: Citation }>(
         `/api/v1/citations/${citationId}/review`,
         { action, ...payload })
-      // Optimistic state update through the store — the new row
-      // is visible immediately AND persisted across navigation.
       upsertCitation(generationId, res.data.citation)
       onReviewed?.()
     } catch (e) {
-      // Surface the error via the store so the message persists
-      // across remount too. The store's load() clears it on the
-      // next successful fetch.
       const msg = axios.isAxiosError(e)
         ? (e.response?.data?.detail || e.message)
         : (e as Error).message
       useCitationReviewStore.setState((s) => ({
-        errorByGenerationId: {
-          ...s.errorByGenerationId,
+        findingsErrorByGenerationId: {
+          ...s.findingsErrorByGenerationId,
           [generationId]: String(msg),
         },
       }))
@@ -245,44 +262,76 @@ export default function CitationReviewPanel({
     }
   }, [generationId, upsertCitation, onReviewed])
 
+  const handleToggleMatch = useCallback(async (
+    citationId: number,
+    findingId: number,
+    currentlyMatched: boolean,
+  ) => {
+    if (generationId === null || generationId === undefined) return
+    try {
+      await toggleMatch(
+        generationId, citationId, findingId, currentlyMatched)
+      onReviewed?.()
+    } catch (e) {
+      // toggleMatch already reverted optimistic state; surface the
+      // error so the reviewer knows the toggle didn't land.
+      const msg = axios.isAxiosError(e)
+        ? (e.response?.data?.detail || e.message)
+        : (e as Error).message
+      useCitationReviewStore.setState((s) => ({
+        findingsErrorByGenerationId: {
+          ...s.findingsErrorByGenerationId,
+          [generationId]: String(msg),
+        },
+      }))
+    }
+  }, [generationId, toggleMatch, onReviewed])
+
+  // Compute summary numbers up-front so they're available for the
+  // header chip even before any finding is expanded.
+  const summary = useMemo(() => {
+    const gaps = findings.filter((f) => f.matched_count === 0).length
+    return {
+      n_findings: findings.length,
+      n_citations: citations.length,
+      n_gaps: gaps,
+    }
+  }, [findings, citations])
+
   if (generationId === null || generationId === undefined) {
     return null
   }
-
-  const needsReview = citations.filter((c) =>
-    NEEDS_REVIEW_STATES.has(c.verification_status))
-  const verified = citations.filter((c) =>
-    VERIFIED_STATES.has(c.verification_status))
-  const rejected = citations.filter((c) =>
-    c.verification_status === 'rejected')
 
   return (
     <section
       data-testid="citation-review-panel"
       className="bg-navy-900 border border-navy-700 rounded p-3 space-y-2">
-      <header className="flex items-center justify-between">
+      <header className="flex items-center justify-between gap-2">
         <button
           type="button"
           className="flex items-center gap-2 text-sm font-semibold
                      text-text-primary hover:text-electric-blue
-                     transition-colors"
+                     transition-colors min-w-0"
           onClick={() => setOpen(!open)}>
           {open
-            ? <ChevronDown className="w-4 h-4" />
-            : <ChevronRight className="w-4 h-4" />}
-          Citation Review
-          {needsReview.length > 0 ? (
+            ? <ChevronDown className="w-4 h-4 shrink-0" />
+            : <ChevronRight className="w-4 h-4 shrink-0" />}
+          <span className="truncate">Citation Review</span>
+          {summary.n_findings > 0 ? (
             <span className="text-2xs px-1.5 py-0.5 rounded
-                             bg-amber-500/15 text-amber-300">
-              {needsReview.length} need
-              {needsReview.length === 1 ? 's' : ''} review
+                             bg-navy-800 text-text-secondary shrink-0">
+              {summary.n_findings} finding
+              {summary.n_findings === 1 ? '' : 's'} ·{' '}
+              {summary.n_citations} citation
+              {summary.n_citations === 1 ? '' : 's'}
             </span>
-          ) : (
+          ) : null}
+          {summary.n_gaps > 0 ? (
             <span className="text-2xs px-1.5 py-0.5 rounded
-                             bg-green-500/15 text-green-300">
-              All reviewed
+                             bg-amber-500/15 text-amber-300 shrink-0">
+              {summary.n_gaps} gap{summary.n_gaps === 1 ? '' : 's'}
             </span>
-          )}
+          ) : null}
         </button>
         {loading ? (
           <Loader2 className="w-3.5 h-3.5 animate-spin text-text-muted" />
@@ -296,76 +345,327 @@ export default function CitationReviewPanel({
         </p>
       ) : null}
 
-      {open && !loading && citations.length === 0 ? (
+      {open && !loading && findings.length === 0
+            && citations.length === 0 ? (
         <p className="text-xs text-text-muted italic">
-          No citations to review — citations only appear after
-          Step 2 completes.
+          No findings or citations to review — citations only appear
+          after Step 2 completes and findings only appear after a
+          substantive audit or QA verdict has been recorded.
         </p>
       ) : null}
 
-      {open ? (
-        <div className="space-y-2 text-xs">
-          {needsReview.length > 0 ? (
-            <div className="space-y-1.5">
-              <h4 className="text-2xs uppercase tracking-wider
-                             text-amber-300">
-                Needs review ({needsReview.length})
-              </h4>
-              {needsReview.map((c) => (
-                <CitationRow
-                  key={c.id}
-                  citation={c}
-                  busy={busyId === c.id}
-                  onAction={submitReview}
-                />
-              ))}
-            </div>
-          ) : null}
+      {open && !loading && findings.length === 0
+            && citations.length > 0 ? (
+        <p className="text-xs text-text-muted italic">
+          No high or medium-rank findings to match citations against —
+          the analytical state is currently clean. Citations remain
+          reviewable below.
+        </p>
+      ) : null}
 
-          {/* Verified tiles render the SAME evidence card so a
-              reviewer can see why every verified citation was
-              accepted — Bob's "transparency builds trust"
-              request. Collapsed by default at the bucket level
-              to save space when nothing needs action. */}
-          {verified.length > 0 ? (
-            <details className="text-2xs" data-testid="verified-bucket">
-              <summary className="cursor-pointer text-text-muted
-                                   hover:text-text-primary
-                                   inline-flex items-center gap-1">
-                <CheckCircle className="w-3 h-3 text-green-400" />
-                Verified ({verified.length}) — click to inspect
-              </summary>
-              <div className="mt-1.5 space-y-1.5">
-                {verified.map((c) => (
-                  <CitationRow
-                    key={c.id}
-                    citation={c}
-                    busy={busyId === c.id}
-                    onAction={submitReview}
-                  />
-                ))}
-              </div>
-            </details>
-          ) : null}
-
-          {rejected.length > 0 ? (
-            <details className="text-2xs">
-              <summary className="cursor-pointer text-text-muted
-                                   hover:text-text-primary">
-                Rejected ({rejected.length})
-              </summary>
-              <ul className="mt-1 space-y-0.5 pl-2 text-text-muted">
-                {rejected.map((c) => (
-                  <li key={c.id} className="font-mono">
-                    {c.concept_id}
-                  </li>
-                ))}
-              </ul>
-            </details>
-          ) : null}
+      {open && findings.length > 0 ? (
+        <div data-testid="findings-list" className="space-y-2 text-xs">
+          {findings.map((finding) => (
+            <FindingSection
+              key={finding.id}
+              finding={finding}
+              citations={citations}
+              busyId={busyId}
+              onToggleMatch={handleToggleMatch}
+              onAction={submitReview}
+            />
+          ))}
         </div>
       ) : null}
     </section>
+  )
+}
+
+
+// ── FindingSection — Level 1 wrapper for one finding ────────────────────────
+
+
+interface FindingSectionProps {
+  finding: Finding
+  citations: Citation[]
+  busyId: number | null
+  onToggleMatch: (
+    citationId: number,
+    findingId: number,
+    currentlyMatched: boolean,
+  ) => Promise<void>
+  onAction: (
+    citationId: number,
+    action: ReviewAction,
+    payload?: Record<string, unknown>,
+  ) => Promise<void>
+}
+
+
+function FindingSection({
+  finding, citations, busyId, onToggleMatch, onAction,
+}: FindingSectionProps) {
+  // Default-expand any finding that has a match or is unmatched
+  // (a gap demands attention). Collapsed-by-default would hide both
+  // the work-so-far AND the gaps. Local UI state — fine to reset
+  // on remount; the per-row tile state is what really matters and
+  // that lives in the store via CitationRow.
+  const [expanded, setExpanded] = useState(true)
+
+  const rankBadge = finding.rank === 'high'
+    ? { label: 'HIGH',   cls: 'bg-red-500/20 text-red-300 border border-red-500/40' }
+    : { label: 'MEDIUM', cls: 'bg-amber-500/15 text-amber-300 border border-amber-500/40' }
+
+  const sourceBadge = finding.source === 'audit'
+    ? { label: 'Audit', cls: 'bg-blue-900/40 text-blue-300 border border-blue-700/40' }
+    : { label: 'QA',    cls: 'bg-purple-900/40 text-purple-300 border border-purple-700/40' }
+
+  const hasGap = finding.matched_count === 0
+
+  // Group citations by type for the Level-2 sub-headers. Citations
+  // matched to THIS finding sort to the top within each type so the
+  // reviewer's work-so-far is visible at a glance. Within each bucket
+  // the matched citations are also sorted by confidence_score desc.
+  const groupedByType = useMemo(() => {
+    const groups: Record<string, Citation[]> = {}
+    for (const c of citations) {
+      const type = (c.citation_type || 'theoretical').toLowerCase()
+      const bucket = groups[type] ?? (groups[type] = [])
+      bucket.push(c)
+    }
+    // Sort each bucket: matched-to-this-finding first, then by
+    // confidence desc within each matched/unmatched group.
+    for (const bucket of Object.values(groups)) {
+      bucket.sort((a, b) => {
+        const aMatched = (a.matched_finding_ids ?? []).includes(finding.id)
+        const bMatched = (b.matched_finding_ids ?? []).includes(finding.id)
+        if (aMatched !== bMatched) return aMatched ? -1 : 1
+        const aConf = a.confidence_score ?? -1
+        const bConf = b.confidence_score ?? -1
+        return bConf - aConf
+      })
+    }
+    return groups
+  }, [citations, finding.id])
+
+  const orderedTypes = useMemo(() => {
+    const present = Object.keys(groupedByType)
+    return CITATION_TYPE_ORDER
+      .filter((t) => present.includes(t))
+      .concat(present.filter((t) => !CITATION_TYPE_ORDER.includes(t)))
+  }, [groupedByType])
+
+  return (
+    <div
+      data-testid={`finding-section-${finding.id}`}
+      className={`border rounded ${
+        hasGap
+          ? 'border-amber-700/50 bg-amber-500/5'
+          : 'border-navy-700 bg-navy-800/40'
+      }`}>
+      <button
+        type="button"
+        onClick={() => setExpanded(!expanded)}
+        data-testid={`finding-toggle-${finding.id}`}
+        className="w-full p-2 text-left flex items-start gap-2
+                   hover:bg-navy-800/60 transition-colors rounded">
+        <div className="mt-0.5 shrink-0">
+          {expanded
+            ? <ChevronDown className="w-3.5 h-3.5 text-text-muted" />
+            : <ChevronRight className="w-3.5 h-3.5 text-text-muted" />}
+        </div>
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className={`text-2xs px-1.5 py-0.5 rounded ${rankBadge.cls}`}>
+              {rankBadge.label}
+            </span>
+            <span className={`text-2xs px-1.5 py-0.5 rounded ${sourceBadge.cls}`}>
+              {sourceBadge.label}
+            </span>
+            <span className="font-mono text-2xs text-electric-blue">
+              {finding.source_id}
+            </span>
+            <span className={`text-2xs px-1.5 py-0.5 rounded ${
+              hasGap
+                ? 'bg-amber-500/15 text-amber-300'
+                : 'bg-green-500/15 text-green-300'
+            }`}>
+              {finding.matched_count} matched
+            </span>
+          </div>
+          <p className="text-text-primary text-2xs leading-snug font-medium">
+            {finding.title}
+          </p>
+          {finding.description ? (
+            <p className="text-text-muted text-2xs leading-snug">
+              {finding.description}
+            </p>
+          ) : null}
+        </div>
+      </button>
+
+      {expanded ? (
+        <div className="border-t border-navy-700 p-2 space-y-2">
+          {hasGap ? (
+            <div data-testid={`finding-gap-${finding.id}`}
+                 className="flex items-start gap-1.5 text-2xs
+                            text-amber-300 bg-amber-500/10 border
+                            border-amber-500/30 rounded p-1.5">
+              <AlertTriangle className="w-3 h-3 mt-0.5 shrink-0" />
+              <span>
+                No supporting citations yet — tick a citation below
+                to record it as evidence for this finding.
+              </span>
+            </div>
+          ) : null}
+
+          {orderedTypes.length === 0 ? (
+            <p className="text-2xs text-text-muted italic">
+              No citations available yet — re-run Step 2 to source
+              citations before recording matches.
+            </p>
+          ) : null}
+
+          {orderedTypes.map((type) => (
+            <TypeSubgroup
+              key={`${finding.id}-${type}`}
+              type={type}
+              citations={groupedByType[type] ?? []}
+              findingId={finding.id}
+              busyId={busyId}
+              onToggleMatch={onToggleMatch}
+              onAction={onAction}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
+
+// ── TypeSubgroup — Level 2 sub-header for a citation type ───────────────────
+
+
+interface TypeSubgroupProps {
+  type: string
+  citations: Citation[]
+  findingId: number
+  busyId: number | null
+  onToggleMatch: (
+    citationId: number,
+    findingId: number,
+    currentlyMatched: boolean,
+  ) => Promise<void>
+  onAction: (
+    citationId: number,
+    action: ReviewAction,
+    payload?: Record<string, unknown>,
+  ) => Promise<void>
+}
+
+
+function TypeSubgroup({
+  type, citations, findingId, busyId, onToggleMatch, onAction,
+}: TypeSubgroupProps) {
+  const style = CITATION_TYPE_STYLES[type] ?? {
+    label: type, cls: 'bg-navy-800 text-text-muted border border-navy-700',
+  }
+  const matchedCount = citations.filter(
+    (c) => (c.matched_finding_ids ?? []).includes(findingId)).length
+
+  return (
+    <div
+      data-testid={`type-subgroup-${findingId}-${type}`}
+      className="space-y-1">
+      <div className="flex items-center gap-1.5">
+        <span className={`text-2xs px-1.5 py-0.5 rounded ${style.cls}`}>
+          {style.label}
+        </span>
+        <span className="text-2xs text-text-muted">
+          {matchedCount} of {citations.length} matched
+        </span>
+      </div>
+      <div className="space-y-1 pl-1">
+        {citations.map((c) => (
+          <CitationFindingRow
+            key={`${findingId}-${c.id}`}
+            citation={c}
+            findingId={findingId}
+            busy={busyId === c.id}
+            onToggleMatch={onToggleMatch}
+            onAction={onAction}
+          />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+
+// ── CitationFindingRow — Level 3 wrapper that adds the match checkbox ──────
+//
+// Wraps the existing CitationRow with a checkbox indicating whether
+// this citation is matched to the surrounding finding. Citations not
+// matched to the current finding render at lower opacity so the eye
+// reads "this finding's support stack" at a glance.
+
+
+interface CitationFindingRowProps {
+  citation: Citation
+  findingId: number
+  busy: boolean
+  onToggleMatch: (
+    citationId: number,
+    findingId: number,
+    currentlyMatched: boolean,
+  ) => Promise<void>
+  onAction: (
+    citationId: number,
+    action: ReviewAction,
+    payload?: Record<string, unknown>,
+  ) => Promise<void>
+}
+
+
+function CitationFindingRow({
+  citation, findingId, busy, onToggleMatch, onAction,
+}: CitationFindingRowProps) {
+  const matched = (citation.matched_finding_ids ?? []).includes(findingId)
+  const [toggling, setToggling] = useState(false)
+
+  const handleToggle = async (e: React.MouseEvent<HTMLInputElement>) => {
+    e.stopPropagation()
+    setToggling(true)
+    try {
+      await onToggleMatch(citation.id, findingId, matched)
+    } finally {
+      setToggling(false)
+    }
+  }
+
+  return (
+    <div className={`flex items-start gap-1.5 transition-opacity
+                     ${matched ? '' : 'opacity-60'}`}>
+      <input
+        type="checkbox"
+        checked={matched}
+        disabled={toggling}
+        onClick={handleToggle}
+        onChange={() => { /* handled in onClick */ }}
+        data-testid={`citation-match-${findingId}-${citation.id}`}
+        aria-label={
+          matched ? 'Remove match' : 'Match citation to finding'}
+        className="mt-2 ml-1.5 shrink-0 cursor-pointer accent-electric-blue
+                   disabled:opacity-50 disabled:cursor-not-allowed" />
+      <div className="min-w-0 flex-1">
+        <CitationRow
+          citation={citation}
+          busy={busy}
+          onAction={onAction}
+        />
+      </div>
+    </div>
   )
 }
 
@@ -385,21 +685,15 @@ interface CitationRowProps {
 
 
 function CitationRow({ citation, busy, onAction }: CitationRowProps) {
-  // Expanded-state lives in the store so the tile remembers its
-  // state across navigation. Default = collapsed.
   const expanded = useCitationReviewStore(
     (s) => Boolean(s.expandedByCitationId[citation.id]))
   const setExpanded = useCitationReviewStore((s) => s.setExpanded)
 
-  // Manual-form open state also lives in the store (the bug
-  // originally fixed in PR #103).
   const showManual = useCitationReviewStore(
     (s) => Boolean(s.manualOpenByCitationId[citation.id]))
   const setManualOpen = useCitationReviewStore((s) => s.setManualOpen)
   const setShowManual = (open: boolean) => setManualOpen(citation.id, open)
 
-  // Manual-entry form fields stay local — half-typed values must
-  // NOT reappear after a navigation round-trip.
   const [manualAuthor, setManualAuthor] = useState('')
   const [manualYear,   setManualYear]   = useState('')
   const [manualTitle,  setManualTitle]  = useState('')
@@ -412,9 +706,6 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
     citation.verification_status === 'pending_review'
     || citation.verification_status === 'untrusted_source'
 
-  // Total options surfaced to the reviewer = primary + every
-  // alternative. The <3 flag fires when the 3-pass search produced
-  // fewer than three distinct candidates.
   const totalOptions =
     (citation.url ? 1 : 0) + (citation.alternatives?.length ?? 0)
   const limitedAlternatives = totalOptions < 3
@@ -426,7 +717,6 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
   return (
     <div data-testid={`citation-row-${citation.concept_id}`}
          className="border border-navy-700 rounded bg-navy-800/40">
-      {/* ── Collapsed header ─────────────────────────────────────────────── */}
       <button
         type="button"
         onClick={() => setExpanded(citation.id, !expanded)}
@@ -446,47 +736,6 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
             <span className={`text-2xs px-1.5 py-0.5 rounded ${status.cls}`}>
               {status.label}
             </span>
-            {/* Citation type badge — surfaces the four-layer
-                taxonomy (theoretical / empirical / methodological /
-                practitioner) from migration 043. Without this the
-                Citation Review panel rendered every type identically
-                and the reviewer could not see gaps in coverage.
-                May 26 2026. */}
-            {(() => {
-              const type = (citation.citation_type
-                || 'theoretical').toLowerCase()
-              const typeStyles: Record<string, {label: string, cls: string}> = {
-                theoretical: {
-                  label: 'Theoretical',
-                  cls: 'bg-blue-900/40 text-blue-300 border border-blue-700/40',
-                },
-                empirical: {
-                  label: 'Empirical',
-                  cls: 'bg-green-900/40 text-green-300 border border-green-700/40',
-                },
-                methodological: {
-                  label: 'Methodological',
-                  cls: 'bg-purple-900/40 text-purple-300 border border-purple-700/40',
-                },
-                practitioner: {
-                  label: 'Practitioner',
-                  cls: 'bg-amber-900/40 text-amber-300 border border-amber-700/40',
-                },
-              }
-              const t = typeStyles[type] ?? typeStyles.theoretical
-              return (
-                <span
-                  data-testid={`citation-type-${citation.concept_id}`}
-                  className={`text-2xs px-1.5 py-0.5 rounded ${t.cls}`}
-                  title={citation.scoring_rationale
-                    || `Citation layer: ${t.label}`}>
-                  {t.label}
-                </span>
-              )
-            })()}
-            {/* Trust flag — surfaces only when the multi-layered
-                pipeline assessed the source. Legacy rows render
-                without this badge. */}
             {citation.trust_flag ? (
               <span
                 data-testid={`citation-trust-${citation.concept_id}`}
@@ -514,6 +763,16 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
               No primary citation yet — alternatives may be available below.
             </p>
           )}
+          {/* Match rationale — visible in the collapsed row so a
+              reviewer can scan the support stack without expanding
+              every tile. Per the design doc: "Match rationale and
+              score always visible." */}
+          {citation.finding_supported ? (
+            <p className="text-2xs text-text-muted leading-snug">
+              <span className="font-medium">Why: </span>
+              {citation.finding_supported}
+            </p>
+          ) : null}
         </div>
         <div className="shrink-0 flex items-center gap-1">
           <span
@@ -526,7 +785,6 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
         </div>
       </button>
 
-      {/* ── Expanded evidence card ───────────────────────────────────────── */}
       {expanded ? (
         <div data-testid={`citation-expanded-${citation.concept_id}`}
              className="border-t border-navy-700 p-2 space-y-2">
@@ -544,14 +802,12 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
             </div>
           ) : null}
 
-          {/* ── Finding supported ──────────────────────────────────────── */}
           <EvidenceSection
             label="Finding supported"
             empty="Not captured for this citation — re-generate the draft to populate.">
             {citation.finding_supported}
           </EvidenceSection>
 
-          {/* ── Supporting extract ─────────────────────────────────────── */}
           <EvidenceSection
             label="Supporting extract"
             empty="Extract not captured for this citation — the source URL is the authoritative reference.">
@@ -560,15 +816,12 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
               : null}
           </EvidenceSection>
 
-          {/* ── Selection rationale ────────────────────────────────────── */}
           <EvidenceSection
             label="Selection rationale"
             empty="Rationale not captured — derived from search pass tier (see source URL).">
             {citation.selection_rationale}
           </EvidenceSection>
 
-          {/* ── Confidence (already visible on the chip; restate the
-              breakdown for full transparency) ──────────────────────────── */}
           <EvidenceSection label="Confidence">
             <span className={`inline-flex items-center gap-1 text-2xs
                               px-1.5 py-0.5 rounded border
@@ -582,7 +835,6 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
             </span>
           </EvidenceSection>
 
-          {/* ── Primary citation link ──────────────────────────────────── */}
           {citation.url ? (
             <div>
               <p className="text-2xs uppercase tracking-wider
@@ -600,7 +852,6 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
             </div>
           ) : null}
 
-          {/* ── Alternative citations ──────────────────────────────────── */}
           {citation.alternatives && citation.alternatives.length > 0 ? (
             <div className="space-y-1.5">
               <p className="text-2xs uppercase tracking-wider
@@ -622,7 +873,6 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
             </div>
           ) : null}
 
-          {/* ── Review actions (suppressed for verified tiles) ──────────── */}
           {isNeedsReview ? (
             <div className="flex flex-wrap items-center gap-1 pt-1
                             border-t border-navy-700">
@@ -667,7 +917,6 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
             </div>
           ) : null}
 
-          {/* ── Manual override form ───────────────────────────────────── */}
           {showManual && isNeedsReview ? (
             <div className="pt-1 border-t border-navy-700 space-y-1">
               <p className="text-2xs text-text-muted">
@@ -857,3 +1106,4 @@ function AlternativeCard({
     </div>
   )
 }
+

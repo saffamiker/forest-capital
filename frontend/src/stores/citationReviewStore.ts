@@ -95,6 +95,30 @@ export interface Citation {
   citation_type: string
   trust_flag: string | null
   scoring_rationale: string | null
+  // ── May 26 2026 — Citation Review redesign (migration 045).
+  // matched_finding_ids: each finding.id this citation is currently
+  // matched to. Populated by GET /api/v1/citations/findings/{gen_id};
+  // empty array when no matches recorded. Optional for back-compat
+  // with the legacy /api/v1/citations/{gen_id} endpoint which
+  // doesn't include this field.
+  matched_finding_ids?: number[]
+}
+
+
+// Level-1 finding wrapper, as returned by
+// GET /api/v1/citations/findings/{generation_id}. Sourced live from
+// the latest substantive statistical audit + the latest QA
+// methodology verdict (see backend tools/citation_findings.py).
+export interface Finding {
+  id: number
+  source: 'audit' | 'qa'
+  source_id: string
+  title: string
+  description: string | null
+  rank: 'high' | 'medium'
+  status: string | null
+  severity: string | null
+  matched_count: number
 }
 
 
@@ -128,11 +152,42 @@ interface CitationReviewState {
   /** Per-generation error, keyed by generation_id. */
   errorByGenerationId: Record<number, string | null>
 
+  // ── May 26 2026 — Citation Review redesign (migration 045) ────────
+  /** Per-generation Level-1 findings list. Populated by loadFindings()
+   *  from GET /api/v1/citations/findings/{generation_id}. */
+  findingsByGenerationId: Record<number, Finding[]>
+  /** Per-generation last-fetched timestamp for findings (ms). */
+  lastFindingsFetchAt: Record<number, number>
+  /** In-flight findings requests, keyed by generation_id. */
+  findingsInFlight: Record<number, Promise<void> | undefined>
+  /** Per-generation findings error. */
+  findingsErrorByGenerationId: Record<number, string | null>
+
   /** Load citations for a generation. Soft-refresh by default —
    *  returns immediately if cached data is fresh; rehydrate from
    *  cache and trigger background refresh if stale. force=true
    *  bypasses the freshness check. */
   load: (generationId: number, opts?: { force?: boolean }) => Promise<void>
+
+  /** Load Level-1 findings AND citations (with matched_finding_ids
+   *  joined in) for a generation. Backs the 3-level redesigned panel.
+   *  The endpoint re-seeds findings on every call from the latest
+   *  substantive audit + the latest QA verdict, so the returned set
+   *  reflects the live analytical state. Same stale-while-revalidate
+   *  semantics as load(). */
+  loadFindings: (
+    generationId: number, opts?: { force?: boolean }) => Promise<void>
+
+  /** Toggle a citation→finding match. Optimistically updates the
+   *  citation's matched_finding_ids and the finding's matched_count,
+   *  then fires POST or DELETE /api/v1/citations/match. On failure
+   *  the optimistic update is reverted. Idempotent on the backend. */
+  toggleMatch: (
+    generationId: number,
+    citationId: number,
+    findingId: number,
+    currentlyMatched: boolean,
+  ) => Promise<void>
 
   /** Optimistic replace — called after a successful review POST so
    *  the row reflects the new state without waiting for a refetch. */
@@ -150,12 +205,16 @@ interface CitationReviewState {
 
 
 const _initial = {
-  citationsByGenerationId: {} as Record<number, Citation[]>,
-  lastFetchedAt:           {} as Record<number, number>,
-  inFlight:                {} as Record<number, Promise<void> | undefined>,
-  manualOpenByCitationId:  {} as Record<number, boolean>,
-  expandedByCitationId:    {} as Record<number, boolean>,
-  errorByGenerationId:     {} as Record<number, string | null>,
+  citationsByGenerationId:     {} as Record<number, Citation[]>,
+  lastFetchedAt:               {} as Record<number, number>,
+  inFlight:                    {} as Record<number, Promise<void> | undefined>,
+  manualOpenByCitationId:      {} as Record<number, boolean>,
+  expandedByCitationId:        {} as Record<number, boolean>,
+  errorByGenerationId:         {} as Record<number, string | null>,
+  findingsByGenerationId:      {} as Record<number, Finding[]>,
+  lastFindingsFetchAt:         {} as Record<number, number>,
+  findingsInFlight:            {} as Record<number, Promise<void> | undefined>,
+  findingsErrorByGenerationId: {} as Record<number, string | null>,
 }
 
 
@@ -277,6 +336,143 @@ export const useCitationReviewStore = create<CitationReviewState>((set, get) => 
         [citationId]: expanded,
       },
     }))
+  },
+
+  loadFindings: async (generationId, opts = {}) => {
+    const safeId = Math.trunc(Number(generationId))
+    if (!Number.isFinite(safeId) || safeId <= 0) {
+      return
+    }
+    generationId = safeId
+    const { force = false } = opts
+    const now = Date.now()
+    const lastAt = get().lastFindingsFetchAt[generationId]
+    const cached = get().findingsByGenerationId[generationId]
+    const inFlight = get().findingsInFlight[generationId]
+
+    if (!force && cached && lastAt && (now - lastAt) < STALE_AFTER_MS) {
+      return
+    }
+    if (inFlight) {
+      return inFlight
+    }
+
+    const fetchPromise = (async () => {
+      try {
+        const res = await axios.get<{
+          generation_id: number
+          seeded_at: string | null
+          findings: Finding[]
+          citations: Citation[]
+        }>(`/api/v1/citations/findings/${generationId}`)
+        const data = res.data
+        // The /findings endpoint returns BOTH findings AND citations
+        // (with matched_finding_ids[] joined in). Update both slices
+        // in one set() so the 3-level panel sees a consistent state.
+        set((s) => ({
+          findingsByGenerationId: {
+            ...s.findingsByGenerationId,
+            [generationId]: data.findings ?? [],
+          },
+          citationsByGenerationId: {
+            ...s.citationsByGenerationId,
+            [generationId]: data.citations ?? [],
+          },
+          lastFindingsFetchAt: {
+            ...s.lastFindingsFetchAt,
+            [generationId]: Date.now(),
+          },
+          lastFetchedAt: {
+            ...s.lastFetchedAt,
+            [generationId]: Date.now(),
+          },
+          findingsErrorByGenerationId: {
+            ...s.findingsErrorByGenerationId,
+            [generationId]: null,
+          },
+        }))
+      } catch (e) {
+        const msg = axios.isAxiosError(e)
+          ? (e.response?.data?.detail || e.message)
+          : (e as Error).message
+        set((s) => ({
+          findingsErrorByGenerationId: {
+            ...s.findingsErrorByGenerationId,
+            [generationId]: String(msg),
+          },
+        }))
+      } finally {
+        set((s) => {
+          const next = { ...s.findingsInFlight }
+          delete next[generationId]
+          return { findingsInFlight: next }
+        })
+      }
+    })()
+
+    set((s) => ({
+      findingsInFlight: { ...s.findingsInFlight, [generationId]: fetchPromise },
+    }))
+    return fetchPromise
+  },
+
+  toggleMatch: async (generationId, citationId, findingId, currentlyMatched) => {
+    // Optimistic update: flip the citation's matched_finding_ids array
+    // AND the finding's matched_count, then fire the network call.
+    // Snapshot the pre-toggle state so we can revert on failure.
+    const prevCitations = get().citationsByGenerationId[generationId] ?? []
+    const prevFindings  = get().findingsByGenerationId[generationId] ?? []
+
+    const nextCitations = prevCitations.map((c) => {
+      if (c.id !== citationId) return c
+      const existing = c.matched_finding_ids ?? []
+      const next = currentlyMatched
+        ? existing.filter((id) => id !== findingId)
+        : [...existing, findingId]
+      return { ...c, matched_finding_ids: next }
+    })
+    const nextFindings = prevFindings.map((f) => {
+      if (f.id !== findingId) return f
+      const delta = currentlyMatched ? -1 : 1
+      return { ...f, matched_count: Math.max(0, f.matched_count + delta) }
+    })
+
+    set((s) => ({
+      citationsByGenerationId: {
+        ...s.citationsByGenerationId,
+        [generationId]: nextCitations,
+      },
+      findingsByGenerationId: {
+        ...s.findingsByGenerationId,
+        [generationId]: nextFindings,
+      },
+    }))
+
+    try {
+      if (currentlyMatched) {
+        await axios.delete('/api/v1/citations/match', {
+          data: { citation_id: citationId, finding_id: findingId },
+        })
+      } else {
+        await axios.post('/api/v1/citations/match', {
+          citation_id: citationId,
+          finding_id: findingId,
+        })
+      }
+    } catch (e) {
+      // Revert the optimistic update.
+      set((s) => ({
+        citationsByGenerationId: {
+          ...s.citationsByGenerationId,
+          [generationId]: prevCitations,
+        },
+        findingsByGenerationId: {
+          ...s.findingsByGenerationId,
+          [generationId]: prevFindings,
+        },
+      }))
+      throw e
+    }
   },
 
   _reset: () => set(_initial),
