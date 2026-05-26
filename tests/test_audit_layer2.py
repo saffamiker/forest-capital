@@ -233,43 +233,63 @@ class TestLayer2OrchestratorChunking:
     def test_orchestrator_emits_two_factor_loadings_jobs(
         self, monkeypatch,
     ):
+        """The deterministic recompute path (May 25 2026 refactor) still
+        splits factor loadings into two groups (A / B) covering disjoint
+        strategy subsets — purely for finding provenance / audit history
+        readability, since the recompute itself doesn't need chunking
+        (no token cap). Verify the two recompute calls cover the full
+        strategy set without overlap by monkeypatching the recompute
+        function and capturing the subset_names argument."""
+        import tools.audit_layer2_deterministic as det
         from tools import audit_layer2
 
-        # Bypass the test-env skip without an API key.
+        # Bypass the test-env skip; the deterministic path doesn't NEED
+        # an API key but the orchestrator's gate still requires it.
         monkeypatch.setattr(audit_layer2, "_is_test_env", lambda: False)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
-        captured: list[tuple[str, str]] = []
+        captured_subsets: list[list[str]] = []
 
-        def _capture(prompt: str) -> str:
-            # Find which group's prompt this is by inspecting the body.
-            # Return a valid empty JSON shape so _run_group succeeds.
-            captured.append(("call", prompt))
-            return '{"strategy": "stub", "checks": []}'
+        def _capture_recompute(subset_names, payload):
+            captured_subsets.append(list(subset_names))
+            return {"strategy": "factor_loadings", "checks": []}
 
-        monkeypatch.setattr(audit_layer2, "_call_auditor", _capture)
-
-        result = asyncio.run(audit_layer2.layer_2_metric_audit(self._payload()))
-        # The result is built from at least the chunked factor calls and
-        # the other groups; what we pin here is that TWO of the captured
-        # prompts are factor-loadings prompts and they cover the strategies.
-        factor_prompts = [p for _, p in captured
-                          if "Carhart four-factor loadings" in p]
-        assert len(factor_prompts) == 2, (
-            f"expected 2 factor-loadings calls, got {len(factor_prompts)}"
+        monkeypatch.setattr(
+            det, "recompute_factor_loadings", _capture_recompute)
+        # The orchestrator imports recompute_factor_loadings INSIDE the
+        # async function — patch the module attribute the import points
+        # to AFTER it lands. Easier: also patch the module-level binding
+        # the orchestrator looks up via from-import resolution.
+        monkeypatch.setattr(
+            "tools.audit_layer2_deterministic.recompute_factor_loadings",
+            _capture_recompute,
         )
-        # The two subsets together cover every strategy and they do not
-        # overlap (5 + 5 = 10 with no duplicates).
-        subsets: list[set[str]] = []
-        for p in factor_prompts:
-            strats = {
-                f"STRAT_{i}" for i in range(10) if f"STRAT_{i}" in p
-            }
-            subsets.append(strats)
-        union = subsets[0] | subsets[1]
-        overlap = subsets[0] & subsets[1]
-        assert union == {f"STRAT_{i}" for i in range(10)}
-        assert len(overlap) == 0
+        # Stub the other recomputes so they don't error on the minimal
+        # fixture; the orchestrator runs all six concurrently and any
+        # raised exception aborts the gather.
+        for fn_name in ("recompute_summary_statistics",
+                        "recompute_efficient_frontier",
+                        "recompute_regime_split",
+                        "recompute_rolling_correlation"):
+            monkeypatch.setattr(
+                f"tools.audit_layer2_deterministic.{fn_name}",
+                lambda *a, **kw: {"strategy": "stub", "checks": []},
+            )
+
+        result = asyncio.run(
+            audit_layer2.layer_2_metric_audit(self._payload()))
+
+        # Exactly two factor-loadings recomputes fired.
+        assert len(captured_subsets) == 2, (
+            f"expected 2 factor recompute calls, "
+            f"got {len(captured_subsets)}"
+        )
+        # The two subsets together cover every strategy with no overlap
+        # (5 + 5 = 10).
+        set_a = set(captured_subsets[0])
+        set_b = set(captured_subsets[1])
+        assert set_a | set_b == {f"STRAT_{i}" for i in range(10)}
+        assert set_a & set_b == set()
         assert result["status"] in ("pass", "warning", "warn", "fail", "skip")
 
     def test_max_tokens_raised_to_8000(self):
