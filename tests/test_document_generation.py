@@ -371,15 +371,18 @@ class TestArbiterDualVerdict:
                 f"arbiter prompt missing PM criterion: {marker}")
 
     def test_arbiter_prompt_still_lists_five_rubric_sections(self):
-        # The new top-level lines are additive — the five rubric
-        # sections must still be specified so the verdict shape the UI
-        # parses is unchanged.
+        # PR #194 renamed sections 1-4 to match the FNA 670 midpoint
+        # rubric (Data and Methodology / Preliminary Results and
+        # Diagnostics / Roles and Division of Labor / Next Steps and
+        # Open Questions). Section 5 keeps the literal title "Overall
+        # Academic Readiness" so the existing truncation detector and
+        # fallback (UAT #53/#59/#125/#128) keep working.
         from agents.academic_review import _ARBITER_INSTRUCTIONS
         for marker in (
-            "### 1. Data Sufficiency and Methodology",
-            "### 2. Requirements and Rubric Alignment",
-            "### 3. Deliverable Quality",
-            "### 4. Priority Areas for Further Investigation",
+            "### 1. Data and Methodology (1p, 33%)",
+            "### 2. Preliminary Results and Diagnostics (1p, 33%)",
+            "### 3. Roles and Division of Labor (0.5p, 17%)",
+            "### 4. Next Steps and Open Questions (0.5p, 17%)",
             "### 5. Overall Academic Readiness",
         ):
             assert marker in _ARBITER_INSTRUCTIONS

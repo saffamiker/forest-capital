@@ -159,27 +159,45 @@ def group_documents_by_type(docs: list[dict]) -> dict[str, list[dict]]:
     return grouped
 
 
-# May 28 2026 — team role division context. Prepended to the team-
-# engagement block in the arbiter (and peer) context so the verdict
-# evaluates each member's contributions against role-appropriate
-# expectations rather than raw commit / interaction counts. Michael's
-# front-loaded platform engineering should NOT be read as analytical
-# disengagement; Bob's analytical writing and Molly's presentation
-# work are the genuine analytical surfaces to assess.
+# May 26 2026 — team role division context, revised to reflect the
+# explicit ownership framing the course encourages: human judgment
+# layered on automated validation. The prior phrasing positioned
+# Michael as "front-loaded engineering, not analytical disengagement"
+# which framed his work as a defensive disclaimer. The course
+# rewards the structure directly: Michael builds the validation
+# infrastructure that makes the team's analytical judgments
+# auditable; Bob owns the analytical interpretation that sits on
+# top; Molly owns the human UAT layer that catches what automated
+# checks miss.
 _TEAM_ROLE_CONTEXT_LINES: list[str] = [
     "",
-    "TEAM ROLE DIVISION CONTEXT",
-    "Michael Ruurds is the platform engineer — commit count and QA "
-    "activity reflect front-loaded engineering work, not analytical "
-    "disengagement. Bob Thao owns analytical interpretation, written "
-    "deliverables, and Council engagement. Molly Murdock owns "
-    "presentation, visualisation, and rehearsal. Engagement metrics "
-    "should be evaluated against role-appropriate contributions, not "
-    "raw commit counts.",
+    "TEAM ROLE DIVISION CONTEXT — analytical ownership",
+    "The team operates a layered division of labor that the FNA 670 "
+    "course encourages: human judgment on top of automated "
+    "validation. Each member owns a distinct analytical layer.",
     "",
-    "When assessing team engagement, flag genuine analytical gaps "
-    "(e.g. unresolved [[BOB]] markers, missing interpretation "
-    "sections) rather than engineering commit disparity.",
+    "Michael Ruurds builds and operates the validation infrastructure "
+    "that underpins the team's analytical integrity. This includes "
+    "the three-layer independent audit, the automated QA checks, and "
+    "the AI council. His commit and QA activity reflect this "
+    "engineering layer.",
+    "",
+    "Bob Thao interprets the platform's findings, makes analytical "
+    "judgments on items the platform flags for human review, and "
+    "owns the academic narrative and financial conclusions.",
+    "",
+    "Molly Murdock conducts human UAT. She verifies that platform "
+    "outputs match real-world expectations, files failure reports "
+    "when automated checks miss edge cases, and provides the human "
+    "sign-off layer that automated testing cannot replace.",
+    "",
+    "Evaluate Section 3 against this layered ownership model, not "
+    "against a missing human-only division of labor. A draft that "
+    "describes the layers clearly and follows with activity evidence "
+    "satisfies the rubric. Do NOT flag Michael's engineering activity "
+    "as analytical disengagement; do NOT flag Molly's lower commit "
+    "count as a contribution gap. Each layer is its own analytical "
+    "ownership.",
 ]
 
 
@@ -483,28 +501,53 @@ async def gather_review_context(
 # ── Peer fan-out ──────────────────────────────────────────────────────────────
 
 _PEER_QUESTION_BASE = (
-    "Review this project's academic readiness. Address all areas "
-    "concisely, from your expert perspective:\n\n"
-    "1. DATA SUFFICIENCY — breadth, depth, time range, factor-model "
-    "coverage; name specific gaps.\n"
-    "2. REQUIREMENTS & RUBRIC ALIGNMENT — does the current work satisfy the "
-    "stated criteria; what is unmet.\n"
-    "3. DELIVERABLE QUALITY — assess any draft materials present; what would "
-    "strengthen them.\n"
-    "4. AREAS FOR FURTHER INVESTIGATION — the highest-leverage actions before "
-    "the deadline; specific, not generic.\n"
+    "Review this project's MIDPOINT CHECK readiness against the FNA 670 "
+    "rubric. The submission is a 3-page midpoint paper, due May 27 2026. "
+    "Page budget per section: Data and Methodology (1p), Preliminary "
+    "Results and Diagnostics (1p), Roles and Division of Labor (0.5p), "
+    "Next Steps and Open Questions (0.5p). Total body 825 words.\n\n"
+    "Address every area below concisely, from your expert lens. Evaluate "
+    "what IS in the current draft, not against a target the team has not "
+    "yet committed to. The midpoint check is a progress report, not the "
+    "final submission.\n\n"
+    "1. DATA AND METHODOLOGY (1p) — three-asset universe (US equities, IG "
+    "bonds, HY bonds), 286+ monthly observations, ten strategies, "
+    "statistical methodology (FDR correction, deflated Sharpe, CPCV, "
+    "block bootstrap), data provenance. Name specific gaps.\n"
+    "2. PRELIMINARY RESULTS AND DIAGNOSTICS (1p) — the 2022 correlation "
+    "regime break (the central finding), the FDR result, top-line strategy "
+    "comparisons, audit verification. Does the section quantify the 2022 "
+    "break with actual pre/post values, and present the FDR result "
+    "honestly?\n"
+    "3. ROLES AND DIVISION OF LABOR (0.5p) — does Section 3 state each "
+    "member's analytical ownership directly, framed as human judgment "
+    "on top of automated validation? See the TEAM ROLE DIVISION CONTEXT "
+    "above for the ownership model the section should evaluate against.\n"
+    "4. NEXT STEPS AND OPEN QUESTIONS (0.5p) — does the section name "
+    "concrete next steps before the July 1 final submission, and at "
+    "least one substantive open question for the midpoint meetup peer "
+    "review?\n"
+    "5. AREAS FOR FURTHER INVESTIGATION — the highest-leverage actions "
+    "before the May 27 midpoint deadline. Specific, not generic.\n"
 )
 
-# Fifth dimension — appended only when more than one team member has
+# Sixth dimension (was 5th before the May 26 2026 midpoint-rubric
+# revision) — appended only when more than one team member has
 # recorded activity. With a single active user the platform may simply
-# not be in use by the whole team yet; assessing task-sharing then would
-# penalise an adoption gap, not a division-of-labour problem.
+# not be in use by the whole team yet; assessing task-sharing then
+# would penalise an adoption gap, not a division-of-labour problem.
+# Frame against the layered ownership model (see TEAM ROLE DIVISION
+# CONTEXT above): genuine shared effort across the validation layer
+# (Michael), the analytical-narrative layer (Bob), and the UAT layer
+# (Molly) is the desired pattern — not equal raw counts.
 _PEER_DIMENSION_5 = (
-    "5. TEAM ENGAGEMENT AND TASK SHARING — Based on the team activity "
-    "summary provided, assess whether the team's engagement with the "
-    "platform reflects genuine shared effort. Is analytical work "
-    "distributed across team members or concentrated? Does the pattern of "
-    "interactions suggest coordinated division of labour?\n"
+    "6. TEAM ENGAGEMENT AND TASK SHARING — Based on the team activity "
+    "summary provided, assess whether the team's engagement reflects "
+    "the layered ownership model (validation infrastructure, "
+    "analytical narrative, human UAT). Each member should be active "
+    "in their layer; equal raw counts across layers are NOT the "
+    "target. Flag genuine analytical gaps, not engineering vs "
+    "analytical activity disparity.\n"
 )
 
 _PEER_QUESTION_CLOSE = "\nKeep your whole response under 400 words."
@@ -684,111 +727,157 @@ async def run_peer_fan_out(
 
 # ── Arbiter (academic advisor, Opus) ──────────────────────────────────────────
 
-_ARBITER_INSTRUCTIONS = """=== YOUR TASK — ARBITER VERDICT ===
-You are the arbiter. Integrate and WEIGH the peer review notes above — do
-not restate them. Produce a structured, rubric-mapped verdict that opens
-with a TWO-LINE TOP-LEVEL SUMMARY and is followed by five rubric sections,
-in this exact markdown format so the UI can parse it:
+_ARBITER_INSTRUCTIONS = """=== YOUR TASK — ARBITER VERDICT (MIDPOINT CHECK) ===
+You are the arbiter for the FNA 670 MIDPOINT CHECK submission (3-page
+paper, due May 27 2026). This is a PROGRESS REPORT, not the July 1
+final submission. Evaluate against the midpoint rubric, not the final
+submission standard.
+
+CRITICAL EVALUATION POSTURE — read what IS in the current draft.
+Do not speculate, do not list things you would expect to see, do not
+flag absence of features that the team has not committed to for the
+midpoint check. The midpoint check rewards demonstrated analytical
+progress; it does not require the full final-submission polish.
+
+DO NOT proactively hunt for [[BOB]] / [[VERIFY]] / [[MOLLY]] markers
+in the draft. Earlier versions of the report template embedded these
+markers as section callouts; PR #178 removed them. The current
+template does not produce them as boilerplate. If you observe one in
+the draft text you have been given, flag it under the relevant
+section. If you do not observe one, do not mention them. Do not write
+"the draft contains unresolved markers" unless you can quote the
+marker text verbatim from the draft you received.
+
+The midpoint rubric has FOUR weighted sections (page budget noted):
+
+  1. Data and Methodology              1 page    (33%)
+  2. Preliminary Results and Diagnostics   1 page    (33%)
+  3. Roles and Division of Labor       0.5 page  (17%)
+  4. Next Steps and Open Questions     0.5 page  (17%)
+
+The verdict opens with a TWO-LINE TOP-LEVEL SUMMARY and is followed by
+five rubric sections, in this exact markdown format so the UI can
+parse it:
 
 **Academic rigour:** <Strong | Developing | Needs Work>
 **Portfolio Manager insight:** <Strong | Developing | Needs Work>
 
-The two top-level lines summarise the deliverable through two distinct
-lenses:
+The two top-level lines summarise the deliverable through two lenses:
 
-  ACADEMIC RIGOUR — methodology, citations, data provenance, structural
-  completeness against the FNA 670 rubric. Aggregate this from the five
-  rubric sections below; a deliverable with mostly Strong section
-  ratings should read Strong here.
+  ACADEMIC RIGOUR — methodology, citations, data provenance,
+  structural completeness against the midpoint rubric. Aggregate from
+  the five sections below, weighted by the midpoint percentages
+  (33/33/17/17 for sections 1-4; section 5 is synthesis). A
+  deliverable with mostly Strong section ratings should read Strong
+  here.
 
   PORTFOLIO MANAGER INSIGHT — does the document tell a PM something
-  they did not already know? Score against these five PM criteria
-  (PASS / NEEDS WORK / N/A per criterion) and aggregate:
-    1. Insight beyond the obvious — non-obvious finding, contradiction,
-       or signal that challenges conventional wisdom.
+  they did not already know? At the midpoint stage, the question is
+  whether the analytical PROGRESS so far reads as substantive, not
+  whether the paper is final-submission-ready. Score against these
+  five PM criteria (PASS / NEEDS WORK / N/A per criterion) and
+  aggregate:
+    1. Insight beyond the obvious — a non-obvious finding,
+       contradiction, or signal that challenges conventional wisdom.
     2. The 2022 break — mechanism (inflation, Fed policy, duration
        repricing), not just observation. N/A if not covered.
     3. Actionable signal identification — names specific signals and
-       why they have predictive power in the current regime. N/A if
-       methodology-only.
+       why they have predictive power. N/A if methodology-only.
     4. Contradictions acknowledged and pressed — tensions between
        findings explained, not smoothed over.
     5. So what / explicit implication — every major finding followed
        by what a PM should do, conclude, or watch for.
   4-5 PASS → Strong; 2-3 PASS → Developing; 0-1 PASS → Needs Work.
 
-After the two top-level lines, produce the five rubric sections:
+After the two top-level lines, produce these five rubric sections.
+The first four map DIRECTLY to the midpoint rubric (so the headings
+read as the rubric, not as a generic review). Each section assesses
+ONLY what the corresponding rubric section in the draft contains:
 
-### 1. Data Sufficiency and Methodology
+### 1. Data and Methodology (1p, 33%)
 **Rating:** <Strong | Developing | Needs Work>
-<your assessment>
+<assessment of Section 1 of the midpoint draft: three-asset universe,
+286+ monthly observations, ten strategies named, statistical
+methodology (FDR correction, deflated Sharpe, CPCV, block bootstrap),
+data provenance>
 
-### 2. Requirements and Rubric Alignment
+### 2. Preliminary Results and Diagnostics (1p, 33%)
 **Rating:** <Strong | Developing | Needs Work>
-<your assessment>
+<assessment of Section 2: the 2022 regime break with actual pre/post
+values, FDR result presented honestly, top-line strategy comparisons,
+audit verification. This section carries the central thesis>
 
-### 3. Deliverable Quality
+### 3. Roles and Division of Labor (0.5p, 17%)
 **Rating:** <Strong | Developing | Needs Work>
-<your assessment>
+<assessment of Section 3 against the LAYERED OWNERSHIP MODEL
+(see TEAM ROLE DIVISION CONTEXT above): does the section state each
+member's analytical ownership directly — Michael's validation
+infrastructure, Bob's analytical narrative, Molly's human UAT — and
+follow with activity-count evidence? Do NOT mark down a layered
+description for not being a single human-only narrative; the layered
+model IS the course's encouraged structure>
 
-### 4. Priority Areas for Further Investigation
+### 4. Next Steps and Open Questions (0.5p, 17%)
 **Rating:** <Strong | Developing | Needs Work>
-<a numbered list, ordered by impact — specific actions, not generic advice>
+<assessment of Section 4: concrete steps before the July 1 final
+submission, and at least one substantive open question for the May 27
+midpoint peer-review meetup>
 
 ### 5. Overall Academic Readiness
 **Rating:** <Strong | Developing | Needs Work>
-<one paragraph>
+<This section is YOUR external summary verdict, NOT a section the
+team needs to add to the midpoint paper. The midpoint paper has the
+four rubric sections above (Data and Methodology, Preliminary Results
+and Diagnostics, Roles and Division of Labor, Next Steps and Open
+Questions) — nothing else is required. Section 5 here is YOUR overall
+assessment of how the draft scores against the rubric AS A WHOLE.
+
+Write one short synthesis paragraph that integrates sections 1-4 and
+names whether this draft is on track for the May 27 midpoint deadline,
+FOLLOWED by a numbered list titled "Priority actions before May 27 —
+ordered by grade impact" of the highest-leverage fixes, ordered by
+GRADE IMPACT given the midpoint rubric weights. A gap in section 1 or
+2 (33% weight each) is higher impact than a gap in section 3 or 4
+(17% weight each), all else equal. Be specific.
+
+Do NOT word this section as if the team needs to write an "Overall
+Academic Readiness" section in the paper. They do not. The midpoint
+paper has four sections, full stop.>
+The Section 5 title MUST be literally "Overall Academic Readiness" —
+the UI's truncation detector and fallback both pin on this exact
+title (UAT #53/#59 history). Do not rename it.
 
 VISUAL EVIDENCE — chart snapshots may be attached to your prompt:
 rolling_correlation, cumulative_returns, regime_signals, factor_loadings,
-drawdown_periods, significance_journey, oos_performance. The peer notes
-above may reference what they saw on these charts. When you assess the
-document under Data Sufficiency and Methodology, cross-check the
-document's quantitative claims against the visual evidence — a claim
-that disagrees with what is plainly visible on the chart is a serious
+drawdown_periods, significance_journey, oos_performance. The peer
+notes above may reference what they saw on these charts. When you
+assess Section 1 (Data and Methodology), cross-check the document's
+quantitative claims against the visual evidence. A claim that
+disagrees with what is plainly visible on the chart is a serious
 methodological concern. When no charts are attached (cold deploy), do
 not refer to chart features; reason from the peer notes alone.
 
 THE CENTRAL FINDING — the most important analytical finding in this
-project is the 2022 equity-bond correlation regime break. A submission
-that does not quantify it with actual pre/post values (approximately
--0.05 and +0.61) and connect it to strategy performance differences is
-materially incomplete regardless of other qualities. The FDR correction
-result (zero strategies significant at q < 0.005) must be present and
-correctly interpreted; a submission that omits it or misrepresents it as
-a positive finding is a methodological disclosure failure. The
+project is the 2022 equity-bond correlation regime break. A midpoint
+submission that does not quantify it with actual pre/post values
+(approximately -0.05 and +0.61) and connect it to strategy performance
+differences is materially incomplete. The FDR correction result (zero
+strategies significant at q < 0.005) must be present and correctly
+interpreted; a submission that omits it or misrepresents it as a
+positive finding is a methodological disclosure failure. The
 independent three-layer statistical audit (zero critical failures
-across 59 checks) is a distinguishing feature of the project and should
-be cited as evidence of analytical rigour in the methodology section.
-When evaluating citations, check they are real and support the specific
-claim made — fabricated or misattributed citations are a serious concern
-to flag under Requirements and Rubric Alignment.
+across 59 checks) is a distinguishing feature of the project and
+should be cited as evidence of analytical rigour in Section 1. When
+evaluating citations that ARE in the draft, check they are real and
+support the specific claim made; fabricated or misattributed citations
+are a serious concern. The midpoint check does NOT require a full
+references list — only that the citations PRESENT are correct.
 
-UNRESOLVED MARKERS CHECK — if any document in the context still
-contains [[VERIFY]] or [[VERIFY CITATION]] markers, or unresolved
-[[BOB]] / [[MOLLY]] callouts, flag it prominently under section 2,
-Requirements and Rubric Alignment: state that the draft contains
-unresolved verification markers, that every marker must be resolved
-before submission, and that a document carrying unresolved markers is
-not ready to submit.
-
-EXTERNAL CITATIONS CHECK — within sections 1 and 2:
-Check whether the work contextualises its key findings with external
-academic citations. A submission with no citations is weaker than one
-that situates its findings within the existing literature. Specifically
-look for: a citation supporting the 2022 correlation regime break, a
-citation supporting the FDR methodology choice, a citation for the
-Carhart four-factor model, and a References section in APA format.
-- If citations are present and real (authors and titles that match
-  known literature), note this positively under section 1, Data
-  Sufficiency and Methodology.
-- If citations appear fabricated (authors or titles that do not match
-  any known work), flag it as a serious concern under section 2,
-  Requirements and Rubric Alignment.
-
-Every rating is exactly one of: Strong, Developing, Needs Work. Be direct
-and actionable — the team is preparing a graded submission, so generic
-encouragement is not useful."""
+Every rating is exactly one of: Strong, Developing, Needs Work. Be
+direct and actionable. The team is preparing a graded submission on a
+short clock — generic encouragement is not useful. But the converse
+also holds: do not invent concerns to look thorough. Read what's in
+the draft, evaluate that, stop."""
 
 # Script-specific rubric — used when Academic Review runs against a
 # presentation_script editor draft. The default rubric evaluates a
