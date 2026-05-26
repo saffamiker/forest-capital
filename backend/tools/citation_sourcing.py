@@ -61,12 +61,23 @@ log = structlog.get_logger(__name__)
 CITATION_TYPE_THEORETICAL:    Final[str] = "theoretical"
 CITATION_TYPE_EMPIRICAL:      Final[str] = "empirical"
 CITATION_TYPE_METHODOLOGICAL: Final[str] = "methodological"
+# May 26 2026 — Citation Review redesign. Two new types: regulatory
+# (standards / rules / IFRS / accounting guidance / FSB / BCBS) and
+# data_source (data-provider documentation, dataset references,
+# methodology PDFs). Stored as VARCHAR(40) — no schema change since
+# the column carries no CHECK constraint. See migration 045's
+# `COMMENT ON COLUMN citations_cache.citation_type` for the full
+# taxonomy documented on the column itself.
+CITATION_TYPE_REGULATORY:     Final[str] = "regulatory"
+CITATION_TYPE_DATA_SOURCE:    Final[str] = "data_source"
 CITATION_TYPE_PRACTITIONER:   Final[str] = "practitioner"
 
 CITATION_TYPES: Final[frozenset[str]] = frozenset([
     CITATION_TYPE_THEORETICAL,
     CITATION_TYPE_EMPIRICAL,
     CITATION_TYPE_METHODOLOGICAL,
+    CITATION_TYPE_REGULATORY,
+    CITATION_TYPE_DATA_SOURCE,
     CITATION_TYPE_PRACTITIONER,
 ])
 

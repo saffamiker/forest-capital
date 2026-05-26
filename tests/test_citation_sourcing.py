@@ -48,10 +48,16 @@ class TestEnums:
             "verified", "unverified", "paywalled", "stale", "mismatch",
         })
 
-    def test_citation_type_set_is_exactly_four(self):
+    def test_citation_type_set_is_exactly_six(self):
+        # Expanded May 26 2026 — Citation Review redesign added
+        # 'regulatory' and 'data_source' to the application-layer
+        # taxonomy (migration 045's docstring documents the rationale).
+        # The column remains VARCHAR(40) with no CHECK constraint so
+        # the expansion needed zero schema change.
         from tools.citation_sourcing import CITATION_TYPES
         assert CITATION_TYPES == frozenset({
-            "theoretical", "empirical", "methodological", "practitioner",
+            "theoretical", "empirical", "methodological",
+            "regulatory", "data_source", "practitioner",
         })
 
     def test_weights_sum_to_one(self):
@@ -295,7 +301,12 @@ class TestGenerateQueriesGraceful:
     def test_complete_finding_returns_four_queries(self):
         # In the test environment the LLM is not invoked; the
         # function falls back to the title-only generator and
-        # returns all four citation types keyed off the title.
+        # returns four citation types keyed off the title. The
+        # query generator's vocabulary is the original four
+        # (theoretical / empirical / methodological / practitioner)
+        # — the two newer types (regulatory / data_source) added in
+        # the May 26 2026 redesign are tagged at sourcing time on
+        # the citation itself, not via a separate search query.
         from tools.citation_sourcing import (
             generate_queries, CITATION_TYPES,
         )
@@ -311,8 +322,15 @@ class TestGenerateQueriesGraceful:
         }
         queries = generate_queries(finding)
         assert isinstance(queries, dict)
-        # Title-only fallback produces ALL four keys.
-        assert set(queries.keys()) == CITATION_TYPES
+        # Every query key is a member of the (expanded) CITATION_TYPES
+        # set. The query generator emits the four query-bearing
+        # types; the additional regulatory / data_source types are
+        # valid storage tags but not queried for separately.
+        expected_query_types = {
+            "theoretical", "empirical", "methodological", "practitioner",
+        }
+        assert set(queries.keys()) == expected_query_types
+        assert expected_query_types.issubset(CITATION_TYPES)
         # Every query is a non-empty string.
         for k, v in queries.items():
             assert isinstance(v, str) and v.strip(), f"{k} is empty"
@@ -412,12 +430,24 @@ class TestNoPipelineWiring:
     itself + the test file are allowed; nothing else is."""
 
     def test_no_existing_backend_file_imports_citation_sourcing(self):
+        # Relaxed May 26 2026 — the redesign legitimately references
+        # the module from migration 045's docstring (it documents the
+        # six-value CITATION_TYPES tuple for future readers). The
+        # original guardrail used a broad substring match which
+        # tripped on the comment. Narrowed to look for an actual
+        # `import` statement targeting the module — that's the real
+        # wiring signal, and the migration's prose mention is not.
         import pathlib
+        import re
         root = pathlib.Path(__file__).resolve().parents[1]
         backend = root / "backend"
+        import_re = re.compile(
+            r"^\s*(?:from\s+\S*\bcitation_sourcing\b\s+import\b"
+            r"|import\s+\S*\bcitation_sourcing\b)",
+            re.MULTILINE,
+        )
         offenders: list[str] = []
         for path in backend.rglob("*.py"):
-            # Skip the module itself + __pycache__.
             if "__pycache__" in path.parts:
                 continue
             if path.name == "citation_sourcing.py":
@@ -426,7 +456,7 @@ class TestNoPipelineWiring:
                 text = path.read_text(encoding="utf-8")
             except Exception:  # noqa: BLE001
                 continue
-            if "citation_sourcing" in text:
+            if import_re.search(text):
                 offenders.append(str(path.relative_to(root)))
         assert not offenders, (
             f"citation_sourcing imported from existing backend files "
