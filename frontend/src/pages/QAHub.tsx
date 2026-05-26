@@ -409,8 +409,16 @@ export default function QAHub() {
       audit_id?: number
       message?: string
     }
+    // User-initiated clicks ALWAYS pass force=true so they
+    // explicitly bust the cache. Per user spec (May 26 2026
+    // follow-up): "the Re-run Audit button on the QA page must
+    // pass force=true so the user can manually bust the cache when
+    // needed." The endpoint's smart cache-hit path stays in place
+    // for any non-user-initiated caller (scripts, future scheduled
+    // tasks) but every button on the page commits the user's
+    // intent to re-run.
     void axios.post<AuditRunResponse>('/api/v1/audit/run',
-      demo ? { reason: 'demo', force: true } : { triggered_by: 'manual' })
+      demo ? { reason: 'demo', force: true } : { triggered_by: 'manual', force: true })
       .then((res) => {
         // Cache hit — endpoint served the prior substantive audit.
         // No new run is in flight; just refresh and surface the
