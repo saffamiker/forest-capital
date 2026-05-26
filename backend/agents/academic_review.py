@@ -825,13 +825,24 @@ midpoint peer-review meetup>
 
 ### 5. Overall Academic Readiness
 **Rating:** <Strong | Developing | Needs Work>
-<one short synthesis paragraph that integrates sections 1-4 and
-names whether this draft is on track for the May 27 midpoint
-deadline, FOLLOWED by a numbered list titled "Priority actions before
-May 27 — ordered by grade impact" of the highest-leverage fixes,
-ordered by GRADE IMPACT given the midpoint rubric weights. A gap in
-section 1 or 2 (33% weight each) is higher impact than a gap in
-section 3 or 4 (17% weight each), all else equal. Be specific.>
+<This section is YOUR external summary verdict, NOT a section the
+team needs to add to the midpoint paper. The midpoint paper has the
+four rubric sections above (Data and Methodology, Preliminary Results
+and Diagnostics, Roles and Division of Labor, Next Steps and Open
+Questions) — nothing else is required. Section 5 here is YOUR overall
+assessment of how the draft scores against the rubric AS A WHOLE.
+
+Write one short synthesis paragraph that integrates sections 1-4 and
+names whether this draft is on track for the May 27 midpoint deadline,
+FOLLOWED by a numbered list titled "Priority actions before May 27 —
+ordered by grade impact" of the highest-leverage fixes, ordered by
+GRADE IMPACT given the midpoint rubric weights. A gap in section 1 or
+2 (33% weight each) is higher impact than a gap in section 3 or 4
+(17% weight each), all else equal. Be specific.
+
+Do NOT word this section as if the team needs to write an "Overall
+Academic Readiness" section in the paper. They do not. The midpoint
+paper has four sections, full stop.>
 The Section 5 title MUST be literally "Overall Academic Readiness" —
 the UI's truncation detector and fallback both pin on this exact
 title (UAT #53/#59 history). Do not rename it.
