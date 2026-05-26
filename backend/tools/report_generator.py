@@ -269,6 +269,273 @@ def _writer_unavailable_draft(ref: str | None = None) -> str:
         "with the next-steps paragraph.]\n")
 
 
+# ── Stage 3b — word-count rationalization ───────────────────────────────────
+#
+# Follow-up to commit 70a9290 (May 26 2026). The writer prompt now
+# places all interpretation inline so there are no trailing [BOB] blocks
+# to merge — the paper is fully assembled the moment the writer
+# returns. But Sonnet does not perfectly hit the per-section word
+# budgets (250 / 300 / 150 / 125 — see _SECTION_BUDGETS), so a section
+# can land >10% over budget and trigger the existing
+# word_count_over_budget flag.
+#
+# This pass runs ONCE between the writer call and the post-check. For
+# every section flagged 'red' (more than 10% over budget) it asks the
+# writer to compress the section TO ITS BUDGET while preserving every
+# specific number, every inline citation, and every analytical
+# conclusion. Coherent prose, not truncation. The 'amber' band
+# (100-110% of budget) is left alone — within tolerance per the
+# existing rebalance_paper() convention.
+#
+# The word-count check that emits the over-budget flag runs AFTER this
+# pass, so the warning block reflects the FINAL assembled word count.
+
+
+_SECTION_PURPOSE: dict[int, str] = {
+    1: (
+        "Data and Methodology — what the data is, why construction "
+        "decisions are defensible, and what the analytical framework "
+        "is. Anchored on the three-asset universe, the monthly return "
+        "series spanning multiple market cycles, and the ten strategies."
+    ),
+    2: (
+        "Preliminary Results and Diagnostics — evidence of analytical "
+        "progress. The central thesis statement lives here. Highest-"
+        "ranked finding opens the section; supporting findings follow."
+    ),
+    3: (
+        "Roles and Division of Labor — concise factual description of "
+        "which team member led which analytical area. Backed by the "
+        "team-activity evidence block."
+    ),
+    4: (
+        "Next Steps and Open Questions — what remains for the final "
+        "submission and the open question for the midpoint meetup."
+    ),
+}
+
+
+def _split_heading_and_body(section_text: str) -> tuple[str, str]:
+    """Splits a section block produced by split_by_section() into
+    (heading_line, body). The heading is the first non-empty line —
+    by convention this is a markdown header like '## 2. Preliminary
+    Results and Diagnostics'. Everything after is the body.
+
+    Returns ('', section_text) when the section is empty or carries
+    no recognisable heading — the caller treats this as "leave
+    untouched".
+    """
+    if not section_text:
+        return "", ""
+    lines = section_text.splitlines()
+    # Strip leading blank lines.
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i >= len(lines):
+        return "", section_text
+    heading = lines[i]
+    body = "\n".join(lines[i + 1:])
+    return heading, body.strip()
+
+
+def _build_rationalizer_system_prompt(
+    section_num: int, budget: int, purpose: str,
+) -> str:
+    """The compression prompt. Mirrors the trim-priority list from
+    the template's word-budget section (migration 031 — the section
+    that documents the rules of trimming) so the rationalizer
+    inherits the same editorial rules as the writer."""
+    return (
+        "You are an academic copy editor compressing a single section "
+        "of a graduate practicum paper.\n\n"
+        f"Section {section_num} purpose: {purpose}\n"
+        f"Word budget: {budget} words MAX.\n\n"
+        "Compress the section to land within budget while preserving "
+        "every specific number, every inline citation, and every "
+        "analytical conclusion verbatim.\n\n"
+        "Trim priority — in order:\n"
+        "  1. Remove meaningless adjectives.\n"
+        "  2. Convert prose lists to compact inline format.\n"
+        "  3. Shorten examples.\n"
+        "  4. Compress transition language, redundant restatement, "
+        "and setup prose that duplicates what the data already shows.\n"
+        "  5. NEVER remove a number, a percentage, a Sharpe ratio, "
+        "a p-value, a date, or a citation reference like "
+        "(Author, Year).\n"
+        "  6. NEVER cut the central thesis statement.\n"
+        "  7. NEVER cut the open question (section 4).\n\n"
+        "Output requirements:\n"
+        "  - Coherent academic prose, NOT a bulleted list, NOT a "
+        "truncated mid-sentence cut.\n"
+        "  - Return ONLY the rewritten section body. No heading, no "
+        "preface, no editor's commentary on what was changed.\n"
+        "  - Match the existing prose voice and academic register."
+    )
+
+
+def _call_rationalizer_sync(
+    system_prompt: str, user_message: str, max_tokens: int = 1200,
+) -> str:
+    """Sync wrapper around call_claude for a section rationalization.
+    Returns the writer's compressed body on success, '' on any
+    failure path. The caller treats '' as "keep the original" so a
+    flaky LLM never wipes Bob's content.
+
+    Sized for the largest section budget (300 words ≈ 400 tokens with
+    headroom) — 1200 max_tokens is comfortable without paying for a
+    full first-draft sized response.
+    """
+    try:
+        from agents.base import call_claude, SONNET_MODEL
+    except Exception as exc:  # noqa: BLE001
+        log.warning("rationalizer_import_failed", error=str(exc))
+        return ""
+
+    try:
+        raw = call_claude(
+            model=SONNET_MODEL,
+            system_prompt=system_prompt,
+            user_message=user_message,
+            max_tokens=max_tokens,
+            trigger="report_generator:rationalize_section",
+        )
+        return (raw or "").strip()
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.warning("rationalizer_call_failed",
+                    ref=ref, error=str(exc))
+        return ""
+
+
+async def _rationalize_over_budget_sections(
+    paper_md: str,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Compresses every section that landed more than 10% over its
+    budget. Runs ONCE between the writer call and the post-check.
+
+    Returns (rewritten_paper_md, details) — details is a list of
+    per-section dicts the caller can persist for audit. Each detail:
+      {section, before, target, after, status, error?}
+
+    status:
+      'rationalized' — call succeeded, section now within ±10%
+      'still_over'   — call succeeded but the result is still over
+                       budget (no further compression attempted —
+                       the writer was as terse as it could be)
+      'skipped'      — section already within tolerance, no call
+      'failed'       — call failed, original section text retained
+      'no_heading'   — section had no recognisable heading, retained
+
+    Fail-open: a section that fails or has no heading keeps its
+    original text. The full paper is always returned.
+    """
+    if not paper_md or not paper_md.strip():
+        return paper_md, []
+
+    from tools.template_pipeline import (
+        split_by_section, word_count_report, _SECTION_BUDGETS,
+    )
+
+    counts = word_count_report(paper_md)
+    per = counts.get("per_section") or {}
+
+    over_budget_sections = [
+        sec_num for sec_num, info in per.items()
+        if isinstance(info, dict) and info.get("status") == "red"
+    ]
+    if not over_budget_sections:
+        return paper_md, []
+
+    sections = split_by_section(paper_md)
+    details: list[dict[str, Any]] = []
+
+    for sec_num in over_budget_sections:
+        budget = _SECTION_BUDGETS.get(sec_num)
+        purpose = _SECTION_PURPOSE.get(sec_num)
+        info = per.get(sec_num) or {}
+        words_before = int(info.get("words") or 0)
+        if not budget or not purpose:
+            details.append({
+                "section": sec_num,
+                "before":  words_before,
+                "target":  budget,
+                "status":  "skipped",
+                "note":    "no_budget_or_purpose",
+            })
+            continue
+
+        original = sections.get(sec_num) or ""
+        heading, body = _split_heading_and_body(original)
+        if not heading or not body.strip():
+            details.append({
+                "section": sec_num,
+                "before":  words_before,
+                "target":  budget,
+                "status":  "no_heading",
+            })
+            continue
+
+        system_prompt = _build_rationalizer_system_prompt(
+            sec_num, budget, purpose)
+        user_message = (
+            f"Rewrite this section to no more than {budget} words. "
+            f"Preserve every number, every citation reference, and "
+            f"every analytical conclusion. Return only the rewritten "
+            f"section body.\n\n"
+            f"=== CURRENT SECTION BODY ({words_before} words) ===\n"
+            f"{body}\n"
+            f"=== END SECTION ==="
+        )
+
+        try:
+            rewritten = await asyncio.to_thread(
+                _call_rationalizer_sync, system_prompt, user_message, 1200)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("rationalizer_thread_failed",
+                        section=sec_num, error=str(exc))
+            rewritten = ""
+
+        if not rewritten:
+            details.append({
+                "section": sec_num,
+                "before":  words_before,
+                "target":  budget,
+                "status":  "failed",
+            })
+            continue
+
+        # Build the replacement section block. Two newlines after the
+        # heading matches the writer's existing layout convention.
+        new_section_text = f"{heading}\n\n{rewritten.strip()}\n\n"
+        sections[sec_num] = new_section_text
+        # Re-count the new body so the detail reports the post-pass
+        # length. The body is the rewritten string before reassembly
+        # (excluding the heading) — same word-count rule as
+        # word_count_report which counts ALL whitespace-separated
+        # tokens in the section (heading included). To keep parity
+        # with the per-section counter, we count the rewritten body
+        # PLUS the heading line.
+        new_words = len((new_section_text or "").split())
+        new_status = (
+            "rationalized" if new_words <= budget * 1.10
+            else "still_over"
+        )
+        details.append({
+            "section": sec_num,
+            "before":  words_before,
+            "target":  budget,
+            "after":   new_words,
+            "status":  new_status,
+        })
+
+    # Reassemble in original key order. split_by_section preserves
+    # insertion order; iterating sections.items() gives the same
+    # sequence the document had originally.
+    rewritten_paper = "".join(sections.values())
+    return rewritten_paper, details
+
+
 # ── Stage 4 — post-generation checks ────────────────────────────────────────
 
 
@@ -791,7 +1058,27 @@ async def generate_paper(template_id: str) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         log.warning("strategy_substitution_failed", error=str(exc))
 
-    # Post-check + word counts.
+    # Word-count rationalization pass — follow-up to commit 70a9290.
+    # The writer prompt now places all interpretation inline (no
+    # trailing [BOB] merge step needed), but Sonnet doesn't perfectly
+    # hit per-section budgets. Any section landing >10% over budget
+    # is compressed in place. Fail-open: a section that can't be
+    # rationalized keeps its original text and the existing
+    # word_count_over_budget flag fires downstream as before.
+    try:
+        raw, rationalization_details = (
+            await _rationalize_over_budget_sections(raw))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("rationalization_failed", error=str(exc))
+        rationalization_details = []
+    if rationalization_details:
+        log.info("rationalization_pass_complete",
+                 sections_processed=len(rationalization_details),
+                 details=rationalization_details)
+
+    # Post-check + word counts. Runs AFTER rationalization so the
+    # over-budget flag block reflects the FINAL assembled state, not
+    # the pre-rationalization writer output.
     checks = _post_check_summary(
         raw, inputs["verified_data"], citations)
 
