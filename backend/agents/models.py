@@ -152,13 +152,30 @@ GEMINI = ModelChain(
     ),
 )
 
+# Gemini Pro — distinct chain from the flash family (May 25 2026).
+# Used by agents that need the larger reasoning model (the Academic
+# Review's independent second-opinion layer). Pro is materially
+# more capable than Flash on multi-step assessment / consistency
+# checks, and the audit layer's cost profile absorbs the difference
+# (one call per review run). Fallbacks intentionally include the
+# Flash chain — if every Pro model is unavailable the second-opinion
+# layer should still produce SOMETHING rather than block.
+GEMINI_PRO = ModelChain(
+    logical_name="gemini_pro",
+    chain=(
+        "gemini-2.5-pro",
+        "gemini-1.5-pro-latest",
+        "gemini-2.5-flash",         # final fallback to flash
+    ),
+)
+
 
 # Lookup: any model string in any chain → the ModelChain that owns it.
 # This lets call_claude / call_gemini receive a model string and find
 # the right chain to advance on 404 without the caller needing to know
 # which logical model it was using.
 _CHAIN_FOR_MODEL: dict[str, ModelChain] = {}
-_ALL_CHAINS: tuple[ModelChain, ...] = (SONNET, OPUS, HAIKU, GEMINI)
+_ALL_CHAINS: tuple[ModelChain, ...] = (SONNET, OPUS, HAIKU, GEMINI, GEMINI_PRO)
 for _chain in _ALL_CHAINS:
     for _model in _chain.chain:
         _CHAIN_FOR_MODEL[_model] = _chain

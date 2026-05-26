@@ -112,6 +112,10 @@ HAIKU_MODEL = HAIKU.primary         # "claude-haiku-4-5-20251001"
 # active model is resolved per call so a future deprecation is absorbed
 # without a code change.
 GEMINI_MODEL = GEMINI.primary       # "gemini-2.5-flash"
+# Gemini Pro — see agents/models.py GEMINI_PRO chain. Used by the
+# Academic Review's independent second-opinion layer (May 25 2026).
+from agents.models import GEMINI_PRO   # noqa: E402
+GEMINI_PRO_MODEL = GEMINI_PRO.primary   # "gemini-2.5-pro"
 
 # Token budget per call — protects credits from runaway prompts.
 MAX_INPUT_TOKENS = 2048
