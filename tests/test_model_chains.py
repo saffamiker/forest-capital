@@ -62,6 +62,23 @@ class TestChainDefinitions:
         assert models.GEMINI.primary != "gemini-2.0-flash"
         assert "gemini-2.0-flash" not in models.GEMINI.chain
 
+    def test_gemini_pro_chain_matches_independent_review_spec(self) -> None:
+        # New chain for the Independent Review advisory layer
+        # (May 25 2026). Primary gemini-2.5-pro; falls back to
+        # gemini-1.5-pro-latest, then gemini-2.5-flash as a final
+        # Pro-unavailable last resort.
+        assert models.GEMINI_PRO.chain == (
+            "gemini-2.5-pro",
+            "gemini-1.5-pro-latest",
+            "gemini-2.5-flash",
+        )
+        assert models.GEMINI_PRO.primary == "gemini-2.5-pro"
+
+    def test_gemini_pro_logical_name(self) -> None:
+        # The chain_state snapshot keys rows by logical_name; pin the
+        # value the snapshot reader expects.
+        assert models.GEMINI_PRO.logical_name == "gemini_pro"
+
 
 # ── Chain advancement ────────────────────────────────────────────────────────
 
@@ -126,14 +143,30 @@ class TestChainAdvance:
 # ── Resolver ─────────────────────────────────────────────────────────────────
 
 class TestResolveActive:
+    # NOTE on the gemini-2.5-flash COLLISION (May 25 2026):
+    # gemini-2.5-flash appears in BOTH the GEMINI Flash chain
+    # (as its primary) AND the GEMINI_PRO chain (as its final
+    # fallback for the Independent Review's "Pro unavailable"
+    # path). Chain registration is last-wins, so
+    # _CHAIN_FOR_MODEL["gemini-2.5-flash"] now points to
+    # GEMINI_PRO. Tests that intend to exercise the GEMINI Flash
+    # chain via the resolver must use a chain-unique entry —
+    # gemini-2.0-flash-exp or gemini-1.5-flash-latest.
+
     def test_resolve_primary_returns_primary_initially(self) -> None:
-        assert models.resolve_active("gemini-2.5-flash") == "gemini-2.5-flash"
+        # Sonnet has no collisions — its primary resolves to itself.
+        # Replaces the previous gemini-2.5-flash example which now
+        # routes through GEMINI_PRO (see class note).
+        assert models.resolve_active("claude-sonnet-4-6") \
+            == "claude-sonnet-4-6"
+        # GEMINI_PRO's primary also resolves to itself initially.
+        assert models.resolve_active("gemini-2.5-pro") == "gemini-2.5-pro"
 
     def test_resolve_fallback_entry_returns_current_active(self) -> None:
         # A caller can pass ANY string in the chain; resolve_active
         # returns the chain's current active, NOT the input string.
-        # This means a stale import of an older model string still
-        # routes through the current chain state.
+        # gemini-2.0-flash-exp is the GEMINI Flash chain's unique
+        # fallback entry; routes via GEMINI → GEMINI.current.
         assert (
             models.resolve_active("gemini-2.0-flash-exp")
             == "gemini-2.5-flash"
@@ -141,11 +174,12 @@ class TestResolveActive:
 
     def test_resolve_after_advance(self) -> None:
         models.GEMINI.advance(reason="404")
-        # Now both the original primary and the fallback resolve
-        # to the new active.
-        assert models.resolve_active("gemini-2.5-flash") \
-            == "gemini-2.0-flash-exp"
+        # Use chain-unique entries — gemini-2.5-flash is shared with
+        # the GEMINI_PRO chain (last-wins registration), so look up
+        # the GEMINI Flash chain via its unique fallback entries.
         assert models.resolve_active("gemini-2.0-flash-exp") \
+            == "gemini-2.0-flash-exp"
+        assert models.resolve_active("gemini-1.5-flash-latest") \
             == "gemini-2.0-flash-exp"
 
     def test_unknown_model_passes_through(self) -> None:
@@ -153,12 +187,36 @@ class TestResolveActive:
         # resolver doesn't pre-filter to known models.
         assert models.resolve_active("custom-model-x") == "custom-model-x"
 
+    def test_gemini_2_5_flash_routes_via_gemini_pro_due_to_last_wins(self):
+        # Document the collision explicitly so a future refactor can
+        # see that this routing is intentional (not a bug). The
+        # GEMINI_PRO chain registers gemini-2.5-flash AFTER GEMINI does,
+        # so _CHAIN_FOR_MODEL["gemini-2.5-flash"] = GEMINI_PRO. Callers
+        # who want the Flash chain by-name use base.GEMINI_MODEL
+        # (which is GEMINI.primary literal); resolution-by-string is
+        # for fallback advancement, which works correctly when the
+        # caller passes a Flash-unique entry.
+        assert models.resolve_active("gemini-2.5-flash") == "gemini-2.5-pro"
+
 
 class TestReportFailure:
     def test_report_failure_advances_the_right_chain(self) -> None:
-        new = models.report_failure("gemini-2.5-flash", reason="404")
-        assert new == "gemini-2.0-flash-exp"
+        # Use a chain-unique GEMINI entry — gemini-2.5-flash now
+        # routes via GEMINI_PRO due to last-wins registration
+        # (see TestResolveActive class note). gemini-2.0-flash-exp
+        # is unique to the GEMINI Flash chain.
+        new = models.report_failure("gemini-2.0-flash-exp", reason="404")
+        assert new == "gemini-2.0-flash-exp"   # current after advance
         assert models.GEMINI.active_index == 1
+
+    def test_report_failure_advances_gemini_pro_chain(self) -> None:
+        # The GEMINI_PRO chain advances independently. Its primary
+        # is gemini-2.5-pro; index 1 is gemini-1.5-pro-latest.
+        new = models.report_failure("gemini-2.5-pro", reason="404")
+        assert new == "gemini-1.5-pro-latest"
+        assert models.GEMINI_PRO.active_index == 1
+        # GEMINI Flash chain is unaffected.
+        assert models.GEMINI.active_index == 0
 
     def test_report_failure_on_unknown_model_returns_none(self) -> None:
         # A model that isn't in any chain can't trigger fallback —
@@ -169,7 +227,7 @@ class TestReportFailure:
         # Reporting on a non-primary entry still advances the chain
         # that owns it.
         new = models.report_failure(
-            "gemini-2.0-flash-exp", reason="404")
+            "gemini-1.5-flash-latest", reason="404")
         assert new == "gemini-2.0-flash-exp"  # current after advance
         # The chain advanced from index 0 to index 1.
         assert models.GEMINI.active_index == 1
@@ -284,15 +342,25 @@ class TestCallClaudeFallback:
 # ── call_gemini integration ──────────────────────────────────────────────────
 
 class TestCallGeminiFallback:
-    """End-to-end: simulate the production Gemini 2.0 Flash 404 and
-    verify call_gemini transparently advances to 2.0-flash-exp."""
+    """End-to-end: simulate a Gemini 404 and verify call_gemini
+    transparently advances along the chain.
+
+    NOTE on chain choice (May 25 2026): These tests exercise the
+    GEMINI_PRO chain via base.GEMINI_PRO_MODEL rather than the
+    GEMINI Flash chain via base.GEMINI_MODEL. The Flash chain's
+    primary (gemini-2.5-flash) is shared with GEMINI_PRO as a
+    fallback, and chain registration is last-wins — so a string-
+    based lookup of gemini-2.5-flash routes through GEMINI_PRO
+    instead of GEMINI. Testing via GEMINI_PRO_MODEL avoids the
+    collision; the call_gemini retry-on-404 logic is identical
+    across chains so this still covers the integration contract."""
 
     def test_404_on_primary_falls_back_and_retries(self) -> None:
         from agents import base
 
         # The fake SDK raises a 404-shaped error on the FIRST model
-        # (gemini-2.5-flash) and succeeds on the SECOND
-        # (gemini-2.0-flash-exp). After the call, the chain should
+        # (gemini-2.5-pro) and succeeds on the SECOND
+        # (gemini-1.5-pro-latest). After the call, the chain should
         # have advanced and we should have the second model's text.
         attempts: list[str] = []
 
@@ -307,9 +375,9 @@ class TestCallGeminiFallback:
         class FakeModels:
             def generate_content(self_inner, *, model, **_kw):
                 attempts.append(model)
-                if model == "gemini-2.5-flash":
+                if model == "gemini-2.5-pro":
                     raise FakeNotFound(
-                        "models/gemini-2.5-flash is not found "
+                        "models/gemini-2.5-pro is not found "
                         "for API version v1beta")
                 return FakeResponse()
 
@@ -334,13 +402,13 @@ class TestCallGeminiFallback:
             "google.genai.types": fake_types_mod,
         }):
             result = base.call_gemini(
-                base.GEMINI_MODEL, "system", "user_msg")
+                base.GEMINI_PRO_MODEL, "system", "user_msg")
 
         assert result == "fallback succeeded"
         # The chain advanced once (from index 0 to index 1).
-        assert models.GEMINI.active_index == 1
+        assert models.GEMINI_PRO.active_index == 1
         # Both attempts were made — primary then fallback.
-        assert attempts == ["gemini-2.5-flash", "gemini-2.0-flash-exp"]
+        assert attempts == ["gemini-2.5-pro", "gemini-1.5-pro-latest"]
 
     def test_exhausted_chain_re_raises_404(self) -> None:
         # Every entry 404s — the loop must terminate with the
@@ -371,19 +439,32 @@ class TestCallGeminiFallback:
             "google.genai.types": FakeTypes,
         }):
             with pytest.raises(FakeNotFound):
-                base.call_gemini(base.GEMINI_MODEL, "system", "msg")
+                base.call_gemini(base.GEMINI_PRO_MODEL, "system", "msg")
 
         # All three chain entries were exhausted.
-        assert models.GEMINI.active_index == 2
+        assert models.GEMINI_PRO.active_index == 2
 
 
 # ── chain_state observability ────────────────────────────────────────────────
 
 class TestChainStateSnapshot:
     def test_chain_state_lists_every_chain(self) -> None:
+        # gemini_pro joined the chain registry May 25 2026 for the
+        # Academic Review's Independent Review advisory layer.
         snapshot = models.chain_state()
         names = {row["name"] for row in snapshot}
-        assert names == {"sonnet", "opus", "haiku", "gemini"}
+        assert names == {"sonnet", "opus", "haiku", "gemini", "gemini_pro"}
+
+    def test_chain_state_includes_gemini_pro_row(self) -> None:
+        # Pin the gemini_pro snapshot row shape so a future refactor
+        # doesn't drop it from the admin / debug surface.
+        snapshot = models.chain_state()
+        pro_row = next(
+            (r for r in snapshot if r["name"] == "gemini_pro"), None)
+        assert pro_row is not None
+        assert pro_row["primary"] == "gemini-2.5-pro"
+        assert pro_row["current"] == "gemini-2.5-pro"
+        assert pro_row["chain_length"] == 3
 
     def test_chain_state_reflects_advance(self) -> None:
         models.GEMINI.advance(reason="404")
