@@ -15,6 +15,17 @@ Layer 2 statistical-audit task-group robustness:
   3. layer_2_metric_audit orchestrator — emits TWO factor-loadings
      jobs covering disjoint subsets of strategies, same chunking
      pattern as the existing regime-split jobs.
+
+  4. _run_group retry-with-higher-tokens (May 25 2026) — on a parse
+     failure, retries once with _AUDITOR_MAX_TOKENS_RETRY (16000),
+     mirroring the harness evaluator's 600 → 1500 escalation. The
+     summary statistics (IG) group was the canonical trigger: seven
+     metrics × step-by-step reasoning routinely overshot 8000 and
+     truncated past the closing '}'.
+
+  5. _summary_prompt — example schema now lists all seven metrics
+     and instructs one-sentence reasoning, so the auditor emits one
+     check per metric (not just cagr) without overshooting tokens.
 """
 from __future__ import annotations
 
@@ -222,43 +233,63 @@ class TestLayer2OrchestratorChunking:
     def test_orchestrator_emits_two_factor_loadings_jobs(
         self, monkeypatch,
     ):
+        """The deterministic recompute path (May 25 2026 refactor) still
+        splits factor loadings into two groups (A / B) covering disjoint
+        strategy subsets — purely for finding provenance / audit history
+        readability, since the recompute itself doesn't need chunking
+        (no token cap). Verify the two recompute calls cover the full
+        strategy set without overlap by monkeypatching the recompute
+        function and capturing the subset_names argument."""
+        import tools.audit_layer2_deterministic as det
         from tools import audit_layer2
 
-        # Bypass the test-env skip without an API key.
+        # Bypass the test-env skip; the deterministic path doesn't NEED
+        # an API key but the orchestrator's gate still requires it.
         monkeypatch.setattr(audit_layer2, "_is_test_env", lambda: False)
         monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
-        captured: list[tuple[str, str]] = []
+        captured_subsets: list[list[str]] = []
 
-        def _capture(prompt: str) -> str:
-            # Find which group's prompt this is by inspecting the body.
-            # Return a valid empty JSON shape so _run_group succeeds.
-            captured.append(("call", prompt))
-            return '{"strategy": "stub", "checks": []}'
+        def _capture_recompute(subset_names, payload):
+            captured_subsets.append(list(subset_names))
+            return {"strategy": "factor_loadings", "checks": []}
 
-        monkeypatch.setattr(audit_layer2, "_call_auditor", _capture)
-
-        result = asyncio.run(audit_layer2.layer_2_metric_audit(self._payload()))
-        # The result is built from at least the chunked factor calls and
-        # the other groups; what we pin here is that TWO of the captured
-        # prompts are factor-loadings prompts and they cover the strategies.
-        factor_prompts = [p for _, p in captured
-                          if "Carhart four-factor loadings" in p]
-        assert len(factor_prompts) == 2, (
-            f"expected 2 factor-loadings calls, got {len(factor_prompts)}"
+        monkeypatch.setattr(
+            det, "recompute_factor_loadings", _capture_recompute)
+        # The orchestrator imports recompute_factor_loadings INSIDE the
+        # async function — patch the module attribute the import points
+        # to AFTER it lands. Easier: also patch the module-level binding
+        # the orchestrator looks up via from-import resolution.
+        monkeypatch.setattr(
+            "tools.audit_layer2_deterministic.recompute_factor_loadings",
+            _capture_recompute,
         )
-        # The two subsets together cover every strategy and they do not
-        # overlap (5 + 5 = 10 with no duplicates).
-        subsets: list[set[str]] = []
-        for p in factor_prompts:
-            strats = {
-                f"STRAT_{i}" for i in range(10) if f"STRAT_{i}" in p
-            }
-            subsets.append(strats)
-        union = subsets[0] | subsets[1]
-        overlap = subsets[0] & subsets[1]
-        assert union == {f"STRAT_{i}" for i in range(10)}
-        assert len(overlap) == 0
+        # Stub the other recomputes so they don't error on the minimal
+        # fixture; the orchestrator runs all six concurrently and any
+        # raised exception aborts the gather.
+        for fn_name in ("recompute_summary_statistics",
+                        "recompute_efficient_frontier",
+                        "recompute_regime_split",
+                        "recompute_rolling_correlation"):
+            monkeypatch.setattr(
+                f"tools.audit_layer2_deterministic.{fn_name}",
+                lambda *a, **kw: {"strategy": "stub", "checks": []},
+            )
+
+        result = asyncio.run(
+            audit_layer2.layer_2_metric_audit(self._payload()))
+
+        # Exactly two factor-loadings recomputes fired.
+        assert len(captured_subsets) == 2, (
+            f"expected 2 factor recompute calls, "
+            f"got {len(captured_subsets)}"
+        )
+        # The two subsets together cover every strategy with no overlap
+        # (5 + 5 = 10).
+        set_a = set(captured_subsets[0])
+        set_b = set(captured_subsets[1])
+        assert set_a | set_b == {f"STRAT_{i}" for i in range(10)}
+        assert set_a & set_b == set()
         assert result["status"] in ("pass", "warning", "warn", "fail", "skip")
 
     def test_max_tokens_raised_to_8000(self):
@@ -266,3 +297,184 @@ class TestLayer2OrchestratorChunking:
         # group ~4× the worst-case payload headroom.
         from tools.audit_layer2 import _AUDITOR_MAX_TOKENS
         assert _AUDITOR_MAX_TOKENS == 8000
+
+    def test_retry_max_tokens_doubles_for_truncation_fallback(self):
+        # Parse-failure retry uses a larger budget so a truncated
+        # initial response can complete the JSON on the second pass.
+        # Mirrors the harness evaluator's 600 → 1500 escalation.
+        from tools.audit_layer2 import (
+            _AUDITOR_MAX_TOKENS, _AUDITOR_MAX_TOKENS_RETRY,
+        )
+        assert _AUDITOR_MAX_TOKENS_RETRY == 16000
+        assert _AUDITOR_MAX_TOKENS_RETRY > _AUDITOR_MAX_TOKENS
+
+
+# ── _run_group retry-with-higher-tokens (May 25 2026) ────────────────────────
+
+
+class TestRunGroupRetryOnParseFailure:
+    """When the first auditor response truncates past the closing '}',
+    _run_group retries ONCE with _AUDITOR_MAX_TOKENS_RETRY. If the
+    retry parses, the findings reflect the retry's JSON. If both
+    fail, the group degrades to one WARN finding noting the retry."""
+
+    _TRUNCATED = (
+        '{"strategy": "IG", "checks": [{"metric": "cagr", '
+        '"platform_value": 0.05, "auditor_value": 0.05, '
+        '"status": "pass", "discrepancy_pct": 0.0, '
+        '"reasoning": "Recomputed value matches.", "flag": ""},'
+        '{"metric": "volatility", "platform_va'  # truncates here
+    )
+
+    _VALID_FULL = (
+        '{"strategy": "IG", "checks": ['
+        '{"metric": "cagr", "platform_value": 0.05, '
+        '"auditor_value": 0.05, "status": "pass", '
+        '"discrepancy_pct": 0.0, "reasoning": "x", "flag": ""},'
+        '{"metric": "volatility", "platform_value": 0.06, '
+        '"auditor_value": 0.06, "status": "pass", '
+        '"discrepancy_pct": 0.0, "reasoning": "x", "flag": ""}'
+        ']}'
+    )
+
+    def test_first_truncated_response_triggers_retry(self, monkeypatch):
+        from tools import audit_layer2
+
+        calls: list[tuple[str, int]] = []
+
+        def _fake_call(prompt: str,
+                       max_tokens: int = audit_layer2._AUDITOR_MAX_TOKENS) -> str:
+            calls.append((prompt[:50], max_tokens))
+            if len(calls) == 1:
+                return self._TRUNCATED
+            return self._VALID_FULL
+
+        monkeypatch.setattr(audit_layer2, "_call_auditor", _fake_call)
+
+        findings = audit_layer2._run_group(
+            "summary statistics (IG)",
+            "stub prompt",
+            "raw_hash_abc",
+            "cagr formula",
+        )
+
+        # Exactly two calls: first at default cap, second at the retry cap.
+        assert len(calls) == 2
+        assert calls[0][1] == audit_layer2._AUDITOR_MAX_TOKENS
+        assert calls[1][1] == audit_layer2._AUDITOR_MAX_TOKENS_RETRY
+        # The retry's JSON parsed; the two checks landed as findings.
+        assert len(findings) == 2
+        metrics = {f["metric"] for f in findings}
+        assert metrics == {"cagr", "volatility"}
+
+    def test_successful_first_attempt_does_not_retry(self, monkeypatch):
+        from tools import audit_layer2
+
+        calls: list[int] = []
+
+        def _fake_call(prompt: str,
+                       max_tokens: int = audit_layer2._AUDITOR_MAX_TOKENS) -> str:
+            calls.append(max_tokens)
+            return self._VALID_FULL
+
+        monkeypatch.setattr(audit_layer2, "_call_auditor", _fake_call)
+
+        findings = audit_layer2._run_group(
+            "summary statistics (IG)", "p", "h", "cagr")
+
+        # No retry — first call succeeded.
+        assert len(calls) == 1
+        assert calls[0] == audit_layer2._AUDITOR_MAX_TOKENS
+        assert len(findings) == 2
+
+    def test_both_attempts_truncated_yields_warn_finding(self, monkeypatch):
+        from tools import audit_layer2
+
+        def _fake_call(prompt: str,
+                       max_tokens: int = audit_layer2._AUDITOR_MAX_TOKENS) -> str:
+            return self._TRUNCATED
+
+        monkeypatch.setattr(audit_layer2, "_call_auditor", _fake_call)
+
+        findings = audit_layer2._run_group(
+            "summary statistics (IG)", "p", "h", "cagr")
+
+        # One WARN finding referencing the retry path.
+        assert len(findings) == 1
+        f = findings[0]
+        assert f["status"] == "warning"
+        # The auditor_reasoning explicitly mentions the retry — so an
+        # operator scanning Render logs knows the higher-tokens fallback
+        # was exercised before the warning fired.
+        assert "retry" in f["auditor_reasoning"]
+
+
+# ── _summary_prompt all-seven-metrics expansion (May 25 2026) ────────────────
+
+
+class TestSummaryPromptListsAllSevenMetrics:
+    """The example schema spells out every metric the auditor must
+    cover, so the auditor doesn't emit a single 'cagr' check and call
+    it a day. The expansion was the upstream cause of the IG parse
+    failure: an auditor that emits seven step-by-step checks
+    overshoots the token cap; an example that asks for one terse
+    line per check fits comfortably under it."""
+
+    def _payload(self) -> dict:
+        return {
+            "raw_data": {
+                "asset_returns": {
+                    "equity": [0.01, 0.02, 0.03],
+                    "ig":     [0.005, 0.006, 0.007],
+                    "hy":     [0.008, 0.009, 0.010],
+                    "rf":     [0.001, 0.001, 0.001],
+                    "dates":  ["2022-01-31", "2022-02-28", "2022-03-31"],
+                },
+            },
+            "metadata": {"risk_free_rate": {"value": 0.025}},
+            "formula_specifications": {
+                "cagr": "...", "volatility": "...", "sharpe": "...",
+                "max_drawdown": "...", "skewness": "...",
+                "excess_return": "...", "information_ratio": "...",
+            },
+        }
+
+    def test_prompt_lists_all_seven_metrics_in_schema(self):
+        from tools.audit_layer2 import _summary_prompt
+
+        prompt = _summary_prompt(
+            "IG", self._payload(), {"cagr": 0.05})
+        # Every metric appears as a `"metric": "<name>"` line in the
+        # JSON schema example — the auditor knows to emit one per.
+        for metric in ("cagr", "volatility", "sharpe", "max_drawdown",
+                       "skewness", "excess_return", "information_ratio"):
+            assert f'"metric": "{metric}"' in prompt
+
+    def test_prompt_uses_ig_series_for_ig_asset(self):
+        # Asset routing — IG audits the IG series, not the equity one.
+        from tools.audit_layer2 import _summary_prompt
+
+        prompt = _summary_prompt(
+            "IG", self._payload(), {"cagr": 0.05})
+        # The IG series numbers appear once as the "Series to audit"
+        # block. The equity numbers appear under the
+        # "Benchmark monthly returns (equity)" line, but the IG line
+        # must reference the IG series specifically.
+        assert "[0.005, 0.006, 0.007]" in prompt
+        assert "Series to audit (IG)" in prompt
+
+    def test_prompt_uses_hy_series_for_hy_asset(self):
+        from tools.audit_layer2 import _summary_prompt
+        prompt = _summary_prompt(
+            "HY", self._payload(), {"cagr": 0.05})
+        # Python's repr drops the trailing zero from 0.010 → 0.01.
+        assert "[0.008, 0.009, 0.01]" in prompt
+        assert "Series to audit (HY)" in prompt
+
+    def test_prompt_instructs_one_sentence_reasoning(self):
+        # Verbose reasoning was the root cause of the IG truncation.
+        # The new prompt explicitly limits reasoning to one sentence.
+        from tools.audit_layer2 import _summary_prompt
+        prompt = _summary_prompt(
+            "IG", self._payload(), {"cagr": 0.05})
+        assert "ONE sentence per check" in prompt

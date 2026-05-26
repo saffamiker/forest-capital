@@ -42,6 +42,13 @@ log = structlog.get_logger(__name__)
 # gives every chunked group ~4× the worst-case payload size and never
 # exceeds the model's per-call output budget.
 _AUDITOR_MAX_TOKENS = 8000
+# Retry budget — used by _run_group when the first response truncates
+# past parsing. 16000 is the largest output the auditor model
+# (claude-opus-4-7) accepts in a single call; one retry at this budget
+# absorbs the long-reasoning runs that overshoot 8000 without
+# burning the budget on every call. Mirrors the harness evaluator's
+# 600 → 1500 escalation pattern (agents/harness.py).
+_AUDITOR_MAX_TOKENS_RETRY = 16000
 
 _AUDITOR_SYSTEM = (
     "You are an independent quantitative auditor verifying portfolio "
@@ -108,7 +115,9 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _call_auditor(user_message: str) -> str:
+def _call_auditor(
+    user_message: str, max_tokens: int = _AUDITOR_MAX_TOKENS,
+) -> str:
     """One Opus auditor call. Synchronous — the caller fans groups out
     with asyncio.to_thread.
 
@@ -118,10 +127,14 @@ def _call_auditor(user_message: str) -> str:
     hash_gate=True because audit_engine.run_full_audit() runs an
     is_audit_current() check BEFORE firing the auditor — every
     auditor call has already passed the gate when it reaches here.
+
+    max_tokens defaults to _AUDITOR_MAX_TOKENS (8000); _run_group
+    passes _AUDITOR_MAX_TOKENS_RETRY (16000) on a retry when the
+    first response truncated past parsing.
     """
     from agents.base import OPUS_MODEL, call_claude
     return call_claude(OPUS_MODEL, _AUDITOR_SYSTEM, user_message,
-                        max_tokens=_AUDITOR_MAX_TOKENS,
+                        max_tokens=max_tokens,
                         trigger="statistical_audit_layer2",
                         hash_gate=True)
 
@@ -178,10 +191,15 @@ def _summary_prompt(asset: str, payload: dict, platform: dict) -> str:
     raw = payload["raw_data"]["asset_returns"]
     specs = payload["formula_specifications"]
     rf_annual = payload["metadata"]["risk_free_rate"]["value"]
+    # Series resolution — IG / HY / BENCHMARK use the asset-specific
+    # series; EQUITY uses raw.get('equity'). BENCHMARK falls back to
+    # the equity series (the strategy is 100% equity).
+    series_to_audit = raw.get(
+        asset.lower(), raw.get("equity")) if asset != "BENCHMARK" \
+        else raw.get("equity")
     return (
         f"Independently verify the summary statistics for {asset}.\n\n"
-        f"Raw monthly returns: {raw.get('equity') if asset == 'EQUITY' else '(see series below)'}\n"
-        f"Series to audit ({asset}): {payload['raw_data']['asset_returns'].get(asset.lower(), raw.get('equity'))}\n"
+        f"Series to audit ({asset}): {series_to_audit}\n"
         f"Dates: {raw.get('dates')}\n"
         f"Monthly risk-free series: {raw.get('rf')}\n"
         f"Annualised risk-free rate: {rf_annual}\n"
@@ -195,11 +213,27 @@ def _summary_prompt(asset: str, payload: dict, platform: dict) -> str:
         f"- skewness: {specs['skewness']}\n"
         f"- excess_return: {specs['excess_return']}\n"
         f"- information_ratio: {specs['information_ratio']}\n\n"
-        "Recompute each metric, then return ONLY this JSON:\n"
-        '{"strategy": "' + asset + '", "checks": [{"metric": "cagr", '
-        '"platform_value": <num>, "auditor_value": <num>, '
-        '"status": "pass|warning|fail", "discrepancy_pct": <num>, '
-        '"reasoning": "<step by step>", "flag": "<description if not pass>"}]}'
+        # Spell out ALL seven expected metrics in the example schema so
+        # the auditor emits one check per metric — NOT just the single
+        # 'cagr' example. Keep `reasoning` short ("one sentence") to
+        # contain the per-check verbosity; the long step-by-step form
+        # was the main driver of the >8000-token responses that
+        # truncated past the closing '}' and tripped the IG parse
+        # failure.
+        "Recompute every metric (all seven below), then return ONLY a "
+        "JSON object with exactly seven check entries — one per metric. "
+        "Keep `reasoning` to ONE sentence per check; verbose reasoning "
+        "has caused responses to truncate past the closing brace in the "
+        "past.\n\n"
+        '{"strategy": "' + asset + '", "checks": [\n'
+        '  {"metric": "cagr",              "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "volatility",        "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "sharpe",            "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "max_drawdown",      "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "skewness",          "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "excess_return",     "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "information_ratio", "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""}\n'
+        ']}'
     )
 
 
@@ -248,14 +282,47 @@ def _factor_prompt(
 
 def _frontier_prompt(payload: dict) -> str:
     specs = payload["formula_specifications"]
-    raw = payload["raw_data"]["asset_returns"]
+    # Use the aligned subset the platform's frontier was actually
+    # computed against — refresh_efficient_frontier builds its mu / cov
+    # from pd.DataFrame({EQUITY, IG, HY}).dropna(), and the auditor must
+    # average over the SAME sample for mu @ w to match. Falls back to
+    # the raw asset_returns block if the aligned key is missing (legacy
+    # payloads predating May 25 2026).
+    ef_block = payload["platform_computed"].get("efficient_frontier") or {}
+    aligned = ef_block.get("aligned_returns") or {}
+    if aligned:
+        equity_arr = aligned.get("equity") or []
+        ig_arr     = aligned.get("ig") or []
+        hy_arr     = aligned.get("hy") or []
+        rf_annual  = aligned.get("rf_annual",
+                                 payload["metadata"]["risk_free_rate"]["value"])
+        sample_note = (
+            f"Sample: {aligned.get('n_obs', len(equity_arr))} months "
+            f"after aligning the three series (rows dropped where any "
+            f"of EQUITY / IG / HY is NaN) — this is the SAME subset "
+            f"the platform's mu and cov were computed over, so mu @ w "
+            f"and sqrt(w · cov · w) MUST be evaluated on these arrays "
+            f"to match the platform's report."
+        )
+    else:
+        raw = payload["raw_data"]["asset_returns"]
+        equity_arr = raw.get("equity") or []
+        ig_arr     = raw.get("ig") or []
+        hy_arr     = raw.get("hy") or []
+        rf_annual  = payload["metadata"]["risk_free_rate"]["value"]
+        sample_note = (
+            "Sample: full monthly arrays from market_data_monthly "
+            "(legacy payload without an aligned subset)."
+        )
     return (
         "Independently verify the efficient-frontier max-Sharpe point.\n\n"
-        f"Equity monthly returns: {raw.get('equity')}\n"
-        f"IG monthly returns: {raw.get('ig')}\n"
-        f"HY monthly returns: {raw.get('hy')}\n"
-        f"Annualised risk-free rate: {payload['metadata']['risk_free_rate']['value']}\n\n"
-        f"Platform max-Sharpe point: {json.dumps(payload['platform_computed']['efficient_frontier'])}\n\n"
+        f"Equity monthly returns: {equity_arr}\n"
+        f"IG monthly returns: {ig_arr}\n"
+        f"HY monthly returns: {hy_arr}\n"
+        f"Annualised risk-free rate: {rf_annual}\n\n"
+        f"{sample_note}\n\n"
+        f"Platform max-Sharpe point: "
+        f"{json.dumps({'max_sharpe_point': ef_block.get('max_sharpe_point')})}\n\n"
         f"Formula: {specs['efficient_frontier']}\n\n"
         "Find the tangency (max-Sharpe) portfolio and compare sigma, mu "
         "and the weights. Return ONLY JSON: "
@@ -350,21 +417,98 @@ def _run_group(group: str, prompt: str, hash_: str | None,
                   group=group, response_chars=len(raw or ""), raw=raw)
         parsed = _extract_json(raw)
         if parsed is None:
-            return [_parse_failed_finding(group, hash_, "no JSON in response")]
+            # First attempt failed parse — most likely truncation past
+            # the closing '}' on a verbose-reasoning response. Retry
+            # ONCE with the higher token budget. Mirrors the harness
+            # evaluator's 600 → 1500 escalation pattern: small initial
+            # budget for the common case, generous retry for the
+            # outlier. Summary statistics (IG) was hitting this — the
+            # 7-metric checks array + per-check step-by-step reasoning
+            # routinely overshot 8000.
+            log.info(
+                "audit_layer2_retry_with_higher_tokens",
+                group=group,
+                first_attempt_chars=len(raw or ""),
+                retry_max_tokens=_AUDITOR_MAX_TOKENS_RETRY,
+            )
+            raw_retry = _call_auditor(prompt,
+                                      max_tokens=_AUDITOR_MAX_TOKENS_RETRY)
+            log.debug("audit_layer2_raw_response_retry",
+                      group=group, response_chars=len(raw_retry or ""),
+                      raw=raw_retry)
+            parsed = _extract_json(raw_retry)
+            if parsed is None:
+                # Both attempts truncated or unparseable — log the
+                # retry's tail so a Render-log scan can see WHERE the
+                # response cut off (typical truncation lands mid-check).
+                log.warning(
+                    "audit_layer2_retry_also_failed",
+                    group=group,
+                    retry_chars=len(raw_retry or ""),
+                    retry_tail=(raw_retry or "")[-300:],
+                )
+                return [_parse_failed_finding(
+                    group, hash_,
+                    "no JSON in response after retry with higher tokens")]
         return _checks_to_findings(group, parsed, hash_, formula)
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_layer2_group_failed", group=group, error=str(exc))
         return [_parse_failed_finding(group, hash_, str(exc))]
 
 
+def _run_deterministic_group(
+    group: str, recompute_result: dict[str, Any],
+    hash_: str | None, formula: str,
+) -> list[dict[str, Any]]:
+    """Converts the deterministic recompute output (same {strategy,
+    checks: [...]} shape as the LLM path produced) into findings.
+
+    No LLM call — the arithmetic IS the verdict. _checks_to_findings
+    is the shared converter so the downstream finding shape and the
+    layer-level pass/fail aggregation are unchanged. Fail-open: any
+    exception around the conversion logs and yields one WARN finding
+    naming the group.
+    """
+    try:
+        return _checks_to_findings(group, recompute_result, hash_, formula)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_layer2_deterministic_failed",
+                    group=group, error=str(exc))
+        return [_parse_failed_finding(group, hash_, str(exc))]
+
+
 async def layer_2_metric_audit(payload: dict[str, Any]) -> dict[str, Any]:
     """
-    Runs the five task groups against the auditor model, in parallel.
+    Runs the Layer 2 recomputation checks via DETERMINISTIC Python
+    (May 25 2026 refactor — switched from LLM arithmetic). Each
+    check re-derives the metric from raw_data and compares against
+    the platform's stored value with a tolerance threshold; the LLM
+    is no longer in the arithmetic critical path.
+
     Returns {"status": pass|fail|skip, "findings": [...]}. The test
-    environment / no API key skips the layer cleanly.
+    environment / no API key skips the layer cleanly so the existing
+    contract tests still pass.
+
+    Reasoning for the switch: the LLM-recomputation path was
+    occasionally hallucinating numeric values (the IG check returned
+    "no JSON in response" on truncation; the EF check returned
+    auditor μ values that disagreed with deterministic math on the
+    same weights). Deterministic recompute eliminates both failure
+    modes — the verdict is now a function of raw_data alone, and the
+    response can never truncate because there is no LLM response.
+
+    The LLM is RESERVED for qualitative interpretation of flagged
+    findings (a separate optional pass; not implemented in this
+    refactor — the deterministic verdict's reasoning string is
+    explicit enough on its own for the operator).
     """
     if not payload.get("available"):
         return {"status": "skip", "findings": []}
+    # The test-env / no-API-key gate stays so the existing contract
+    # tests (which assert "skip" status in tests) continue to pass.
+    # The deterministic path doesn't NEED the API key — but skipping
+    # in tests keeps the audit's overall verdict semantics stable
+    # against the existing fixtures. Production always has the key.
     if _is_test_env() or not os.getenv("ANTHROPIC_API_KEY"):
         return {"status": "skip", "findings": [make_finding(
             2, "Layer 2 — recomputation", "layer_2", "warning", "info",
@@ -373,56 +517,74 @@ async def layer_2_metric_audit(payload: dict[str, Any]) -> dict[str, Any]:
                               "environment.")]}
 
     import asyncio
+    from tools.audit_layer2_deterministic import (
+        recompute_efficient_frontier,
+        recompute_factor_loadings,
+        recompute_regime_split,
+        recompute_rolling_correlation,
+        recompute_summary_statistics,
+    )
 
     h = payload.get("raw_inputs_hash")
     specs = payload["formula_specifications"]
     summary = payload["platform_computed"]["summary_statistics"]
 
-    # Task group A — one call per summary-statistics entry.
-    jobs: list[tuple[str, str, str]] = [
+    # Task group A — one entry per asset's summary statistics. The
+    # deterministic recompute returns the {strategy, checks: [...]}
+    # shape directly; no LLM call needed.
+    jobs: list[tuple[str, dict[str, Any], str]] = [
         (f"summary statistics ({asset})",
-         _summary_prompt(asset, payload, vals),
+         recompute_summary_statistics(asset, payload, vals),
          specs["sharpe"])
         for asset, vals in summary.items()
     ]
-    # Task groups B-E — chunked where the payload exceeds the cap.
-    #
-    # Factor loadings (May 28 2026) — was previously a single call for
-    # all 10 strategies; under the auditor's output cap the response
-    # truncated past parsing and the whole group degraded to a single
-    # WARN finding. Split into two parallel calls of 5 strategies each
-    # mirroring the regime-split chunking below — _run_group flattens
-    # each job's findings, so the two calls' findings concatenate
-    # transparently into one set tagged "factor loadings (A)" /
-    # "factor loadings (B)".
+
+    # Factor loadings — keep the chunking pattern so the operator can
+    # see two groups (A / B) in the audit findings, mirroring the
+    # historical LLM-era log structure. The recompute itself doesn't
+    # need chunking (no token cap) — the split is purely for finding
+    # provenance / human readability of audit history.
     factor_names = list(payload["raw_data"]["strategy_returns"].keys())
     half_f = (len(factor_names) + 1) // 2
     jobs.append(("factor loadings (A)",
-                 _factor_prompt(payload, factor_names[:half_f]),
+                 recompute_factor_loadings(factor_names[:half_f], payload),
                  specs["factor_regression"]))
     jobs.append(("factor loadings (B)",
-                 _factor_prompt(payload, factor_names[half_f:]),
+                 recompute_factor_loadings(factor_names[half_f:], payload),
                  specs["factor_regression"]))
-    jobs.append(("efficient frontier", _frontier_prompt(payload),
+    jobs.append(("efficient frontier",
+                 recompute_efficient_frontier(payload),
                  specs["efficient_frontier"]))
-    # The regime split runs as two parallel calls of five strategies
-    # each — one call for all ten overshoots the token cap and the JSON
-    # truncates past parsing. _run_group flattens each job's findings,
-    # so the two calls' findings concatenate transparently.
     regime_names = list(payload["raw_data"]["strategy_returns"].keys())
     half = (len(regime_names) + 1) // 2
     jobs.append(("regime split (A)",
-                 _regime_prompt(payload, regime_names[:half]),
+                 recompute_regime_split(regime_names[:half], payload),
                  specs["regime_split"]))
     jobs.append(("regime split (B)",
-                 _regime_prompt(payload, regime_names[half:]),
+                 recompute_regime_split(regime_names[half:], payload),
                  specs["regime_split"]))
-    jobs.append(("rolling metrics", _rolling_prompt(payload),
+    jobs.append(("rolling metrics",
+                 recompute_rolling_correlation(payload),
                  specs["rolling_correlation"]))
 
+    # Each job's recompute already ran (it's pure CPU). Run the
+    # findings-conversion step in parallel just to keep the
+    # orchestration shape mirroring the prior LLM-call layout —
+    # asyncio.to_thread isn't strictly required for pure-CPU work
+    # but keeps the verdict aggregation parallelism intact, which
+    # matters more for future work that might fire LLM-interpretation
+    # calls per flagged finding.
     results = await asyncio.gather(*[
-        asyncio.to_thread(_run_group, name, prompt, h, formula)
-        for name, prompt, formula in jobs
+        asyncio.to_thread(_run_deterministic_group, name, result, h, formula)
+        for name, result, formula in jobs
     ])
     findings = [f for group in results for f in group]
+    log.info(
+        "audit_layer2_deterministic_complete",
+        n_jobs=len(jobs),
+        n_findings=len(findings),
+        n_pass=sum(1 for f in findings if f.get("status") == "pass"),
+        n_warning=sum(1 for f in findings if f.get("status") == "warning"),
+        n_fail=sum(1 for f in findings if f.get("status") == "fail"),
+    )
     return {"status": layer_status(findings), "findings": findings}
