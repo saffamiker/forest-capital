@@ -50,10 +50,16 @@ async def _none():
     return None
 
 
-async def _fake_start_audit(triggered_by: str, email: str) -> dict:
+async def _fake_start_audit(
+    triggered_by: str, email: str, *, force: bool = False,
+) -> dict:
     """Stubs start_audit so a contract test never inserts a real
-    'running' audit_runs row that would leak into later tests."""
-    return {"status": "started", "audit_id": 1}
+    'running' audit_runs row that would leak into later tests. The
+    force kwarg matches the real start_audit signature (added by
+    commit c0ebf78 — submission-night cache-hit work) so the
+    monkeypatch substitutes cleanly when audit_run passes force=True.
+    """
+    return {"status": "started", "audit_id": 1, "forced": force}
 
 
 @pytest.fixture(autouse=True)
