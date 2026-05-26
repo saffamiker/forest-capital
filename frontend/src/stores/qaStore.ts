@@ -43,6 +43,12 @@ interface QAState {
   // Tiered-QA badge state. Source of truth for the Present-mode gate;
   // refreshed by pollStatus() every 30 seconds.
   tieredStatus: QAStatusPayload | null
+  // Set of check_ids the team has acknowledged via the intentional-
+  // overrides endpoint (mark-intentional / disclosure_required confirm).
+  // The badge derivation skips warnings whose check_id is in this set,
+  // so a fully-acknowledged result reads PASS instead of WARN. Polled
+  // alongside the audit status; refreshed by pollOverrides().
+  acknowledgedChecks: Set<string>
   loading: boolean
   error: string | null
   loaded: boolean
@@ -54,6 +60,7 @@ interface QAState {
   // reload(false) so the first tab visit benefits from a cached audit.
   reload: (force?: boolean) => Promise<void>
   pollStatus: () => Promise<void>  // refreshes tieredStatus from /api/v1/qa/status
+  pollOverrides: () => Promise<void>  // refreshes acknowledgedChecks from /api/v1/qa/intentional-overrides
   triggerTier1: () => Promise<void> // POST /api/v1/qa/run — sync Tier 1 + async Tier 2
   triggerFullReview: () => Promise<void> // POST /api/v1/qa/full-review — Opus Tier 3
   setResult: (r: QAAuditResult) => void
@@ -62,15 +69,130 @@ interface QAState {
   clear: () => void
 }
 
-function deriveStatus(r: QAAuditResult): QAStatus {
-  if (r.checks_failed > 0) return 'fail'
-  if (r.checks_warned > 0) return 'warn'
+// Check IDs that are EXCLUDED from the badge's warning calculation
+// regardless of their status. These are attestation checks whose
+// disclosed/acknowledged state is the meaningful signal, not the
+// raw WARN. Leaving them in the count would create false alarm
+// fatigue — every audit would read WARN despite no actionable
+// issues. May 26 2026 spec from the user.
+//
+// IN02 = Academic Review attestation. The check WARNs by design
+// when the latest Academic Review hasn't parsed five rated
+// sections, but that is a state the team manages by RE-RUNNING
+// the review — not an audit finding to be acknowledged
+// per-check. It doesn't belong in the actionable warning count.
+const _BADGE_EXCLUDED_CHECK_IDS: ReadonlySet<string> = new Set([
+  'IN02',
+])
+
+// Statuses on a QACheck that count as a warning for the badge.
+// 'incomplete' is included because an unfinished section is
+// actionable (re-run the audit). 'pass' / 'unknown' are not.
+const _BADGE_WARN_STATUSES: ReadonlySet<string> = new Set([
+  'warn', 'warning', 'incomplete',
+])
+
+// Statuses that count as a failure for the badge.
+const _BADGE_FAIL_STATUSES: ReadonlySet<string> = new Set([
+  'fail', 'failure',
+])
+
+/**
+ * Per-check badge derivation. Walks the items array, EXCLUDES
+ * IN02 (and any other badge-excluded attestation check) from
+ * the warning count, and SKIPS warnings whose check_id is in
+ * the team's acknowledged-overrides set. Returns
+ *   { effective_failed, effective_warned }
+ * — the counts the badge cares about.
+ *
+ * A check that doesn't appear in acknowledgedChecks but carries
+ * status='warn' is "actionable" and contributes to the badge.
+ * A check that does appear is treated as resolved (the team
+ * has recorded a disclosure / intentional-design override) and
+ * the badge can clear to PASS.
+ */
+function _effectiveCounts(
+  r: QAAuditResult, acknowledged: ReadonlySet<string>,
+): { failed: number, warned: number } {
+  const items = Array.isArray(r.items) ? r.items : []
+  if (items.length === 0) {
+    // Fallback for stale / placeholder results that lack the
+    // items array — use the summary counts. The user's spec
+    // ("badge should reflect actionable state only") applies
+    // only when we have per-check data to inspect; without it
+    // the conservative answer is "use what we have".
+    return {
+      failed: r.checks_failed || 0,
+      warned: r.checks_warned || 0,
+    }
+  }
+  let failed = 0
+  let warned = 0
+  for (const item of items) {
+    const cid = String(item.check_id || '')
+    const st = String(item.status || '').toLowerCase()
+    if (_BADGE_FAIL_STATUSES.has(st)) {
+      failed += 1
+      continue
+    }
+    if (!_BADGE_WARN_STATUSES.has(st)) continue
+    // Warning-class status — apply the exclusion + ack filters.
+    if (_BADGE_EXCLUDED_CHECK_IDS.has(cid)) continue
+    if (acknowledged.has(cid)) continue
+    warned += 1
+  }
+  return { failed, warned }
+}
+
+/**
+ * Badge derivation from the full audit result. Per user spec
+ * (May 26 2026):
+ *   FAIL — any check carrying a failure status.
+ *   WARN — at least one unacknowledged actionable warning,
+ *          AFTER excluding badge-excluded attestation checks
+ *          (IN02) and warnings the team has confirmed via the
+ *          intentional-overrides endpoint.
+ *   PASS — everything else: no failures and no unacknowledged
+ *          actionable warnings.
+ */
+function deriveStatus(
+  r: QAAuditResult, acknowledged: ReadonlySet<string>,
+): QAStatus {
+  const { failed, warned } = _effectiveCounts(r, acknowledged)
+  if (failed > 0) return 'fail'
+  if (warned > 0) return 'warn'
   return 'pass'
 }
 
-function statusFromVerdict(p: QAStatusPayload | null): QAStatus {
+/**
+ * Badge derivation from the tiered status payload. The payload
+ * carries only the summary verdict — there's no items list to
+ * inspect per-check — so an acknowledgement cannot override a
+ * server-side WARN at this layer. If we have a cached audit
+ * result with items, we PREFER deriveStatus(result, ...) so
+ * acknowledgements clear the badge. Without a cached result we
+ * trust the server verdict.
+ *
+ * The caller passes both pieces of state so this function can
+ * decide which signal to use:
+ *   - cached audit present  → derive from items + acknowledged
+ *   - tieredStatus only     → trust the server verdict
+ */
+function statusFromVerdict(
+  p: QAStatusPayload | null,
+  cachedResult: QAAuditResult | null,
+  acknowledged: ReadonlySet<string>,
+): QAStatus {
   if (!p) return 'unknown'
   if (p.running) return 'running'
+  // Prefer the per-check derivation when we have items — it
+  // respects IN02 exclusion + acknowledgements. A server WARN
+  // verdict that is entirely composed of acknowledged warnings
+  // becomes PASS via this path.
+  if (cachedResult && Array.isArray(cachedResult.items)
+        && cachedResult.items.length > 0) {
+    return deriveStatus(cachedResult, acknowledged)
+  }
   if (p.verdict === 'PASS') return 'pass'
   if (p.verdict === 'WARN') return 'warn'
   if (p.verdict === 'FAIL') return 'fail'
@@ -113,6 +235,7 @@ export const useQAStore = create<QAState>((set, get) => ({
   result: null,
   status: 'unknown',
   tieredStatus: null,
+  acknowledgedChecks: new Set<string>(),
   loading: false,
   error: null,
   loaded: false,
@@ -135,9 +258,15 @@ export const useQAStore = create<QAState>((set, get) => ({
     try {
       const res = await axios.post<QAAuditResult>(
         '/api/qa/audit', { force })
+      // Refresh acknowledgements alongside the audit so the badge
+      // reflects the most current ack state — a Mark Intentional /
+      // Confirm Disclosure click in another tab is picked up on
+      // the next reload. Sequential await keeps the order
+      // deterministic; pollOverrides() never raises.
+      await get().pollOverrides()
       set({
         result: res.data,
-        status: deriveStatus(res.data),
+        status: deriveStatus(res.data, get().acknowledgedChecks),
         loaded: true,
         loading: false,
         error: null,
@@ -158,12 +287,50 @@ export const useQAStore = create<QAState>((set, get) => ({
   // Lightweight status poll for the nav badge. Returns silently on error
   // — a transient backend hiccup must not flicker the badge to UNKNOWN
   // when the user is in the middle of preparing a presentation.
+  //
+  // May 26 2026 — also refreshes the acknowledgedChecks set so a
+  // recently-recorded disclosure / Mark Intentional clears the
+  // badge from WARN to PASS within the 30-second poll cycle.
   pollStatus: async () => {
     try {
-      const res = await axios.get<QAStatusPayload>('/api/v1/qa/status')
-      set({ tieredStatus: res.data, status: statusFromVerdict(res.data) })
+      // Fetch both in parallel — they're independent endpoints
+      // and the badge needs both to derive correctly.
+      const [statusRes] = await Promise.all([
+        axios.get<QAStatusPayload>('/api/v1/qa/status'),
+        get().pollOverrides(),
+      ])
+      set({
+        tieredStatus: statusRes.data,
+        status: statusFromVerdict(
+          statusRes.data, get().result, get().acknowledgedChecks),
+      })
     } catch {
       // Keep the previous tieredStatus so the badge doesn't flicker.
+    }
+  },
+
+  // Refreshes the acknowledgedChecks set from the intentional-
+  // overrides endpoint. The endpoint returns the full overrides
+  // map keyed by check_id; we project to a set of check_ids the
+  // badge derivation walks. Fail-silent — a transient outage
+  // keeps the previous set rather than flickering the badge.
+  pollOverrides: async () => {
+    try {
+      const res = await axios.get<{
+        overrides: Record<string, unknown>
+      }>('/api/v1/qa/intentional-overrides')
+      const map = res.data?.overrides || {}
+      const next = new Set<string>(Object.keys(map))
+      set({
+        acknowledgedChecks: next,
+        // Re-derive status against the fresh ack set when we
+        // already have an audit result cached.
+        ...(get().result
+          ? { status: deriveStatus(get().result as QAAuditResult, next) }
+          : {}),
+      })
+    } catch {
+      // Keep the previous set.
     }
   },
 
@@ -195,9 +362,21 @@ export const useQAStore = create<QAState>((set, get) => ({
   },
 
   setResult: (r) =>
-    set({ result: r, status: deriveStatus(r), loaded: true, error: null }),
+    set({
+      result: r,
+      status: deriveStatus(r, get().acknowledgedChecks),
+      loaded: true,
+      error: null,
+    }),
   setLoading: (v) => set({ loading: v }),
   setError: (e) => set({ error: e, loading: false }),
   clear: () =>
-    set({ result: null, status: 'unknown', tieredStatus: null, loaded: false, error: null }),
+    set({
+      result: null,
+      status: 'unknown',
+      tieredStatus: null,
+      acknowledgedChecks: new Set<string>(),
+      loaded: false,
+      error: null,
+    }),
 }))
