@@ -208,3 +208,83 @@ class TestAssemblerBuildsAlignedSubset:
         result = asyncio.run(assemble_audit_payload())
         assert result["available"] is False
         assert "test environment" in result["note"]
+
+
+# ── _by_strategy_key — re-key analytics rows by canonical dict key ───────────
+
+
+class TestByStrategyKey:
+    """The backtester writes BENCHMARK's strategy_name as
+    "100% Equity (Benchmark)" — different from the strategies dict
+    key "BENCHMARK". analytics rows carry strategy=strategy_name; if
+    _list_to_dict keys by the row's strategy field, BENCHMARK lookups
+    via the canonical dict key return None and every BENCHMARK metric
+    surfaces as a missing_value WARN.
+
+    _by_strategy_key re-keys the rows by the strategies dict key so
+    raw_data.strategy_returns and platform_computed.* tables agree
+    on the lookup convention."""
+
+    def test_rekeys_rows_by_strategies_dict_key_not_display_name(self):
+        from tools.audit_assembler import _by_strategy_key
+
+        strategies = {
+            # BENCHMARK's display name differs from the dict key — the
+            # canonical bug case.
+            "BENCHMARK": {"strategy_name": "100% Equity (Benchmark)"},
+            "CLASSIC_60_40": {"strategy_name": "CLASSIC_60_40"},
+        }
+        rows = [
+            # The analytics row writes strategy=strategy_name.
+            {"strategy": "100% Equity (Benchmark)", "alpha": 0.0},
+            {"strategy": "CLASSIC_60_40", "alpha": 0.001},
+        ]
+        out = _by_strategy_key(rows, strategies)
+        # The output is keyed by the DICT KEY (BENCHMARK), not the
+        # display name. This is what raw_data.strategy_returns also
+        # uses, so the recompute's lookup lands.
+        assert "BENCHMARK" in out
+        assert "100% Equity (Benchmark)" not in out
+        assert out["BENCHMARK"]["alpha"] == 0.0
+        assert out["CLASSIC_60_40"]["alpha"] == 0.001
+        # The `strategy` field is stripped from the inner dict — the
+        # key carries the identifier now.
+        assert "strategy" not in out["BENCHMARK"]
+        assert "strategy" not in out["CLASSIC_60_40"]
+
+    def test_falls_back_to_dict_key_when_strategy_name_missing(self):
+        """A strategy without an explicit strategy_name field falls
+        back to the dict key — the legacy shape where analytics rows
+        carry strategy=dict_key directly."""
+        from tools.audit_assembler import _by_strategy_key
+
+        strategies = {"X": {}}   # no strategy_name field
+        rows = [{"strategy": "X", "val": 1.23}]
+        out = _by_strategy_key(rows, strategies)
+        assert out == {"X": {"val": 1.23}}
+
+    def test_drops_row_for_unknown_strategy(self):
+        """A row whose strategy_name doesn't match any strategies
+        entry is dropped — analytics emitted a row for a strategy
+        not in the cache, which we can't audit."""
+        from tools.audit_assembler import _by_strategy_key
+
+        strategies = {"KNOWN": {"strategy_name": "KNOWN"}}
+        rows = [
+            {"strategy": "KNOWN", "val": 1.0},
+            {"strategy": "UNKNOWN_STRATEGY", "val": 2.0},
+        ]
+        out = _by_strategy_key(rows, strategies)
+        assert list(out.keys()) == ["KNOWN"]
+
+    def test_empty_rows_returns_empty_dict(self):
+        from tools.audit_assembler import _by_strategy_key
+        assert _by_strategy_key([], {"BENCHMARK": {}}) == {}
+
+    def test_strategies_with_non_dict_values_falls_back_to_key(self):
+        # Defensive — a malformed strategies dict where a value isn't
+        # a dict shouldn't crash; fall back to the dict key.
+        from tools.audit_assembler import _by_strategy_key
+        rows = [{"strategy": "STRAT_A", "val": 1.0}]
+        out = _by_strategy_key(rows, {"STRAT_A": "not a dict"})
+        assert out["STRAT_A"]["val"] == 1.0

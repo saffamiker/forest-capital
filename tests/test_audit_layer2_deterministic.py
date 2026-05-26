@@ -87,6 +87,8 @@ class TestCompare:
         assert "Sign disagreement" not in out["reasoning"]
 
     def test_platform_none_yields_warning(self):
+        # ONE side None is missing_value WARN — the two sides disagree
+        # about whether the value is computable.
         from tools.audit_layer2_deterministic import _compare
         out = _compare("m", None, 0.5)
         assert out["status"] == "warning"
@@ -97,6 +99,24 @@ class TestCompare:
         out = _compare("m", 0.5, None)
         assert out["status"] == "warning"
         assert out["flag"] == "missing_value"
+
+    def test_both_none_is_pass_with_agreement_reasoning(self):
+        """Both sides agree the value is not computable — PASS, not
+        missing_value WARN. May 25 2026 fix: the previous behaviour
+        flagged the agreement as a defect, surfacing dozens of
+        spurious warnings for EQUITY/BENCHMARK information_ratio,
+        short-history regime sub-periods, and MOM-factor fallbacks."""
+        from tools.audit_layer2_deterministic import _compare
+        out = _compare("m", None, None)
+        assert out["status"] == "pass"
+        # The reasoning string explicitly tells the operator this is
+        # an agreement, not a missing-data failure.
+        assert "agreement" in out["reasoning"].lower()
+        assert "not computable" in out["reasoning"].lower()
+        # discrepancy_pct is 0 (perfect agreement) and flag is empty
+        # so the finding shape is consistent with other PASS cases.
+        assert out["discrepancy_pct"] == 0.0
+        assert out["flag"] == ""
 
     def test_nan_auditor_yields_warning(self):
         from tools.audit_layer2_deterministic import _compare
@@ -484,6 +504,75 @@ class TestRecomputeRollingCorrelation:
         assert len(result["checks"]) == 1
         assert result["checks"][0]["status"] == "warning"
         assert result["checks"][0]["flag"] == "no_data"
+
+    def test_nested_platform_shape_resolves_correctly(self):
+        """Canonical shape: {pre_2022: {equity_ig, equity_hy}, ...}."""
+        from tools.audit_layer2_deterministic import (
+            recompute_rolling_correlation,
+        )
+        n = 30
+        idx = pd.date_range("2019-01-31", periods=n, freq="ME")
+        rng = np.random.default_rng(99)
+        eq = rng.normal(0.008, 0.04, n).tolist()
+        ig = rng.normal(0.003, 0.02, n).tolist()
+        hy = rng.normal(0.005, 0.03, n).tolist()
+        payload = {
+            "raw_data": {"asset_returns": {
+                "equity": eq, "ig": ig, "hy": hy,
+                "rf": [0.0] * n,
+                "dates": [d.isoformat() for d in idx],
+            }},
+            "platform_computed": {"rolling_correlation": {
+                # The canonical shape analytics emits.
+                "pre_2022":  {"equity_ig": 0.123, "equity_hy": 0.456},
+                "post_2022": {"equity_ig": 0.789, "equity_hy": 0.234},
+            }},
+        }
+        result = recompute_rolling_correlation(payload)
+        # Each check's platform_value comes back as the float from the
+        # nested payload (rounded by _compare). No missing_value.
+        by_metric = {c["metric"]: c for c in result["checks"]}
+        for metric in ("equity_ig.pre_2022", "equity_ig.post_2022",
+                       "equity_hy.pre_2022", "equity_hy.post_2022"):
+            assert by_metric[metric]["platform_value"] is not None, (
+                f"{metric}: platform_value should resolve via nested "
+                f"lookup, got {by_metric[metric]}"
+            )
+
+    def test_flat_key_fallback_resolves_period_dot_pair(self):
+        """Legacy/alternative flat-key shape: 'pre_2022.equity_ig'."""
+        from tools.audit_layer2_deterministic import (
+            recompute_rolling_correlation,
+        )
+        n = 30
+        idx = pd.date_range("2019-01-31", periods=n, freq="ME")
+        rng = np.random.default_rng(101)
+        eq = rng.normal(0.008, 0.04, n).tolist()
+        ig = rng.normal(0.003, 0.02, n).tolist()
+        hy = rng.normal(0.005, 0.03, n).tolist()
+        payload = {
+            "raw_data": {"asset_returns": {
+                "equity": eq, "ig": ig, "hy": hy,
+                "rf": [0.0] * n,
+                "dates": [d.isoformat() for d in idx],
+            }},
+            "platform_computed": {"rolling_correlation": {
+                # Flat-key shape — fallback path.
+                "pre_2022.equity_ig": 0.111,
+                "pre_2022.equity_hy": 0.222,
+                "post_2022.equity_ig": 0.333,
+                "post_2022.equity_hy": 0.444,
+            }},
+        }
+        result = recompute_rolling_correlation(payload)
+        by_metric = {c["metric"]: c for c in result["checks"]}
+        # All four checks resolve via the flat-key fallback.
+        for metric in ("equity_ig.pre_2022", "equity_ig.post_2022",
+                       "equity_hy.pre_2022", "equity_hy.post_2022"):
+            assert by_metric[metric]["platform_value"] is not None, (
+                f"{metric}: flat-key fallback should resolve, "
+                f"got {by_metric[metric]}"
+            )
 
 
 # ── Hash check — TOLERANCE constants are reasonable ──────────────────────────

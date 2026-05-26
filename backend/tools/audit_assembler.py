@@ -278,6 +278,41 @@ def _list_to_dict(rows: list[dict], key: str) -> dict[str, dict]:
     return out
 
 
+def _by_strategy_key(
+    rows: list[dict], strategies: dict[str, dict],
+) -> dict[str, dict]:
+    """Re-keys analytics rows by the strategies dict's CANONICAL key
+    (e.g. 'BENCHMARK') rather than the row's `strategy` field — which
+    may be a display name from the backtester output (BENCHMARK's
+    `strategy_name` is "100% Equity (Benchmark)", not "BENCHMARK").
+
+    The bug this guards against: audit_assembler's raw_data.
+    strategy_returns is keyed by strategies.items() canonical keys
+    ('BENCHMARK', 'CLASSIC_60_40', ...). The deterministic recomputer
+    iterates THAT key set and looks each up in platform_loadings /
+    platform_regime. If those tables are keyed by display name
+    instead, every BENCHMARK metric falls through to None and
+    surfaces as a spurious missing_value WARN.
+
+    Build a display-name → row map, then walk strategies in
+    canonical-key order; map each row back to its dict key. A row
+    whose strategy_name doesn't exist in the strategies dict is
+    dropped (analytics emitted a row for a strategy not in the
+    cache — unusual but harmless to ignore).
+    """
+    by_display = {r.get("strategy"): r for r in rows}
+    out: dict[str, dict] = {}
+    for canonical_key, s in strategies.items():
+        display = (s.get("strategy_name") or canonical_key) if isinstance(s, dict) else canonical_key
+        row = by_display.get(display) or by_display.get(canonical_key)
+        if row is None:
+            continue
+        out[str(canonical_key)] = {
+            k: v for k, v in row.items() if k != "strategy"
+        }
+    return out
+
+
 def _weight_columns(weight_schedule: list[dict]) -> dict[str, list]:
     """
     Converts a strategy's persisted weight_schedule — a list of
@@ -424,12 +459,21 @@ async def assemble_audit_payload() -> dict[str, Any]:
             ef_max_sharpe = None
 
         platform_computed: dict[str, Any] = {
+            # summary_statistics is keyed by asset name (EQUITY / IG /
+            # HY / BENCHMARK); analytics writes those names directly
+            # as the "asset" field, so a plain _list_to_dict is fine.
             "summary_statistics": _list_to_dict(
                 an.summary_statistics(asset_series, rf), "asset"),
-            "regime_conditional": _list_to_dict(
-                an.regime_conditional_performance(strategies, rf), "strategy"),
-            "factor_loadings": _list_to_dict(
-                an.factor_loadings(strategies, ff or []), "strategy"),
+            # regime_conditional and factor_loadings are keyed by the
+            # strategy_results dict key (e.g. 'BENCHMARK'), not by the
+            # row's strategy field (which is the display name —
+            # "100% Equity (Benchmark)" for the benchmark, ≠ 'BENCHMARK').
+            # _by_strategy_key re-keys via the strategies dict so the
+            # deterministic recomputer's lookups land.
+            "regime_conditional": _by_strategy_key(
+                an.regime_conditional_performance(strategies, rf), strategies),
+            "factor_loadings": _by_strategy_key(
+                an.factor_loadings(strategies, ff or []), strategies),
             "efficient_frontier": {
                 "max_sharpe_point": ef_max_sharpe,
                 # The aligned subset the frontier was actually computed
