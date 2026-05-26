@@ -105,16 +105,46 @@ const NON_DETERMINISTIC_STYLE = {
   border: 'border-orange-500/40',
 }
 
+// Blue badge applied when a confirmed intentional override exists for
+// this check_id. Overrides the planned_extension / disclosure_required
+// amber styling: the team has recorded a deliberate disclosure, so the
+// check should read as RESOLVED, not as "this is incomplete and might
+// be broken". May 26 2026 — user fix for the S10 INCOMPLETE-vs-
+// CONFIRMED-INTENTIONAL conflict.
+const CONFIRMED_INTENTIONAL_STYLE = {
+  label: 'CONFIRMED INTENTIONAL',
+  bg: 'bg-blue-500/15',
+  text: 'text-blue-300',
+  border: 'border-blue-500/40',
+}
+
 
 function SubmissionBadge({
-  check,
+  check, override,
 }: {
   check: { submission_label?: string | null; non_deterministic?: boolean | null; status: Verdict }
+  // When supplied, an intentional-override row exists for check.check_id.
+  // The badge then renders as CONFIRMED INTENTIONAL (blue) regardless of
+  // the underlying submission_label — the team's documented disclosure
+  // supersedes the raw verdict's badge.
+  override?: { marked_at?: string | null } | undefined
 }) {
-  // Non-deterministic overlay wins regardless of submission_label —
-  // an AI verdict that flickers across runs is never a clean PASS.
+  // Confirmed intentional override wins over every other badge state —
+  // the team has recorded a deliberate disclosure for this check, so
+  // the amber "INCOMPLETE — planned extension" / "WARN — disclosure
+  // required" labels would mislead. Non-deterministic still wins over
+  // confirmed because an AI verdict that flickers across runs is
+  // never resolved even with a prior disclosure on file.
   if (check.non_deterministic) {
     const s = NON_DETERMINISTIC_STYLE
+    return (
+      <span className={`px-2 py-0.5 rounded text-2xs font-medium border ${s.bg} ${s.text} ${s.border}`}>
+        {s.label}
+      </span>
+    )
+  }
+  if (override) {
+    const s = CONFIRMED_INTENTIONAL_STYLE
     return (
       <span className={`px-2 py-0.5 rounded text-2xs font-medium border ${s.bg} ${s.text} ${s.border}`}>
         {s.label}
@@ -931,7 +961,10 @@ function CheckRow({
         <Icon className={`w-4 h-4 shrink-0 ${cfg.color}`} />
         <span className="font-mono text-2xs text-muted w-7 shrink-0">{check.check_id}</span>
         <span className="text-white text-xs flex-1">{check.description}</span>
-        <SubmissionBadge check={check} />
+        {/* override threads in from CheckRowProps so the badge swaps to
+            CONFIRMED INTENTIONAL (blue) the moment the team records a
+            disclosure — matches the action card below it. May 26 2026. */}
+        <SubmissionBadge check={check} override={override} />
         {open ? (
           <ChevronUp className="w-3.5 h-3.5 text-muted ml-1 shrink-0" />
         ) : (

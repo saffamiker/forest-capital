@@ -1716,9 +1716,32 @@ export const STEP_ACTIONS: Record<number, (templateId: string) => Promise<StepSu
         run_at: run.completed_at,
         is_current: res.data.is_current,
       }
+      // Step 4 verdict logic (May 26 2026 fix). The previous check
+      // `run.status === 'pass' ? 'complete' : 'warning'` was always
+      // false — audit_runs.status is one of 'complete' | 'failed' |
+      // 'running', never 'pass' — so step 4 was perpetually amber
+      // even after a clean statistical audit. The right semantic:
+      //   - 'complete' → audit ran AND no critical FAILURES
+      //   - 'warning'  → audit ran but produced critical failures
+      //                   OR the audit row itself failed to execute
+      // Warnings alone (audit_runs.warnings > 0) do NOT block step 4;
+      // they're acknowledged through the QA tab's disclosure flow.
+      // IN02 (Academic Review attestation) lives in qa_results_cache,
+      // NOT in audit_runs — it never contributes to this status. The
+      // exclusion logic parallels the QA badge's: a check the team has
+      // marked intentional / disclosed is RESOLVED, not actionable.
+      const failed = Number(run.failed || 0)
+      const auditCompleted = run.status === 'complete'
+      const stepStatus: 'complete' | 'warning' = (
+        auditCompleted && failed === 0
+      ) ? 'complete' : 'warning'
       return {
-        status: run.status === 'pass' ? 'complete' : 'warning',
-        message: `Statistical audit: ${run.status}`,
+        status: stepStatus,
+        message: stepStatus === 'complete'
+          ? `Statistical audit: complete · ${run.passed ?? 0} passed`
+          + (run.warnings ? ` · ${run.warnings} disclosed` : '')
+          : `Statistical audit: ${run.status}`
+            + (failed > 0 ? ` · ${failed} critical failure(s)` : ''),
         payload: reshaped,
       }
     } catch (err) {

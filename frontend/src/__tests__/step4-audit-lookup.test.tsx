@@ -32,14 +32,24 @@ beforeEach(() => {
 })
 
 describe('Step 4 audit-lookup — reshapes the run row', () => {
-  it('returns complete + reshaped payload when run.status is pass', async () => {
+  // May 26 2026 — audit_runs.status is one of 'complete' | 'failed' |
+  // 'running' (per migration 017). The previous tests asserted
+  // 'pass'/'warn' which never appeared in real data — they were
+  // pinning a buggy === 'pass' comparison that always returned
+  // 'warning'. Step 4 now reads 'complete' when the audit completed
+  // AND failed === 0; warnings alone are disclosure-required state,
+  // not pipeline-blocking. IN02 (Academic Review attestation, lives
+  // in qa_results_cache, not audit_runs) cannot reach this gate by
+  // design.
+
+  it('returns complete + reshaped payload when audit ran with no failures', async () => {
     mockedAxios.get = vi.fn().mockResolvedValue({
       data: {
         run: {
-          status: 'pass',
-          layer_1_status: 'pass',
-          layer_2_status: 'pass',
-          layer_3_status: 'pass',
+          status: 'complete',
+          layer_1_status: 'complete',
+          layer_2_status: 'complete',
+          layer_3_status: 'complete',
           passed: 39, failed: 0, warnings: 2,
           completed_at: '2026-05-22T10:00:00Z',
         },
@@ -50,10 +60,9 @@ describe('Step 4 audit-lookup — reshapes the run row', () => {
     })
     const result = await STEP_ACTIONS[4]!('test-template-id')
     expect(result.status).toBe('complete')
-    expect(result.message).toBe('Statistical audit: pass')
     // The detail panel reads payload['statistical_status']; the
     // reshape must put run.status under that key.
-    expect(result.payload?.statistical_status).toBe('pass')
+    expect(result.payload?.statistical_status).toBe('complete')
     // The plural-to-singular rename (warnings → warning) is intentional;
     // the detail panel renders `${payload['warning']} warnings`.
     expect(result.payload?.warning).toBe(2)
@@ -63,14 +72,18 @@ describe('Step 4 audit-lookup — reshapes the run row', () => {
     expect(result.payload?._no_audit).toBeUndefined()
   })
 
-  it('returns warning when run.status is warn (not pass)', async () => {
+  it('returns complete even when warnings > 0 (disclosure-required state)', async () => {
+    // A clean audit with several warnings is still a clean audit for
+    // pipeline purposes — the team will acknowledge/disclose each
+    // warning on the QA tab. IN02 is the canonical example: it WARNs
+    // by design but is an attestation, not a validation gate.
     mockedAxios.get = vi.fn().mockResolvedValue({
       data: {
         run: {
-          status: 'warn',
-          layer_1_status: 'pass',
-          layer_2_status: 'warn',
-          layer_3_status: 'pass',
+          status: 'complete',
+          layer_1_status: 'complete',
+          layer_2_status: 'complete',
+          layer_3_status: 'complete',
           passed: 35, failed: 0, warnings: 4,
           completed_at: '2026-05-25T08:00:00Z',
         },
@@ -78,11 +91,53 @@ describe('Step 4 audit-lookup — reshapes the run row', () => {
       },
     })
     const result = await STEP_ACTIONS[4]!('t')
+    expect(result.status).toBe('complete')
+    expect(result.payload?.statistical_status).toBe('complete')
+    expect(result.payload?.failed).toBe(0)
+    expect(result.payload?.warning).toBe(4)
+    expect(result.payload?._no_audit).toBeUndefined()
+  })
+
+  it('returns warning when the audit produced critical failures', async () => {
+    mockedAxios.get = vi.fn().mockResolvedValue({
+      data: {
+        run: {
+          status: 'complete',
+          layer_1_status: 'complete',
+          layer_2_status: 'complete',
+          layer_3_status: 'complete',
+          passed: 30, failed: 3, warnings: 2,
+          completed_at: '2026-05-25T08:00:00Z',
+        },
+        is_current: true,
+      },
+    })
+    const result = await STEP_ACTIONS[4]!('t')
     expect(result.status).toBe('warning')
-    expect(result.message).toBe('Statistical audit: warn')
-    expect(result.payload?.statistical_status).toBe('warn')
-    // The no-audit flag MUST be absent — a warn-status run is still
-    // a run on record; the pipeline should unblock past this gate.
+    expect(result.payload?.statistical_status).toBe('complete')
+    expect(result.payload?.failed).toBe(3)
+    // A run with critical failures is still "a run on record" — the
+    // pipeline surfaces the gate, doesn't claim no-audit.
+    expect(result.payload?._no_audit).toBeUndefined()
+  })
+
+  it('returns warning when the audit row itself failed to execute', async () => {
+    mockedAxios.get = vi.fn().mockResolvedValue({
+      data: {
+        run: {
+          status: 'failed',
+          layer_1_status: 'skipped_no_data',
+          layer_2_status: 'skipped_no_data',
+          layer_3_status: 'skipped_no_data',
+          passed: 0, failed: 0, warnings: 0,
+          completed_at: '2026-05-25T08:00:00Z',
+        },
+        is_current: true,
+      },
+    })
+    const result = await STEP_ACTIONS[4]!('t')
+    expect(result.status).toBe('warning')
+    expect(result.payload?.statistical_status).toBe('failed')
     expect(result.payload?._no_audit).toBeUndefined()
   })
 

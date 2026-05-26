@@ -288,7 +288,15 @@ def harness_narrative(
     task: str,
     context: Any,
     *,
-    max_tokens: int = 900,
+    # May 26 2026 — bumped from 900 to 1500. User reported Section 3
+    # of the midpoint paper terminating mid-sentence: the 110-135 word
+    # target is well under 900 tokens for the prose alone, but each
+    # section also emits [[VERIFY]] markers, inline citations and the
+    # Academic Writer's hedging language — which together pushed the
+    # output past the 900-token cap mid-sentence. 1500 gives ~2.5x
+    # headroom for a typical 300-word section + its markers and
+    # citations, with negligible cost overhead (Sonnet is per-token).
+    max_tokens: int = 1500,
     n_strategies: int | None = None,
 ) -> str:
     """
