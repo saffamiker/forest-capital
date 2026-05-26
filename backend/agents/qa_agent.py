@@ -718,6 +718,7 @@ class QAAgent:
         run_full_checklist: bool = True,
         analytics_cache: dict[str, Any] | None = None,
         audit_attestation: dict[str, Any] | None = None,
+        academic_review_attestation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Runs the full methodology audit.
@@ -749,6 +750,7 @@ class QAAgent:
         deterministic_results = self._run_deterministic_checks(
             strategy_results, analytics_cache=analytics_cache,
             audit_attestation=audit_attestation,
+            academic_review_attestation=academic_review_attestation,
         )
 
         if not run_full_checklist:
@@ -849,6 +851,7 @@ class QAAgent:
         strategy_results: dict[str, Any],
         analytics_cache: dict[str, Any] | None = None,
         audit_attestation: dict[str, Any] | None = None,
+        academic_review_attestation: dict[str, Any] | None = None,
     ) -> dict[str, dict[str, str]]:
         """
         Runs checklist items that can be verified directly from the results dict.
@@ -1232,39 +1235,42 @@ class QAAgent:
                 ),
             }
 
-        # IN02: Academic Review complete (five rated sections). The
-        # academic_review surface is opt-in (Bob clicks the panel
-        # button when ready). At audit time we cannot run a fresh
-        # review — but we CAN check that the latest cached review
-        # row (if any) carried all five required sections.
-        # Lightweight check: the field name presence on the
-        # strategy_results dict's metadata (set by the orchestrator
-        # when a review has been run during this session).
-        review_meta = (
-            strategy_results.get("_academic_review")
-            or strategy_results.get("__academic_review")
-            or {}
-        )
-        review_sections = (
-            review_meta.get("sections", []) if isinstance(review_meta, dict) else []
-        )
-        review_complete = (
-            isinstance(review_sections, list) and len(review_sections) >= 5
-        )
-        # Fallback — if no review has been run yet, INCOMPLETE is the
-        # right verdict (the run is required, not a pass).
-        results["academic_review"] = {
-            "status": "PASS" if review_complete else "WARN",
-            "evidence": (
-                f"Academic Review has been run during this session "
-                f"and carries {len(review_sections)} rated sections."
-                if review_complete else
-                "No Academic Review has been recorded for the "
-                "current strategies. Run the council's Academic "
-                "Review (the gold-accent panel) before submission "
-                "so the five rated sections are captured."
-            ),
-        }
+        # IN02: Academic Review complete (five rated sections).
+        # Reads the precomputed academic_review_attestation payload
+        # (May 26 2026 fix). Previously this check looked for an
+        # `_academic_review` key on the strategy_results dict — a
+        # runtime-only hand-off that nothing was populating, so the
+        # check WARNed "No Academic Review has been recorded" no
+        # matter how many times the user ran the Council Academic
+        # Review panel. The attestation is computed async-side via
+        # tools.audit_engine.compute_in02_attestation, which queries
+        # agent_interactions (the canonical persisted record) for
+        # the most recent academic_review row in the last 14 days
+        # and parses its five rated sections from the response_summary.
+        if (academic_review_attestation
+                and isinstance(academic_review_attestation, dict)):
+            results["academic_review"] = {
+                "status":   academic_review_attestation.get("status", "FAIL"),
+                "evidence": academic_review_attestation.get(
+                    "evidence",
+                    "Attestation payload was provided but carried no "
+                    "evidence — treating as FAIL until the caller "
+                    "computes a verdict."),
+            }
+        else:
+            # Legacy / test callers without the attestation argument
+            # fall back to the no-op WARN — explicit fail-open so
+            # the caller sees the gap rather than a silent pass.
+            results["academic_review"] = {
+                "status": "WARN",
+                "evidence": (
+                    "No academic_review_attestation was supplied to the "
+                    "audit run. The IN02 check requires the caller "
+                    "(main.py qa_audit endpoint) to precompute the "
+                    "attestation via compute_in02_attestation before "
+                    "invoking run_audit."
+                ),
+            }
 
         # IN03: midpoint paper has no DATA PENDING placeholders.
         # The midpoint generator emits [DATA PENDING] tokens only

@@ -610,6 +610,145 @@ async def compute_in01_attestation() -> dict[str, Any]:
         }
 
 
+# ── IN02 attestation — Academic Review complete (May 26 2026) ───────────────
+#
+# Previously IN02 looked for an `_academic_review` key on the
+# strategy_results dict — a runtime-only hand-off that nothing was
+# actually populating. Result: every audit reported "No Academic
+# Review has been recorded" no matter how many times the user ran
+# the Council Academic Review panel.
+#
+# Fix — query agent_interactions for the most recent academic_review
+# row and parse the overall_rating + the review verdict's section
+# count from response_summary. The Academic Review endpoint already
+# writes that row via _log_interaction_bg every time it runs, so the
+# IN02 attestation reads the canonical persisted record rather than
+# a runtime field that no caller sets.
+
+async def compute_in02_attestation() -> dict[str, Any]:
+    """Returns the IN02 attestation payload — was an Academic Review
+    run, and did it carry the five rated sections.
+
+    Verdict logic:
+      PASS — an academic_review agent_interactions row exists within
+             the last 14 days AND its response_summary parses out
+             five `### N. ...` section headings AND each carries a
+             `**Rating:**` line (the canonical arbiter output shape).
+      WARN — the row exists but the response_summary is malformed or
+             carries fewer than five rated sections.
+      FAIL — no academic_review row in the lookback window.
+
+    14-day window is generous — the project's submission cycle is
+    weeks-long, and re-running the review every time the audit fires
+    would burn the Opus + Gemini budget for no gain. A real review
+    from earlier in the week is enough evidence for IN02.
+
+    The function lives here (not in agents/qa_agent.py) because the
+    QA agent is synchronous and this helper is async — same pattern
+    as compute_in01_attestation. The caller in main.py runs it before
+    invoking QAAgent.run_audit and passes the result in via the
+    academic_review_attestation argument.
+    """
+    import re
+    LOOKBACK_DAYS = 14
+
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return {
+                "status": "FAIL",
+                "evidence": (
+                    "Database unavailable — could not verify whether an "
+                    "Academic Review has been run. Re-check after the "
+                    "database is reachable."
+                ),
+            }
+        async with AsyncSessionLocal() as session:
+            # Most recent academic_review row within the lookback
+            # window. ORDER BY timestamp DESC is the canonical "what
+            # was the latest review" query — same pattern the Team
+            # Activity surface uses.
+            row = await session.execute(text(
+                "SELECT id, user_email, timestamp, response_summary, "
+                "       metadata "
+                "FROM agent_interactions "
+                "WHERE interaction_type = 'academic_review' "
+                "  AND timestamp >= now() - "
+                f"      INTERVAL '{LOOKBACK_DAYS} days' "
+                "ORDER BY timestamp DESC LIMIT 1"
+            ))
+            found = row.fetchone()
+        if found is None:
+            return {
+                "status": "FAIL",
+                "evidence": (
+                    f"No Academic Review has been run in the last "
+                    f"{LOOKBACK_DAYS} days. Click 'Run Academic "
+                    f"Review' on the QA Audit page (Academic Review "
+                    f"section) before submission — the arbiter "
+                    f"verdict's five rated sections are the IN02 "
+                    f"attestation."
+                ),
+            }
+
+        row_id, email, ts, summary, metadata = found
+        # The arbiter writes one `### N. Section\n**Rating:** ...`
+        # block per section. Count the well-formed ones via the same
+        # regex agents.academic_review_score uses.
+        section_re = re.compile(
+            r"###?\s*\d+\.[^\n]+", re.MULTILINE)
+        rating_re = re.compile(
+            r"\*\*Rating\s*:\s*\*\*\s*(Strong|Developing|Needs[\s-]?Work)",
+            re.IGNORECASE)
+        headings = section_re.findall(summary or "")
+        ratings = rating_re.findall(summary or "")
+        n_sections = min(len(headings), len(ratings))
+
+        when = ts.isoformat() if ts else "?"
+        meta = metadata or {}
+        overall = (meta.get("overall_rating") if isinstance(meta, dict)
+                   else None)
+
+        if n_sections >= 5:
+            return {
+                "status": "PASS",
+                "evidence": (
+                    f"Academic Review run by {email} on {when} carries "
+                    f"{n_sections} rated sections" +
+                    (f"; overall rating: {overall}" if overall else "") +
+                    ". The arbiter verdict is on record as the "
+                    "submission-readiness attestation."
+                ),
+                "last_review_at": when,
+                "last_review_by": email,
+                "n_sections": n_sections,
+                "overall_rating": overall,
+            }
+        return {
+            "status": "WARN",
+            "evidence": (
+                f"An Academic Review row exists ({email} on {when}), "
+                f"but the verdict parsed only {n_sections} of 5 rated "
+                f"sections — the arbiter response may have truncated. "
+                f"Re-run the Academic Review so the full five-section "
+                f"verdict lands."
+            ),
+            "last_review_at": when,
+            "n_sections": n_sections,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("in02_attestation_query_failed", error=str(exc))
+        return {
+            "status": "FAIL",
+            "evidence": (
+                f"Could not verify whether an Academic Review has "
+                f"been run (query error: {exc}). Re-run the audit so "
+                f"the attestation lookup can complete."
+            ),
+        }
+
+
 # ── Orchestration ─────────────────────────────────────────────────────────────
 
 def _tally(findings: list[dict[str, Any]]) -> dict[str, int]:
@@ -621,10 +760,23 @@ def _tally(findings: list[dict[str, Any]]) -> dict[str, int]:
     }
 
 
-async def _execute_audit(run_id: int) -> None:
+async def _execute_audit(run_id: int, *, force: bool = False) -> None:
     """The three-layer audit body — runs in the background after the
     endpoint has returned the audit_id. Fail-open: a layer failure still
-    finalises the run with status 'failed' and whatever completed."""
+    finalises the run with status 'failed' and whatever completed.
+
+    force — when True (May 26 2026), attempts to warm strategy_results_cache
+    by running the full data pipeline inline before assembling the payload.
+    Without it, a cold cache made assemble_audit_payload return
+    available=False, every layer skipped, and the audit completed with
+    0 checks recorded — a silent failure mode the user reported as
+    'all layers skip instead of actually executing'. With force=true the
+    run either succeeds (warm cache → real findings) or finalises with
+    status='failed' + a metadata.note that names the cold cache loudly,
+    so the QA tab can surface it. The flag never affects an already-warm
+    cache — the pre-warm call short-circuits when strategy_results_cache
+    already carries a current row.
+    """
     from tools.audit_assembler import (
         assemble_audit_payload, current_data_hash,
     )
@@ -642,6 +794,21 @@ async def _execute_audit(run_id: int) -> None:
         # stored on the run so smart audit caching can tell, cheaply,
         # whether a later request still reflects the same data.
         data_hash = await current_data_hash() or None
+
+        # force=true pre-warm. Replicates the cache-population path
+        # /api/backtest/compare uses on a dashboard load: if the
+        # strategy cache is cold, run the pipeline inline (off the
+        # event loop) so assemble_audit_payload sees real data. A
+        # warming failure is logged but does not block — the audit
+        # then surfaces 'available=False' via the explicit status
+        # branch below, which is the loud-failure path.
+        if force:
+            try:
+                await _prewarm_strategy_cache(run_id)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("audit_prewarm_failed",
+                            run_id=run_id, error=str(exc))
+
         payload = await assemble_audit_payload()
         metadata = {
             "available": payload.get("available"),
@@ -650,6 +817,36 @@ async def _execute_audit(run_id: int) -> None:
         if payload.get("metadata"):
             metadata["study_period"] = payload["metadata"].get("study_period")
             metadata["risk_free_rate"] = payload["metadata"].get("risk_free_rate")
+
+        # Loud-failure branch (May 26 2026). A payload that the
+        # assembler marks unavailable used to fall through into the
+        # layer calls, each of which returned skip+empty silently;
+        # the run finalised as 'complete' with 0 checks and the user
+        # saw a green-looking row carrying no information. Now we
+        # detect that state explicitly and finalise as 'failed' with
+        # the assembler's note, so the QA tab can surface what to
+        # do (warm the dashboard, retry).
+        if not payload.get("available"):
+            note = payload.get(
+                "note",
+                "audit payload unavailable — strategy or market cache cold",
+            )
+            log.warning("audit_payload_unavailable",
+                        run_id=run_id, note=note, forced=force)
+            metadata["note"] = note
+            metadata["forced"] = force
+            await _finalise_audit(
+                run_id, status="failed",
+                layer_statuses={"1": "skipped_no_data",
+                                "2": "skipped_no_data",
+                                "3": "skipped_no_data"},
+                counts={"total": 0, "passed": 0, "failed": 0, "warnings": 0},
+                metadata=metadata, data_hash=data_hash,
+            )
+            log.info("audit_complete", run_id=run_id, status="failed",
+                     data_hash=data_hash, total=0, passed=0, failed=0,
+                     warnings=0, reason="payload_unavailable")
+            return
 
         l1 = layer_1_raw_data_audit(payload)
         l2 = await layer_2_metric_audit(payload)
@@ -684,13 +881,60 @@ async def _execute_audit(run_id: int) -> None:
              data_hash=data_hash, **counts)
 
 
+async def _prewarm_strategy_cache(run_id: int) -> None:
+    """Mirror the /api/backtest/compare cache-population path so a
+    force=true audit run never sees a cold strategy_results_cache. Reads
+    the latest cache row first; only if it is empty does the heavy
+    get_full_history + run_all_strategies pipeline execute (off-loop in
+    a worker thread, never blocking the audit's event loop).
+    """
+    import asyncio as _asyncio
+    from tools.cache import (
+        _compute_data_hash, get_strategy_cache, set_strategy_cache,
+    )
+
+    try:
+        from tools.data_fetcher import get_full_history_async
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_prewarm_import_failed",
+                    run_id=run_id, error=str(exc))
+        return
+
+    history = await get_full_history_async()
+    monthly = history.get("equity_monthly")
+    n_rows = len(monthly) if monthly is not None else 0
+    if n_rows == 0:
+        log.warning("audit_prewarm_no_history", run_id=run_id)
+        return
+    last_date = str(monthly.index[-1].date())
+    strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
+    cached = await get_strategy_cache(strategy_hash)
+    if cached:
+        log.info("audit_prewarm_cache_hit", run_id=run_id,
+                 strategy_hash=strategy_hash[:8])
+        return
+
+    from tools.backtester import run_all_strategies
+    results_dict = await _asyncio.to_thread(run_all_strategies, history)
+    await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
+    log.info("audit_prewarm_cache_filled", run_id=run_id,
+             strategy_hash=strategy_hash[:8], n_strategies=len(results_dict))
+
+
 async def start_audit(
-    triggered_by: str = "manual", email: str = "",
+    triggered_by: str = "manual", email: str = "", *,
+    force: bool = False,
 ) -> dict[str, Any]:
     """
     Claims an audit run and fires the three layers in the background.
     Returns immediately with the audit_id. A concurrent run is refused
     with already_running and the in-flight run's id.
+
+    force — when True (May 26 2026), the background _execute_audit
+    pre-warms strategy_results_cache before assembling the payload.
+    Symmetric with /api/qa/audit's force flag (PR #fdd0f57): a manual
+    "Run Full QA" click on a cold cache should produce real findings,
+    not a silent 'all layers skip'.
     """
     existing = await is_audit_running()
     if existing is not None:
@@ -700,14 +944,14 @@ async def start_audit(
         return {"status": "failed", "reason": "no_database"}
     try:
         import asyncio
-        task = asyncio.create_task(_execute_audit(run_id))
+        task = asyncio.create_task(_execute_audit(run_id, force=force))
         _audit_bg_tasks.add(task)
         task.add_done_callback(_audit_bg_tasks.discard)
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_fire_failed", run_id=run_id, error=str(exc))
         return {"status": "failed", "reason": "could_not_start",
                 "audit_id": run_id}
-    return {"status": "started", "audit_id": run_id}
+    return {"status": "started", "audit_id": run_id, "forced": force}
 
 
 # ── Smart audit caching — the auto-trigger ────────────────────────────────────

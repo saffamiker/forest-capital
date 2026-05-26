@@ -419,6 +419,10 @@ def classify_hmm_regime(
         "state_means": {label_map[i]: round(float(state_means[i]) * ANNUALIZATION_FACTOR, 4)
                         for i in range(n_states)},
         "historical_labels": labelled_series.to_dict(),
+        # Alias — refresh_transition_matrix and chart_renderers both read
+        # "labelled_series" from this return dict. Without the alias the
+        # transition_matrix never lands in cache (AN04 WARN).
+        "labelled_series": labelled_series.to_dict(),
         "converged": bool(model.monitor_.converged),
     }
 

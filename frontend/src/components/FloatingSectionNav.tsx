@@ -312,6 +312,25 @@ export default function FloatingSectionNav({
     })
   }, [pageKey])
 
+  // Mobile-drawer clearance for the scrollable main column. The
+  // mobile drawer is `fixed bottom-0` and 44px tall when collapsed;
+  // without bottom padding on <main>, the page's last content (the
+  // Academic Review red error card the user reported as 'hidden')
+  // sits behind it. Inject a class onto the page's scrollable
+  // ancestor while this component is mounted; remove on unmount so
+  // pages without a section nav don't keep the padding. md:hidden
+  // (no drawer on desktop) is enforced via the data attribute the
+  // CSS rule targets.
+  useEffect(() => {
+    if (sections.length < minSections) return
+    const scrollable = (document.querySelector('main') as HTMLElement | null)
+    if (!scrollable) return
+    scrollable.dataset.fcMobileNavSpacer = 'true'
+    return () => {
+      delete scrollable.dataset.fcMobileNavSpacer
+    }
+  }, [sections, minSections])
+
   // Suppress the nav on a page with too few sections.
   if (sections.length < minSections) return null
 
