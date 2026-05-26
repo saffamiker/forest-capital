@@ -37,7 +37,23 @@ export interface TestScript {
 // v2 (May 22 2026) — adds the report-writer editor flow + macro research +
 // explainer CIO follow-up + diversification chart steps to all three
 // scripts; adds QA audit / failure / issue tracker steps to Molly's script.
-export const TEST_SCRIPT_VERSION = 3
+// v3 (May 25 2026) — UAT guide reset after PRs 147-153.
+// v4 (May 26 2026) — addresses the today-PR change axes that invalidated
+// the v3 scripts:
+//   - Academic Review moved /council -> /qa (commit 9ff578b, May 25);
+//     17 tests had route='/council' against the [data-tour="academic-
+//     review"] anchor that now lives on the QA Hub. Route updated.
+//   - [[BOB]] section callouts removed from the report template
+//     (PR #176); the writer's [BOB] block emission semantics
+//     changed (PR #178). The bob_writer_bob_blocks test expected
+//     visible callout BADGES — reworded to inline markers.
+//   - word_count_over_budget is now warn-only after the rationalization
+//     pass (PR #184); bob_writer_word_counts and bob_writer_final_check
+//     reworded to reflect the new gate.
+//   - The midpoint paper no longer carries trailing [BOB] PRE-POPULATED
+//     BLOCKS after References (PR #178 commit 70a9290); bob_doc_midpoint
+//     expectation refreshed.
+export const TEST_SCRIPT_VERSION = 4
 
 const allTesters: TestScript = {
   id: 'all_testers_v1',
@@ -213,24 +229,27 @@ const allTesters: TestScript = {
       allowSkip: true,
     },
     {
-      id: 'council_review_button', route: '/council',
+      // v4 (May 26 2026) — Academic Review moved from Council to QA
+      // Hub (commit 9ff578b). The `[data-tour="academic-review"]`
+      // anchor now lives in AcademicReviewSection on QAHub.tsx.
+      id: 'council_review_button', route: '/qa',
       target: '[data-tour="academic-review"]',
       title: 'Academic Review button is prominent',
-      instruction: 'Find the Academic Review trigger on the Council '
-        + 'screen.',
+      instruction: 'Open the QA Audit screen and find the Academic '
+        + 'Review trigger.',
       expectedResult: 'It is a visually prominent amber card.',
       allowSkip: true,
     },
     {
-      id: 'council_review_start', route: '/council',
+      id: 'council_review_start', route: '/qa',
       target: '[data-tour="academic-review"]',
       title: 'Academic Review starts',
-      instruction: 'Click the Academic Review button.',
+      instruction: 'Click the Academic Review button on QA Audit.',
       expectedResult: 'The review session begins.',
       allowSkip: true,
     },
     {
-      id: 'council_review_loading', route: '/council', target: null,
+      id: 'council_review_loading', route: '/qa', target: null,
       title: 'Academic Review loading state',
       instruction: 'Watch the screen immediately after starting the '
         + 'review.',
@@ -238,7 +257,7 @@ const allTesters: TestScript = {
       allowSkip: true,
     },
     {
-      id: 'council_verdict', route: '/council', target: null,
+      id: 'council_verdict', route: '/qa', target: null,
       title: 'Verdict renders with badges',
       instruction: 'Wait for the Academic Review verdict to finish.',
       expectedResult: 'The verdict renders with section headings and '
@@ -246,7 +265,7 @@ const allTesters: TestScript = {
       allowSkip: true,
     },
     {
-      id: 'council_peer_accordion', route: '/council', target: null,
+      id: 'council_peer_accordion', route: '/qa', target: null,
       title: 'Peer responses accordion',
       instruction: 'Find the peer responses section under the verdict.',
       expectedResult: 'The peer responses accordion expands and collapses.',
@@ -742,22 +761,26 @@ const bob: TestScript = {
       allowSkip: true,
     },
     // ── Academic Review ────────────────────────────────────────────────
+    // v4 (May 26 2026) — Academic Review moved from Council to QA Hub
+    // (commit 9ff578b). All seven steps in this block follow the
+    // button to /qa.
     {
-      id: 'bob_review_start', route: '/council', target: '[data-tour="academic-review"]',
+      id: 'bob_review_start', route: '/qa', target: '[data-tour="academic-review"]',
       title: 'Start an Academic Review',
-      instruction: 'Click the amber Academic Review button.',
+      instruction: 'On the QA Audit screen, click the amber Academic '
+        + 'Review button.',
       expectedResult: 'The review session starts.',
       allowSkip: true,
     },
     {
-      id: 'bob_review_wait', route: '/council', target: null,
+      id: 'bob_review_wait', route: '/qa', target: null,
       title: 'Wait for the verdict',
       instruction: 'Wait for the full verdict (30–45 seconds).',
       expectedResult: 'The verdict streams in and completes.',
       allowSkip: true,
     },
     {
-      id: 'bob_review_sections', route: '/council', target: null,
+      id: 'bob_review_sections', route: '/qa', target: null,
       title: 'Verdict has five sections',
       instruction: 'Read the verdict.',
       expectedResult: 'It has all five sections: Data Sufficiency, '
@@ -766,28 +789,28 @@ const bob: TestScript = {
       allowSkip: true,
     },
     {
-      id: 'bob_review_badges', route: '/council', target: null,
+      id: 'bob_review_badges', route: '/qa', target: null,
       title: 'Section rating badges',
       instruction: 'Look at each verdict section.',
       expectedResult: 'Each section has a rating badge.',
       allowSkip: true,
     },
     {
-      id: 'bob_review_priority', route: '/council', target: null,
+      id: 'bob_review_priority', route: '/qa', target: null,
       title: 'Priority areas are specific',
       instruction: 'Read the Priority Investigation section.',
       expectedResult: 'Priority areas are specific and numbered.',
       allowSkip: true,
     },
     {
-      id: 'bob_review_readiness', route: '/council', target: null,
+      id: 'bob_review_readiness', route: '/qa', target: null,
       title: 'Overall Readiness assessment',
       instruction: 'Read the Overall Readiness section.',
       expectedResult: 'It gives a clear, honest assessment.',
       allowSkip: true,
     },
     {
-      id: 'bob_review_peers', route: '/council', target: null,
+      id: 'bob_review_peers', route: '/qa', target: null,
       title: 'Peer responses accordion',
       instruction: 'Expand the peer responses accordion.',
       expectedResult: 'It shows multiple agent perspectives.',
@@ -797,12 +820,24 @@ const bob: TestScript = {
     {
       id: 'bob_doc_midpoint', route: '/reports', target: null,
       title: 'Generate the midpoint paper',
-      instruction: 'In Generate Documents, click Generate Midpoint Paper, '
-        + 'wait (30–60s), download the .docx and open it in Word.',
-      expectedResult: 'The .docx is double-spaced 12 pt, has four headed '
-        + 'sections, embedded data tables, team activity in Section 3, '
-        + 'page numbers, runs to three pages or under, and (if a review '
-        + 'has been run and caches are warm) has no [DATA PENDING].',
+      // v4 (May 26 2026) — PR #178 commit 70a9290 changed the writer
+      // prompt so interpretation goes INLINE within sections 1-4
+      // rather than into trailing [BOB] PRE-POPULATED BLOCKS at the
+      // end of the document. PR #176 separately removed the [[BOB]]
+      // section-callout boilerplate. The midpoint paper structure
+      // is now: four headed sections with all analytical content
+      // INSIDE the sections, References, end — no trailing orphan
+      // paragraphs after References.
+      instruction: 'In Generate Documents, click Generate Midpoint '
+        + 'Paper, wait (30–60s), download the .docx and open it in '
+        + 'Word.',
+      expectedResult: 'The .docx is double-spaced 12 pt, has four '
+        + 'headed sections with all analytical content interleaved '
+        + 'INSIDE the sections (not in trailing [BOB] blocks after '
+        + 'References), embedded data tables, team activity in '
+        + 'Section 3, page numbers, runs to three pages or under. '
+        + 'No [[BOB]] section-callout boilerplate. With warm caches '
+        + 'no [DATA PENDING] markers.',
       allowSkip: true,
     },
     {
@@ -899,10 +934,21 @@ const bob: TestScript = {
     },
     {
       id: 'bob_writer_bob_blocks', route: '/reports/writer', target: null,
-      title: '[BOB] callout blocks render',
-      instruction: 'Scroll to the preview pane.',
-      expectedResult: 'Any [BOB] / [DATA REQUIRED] / [CITATION REQUIRED] '
-        + 'markers are highlighted as amber callout badges.',
+      title: 'Inline [BOB] markers render',
+      // v4 (May 26 2026) — PR #176 removed the [[BOB]] section-level
+      // callouts from the report template; PR #178 commit 70a9290
+      // changed the writer's prompt so all interpretation goes inline
+      // rather than into trailing [BOB] PRE-POPULATED BLOCKS. What
+      // remains are INLINE [BOB] / [DATA REQUIRED] / [CITATION
+      // REQUIRED] markers within the section body that the editor
+      // highlights as amber callout chips — not the prior full-block
+      // callout badges.
+      instruction: 'Scroll to the preview pane and look for inline '
+        + 'amber-highlighted markers within the section text.',
+      expectedResult: 'Inline [BOB] / [DATA REQUIRED] / [CITATION '
+        + 'REQUIRED] markers are highlighted in the editor body. The '
+        + 'paper does NOT have trailing [BOB] blocks appearing after '
+        + 'the References section.',
       allowSkip: true,
     },
     {
@@ -944,18 +990,34 @@ const bob: TestScript = {
     {
       id: 'bob_writer_word_counts', route: '/reports/writer', target: null,
       title: 'Word count sidebar updates',
-      instruction: 'Look at the Word Counts sidebar.',
+      // v4 (May 26 2026) — PR #184 added the rationalization pass
+      // BEFORE the post-check, so a section landing >10% over budget
+      // is compressed in place on Generate. The colour rules still
+      // apply, but red-status sections are typically rationalized
+      // back to green/amber before the sidebar settles.
+      instruction: 'Look at the Word Counts sidebar after Generate '
+        + 'Draft completes.',
       expectedResult: 'Each section shows current words / budget; over '
-        + 'budget renders amber, 10%+ over renders red.',
+        + 'budget renders amber, 10%+ over renders red. The May-26 '
+        + 'rationalization pass typically compresses red sections '
+        + 'back into the amber or green band before the sidebar '
+        + 'settles, so seeing all green / amber is the expected '
+        + 'happy path.',
       allowSkip: true,
     },
     {
       id: 'bob_writer_final_check', route: '/reports/writer', target: null,
       title: 'Run Final Check',
+      // v4 (May 26 2026) — PR #184 moved word_count_over_budget OUT
+      // of flag_count and INTO a separate warning_count. A section
+      // still over budget after rationalization is a warn-only
+      // signal — it never blocks download.
       instruction: 'After resolving every [BOB] block, click Run Final '
         + 'Check.',
       expectedResult: 'Step 9 turns green; the flag count drops to 0; '
-        + 'the Download Paper button becomes enabled.',
+        + 'the Download Paper button becomes enabled. A red word-count '
+        + 'badge on any section is warn-only (PR #184) and does NOT '
+        + 'block download.',
       allowSkip: true,
     },
     {
@@ -1120,22 +1182,29 @@ const molly: TestScript = {
       allowSkip: true,
     },
     // ── Peer review preparation ────────────────────────────────────────
+    // v4 (May 26 2026) — Academic Review moved from Council to QA Hub
+    // (commit 9ff578b). molly_peer_review + molly_peer_readiness +
+    // molly_peer_priority follow the Academic Review verdict on /qa.
+    // molly_peer_questions and molly_peer_quality stay on /council
+    // because they exercise the regular Council "ask a question" flow,
+    // not the Academic Review verdict.
     {
-      id: 'molly_peer_review', route: '/council', target: '[data-tour="academic-review"]',
+      id: 'molly_peer_review', route: '/qa', target: '[data-tour="academic-review"]',
       title: 'Run an Academic Review',
-      instruction: 'Run an Academic Review session.',
+      instruction: 'On the QA Audit screen, run an Academic Review '
+        + 'session.',
       expectedResult: 'The verdict completes.',
       allowSkip: true,
     },
     {
-      id: 'molly_peer_readiness', route: '/council', target: null,
+      id: 'molly_peer_readiness', route: '/qa', target: null,
       title: 'Read Overall Readiness',
       instruction: 'Read the Overall Readiness section of the verdict.',
       expectedResult: 'It reads as a clear, honest assessment.',
       allowSkip: true,
     },
     {
-      id: 'molly_peer_priority', route: '/council', target: null,
+      id: 'molly_peer_priority', route: '/qa', target: null,
       title: 'Identify the top priority area',
       instruction: 'Find the top Priority Area for Further Investigation.',
       expectedResult: 'A clear top priority area is identifiable.',
@@ -1144,8 +1213,8 @@ const molly: TestScript = {
     {
       id: 'molly_peer_questions', route: '/council', target: null,
       title: 'Ask about peer-review questions',
-      instruction: 'Ask the council: "What questions might a peer '
-        + 'reviewer ask about our regime analysis methodology?"',
+      instruction: 'On the Council screen, ask: "What questions might '
+        + 'a peer reviewer ask about our regime analysis methodology?"',
       expectedResult: 'The council answers.',
       allowSkip: true,
     },
