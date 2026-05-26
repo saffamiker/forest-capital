@@ -13,6 +13,7 @@ a run as the downloadable text report for the Analytical Appendix.
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from typing import Any
 
@@ -1015,12 +1016,104 @@ async def _execute_audit(run_id: int, *, force: bool = False) -> None:
                      warnings=0, reason="payload_unavailable")
             return
 
+        # Pre-flight diagnostic — log exactly what data the layers
+        # are about to receive. May 26 2026 user spec: "Add logging
+        # to show exactly what data the layers receive when they
+        # execute." This shows up in Render once per audit run and
+        # tells the operator whether the data shape is what the
+        # layer code expects.
+        raw = payload.get("raw_data") or {}
+        assets = raw.get("asset_returns") or {}
+        strategy_returns = raw.get("strategy_returns") or {}
+        platform = payload.get("platform_computed") or {}
+        log.info(
+            "audit_layers_preflight",
+            run_id=run_id,
+            forced=force,
+            raw_inputs_hash=payload.get("raw_inputs_hash"),
+            equity_obs=len(assets.get("equity") or []),
+            ig_obs=len(assets.get("ig") or []),
+            hy_obs=len(assets.get("hy") or []),
+            n_strategies=len(strategy_returns),
+            strategy_names=sorted(list(strategy_returns.keys()))[:12],
+            has_summary_statistics=bool(platform.get("summary_statistics")),
+            has_regime_conditional=bool(platform.get("regime_conditional")),
+            has_factor_loadings=bool(platform.get("factor_loadings")),
+            has_efficient_frontier=bool(
+                platform.get("efficient_frontier", {}).get("max_sharpe_point")),
+            anthropic_api_key_present=bool(os.getenv("ANTHROPIC_API_KEY")),
+            environment=os.getenv("ENVIRONMENT", ""),
+        )
+
         l1 = layer_1_raw_data_audit(payload)
+        log.info("audit_layer_complete",
+                 run_id=run_id, layer=1,
+                 status=l1.get("status"),
+                 n_findings=len(l1.get("findings") or []))
         l2 = await layer_2_metric_audit(payload)
+        log.info("audit_layer_complete",
+                 run_id=run_id, layer=2,
+                 status=l2.get("status"),
+                 n_findings=len(l2.get("findings") or []))
         l3 = await layer_3_consistency_audit(payload)
+        log.info("audit_layer_complete",
+                 run_id=run_id, layer=3,
+                 status=l3.get("status"),
+                 n_findings=len(l3.get("findings") or []))
         layer_statuses = {"1": l1["status"], "2": l2["status"],
                           "3": l3["status"]}
         all_findings = l1["findings"] + l2["findings"] + l3["findings"]
+
+        # SECOND LOUD-FAILURE BRANCH (May 26 2026 follow-up). The
+        # payload-unavailable check above catches assemble_audit_payload
+        # returning available=False, but a SEPARATE failure mode exists:
+        # payload.available=True (strategies + market data ARE in the
+        # cache) yet every layer's internal gate fires and each returns
+        # {status: 'skip', findings: []}. The audit then stored as
+        # 'complete' with 0 checks — exactly the hollow row the user
+        # has been seeing. Promote that state to 'failed' so the
+        # cache-hit guard in get_last_substantive_audit will reject it
+        # AND the downloaded PDF cannot read as a real audit.
+        #
+        # The most common cause of this state is layer 2's internal
+        # `_is_test_env() or not os.getenv('ANTHROPIC_API_KEY')` gate
+        # — but L1 and L3 do NOT have that gate, so when this branch
+        # fires it's because each layer returned skip without raising.
+        skipped_layer_values = {"skip", "skipped", "skipped_no_data",
+                                "no_data", ""}
+        all_skipped = all(
+            str(s or "").strip().lower() in skipped_layer_values
+            for s in layer_statuses.values()
+        )
+        if all_skipped and len(all_findings) == 0:
+            log.warning(
+                "audit_all_layers_skipped",
+                run_id=run_id,
+                layer_statuses=layer_statuses,
+                forced=force,
+                note="Every layer returned skip + 0 findings despite "
+                     "payload.available=True. Promoting to status=failed "
+                     "so the cache-hit guard cannot serve this row.",
+            )
+            metadata["note"] = (
+                "All three layers returned skip + 0 findings despite a "
+                "fully-assembled payload. Most likely cause: layer 2's "
+                "ANTHROPIC_API_KEY or ENVIRONMENT=test gate fired. Check "
+                "the audit_layers_preflight log line for env state."
+            )
+            metadata["forced"] = force
+            await _finalise_audit(
+                run_id, status="failed",
+                layer_statuses=layer_statuses,
+                counts={"total": 0, "passed": 0,
+                        "failed": 0, "warnings": 0},
+                metadata=metadata, data_hash=data_hash,
+            )
+            log.info("audit_complete", run_id=run_id, status="failed",
+                     data_hash=data_hash, total=0, passed=0, failed=0,
+                     warnings=0, reason="all_layers_skipped")
+            return
+
         await _store_findings(run_id, all_findings)
         # Workstream A — apply auto-carry of prior acks against the
         # newly-stored findings. Each WARN whose check_id has a
@@ -1054,11 +1147,20 @@ async def _prewarm_strategy_cache(run_id: int) -> None:
     the latest cache row first; only if it is empty does the heavy
     get_full_history + run_all_strategies pipeline execute (off-loop in
     a worker thread, never blocking the audit's event loop).
+
+    May 26 2026 — diagnostic logging at every decision point. The user
+    reported audit #43 ran force=true but still produced zero checks;
+    the warm path logged nothing visible, so we couldn't tell whether
+    the pipeline returned data, whether the cache was already current,
+    or whether run_all_strategies actually ran. Each branch now emits
+    a structured log line naming the variables that drove the decision.
     """
     import asyncio as _asyncio
     from tools.cache import (
         _compute_data_hash, get_strategy_cache, set_strategy_cache,
     )
+
+    log.info("audit_prewarm_started", run_id=run_id)
 
     try:
         from tools.data_fetcher import get_full_history_async
@@ -1067,25 +1169,76 @@ async def _prewarm_strategy_cache(run_id: int) -> None:
                     run_id=run_id, error=str(exc))
         return
 
-    history = await get_full_history_async()
+    try:
+        history = await get_full_history_async()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_prewarm_history_fetch_failed",
+                    run_id=run_id, error=str(exc),
+                    exc_type=type(exc).__name__)
+        return
+
     monthly = history.get("equity_monthly")
     n_rows = len(monthly) if monthly is not None else 0
+    log.info(
+        "audit_prewarm_history_loaded",
+        run_id=run_id,
+        equity_monthly_rows=n_rows,
+        equity_monthly_first_date=(
+            str(monthly.index[0].date()) if monthly is not None and n_rows > 0
+            else None),
+        equity_monthly_last_date=(
+            str(monthly.index[-1].date()) if monthly is not None and n_rows > 0
+            else None),
+        has_ig_monthly="ig_monthly" in history,
+        has_hy_monthly="hy_monthly" in history,
+        history_keys=sorted(list(history.keys())),
+    )
+
     if n_rows == 0:
-        log.warning("audit_prewarm_no_history", run_id=run_id)
+        log.warning("audit_prewarm_no_history", run_id=run_id,
+                    history_keys=sorted(list(history.keys())))
         return
+
     last_date = str(monthly.index[-1].date())
     strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
     cached = await get_strategy_cache(strategy_hash)
     if cached:
-        log.info("audit_prewarm_cache_hit", run_id=run_id,
-                 strategy_hash=strategy_hash[:8])
+        log.info("audit_prewarm_cache_hit",
+                 run_id=run_id,
+                 strategy_hash=strategy_hash[:8],
+                 n_cached_strategies=len(cached) if cached else 0)
         return
 
+    log.info("audit_prewarm_cache_miss_running_strategies",
+             run_id=run_id, strategy_hash=strategy_hash[:8],
+             n_rows=n_rows, last_date=last_date)
+
     from tools.backtester import run_all_strategies
-    results_dict = await _asyncio.to_thread(run_all_strategies, history)
-    await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
-    log.info("audit_prewarm_cache_filled", run_id=run_id,
-             strategy_hash=strategy_hash[:8], n_strategies=len(results_dict))
+    try:
+        results_dict = await _asyncio.to_thread(run_all_strategies, history)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_prewarm_strategies_failed",
+                    run_id=run_id, error=str(exc),
+                    exc_type=type(exc).__name__)
+        return
+
+    if not results_dict:
+        log.warning("audit_prewarm_strategies_empty",
+                    run_id=run_id, strategy_hash=strategy_hash[:8])
+        return
+
+    try:
+        await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_prewarm_cache_write_failed",
+                    run_id=run_id, error=str(exc),
+                    n_strategies=len(results_dict))
+        return
+
+    log.info("audit_prewarm_cache_filled",
+             run_id=run_id, strategy_hash=strategy_hash[:8],
+             n_strategies=len(results_dict),
+             strategy_names=sorted(list(results_dict.keys())))
 
 
 async def start_audit(
