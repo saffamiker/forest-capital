@@ -127,8 +127,17 @@ class TestDocumentGenerationContract:
         assert "Roles and Division of Labor" in text
         assert "Next Steps" in text
         assert "AI DRAFT" in text          # mandatory banner
-        # Section 2 (Preliminary Results) carries the [[BOB]] callout.
-        assert "BOB — YOUR INTERPRETATION REQUIRED" in text
+        # May 26 2026 — the six [[BOB]] section callouts were removed.
+        # The Academic Writer's prose stands as each section's
+        # interpretation; no placeholder titles should appear.
+        for banned in (
+            "BOB — YOUR INTERPRETATION REQUIRED",
+            "BOB — PERSONALISE THIS SECTION",
+            "BOB — REVIEW AND REFINE",
+        ):
+            assert banned not in text, f"unexpected placeholder: {banned}"
+        # The submission checklist now lists only [[MOLLY]] callouts.
+        assert "[[BOB]]" not in text
         # Cold caches in the test environment — every data-dependent
         # section degrades to a [DATA PENDING] marker.
         assert "[DATA PENDING]" in text
@@ -145,10 +154,15 @@ class TestDocumentGenerationContract:
         assert "Key Findings" in text
         assert "Limitations and Risks" in text
         assert "Final Recommendations" in text
-        # The three judgement sections each carry a [[BOB]] callout.
-        assert "BOB — YOUR FRAMING" in text
-        assert "BOB — YOUR JUDGEMENT" in text
-        assert "BOB — YOUR RECOMMENDATION" in text
+        # May 26 2026 — the three judgement-section [[BOB]] callouts
+        # (FRAMING / JUDGEMENT / RECOMMENDATION) were removed.
+        for banned in (
+            "BOB — YOUR FRAMING",
+            "BOB — YOUR JUDGEMENT",
+            "BOB — YOUR RECOMMENDATION",
+        ):
+            assert banned not in text, f"unexpected placeholder: {banned}"
+        assert "[[BOB]]" not in text
         assert "[DATA PENDING]" in text
 
     def test_presentation_deck_document_is_a_valid_16_slide_pptx(self):
