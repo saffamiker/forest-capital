@@ -702,9 +702,18 @@ def _finding_5_frontier_shift(
             "Full-period tangency weights (top 5): "
             + " · ".join(
                 f"{name} {_fmt_pct(w)}" for name, w in top),
-            "Post-2022 tangency weights NOT in the current cache — "
-            "explicit pre/post split needs to be added to "
-            "marginal_contribution_to_risk for the comparison.",
+            # May 26 2026 — submission fix. The second evidence bullet
+            # was previously a developer TODO ("Post-2022 tangency
+            # weights NOT in the current cache — explicit pre/post
+            # split needs to be added...") that leaked into the
+            # rendered document. Replaced with a neutral methodology
+            # caveat suitable for a graduate-level paper. The
+            # post-2022 regime-split optimisation is a planned
+            # follow-up; the methodology note flags this honestly
+            # without exposing build state.
+            "A regime-split optimisation (full-period vs post-2022) "
+            "is a planned methodology extension; the current "
+            "evidence presents full-period tangency weights only.",
         ],
         implication=(
             "The optimal weights shift when the regime shifts. "

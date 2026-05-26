@@ -540,11 +540,17 @@ def _appendix_b(doc: Document, context: dict) -> None:
                 doc, f"**SURPRISE:** {f.get('surprise_reason') or 'yes'}")
 
     md = context.get("findings_metadata") or {}
+    # May 26 2026 — submission fix. dict.get(key, default) returns the
+    # value when the key exists, EVEN IF that value is None. So
+    # md.get('data_hash', '—') rendered as 'None' when the underlying
+    # findings_row carried a NULL data_hash. _fmt_value normalises
+    # None / dict / etc. to an em dash. Same defensive read applied
+    # to every interpolated field.
     _add_body_paragraph(doc, (
         f"All figures pulled live from platform analytics cache on "
-        f"{md.get('computed_at', '—')}. Data hash: "
-        f"{md.get('data_hash', '—')}. Independent validation: "
-        f"three-layer audit {md.get('audit_status', '—')}."))
+        f"{_fmt_value(md.get('computed_at'))}. Data hash: "
+        f"{_fmt_value(md.get('data_hash'))}. Independent validation: "
+        f"three-layer audit {_fmt_value(md.get('audit_status'))}."))
 
 
 def _appendix_c(doc: Document, context: dict) -> None:
@@ -676,11 +682,32 @@ def _appendix_d(doc: Document, context: dict) -> None:
 
 
 def _build_references_md(citations: dict) -> str:
-    """Builds the consolidated References markdown from verified
-    entries only. Alphabetical by first-author surname."""
+    """Builds the consolidated References markdown from every
+    verified-equivalent entry. Alphabetical by first-author surname.
+
+    May 26 2026 — submission fix. The filter previously matched ONLY
+    the literal 'verified' state, which is the automatic
+    trusted-domain pass-1 outcome. Citations that Bob ADJUDICATED
+    via the Citation Review panel (becoming human_verified /
+    search_selected / manually_added) were silently excluded from
+    References — making the section render empty even when Bob had
+    just confirmed every citation. Broadened to match
+    CITATION_VERIFIED_STATES (the same set citation_quality() uses).
+    """
+    # Inline the verified set so this module has no import-cycle risk
+    # with template_pipeline.CITATION_VERIFIED_STATES. The two must
+    # stay in lockstep; the inline copy carries a comment naming the
+    # canonical source.
+    _VERIFIED_STATES = frozenset({
+        # Mirrors template_pipeline.CITATION_VERIFIED_STATES.
+        "verified",          # automatic trusted-domain hit
+        "human_verified",    # Bob accepted an untrusted-domain hit
+        "search_selected",   # Bob accepted one of the alternatives
+        "manually_added",    # Bob typed the citation in manually
+    })
     verified = [
         c for c in (citations or {}).values()
-        if c.get("verification_status") == "verified"]
+        if c.get("verification_status") in _VERIFIED_STATES]
     if not verified:
         return ""
     verified.sort(key=lambda c: (c.get("author") or "").lower())
