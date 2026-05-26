@@ -302,7 +302,7 @@ TOUR_VERSION = 2
 # none), the script's steps need re-attestation and a login notification
 # surfaces. Increment by 1 whenever a test script's steps change
 # materially, and bump the matching `version` field in testScripts.ts.
-TEST_SCRIPT_VERSION = 4
+TEST_SCRIPT_VERSION = 5
 
 # ── AI TOKEN COSTS ────────────────────────────────────────────────────────────
 # Per-token USD rates used to estimate the cost of every AI agent call.

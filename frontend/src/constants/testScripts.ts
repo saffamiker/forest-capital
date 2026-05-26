@@ -53,7 +53,25 @@ export interface TestScript {
 //   - The midpoint paper no longer carries trailing [BOB] PRE-POPULATED
 //     BLOCKS after References (PR #178 commit 70a9290); bob_doc_midpoint
 //     expectation refreshed.
-export const TEST_SCRIPT_VERSION = 4
+// v5 (May 26 2026 — same day as v4) — adds ~25 new tests covering
+// today's shipped functionality that had no prior coverage:
+//   - Citation Review 3-level redesign (Finding > Type > Citation,
+//     analytical findings source, gap warning, checkbox match,
+//     relevance filter, show-all toggle) — 11 tests in Bob's section
+//   - QA badge IN02 exclusion + acknowledge-flip behaviour + force
+//     full-audit bypass — 3 tests in Molly's section
+//   - S10 blue CONFIRMED INTENTIONAL badge — 1 test in Bob's section
+//   - Submission pipeline step 4 status semantics + no_audit bypass —
+//     2 tests in Bob's section
+//   - Word count rationalization pass + warn-only over-budget — 2
+//     tests in Bob's section
+//   - Inline interpretation (no trailing [BOB] PRE-POPULATED blocks) +
+//     Section-3 personalization callout — 2 tests in Bob's section
+//   - Mobile drawer clearance on Settings + nav — 2 tests in
+//     All Testers' section
+//   - access_test_panel permission visibility after PR #185 back-fill —
+//     2 tests in Michael's section
+export const TEST_SCRIPT_VERSION = 5
 
 const allTesters: TestScript = {
   id: 'all_testers_v1',
@@ -448,6 +466,34 @@ const allTesters: TestScript = {
         + 'state — sysadmin-only by design).',
       allowSkip: true,
     },
+    // ── Mobile FloatingSectionNav drawer clearance (v5, PR #171) ────────
+    {
+      id: 'mobile_drawer_nav_clearance', route: '/', target: null,
+      title: 'Mobile drawer clears the nav bar',
+      // v5 (May 26 2026, PR #171) — the FloatingSectionNav drawer
+      // was overlapping the top nav at mobile widths. Fix shipped
+      // a top-offset so the drawer starts below the 56px nav.
+      instruction: 'Resize the browser to <640px width (or use a '
+        + 'phone) and open any page that shows the section navigator '
+        + '(QA Audit, Settings, Statistical Evidence, Regime '
+        + 'Analysis, or Reports). Open the drawer.',
+      expectedResult: 'The section drawer starts BELOW the top nav '
+        + 'bar — no overlap; the nav stays clickable.',
+      allowSkip: true,
+    },
+    {
+      id: 'mobile_drawer_settings_overlap', route: '/settings', target: null,
+      title: 'Mobile drawer does not cover Settings content',
+      // v5 (May 26 2026, PR #171) — the drawer's z-index + position
+      // was covering settings sections below it. Fix ensured the
+      // drawer is a peer to content, not an overlay covering it.
+      instruction: 'Resize to <640px width. Open Settings, scroll to '
+        + 'the Data and Study Period section.',
+      expectedResult: 'The section navigator does not obscure the '
+        + 'staleness pills or table rows; content remains readable '
+        + 'while the drawer is open.',
+      allowSkip: true,
+    },
   ],
 }
 
@@ -708,6 +754,40 @@ const michael: TestScript = {
       title: 'SECRET_KEY fail-fast',
       instruction: 'Review the config.py production fail-fast logic.',
       expectedResult: 'Production startup fails if SECRET_KEY is unset.',
+      allowSkip: true,
+    },
+    // ── Permissions — access_test_panel back-fill (v5, PR #185) ────────
+    {
+      id: 'permission_test_panel_visible', route: '/settings', target: null,
+      title: 'Test Administration visible after permission back-fill',
+      // v5 (May 26 2026, PR #185) — migration 046 back-filled the
+      // access_test_panel permission onto every active team_member
+      // and sysadmin row. Before the migration, every existing
+      // platform_users row was missing the permission (it was added
+      // to ROLE_PRESETS on May 24 with NO companion back-fill until
+      // PR #185). After the migration + sign-out/in, the Test
+      // Administration section renders on Settings.
+      instruction: 'Sign out and sign back in (to refresh the JWT '
+        + 'with the back-filled permission), then scroll to the '
+        + 'bottom of the Settings page.',
+      expectedResult: 'The Test Administration section is visible at '
+        + 'the bottom of Settings (below Test Results), with Failure '
+        + 'Reports / Feedback Backlog / Issue Tracker tabs.',
+      allowSkip: true,
+    },
+    {
+      id: 'permission_test_panel_team_member', route: '/settings', target: null,
+      title: 'Team member sees Test Administration (read-only)',
+      // v5 (May 26 2026, PR #185) — team_member preset carries
+      // access_test_panel + view_uat_status; Bob and Molly see the
+      // section and the data tables (read-only — mutate buttons
+      // gate on manage_users).
+      instruction: 'Sign in as Bob (thaob@) or Molly (murdockm@) and '
+        + 'open Settings → Test Administration.',
+      expectedResult: 'The section renders with Failure Reports / '
+        + 'Feedback Backlog / Issue Tracker tabs visible. Data tables '
+        + 'populate (not 403). Action buttons (Mark Resolved, etc.) '
+        + 'are hidden or 403 on click — sysadmin-only.',
       allowSkip: true,
     },
   ],
@@ -1055,6 +1135,292 @@ const bob: TestScript = {
         + '(A: Platform Overview, B: Full Findings, C: Team Activity '
         + 'Log, D: Validation Summary) plus a References section built '
         + 'from verified citations.',
+      allowSkip: true,
+    },
+    // ── Citation Review — 3-level redesign (v5, PR #178 / #186 / #189) ──
+    // The Citation Review panel was redesigned May 26 2026 to surface a
+    // 3-level Finding > Type > Citation hierarchy. PR #186 added
+    // analytical findings as a source; PR #187 made the sourcing prompt
+    // request citation type diversity; PR #189 added a deterministic
+    // concept_id-based relevance filter. These tests cover the new
+    // panel surface end to end.
+    {
+      id: 'cr_panel_loads', route: '/reports/writer', target: null,
+      title: 'Citation Review panel opens',
+      instruction: 'Open the Report Writer, generate a draft, then '
+        + 'click the Citation Review section header to expand it.',
+      expectedResult: 'The panel renders with a header summary chip '
+        + '("N findings · M citations") and one collapsible Finding '
+        + 'section per high+medium-rank finding.',
+      allowSkip: true,
+    },
+    {
+      id: 'cr_finding_sources_badged', route: '/reports/writer', target: null,
+      title: 'Finding source badges colour-coded by source',
+      // v5 — PR #186 added analytical findings; the panel now shows
+      // emerald (Analytical) / blue (Audit) / purple (QA) badges.
+      instruction: 'Look at the badges on each Finding section header.',
+      expectedResult: 'Three distinct badge colours: emerald for '
+        + 'Analytical, blue for Audit, purple for QA. Each badge '
+        + 'names the source.',
+      allowSkip: true,
+    },
+    {
+      id: 'cr_analytical_findings_visible', route: '/reports/writer', target: null,
+      title: 'Analytical findings surface in the panel',
+      // v5 — PR #186 bug fix. Before #186 the panel only listed
+      // audit + QA findings; analytical findings from Step 1 were
+      // invisible.
+      instruction: 'After running Step 1 (Stage Findings), open '
+        + 'Citation Review. Count the Analytical-source findings.',
+      expectedResult: 'At least 6 HIGH and 4 MEDIUM analytical '
+        + 'findings appear (BENCHMARK COMPETITIVENESS, REGIME SHIFT '
+        + 'EVIDENCE, TAIL RISK DIVERGENCE, etc.), each with an '
+        + 'emerald "Analytical" badge.',
+      allowSkip: true,
+    },
+    {
+      id: 'cr_type_subgroups', route: '/reports/writer', target: null,
+      title: 'Citations grouped by 6-value citation type',
+      // v5 — PR #178 6-value taxonomy + PR #187 sourcing prompt.
+      instruction: 'Expand a Finding section that has multiple '
+        + 'citations.',
+      expectedResult: 'Citations are grouped into sub-headers by '
+        + 'type — Theoretical / Empirical / Methodological / '
+        + 'Regulatory / Data source / Practitioner. Each sub-header '
+        + 'shows a "N of M matched" count.',
+      allowSkip: true,
+    },
+    {
+      id: 'cr_type_diversity_in_sourcing', route: '/reports/writer', target: null,
+      title: 'Step 2 sourcing produces type-diverse citations',
+      // v5 — PR #187 taught the sourcing prompt the 6-value taxonomy
+      // and added a diversity steer across passes. Before the PR
+      // every citation came back as "theoretical".
+      instruction: 'Trigger Step 2 (Source Citations) and open '
+        + 'Citation Review. Look at the citation types across the '
+        + 'panel.',
+      expectedResult: 'Citations span at least 2 distinct types '
+        + 'across the panel — not all theoretical. Data-anchored '
+        + 'concepts (FRED series, BAML index) tend to land as '
+        + 'data_source; regulatory concepts as regulatory.',
+      allowSkip: true,
+    },
+    {
+      id: 'cr_gap_warning', route: '/reports/writer', target: null,
+      title: 'Finding with 0 matches shows the gap warning',
+      // v5 — PR #178 redesign.
+      instruction: 'Find a Finding section with no matched citations '
+        + 'yet (matched_count = 0).',
+      expectedResult: 'The section renders an amber "No supporting '
+        + 'citations yet — tick a citation below to record it as '
+        + 'evidence for this finding" warning.',
+      allowSkip: true,
+    },
+    {
+      id: 'cr_checkbox_match', route: '/reports/writer', target: null,
+      title: 'Tick a citation against a finding',
+      // v5 — PR #178 redesign. matched_count increments via the
+      // POST /api/v1/citations/match endpoint.
+      instruction: 'Find a relevant citation under a finding and '
+        + 'tick its checkbox.',
+      expectedResult: 'The checkbox flips checked; the Finding '
+        + 'section header\'s "N matched" count increments by 1.',
+      allowSkip: true,
+    },
+    {
+      id: 'cr_checkbox_unmatch', route: '/reports/writer', target: null,
+      title: 'Untick a citation against a finding',
+      // v5 — PR #178 redesign. DELETE /api/v1/citations/match.
+      instruction: 'Untick a previously checked citation.',
+      expectedResult: 'The checkbox flips unchecked; the Finding\'s '
+        + '"N matched" count decrements by 1; the citation reflows '
+        + 'to the unmatched position within its type sub-group.',
+      allowSkip: true,
+    },
+    {
+      id: 'cr_relevance_filter_default', route: '/reports/writer', target: null,
+      title: 'Citations pre-filtered by concept_id relevance',
+      // v5 — PR #189 (concept_id whole-word match, replacing the
+      // broken token-overlap heuristic from PR #188).
+      instruction: 'Expand a Finding section. Count the citations '
+        + 'visible by default.',
+      expectedResult: 'Only citations whose concept_id whole-word '
+        + 'matches against the finding\'s title or description '
+        + 'render. Typical count: 1–3 per finding, not all 10. A '
+        + 'relevance summary line shows "Showing N of M citations '
+        + 'relevant to this finding · [Show all]".',
+      allowSkip: true,
+    },
+    {
+      id: 'cr_show_all_toggle', route: '/reports/writer', target: null,
+      title: '"Show all" reveals every citation under the finding',
+      // v5 — PR #188/#189 escape hatch for relevance-heuristic
+      // false negatives.
+      instruction: 'Click the "Show all" link in a Finding section\'s '
+        + 'relevance summary.',
+      expectedResult: 'Every citation in the pool renders under the '
+        + 'finding (typically all 10). The toggle text flips to '
+        + '"Show only relevant".',
+      allowSkip: true,
+    },
+    {
+      id: 'cr_matched_always_visible', route: '/reports/writer', target: null,
+      title: 'A matched citation renders even when not heuristically relevant',
+      // v5 — PR #188/#189 matched-citation bypass. The user\'s
+      // explicit match always wins over the heuristic.
+      instruction: 'Tick a citation against a finding it is NOT '
+        + 'heuristically relevant to (Show all first to find it; '
+        + 'tick the checkbox; toggle back to "Show only relevant").',
+      expectedResult: 'The matched citation continues to render in '
+        + 'the default view even though the relevance heuristic '
+        + 'would have hidden it. Untick it and it disappears from '
+        + 'the default view (the relevance filter applies again).',
+      allowSkip: true,
+    },
+    // ── QA badge (v5, PR #176) ──────────────────────────────────────────
+    {
+      id: 'qa_badge_in02_excluded', route: '/qa', target: null,
+      title: 'QA badge excludes IN02 (Academic Review attestation)',
+      // v5 — PR #176. IN02 is the Academic Review attestation; its
+      // WARN state is by design (a manual reviewer action is
+      // required before a paper can ship). It must never contribute
+      // to the QA badge count.
+      instruction: 'Open the QA Audit screen. Find the IN02 row in '
+        + 'the methodology checklist.',
+      expectedResult: 'IN02 displays its current state (typically '
+        + 'WARN) but does NOT contribute to the QA badge\'s warning '
+        + 'count. The badge\'s "N warnings remaining" number EXCLUDES '
+        + 'IN02.',
+      allowSkip: true,
+    },
+    {
+      id: 'qa_badge_acknowledge_flip', route: '/qa', target: null,
+      title: 'Acknowledging the last WARN flips the badge to green',
+      // v5 — PR #176. The QA badge turns green when every WARN
+      // is acknowledged (the IN02 exclusion above + acknowledged
+      // warnings counted as PASS).
+      instruction: 'Acknowledge every WARN finding on the QA Audit '
+        + 'screen via the per-card Acknowledge action.',
+      expectedResult: 'After the last WARN is acknowledged, the QA '
+        + 'badge in the nav bar flips from amber to green.',
+      allowSkip: true,
+    },
+    {
+      id: 'qa_badge_force_full_audit', route: '/qa', target: null,
+      title: 'Force Full Audit bypasses the cache',
+      // v5 — PR #171 4-fix bundle. The Force Audit button passes
+      // force=true to the run endpoint so a fresh audit runs even
+      // when the data-hash cache says one is current.
+      instruction: 'Click "Force Full Audit" on the QA Audit screen.',
+      expectedResult: 'A new audit run starts (visible in the run '
+        + 'history) even if the most recent run is the same data '
+        + 'hash. The audit completes with a fresh timestamp.',
+      allowSkip: true,
+    },
+    // ── S10 blue CONFIRMED INTENTIONAL badge (v5, PR #177) ──────────────
+    {
+      id: 's10_blue_intentional_badge', route: '/qa', target: null,
+      title: 'S10 shows blue CONFIRMED INTENTIONAL, not amber',
+      // v5 — PR #177. S10 is the "single-strategy bias" disclosure.
+      // It is intentionally documented in the paper, not a defect,
+      // so the methodology audit renders it as blue CONFIRMED
+      // INTENTIONAL rather than amber WARN.
+      instruction: 'Find S10 in the methodology checklist on the QA '
+        + 'Audit screen.',
+      expectedResult: 'S10 renders with a blue "CONFIRMED INTENTIONAL" '
+        + 'badge, not an amber WARN.',
+      allowSkip: true,
+    },
+    // ── Submission pipeline step 4 (v5, PR #177) ────────────────────────
+    {
+      id: 'pipeline_step4_complete_on_audit_pass',
+      route: '/reports/writer', target: null,
+      title: 'Pipeline step 4 turns complete when audit passes',
+      // v5 — PR #177. Step 4 (Pull Validation Data) status used to
+      // be derived from run.status === \'pass\' (always false — the
+      // enum is complete | failed | running). Fixed to use
+      // auditCompleted && failed === 0 semantic.
+      instruction: 'Trigger Step 4 after a clean audit run.',
+      expectedResult: 'Step 4 turns green-complete when the audit '
+        + 'has run, all layers completed, and zero failures. It '
+        + 'does NOT stay amber.',
+      allowSkip: true,
+    },
+    {
+      id: 'pipeline_step4_no_audit_bypass',
+      route: '/reports/writer', target: null,
+      title: 'Step 4 with _no_audit:true does not block downstream',
+      // v5 — PR #177. A Step 4 warning with _no_audit:true is the
+      // canonical bypass flag (no statistical audit was needed for
+      // this draft).
+      instruction: 'Generate a draft for a template that does not '
+        + 'require statistical audit; observe Step 4 + downstream.',
+      expectedResult: 'Step 4 renders as warning with a _no_audit '
+        + 'marker but downstream steps still fire. The pipeline is '
+        + 'not blocked.',
+      allowSkip: true,
+    },
+    // ── Word count rationalization + warn-only over-budget (v5, PR #184) ──
+    {
+      id: 'writer_rationalization_compresses',
+      route: '/reports/writer', target: null,
+      title: 'Sections >10% over budget compress automatically',
+      // v5 — PR #184. The rationalization pass runs BEFORE the
+      // post-check on Generate Draft, compressing sections that
+      // would land red on the word-count sidebar.
+      instruction: 'Click Generate Draft on the FNA670 midpoint '
+        + 'template. Wait for the writer to finish (30–60s). Look '
+        + 'at the Word Counts sidebar.',
+      expectedResult: 'All four sections land within ±10% of their '
+        + 'budgets on the FIRST generate (no red badge typically). '
+        + 'Any pre-rationalization red state was compressed away by '
+        + 'the pass.',
+      allowSkip: true,
+    },
+    {
+      id: 'writer_word_count_warn_only',
+      route: '/reports/writer', target: null,
+      title: 'Red word-count is warn-only, never blocks download',
+      // v5 — PR #184. word_count_over_budget moved from flag_count
+      // (hard gate) to warning_count (visible-but-non-blocking).
+      instruction: 'Resolve every [BOB] block but leave a section '
+        + 'red on word count. Click Run Final Check, then Download '
+        + 'Paper.',
+      expectedResult: 'Run Final Check turns Step 9 green and the '
+        + 'flag count drops to 0 EVEN WITH a red word-count badge '
+        + 'on a section. Download Paper becomes enabled.',
+      allowSkip: true,
+    },
+    // ── Inline interpretation (v5, PR #178 commit 70a9290) ──────────────
+    {
+      id: 'writer_no_trailing_bob_blocks',
+      route: '/reports/writer', target: null,
+      title: 'No trailing [BOB] PRE-POPULATED BLOCKS after References',
+      // v5 — PR #178 commit 70a9290. The Academic Writer prompt was
+      // instructed to emit [BOB] PRE-POPULATED BLOCKS at the end of
+      // the paper for a downstream merge step that never existed.
+      // Fixed: interpretation goes inline within sections 1-4.
+      instruction: 'Generate the midpoint paper and scroll to the '
+        + 'bottom of the .docx after References.',
+      expectedResult: 'The document ends cleanly at References. NO '
+        + 'orphan [BOB] paragraphs, NO trailing "Our ..." sentences '
+        + 'restating Section 2 content. Every analytical claim sits '
+        + 'inline within sections 1-4.',
+      allowSkip: true,
+    },
+    {
+      id: 'writer_section3_personalization_callout',
+      route: '/reports/writer', target: null,
+      title: 'Section 3 carries the BOB personalization callout',
+      // v5 — PR #178 + earlier. Section 3 (Roles and Division of
+      // Labor) is pre-seeded from real team activity but Bob must
+      // personalize it — the callout reminds him.
+      instruction: 'Scroll to Section 3 of the generated paper.',
+      expectedResult: 'Section 3 carries a boxed amber "BOB — '
+        + 'PERSONALIZE THIS SECTION" callout above the AI-drafted '
+        + 'roles summary. The AI draft uses real activity counts; '
+        + 'Bob is reminded to put it in his own voice.',
       allowSkip: true,
     },
   ],
