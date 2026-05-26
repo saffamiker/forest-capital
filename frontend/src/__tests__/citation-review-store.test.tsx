@@ -28,6 +28,15 @@ const mockedAxios = axios as unknown as {
 
 
 function makeCitations() {
+  // The three multi-layered sourcing fields (migration 043) are
+  // required on the Citation type since commit 3512b15. Both
+  // entries below set them — the Sharpe Ratio (Sharpe 1994) is a
+  // foundational framework so reads as 'theoretical'; the Acerbi
+  // CVaR paper is a technique / validation reference so reads as
+  // 'methodological'. trust_flag and scoring_rationale stay null
+  // here because the mock represents the pre-multi-layer state of
+  // each row (the new pipeline writes both on insert, but the
+  // store contract serves rows from either pipeline).
   return [
     {
       id: 1, concept_id: 'sharpe_ratio',
@@ -45,6 +54,9 @@ function makeCitations() {
       selection_rationale: null,
       confidence_score: null,
       finding_supported: null,
+      citation_type: 'theoretical',
+      trust_flag: null,
+      scoring_rationale: null,
     },
     {
       id: 2, concept_id: 'cvar_coherent_risk',
@@ -62,6 +74,9 @@ function makeCitations() {
       selection_rationale: null,
       confidence_score: null,
       finding_supported: null,
+      citation_type: 'methodological',
+      trust_flag: null,
+      scoring_rationale: null,
     },
   ]
 }
