@@ -3,11 +3,22 @@ tools/citation_findings.py — Citation Review Level-1 findings.
 
 The Citation Review panel reads its top-level wrappers (Level 1) from
 THIS module. Each wrapper is a high+medium-priority finding sourced
-LIVE from the existing analytical state at panel-open time:
+LIVE from the existing analytical state at panel-open time. THREE
+source streams are merged:
+
+  * analytical_findings_cache — the Step 1 'Stage Findings' output in
+    the Report Writer pipeline. Per-finding rank derived from
+    {nugget_strength}: HIGH -> high, MEDIUM -> medium, LOW dropped.
+    THIS IS THE PRIMARY CITATION TARGET — the Sharpe / regime /
+    factor claims a citation will support. (Added May 26 2026 after
+    the user reported Step 1 producing 6 HIGH findings while the
+    Citation Review panel showed "no findings".)
 
   * audit_findings — the latest substantive statistical audit run
     (status='complete', total_checks>0, no skipped layers).
-    Per-finding rank derived from {status, severity}.
+    Per-finding rank derived from {status, severity}. Statistical-
+    audit defects (D02 splice-junction visibility, etc.) that may
+    need citation support to justify a methodology choice.
 
   * qa_results_cache.checklist_json — the most recent methodology
     audit's verdict for the current strategy_hash. Per-check rank
@@ -214,6 +225,119 @@ async def _gather_qa_findings() -> list[dict[str, Any]]:
         return []
 
 
+def _rank_analytical_finding(nugget_strength: str) -> str | None:
+    """Maps an analytical_findings_cache nugget to {high, medium, None}.
+
+    HIGH    -> high
+    MEDIUM  -> medium
+    LOW     -> None (not citation-worthy — same drop policy as the
+               other two sources' low-rank items)
+
+    Analytical findings are the actual analytical claims that need
+    citation support — Sharpe deltas, regime breaks, factor exposures —
+    distinct from audit findings (statistical-audit failures) and QA
+    findings (methodology checks). The Citation Review panel needs
+    ALL THREE source streams so the reviewer can record citation
+    support for every kind of claim, not just methodology defects.
+    """
+    s = (nugget_strength or "").strip().upper()
+    if s == "HIGH":
+        return _RANK_HIGH
+    if s == "MEDIUM":
+        return _RANK_MEDIUM
+    return None
+
+
+async def _gather_analytical_findings() -> list[dict[str, Any]]:
+    """Reads the latest analytical_findings_cache row (the Step 1 'Stage
+    Findings' output in the Report Writer pipeline) and surfaces every
+    high+medium-strength finding as a Level-1 wrapper.
+
+    May 26 2026 — added when the user reported that Step 1 was
+    producing 6 HIGH findings but the Citation Review panel showed
+    'no high or medium-rank findings'. The redesign (PR #178) seeded
+    findings ONLY from audit + QA sources, missing the analytical
+    findings stream entirely. Analytical findings are the PRIMARY
+    citation target — the Sharpe / regime / factor claims the writer
+    will put in the paper — so excluding them effectively broke the
+    citation-matching workflow.
+
+    Source naming:
+      source     = 'analytical'
+      source_id  = finding title (stable across re-stages because the
+                   title catalogue is a fixed enum in
+                   analytical_findings.py — BENCHMARK COMPETITIVENESS,
+                   REGIME SHIFT EVIDENCE, etc.). Using the title means
+                   citation_finding_matches rows survive a re-stage
+                   when the same finding type recurs, same UPSERT
+                   contract the audit + QA gatherers use.
+      status     = 'surprise' when the finding's surprise flag is True,
+                   else None. Surfaces the surprise hint into the
+                   findings table without inventing a new column.
+
+    Returns [] on any DB error or when no analytical_findings_cache
+    row exists.
+    """
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return []
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(text(
+                "SELECT findings FROM analytical_findings_cache "
+                "ORDER BY computed_at DESC LIMIT 1"))
+            found = row.fetchone()
+        if not found or not found[0]:
+            return []
+        findings = found[0]
+        if isinstance(findings, str):
+            try:
+                findings = json.loads(findings)
+            except json.JSONDecodeError:
+                return []
+        if not isinstance(findings, list):
+            return []
+        out: list[dict[str, Any]] = []
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            title = str(f.get("title") or "").strip()
+            if not title:
+                continue
+            rank = _rank_analytical_finding(
+                str(f.get("nugget_strength") or ""))
+            if rank is None:
+                continue
+            # Description: the one-sentence conclusion, with the
+            # implication appended when present so the panel can show
+            # both the finding and what it means in one line.
+            conclusion = str(f.get("finding") or "").strip()
+            implication = str(f.get("implication") or "").strip()
+            description: str | None
+            if conclusion and implication:
+                description = f"{conclusion} {implication}"
+            elif conclusion or implication:
+                description = conclusion or implication
+            else:
+                description = None
+            out.append({
+                "source":      "analytical",
+                "source_id":   title,
+                "title":       title,
+                "description": description,
+                "status":      ("surprise" if f.get("surprise")
+                                else None),
+                "severity":    None,
+                "rank":        rank,
+            })
+        return out
+    except Exception as exc:  # noqa: BLE001
+        log.warning("citation_findings_analytical_read_failed",
+                    error=str(exc), exc_type=type(exc).__name__)
+        return []
+
+
 async def seed_findings_for_generation(
     generation_id: int,
 ) -> list[dict[str, Any]]:
@@ -239,7 +363,16 @@ async def seed_findings_for_generation(
             return []
         audit_rows = await _gather_audit_findings()
         qa_rows = await _gather_qa_findings()
-        all_rows = [r for r in (audit_rows + qa_rows)
+        analytical_rows = await _gather_analytical_findings()
+        # Order matters for the panel's default reading flow:
+        # ANALYTICAL findings open the list because they're the
+        # primary citation target (the Sharpe / regime / factor
+        # claims a citation supports). AUDIT findings (statistical-
+        # audit defects) follow. QA findings (methodology checks)
+        # last — citation-supportable but more operational than
+        # analytical. The panel re-sorts by rank within source on
+        # the read-back below, so this ordering is only a tiebreaker.
+        all_rows = [r for r in (analytical_rows + audit_rows + qa_rows)
                     if r.get("rank") in (_RANK_HIGH, _RANK_MEDIUM)]
 
         async with AsyncSessionLocal() as session:

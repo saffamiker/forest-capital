@@ -107,6 +107,39 @@ class TestRankQACheck:
         assert cf._rank_qa_check("Warn", "Methodology_Decision") == "medium"
 
 
+# ── _rank_analytical_finding ────────────────────────────────────────────────
+
+
+class TestRankAnalyticalFinding:
+    """Analytical findings come from analytical_findings_cache, written
+    by Step 1 (Stage Findings) in the Report Writer pipeline. The rank
+    is derived from the nugget_strength field. This is the PRIMARY
+    citation target — Sharpe / regime / factor claims that need
+    supporting references. The rank rule is simpler than audit / QA
+    because the finding pipeline already does the analytical work of
+    classifying strength."""
+
+    def test_high_strength_is_high(self):
+        assert cf._rank_analytical_finding("HIGH") == "high"
+
+    def test_medium_strength_is_medium(self):
+        assert cf._rank_analytical_finding("MEDIUM") == "medium"
+
+    def test_low_strength_is_dropped(self):
+        # Low-strength findings aren't citation-worthy. Same drop
+        # policy as the audit + QA gatherers; keeps the Level-1
+        # surface noise-free.
+        assert cf._rank_analytical_finding("LOW") is None
+
+    def test_empty_or_unknown_is_dropped(self):
+        assert cf._rank_analytical_finding("") is None
+        assert cf._rank_analytical_finding("UNKNOWN") is None
+
+    def test_case_insensitive(self):
+        assert cf._rank_analytical_finding("high") == "high"
+        assert cf._rank_analytical_finding("Medium") == "medium"
+
+
 # ── IN02 exclusion ──────────────────────────────────────────────────────────
 
 
@@ -147,6 +180,12 @@ class TestFailOpenContract:
         import database as db_mod
         monkeypatch.setattr(db_mod, "AsyncSessionLocal", None)
         assert asyncio.run(cf._gather_qa_findings()) == []
+
+    def test_gather_analytical_findings_returns_empty_when_no_db(
+            self, monkeypatch):
+        import database as db_mod
+        monkeypatch.setattr(db_mod, "AsyncSessionLocal", None)
+        assert asyncio.run(cf._gather_analytical_findings()) == []
 
     def test_seed_returns_empty_when_no_db(self, monkeypatch):
         import database as db_mod

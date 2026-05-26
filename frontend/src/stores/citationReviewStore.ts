@@ -111,7 +111,10 @@ export interface Citation {
 // methodology verdict (see backend tools/citation_findings.py).
 export interface Finding {
   id: number
-  source: 'audit' | 'qa'
+  // 'analytical' added May 26 2026 — Step 1 analytical_findings_cache
+  // is the third source the seeder now reads from (the primary
+  // citation target: Sharpe / regime / factor claims).
+  source: 'analytical' | 'audit' | 'qa'
   source_id: string
   title: string
   description: string | null
