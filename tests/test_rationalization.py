@@ -335,6 +335,162 @@ class TestRationalizeOverBudgetSections:
         assert s2.get("status") == "green"
 
 
+# ── Multi-pass rationalization (May 26 2026) ────────────────────────────────
+
+
+class TestMultiPassRationalization:
+    """Each over-budget section gets up to _MAX_RATIONALIZATION_PASSES
+    rationalizer calls. The loop bails as soon as the section lands
+    within tolerance OR the cap is reached — never silently fails."""
+
+    def test_max_passes_constant_is_three(self):
+        # Pinned by name so a change to the constant requires updating
+        # this test in lockstep.
+        assert rg._MAX_RATIONALIZATION_PASSES == 3
+
+    def test_bails_early_when_first_pass_lands_in_tolerance(
+            self, monkeypatch):
+        # The first pass already lands the section inside ±10% — no
+        # second call should fire.
+        call_count: list[int] = [0]
+
+        def _fake(system, user, max_tokens=1200):
+            call_count[0] += 1
+            # Return a 50-word body well under the 300-word budget.
+            return " ".join(["short"] * 50)
+
+        monkeypatch.setattr(rg, "_call_rationalizer_sync", _fake)
+        paper = _make_over_budget_paper()
+        _, details = asyncio.run(
+            rg._rationalize_over_budget_sections(paper))
+
+        assert call_count[0] == 1, (
+            "expected a single call when first pass lands in tolerance")
+        assert len(details) == 1
+        assert details[0]["status"] == "rationalized"
+        assert details[0]["passes"] == 1
+
+    def test_loops_up_to_three_passes_when_each_call_overshoots(
+            self, monkeypatch):
+        # Every call returns 400 words (still over budget). The loop
+        # must run the cap and then return still_over — not failed.
+        call_count: list[int] = [0]
+
+        def _fake(system, user, max_tokens=1200):
+            call_count[0] += 1
+            return " ".join(["lorem"] * 400)
+
+        monkeypatch.setattr(rg, "_call_rationalizer_sync", _fake)
+        paper = _make_over_budget_paper()
+        _, details = asyncio.run(
+            rg._rationalize_over_budget_sections(paper))
+
+        assert call_count[0] == 3, (
+            "expected three calls when every pass overshoots")
+        assert len(details) == 1
+        d = details[0]
+        assert d["status"] == "still_over"
+        assert d["passes"] == 3
+        # The reviewer downstream sees the warn-only badge; the run
+        # still proceeds. word_count_over_budget is in
+        # _WARN_ONLY_FLAG_KINDS, so this status does NOT hard-gate.
+
+    def test_each_pass_compresses_against_latest_rewrite(
+            self, monkeypatch):
+        # First pass returns ~400 words, second returns ~250 (now in
+        # tolerance against the 300-word budget). The loop must bail
+        # after the second pass, not the third.
+        responses = iter([
+            " ".join(["lorem"] * 400),  # pass 1 — still over
+            " ".join(["lorem"] * 250),  # pass 2 — in tolerance
+        ])
+        call_count: list[int] = [0]
+
+        def _fake(system, user, max_tokens=1200):
+            call_count[0] += 1
+            try:
+                return next(responses)
+            except StopIteration:
+                raise AssertionError(
+                    "rationalizer called more than twice")
+
+        monkeypatch.setattr(rg, "_call_rationalizer_sync", _fake)
+        paper = _make_over_budget_paper()
+        _, details = asyncio.run(
+            rg._rationalize_over_budget_sections(paper))
+
+        assert call_count[0] == 2
+        assert details[0]["status"] == "rationalized"
+        assert details[0]["passes"] == 2
+
+    def test_failed_first_pass_records_failed_not_still_over(
+            self, monkeypatch):
+        # Every attempted call fails. The detail records 'failed' and
+        # the original section text survives unchanged.
+        def _fake(system, user, max_tokens=1200):
+            return ""
+
+        monkeypatch.setattr(rg, "_call_rationalizer_sync", _fake)
+        paper = _make_over_budget_paper()
+        rewritten, details = asyncio.run(
+            rg._rationalize_over_budget_sections(paper))
+
+        # Original lorem padding survives the failed compression.
+        assert "lorem lorem" in rewritten
+        assert len(details) == 1
+        d = details[0]
+        assert d["status"] == "failed"
+        # The "passes" key is present and records how many attempts
+        # were made before the bailout (one — the first one failed).
+        assert d.get("passes") == 1
+
+    def test_late_failure_preserves_earlier_rewrite(self, monkeypatch):
+        # First pass succeeds but is still over budget, second pass
+        # fails. The earlier rewrite must be preserved (not reverted
+        # to the original), with note='final_pass_failed' on the
+        # detail.
+        responses = iter([
+            " ".join(["lorem"] * 400),  # pass 1 — succeeds but over
+            "",                         # pass 2 — fails
+        ])
+
+        def _fake(system, user, max_tokens=1200):
+            return next(responses)
+
+        monkeypatch.setattr(rg, "_call_rationalizer_sync", _fake)
+        paper = _make_over_budget_paper()
+        _, details = asyncio.run(
+            rg._rationalize_over_budget_sections(paper))
+
+        d = details[0]
+        assert d["status"] == "still_over"
+        assert d.get("note") == "final_pass_failed"
+        # The status is still_over (warn-only downstream), not 'failed'
+        # — a partial success is honoured.
+
+
+# ── Warn-only contract for still_over (option b) ────────────────────────────
+
+
+class TestStillOverIsWarnOnly:
+    """The user-explicit contract: a section that lands still_over
+    after the rationalization cap is a WARNING, not a download
+    blocker. _WARN_ONLY_FLAG_KINDS holds word_count_over_budget;
+    _HARD_GATE_FLAG_KINDS does not. _gate_download (main.py) checks
+    flag_count which counts only hard-gate kinds."""
+
+    def test_word_count_over_budget_is_in_warn_only_set(self):
+        assert "word_count_over_budget" in rg._WARN_ONLY_FLAG_KINDS
+
+    def test_word_count_over_budget_is_NOT_in_hard_gate_set(self):
+        assert "word_count_over_budget" not in rg._HARD_GATE_FLAG_KINDS
+
+    def test_warn_and_hard_gate_sets_are_disjoint(self):
+        # No flag kind can be both warn-only AND hard-gate.
+        overlap = rg._WARN_ONLY_FLAG_KINDS & rg._HARD_GATE_FLAG_KINDS
+        assert overlap == frozenset()
+
+
 # ── _call_rationalizer_sync — fail-open contract ────────────────────────────
 
 

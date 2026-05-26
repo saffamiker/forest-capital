@@ -488,27 +488,50 @@ def _call_rationalizer_sync(
         return ""
 
 
+# Maximum number of rationalization attempts per section. One pass
+# is often insufficient when the writer overshoots dramatically
+# (Section 4 — Next Steps — has been observed at ~750 words against
+# a 125-word budget, a 6× overshoot one Sonnet pass cannot fully
+# resolve). Up to three passes give the model successive chances
+# to compress against a progressively shorter target; after the
+# cap is reached the loop returns the best rewrite seen. The
+# word_count_over_budget flag (warn-only; see
+# _WARN_ONLY_FLAG_KINDS) still fires downstream for any still-over
+# section so the reviewer sees the badge — never a hard block.
+_MAX_RATIONALIZATION_PASSES: int = 3
+
+
 async def _rationalize_over_budget_sections(
     paper_md: str,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Compresses every section that landed more than 10% over its
-    budget. Runs ONCE between the writer call and the post-check.
+    budget. Loops up to _MAX_RATIONALIZATION_PASSES per section,
+    bailing as soon as the section lands within tolerance OR the
+    pass cap is reached.
 
     Returns (rewritten_paper_md, details) — details is a list of
     per-section dicts the caller can persist for audit. Each detail:
-      {section, before, target, after, status, error?}
+      {section, before, target, after, passes, status, note?}
 
     status:
-      'rationalized' — call succeeded, section now within ±10%
-      'still_over'   — call succeeded but the result is still over
-                       budget (no further compression attempted —
-                       the writer was as terse as it could be)
+      'rationalized' — at least one pass succeeded and the section
+                       now sits within ±10% of budget
+      'still_over'   — all attempted passes returned text, but the
+                       section is still over budget after the cap.
+                       NOT a hard failure — word_count_over_budget
+                       is warn-only and downloads are not gated on
+                       it. The reviewer trims manually or submits
+                       as-is.
       'skipped'      — section already within tolerance, no call
-      'failed'       — call failed, original section text retained
+      'failed'       — every attempted compression call failed and
+                       the original section text was retained
       'no_heading'   — section had no recognisable heading, retained
 
     Fail-open: a section that fails or has no heading keeps its
-    original text. The full paper is always returned.
+    original text. The full paper is always returned. A partial
+    success across N<cap passes still returns the BEST rewrite
+    seen, even if the final pass failed (the inner loop never
+    discards a successful rewrite to revert to the original).
     """
     if not paper_md or not paper_md.strip():
         return paper_md, []
@@ -534,11 +557,11 @@ async def _rationalize_over_budget_sections(
         budget = _SECTION_BUDGETS.get(sec_num)
         purpose = _SECTION_PURPOSE.get(sec_num)
         info = per.get(sec_num) or {}
-        words_before = int(info.get("words") or 0)
+        words_before_first_pass = int(info.get("words") or 0)
         if not budget or not purpose:
             details.append({
                 "section": sec_num,
-                "before":  words_before,
+                "before":  words_before_first_pass,
                 "target":  budget,
                 "status":  "skipped",
                 "note":    "no_budget_or_purpose",
@@ -550,7 +573,7 @@ async def _rationalize_over_budget_sections(
         if not heading or not body.strip():
             details.append({
                 "section": sec_num,
-                "before":  words_before,
+                "before":  words_before_first_pass,
                 "target":  budget,
                 "status":  "no_heading",
             })
@@ -558,56 +581,102 @@ async def _rationalize_over_budget_sections(
 
         system_prompt = _build_rationalizer_system_prompt(
             sec_num, budget, purpose)
-        user_message = (
-            f"Rewrite this section to no more than {budget} words. "
-            f"Preserve every number, every citation reference, and "
-            f"every analytical conclusion. Return only the rewritten "
-            f"section body.\n\n"
-            f"=== CURRENT SECTION BODY ({words_before} words) ===\n"
-            f"{body}\n"
-            f"=== END SECTION ==="
-        )
 
-        try:
-            rewritten = await asyncio.to_thread(
-                _call_rationalizer_sync, system_prompt, user_message, 1200)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("rationalizer_thread_failed",
-                        section=sec_num, error=str(exc))
-            rewritten = ""
+        # Loop bookkeeping. current_body / current_words track the
+        # latest accepted rewrite; passes counts the number of LLM
+        # calls actually made. last_call_failed records whether the
+        # final pass failed (so the audit detail can carry it).
+        current_body = body
+        current_words = words_before_first_pass
+        passes = 0
+        last_call_failed = False
+        any_pass_succeeded = False
 
-        if not rewritten:
+        for attempt in range(_MAX_RATIONALIZATION_PASSES):
+            passes = attempt + 1
+            user_message = (
+                f"Rewrite this section to no more than {budget} "
+                f"words. Preserve every number, every citation "
+                f"reference, and every analytical conclusion. "
+                f"Return only the rewritten section body.\n\n"
+                f"=== CURRENT SECTION BODY "
+                f"({current_words} words) ===\n"
+                f"{current_body}\n"
+                f"=== END SECTION ==="
+            )
+            try:
+                rewritten = await asyncio.to_thread(
+                    _call_rationalizer_sync,
+                    system_prompt, user_message, 1200)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("rationalizer_thread_failed",
+                            section=sec_num, attempt=passes,
+                            error=str(exc))
+                rewritten = ""
+                last_call_failed = True
+
+            if not rewritten:
+                # This attempt failed. Don't discard prior progress;
+                # break out and keep whatever current_body holds
+                # (either the original text or the best rewrite from
+                # an earlier pass).
+                last_call_failed = True
+                break
+
+            # Accept this rewrite as the current best — even if it's
+            # still over budget. A partial compression is better than
+            # the previous body, and the NEXT pass will compress this
+            # further against the same budget.
+            last_call_failed = False
+            any_pass_succeeded = True
+            current_body = rewritten.strip()
+            # Approximate the section's total word count (heading +
+            # rewritten body, two newlines between, trailing newline)
+            # so the bail-out check matches the post-pass word count
+            # word_count_report would compute downstream.
+            provisional = f"{heading}\n\n{current_body}\n\n"
+            current_words = len(provisional.split())
+            if current_words <= budget * 1.10:
+                # Inside tolerance — no further pass needed.
+                break
+
+        if not any_pass_succeeded:
+            # Every attempted call failed and we still hold only the
+            # original body. Surface 'failed' so the reviewer knows
+            # the rationalizer never produced anything.
             details.append({
                 "section": sec_num,
-                "before":  words_before,
+                "before":  words_before_first_pass,
                 "target":  budget,
+                "passes":  passes,
                 "status":  "failed",
             })
             continue
 
-        # Build the replacement section block. Two newlines after the
-        # heading matches the writer's existing layout convention.
-        new_section_text = f"{heading}\n\n{rewritten.strip()}\n\n"
+        # Assemble the final section block from whatever current_body
+        # holds (the best rewrite seen across the passes).
+        new_section_text = f"{heading}\n\n{current_body}\n\n"
         sections[sec_num] = new_section_text
-        # Re-count the new body so the detail reports the post-pass
-        # length. The body is the rewritten string before reassembly
-        # (excluding the heading) — same word-count rule as
-        # word_count_report which counts ALL whitespace-separated
-        # tokens in the section (heading included). To keep parity
-        # with the per-section counter, we count the rewritten body
-        # PLUS the heading line.
         new_words = len((new_section_text or "").split())
         new_status = (
             "rationalized" if new_words <= budget * 1.10
             else "still_over"
         )
-        details.append({
+        detail: dict[str, Any] = {
             "section": sec_num,
-            "before":  words_before,
+            "before":  words_before_first_pass,
             "target":  budget,
             "after":   new_words,
+            "passes":  passes,
             "status":  new_status,
-        })
+        }
+        if last_call_failed:
+            # An earlier pass succeeded but the final pass failed —
+            # still-over is the honest status; the partial success
+            # carries through with a note that the model didn't get
+            # a full attempt count.
+            detail["note"] = "final_pass_failed"
+        details.append(detail)
 
     # Reassemble in original key order. split_by_section preserves
     # insertion order; iterating sections.items() gives the same
