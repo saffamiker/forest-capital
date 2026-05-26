@@ -56,20 +56,50 @@ _EXPECTED_LOOKBACK_MONTHS: dict[str, int] = {
 }
 
 
-def _total_return(series: list[float]) -> float:
-    """Cumulative total return of a monthly series — product of (1+r) - 1."""
+def _coerce_returns(series: list) -> list[float]:
+    """Coerces the payload's return series to a list of floats. Accepts
+    BOTH the flat scalar shape (asset_returns.equity / ig / hy) AND
+    the [iso_date, value] pair shape (strategy_returns since the
+    May 25 2026 short-history alignment fix). Anything that cannot
+    be converted is skipped rather than raised — keeps Layer 1
+    robust to mixed shapes.
+    """
+    out: list[float] = []
+    for x in series or []:
+        if x is None:
+            continue
+        if isinstance(x, (list, tuple)):
+            if len(x) < 2 or x[1] is None:
+                continue
+            candidate = x[1]
+        else:
+            candidate = x
+        try:
+            out.append(float(candidate))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _total_return(series: list) -> float:
+    """Cumulative total return of a monthly series — product of (1+r) - 1.
+    Accepts both flat and pair-shape via _coerce_returns."""
     growth = 1.0
-    for r in series:
-        growth *= (1.0 + float(r))
+    for r in _coerce_returns(series):
+        growth *= (1.0 + r)
     return growth - 1.0
 
 
-def _cagr(series: list[float]) -> float:
-    """Geometric CAGR — the Analytics-layer formula, 12-month annualised."""
-    n = len(series)
+def _cagr(series: list) -> float:
+    """Geometric CAGR — the Analytics-layer formula, 12-month annualised.
+    Accepts both flat and pair-shape via _coerce_returns."""
+    vals = _coerce_returns(series)
+    n = len(vals)
     if n == 0:
         return 0.0
-    growth = _total_return(series) + 1.0
+    growth = 1.0
+    for r in vals:
+        growth *= (1.0 + r)
     if growth <= 0.0:
         return -1.0
     return growth ** (12.0 / n) - 1.0
@@ -156,15 +186,37 @@ def layer_1_raw_data_audit(payload: dict[str, Any]) -> dict[str, Any]:
                                 "Fama-French series.")
 
     # ── Check 4 — monthly return bounds ───────────────────────────────────
+    # strategy_returns carries [iso_date, value] pairs since the May 25
+    # 2026 assembler change (short-history alignment fix). Iterating
+    # each entry as if it were a scalar and calling float(r) raises
+    # TypeError: float() argument must be a string or a real number,
+    # not 'list'. That exception killed Layer 1 silently on every
+    # production run — preflight fired, layer_complete never did, the
+    # outer except set status='failed' with 0 findings.
+    # Fix May 26 2026: unpack the pair when present; treat a bare
+    # scalar (legacy shape) the same way for safety.
     breaches: list[str] = []
     for name, series in [("equity", equity), ("ig", ig), ("hy", hy)]:
         for i, r in enumerate(series):
             if abs(float(r)) > _RETURN_BOUND:
                 breaches.append(f"{name}[{i}]={float(r):.2%}")
     for name, series in strategy_returns.items():
-        for i, r in enumerate(series):
-            if r is not None and abs(float(r)) > _RETURN_BOUND:
-                breaches.append(f"{name}[{i}]={float(r):.2%}")
+        for i, entry in enumerate(series):
+            if entry is None:
+                continue
+            # Pair shape [iso_date, value] OR legacy scalar.
+            if isinstance(entry, (list, tuple)):
+                if len(entry) < 2 or entry[1] is None:
+                    continue
+                r_value = entry[1]
+            else:
+                r_value = entry
+            try:
+                r_float = float(r_value)
+            except (TypeError, ValueError):
+                continue
+            if abs(r_float) > _RETURN_BOUND:
+                breaches.append(f"{name}[{i}]={r_float:.2%}")
     if breaches:
         f("Monthly return bounds", "monthly_return", "fail", "critical",
           platform_value="; ".join(breaches[:10]),

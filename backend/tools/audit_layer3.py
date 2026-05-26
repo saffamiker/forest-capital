@@ -35,8 +35,33 @@ _DYNAMIC = {
 
 
 def _cagr(series: list) -> float:
-    """Geometric CAGR of a monthly return series — regime-independent."""
-    vals = [float(x) for x in series if x is not None]
+    """Geometric CAGR of a monthly return series — regime-independent.
+
+    Accepts BOTH the [iso_date, value] pair shape (the assembler's
+    strategy_returns since the May 25 2026 short-history alignment
+    fix) AND the flat scalar shape (asset_returns.equity / ig / hy).
+    A naive `float(x)` on a pair raises TypeError, which crashed L3's
+    CAGR-consistency and benchmark-identity checks silently — the
+    exception escaped to _execute_audit's outer except and
+    finalised the audit as status='failed' with 0 findings. Fix May
+    26 2026: unpack the pair when present, coerce other shapes
+    defensively, skip anything that can't become a float.
+    """
+    vals: list[float] = []
+    for x in series or []:
+        if x is None:
+            continue
+        if isinstance(x, (list, tuple)):
+            # [iso_date, value] pair — take the value at index 1.
+            if len(x) < 2 or x[1] is None:
+                continue
+            candidate = x[1]
+        else:
+            candidate = x
+        try:
+            vals.append(float(candidate))
+        except (TypeError, ValueError):
+            continue
     n = len(vals)
     if n == 0:
         return 0.0
