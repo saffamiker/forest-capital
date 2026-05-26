@@ -99,14 +99,22 @@ def test_context_block_carries_team_role_division_context():
          "risk_free_rate": None, "analytics_components": []},
         grouped,
     )
-    # Section header + every named team member + the engagement guidance.
+    # May 26 2026 — assertions track the layered-ownership rewrite of
+    # the TEAM ROLE DIVISION CONTEXT. The prior framing (Michael as
+    # "platform engineer, not analytical disengagement") was replaced
+    # with a positive ownership statement: validation infrastructure
+    # (Michael) / analytical narrative (Bob) / human UAT (Molly).
     assert "TEAM ROLE DIVISION CONTEXT" in block
-    assert "Michael Ruurds is the platform engineer" in block
-    assert "Bob Thao owns analytical interpretation" in block
-    assert "Molly Murdock owns" in block
-    assert "role-appropriate contributions" in block
-    assert "unresolved [[BOB]] markers" in block
-    assert "engineering commit disparity" in block
+    assert "Michael Ruurds builds and operates the validation" in block
+    assert "Bob Thao interprets" in block
+    assert "Molly Murdock conducts human UAT" in block
+    assert "layered ownership model" in block
+    # The layered-ownership framing is the new explicit guidance.
+    # The old "unresolved [[BOB]] markers" / "engineering commit
+    # disparity" phrases are gone (proactive marker-hunting was the
+    # bug PR was tracking).
+    assert "Michael's engineering activity" in block
+    assert "human-only division of labor" in block
 
 
 def test_team_role_context_appears_before_team_engagement():
@@ -159,8 +167,17 @@ def test_arbiter_message_contains_every_peer_response():
     # Every peer's response text reaches the arbiter prompt.
     for aid, text in peer_responses.items():
         assert text in msg, f"{aid} response missing from arbiter message"
-    # The five-section verdict instructions are present.
+    # May 26 2026 — the five rubric sections are the FNA 670 midpoint
+    # rubric (sections 1-4) + Section 5 "Overall Academic Readiness"
+    # (kept under that title so the Section-5 truncation detector
+    # and fallback continue to work — UAT #53 / #59 / #128 / #125
+    # history). The grade-impact-ranked Priority Areas list now
+    # lives INSIDE Section 5.
     assert "five rubric sections" in msg
+    assert "Data and Methodology" in msg
+    assert "Preliminary Results and Diagnostics" in msg
+    assert "Roles and Division of Labor" in msg
+    assert "Next Steps and Open Questions" in msg
     assert "Overall Academic Readiness" in msg
     # The PM dual-verdict additions surface in the arbiter prompt too —
     # the top-level **Academic rigour:** + **Portfolio Manager insight:**
@@ -206,9 +223,16 @@ class TestScriptRubric:
         )
         peer_responses = {aid: "ok" for aid in peer_agent_ids()}
         msg = build_arbiter_user_message("CTX", peer_responses)
-        # Default rubric — sections 1-5 from the written-submission set.
-        assert "Data Sufficiency and Methodology" in msg
-        assert "Requirements and Rubric Alignment" in msg
+        # May 26 2026 — default rubric was rewritten to the FNA 670
+        # midpoint check sections (1p / 1p / 0.5p / 0.5p) for
+        # sections 1-4. Section 5 is kept as "Overall Academic
+        # Readiness" so the Section-5 truncation detector / fallback
+        # continues to work. The grade-impact-ranked Priority Areas
+        # list now lives INSIDE Section 5.
+        assert "Data and Methodology" in msg
+        assert "Preliminary Results and Diagnostics" in msg
+        assert "Roles and Division of Labor" in msg
+        assert "Next Steps and Open Questions" in msg
         assert "Overall Academic Readiness" in msg
         # Script-specific section headings do NOT appear.
         assert "Argument Coherence Across Slides" not in msg
@@ -230,8 +254,8 @@ class TestScriptRubric:
         assert "Speaker Differentiation and Voice" in msg
         assert "Overall Delivery Readiness" in msg
         # Written-submission sections do NOT appear.
-        assert "Data Sufficiency and Methodology" not in msg
-        assert "Requirements and Rubric Alignment" not in msg
+        assert "Data and Methodology" not in msg
+        assert "Preliminary Results and Diagnostics" not in msg
         # Script rating scale — Incomplete replaces Developing.
         assert "Strong | Needs Work | Incomplete" in msg
         # Exclusion list is explicit — citation formatting etc. is
@@ -433,18 +457,20 @@ class TestSectionFiveFallback:
         assert "**Rating:** Needs Work" in out[section_5_start:]
 
     def test_evaluator_prompt_penalises_missing_sections_strictly(self):
-        # The user-visible fix to the lenient evaluator. The previous
-        # rubric scored 4 sections at 8/10; the tightened rubric scores
-        # 4 sections at 3/10 and 3-or-fewer at 0/10. Verify the prompt
-        # carries the new scale so a future edit does not regress it.
+        # May 26 2026 — the midpoint-rubric revision counts SEVEN
+        # required elements (2 top-line summary lines + 5 sections),
+        # not 5. The tightened scale is now: all 7 → 10, missing
+        # 1 → 5, missing 2+ → 0. UAT issue references are kept so a
+        # future maintainer who tries to relax the rubric reads the
+        # historical context first.
         from agents.evaluator_prompts import (
             academic_review_arbiter_evaluator_prompt,
         )
         prompt = academic_review_arbiter_evaluator_prompt()
         # The new scale wording is present.
-        assert "5 sections present scores 10" in prompt
-        assert "4 sections scores 3" in prompt
-        assert "3 or fewer scores 0" in prompt
+        assert "all 7 elements present scores 10" in prompt
+        assert "missing one of the seven scores 5" in prompt
+        assert "missing two or more scores 0" in prompt
         # The fix references UAT #128/#125 so a future maintainer who
         # tries to relax the rubric reads the historical context first.
         assert "#128" in prompt and "#125" in prompt

@@ -1060,6 +1060,45 @@ def _finding_9_factor_exposure(academic: dict | None) -> dict:
 # Finding 10 — Macro context alignment ────────────────────────────────────────
 
 
+def _polite_truncate(text: str, max_chars: int = 400) -> str:
+    """Truncate `text` at a sentence or word boundary so the rendered
+    evidence reads as a complete thought, not a mid-word cut. Used
+    for the macro-digest summary + regime_implication bullets in F8;
+    the prior implementation cut at exactly 300 chars and tacked on
+    an ellipsis, which read as unpolished in submission-grade docs.
+
+    Rules:
+      - Return text unchanged if already within max_chars.
+      - Otherwise look for the last sentence terminator (. ! ?)
+        within [max_chars // 2, max_chars] and cut there. The
+        terminator is kept; no ellipsis is appended (the natural
+        period reads as intentional).
+      - Failing that, cut at the last word boundary within max_chars
+        and append a single ellipsis.
+      - Failing that (very long single word), hard-cut at max_chars
+        and append ellipsis.
+    """
+    if not text or len(text) <= max_chars:
+        return text or ""
+    # Look for sentence terminators in the back half of the window so
+    # we don't cut too aggressively. Search the slice [floor : max_chars]
+    # for the LAST terminator.
+    floor = max_chars // 2
+    window = text[:max_chars]
+    best = -1
+    for term in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
+        idx = window.rfind(term, floor)
+        if idx > best:
+            best = idx + len(term) - 1  # include terminator, drop space
+    if best >= floor:
+        return text[: best + 1].rstrip()
+    # No sentence boundary — fall back to word boundary.
+    space = window.rfind(" ", floor)
+    if space >= floor:
+        return text[:space].rstrip() + "…"
+    return window.rstrip() + "…"
+
+
 def _finding_10_macro_context(macro_digest: dict | None) -> dict:
     if not macro_digest or not macro_digest.get("summary_text"):
         return _deferred("MACRO CONTEXT ALIGNMENT",
@@ -1080,21 +1119,25 @@ def _finding_10_macro_context(macro_digest: dict | None) -> dict:
     favoured = ["REGIME_SWITCHING", "RISK_PARITY", "MIN_VARIANCE"]
     exposed = ["BENCHMARK", "MOMENTUM_ROTATION"]
 
+    # May 26 2026 — _polite_truncate cuts at the nearest sentence
+    # boundary rather than mid-word + ellipsis, which read as
+    # unpolished in the submission document. Raised the per-bullet
+    # cap from 300 to 400 chars at the same time; the digest fits
+    # in 400 in most cases and the bullet's purpose is to summarise,
+    # not to reproduce the full prose.
     return _finding_template(
         title="MACRO CONTEXT ALIGNMENT",
-        finding=(
-            "Current digest favours regime-aware and low-beta tilts; "
-            "high-beta passives carry the most macro exposure."),
         evidence=[
-            f"Digest summary: {summary[:300]}"
-            + ("…" if len(summary) > 300 else ""),
-            f"Regime implication: {regime[:300]}"
-            + ("…" if len(regime) > 300 else ""),
+            f"Digest summary: {_polite_truncate(summary, 400)}",
+            f"Regime implication: {_polite_truncate(regime, 400)}",
             "Key signals: " + " · ".join(sig_lines)
             if sig_lines else "No key signals in current digest.",
             "Most aligned (heuristic): " + ", ".join(favoured) + ".",
             "Most exposed to current risks: " + ", ".join(exposed) + ".",
         ],
+        finding=(
+            "Current digest favours regime-aware and low-beta tilts; "
+            "high-beta passives carry the most macro exposure."),
         implication=(
             "Macro context is the bridge between the historical "
             "backtest and the forward-looking mandate. A strategy "

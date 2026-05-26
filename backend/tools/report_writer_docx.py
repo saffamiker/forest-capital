@@ -61,6 +61,31 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 
 
+# Citations are "verified-equivalent" if any of these four states.
+# Mirrors template_pipeline.CITATION_VERIFIED_STATES; inlined here to
+# avoid an import cycle with the pipeline module. May 26 2026 —
+# centralised so References / Appendix A methodological references /
+# Appendix D GIPS reference all use the same filter (the prior code
+# checked only the literal 'verified' state, so adjudicated
+# citations — human_verified / search_selected / manually_added —
+# silently dropped out of all three sections).
+_VERIFIED_STATES: frozenset[str] = frozenset({
+    "verified",          # automatic trusted-domain hit
+    "human_verified",    # reviewer accepted an untrusted-domain hit
+    "search_selected",   # reviewer accepted one of the alternatives
+    "manually_added",    # reviewer typed the citation in manually
+})
+
+
+def _is_verified(citation: dict | None) -> bool:
+    """True when this citation row counts as verified for the purposes
+    of References / inline citation rendering. Centralised so the
+    four call sites stay in lockstep."""
+    if not citation:
+        return False
+    return citation.get("verification_status") in _VERIFIED_STATES
+
+
 _BODY_FONT = "Times New Roman"
 _INDENT_FIRST_LINE = Inches(0.5)
 _INDENT_HANGING = Inches(0.5)
@@ -497,7 +522,13 @@ def _appendix_a(doc: Document, context: dict) -> None:
     for cid in ("cvar_coherent_risk", "four_factor_model",
                 "portfolio_diversification", "regime_switching"):
         c = citations.get(cid) or {}
-        if c.get("verification_status") == "verified":
+        # May 26 2026 — _is_verified accepts all four verified-equivalent
+        # states (verified / human_verified / search_selected /
+        # manually_added). Previously this checked the literal 'verified'
+        # only, so Bob's adjudicated citations dropped out and the
+        # [CITATION REQUIRED] placeholder rendered even when valid
+        # references were in the cache.
+        if _is_verified(c):
             cited.append(c.get("formatted") or "")
     if cited:
         _add_section_heading(doc, "Methodological References", level=2)
@@ -672,7 +703,7 @@ def _appendix_d(doc: Document, context: dict) -> None:
 
     citations = context.get("citations_cache") or {}
     gips = citations.get("gips_verification") or {}
-    if gips.get("verification_status") == "verified":
+    if _is_verified(gips):
         _add_body_paragraph(doc, (
             f"This methodology is consistent with industry standards "
             f"for independent performance verification as described "
