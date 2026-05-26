@@ -312,9 +312,13 @@ async def check_model_availability() -> dict[str, dict[str, object]]:
     for chain in _ALL_CHAINS:
         # Identify the provider from the chain name. The check
         # functions below each handle their provider's SDK + auth.
+        # gemini_pro shares the Google SDK + GOOGLE_API_KEY with the
+        # gemini Flash chain, so both route through _check_gemini_chain
+        # — the per-call ping logic is identical, only the model
+        # strings differ.
         if chain.logical_name in ("sonnet", "opus", "haiku"):
             summary[chain.logical_name] = await _check_anthropic_chain(chain)
-        elif chain.logical_name == "gemini":
+        elif chain.logical_name in ("gemini", "gemini_pro"):
             summary[chain.logical_name] = await _check_gemini_chain(chain)
         else:
             # Future provider — log and skip rather than guess.
