@@ -455,6 +455,239 @@ class TestRecomputeRegimeSplit:
         assert result["checks"][0]["status"] == "warning"
         assert result["checks"][0]["flag"] == "alignment_error"
 
+    def test_short_history_strategy_recomputes_on_pair_shape(self):
+        """The actual bug the user reported: MOMENTUM_ROTATION starts
+        ~2003-07 (270 months) while the global asset_returns dates
+        index has 282 months. The flat-values shape couldn't align —
+        my length-mismatch guard skipped these strategies, surfacing
+        every coef as missing_value WARN. With pair-shape input each
+        strategy carries its own dates and aligns correctly."""
+        from tools.audit_layer2_deterministic import (
+            recompute_regime_split,
+        )
+
+        # Global index: 36 months starting 2018-01-31.
+        global_idx = pd.date_range("2018-01-31", periods=36, freq="ME")
+        # SHORT-HISTORY strategy: only 24 months (starts 2020-01),
+        # 12 months shorter than the global index.
+        rng = np.random.default_rng(13)
+        short_dates = pd.date_range(
+            "2020-01-31", periods=24, freq="ME")
+        short_vals = rng.normal(0.008, 0.04, 24).tolist()
+        short_pairs = [[d.isoformat(), v]
+                       for d, v in zip(short_dates, short_vals)]
+
+        payload = {
+            "raw_data": {
+                # Pair shape carries the strategy's own dates.
+                "strategy_returns": {"SHORT_STRAT": short_pairs},
+                "asset_returns": {
+                    "dates": [d.isoformat() for d in global_idx],
+                    "rf": [0.0] * 36,
+                },
+            },
+            "platform_computed": {"regime_conditional": {
+                "SHORT_STRAT": {
+                    "pre_2022_sharpe": None,    # < 24 mo pre-2022
+                    "post_2022_sharpe": 0.5,
+                    "pre_2022_cagr": None,
+                    "post_2022_cagr": 0.06,
+                    "pre_2022_months": 24,
+                    "post_2022_months": 0,
+                },
+            }},
+        }
+        result = recompute_regime_split(["SHORT_STRAT"], payload)
+        # NO alignment_error WARN — the pair shape lets the recompute
+        # build the series on the strategy's own timeline. 4 checks
+        # (pre/post × sharpe/cagr).
+        assert len(result["checks"]) == 4
+        flags = {c["flag"] for c in result["checks"]}
+        assert "alignment_error" not in flags
+
+    def test_pair_shape_for_full_history_strategy_also_works(self):
+        """A full-history strategy in pair shape recomputes identically
+        to the equivalent flat-values input — the pair path is a
+        SUPERSET of the legacy path."""
+        from tools.audit_layer2_deterministic import (
+            recompute_regime_split,
+        )
+
+        rng = np.random.default_rng(17)
+        idx = pd.date_range("2018-01-31", periods=72, freq="ME")
+        vals = rng.normal(0.008, 0.04, 72).tolist()
+        pairs = [[d.isoformat(), v] for d, v in zip(idx, vals)]
+
+        payload = {
+            "raw_data": {
+                "strategy_returns": {"FULL_STRAT": pairs},
+                "asset_returns": {
+                    "dates": [d.isoformat() for d in idx],
+                    "rf": [0.0] * 72,
+                },
+            },
+            "platform_computed": {"regime_conditional": {
+                "FULL_STRAT": {
+                    "pre_2022_sharpe": 0.5, "post_2022_sharpe": 0.4,
+                    "pre_2022_cagr": 0.07, "post_2022_cagr": 0.05,
+                    "pre_2022_months": 48, "post_2022_months": 24,
+                },
+            }},
+        }
+        result = recompute_regime_split(["FULL_STRAT"], payload)
+        assert len(result["checks"]) == 4
+        # No alignment_error — the pair shape resolves cleanly.
+        assert not any(c["flag"] == "alignment_error"
+                       for c in result["checks"])
+
+    def test_flat_values_short_history_falls_through_as_alignment_error(
+        self,
+    ):
+        """A LEGACY flat-values payload with a short-history strategy
+        can't be aligned (no per-strategy dates available). Drop to
+        the alignment_error path so the operator sees the actual
+        cause rather than a silent zero-output for that strategy.
+        This is the pre-fix behaviour preserved for legacy data."""
+        from tools.audit_layer2_deterministic import (
+            recompute_regime_split,
+        )
+
+        global_idx = pd.date_range("2018-01-31", periods=36, freq="ME")
+        # Flat values — 24 entries (shorter than the 36-month index).
+        short_vals = [0.01] * 24
+        payload = {
+            "raw_data": {
+                "strategy_returns": {"SHORT_STRAT": short_vals},
+                "asset_returns": {
+                    "dates": [d.isoformat() for d in global_idx],
+                    "rf": [0.0] * 36,
+                },
+            },
+            "platform_computed": {"regime_conditional": {
+                "SHORT_STRAT": {"pre_2022_sharpe": 0.5,
+                                "post_2022_sharpe": 0.5,
+                                "pre_2022_cagr": 0.05,
+                                "post_2022_cagr": 0.05,
+                                "pre_2022_months": 24,
+                                "post_2022_months": 0},
+            }},
+        }
+        result = recompute_regime_split(["SHORT_STRAT"], payload)
+        # Single alignment_error WARN — the legacy flat-values path
+        # can't recover the dates without per-strategy timeline.
+        assert any(c["flag"] == "alignment_error"
+                   for c in result["checks"])
+
+
+# ── recompute_factor_loadings — short-history pair-shape support ────────────
+
+
+class TestRecomputeFactorLoadings:
+    """A short-history strategy (MOMENTUM_ROTATION starts ~2003-07 vs
+    the global asset_returns 2002-07 index) was the user-reported
+    cause of 30+ missing_value warnings in factor_loadings: the
+    audit payload's flat-values strategy_returns couldn't pair the
+    270-entry strategy values to the 282-entry global dates index,
+    so the recomputer's length-mismatch guard skipped the strategy
+    and every coef came back None on the auditor side."""
+
+    def _ff_rows(self, n: int = 60) -> dict[str, list]:
+        # Construct Fama-French factor rows from yyyymm dates.
+        start = pd.Timestamp("2018-01-01")
+        return {
+            "dates":   [(start + pd.DateOffset(months=i)).strftime("%Y-%m")
+                        for i in range(n)],
+            "mkt_rf":  [0.5 + 0.01 * i for i in range(n)],
+            "smb":     [0.1] * n,
+            "hml":     [0.05] * n,
+            "mom":     [0.02] * n,
+            "rf":      [0.001] * n,
+        }
+
+    def test_pair_shape_for_short_history_strategy_recomputes(self):
+        """The bug: short-history strategy in flat-values form skipped
+        on length mismatch. With pair shape the strategy carries its
+        own dates and resolves on its own timeline."""
+        from tools.audit_layer2_deterministic import (
+            recompute_factor_loadings,
+        )
+
+        rng = np.random.default_rng(101)
+        # Global index: 60 months. Strategy has 36 months (short).
+        global_idx = pd.date_range("2018-01-31", periods=60, freq="ME")
+        short_idx = pd.date_range("2020-07-31", periods=36, freq="ME")
+        short_vals = rng.normal(0.008, 0.04, 36).tolist()
+        # Pair shape — carries the strategy's own dates.
+        short_pairs = [[d.isoformat(), v]
+                       for d, v in zip(short_idx, short_vals)]
+
+        ff = self._ff_rows(60)
+        payload = {
+            "raw_data": {
+                "strategy_returns": {"SHORT_STRAT": short_pairs},
+                "asset_returns": {
+                    "dates": [d.isoformat() for d in global_idx],
+                    "rf": [0.0] * 60,
+                },
+                "ff_factors": ff,
+            },
+            # Platform values: pretend the regression ran successfully.
+            "platform_computed": {"factor_loadings": {"SHORT_STRAT": {
+                "model": "carhart_4factor",
+                "mkt_rf": 0.85, "smb": 0.0, "hml": 0.0, "mom": -0.02,
+                "alpha_annualized": 0.01, "r_squared": 0.7,
+                "mkt_rf_significant": True, "smb_significant": False,
+                "hml_significant": False, "mom_significant": False,
+                "alpha_significant": False,
+            }}},
+        }
+        result = recompute_factor_loadings(["SHORT_STRAT"], payload)
+        # The recompute landed — not the "no_data" fall-through.
+        assert result["strategy"] == "factor_loadings"
+        assert len(result["checks"]) >= 1
+        # At least one check has an auditor_value populated; the
+        # regression ran. The pre-fix behaviour would have surfaced
+        # one "no_data" WARN and zero recomputed values.
+        flags = [c.get("flag") for c in result["checks"]]
+        assert flags.count("no_data") == 0, (
+            f"recompute fell through to no_data — pair shape not "
+            f"resolving short-history strategy. checks: {result['checks']}"
+        )
+
+    def test_full_history_pair_shape_recomputes(self):
+        """Sanity — full-history strategy in pair shape also works
+        (regression guard so a future refactor doesn't break the
+        common case while fixing the short-history one)."""
+        from tools.audit_layer2_deterministic import (
+            recompute_factor_loadings,
+        )
+
+        rng = np.random.default_rng(103)
+        idx = pd.date_range("2018-01-31", periods=60, freq="ME")
+        vals = rng.normal(0.008, 0.04, 60).tolist()
+        pairs = [[d.isoformat(), v] for d, v in zip(idx, vals)]
+        ff = self._ff_rows(60)
+        payload = {
+            "raw_data": {
+                "strategy_returns": {"FULL_STRAT": pairs},
+                "asset_returns": {
+                    "dates": [d.isoformat() for d in idx],
+                    "rf": [0.0] * 60,
+                },
+                "ff_factors": ff,
+            },
+            "platform_computed": {"factor_loadings": {"FULL_STRAT": {
+                "model": "carhart_4factor",
+                "mkt_rf": 0.0, "smb": 0.0, "hml": 0.0, "mom": 0.0,
+                "alpha_annualized": 0.0, "r_squared": 0.0,
+            }}},
+        }
+        result = recompute_factor_loadings(["FULL_STRAT"], payload)
+        assert result["strategy"] == "factor_loadings"
+        # No "no_data" WARN — the pair shape resolved.
+        flags = [c.get("flag") for c in result["checks"]]
+        assert flags.count("no_data") == 0
+
 
 # ── recompute_rolling_correlation ────────────────────────────────────────────
 

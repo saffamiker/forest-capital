@@ -435,16 +435,52 @@ def recompute_efficient_frontier(
 
 # ── Regime split — pre/post-2022 Sharpe + CAGR per strategy ──────────────────
 
+def _strategy_series_from_raw(
+    raw_strategies: dict, name: str,
+    fallback_index: pd.DatetimeIndex | None = None,
+) -> pd.Series | None:
+    """Builds a date-indexed Series for one strategy from the audit
+    payload's strategy_returns block.
+
+    Handles BOTH shapes:
+      - Pairs:        [[date, val], [date, val], ...] (canonical)
+      - Flat values:  [val, val, val, ...]            (legacy)
+
+    The pair form carries the strategy's own dates so short-history
+    strategies align correctly on their own timeline.
+
+    The flat form requires a fallback_index of the same length. A
+    length mismatch (e.g. short-history strategy + global index)
+    returns None, which the caller treats as "could not align."
+    """
+    from tools.analytics import _pairs_to_series
+
+    raw = raw_strategies.get(name)
+    if not raw:
+        return None
+    # Pair-shape detection — first element is a list/tuple of length 2.
+    first = raw[0]
+    if isinstance(first, (list, tuple)) and len(first) >= 2:
+        return _pairs_to_series(raw)
+    # Flat-values fallback. Requires an index of matching length.
+    if fallback_index is None or len(raw) != len(fallback_index):
+        return None
+    return pd.Series(raw, index=fallback_index, dtype=float).dropna()
+
+
 def recompute_regime_split(
     subset_names: list[str], payload: dict[str, Any],
 ) -> dict[str, Any]:
     """Recomputes pre/post-2022 Sharpe and CAGR for each strategy in
     subset_names, using the analytics layer's _safe_sharpe / _safe_cagr
     (the SAME helpers regime_conditional_performance uses). Compares
-    against the platform's regime_conditional payload."""
-    from tools.analytics import (
-        REGIME_BREAK, _pairs_to_series, _safe_cagr, _safe_sharpe,
-    )
+    against the platform's regime_conditional payload.
+
+    Handles both pair-shape and flat-value strategy_returns — the
+    pair shape is canonical going forward (May 25 2026); flat values
+    are still accepted for legacy / test compatibility.
+    """
+    from tools.analytics import REGIME_BREAK, _safe_cagr, _safe_sharpe
 
     raw_strategies = payload.get("raw_data", {}).get("strategy_returns", {})
     raw_asset = payload.get("raw_data", {}).get("asset_returns", {})
@@ -452,30 +488,26 @@ def recompute_regime_split(
                        .get("regime_conditional") or {})
     rf_series = _rf_series_from_raw(raw_asset)
     dates = raw_asset.get("dates") or []
-    idx = pd.to_datetime(dates) if dates else None
+    fallback_idx = pd.to_datetime(dates) if dates else None
 
     checks: list[dict[str, Any]] = []
     for name in subset_names:
         platform = platform_regime.get(name) or {}
-        raw_vals = raw_strategies.get(name)
-        if raw_vals is None or idx is None or len(raw_vals) != len(idx):
-            # Reconstitute from the strategy_results_cache structure
-            # (the platform stores monthly_returns as [[date, val], ...]).
-            # The audit_assembler currently strips dates from
-            # strategy_returns, so we use the aligned monthly idx here.
-            # Fall through to a warning if neither shape lines up.
+        series = _strategy_series_from_raw(
+            raw_strategies, name, fallback_idx)
+        if series is None or series.empty:
             checks.append({
                 "metric": f"{name}.post_2022_sharpe",
                 "platform_value": platform.get("post_2022_sharpe"),
                 "auditor_value": None,
                 "discrepancy_pct": None, "status": "warning",
-                "reasoning": (f"Could not align {name} monthly returns to "
-                              "the dates index — recompute skipped."),
+                "reasoning": (f"Could not build {name} series from "
+                              "raw_data.strategy_returns "
+                              "(missing / unaligned) — recompute skipped."),
                 "flag": "alignment_error",
             })
             continue
 
-        series = pd.Series(raw_vals, index=idx, dtype=float).dropna()
         pre = series[series.index < REGIME_BREAK]
         post = series[series.index >= REGIME_BREAK]
         auditor_pre_sharpe  = _safe_sharpe(pre,  rf_series)
@@ -602,15 +634,34 @@ def recompute_factor_loadings(
     checks: list[dict[str, Any]] = []
 
     # Reconstitute the strategy_results shape factor_loadings() expects.
+    # The pair shape ([[date, val], ...]) is preferred — it carries
+    # each strategy's own dates so short-history strategies align
+    # correctly on their own timeline. Flat values are accepted as a
+    # legacy fallback when the strategy's value count matches the
+    # global dates index.
+    fallback_idx = pd.to_datetime(dates) if dates else None
     strategy_results: dict[str, dict] = {}
     for name in subset_names:
-        values = raw_strategies.get(name)
-        if values is None or len(values) != len(dates):
+        raw = raw_strategies.get(name)
+        if not raw:
             continue
-        strategy_results[name] = {
-            "strategy_name": name,
-            "monthly_returns": [[d, v] for d, v in zip(dates, values)],
-        }
+        first = raw[0]
+        if isinstance(first, (list, tuple)) and len(first) >= 2:
+            # Pair shape — pass through as monthly_returns.
+            strategy_results[name] = {
+                "strategy_name": name,
+                "monthly_returns": list(raw),
+            }
+        else:
+            # Flat-values fallback. Skip when the length doesn't match
+            # the global index (a short-history strategy can't be
+            # aligned without its own dates).
+            if fallback_idx is None or len(raw) != len(fallback_idx):
+                continue
+            strategy_results[name] = {
+                "strategy_name": name,
+                "monthly_returns": [[d, v] for d, v in zip(dates, raw)],
+            }
 
     if not strategy_results:
         return {
