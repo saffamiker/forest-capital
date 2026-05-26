@@ -539,13 +539,52 @@ async def _rationalize_over_budget_sections(
 # ── Stage 4 — post-generation checks ────────────────────────────────────────
 
 
+# Flag kinds that count toward flag_count and therefore HARD-GATE
+# downloads via _gate_download in main.py. A flag NOT in this set is
+# warn-only — surfaced to the reviewer in the UI but never blocks the
+# download flow. The user decides whether to address the warning or
+# submit as-is. May 26 2026 — word_count_over_budget moved OUT of
+# this set as the warn-only follow-up to commit 70a9290's
+# rationalization pass: the rationalizer is a best-effort
+# compression, and a section that lands still_over is a soft caveat
+# Bob can trim manually, not an analytical defect.
+_HARD_GATE_FLAG_KINDS: frozenset[str] = frozenset({
+    "unverified_number",
+    "citation_unverified",
+    "bob_block",
+})
+
+# Kinds surfaced in the UI as warnings (visible, never blocking).
+# Kept as a named constant so a future addition is explicit at the
+# warn-only level rather than implicitly inheriting the gate.
+_WARN_ONLY_FLAG_KINDS: frozenset[str] = frozenset({
+    "word_count_over_budget",
+})
+
+
 def _post_check_summary(
     paper_md: str,
     verified_data: dict[str, Any],
     citations: dict[str, Any],
 ) -> dict[str, Any]:
     """Bundles the three regex post-checks plus the word-count
-    report into the shape the row + the UI both consume."""
+    report into the shape the row + the UI both consume.
+
+    flag_count counts only HARD-gate flags (unresolved [BOB] markers,
+    unverified numbers, missing citations). word_count_over_budget is
+    a WARN-ONLY flag — it appears in the `flags` list and the new
+    `warning_count` field so the UI can render the badge, but it
+    does NOT contribute to flag_count and therefore never blocks a
+    download. The reviewer sees the warning and decides whether to
+    trim manually or submit as-is.
+
+    Returns:
+      flags:           the full flag list (every kind, ordered)
+      flag_count:      count of HARD-gate flags (download-blocking)
+      warning_count:   count of warn-only flags (visible, non-blocking)
+      bob_blocks, bob_block_count, unverified_numbers, inline_only_cites,
+      refs_only_cites, word_counts
+    """
     from tools.template_pipeline import (
         post_check_citations, post_check_numbers, word_count_report,
     )
@@ -577,9 +616,14 @@ def _post_check_summary(
             "description": b["description"],
             "position": b["position"],
         })
+    hard_gate_count = sum(
+        1 for f in flags if f.get("kind") in _HARD_GATE_FLAG_KINDS)
+    warning_count = sum(
+        1 for f in flags if f.get("kind") in _WARN_ONLY_FLAG_KINDS)
     return {
         "flags":               flags,
-        "flag_count":          len(flags),
+        "flag_count":          hard_gate_count,
+        "warning_count":       warning_count,
         "bob_blocks":          bob_blocks,
         "bob_block_count":     len(bob_blocks),
         "unverified_numbers":  unverified_numbers,
