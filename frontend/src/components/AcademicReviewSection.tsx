@@ -33,6 +33,7 @@ import {
   GraduationCap, Loader2, X, ChevronDown, ChevronRight, AlertTriangle,
 } from 'lucide-react'
 import Markdown from './Markdown'
+import IndependentReviewCard from './IndependentReviewCard'
 import { useIsTeamMember } from '../hooks/usePermissions'
 import { trackFeature } from '../lib/activityLogger'
 import {
@@ -257,6 +258,7 @@ export default function AcademicReviewSection() {
   const arbiterText = result?.arbiterText ?? ''
   const peerResponses = result?.peerResponses ?? {}
   const peerEntries = Object.entries(peerResponses)
+  const independentReview = result?.independentReview ?? null
   const { overall, sections } = parseVerdict(arbiterText)
   const topPriority = extractTopPriority(sections)
 
@@ -401,6 +403,12 @@ export default function AcademicReviewSection() {
           })()}
         </div>
       )}
+
+      {/* Independent Review — second-opinion advisory card. Renders
+          below the primary verdict; ONLY when the independent_review
+          SSE frame has landed. Never affects the primary score or
+          gates. */}
+      <IndependentReviewCard review={independentReview} />
 
       {/* Peer responses — supporting detail, collapsed by default. */}
       {peerEntries.length > 0 && (

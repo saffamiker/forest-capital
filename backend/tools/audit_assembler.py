@@ -429,8 +429,19 @@ async def assemble_audit_payload() -> dict[str, Any]:
                 "mom": [f.get("mom") for f in (ff or [])],
                 "rf": [f.get("rf") for f in (ff or [])],
             },
+            # Preserve the full [date, value] pairs per strategy
+            # (May 25 2026 fix). The previous shape — flat values
+            # only — silently broke alignment for short-history
+            # strategies: MOMENTUM_ROTATION starts 2003-07 with 270
+            # months while the global asset_returns dates index has
+            # 282 months, so a pair-by-index zip misaligned by 12
+            # months. The deterministic recomputer would either skip
+            # the strategy (length-mismatch guard) or compute over
+            # wrong dates. Pairs carry their own dates so analytics'
+            # _pairs_to_series handles each strategy on its own
+            # timeline.
             "strategy_returns": {
-                name: [p[1] for p in (s.get("monthly_returns") or [])]
+                name: list(s.get("monthly_returns") or [])
                 for name, s in strategies.items()
             },
             # Per-rebalance target weights, from each strategy's persisted

@@ -170,3 +170,132 @@ describe('academicReviewStore — clear / cancel', () => {
     expect(useAcademicReviewStore.getState().result).toBeNull()
   })
 })
+
+
+// ── SSE event ingestion — independent_review frame (May 25 2026) ─────────────
+
+describe('academicReviewStore — independent_review SSE frame', () => {
+  beforeEach(() => {
+    useAcademicReviewStore.getState().clear()
+  })
+
+  // The store's runReview consumes a text/event-stream response.
+  // This helper builds a Response whose body iterates pre-built
+  // SSE frames so the test can drive the reader without a real
+  // network call. Each frame is a complete `data: {...}\n\n` block.
+  function sseResponse(frames: string[]): Response {
+    const encoder = new TextEncoder()
+    const stream = new ReadableStream({
+      start(controller) {
+        for (const frame of frames) {
+          controller.enqueue(encoder.encode(frame))
+        }
+        controller.close()
+      },
+    })
+    return new Response(stream, {
+      status: 200,
+      headers: { 'Content-Type': 'text/event-stream' },
+    })
+  }
+
+  it('captures the independent_review frame into result.independentReview',
+    async () => {
+      const frames = [
+        'data: ' + JSON.stringify({
+          type: 'peer_responses',
+          data: { equity_analyst: 'OK.' },
+        }) + '\n\n',
+        'data: ' + JSON.stringify({
+          type: 'arbiter_chunk',
+          text: '## Section 1.\nAll good.',
+        }) + '\n\n',
+        'data: ' + JSON.stringify({
+          type: 'independent_review',
+          verdict: 'Plausible',
+          overall_reasoning: 'Findings hang together.',
+          per_finding: [
+            { finding: 'best_strategy_sharpe',
+              label: 'Best Strategy Sharpe',
+              assessment: 'Plausible Sharpe.',
+              concern: '' },
+          ],
+          model: 'gemini-2.5-pro',
+          findings_seen: { best_strategy_sharpe: 'Sharpe 0.63' },
+        }) + '\n\n',
+        'data: [DONE]\n\n',
+      ]
+      const origFetch = globalThis.fetch
+      globalThis.fetch = async () => sseResponse(frames)
+      try {
+        await useAcademicReviewStore.getState().runReview('hash1', 'token')
+      } finally {
+        globalThis.fetch = origFetch
+      }
+      const s = useAcademicReviewStore.getState()
+      expect(s.phase).toBe('done')
+      expect(s.result?.independentReview).not.toBeNull()
+      expect(s.result?.independentReview?.verdict).toBe('Plausible')
+      expect(s.result?.independentReview?.model).toBe('gemini-2.5-pro')
+      // The per-finding entries surface intact.
+      expect(s.result?.independentReview?.per_finding).toHaveLength(1)
+      expect(s.result?.independentReview?.per_finding[0].finding)
+        .toBe('best_strategy_sharpe')
+    })
+
+  it('independentReview stays null when the SSE stream never emits the frame',
+    async () => {
+      // Legacy producer that hasn't yet emitted independent_review —
+      // the store must finalise the run with independentReview: null
+      // rather than failing the parse.
+      const frames = [
+        'data: ' + JSON.stringify({
+          type: 'peer_responses', data: {},
+        }) + '\n\n',
+        'data: ' + JSON.stringify({
+          type: 'arbiter_chunk', text: 'verdict here.',
+        }) + '\n\n',
+        'data: [DONE]\n\n',
+      ]
+      const origFetch = globalThis.fetch
+      globalThis.fetch = async () => sseResponse(frames)
+      try {
+        await useAcademicReviewStore.getState().runReview('hash2', 'token')
+      } finally {
+        globalThis.fetch = origFetch
+      }
+      const s = useAcademicReviewStore.getState()
+      expect(s.phase).toBe('done')
+      expect(s.result?.independentReview ?? null).toBeNull()
+    })
+
+  it('a Concerns verdict surfaces with its per-finding concerns intact',
+    async () => {
+      const frames = [
+        'data: ' + JSON.stringify({
+          type: 'independent_review',
+          verdict: 'Concerns',
+          overall_reasoning: 'One finding is borderline.',
+          per_finding: [
+            { finding: 'best_strategy_sharpe',
+              label: 'Best Strategy Sharpe',
+              assessment: 'High Sharpe.',
+              concern: '1.2 Sharpe on monthly data is above literature.' },
+          ],
+          model: 'gemini-2.5-pro',
+          findings_seen: {},
+        }) + '\n\n',
+        'data: [DONE]\n\n',
+      ]
+      const origFetch = globalThis.fetch
+      globalThis.fetch = async () => sseResponse(frames)
+      try {
+        await useAcademicReviewStore.getState().runReview('hash3', 'token')
+      } finally {
+        globalThis.fetch = origFetch
+      }
+      const ir = useAcademicReviewStore.getState().result?.independentReview
+      expect(ir?.verdict).toBe('Concerns')
+      expect(ir?.per_finding[0].concern).toContain('1.2 Sharpe')
+    })
+})

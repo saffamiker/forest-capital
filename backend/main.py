@@ -4635,10 +4635,66 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             log.info("academic_review_arbiter_complete",
                      arbiter_chars=len(arbiter_text))
 
+            # Independent Review — second-opinion advisory layer. A
+            # SEPARATE agent (Gemini) sees ONLY the headline findings
+            # extracted from the arbiter, with no platform context.
+            # Assesses plausibility, internal consistency, and
+            # graduate-finance defensibility. Advisory only — never
+            # affects the primary verdict or any gates. Fail-open:
+            # any failure surfaces a stub Concerns verdict so the SSE
+            # stream never blocks on this layer.
+            try:
+                from agents.independent_review import (
+                    extract_key_findings, run_independent_review,
+                )
+                strategy_results_for_findings: dict[str, Any] | None = None
+                try:
+                    from tools.cache import get_latest_strategy_cache
+                    strategy_results_for_findings = (
+                        await get_latest_strategy_cache())
+                except Exception as _exc:  # noqa: BLE001
+                    log.info("independent_review_strategy_read_failed",
+                             error=str(_exc))
+                findings = extract_key_findings(
+                    arbiter_text,
+                    analytics_snapshot=ctx.get("analytics"),
+                    strategy_results=strategy_results_for_findings,
+                )
+                independent = await asyncio.to_thread(
+                    run_independent_review, findings)
+                independent["findings_seen"] = findings
+                yield _sse("independent_review", **independent)
+                log.info(
+                    "academic_review_independent_complete",
+                    verdict=independent.get("verdict"),
+                    model=independent.get("model"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Defensive fallback — should be unreachable because
+                # run_independent_review is itself fail-open. If we
+                # land here it's an extract / asyncio failure; log
+                # and emit a placeholder so the frontend's stream
+                # contract is honoured (the event always fires).
+                log.warning(
+                    "independent_review_orchestration_failed",
+                    error=str(exc),
+                )
+                yield _sse(
+                    "independent_review",
+                    verdict="Concerns",
+                    overall_reasoning=(
+                        f"Independent review failed to run: {exc}. "
+                        "The primary verdict stands; re-run to retry."),
+                    per_finding=[],
+                    model="unavailable",
+                    findings_seen={},
+                )
+
             # Team Activity — log the completed review. The overall
             # readiness rating is parsed out of the verdict; the harness
             # block aggregates the peer + arbiter quality runs.
-            agents = list(peer_responses.keys()) + ["academic_advisor"]
+            agents = list(peer_responses.keys()) + ["academic_advisor",
+                                                     "independent_reviewer"]
             review_metadata: dict[str, Any] = {
                 "overall_rating": _parse_overall_rating(arbiter_text),
             }

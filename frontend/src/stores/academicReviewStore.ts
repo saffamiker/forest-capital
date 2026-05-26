@@ -42,6 +42,23 @@ import { create } from 'zustand'
 export type AcademicReviewPhase =
   | 'idle' | 'consulting' | 'streaming' | 'done' | 'error'
 
+export type IndependentVerdict = 'Plausible' | 'Concerns' | 'Implausible'
+
+export interface IndependentPerFinding {
+  finding:    string
+  label:      string
+  assessment: string
+  concern:    string
+}
+
+export interface IndependentReview {
+  verdict:           IndependentVerdict
+  overall_reasoning: string
+  per_finding:       IndependentPerFinding[]
+  model:             string
+  findings_seen:     Record<string, string>
+}
+
 export interface AcademicReviewResult {
   /** The full text-event-stream arbiter output as it landed. Parsed
    *  into structured sections by the rendering component via
@@ -50,6 +67,14 @@ export interface AcademicReviewResult {
   arbiterText:   string
   /** {agentId → markdown body} for the peer responses panel. */
   peerResponses: Record<string, string>
+  /** Advisory second-opinion verdict from an independent agent
+   *  (Gemini Pro). Lands on the `independent_review` SSE frame
+   *  after the arbiter completes. Never affects the primary verdict
+   *  or any gates — purely informational. Optional in the type so
+   *  legacy test fixtures don't need to pass null; runtime store
+   *  setters always include the field. Reader-side code defaults
+   *  to null on a missing field. */
+  independentReview?: IndependentReview | null
 }
 
 interface AcademicReviewStore {
@@ -145,6 +170,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         let buffer = ''
         let arbiterText = ''
         let peerResponses: Record<string, string> = {}
+        let independentReview: IndependentReview | null = null
         let phaseSeen: AcademicReviewPhase = 'consulting'
 
         // eslint-disable-next-line no-constant-condition
@@ -164,10 +190,15 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
               continue
             }
             let evt: {
-              type?:    string
-              data?:    Record<string, string>
-              text?:    string
-              message?: string
+              type?:              string
+              data?:              Record<string, string>
+              text?:              string
+              message?:           string
+              verdict?:           IndependentVerdict
+              overall_reasoning?: string
+              per_finding?:       IndependentPerFinding[]
+              model?:             string
+              findings_seen?:     Record<string, string>
             }
             try { evt = JSON.parse(payload) } catch { continue }
             if (evt.type === 'peer_responses') {
@@ -175,12 +206,32 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
               phaseSeen = 'streaming'
               set({
                 phase:  'streaming',
-                result: { arbiterText, peerResponses },
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                },
               })
             } else if (evt.type === 'arbiter_chunk') {
               arbiterText += evt.text ?? ''
               set({
-                result: { arbiterText, peerResponses },
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                },
+              })
+            } else if (evt.type === 'independent_review') {
+              // Advisory second-opinion verdict from Gemini Pro.
+              // Lands after the arbiter completes; never affects
+              // the primary verdict or any gates.
+              independentReview = {
+                verdict:           evt.verdict ?? 'Concerns',
+                overall_reasoning: evt.overall_reasoning ?? '',
+                per_finding:       evt.per_finding ?? [],
+                model:             evt.model ?? 'unknown',
+                findings_seen:     evt.findings_seen ?? {},
+              }
+              set({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                },
               })
             } else if (evt.type === 'error') {
               set({
@@ -199,7 +250,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         void phaseSeen  // captured for tracing only
         set({
           phase:       'done',
-          result:      { arbiterText, peerResponses },
+          result:      { arbiterText, peerResponses, independentReview },
           completedAt: new Date().toISOString(),
           _controller: null,
         })
