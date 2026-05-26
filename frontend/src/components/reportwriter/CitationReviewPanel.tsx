@@ -382,86 +382,88 @@ export default function CitationReviewPanel({
 }
 
 
-// ── Relevance heuristic — May 26 2026 ──────────────────────────────────────
+// ── Relevance heuristic — concept_id whole-word match (May 26 2026 v2) ─────
 //
-// The 3-level panel previously rendered EVERY citation under EVERY
-// finding (dimmed when unmatched). With 10 citations and 10 findings
-// that's 100 rows per panel open — overwhelming, and most rows are
-// noise. Filter so a citation only appears under a finding it's
-// plausibly relevant to, with an escape hatch to "Show all citations"
-// for the heuristic-misses case.
+// PRIOR ATTEMPT (PR #188): general token overlap with a stop-word set.
+// Failed in production — finance domain words like 'return', 'risk',
+// 'sharpe', 'portfolio' appear in nearly every citation AND every
+// finding description, so every pair matched and no citations were
+// filtered out.
 //
-// Relevance signal: token overlap between the citation's
-// `finding_supported` text (and its concept_id as a fallback) and the
-// finding's title + description. A citation is relevant to a finding
-// if they share at least one significant token.
+// THIS REVISION: deterministic concept_id whole-word match. Each
+// citation carries a stable `concept_id` from the template's concept
+// list ('sharpe_ratio', 'cvar_coherent_risk', 'momentum_strategy',
+// etc.). Analytical findings almost always name the concept verbatim
+// in their title or description ('Sharpe ratio 0.83 vs benchmark 0.61',
+// 'CVaR / max drawdown', 'momentum strategy'). A whole-word match of
+// any concept_id token against the finding text is a tight, low-
+// false-positive signal — concept_ids are a small controlled vocabulary,
+// not arbitrary prose.
 //
-// "Significant token": lowercased, ≥4 chars, not in the stop-words
-// set. We accept a permissive threshold because the user's escape
-// hatch ("Show all") covers the false-negative path; the cost of a
-// false negative is just "Bob clicks Show all", the cost of a false
-// positive is wasted scrolling.
+// Architectural note: the *correct* long-term answer is per-finding
+// sourcing provenance — a `finding_id` foreign key on citations_cache
+// populated by routing source_citations through
+// citation_sourcing.generate_queries(finding). That's a multi-PR
+// schema + pipeline change and is on the post-deadline backlog.
 //
 // CRITICAL: a citation already MATCHED to the finding always renders,
-// regardless of the relevance heuristic. The user's explicit match
-// wins over our heuristic.
+// regardless of the heuristic. The user's explicit match wins.
 
 
-// Words too generic to indicate topical relevance. The finance domain
-// terms ('return', 'risk', 'data') stay in — they're meaningful in
-// context. Only true stop words are excluded.
-const _RELEVANCE_STOP_WORDS = new Set<string>([
-  'this', 'that', 'these', 'those', 'with', 'from', 'into', 'upon',
-  'have', 'been', 'were', 'being', 'their', 'them', 'they', 'than',
-  'will', 'would', 'could', 'should', 'across', 'about', 'after',
-  'before', 'between', 'during', 'where', 'which', 'while', 'over',
-  'under', 'within', 'without', 'against', 'through', 'because',
-  'some', 'such', 'shows', 'note', 'each', 'both', 'most', 'more',
-  'less', 'when', 'what', 'when', 'every', 'finding', 'support',
-  'supports', 'supported', 'evidence',
-])
+// Concept_id tokens shorter than this are too generic to be a useful
+// match (e.g. would match 'a' or 'of'). Concept_ids in the template
+// are all multi-word and at least 4 chars per word.
+const _MIN_CONCEPT_TOKEN_LENGTH = 4
 
 
-function _relevanceTokens(text: string | null | undefined): Set<string> {
-  if (!text) return new Set()
-  const tokens = text
+function _conceptIdTokens(conceptId: string | null | undefined): string[] {
+  if (!conceptId) return []
+  return conceptId
     .toLowerCase()
-    // Split on any non-word run; treat underscores as separators so
-    // concept_id 'sharpe_ratio' yields tokens 'sharpe' + 'ratio'.
+    // concept_id is snake_case ('sharpe_ratio', 'four_factor_model').
+    // Split on underscores AND any other non-word characters as a
+    // defensive measure.
     .split(/[^\p{L}\p{N}]+/u)
-    .filter((t) =>
-      t.length >= 4 && !_RELEVANCE_STOP_WORDS.has(t))
-  return new Set(tokens)
+    .filter((t) => t.length >= _MIN_CONCEPT_TOKEN_LENGTH)
+}
+
+
+function _findingTextLower(finding: Finding): string {
+  // Title + description, lowercased once for the whole-word regex
+  // checks below. Description carries the meat (the conclusion +
+  // implication for analytical findings, the evidence text for QA
+  // findings, the discrepancy / reasoning for audit findings).
+  return (
+    (finding.title || '') + ' ' + (finding.description || '')
+  ).toLowerCase()
+}
+
+
+function _conceptTokenInText(token: string, lowerText: string): boolean {
+  // Whole-word match — ensures concept token 'factor' doesn't match
+  // 'factory' or 'manufacturer'. \b is a word boundary.
+  const re = new RegExp(`\\b${token}\\b`)
+  return re.test(lowerText)
 }
 
 
 function _isCitationRelevantToFinding(
   citation: Citation, finding: Finding,
 ): boolean {
-  // Citation already matched to this finding always renders — Bob's
-  // explicit match wins over the heuristic.
+  // 1. Citation already matched to this finding always renders.
   if ((citation.matched_finding_ids ?? []).includes(finding.id)) {
     return true
   }
-  // Build the citation's "what this is about" token set from
-  // finding_supported (the most direct relevance signal) PLUS the
-  // concept_id and the title as fallbacks. concept_id often carries
-  // the strongest signal on legacy rows where finding_supported is
-  // null.
-  const cTokens = new Set<string>([
-    ..._relevanceTokens(citation.finding_supported),
-    ..._relevanceTokens(citation.concept_id),
-    ..._relevanceTokens(citation.title),
-  ])
-  // The finding's token set: title + description (which includes the
-  // implication clause for analytical findings).
-  const fTokens = new Set<string>([
-    ..._relevanceTokens(finding.title),
-    ..._relevanceTokens(finding.description),
-  ])
-  // Any shared significant token = relevant.
-  for (const t of cTokens) {
-    if (fTokens.has(t)) return true
+  // 2. Any concept_id token appears as a whole word in the finding's
+  // title or description. Whole-word match keeps 'factor' from
+  // matching 'factory'; per-token AND-or-OR not needed because a
+  // single concept token (e.g. 'sharpe' from 'sharpe_ratio') is
+  // already discriminating against the small finding text.
+  const tokens = _conceptIdTokens(citation.concept_id)
+  if (tokens.length === 0) return false
+  const text = _findingTextLower(finding)
+  for (const t of tokens) {
+    if (_conceptTokenInText(t, text)) return true
   }
   return false
 }

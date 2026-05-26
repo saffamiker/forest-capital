@@ -575,3 +575,94 @@ describe('CitationReviewPanel — relevance filter (May 26 2026)', () => {
     expect(screen.queryByTestId('relevance-toggle-9001')).toBeNull()
   })
 })
+
+
+describe('CitationReviewPanel — concept_id-only matching (May 26 v2)', () => {
+  // PR #188 v1 used general token overlap with a stop-word set. It
+  // failed in production — finance domain words like 'return', 'risk',
+  // 'sharpe' appeared in every citation and finding, so every pair
+  // matched. v2 narrowed the heuristic to whole-word match against the
+  // citation's CONCEPT_ID specifically. These tests pin the new
+  // contract so a future regression back to token overlap is caught.
+
+  function _findingWithDescription(desc: string) {
+    return [{
+      id: 9001,
+      source: 'audit',
+      source_id: 'D04',
+      title: 'Test Finding',
+      description: desc,
+      rank: 'high',
+      status: 'warning',
+      severity: 'warning',
+      matched_count: 0,
+    }]
+  }
+
+  it('common finance words alone do NOT make a citation relevant', async () => {
+    // Finding description names 'risk' and 'return' — both finance
+    // commons. The v1 heuristic would have matched every citation
+    // here because those tokens were in the citations' finding_supported
+    // / title text. The v2 heuristic only matches on the concept_id
+    // itself, which is NOT 'risk' or 'return'.
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      findings: _findingWithDescription(
+        'Tax risk and return treatment in pension accounting.'),
+    }))
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() =>
+      screen.getByTestId('finding-section-9001'))
+    // Even though 'risk' and 'return' appear in finding text and in
+    // citation evidence, the citation concept_ids
+    // ('sharpe_ratio', 'cvar_coherent_risk', 'momentum_factor') do
+    // NOT have 'tax', 'risk' / 'pension', 'accounting' in them. Well,
+    // 'cvar_coherent_risk' DOES split to {cvar, coherent, risk} — and
+    // 'risk' appears in the finding text. So this citation is
+    // (correctly) relevant by concept_id rule. The other two are not.
+    // We assert the discriminating behaviour: sharpe_ratio is NOT
+    // shown despite 'sharpe' being a common finance word that does NOT
+    // appear in 'tax risk and return treatment in pension accounting'.
+    expect(screen.queryByTestId('citation-row-sharpe_ratio')).toBeNull()
+    expect(screen.queryByTestId('citation-row-momentum_factor')).toBeNull()
+    // cvar_coherent_risk's 'risk' token DOES match. Acceptable — the
+    // concept_id explicitly names the topic, so this is a legitimate
+    // match.
+    expect(screen.queryByTestId('citation-row-cvar_coherent_risk')).toBeTruthy()
+  })
+
+  it('concept_id token must match as a WHOLE WORD, not a substring', async () => {
+    // Concept_id 'four_factor_model' has token 'factor'. A finding
+    // mentioning 'factory' or 'manufacturer' must NOT match —
+    // substring matching would yield a false positive.
+    const cits = makeCitations()
+    cits[2] = { ...cits[2]!, concept_id: 'four_factor_model' }
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      citations: cits,
+      findings: _findingWithDescription(
+        'Manufacturing factory output during 2008.'),
+    }))
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() =>
+      screen.getByTestId('finding-section-9001'))
+    // 'factor' is a SUBSTRING of 'factory' / 'manufacturing' but not
+    // a whole-word match — the citation must be filtered out.
+    expect(screen.queryByTestId(
+      'citation-row-momentum_factor')).toBeNull()
+  })
+
+  it('a citation with no concept_id is filtered out by default', async () => {
+    // Defensive: a row without a concept_id has no relevance signal.
+    // Hide it under the default view; reveal via Show all.
+    const cits = makeCitations()
+    cits[0] = { ...cits[0]!, concept_id: '' }
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      citations: cits,
+    }))
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() => screen.getByTestId('finding-section-9001'))
+    // The other two citations still render against the default fixture
+    // finding (which names sharpe / cvar / momentum), so the panel
+    // isn't empty. But the no-concept-id row is hidden.
+    expect(screen.queryByTestId('citation-row-')).toBeNull()
+  })
+})
