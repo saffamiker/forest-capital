@@ -361,19 +361,33 @@ async def seed_findings_for_generation(
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return []
-        audit_rows = await _gather_audit_findings()
-        qa_rows = await _gather_qa_findings()
+        # May 26 2026 — Citation Review surfaces ONLY analytical
+        # findings. The earlier design merged audit + QA + analytical
+        # rows because all three CAN need citation support, but in
+        # practice this caused two blocker-grade problems on the
+        # midpoint deadline:
+        #   1. QA checks (S10 "OOS p-values reported", etc.) are
+        #      remediation items, not citable analytical claims —
+        #      surfacing them as HIGH findings in the citation panel
+        #      misdirected the reviewer.
+        #   2. QA / audit check_ids are NOT guaranteed stable across
+        #      runs. seed_findings_for_generation DELETEs findings
+        #      whose (source, source_id) tuple is no longer present
+        #      in the seed, and citation_finding_matches CASCADEs on
+        #      the FK. A QA check_id rename between runs silently
+        #      cascade-deleted the team's prior matches — exactly the
+        #      "matches not persisting" symptom the user reported.
+        # The audit + QA gatherers stay imported (other callers may
+        # use them later) but are no longer merged into the seed.
         analytical_rows = await _gather_analytical_findings()
-        # Order matters for the panel's default reading flow:
-        # ANALYTICAL findings open the list because they're the
-        # primary citation target (the Sharpe / regime / factor
-        # claims a citation supports). AUDIT findings (statistical-
-        # audit defects) follow. QA findings (methodology checks)
-        # last — citation-supportable but more operational than
-        # analytical. The panel re-sorts by rank within source on
-        # the read-back below, so this ordering is only a tiebreaker.
-        all_rows = [r for r in (analytical_rows + audit_rows + qa_rows)
-                    if r.get("rank") in (_RANK_HIGH, _RANK_MEDIUM)]
+        # HIGH-only — MEDIUM analytical findings (interesting but
+        # secondary) are dropped at the seed step. Citation matching
+        # is only required for the headline claims that drive the
+        # paper's argument; surfacing MEDIUM findings created gap
+        # flags the team couldn't reasonably action under the
+        # midpoint clock.
+        all_rows = [r for r in analytical_rows
+                    if r.get("rank") == _RANK_HIGH]
 
         async with AsyncSessionLocal() as session:
             # 1. UPSERT each fresh finding. Unique constraint on
