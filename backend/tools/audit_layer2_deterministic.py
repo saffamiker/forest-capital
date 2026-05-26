@@ -298,13 +298,19 @@ def recompute_summary_statistics(
                 None if sd < 1e-12
                 else float(diff.mean() / sd * np.sqrt(12)))
 
+    # Platform field-name map (tools.analytics.summary_statistics).
+    # Two metrics differ from the recompute's natural name:
+    #   volatility  ← stored as  ann_volatility
+    #   sharpe      ← stored as  sharpe_ratio
+    # All other names match. Looking up the wrong key returns None,
+    # which surfaces as a "missing_value" WARN — the May 25 2026 bug.
     checks = [
         _compare(f"{asset}.cagr",
                  platform.get("cagr"), auditor_cagr),
         _compare(f"{asset}.volatility",
-                 platform.get("volatility"), auditor_vol),
+                 platform.get("ann_volatility"), auditor_vol),
         _compare(f"{asset}.sharpe",
-                 platform.get("sharpe"), auditor_sharpe),
+                 platform.get("sharpe_ratio"), auditor_sharpe),
         _compare(f"{asset}.max_drawdown",
                  platform.get("max_drawdown"), auditor_dd),
         _compare(f"{asset}.skewness",

@@ -139,6 +139,11 @@ class TestRecomputeSummaryStatistics:
     def test_recompute_matches_platform_value_for_clean_series(self):
         # Build a deterministic returns series; compute the seven
         # metrics via analytics directly; assert recompute matches.
+        # IMPORTANT — the platform's analytics.summary_statistics()
+        # stores volatility under `ann_volatility` and Sharpe under
+        # `sharpe_ratio`. The recompute MUST read those keys; reading
+        # `volatility` / `sharpe` returns None and surfaces a spurious
+        # missing_value WARN (the May 25 2026 bug this test pins).
         from tools import analytics as an
         from tools.audit_layer2_deterministic import (
             recompute_summary_statistics,
@@ -152,14 +157,14 @@ class TestRecomputeSummaryStatistics:
         rf_arr = [0.001] * 24
 
         # Platform-computed values via the same primitives — these are
-        # what the analytics layer would have stored.
+        # what the analytics layer stores, under its native field names.
         rf = pd.Series(rf_arr, index=idx)
         ig_series = pd.Series(ig, index=idx)
         platform = {
-            "cagr":          round(an._cagr(ig_series), 4),
-            "volatility":    round(an._ann_vol(ig_series), 4),
-            "sharpe":        round(an._sharpe(ig_series, rf), 4),
-            "max_drawdown":  round(an._max_drawdown(ig_series), 4),
+            "cagr":           round(an._cagr(ig_series), 4),
+            "ann_volatility": round(an._ann_vol(ig_series), 4),
+            "sharpe_ratio":   round(an._sharpe(ig_series, rf), 4),
+            "max_drawdown":   round(an._max_drawdown(ig_series), 4),
             "skewness":      None,    # tested independently
             "excess_return": None,
             "information_ratio": None,
@@ -181,6 +186,77 @@ class TestRecomputeSummaryStatistics:
                 f"{metric}: expected pass, got "
                 f"{statuses[metric]} ({result['checks']})"
             )
+
+    def test_recompute_uses_analytics_layer_field_names(self):
+        """Regression pin for the May 25 2026 bug — every platform
+        summary-statistics row uses the analytics layer's native
+        field names (ann_volatility / sharpe_ratio), NOT the natural
+        metric names (volatility / sharpe). Reading the wrong key
+        returns None and surfaces a spurious missing_value WARN on
+        46 checks across the four assets (EQUITY / IG / HY /
+        BENCHMARK × 7 metrics).
+
+        The bug was the recomputer asking for platform.get("volatility"),
+        which the analytics layer never sets. This test asserts:
+          (1) When the platform dict ONLY carries the canonical field
+              names, volatility and sharpe checks PASS — the recomputer
+              found them.
+          (2) When the platform dict carries the wrong-named fields
+              (volatility / sharpe), the recomputer falls through to
+              the canonical names and STILL reports missing_value —
+              proving the lookup keys are exactly the canonical ones.
+        """
+        from tools.audit_layer2_deterministic import (
+            recompute_summary_statistics,
+        )
+
+        idx = pd.date_range("2020-01-31", periods=12, freq="ME")
+        equity = [0.01] * 12
+        ig     = [0.005] * 12
+        hy     = [0.008] * 12
+        rf_arr = [0.0] * 12
+        payload = self._payload(
+            {"equity": equity, "ig": ig, "hy": hy, "rf": rf_arr,
+             "dates": [d.isoformat() for d in idx]},
+            {},
+        )
+
+        # (1) Canonical field names — checks find the value.
+        canonical_platform = {
+            "cagr":           0.0617,
+            "ann_volatility": 0.0,    # constant series → zero vol
+            "sharpe_ratio":   0.0,    # zero vol → zero sharpe
+            "max_drawdown":   0.0,
+            "skewness":       0.0,
+            "excess_return":  0.0,
+            "information_ratio": None,
+        }
+        result = recompute_summary_statistics(
+            "IG", payload, canonical_platform)
+        by_metric = {c["metric"]: c for c in result["checks"]}
+        # No missing-value flags on ann_volatility / sharpe_ratio reads
+        # — proves the recompute uses the right keys.
+        assert by_metric["IG.volatility"]["flag"] != "missing_value", \
+            by_metric["IG.volatility"]
+        assert by_metric["IG.sharpe"]["flag"] != "missing_value", \
+            by_metric["IG.sharpe"]
+
+        # (2) Wrong field names — checks fall through to missing_value.
+        wrong_platform = {
+            "cagr":         0.0617,
+            "volatility":   0.0,   # WRONG key — analytics doesn't set this
+            "sharpe":       0.0,   # WRONG key — analytics doesn't set this
+            "max_drawdown": 0.0,
+            "skewness":     0.0,
+            "excess_return": 0.0,
+            "information_ratio": None,
+        }
+        result = recompute_summary_statistics("IG", payload, wrong_platform)
+        by_metric = {c["metric"]: c for c in result["checks"]}
+        # With the wrong-named fields, the recompute reports
+        # missing_value — proves it's reading the canonical names.
+        assert by_metric["IG.volatility"]["flag"] == "missing_value"
+        assert by_metric["IG.sharpe"]["flag"] == "missing_value"
 
     def test_missing_asset_returns_warning(self):
         from tools.audit_layer2_deterministic import (
