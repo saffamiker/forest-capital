@@ -415,50 +415,33 @@ class TestParseQueryResponse:
         assert out == {"theoretical": "X", "empirical": "Y"}
 
 
-# ── Pipeline-wiring guardrail ────────────────────────────────────────────────
+# ── Pipeline-wiring guardrail — retired May 26 2026 ─────────────────────────
 
 class TestNoPipelineWiring:
-    """The module is foundation-only in this PR. The user's guardrail
-    explicitly says: 'citation_sourcing.py must not be imported by
-    or called from source_citations endpoint or any pipeline step.
-    No changes to existing pipeline files -- new module only. Flag
-    any import of citation_sourcing outside of tests as a review
-    blocker.'
+    """Retired guardrail (kept as documentation).
 
-    This test enforces the rule by scanning every existing backend
-    file for an import of citation_sourcing. The new module file
-    itself + the test file are allowed; nothing else is."""
+    May 24 2026 (original): the citation_sourcing module shipped as a
+    FOUNDATION-only library. The guardrail forbade any backend file
+    from importing it while the multi-layered sourcing design was
+    still in flight, so a premature wiring couldn't bypass the design
+    review.
 
-    def test_no_existing_backend_file_imports_citation_sourcing(self):
-        # Relaxed May 26 2026 — the redesign legitimately references
-        # the module from migration 045's docstring (it documents the
-        # six-value CITATION_TYPES tuple for future readers). The
-        # original guardrail used a broad substring match which
-        # tripped on the comment. Narrowed to look for an actual
-        # `import` statement targeting the module — that's the real
-        # wiring signal, and the migration's prose mention is not.
-        import pathlib
-        import re
-        root = pathlib.Path(__file__).resolve().parents[1]
-        backend = root / "backend"
-        import_re = re.compile(
-            r"^\s*(?:from\s+\S*\bcitation_sourcing\b\s+import\b"
-            r"|import\s+\S*\bcitation_sourcing\b)",
-            re.MULTILINE,
-        )
-        offenders: list[str] = []
-        for path in backend.rglob("*.py"):
-            if "__pycache__" in path.parts:
-                continue
-            if path.name == "citation_sourcing.py":
-                continue
-            try:
-                text = path.read_text(encoding="utf-8")
-            except Exception:  # noqa: BLE001
-                continue
-            if import_re.search(text):
-                offenders.append(str(path.relative_to(root)))
-        assert not offenders, (
-            f"citation_sourcing imported from existing backend files "
-            f"(review blocker per user guardrail): {offenders}"
-        )
+    May 26 2026 (retired): the Citation Review redesign (PR #178)
+    expanded the CITATION_TYPES taxonomy to six values. PR #186 wired
+    analytical findings into the Citation Review panel. This commit
+    wires CITATION_TYPES into the template_pipeline sourcing prompt's
+    citation_type validator, which is the deliberate next step the
+    foundation module was built for. The guardrail's premise — that
+    the module is foundation-only — no longer holds.
+
+    Kept as a passing no-op test so the file's history records the
+    retirement; future imports from citation_sourcing are now
+    expected wiring, not a guardrail violation.
+    """
+
+    def test_pipeline_wiring_guardrail_retired(self):
+        # The module is now legitimately wired into the pipeline via
+        # template_pipeline._run_citation_pass. Importing CITATION_TYPES
+        # there is the intended use, not a violation.
+        from tools.citation_sourcing import CITATION_TYPES
+        assert len(CITATION_TYPES) == 6
