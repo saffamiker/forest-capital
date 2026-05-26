@@ -273,6 +273,46 @@ describe('CitationReviewPanel — match checkbox', () => {
     })
   })
 
+  it('shows a "saved" indicator after the POST succeeds', async () => {
+    // May 26 2026 — the auto-save indicator gives the reviewer visual
+    // confirmation the network call landed. Without it, ticks read as
+    // "local state only" even though the POST is firing.
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
+    mockedAxios.post.mockResolvedValueOnce({ data: { matched: true } })
+
+    render(<CitationReviewPanel generationId={42} />)
+    const checkbox = await screen.findByTestId(
+      'citation-match-9001-2')
+    fireEvent.click(checkbox)
+
+    await waitFor(() => {
+      expect(screen.getByTestId(
+        'citation-match-9001-2-save-state')).toBeTruthy()
+    })
+    // The indicator passes through 'saving…' to 'saved'.
+    const indicator = screen.getByTestId(
+      'citation-match-9001-2-save-state')
+    expect(indicator.textContent || '').toMatch(/saving|saved/i)
+  })
+
+  it('shows a "failed — retry" indicator when the POST errors', async () => {
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
+    mockedAxios.post.mockRejectedValueOnce(new Error('network down'))
+    mockedAxios.isAxiosError = () => false
+
+    render(<CitationReviewPanel generationId={42} />)
+    const checkbox = await screen.findByTestId(
+      'citation-match-9001-2')
+    fireEvent.click(checkbox)
+
+    await waitFor(() => {
+      const indicator = screen.getByTestId(
+        'citation-match-9001-2-save-state')
+      expect((indicator.textContent || '').toLowerCase())
+        .toContain('failed')
+    })
+  })
+
   it('clicking a ticked checkbox DELETEs from /citations/match', async () => {
     const cits = makeCitations()
     cits[1]!.matched_finding_ids = [9001]

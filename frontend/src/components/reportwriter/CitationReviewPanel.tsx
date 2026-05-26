@@ -274,7 +274,8 @@ export default function CitationReviewPanel({
       onReviewed?.()
     } catch (e) {
       // toggleMatch already reverted optimistic state; surface the
-      // error so the reviewer knows the toggle didn't land.
+      // error to BOTH the panel-level error banner AND the row-level
+      // save indicator so the reviewer knows the toggle didn't land.
       const msg = axios.isAxiosError(e)
         ? (e.response?.data?.detail || e.message)
         : (e as Error).message
@@ -284,6 +285,12 @@ export default function CitationReviewPanel({
           [generationId]: String(msg),
         },
       }))
+      // Re-throw so the CitationFindingRow's fireToggle catch sees
+      // the failure and renders the row-level "failed — retry"
+      // indicator. Previously the error was swallowed here, leaving
+      // the row visually idle while the panel-level banner carried
+      // the failure — easy to miss in a long citation list.
+      throw e
     }
   }, [generationId, toggleMatch, onReviewed])
 
@@ -793,12 +800,37 @@ function CitationFindingRow({
 }: CitationFindingRowProps) {
   const matched = (citation.matched_finding_ids ?? []).includes(findingId)
   const [toggling, setToggling] = useState(false)
+  // May 26 2026 — saveState surfaces the auto-save status next to the
+  // checkbox so the reviewer can SEE the network call land. The user
+  // reported "ticking a citation appears to be local state only" —
+  // the network call was firing, but with no UI indicator the team
+  // had no way to confirm persistence. 'saving' shows briefly during
+  // the POST/DELETE, 'saved' shows for ~1.5s on success, 'failed'
+  // shows on error (the store's optimistic-revert has already flipped
+  // the checkbox back at that point).
+  const [saveState, setSaveState] = useState<
+    'idle' | 'saving' | 'saved' | 'failed'>('idle')
 
-  const handleToggle = async (e: React.MouseEvent<HTMLInputElement>) => {
-    e.stopPropagation()
+  // ALWAYS fire on the canonical state-change event. onChange is what
+  // React/HTML uses to signal a checkbox value flipped; using it here
+  // means a tick CANNOT be local-state-only. onClick is kept solely
+  // to stopPropagation (so clicking the checkbox doesn't bubble up
+  // and expand/collapse the parent citation row).
+  const fireToggle = async () => {
     setToggling(true)
+    setSaveState('saving')
     try {
       await onToggleMatch(citation.id, findingId, matched)
+      setSaveState('saved')
+      // Clear the 'saved' indicator after a beat so the chrome stays
+      // quiet between actions.
+      setTimeout(() => setSaveState((s) => s === 'saved' ? 'idle' : s),
+                 1500)
+    } catch {
+      // The store's optimistic-revert has already restored the
+      // checkbox to its pre-click state. Surface the failure visibly
+      // so the reviewer notices and retries.
+      setSaveState('failed')
     } finally {
       setToggling(false)
     }
@@ -811,13 +843,26 @@ function CitationFindingRow({
         type="checkbox"
         checked={matched}
         disabled={toggling}
-        onClick={handleToggle}
-        onChange={() => { /* handled in onClick */ }}
+        onClick={(e) => e.stopPropagation()}
+        onChange={fireToggle}
         data-testid={`citation-match-${findingId}-${citation.id}`}
         aria-label={
           matched ? 'Remove match' : 'Match citation to finding'}
         className="mt-2 ml-1.5 shrink-0 cursor-pointer accent-electric-blue
                    disabled:opacity-50 disabled:cursor-not-allowed" />
+      {saveState !== 'idle' && (
+        <span
+          data-testid={
+            `citation-match-${findingId}-${citation.id}-save-state`}
+          className={`mt-2 text-[10px] font-medium uppercase tracking-wide
+            ${saveState === 'saving' ? 'text-text-muted' : ''}
+            ${saveState === 'saved'  ? 'text-positive' : ''}
+            ${saveState === 'failed' ? 'text-negative' : ''}`}>
+          {saveState === 'saving' && 'saving…'}
+          {saveState === 'saved'  && 'saved'}
+          {saveState === 'failed' && 'failed — retry'}
+        </span>
+      )}
       <div className="min-w-0 flex-1">
         <CitationRow
           citation={citation}
