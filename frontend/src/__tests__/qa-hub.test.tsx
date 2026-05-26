@@ -109,7 +109,7 @@ describe('QAHub — Run Full QA', () => {
     fireEvent.click(screen.getByRole('button', { name: /Run Full QA/ }))
     expect(useQAStore.getState().reload).toHaveBeenCalled()
     expect(vi.mocked(axios.post)).toHaveBeenCalledWith(
-      '/api/v1/audit/run', { triggered_by: 'manual' },
+      '/api/v1/audit/run', { triggered_by: 'manual', force: true },
     )
   })
 
@@ -177,7 +177,7 @@ describe('QAHub — smart audit caching', () => {
     const confirmBtns = screen.getAllByRole('button', { name: /Run Live Demo/ })
     fireEvent.click(confirmBtns[confirmBtns.length - 1])
     expect(vi.mocked(axios.post)).toHaveBeenCalledWith(
-      '/api/v1/audit/run', { reason: 'demo' },
+      '/api/v1/audit/run', { reason: 'demo', force: true },
     )
   })
 })

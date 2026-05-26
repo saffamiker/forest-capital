@@ -6168,7 +6168,16 @@ async def audit_run(
                        or "manual")
     if triggered_by not in ("manual", "scheduled", "pre_submission", "demo"):
         triggered_by = "manual"
-    return await start_audit(triggered_by, session.get("email", ""))
+    # force=true (May 26 2026) — symmetric with /api/qa/audit's force.
+    # The QAHub 'Run Full QA' button passes force=true for a manual
+    # click, so a cold strategy_results_cache is warmed inline rather
+    # than the audit completing silently with 0 checks. Demo runs are
+    # always forced — the operator clicked the button expecting fresh
+    # findings, not a cached or skipped result.
+    force = bool(body.get("force")) or triggered_by == "demo"
+    return await start_audit(
+        triggered_by, session.get("email", ""), force=force,
+    )
 
 
 @app.get("/api/v1/audit/runs")
@@ -7482,6 +7491,19 @@ async def qa_audit(
                 log.warning("qa_in01_attestation_error", error=str(_exc))
                 audit_attestation = None
 
+            # IN02 attestation — was an Academic Review run in the
+            # last 14 days, and did it carry the five rated sections.
+            # Same async-helper pattern as IN01 (compute_in01_attestation).
+            # Query failure surfaces as a FAIL verdict in the IN02
+            # check, not an endpoint 500.
+            try:
+                from tools.audit_engine import compute_in02_attestation
+                academic_review_attestation = (
+                    await compute_in02_attestation())
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("qa_in02_attestation_error", error=str(_exc))
+                academic_review_attestation = None
+
             # Seed the per-request usage bucket before the QA
             # agent's call_claude invocations so their token usage
             # is captured.
@@ -7492,6 +7514,7 @@ async def qa_audit(
                 run_full_checklist=True,
                 analytics_cache=analytics_cache,
                 audit_attestation=audit_attestation,
+                academic_review_attestation=academic_review_attestation,
             )
 
             # Persist the full audit to qa_results_cache so the next
@@ -7572,17 +7595,22 @@ async def qa_export(request: Request, session: dict = Depends(require_auth)):
             from tools.data_fetcher import get_full_history_async
             from tools.backtester import run_all_strategies
             from agents.qa_agent import QAAgent
-            from tools.audit_engine import compute_in01_attestation
+            from tools.audit_engine import (
+                compute_in01_attestation, compute_in02_attestation,
+            )
             history = await get_full_history_async()
             strategy_results = await asyncio.to_thread(run_all_strategies, history)
-            # IN01 attestation — same async-then-pass pattern as the
-            # /api/qa/audit endpoint. The PDF export's IN01 row reflects
-            # the submission-window verdict.
+            # IN01 + IN02 attestations — same async-then-pass pattern
+            # as the /api/qa/audit endpoint. The PDF export's IN01
+            # row reflects the submission-window verdict; IN02 the
+            # latest Academic Review status.
             attestation = await compute_in01_attestation()
+            ar_attestation = await compute_in02_attestation()
             audit = await asyncio.to_thread(
                 lambda: QAAgent().run_audit(
                     strategy_results, run_full_checklist=True,
                     audit_attestation=attestation,
+                    academic_review_attestation=ar_attestation,
                 )
             )
         except Exception as exc:

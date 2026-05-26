@@ -87,8 +87,10 @@ async def _no_run_running() -> None:
     return None
 
 
-async def _fake_start_audit(triggered_by: str, email: str) -> dict:
-    return {"status": "started", "audit_id": 1}
+async def _fake_start_audit(
+    triggered_by: str, email: str, *, force: bool = False,
+) -> dict:
+    return {"status": "started", "audit_id": 1, "forced": force}
 
 
 _db_ready_cache: bool | None = None
@@ -585,9 +587,12 @@ class TestSmartAuditCaching:
     def test_demo_reason_sets_triggered_by_demo(self, monkeypatch):
         captured: dict[str, str] = {}
 
-        async def _fake_start(triggered_by: str, email: str) -> dict:
+        async def _fake_start(
+            triggered_by: str, email: str, *, force: bool = False,
+        ) -> dict:
             captured["triggered_by"] = triggered_by
-            return {"status": "started", "audit_id": 1}
+            captured["force"] = force
+            return {"status": "started", "audit_id": 1, "forced": force}
 
         # The QA-run guard runs before start_audit and reads audit_runs
         # directly — stub it clear so a stale 'running' row never 409s

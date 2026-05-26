@@ -389,8 +389,15 @@ export default function QAHub() {
     // Statistical audit — fire, then poll the latest run until it settles.
     // A demo run forces a fresh audit regardless of cache currency and is
     // tagged triggered_by="demo" so the audit history can mark it.
+    //
+    // force=true (May 26 2026) — a manual 'Run Full QA' click pre-warms
+    // strategy_results_cache before the three layers run. Without the
+    // flag, a cold cache produced 'all layers skip / 0 checks' silently;
+    // with it, the audit either completes against real data or finalises
+    // as 'failed' with a clear metadata.note. Matches the methodology
+    // audit's qaReload(force=true) semantics.
     void axios.post('/api/v1/audit/run',
-      demo ? { reason: 'demo' } : { triggered_by: 'manual' })
+      demo ? { reason: 'demo', force: true } : { triggered_by: 'manual', force: true })
       .then(() => {
         let polls = 0
         pollRef.current = setInterval(() => {
