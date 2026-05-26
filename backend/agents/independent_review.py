@@ -501,9 +501,17 @@ def run_independent_review(findings: dict[str, str]) -> dict[str, Any]:
 
     user_message = _build_user_message(findings)
     try:
+        # max_output_tokens=8192 (May 26 2026). The 5-finding JSON
+        # response was truncating after the first per_finding entry
+        # under gemini-2.5-pro's default output cap, so the
+        # downstream JSON parse fell back to a "Concerns" stub
+        # carrying only one section. 8192 is large enough for all
+        # five entries plus overall_reasoning + JSON braces with
+        # comfortable headroom; well under the model's hard limit.
         raw = call_gemini(
             GEMINI_PRO_MODEL, _SYSTEM_PROMPT, user_message,
             trigger="academic_review_independent",
+            max_output_tokens=8192,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("independent_review_call_failed", error=str(exc))

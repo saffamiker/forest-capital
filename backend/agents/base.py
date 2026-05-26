@@ -510,6 +510,7 @@ def call_gemini(
     *,
     trigger: str = "unspecified",
     hash_gate: bool = False,
+    max_output_tokens: int | None = None,
 ) -> str:
     """
     Thin wrapper around the google-genai SDK — the single Gemini call
@@ -543,13 +544,22 @@ def call_gemini(
     # agents/models.py for the chain.
     from agents.models import resolve_active, report_failure, is_model_not_found
     active_model = resolve_active(model)
+    # Build the config kwargs — only pass max_output_tokens when the
+    # caller supplied one, so existing call sites that rely on the
+    # SDK default (currently 8192 for gemini-2.5-pro) are unchanged.
+    # Added May 26 2026 because the Independent Review's 5-section
+    # JSON was truncating after the first finding — the default
+    # output cap on gemini-2.5-pro is lower than the prompt plus a
+    # full 5-entry reply needs.
+    _config_kwargs: dict[str, Any] = {"system_instruction": system_prompt}
+    if max_output_tokens is not None:
+        _config_kwargs["max_output_tokens"] = int(max_output_tokens)
     while True:
         try:
             response = client.models.generate_content(
                 model=active_model,
                 contents=user_message,
-                config=types.GenerateContentConfig(
-                    system_instruction=system_prompt),
+                config=types.GenerateContentConfig(**_config_kwargs),
             )
             break
         except Exception as exc:  # noqa: BLE001
