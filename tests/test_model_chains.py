@@ -447,6 +447,90 @@ class TestCallGeminiFallback:
 
 # ── chain_state observability ────────────────────────────────────────────────
 
+# ── Startup availability check — dispatcher routing ────────────────────────
+
+
+class TestCheckModelAvailabilityDispatch:
+    """The lifespan startup hook pings every chain's current model to
+    detect provider deprecations early. The dispatcher routes each
+    chain to its provider's check function by logical_name; an
+    unregistered chain falls through to model_check_unknown_provider.
+
+    gemini_pro joined the registry May 25 2026 for the Independent
+    Review advisory layer. Same provider (Google) as the existing
+    gemini Flash chain, so both route through _check_gemini_chain —
+    the per-call ping logic is identical, only the model strings
+    differ. Without this routing, the warm logs report
+    model_check_unknown_provider for every restart."""
+
+    def test_gemini_pro_routes_to_gemini_check_not_unknown_provider(
+        self, monkeypatch,
+    ):
+        # Bypass the test-env early return and capture which check
+        # function each chain is routed to. The check function is
+        # async; stub each to a fast tag-returning coroutine so the
+        # dispatch path is observable without hitting any real API.
+        import asyncio
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+        monkeypatch.setenv("GOOGLE_API_KEY", "test")
+
+        anthropic_calls: list[str] = []
+        gemini_calls: list[str] = []
+
+        async def _fake_anthropic(chain):
+            anthropic_calls.append(chain.logical_name)
+            return {"status": "ok", "active": chain.current}
+
+        async def _fake_gemini(chain):
+            gemini_calls.append(chain.logical_name)
+            return {"status": "ok", "active": chain.current}
+
+        monkeypatch.setattr(models, "_check_anthropic_chain", _fake_anthropic)
+        monkeypatch.setattr(models, "_check_gemini_chain", _fake_gemini)
+
+        unknown_logged: list[str] = []
+        real_log = models.log
+
+        class _SpyLog:
+            def info(self, event, **kwargs):
+                if event == "model_check_unknown_provider":
+                    unknown_logged.append(kwargs.get("chain", "?"))
+                real_log.info(event, **kwargs)
+
+            def warning(self, *a, **kw):
+                real_log.warning(*a, **kw)
+
+            def error(self, *a, **kw):
+                real_log.error(*a, **kw)
+
+        monkeypatch.setattr(models, "log", _SpyLog())
+
+        result = asyncio.run(models.check_model_availability())
+
+        # Both Gemini chains routed to the Google check function.
+        assert "gemini" in gemini_calls
+        assert "gemini_pro" in gemini_calls
+        # Anthropic chains routed to the Anthropic check.
+        assert set(anthropic_calls) == {"sonnet", "opus", "haiku"}
+        # No chain fell through to the unknown-provider branch.
+        assert unknown_logged == [], (
+            f"these chains incorrectly routed to "
+            f"model_check_unknown_provider: {unknown_logged}"
+        )
+        # Every registered chain landed a result entry.
+        assert set(result.keys()) == {
+            "sonnet", "opus", "haiku", "gemini", "gemini_pro"}
+
+    def test_check_skipped_in_test_environment(self, monkeypatch):
+        # Sanity — the test-env short-circuit is the contract that
+        # keeps the existing suite from hitting any real API. Pin it.
+        import asyncio
+        monkeypatch.setenv("ENVIRONMENT", "test")
+        result = asyncio.run(models.check_model_availability())
+        assert result == {}
+
+
 class TestChainStateSnapshot:
     def test_chain_state_lists_every_chain(self) -> None:
         # gemini_pro joined the chain registry May 25 2026 for the
