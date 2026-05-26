@@ -9301,11 +9301,13 @@ async def _generate_midpoint_document(
                          "correlation_pre_post": {
                              "pre_2022": data["rolling_correlation"].get("pre_2022"),
                              "post_2022": data["rolling_correlation"].get("post_2022")}}},
-            # Section 3 (Roles and Division of Labor) is pre-seeded from
-            # real Team Activity counts. The AI draft is factual, not
-            # authoritative — build_midpoint_paper renders a "BOB —
-            # PERSONALISE" callout beneath it directing him to rewrite it
-            # in his own voice and add what the platform data cannot show.
+            # Section 3 (Roles and Division of Labor) is built from real
+            # Team Activity counts — commits, council sessions, reviews,
+            # UAT attestations, documents uploaded. The Academic Writer
+            # produces the full section directly; the placeholder callout
+            # that previously deferred this to a manual rewrite was
+            # removed May 26 2026 (the rubric requires interpretation to
+            # be PRESENT, not human-authored).
             {"key": "roles", "available": has_roles,
              "pending": (f"{DATA_PENDING} — no platform activity on record "
                          "yet. Run council sessions, reviews and UAT, then "
@@ -10215,11 +10217,13 @@ async def executive_brief_template(request: Request, session: dict = Depends(req
       2. Methodology        (Academic Writer → write_methodology)
       3. Key Findings       (top 3 strategies with APA stat reporting)
       4. Limitations        (QA Agent + Risk Manager output where available)
-      5. Recommendations    (deterministic — Bob will personalise)
+      5. Recommendations    (Academic Writer produces the full section
+                             interpretation directly; the team edits for
+                             voice in-editor)
       6. Appendix Charts    (5 chart placeholders + caption — the .pptx
                              pipeline embeds the actual images; here we
-                             insert captioned placeholders that Bob can
-                             populate by dropping screenshots into Word)
+                             insert captioned placeholders the team
+                             populates by dropping screenshots into Word)
     """
     from fastapi.responses import Response as FastAPIResponse
 

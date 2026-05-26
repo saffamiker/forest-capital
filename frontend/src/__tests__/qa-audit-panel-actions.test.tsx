@@ -426,7 +426,14 @@ describe('QAAuditPanel — Action Required card variants', () => {
       ).toBeInTheDocument()
     })
     // The badge surfaces the reviewer's email + the team note.
-    expect(screen.getByText(/Confirmed Intentional/i)).toBeInTheDocument()
+    // May 26 2026 — two Confirmed Intentional indicators now render:
+    //   (1) the row's top-right SubmissionBadge — "CONFIRMED INTENTIONAL"
+    //       (replaces the planned_extension / disclosure_required amber)
+    //   (2) the expanded action card's badge — "Confirmed Intentional —
+    //       recorded {date}" with the reviewer's full note
+    // Both are intentional displays of the override state. getAllByText
+    // allows both to render.
+    expect(screen.getAllByText(/Confirmed Intentional/i).length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText(/ruurdsm@queens\.edu/)).toBeInTheDocument()
     expect(
       screen.getByText(/The double-sided cost capture is intentional/),
