@@ -1825,6 +1825,17 @@ async def persist_citations(
                 # column with _to_str_or_none and the float column
                 # with _to_float_or_none. JSONB column already goes
                 # through json.dumps + CAST(:alts AS JSONB).
+                # citation_type / trust_flag / scoring_rationale —
+                # multi-layered sourcing columns (migration 043). The
+                # upstream pipeline writes each of these per citation;
+                # persist_citations was previously dropping them, so
+                # every row landed as the default 'theoretical' with
+                # NULL trust_flag and NULL scoring_rationale. As a
+                # result the Citation Review panel surfaced only
+                # theoretical (academic-journal-looking) entries and
+                # the four-layer taxonomy was invisible. May 26 2026.
+                citation_type = _to_str_or_none(
+                    c.get("citation_type")) or "theoretical"
                 row = await s.execute(text(
                     "INSERT INTO citations_cache "
                     "(generation_id, concept_id, author, year, title, "
@@ -1832,9 +1843,11 @@ async def persist_citations(
                     " url, verification_status, search_query_used, "
                     " alternatives, supporting_extract, "
                     " selection_rationale, confidence_score, "
-                    " finding_supported) "
+                    " finding_supported, citation_type, trust_flag, "
+                    " scoring_rationale) "
                     "VALUES (:g, :c, :au, :y, :t, :j, :v, :u, :s, :q, "
-                    " CAST(:alts AS JSONB), :ext, :rat, :cs, :fd) "
+                    " CAST(:alts AS JSONB), :ext, :rat, :cs, :fd, "
+                    " :ct, :tf, :sr) "
                     "RETURNING id"
                 ), {
                     "g":    _to_int_or_none(generation_id),
@@ -1852,6 +1865,9 @@ async def persist_citations(
                     "rat":  _to_str_or_none(c.get("selection_rationale")),
                     "cs":   _to_float_or_none(c.get("confidence_score")),
                     "fd":   _to_str_or_none(c.get("finding_supported")),
+                    "ct":   citation_type,
+                    "tf":   _to_str_or_none(c.get("trust_flag")),
+                    "sr":   _to_str_or_none(c.get("scoring_rationale")),
                 })
                 new_id = row.scalar()
                 if new_id is not None:
@@ -1928,6 +1944,12 @@ async def get_citations_for_generation(
         if AsyncSessionLocal is None:
             return []
         async with AsyncSessionLocal() as s:
+            # citation_type / trust_flag / scoring_rationale —
+            # migration 043 columns. Surfaced so the Citation Review
+            # panel can render the four-layer taxonomy
+            # (theoretical / empirical / methodological / practitioner)
+            # the user previously only saw the theoretical layer of.
+            # May 26 2026.
             rows = await s.execute(text(
                 "SELECT id, concept_id, author, year, title, "
                 " journal_or_institution, volume_issue_pages, url, "
@@ -1935,7 +1957,8 @@ async def get_citations_for_generation(
                 " alternatives, reviewer_email, reviewed_at, "
                 " review_action, supporting_extract, "
                 " selection_rationale, confidence_score, "
-                " finding_supported "
+                " finding_supported, citation_type, trust_flag, "
+                " scoring_rationale "
                 "FROM citations_cache "
                 "WHERE generation_id = :g "
                 "ORDER BY concept_id"
@@ -1973,6 +1996,14 @@ async def get_citations_for_generation(
                                                 if r[16] is not None
                                                 else None),
                     "finding_supported":      r[17],
+                    # Multi-layered sourcing fields (migration 043).
+                    # Legacy rows: citation_type defaults to
+                    # 'theoretical' via the migration backfill;
+                    # trust_flag and scoring_rationale are NULL.
+                    "citation_type":          (r[18]
+                                                or "theoretical"),
+                    "trust_flag":             r[19],
+                    "scoring_rationale":      r[20],
                     "formatted":              _format_citation({
                         "author": r[2], "year": r[3], "title": r[4],
                         "journal_or_institution": r[5],

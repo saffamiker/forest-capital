@@ -446,6 +446,63 @@ function CitationRow({ citation, busy, onAction }: CitationRowProps) {
             <span className={`text-2xs px-1.5 py-0.5 rounded ${status.cls}`}>
               {status.label}
             </span>
+            {/* Citation type badge — surfaces the four-layer
+                taxonomy (theoretical / empirical / methodological /
+                practitioner) from migration 043. Without this the
+                Citation Review panel rendered every type identically
+                and the reviewer could not see gaps in coverage.
+                May 26 2026. */}
+            {(() => {
+              const type = (citation.citation_type
+                || 'theoretical').toLowerCase()
+              const typeStyles: Record<string, {label: string, cls: string}> = {
+                theoretical: {
+                  label: 'Theoretical',
+                  cls: 'bg-blue-900/40 text-blue-300 border border-blue-700/40',
+                },
+                empirical: {
+                  label: 'Empirical',
+                  cls: 'bg-green-900/40 text-green-300 border border-green-700/40',
+                },
+                methodological: {
+                  label: 'Methodological',
+                  cls: 'bg-purple-900/40 text-purple-300 border border-purple-700/40',
+                },
+                practitioner: {
+                  label: 'Practitioner',
+                  cls: 'bg-amber-900/40 text-amber-300 border border-amber-700/40',
+                },
+              }
+              const t = typeStyles[type] ?? typeStyles.theoretical
+              return (
+                <span
+                  data-testid={`citation-type-${citation.concept_id}`}
+                  className={`text-2xs px-1.5 py-0.5 rounded ${t.cls}`}
+                  title={citation.scoring_rationale
+                    || `Citation layer: ${t.label}`}>
+                  {t.label}
+                </span>
+              )
+            })()}
+            {/* Trust flag — surfaces only when the multi-layered
+                pipeline assessed the source. Legacy rows render
+                without this badge. */}
+            {citation.trust_flag ? (
+              <span
+                data-testid={`citation-trust-${citation.concept_id}`}
+                className={`text-2xs px-1.5 py-0.5 rounded border ${
+                  citation.trust_flag === 'verified'
+                    ? 'bg-green-900/30 text-green-300 border-green-700/30'
+                    : citation.trust_flag === 'paywalled'
+                      ? 'bg-amber-900/30 text-amber-300 border-amber-700/30'
+                      : citation.trust_flag === 'stale'
+                        ? 'bg-orange-900/30 text-orange-300 border-orange-700/30'
+                        : 'bg-navy-800 text-text-muted border-navy-600'
+                }`}
+                title={`Trust: ${citation.trust_flag}`}>
+                {citation.trust_flag}
+              </span>
+            ) : null}
           </div>
           {citation.author ? (
             <p className="text-text-secondary text-2xs leading-tight">
