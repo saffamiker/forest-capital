@@ -416,9 +416,35 @@ function FindingSection({
     ? { label: 'HIGH',   cls: 'bg-red-500/20 text-red-300 border border-red-500/40' }
     : { label: 'MEDIUM', cls: 'bg-amber-500/15 text-amber-300 border border-amber-500/40' }
 
-  const sourceBadge = finding.source === 'audit'
-    ? { label: 'Audit', cls: 'bg-blue-900/40 text-blue-300 border border-blue-700/40' }
-    : { label: 'QA',    cls: 'bg-purple-900/40 text-purple-300 border border-purple-700/40' }
+  // Three Level-1 source streams (May 26 2026, citation_findings.py).
+  // ANALYTICAL is the primary citation target — Sharpe / regime /
+  // factor claims that need a supporting reference. AUDIT and QA are
+  // methodology / operational findings. The badge colour is the
+  // reader's at-a-glance cue for which kind of claim each finding is.
+  const sourceBadge = (() => {
+    switch (finding.source) {
+      case 'analytical':
+        return {
+          label: 'Analytical',
+          cls: 'bg-emerald-900/40 text-emerald-300 border border-emerald-700/40',
+        }
+      case 'audit':
+        return {
+          label: 'Audit',
+          cls: 'bg-blue-900/40 text-blue-300 border border-blue-700/40',
+        }
+      case 'qa':
+        return {
+          label: 'QA',
+          cls: 'bg-purple-900/40 text-purple-300 border border-purple-700/40',
+        }
+      default:
+        return {
+          label: finding.source,
+          cls: 'bg-navy-800 text-text-muted border border-navy-700',
+        }
+    }
+  })()
 
   const hasGap = finding.matched_count === 0
 
