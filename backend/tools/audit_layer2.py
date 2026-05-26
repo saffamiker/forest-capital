@@ -42,6 +42,13 @@ log = structlog.get_logger(__name__)
 # gives every chunked group ~4× the worst-case payload size and never
 # exceeds the model's per-call output budget.
 _AUDITOR_MAX_TOKENS = 8000
+# Retry budget — used by _run_group when the first response truncates
+# past parsing. 16000 is the largest output the auditor model
+# (claude-opus-4-7) accepts in a single call; one retry at this budget
+# absorbs the long-reasoning runs that overshoot 8000 without
+# burning the budget on every call. Mirrors the harness evaluator's
+# 600 → 1500 escalation pattern (agents/harness.py).
+_AUDITOR_MAX_TOKENS_RETRY = 16000
 
 _AUDITOR_SYSTEM = (
     "You are an independent quantitative auditor verifying portfolio "
@@ -108,7 +115,9 @@ def _extract_json(text: str) -> dict[str, Any] | None:
     return None
 
 
-def _call_auditor(user_message: str) -> str:
+def _call_auditor(
+    user_message: str, max_tokens: int = _AUDITOR_MAX_TOKENS,
+) -> str:
     """One Opus auditor call. Synchronous — the caller fans groups out
     with asyncio.to_thread.
 
@@ -118,10 +127,14 @@ def _call_auditor(user_message: str) -> str:
     hash_gate=True because audit_engine.run_full_audit() runs an
     is_audit_current() check BEFORE firing the auditor — every
     auditor call has already passed the gate when it reaches here.
+
+    max_tokens defaults to _AUDITOR_MAX_TOKENS (8000); _run_group
+    passes _AUDITOR_MAX_TOKENS_RETRY (16000) on a retry when the
+    first response truncated past parsing.
     """
     from agents.base import OPUS_MODEL, call_claude
     return call_claude(OPUS_MODEL, _AUDITOR_SYSTEM, user_message,
-                        max_tokens=_AUDITOR_MAX_TOKENS,
+                        max_tokens=max_tokens,
                         trigger="statistical_audit_layer2",
                         hash_gate=True)
 
@@ -178,10 +191,15 @@ def _summary_prompt(asset: str, payload: dict, platform: dict) -> str:
     raw = payload["raw_data"]["asset_returns"]
     specs = payload["formula_specifications"]
     rf_annual = payload["metadata"]["risk_free_rate"]["value"]
+    # Series resolution — IG / HY / BENCHMARK use the asset-specific
+    # series; EQUITY uses raw.get('equity'). BENCHMARK falls back to
+    # the equity series (the strategy is 100% equity).
+    series_to_audit = raw.get(
+        asset.lower(), raw.get("equity")) if asset != "BENCHMARK" \
+        else raw.get("equity")
     return (
         f"Independently verify the summary statistics for {asset}.\n\n"
-        f"Raw monthly returns: {raw.get('equity') if asset == 'EQUITY' else '(see series below)'}\n"
-        f"Series to audit ({asset}): {payload['raw_data']['asset_returns'].get(asset.lower(), raw.get('equity'))}\n"
+        f"Series to audit ({asset}): {series_to_audit}\n"
         f"Dates: {raw.get('dates')}\n"
         f"Monthly risk-free series: {raw.get('rf')}\n"
         f"Annualised risk-free rate: {rf_annual}\n"
@@ -195,11 +213,27 @@ def _summary_prompt(asset: str, payload: dict, platform: dict) -> str:
         f"- skewness: {specs['skewness']}\n"
         f"- excess_return: {specs['excess_return']}\n"
         f"- information_ratio: {specs['information_ratio']}\n\n"
-        "Recompute each metric, then return ONLY this JSON:\n"
-        '{"strategy": "' + asset + '", "checks": [{"metric": "cagr", '
-        '"platform_value": <num>, "auditor_value": <num>, '
-        '"status": "pass|warning|fail", "discrepancy_pct": <num>, '
-        '"reasoning": "<step by step>", "flag": "<description if not pass>"}]}'
+        # Spell out ALL seven expected metrics in the example schema so
+        # the auditor emits one check per metric — NOT just the single
+        # 'cagr' example. Keep `reasoning` short ("one sentence") to
+        # contain the per-check verbosity; the long step-by-step form
+        # was the main driver of the >8000-token responses that
+        # truncated past the closing '}' and tripped the IG parse
+        # failure.
+        "Recompute every metric (all seven below), then return ONLY a "
+        "JSON object with exactly seven check entries — one per metric. "
+        "Keep `reasoning` to ONE sentence per check; verbose reasoning "
+        "has caused responses to truncate past the closing brace in the "
+        "past.\n\n"
+        '{"strategy": "' + asset + '", "checks": [\n'
+        '  {"metric": "cagr",              "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "volatility",        "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "sharpe",            "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "max_drawdown",      "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "skewness",          "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "excess_return",     "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""},\n'
+        '  {"metric": "information_ratio", "platform_value": <num>, "auditor_value": <num>, "status": "pass|warning|fail", "discrepancy_pct": <num>, "reasoning": "<one sentence>", "flag": ""}\n'
+        ']}'
     )
 
 
@@ -383,7 +417,39 @@ def _run_group(group: str, prompt: str, hash_: str | None,
                   group=group, response_chars=len(raw or ""), raw=raw)
         parsed = _extract_json(raw)
         if parsed is None:
-            return [_parse_failed_finding(group, hash_, "no JSON in response")]
+            # First attempt failed parse — most likely truncation past
+            # the closing '}' on a verbose-reasoning response. Retry
+            # ONCE with the higher token budget. Mirrors the harness
+            # evaluator's 600 → 1500 escalation pattern: small initial
+            # budget for the common case, generous retry for the
+            # outlier. Summary statistics (IG) was hitting this — the
+            # 7-metric checks array + per-check step-by-step reasoning
+            # routinely overshot 8000.
+            log.info(
+                "audit_layer2_retry_with_higher_tokens",
+                group=group,
+                first_attempt_chars=len(raw or ""),
+                retry_max_tokens=_AUDITOR_MAX_TOKENS_RETRY,
+            )
+            raw_retry = _call_auditor(prompt,
+                                      max_tokens=_AUDITOR_MAX_TOKENS_RETRY)
+            log.debug("audit_layer2_raw_response_retry",
+                      group=group, response_chars=len(raw_retry or ""),
+                      raw=raw_retry)
+            parsed = _extract_json(raw_retry)
+            if parsed is None:
+                # Both attempts truncated or unparseable — log the
+                # retry's tail so a Render-log scan can see WHERE the
+                # response cut off (typical truncation lands mid-check).
+                log.warning(
+                    "audit_layer2_retry_also_failed",
+                    group=group,
+                    retry_chars=len(raw_retry or ""),
+                    retry_tail=(raw_retry or "")[-300:],
+                )
+                return [_parse_failed_finding(
+                    group, hash_,
+                    "no JSON in response after retry with higher tokens")]
         return _checks_to_findings(group, parsed, hash_, formula)
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_layer2_group_failed", group=group, error=str(exc))
