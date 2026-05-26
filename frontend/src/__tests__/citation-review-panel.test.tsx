@@ -121,8 +121,16 @@ function makeFindingsResponse(generationId: number, opts?: {
           id: 9001,
           source: 'audit',
           source_id: 'D04',
+          // Description carries tokens that overlap with each
+          // citation in the default fixture (sharpe/ratio/cvar/
+          // risk/measures/momentum/factor) so the May-26 relevance
+          // filter keeps them visible under the default view. The
+          // dedicated TestRelevanceFilter block exercises the
+          // filter-out + show-all toggle paths.
           title: 'Strategy return-series coverage',
-          description: 'Splice junction date not exposed.',
+          description: (
+            'Sharpe ratio, CVaR risk measures, momentum factor '
+            + 'evidence for splice junction coverage.'),
           rank: 'high',
           status: 'warning',
           severity: 'warning',
@@ -445,5 +453,125 @@ describe('CitationReviewPanel — review actions', () => {
       expect(body.manual_citation.year).toBe('1993')
       expect(body.manual_citation.title).toBe('Returns to Buying Winners')
     })
+  })
+})
+
+
+describe('CitationReviewPanel — relevance filter (May 26 2026)', () => {
+  // The filter hides citations whose finding_supported / concept_id /
+  // title share NO significant token with the finding's title +
+  // description. An already-matched citation always renders. A
+  // "Show all" toggle is the escape hatch when the heuristic
+  // misses a genuinely relevant citation.
+
+  function _findingWithDescription(desc: string) {
+    return [{
+      id: 9001,
+      source: 'audit',
+      source_id: 'D04',
+      title: 'Test Finding',
+      description: desc,
+      rank: 'high',
+      status: 'warning',
+      severity: 'warning',
+      matched_count: 0,
+    }]
+  }
+
+  it('hides citations with no token overlap by default', async () => {
+    // Finding description has NO overlap with the three default
+    // fixture citations (sharpe / cvar / momentum). All citations
+    // should be hidden under the default filtered view.
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      findings: _findingWithDescription(
+        'Tax loss harvesting accounting treatment.'),
+    }))
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() =>
+      screen.getByTestId('finding-section-9001'))
+    // No citation rows render under the filtered view.
+    expect(screen.queryByTestId('citation-row-sharpe_ratio'))
+      .toBeNull()
+    expect(screen.queryByTestId('citation-row-cvar_coherent_risk'))
+      .toBeNull()
+    expect(screen.queryByTestId('citation-row-momentum_factor'))
+      .toBeNull()
+    // Summary line shows the filtered count.
+    expect(screen.getByTestId('relevance-summary-9001')).toBeTruthy()
+    expect(screen.getByText(/Showing 0 of 3 citations/i)).toBeTruthy()
+  })
+
+  it('shows citations whose tokens overlap with the finding', async () => {
+    // Finding description names "Sharpe ratio" — overlaps with the
+    // sharpe_ratio citation's title/concept_id but NOT the cvar /
+    // momentum citations.
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      findings: _findingWithDescription(
+        'Sharpe ratio statistical significance.'),
+    }))
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() =>
+      screen.getByTestId('citation-row-sharpe_ratio'))
+    expect(screen.queryByTestId('citation-row-cvar_coherent_risk'))
+      .toBeNull()
+    expect(screen.queryByTestId('citation-row-momentum_factor'))
+      .toBeNull()
+    // 1 of 3 visible — summary shows the filter count.
+    expect(screen.getByText(/Showing 1 of 3 citations/i)).toBeTruthy()
+  })
+
+  it('Show all toggle reveals every citation', async () => {
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      findings: _findingWithDescription(
+        'Tax loss harvesting accounting treatment.'),
+    }))
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() =>
+      screen.getByTestId('relevance-toggle-9001'))
+
+    fireEvent.click(screen.getByTestId('relevance-toggle-9001'))
+
+    // Now every citation renders.
+    await waitFor(() =>
+      screen.getByTestId('citation-row-sharpe_ratio'))
+    expect(screen.getByTestId('citation-row-cvar_coherent_risk'))
+      .toBeTruthy()
+    expect(screen.getByTestId('citation-row-momentum_factor'))
+      .toBeTruthy()
+    expect(screen.getByText(/Showing all 3 citations/i)).toBeTruthy()
+  })
+
+  it('matched citation always renders, even without token overlap', async () => {
+    // Finding has NO overlap with sharpe_ratio's tokens, BUT the
+    // citation is already matched to the finding. The user's
+    // explicit match wins over the heuristic.
+    const cits = makeCitations()
+    cits[0]!.matched_finding_ids = [9001]  // sharpe_ratio matched
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42, {
+      citations: cits,
+      findings: _findingWithDescription(
+        'Tax loss harvesting accounting treatment.'),
+    }))
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() =>
+      screen.getByTestId('citation-row-sharpe_ratio'))
+    // The non-matched citations are still hidden.
+    expect(screen.queryByTestId('citation-row-cvar_coherent_risk'))
+      .toBeNull()
+    // Summary reflects the matched-only render (1 of 3).
+    expect(screen.getByText(/Showing 1 of 3 citations/i)).toBeTruthy()
+  })
+
+  it('no toggle when every citation is already relevant', async () => {
+    // The fixture-default finding ('Strategy return-series coverage'
+    // with description naming sharpe/cvar/risk/measures/momentum/
+    // factor) overlaps with every citation — nothing is filtered.
+    // The relevance-summary line should not render in that case.
+    mockedAxios.get.mockResolvedValueOnce(makeFindingsResponse(42))
+    render(<CitationReviewPanel generationId={42} />)
+    await waitFor(() =>
+      screen.getByTestId('citation-row-sharpe_ratio'))
+    expect(screen.queryByTestId('relevance-summary-9001')).toBeNull()
+    expect(screen.queryByTestId('relevance-toggle-9001')).toBeNull()
   })
 })

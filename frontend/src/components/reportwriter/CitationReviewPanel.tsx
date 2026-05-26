@@ -382,6 +382,91 @@ export default function CitationReviewPanel({
 }
 
 
+// ── Relevance heuristic — May 26 2026 ──────────────────────────────────────
+//
+// The 3-level panel previously rendered EVERY citation under EVERY
+// finding (dimmed when unmatched). With 10 citations and 10 findings
+// that's 100 rows per panel open — overwhelming, and most rows are
+// noise. Filter so a citation only appears under a finding it's
+// plausibly relevant to, with an escape hatch to "Show all citations"
+// for the heuristic-misses case.
+//
+// Relevance signal: token overlap between the citation's
+// `finding_supported` text (and its concept_id as a fallback) and the
+// finding's title + description. A citation is relevant to a finding
+// if they share at least one significant token.
+//
+// "Significant token": lowercased, ≥4 chars, not in the stop-words
+// set. We accept a permissive threshold because the user's escape
+// hatch ("Show all") covers the false-negative path; the cost of a
+// false negative is just "Bob clicks Show all", the cost of a false
+// positive is wasted scrolling.
+//
+// CRITICAL: a citation already MATCHED to the finding always renders,
+// regardless of the relevance heuristic. The user's explicit match
+// wins over our heuristic.
+
+
+// Words too generic to indicate topical relevance. The finance domain
+// terms ('return', 'risk', 'data') stay in — they're meaningful in
+// context. Only true stop words are excluded.
+const _RELEVANCE_STOP_WORDS = new Set<string>([
+  'this', 'that', 'these', 'those', 'with', 'from', 'into', 'upon',
+  'have', 'been', 'were', 'being', 'their', 'them', 'they', 'than',
+  'will', 'would', 'could', 'should', 'across', 'about', 'after',
+  'before', 'between', 'during', 'where', 'which', 'while', 'over',
+  'under', 'within', 'without', 'against', 'through', 'because',
+  'some', 'such', 'shows', 'note', 'each', 'both', 'most', 'more',
+  'less', 'when', 'what', 'when', 'every', 'finding', 'support',
+  'supports', 'supported', 'evidence',
+])
+
+
+function _relevanceTokens(text: string | null | undefined): Set<string> {
+  if (!text) return new Set()
+  const tokens = text
+    .toLowerCase()
+    // Split on any non-word run; treat underscores as separators so
+    // concept_id 'sharpe_ratio' yields tokens 'sharpe' + 'ratio'.
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((t) =>
+      t.length >= 4 && !_RELEVANCE_STOP_WORDS.has(t))
+  return new Set(tokens)
+}
+
+
+function _isCitationRelevantToFinding(
+  citation: Citation, finding: Finding,
+): boolean {
+  // Citation already matched to this finding always renders — Bob's
+  // explicit match wins over the heuristic.
+  if ((citation.matched_finding_ids ?? []).includes(finding.id)) {
+    return true
+  }
+  // Build the citation's "what this is about" token set from
+  // finding_supported (the most direct relevance signal) PLUS the
+  // concept_id and the title as fallbacks. concept_id often carries
+  // the strongest signal on legacy rows where finding_supported is
+  // null.
+  const cTokens = new Set<string>([
+    ..._relevanceTokens(citation.finding_supported),
+    ..._relevanceTokens(citation.concept_id),
+    ..._relevanceTokens(citation.title),
+  ])
+  // The finding's token set: title + description (which includes the
+  // implication clause for analytical findings).
+  const fTokens = new Set<string>([
+    ..._relevanceTokens(finding.title),
+    ..._relevanceTokens(finding.description),
+  ])
+  // Any shared significant token = relevant.
+  for (const t of cTokens) {
+    if (fTokens.has(t)) return true
+  }
+  return false
+}
+
+
 // ── FindingSection — Level 1 wrapper for one finding ────────────────────────
 
 
@@ -448,13 +533,31 @@ function FindingSection({
 
   const hasGap = finding.matched_count === 0
 
+  // "Show all citations" escape hatch (May 26 2026). Default is the
+  // filtered view — only citations whose finding_supported / title /
+  // concept_id share a significant token with the finding's
+  // title/description. The toggle lets the reviewer override the
+  // heuristic when it misses a genuinely relevant citation.
+  const [showAll, setShowAll] = useState(false)
+
+  // Filter citations to those relevant to THIS finding, OR already
+  // matched (an explicit user match always renders). The show-all
+  // toggle bypasses the filter entirely.
+  const visibleCitations = useMemo(() => {
+    if (showAll) return citations
+    return citations.filter((c) =>
+      _isCitationRelevantToFinding(c, finding))
+  }, [citations, finding, showAll])
+
+  const hiddenCount = citations.length - visibleCitations.length
+
   // Group citations by type for the Level-2 sub-headers. Citations
   // matched to THIS finding sort to the top within each type so the
   // reviewer's work-so-far is visible at a glance. Within each bucket
   // the matched citations are also sorted by confidence_score desc.
   const groupedByType = useMemo(() => {
     const groups: Record<string, Citation[]> = {}
-    for (const c of citations) {
+    for (const c of visibleCitations) {
       const type = (c.citation_type || 'theoretical').toLowerCase()
       const bucket = groups[type] ?? (groups[type] = [])
       bucket.push(c)
@@ -472,7 +575,7 @@ function FindingSection({
       })
     }
     return groups
-  }, [citations, finding.id])
+  }, [visibleCitations, finding.id])
 
   const orderedTypes = useMemo(() => {
     const present = Object.keys(groupedByType)
@@ -545,10 +648,39 @@ function FindingSection({
             </div>
           ) : null}
 
+          {/* Relevance summary line — May 26 2026. Shows the
+              filtered count and offers the show-all toggle. Hidden
+              when no citations exist at all or when nothing was
+              filtered (showing 10 of 10 — no toggle needed). */}
+          {citations.length > 0 && (hiddenCount > 0 || showAll) ? (
+            <div
+              data-testid={`relevance-summary-${finding.id}`}
+              className="flex items-center justify-between gap-2
+                         text-2xs text-text-muted px-1">
+              <span>
+                {showAll
+                  ? `Showing all ${citations.length} citations`
+                  : `Showing ${visibleCitations.length} of `
+                    + `${citations.length} citations relevant to this `
+                    + `finding`}
+              </span>
+              <button
+                type="button"
+                onClick={() => setShowAll(!showAll)}
+                data-testid={`relevance-toggle-${finding.id}`}
+                className="text-electric-blue hover:underline">
+                {showAll ? 'Show only relevant' : 'Show all'}
+              </button>
+            </div>
+          ) : null}
+
           {orderedTypes.length === 0 ? (
             <p className="text-2xs text-text-muted italic">
-              No citations available yet — re-run Step 2 to source
-              citations before recording matches.
+              {citations.length === 0
+                ? 'No citations available yet — re-run Step 2 to source '
+                  + 'citations before recording matches.'
+                : 'No citations matched this finding by the relevance '
+                  + 'heuristic. Click "Show all" to see every citation.'}
             </p>
           ) : null}
 
