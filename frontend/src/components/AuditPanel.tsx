@@ -581,8 +581,24 @@ export default function AuditPanel() {
   const runAudit = async (triggeredBy: 'manual' | 'pre_submission') => {
     setError(null)
     try {
-      await axios.post('/api/v1/audit/run', { triggered_by: triggeredBy })
-      setRunning(true)
+      // The endpoint now short-circuits to a cache_hit when the
+      // current data hash matches the last substantive audit, so a
+      // click on unchanged data refreshes the panel against the
+      // prior real run instead of triggering a new (and potentially
+      // hollow) audit. Only set `running` when the server actually
+      // started a new run. May 26 2026 submission-night fix.
+      const res = await axios.post<{
+        status?: string
+        audit_id?: number
+        message?: string
+      }>('/api/v1/audit/run', { triggered_by: triggeredBy })
+      if (res.data?.status === 'cache_hit') {
+        // Refresh immediately — the latest already IS the prior
+        // substantive run. No need to start the poll loop.
+        await load()
+      } else {
+        setRunning(true)
+      }
     } catch {
       setError('Could not start the audit.')
     }

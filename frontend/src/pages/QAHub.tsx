@@ -390,21 +390,50 @@ export default function QAHub() {
     // A demo run forces a fresh audit regardless of cache currency and is
     // tagged triggered_by="demo" so the audit history can mark it.
     //
-    // force=true (May 26 2026) — a manual 'Run Full QA' click pre-warms
-    // strategy_results_cache before the three layers run. Without the
-    // flag, a cold cache produced 'all layers skip / 0 checks' silently;
-    // with it, the audit either completes against real data or finalises
-    // as 'failed' with a clear metadata.note. Matches the methodology
-    // audit's qaReload(force=true) semantics.
-    void axios.post('/api/v1/audit/run',
-      demo ? { reason: 'demo', force: true } : { triggered_by: 'manual', force: true })
-      .then(() => {
+    // Smart cache-hit (May 26 2026 submission-night fix) — the
+    // endpoint now compares the live data hash against the last
+    // substantive completed audit. When they match (and force is
+    // not set), the response is {status: 'cache_hit', audit_id}
+    // and NO new audit_runs row is created. We skip the poll loop
+    // and refresh /audit/runs/latest immediately — that latest IS
+    // the prior real run (substantive, full check counts), so the
+    // downloadable PDF reflects a genuine audit instead of a hollow
+    // skipped-layers run.
+    //
+    // The demo path always sends force=true so a live presentation
+    // re-execution happens regardless of cache currency. A manual
+    // click leaves force absent (server default) so the cache-hit
+    // short-circuit kicks in when applicable.
+    type AuditRunResponse = {
+      status?: string
+      audit_id?: number
+      message?: string
+    }
+    void axios.post<AuditRunResponse>('/api/v1/audit/run',
+      demo ? { reason: 'demo', force: true } : { triggered_by: 'manual' })
+      .then((res) => {
+        // Cache hit — endpoint served the prior substantive audit.
+        // No new run is in flight; just refresh and surface the
+        // existing one.
+        if (res.data?.status === 'cache_hit') {
+          void axios.get<{ run: LatestRun | null }>('/api/v1/audit/runs/latest')
+            .then((latest) => {
+              const run = latest.data.run
+              if (run) setAuditRun(run)
+              setAuditPhase('done')
+              setAuditRefreshKey((k) => k + 1)
+              loadCurrency()
+            })
+            .catch(() => setAuditPhase('error'))
+          return
+        }
+        // Fresh run path — poll for completion.
         let polls = 0
         pollRef.current = setInterval(() => {
           polls += 1
           void axios.get<{ run: LatestRun | null }>('/api/v1/audit/runs/latest')
-            .then((res) => {
-              const run = res.data.run
+            .then((latest) => {
+              const run = latest.data.run
               if (run && run.status !== 'running') {
                 if (pollRef.current) clearInterval(pollRef.current)
                 setAuditRun(run)

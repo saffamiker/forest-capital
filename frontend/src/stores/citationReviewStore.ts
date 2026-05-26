@@ -84,6 +84,17 @@ export interface Citation {
   selection_rationale: string | null
   confidence_score: number | null
   finding_supported: string | null
+  // ── May 26 2026 — multi-layered sourcing (migration 043).
+  // citation_type: 'theoretical' | 'empirical' | 'methodological'
+  //                | 'practitioner'. Legacy rows default to
+  //                'theoretical' via the migration backfill.
+  // trust_flag:    'verified' | 'unverified' | 'paywalled' |
+  //                'stale' | 'mismatch' (or null for legacy rows).
+  // scoring_rationale: one-sentence explanation of the confidence
+  //                    score (or null for legacy rows).
+  citation_type: string
+  trust_flag: string | null
+  scoring_rationale: string | null
 }
 
 

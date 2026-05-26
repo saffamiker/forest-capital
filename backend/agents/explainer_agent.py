@@ -880,16 +880,50 @@ class ExplainerAgent:
         self, audit_results: list[dict[str, Any]]
     ) -> dict[str, dict[str, str]]:
         """
-        Generates plain-English explanations for all 30 QA checklist items.
+        Generates plain-English explanations for all QA checklist items.
 
         Called after every audit run. Explanations are specific to the
         actual pass/fail results — not generic descriptions of the checks.
         Streams into glossaryStore.qa namespace on the frontend.
+
+        May 26 2026 — accuracy fix. Previously the LLM only saw a
+        five-item sample of audit_results plus the lists of failed /
+        warned check_ids, so it had no ground truth about what each
+        check_id ACTUALLY tests. Symptom in production: IN02
+        (Academic Review attestation) rendered the AN05 (Information
+        Ratio) description in its expanded panel — the LLM swapped
+        the content because it was guessing. Now the prompt receives
+        the full per-check metadata block (id, check title, key,
+        description) for every audit result, with an explicit
+        instruction that each check_id is bound to its metadata and
+        the four explanation fields must reflect THAT check's intent
+        only.
         """
         # Build compact audit summary for prompt
         failed = [r for r in audit_results if r.get("status") == "FAIL"]
         warned = [r for r in audit_results if r.get("status") == "WARN"]
         passed = [r for r in audit_results if r.get("status") == "PASS"]
+
+        # Full per-check metadata — id, check title, key, description,
+        # status, evidence — so the LLM cannot confuse IN02 (academic
+        # review attestation) with AN05 (information ratio) or any
+        # other check. The audit_results already carry check_id and
+        # description; we forward both verbatim per row.
+        items_for_prompt = [
+            {
+                "check_id":    r.get("check_id"),
+                "check":       r.get("check"),
+                "category":    r.get("category"),
+                "key":         r.get("key"),
+                "description": r.get("description"),
+                "status":      r.get("status"),
+                # Short evidence excerpt — first 240 chars so the LLM
+                # can write a session-specific 'how it was tested'
+                # line without ballooning the prompt.
+                "evidence":    (str(r.get("evidence") or "")[:240]),
+            }
+            for r in audit_results
+        ]
 
         context = json.dumps(
             {
@@ -898,19 +932,34 @@ class ExplainerAgent:
                 "n_passed": len(passed),
                 "failed_items": [r.get("check_id") for r in failed],
                 "warned_items": [r.get("check_id") for r in warned],
-                "sample_items": audit_results[:5],
+                "checks": items_for_prompt,
             },
             indent=2,
             default=str,
         )
 
         user_message = (
-            f"Generate plain-English explanations for each QA audit result. "
-            f"{len(failed)} items failed, {len(warned)} warned, {len(passed)} passed. "
-            f"For each item, explain: what it tests, why it matters, what failure "
-            f"would mean, and how it was tested in this session.\n\n"
+            f"Generate plain-English explanations for each QA audit "
+            f"result. {len(failed)} items failed, {len(warned)} "
+            f"warned, {len(passed)} passed.\n\n"
+            f"GROUND TRUTH — each check_id below is bound to its "
+            f"metadata. The 'description' field on each check states "
+            f"what that specific check tests. Your four explanation "
+            f"fields MUST reflect that check's intent only. Do NOT "
+            f"swap content between check_ids: IN02 ('Academic Review "
+            f"complete') is unrelated to AN05 ('Information ratio'); "
+            f"IN01 (submission-window attestation) is unrelated to "
+            f"AN01 (Carhart factor regression); etc. Read the "
+            f"description of each row and keep the explanation "
+            f"scoped to it.\n\n"
+            f"For each item, explain: what it tests, why it matters, "
+            f"what failure would mean, and how it was tested in this "
+            f"session (cite the evidence string when present).\n\n"
             f"DATA:\n{context}\n\n"
-            f"Return JSON: {{check_id: {{what: str, why: str, failure_meaning: str, how_tested: str}}}}"
+            f"Return JSON: {{check_id: {{what: str, why: str, "
+            f"failure_meaning: str, how_tested: str}}}}. The "
+            f"check_id keys must match the input EXACTLY — do not "
+            f"omit, rename, or merge check_ids."
         )
 
         try:
