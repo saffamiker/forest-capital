@@ -152,7 +152,21 @@ async def _assemble_inputs(
 async def _latest_audit_summary() -> dict[str, Any]:
     """Reads the most recent completed audit run and shapes it to the
     keys the appendix builder consumes. Fail-open — a cold DB / no
-    audit returns an empty dict."""
+    audit returns an empty dict.
+
+    May 26 2026 — submission fix. The prior implementation read
+    non-existent columns (statistical_status, qa_status) and
+    hardcoded every per-layer COUNT to '—', which is why Appendix D
+    rendered all dashes even after a clean audit run. The real
+    audit_runs schema (migration 017) carries:
+      - status: running | complete | failed
+      - layer_1_status / layer_2_status / layer_3_status:
+        pass | fail | skip
+      - total_checks, passed, failed, warnings
+    This rewrite reads the real columns and produces the per-layer
+    rows the Appendix D builder expects. Per-layer check counts come
+    from audit_findings.layer (rolled up to per-layer totals).
+    """
     try:
         from sqlalchemy import text
         from database import AsyncSessionLocal
@@ -160,21 +174,87 @@ async def _latest_audit_summary() -> dict[str, Any]:
             return {}
         async with AsyncSessionLocal() as s:
             r = await s.execute(text(
-                "SELECT statistical_status, qa_status, completed_at "
+                "SELECT id, status, layer_1_status, layer_2_status, "
+                "       layer_3_status, total_checks, passed, "
+                "       failed, warnings, completed_at, triggered_at "
                 "FROM audit_runs "
-                "WHERE statistical_status IS NOT NULL "
-                "ORDER BY completed_at DESC NULLS LAST "
+                "WHERE status = 'complete' "
+                "ORDER BY completed_at DESC NULLS LAST, id DESC "
                 "LIMIT 1"))
             row = r.fetchone()
             if not row:
                 return {}
-            stat = row[0] or "unknown"
-            qa = row[1] or "unknown"
-            when = row[2].isoformat() if row[2] is not None else "—"
+            run_id = int(row[0])
+            l1, l2, l3 = row[2], row[3], row[4]
+            total_checks = int(row[5] or 0)
+            n_passed = int(row[6] or 0)
+            n_failed = int(row[7] or 0)
+            n_warn = int(row[8] or 0)
+            completed = row[9] or row[10]
+            when = completed.isoformat() if completed is not None else "—"
+            # Per-layer check counts from audit_findings.
+            r2 = await s.execute(text(
+                "SELECT layer, COUNT(*) AS total, "
+                " SUM(CASE WHEN status = 'pass' THEN 1 ELSE 0 END) AS p, "
+                " SUM(CASE WHEN status = 'fail' THEN 1 ELSE 0 END) AS f, "
+                " SUM(CASE WHEN status = 'warning' THEN 1 ELSE 0 END) AS w "
+                "FROM audit_findings "
+                "WHERE audit_run_id = :id "
+                "GROUP BY layer"
+            ), {"id": run_id})
+            per_layer = {int(rr[0]): {
+                "total": int(rr[1] or 0),
+                "passed": int(rr[2] or 0),
+                "failed": int(rr[3] or 0),
+                "warnings": int(rr[4] or 0),
+            } for rr in r2.fetchall()}
+
+        def _layer_status(raw: str | None) -> str:
+            # Normalise pass/fail/skip into the title case the
+            # appendix table reads well — "Pass" / "Fail" / "Skip" /
+            # "Unknown" for missing.
+            if not raw:
+                return "Unknown"
+            s = str(raw).strip().lower()
+            return {"pass": "Pass", "fail": "Fail",
+                    "skip": "Skip"}.get(s, s.title())
+
+        def _layer_count(layer_n: int) -> str:
+            # Compact "{passed}/{total}" string, with warnings noted
+            # inline. Empty per-layer rollup -> dash.
+            info = per_layer.get(layer_n)
+            if not info or info["total"] == 0:
+                return "—"
+            base = f"{info['passed']}/{info['total']}"
+            if info["warnings"]:
+                base += f" ({info['warnings']} warn)"
+            if info["failed"]:
+                base += f" ({info['failed']} fail)"
+            return base
+
+        # Overall summary string — surfaces "150 passed, 1 warning"
+        # the user expects to see in the table footer if the appendix
+        # wants it. Returned as a separate key so the builder can
+        # show it underneath the per-layer table.
+        overall = (
+            f"{n_passed} passed"
+            + (f", {n_warn} warning" + ("s" if n_warn != 1 else "")
+               if n_warn else "")
+            + (f", {n_failed} failed" if n_failed else "")
+            + f" (of {total_checks} checks)")
+
         return {
-            "layer1_status": stat, "layer1_count": "—", "layer1_date": when,
-            "layer2_status": stat, "layer2_count": "—", "layer2_date": when,
-            "layer3_status": qa,   "layer3_count": "—", "layer3_date": when,
+            "layer1_status": _layer_status(l1),
+            "layer1_count":  _layer_count(1),
+            "layer1_date":   when,
+            "layer2_status": _layer_status(l2),
+            "layer2_count":  _layer_count(2),
+            "layer2_date":   when,
+            "layer3_status": _layer_status(l3),
+            "layer3_count":  _layer_count(3),
+            "layer3_date":   when,
+            "overall":       overall,
+            "audit_run_id":  run_id,
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_summary_read_failed", error=str(exc))
@@ -1129,6 +1209,14 @@ async def generate_paper(template_id: str) -> dict[str, Any]:
     # Build appendix markdown for archive (the docx builder will
     # rebuild from the same context dict at download time).
     findings_row = inputs.get("findings_row") or {}
+    # May 26 2026 — submission fix. The findings_row's data_hash can
+    # be None when stage_findings ran before strategy_results_cache
+    # had a hash. Fall back to inputs.data_hash (computed earlier in
+    # _assemble_inputs via get_latest_strategy_hash) so the appendix
+    # always carries the canonical strategy hash if one exists.
+    resolved_data_hash = (
+        (findings_row or {}).get("data_hash")
+        or inputs.get("data_hash"))
     appendix_context = _build_appendix_context(
         verified_data=inputs["verified_data"],
         ranked_findings=inputs["ranked_findings"],
@@ -1137,7 +1225,7 @@ async def generate_paper(template_id: str) -> dict[str, Any]:
         citations=citations,
         findings_metadata={
             "computed_at": (findings_row or {}).get("computed_at"),
-            "data_hash":   (findings_row or {}).get("data_hash"),
+            "data_hash":   resolved_data_hash,
             "audit_status": (
                 inputs["validation_summary"].get("layer3_status")
                 if inputs["validation_summary"] else None),
@@ -1708,6 +1796,35 @@ async def render_appendix_bytes(generation_id: int) -> bytes | None:
         return None
     from tools.report_writer_docx import build_appendix_docx
     citations = await _load_citations_for_generation(generation_id)
+    # May 26 2026 — submission fix. data_hash was hardcoded None,
+    # producing "Data hash: None" in Appendix B prose. Resolve from
+    # the findings_cache row this generation was tied to (preferred —
+    # the snapshot the generation was built against); fall back to
+    # the latest strategy hash if the findings_cache row is missing.
+    resolved_data_hash: str | None = None
+    findings_cache_id = gen.get("findings_cache_id")
+    if findings_cache_id:
+        try:
+            from sqlalchemy import text
+            from database import AsyncSessionLocal
+            if AsyncSessionLocal is not None:
+                async with AsyncSessionLocal() as s:
+                    r = await s.execute(text(
+                        "SELECT data_hash FROM analytical_findings_cache "
+                        "WHERE id = :i"
+                    ), {"i": int(findings_cache_id)})
+                    row = r.fetchone()
+                    if row and row[0]:
+                        resolved_data_hash = str(row[0])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("appendix_data_hash_lookup_failed",
+                        error=str(exc))
+    if not resolved_data_hash:
+        try:
+            from tools.cache import get_latest_strategy_hash
+            resolved_data_hash = await get_latest_strategy_hash()
+        except Exception:  # noqa: BLE001
+            resolved_data_hash = None
     context = _build_appendix_context(
         verified_data=gen.get("verified_data") or {},
         ranked_findings=gen.get("verified_data", {}).get(
@@ -1717,7 +1834,7 @@ async def render_appendix_bytes(generation_id: int) -> bytes | None:
         citations=citations,
         findings_metadata={
             "computed_at": gen.get("generated_at"),
-            "data_hash":   None,
+            "data_hash":   resolved_data_hash,
             "audit_status": (
                 (gen.get("validation_snapshot") or {})
                 .get("layer3_status")),
