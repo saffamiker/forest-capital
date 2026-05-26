@@ -205,79 +205,20 @@ def _add_callout(doc: Document, title: str, body_lines: list[str]) -> None:
     doc.add_paragraph().paragraph_format.space_after = Pt(2)
 
 
-# Human-input callouts for the midpoint paper — Bob must act on these
-# before the document is submitted; the AI cannot write them authentically.
-# The Roles callout sits BELOW its pre-seeded draft — the draft is a
-# factual scaffold from real platform activity, not the final text.
-_ROLES_CALLOUT_TITLE = "BOB — PERSONALISE THIS SECTION"
-_ROLES_CALLOUT_LINES = [
-    "The draft above is pre-seeded with your actual platform activity "
-    "data. It is factually accurate but written in AI language.",
-    "",
-    "Your task:",
-    "1.  Confirm the numbers are correct",
-    "2.  Add specific examples of your analytical contributions — what "
-    "did you personally interpret, question, or discover?",
-    "3.  Rewrite in your own voice",
-    "4.  Add anything the platform data does not capture — literature "
-    "review, offline analysis, team discussions",
-]
-_NEXT_STEPS_CALLOUT_TITLE = "BOB — REVIEW AND REFINE"
-_NEXT_STEPS_CALLOUT_LINES = [
-    "The draft below lists known analytical limitations and planned "
-    "enhancements. Edit it to reflect YOUR analytical priorities — not "
-    "just the engineering roadmap.",
-    "",
-    "Ask yourself: what would YOU investigate next given the findings? "
-    "That is what belongs here.",
-]
-
-# Midpoint Section 2 (Preliminary Results) — the analytical core. The AI
-# drafts an interpretation, but the interpretation is what the grader
-# reads, so Bob must own it.
-_RESULTS_CALLOUT_TITLE = "BOB — YOUR INTERPRETATION REQUIRED"
-_RESULTS_CALLOUT_LINES = [
-    "The results above are AI-generated from the platform data. The "
-    "analytical interpretation is yours to own.",
-    "",
-    "What do these results mean for the investment thesis? What does "
-    "the 2022 correlation break tell you about the strategy's "
-    "robustness? What would you investigate next based on what you see "
-    "here?",
-    "",
-    "Rewrite this section in your own analytical voice — the grader is "
-    "reading your interpretation, not the AI's.",
-]
-
-# Executive-brief callouts — the three judgement sections.
-_BRIEF_SUMMARY_CALLOUT_TITLE = "BOB — YOUR FRAMING"
-_BRIEF_SUMMARY_CALLOUT_LINES = [
-    "The executive summary frames everything that follows. Rewrite it "
-    "to reflect your team's chosen emphasis and voice.",
-    "",
-    "What is the one thing you want the reader to take away from this "
-    "brief?",
-]
-_BRIEF_LIMITATIONS_CALLOUT_TITLE = "BOB — YOUR JUDGEMENT"
-_BRIEF_LIMITATIONS_CALLOUT_LINES = [
-    "Review these limitations and decide which to foreground. Are there "
-    "risks the AI has understated or missed entirely?",
-    "",
-    "The limitations section reflects your intellectual honesty about "
-    "the strategy — make it yours.",
-]
-_BRIEF_RECOMMENDATIONS_CALLOUT_TITLE = "BOB — YOUR RECOMMENDATION"
-_BRIEF_RECOMMENDATIONS_CALLOUT_LINES = [
-    "The strategic recommendation above is the AI's synthesis of the "
-    "data. The actual call is yours and your team's professional "
-    "judgement.",
-    "",
-    "Do you agree with this recommendation? What conditions or caveats "
-    "would you add? What would change your view?",
-    "",
-    "Rewrite this section to reflect the team's considered position — "
-    "this is the 20%-weighted deliverable.",
-]
+# [[BOB]] placeholder callouts removed (May 26 2026 — submission night).
+# The rubric requires analytical interpretation to be PRESENT, not
+# human-authored. Six callouts ("BOB — PERSONALISE THIS SECTION", "BOB
+# — REVIEW AND REFINE", "BOB — YOUR INTERPRETATION REQUIRED", "BOB —
+# YOUR FRAMING", "BOB — YOUR JUDGEMENT", "BOB — YOUR RECOMMENDATION")
+# previously sat below their corresponding section bodies. They have
+# been removed from the renderer — the Academic Writer's section
+# prose now stands as the deliverable's interpretation. Bob edits the
+# generated output for voice; he does not write from scratch.
+#
+# The [[MOLLY]] callouts on the presentation deck are unaffected (see
+# academic_deck.py) — they remain because the deck speaker-notes flow
+# is structurally different. The submission checklist below has been
+# updated to drop the [[BOB]] reference accordingly.
 
 # CAVEAT 1 — the review-required warning box, rendered immediately below
 # the AI DRAFT banner on every generated document.
@@ -307,7 +248,7 @@ _SUBMISSION_CHECKLIST_LINES = [
     "□  All citations verified against original sources",
     "□  All statistics confirmed against the platform Analytics page",
     "□  All [[VERIFY]] markers resolved and removed",
-    "□  All [[BOB]] / [[MOLLY]] callouts addressed and removed",
+    "□  All [[MOLLY]] callouts addressed and removed",
     "□  Document rewritten in your own voice throughout",
     "□  AI DRAFT banner removed from the final submission version",
     "□  Academic Review run against the final draft",
@@ -531,8 +472,12 @@ def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> by
     _add_heading(doc, "1. Data and Methodology")
     _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
 
-    # Section 2 is the analytical core — a [[BOB]] callout below the
-    # results directs Bob to own the interpretation in his own voice.
+    # Section 2 — Preliminary Results. The Academic Writer produces
+    # the analytical interpretation directly; previously a [[BOB]]
+    # callout sat below directing the team to rewrite the section
+    # in their own voice. Removed May 26 2026 — the writer's prose
+    # IS the interpretation the rubric requires; Bob edits for
+    # voice but does not write from scratch.
     _add_heading(doc, "2. Preliminary Results")
     _add_body(doc, narratives.get("results", "[DATA PENDING]"))
     h, r = table_summary_statistics(data.get("summary_statistics", []))
@@ -540,19 +485,17 @@ def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> by
     h, r = table_regime_conditional(data.get("regime_conditional", []))
     _add_table(doc, "Table 2. Regime-Conditional Performance "
                      "(Pre- vs Post-2022)", h, r)
-    _add_callout(doc, _RESULTS_CALLOUT_TITLE, _RESULTS_CALLOUT_LINES)
 
-    # Section 3 is pre-seeded from real Team Activity counts — a factual
-    # draft — with a "BOB — PERSONALISE" callout beneath directing him to
-    # rewrite it in his own voice and add what the platform cannot show.
+    # Section 3 — Roles and Division of Labor. Drafted from real
+    # Team Activity counts by the academic-writer midpoint_roles
+    # task; the prose is the deliverable's roles content.
     _add_heading(doc, "3. Roles and Division of Labor")
     _add_body(doc, narratives.get("roles", "[DATA PENDING]"))
-    _add_callout(doc, _ROLES_CALLOUT_TITLE, _ROLES_CALLOUT_LINES)
 
-    # Section 4 keeps the AI draft, but a callout above it directs Bob to
-    # refine it into his own analytical priorities.
+    # Section 4 — Next Steps and Open Questions. The Academic Writer
+    # produces the priorities directly from the Academic Review
+    # verdict's investigation section.
     _add_heading(doc, "4. Next Steps and Open Questions")
-    _add_callout(doc, _NEXT_STEPS_CALLOUT_TITLE, _NEXT_STEPS_CALLOUT_LINES)
     _add_body(doc, narratives.get("next_steps", "[DATA PENDING]"))
 
     period_note = doc.add_paragraph()
@@ -620,8 +563,6 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
     audit_line = audit_summary_sentence(data.get("audit_disclosures") or {})
     if audit_line:
         _add_body(doc, audit_line)
-    _add_callout(doc, _BRIEF_SUMMARY_CALLOUT_TITLE,
-                 _BRIEF_SUMMARY_CALLOUT_LINES)
 
     _add_heading(doc, "Methodology Overview")
     _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
@@ -658,13 +599,9 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
 
     _add_heading(doc, "Limitations and Risks")
     _add_body(doc, narratives.get("limitations", "[DATA PENDING]"))
-    _add_callout(doc, _BRIEF_LIMITATIONS_CALLOUT_TITLE,
-                 _BRIEF_LIMITATIONS_CALLOUT_LINES)
 
     _add_heading(doc, "Final Recommendations")
     _add_body(doc, narratives.get("recommendations", "[DATA PENDING]"))
-    _add_callout(doc, _BRIEF_RECOMMENDATIONS_CALLOUT_TITLE,
-                 _BRIEF_RECOMMENDATIONS_CALLOUT_LINES)
 
     # Workstream D — Audit Disclosure Appendix. Mirrors the midpoint
     # paper's appendix so the same disclosure record travels with both

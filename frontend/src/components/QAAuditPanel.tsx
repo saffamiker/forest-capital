@@ -1112,6 +1112,12 @@ export default function QAAuditPanel(
   // POST so the badge swap is immediate (no audit re-run needed).
   const [overrides, setOverrides] = useState<Record<string, IntentionalOverride>>({})
 
+  // Also refresh qaStore.acknowledgedChecks so the nav-bar QA
+  // badge re-derives PASS the moment a disclosure / Mark
+  // Intentional is recorded. Without this, the badge would
+  // keep showing WARN until the 30-second pollStatus tick. May
+  // 26 2026.
+  const pollAcknowledgements = useQAStore((s) => s.pollOverrides)
   const loadOverrides = useCallback(async () => {
     try {
       const res = await axios.get<{
@@ -1123,7 +1129,12 @@ export default function QAAuditPanel(
       // are surfaced; the action cards render normally.
       setOverrides({})
     }
-  }, [])
+    // Side-effect: refresh the badge's ack set from the same
+    // source. Independent failure path — never raises into the
+    // panel's render. Sequential await keeps the order
+    // deterministic.
+    await pollAcknowledgements()
+  }, [pollAcknowledgements])
 
   useEffect(() => { void load() }, [load])
   useEffect(() => { void loadOverrides() }, [loadOverrides])

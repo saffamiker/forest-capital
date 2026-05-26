@@ -7,64 +7,19 @@ the plain-text projection the AI and Academic Review read (content_text).
 
 Inline working aids survive the conversion as plain text inside
 paragraphs: [[VERIFY: …]] / [[VERIFY CITATION: …]] markers as the
-Academic Writer emitted them, and a [[BOB: …]] callout per section that
-needs the author's own input. The editor frontend renders [[VERIFY]] as
-an amber span and [[BOB]] as a full-width amber panel.
+Academic Writer emitted them. The editor frontend renders [[VERIFY]]
+as an amber span.
+
+May 26 2026 — submission night. The six [[BOB]] placeholder callouts
+that previously sat below each midpoint/brief section have been
+removed. The rubric requires analytical interpretation to be PRESENT,
+not human-authored — the Academic Writer's section prose now stands
+as the deliverable's interpretation. Bob edits the generated output
+for voice; he does not write from scratch.
 """
 from __future__ import annotations
 
 from typing import Any
-
-# The section-specific human-input callouts, embedded as [[BOB: …]]
-# markers so the editor renders them as amber panels and section
-# progress can track whether each has been resolved.
-_ROLES_CALLOUT = (
-    "BOB — PERSONALISE THIS SECTION: the draft above is pre-seeded with "
-    "your actual platform activity data. Confirm the numbers, add "
-    "specific examples of your analytical contributions, rewrite it in "
-    "your own voice, and add anything the platform data does not capture "
-    "(literature review, offline analysis, team discussions)."
-)
-_NEXT_STEPS_CALLOUT = (
-    "BOB — REVIEW AND REFINE: edit the draft to reflect your own "
-    "analytical priorities — what would you investigate next given these "
-    "findings? That is what belongs here, not an engineering roadmap."
-)
-# Midpoint Section 2 (Preliminary Results) is the analytical core — the
-# AI drafts an interpretation, but the interpretation is what the grader
-# is reading, so it is Bob's to own.
-_RESULTS_CALLOUT = (
-    "BOB — YOUR INTERPRETATION REQUIRED: The results above are "
-    "AI-generated from the platform data. The analytical interpretation "
-    "is yours to own. What do these results mean for the investment "
-    "thesis? What does the 2022 correlation break tell you about the "
-    "strategy's robustness? What would you investigate next based on "
-    "what you see here? Rewrite this section in your own analytical "
-    "voice — the grader is reading your interpretation, not the AI's."
-)
-# Executive-brief callouts — the judgement sections. The recommendation,
-# the framing, and the honest limitations are the team's to own; the
-# four data-anchored Findings keep their AI draft + [[VERIFY]] markers.
-_BRIEF_SUMMARY_CALLOUT = (
-    "BOB — YOUR FRAMING: The executive summary frames everything that "
-    "follows. Rewrite it to reflect your team's chosen emphasis and "
-    "voice. What is the one thing you want the reader to take away from "
-    "this brief?"
-)
-_BRIEF_LIMITATIONS_CALLOUT = (
-    "BOB — YOUR JUDGEMENT: Review these limitations and decide which to "
-    "foreground. Are there risks the AI has understated or missed "
-    "entirely? The limitations section reflects your intellectual "
-    "honesty about the strategy — make it yours."
-)
-_BRIEF_RECOMMENDATIONS_CALLOUT = (
-    "BOB — YOUR RECOMMENDATION: The strategic recommendation above is "
-    "the AI's synthesis of the data. The actual call is yours and your "
-    "team's professional judgement. Do you agree with this "
-    "recommendation? What conditions or caveats would you add? What "
-    "would change your view? Rewrite this section to reflect the team's "
-    "considered position — this is the 20%-weighted deliverable."
-)
 
 
 def _text_node(text: str) -> dict[str, Any]:
@@ -104,29 +59,32 @@ def _section_blocks(
 
 
 # Section order for the midpoint paper — (heading, narratives key,
-# trailing [[BOB]] callout or None).
+# trailing callout or None). All callouts removed May 26 2026; the
+# third tuple element is kept as a None placeholder so the existing
+# _section_to_nodes_and_lines unpacking continues to work and a future
+# callout could be reintroduced without a structure change.
 _MIDPOINT_SECTIONS = [
     ("1. Data and Methodology", "methodology", None),
-    ("2. Preliminary Results", "results", _RESULTS_CALLOUT),
-    ("3. Roles and Division of Labor", "roles", _ROLES_CALLOUT),
-    ("4. Next Steps and Open Questions", "next_steps", _NEXT_STEPS_CALLOUT),
+    ("2. Preliminary Results", "results", None),
+    ("3. Roles and Division of Labor", "roles", None),
+    ("4. Next Steps and Open Questions", "next_steps", None),
 ]
 
 
 # Section order for the executive brief — (heading, narratives key,
-# trailing [[BOB]] callout or None). The three judgement sections — the
-# framing, the honest limitations and the recommendation — carry a
-# callout; the four data-anchored Findings and the factual Methodology
-# Overview keep their AI draft and rely on [[VERIFY]] markers.
+# trailing callout or None). All callouts removed May 26 2026; the
+# Academic Writer produces the executive summary, limitations and
+# final recommendations directly. [[VERIFY]] markers remain inline
+# for any uncertain numeric values the writer flagged.
 _EXEC_BRIEF_SECTIONS = [
-    ("Executive Summary", "exec_summary", _BRIEF_SUMMARY_CALLOUT),
+    ("Executive Summary", "exec_summary", None),
     ("Methodology Overview", "methodology", None),
     ("Finding 1 — The 2022 Correlation Break", "finding_1", None),
     ("Finding 2 — Static Allocation Results", "finding_2", None),
     ("Finding 3 — Dynamic Allocation Results", "finding_3", None),
     ("Finding 4 — Factor Analysis", "finding_4", None),
-    ("Limitations and Risks", "limitations", _BRIEF_LIMITATIONS_CALLOUT),
-    ("Final Recommendations", "recommendations", _BRIEF_RECOMMENDATIONS_CALLOUT),
+    ("Limitations and Risks", "limitations", None),
+    ("Final Recommendations", "recommendations", None),
 ]
 
 
@@ -291,14 +249,17 @@ def midpoint_to_editor(
 
     Returns (content_json, content_text): a TipTap doc and its plain-text
     projection. The four sections become H1 headings with the generated
-    prose as paragraphs; the Roles and Next Steps sections each carry a
-    trailing [[BOB: …]] callout.
+    prose as paragraphs. May 26 2026 — the trailing [[BOB: …]] section
+    callouts have been removed; the Academic Writer's prose stands as
+    the deliverable's interpretation. Bob edits for voice in-editor.
 
     word_validation (May 25 2026): when supplied AND the validation
     failed (any section or the total outside its target range), a
-    [[BOB: WORD COUNT WARNING — …]] callout is prepended to the
+    [[BOB: WORD COUNT WARNING — …]] alert is prepended to the
     document so the user sees the drift at the top of the editor
-    rather than discovering it at submission time.
+    rather than discovering it at submission time. This is a
+    transient quality-check alert, NOT a content placeholder — it
+    disappears when the team fixes the word counts.
     """
     doc_content: list[dict] = []
     text_lines: list[str] = []
@@ -324,9 +285,11 @@ def executive_brief_to_editor(
 
     Returns (content_json, content_text): a TipTap doc and its plain-text
     projection — the same pattern as midpoint_to_editor. The eight
-    sections become H1 headings with the generated prose as paragraphs;
-    the Executive Summary, Limitations and Final Recommendations sections
-    each carry a trailing [[BOB]] callout.
+    sections become H1 headings with the generated prose as paragraphs.
+    May 26 2026 — the trailing [[BOB: …]] callouts that previously
+    sat on the Executive Summary, Limitations and Final Recommendations
+    sections have been removed; the Academic Writer's prose stands as
+    each section's interpretation. Bob edits for voice in-editor.
     """
     doc_content: list[dict] = []
     text_lines: list[str] = []

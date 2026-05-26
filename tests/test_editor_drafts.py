@@ -103,9 +103,14 @@ class TestEditorContentBuilders:
         # Four H1 section headings.
         headings = [n for n in cj["content"] if n.get("type") == "heading"]
         assert len(headings) == 4
-        # Three [[BOB]] callouts — Preliminary Results, Roles, Next Steps.
-        assert ct.count("[[BOB:") == 3
-        assert "BOB — YOUR INTERPRETATION REQUIRED" in ct  # Section 2
+        # May 26 2026 — the six section [[BOB]] callouts were removed.
+        # The Academic Writer's prose now stands as each section's
+        # interpretation; no placeholder blocks should appear in the
+        # generated editor content. The word-count-warning [[BOB:
+        # WORD COUNT WARNING …]] is a separate transient alert and
+        # only fires when word_validation reports drift — not here.
+        assert ct.count("[[BOB:") == 0
+        assert "BOB —" not in ct  # no section callouts at all
 
     def test_deck_to_editor_builds_sixteen_canvas_slides(self):
         from tools.editor_content import deck_to_editor
@@ -154,12 +159,12 @@ class TestEditorContentBuilders:
         headings = [n for n in cj["content"] if n.get("type") == "heading"]
         assert len(headings) == 8
         assert "Executive Summary" in ct
-        # Three [[BOB]] callouts — the judgement sections: the framing,
-        # the limitations, and the recommendation.
-        assert ct.count("[[BOB:") == 3
-        assert "BOB — YOUR FRAMING" in ct
-        assert "BOB — YOUR JUDGEMENT" in ct
-        assert "BOB — YOUR RECOMMENDATION" in ct
+        # May 26 2026 — the three judgement-section [[BOB]] callouts
+        # (FRAMING / JUDGEMENT / RECOMMENDATION) were removed. The
+        # Academic Writer's prose now stands as each section's
+        # interpretation.
+        assert ct.count("[[BOB:") == 0
+        assert "BOB —" not in ct
 
 
 # ── CRUD round-trips — skip without a live database ───────────────────────────

@@ -243,6 +243,11 @@ describe('Full Dashboard → Council → QA → Dashboard navigation flow', () =
           attribution: {}, transition_matrix: {}, n_strategies: 0, n_months: 0,
         }})
         if (url === '/api/regime/current') return Promise.resolve({ data: { threshold_regime: 'BULL' } })
+        // May 26 2026 — qaStore.reload also calls pollOverrides
+        // so the badge derivation can skip acknowledged warnings.
+        // Stub the endpoint with an empty overrides map so the
+        // call resolves cleanly and the test counts the GET.
+        if (url === '/api/v1/qa/intentional-overrides') return Promise.resolve({ data: { overrides: {} } })
         return Promise.reject(new Error(`Unexpected: ${url}`))
       })
     // Council moved off axios.post to fetch+SSE in May 2026.
@@ -285,13 +290,16 @@ describe('Full Dashboard → Council → QA → Dashboard navigation flow', () =
     const { result: council2 } = renderHook(() => useCouncilStore())
     expect(council2.current.result?.final_recommendation).toBe('rec')
 
-    // Expected call counts (council moved off axios in May 2026):
-    //   GET  /api/backtest/compare:    1 (Dashboard)         → axios
-    //   GET  /api/regime/current:      1 (Dashboard)         → axios
-    //   GET  /api/v1/charts/data:      1 (StatisticalEvidence) → axios
-    //   POST /api/qa/audit:            1 (QA load)           → axios
-    //   POST /api/council/query SSE:   1 (Council runQuery)  → fetch
-    expect(mockedAxios.get).toHaveBeenCalledTimes(3)
+    // Expected call counts (council moved off axios in May 2026;
+    // QA store also pollOverrides on every reload as of May 26
+    // 2026 — see qaStore.pollOverrides):
+    //   GET  /api/backtest/compare:              1 (Dashboard)
+    //   GET  /api/regime/current:                1 (Dashboard)
+    //   GET  /api/v1/charts/data:                1 (StatisticalEvidence)
+    //   GET  /api/v1/qa/intentional-overrides:   1 (QA reload — for badge ack derivation)
+    //   POST /api/qa/audit:                      1 (QA load)
+    //   POST /api/council/query SSE:             1 (Council runQuery, fetch)
+    expect(mockedAxios.get).toHaveBeenCalledTimes(4)
     expect(mockedAxios.post).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
