@@ -87,6 +87,8 @@ class TestCompare:
         assert "Sign disagreement" not in out["reasoning"]
 
     def test_platform_none_yields_warning(self):
+        # ONE side None is missing_value WARN — the two sides disagree
+        # about whether the value is computable.
         from tools.audit_layer2_deterministic import _compare
         out = _compare("m", None, 0.5)
         assert out["status"] == "warning"
@@ -97,6 +99,24 @@ class TestCompare:
         out = _compare("m", 0.5, None)
         assert out["status"] == "warning"
         assert out["flag"] == "missing_value"
+
+    def test_both_none_is_pass_with_agreement_reasoning(self):
+        """Both sides agree the value is not computable — PASS, not
+        missing_value WARN. May 25 2026 fix: the previous behaviour
+        flagged the agreement as a defect, surfacing dozens of
+        spurious warnings for EQUITY/BENCHMARK information_ratio,
+        short-history regime sub-periods, and MOM-factor fallbacks."""
+        from tools.audit_layer2_deterministic import _compare
+        out = _compare("m", None, None)
+        assert out["status"] == "pass"
+        # The reasoning string explicitly tells the operator this is
+        # an agreement, not a missing-data failure.
+        assert "agreement" in out["reasoning"].lower()
+        assert "not computable" in out["reasoning"].lower()
+        # discrepancy_pct is 0 (perfect agreement) and flag is empty
+        # so the finding shape is consistent with other PASS cases.
+        assert out["discrepancy_pct"] == 0.0
+        assert out["flag"] == ""
 
     def test_nan_auditor_yields_warning(self):
         from tools.audit_layer2_deterministic import _compare
@@ -139,6 +159,11 @@ class TestRecomputeSummaryStatistics:
     def test_recompute_matches_platform_value_for_clean_series(self):
         # Build a deterministic returns series; compute the seven
         # metrics via analytics directly; assert recompute matches.
+        # IMPORTANT — the platform's analytics.summary_statistics()
+        # stores volatility under `ann_volatility` and Sharpe under
+        # `sharpe_ratio`. The recompute MUST read those keys; reading
+        # `volatility` / `sharpe` returns None and surfaces a spurious
+        # missing_value WARN (the May 25 2026 bug this test pins).
         from tools import analytics as an
         from tools.audit_layer2_deterministic import (
             recompute_summary_statistics,
@@ -152,14 +177,14 @@ class TestRecomputeSummaryStatistics:
         rf_arr = [0.001] * 24
 
         # Platform-computed values via the same primitives — these are
-        # what the analytics layer would have stored.
+        # what the analytics layer stores, under its native field names.
         rf = pd.Series(rf_arr, index=idx)
         ig_series = pd.Series(ig, index=idx)
         platform = {
-            "cagr":          round(an._cagr(ig_series), 4),
-            "volatility":    round(an._ann_vol(ig_series), 4),
-            "sharpe":        round(an._sharpe(ig_series, rf), 4),
-            "max_drawdown":  round(an._max_drawdown(ig_series), 4),
+            "cagr":           round(an._cagr(ig_series), 4),
+            "ann_volatility": round(an._ann_vol(ig_series), 4),
+            "sharpe_ratio":   round(an._sharpe(ig_series, rf), 4),
+            "max_drawdown":   round(an._max_drawdown(ig_series), 4),
             "skewness":      None,    # tested independently
             "excess_return": None,
             "information_ratio": None,
@@ -181,6 +206,77 @@ class TestRecomputeSummaryStatistics:
                 f"{metric}: expected pass, got "
                 f"{statuses[metric]} ({result['checks']})"
             )
+
+    def test_recompute_uses_analytics_layer_field_names(self):
+        """Regression pin for the May 25 2026 bug — every platform
+        summary-statistics row uses the analytics layer's native
+        field names (ann_volatility / sharpe_ratio), NOT the natural
+        metric names (volatility / sharpe). Reading the wrong key
+        returns None and surfaces a spurious missing_value WARN on
+        46 checks across the four assets (EQUITY / IG / HY /
+        BENCHMARK × 7 metrics).
+
+        The bug was the recomputer asking for platform.get("volatility"),
+        which the analytics layer never sets. This test asserts:
+          (1) When the platform dict ONLY carries the canonical field
+              names, volatility and sharpe checks PASS — the recomputer
+              found them.
+          (2) When the platform dict carries the wrong-named fields
+              (volatility / sharpe), the recomputer falls through to
+              the canonical names and STILL reports missing_value —
+              proving the lookup keys are exactly the canonical ones.
+        """
+        from tools.audit_layer2_deterministic import (
+            recompute_summary_statistics,
+        )
+
+        idx = pd.date_range("2020-01-31", periods=12, freq="ME")
+        equity = [0.01] * 12
+        ig     = [0.005] * 12
+        hy     = [0.008] * 12
+        rf_arr = [0.0] * 12
+        payload = self._payload(
+            {"equity": equity, "ig": ig, "hy": hy, "rf": rf_arr,
+             "dates": [d.isoformat() for d in idx]},
+            {},
+        )
+
+        # (1) Canonical field names — checks find the value.
+        canonical_platform = {
+            "cagr":           0.0617,
+            "ann_volatility": 0.0,    # constant series → zero vol
+            "sharpe_ratio":   0.0,    # zero vol → zero sharpe
+            "max_drawdown":   0.0,
+            "skewness":       0.0,
+            "excess_return":  0.0,
+            "information_ratio": None,
+        }
+        result = recompute_summary_statistics(
+            "IG", payload, canonical_platform)
+        by_metric = {c["metric"]: c for c in result["checks"]}
+        # No missing-value flags on ann_volatility / sharpe_ratio reads
+        # — proves the recompute uses the right keys.
+        assert by_metric["IG.volatility"]["flag"] != "missing_value", \
+            by_metric["IG.volatility"]
+        assert by_metric["IG.sharpe"]["flag"] != "missing_value", \
+            by_metric["IG.sharpe"]
+
+        # (2) Wrong field names — checks fall through to missing_value.
+        wrong_platform = {
+            "cagr":         0.0617,
+            "volatility":   0.0,   # WRONG key — analytics doesn't set this
+            "sharpe":       0.0,   # WRONG key — analytics doesn't set this
+            "max_drawdown": 0.0,
+            "skewness":     0.0,
+            "excess_return": 0.0,
+            "information_ratio": None,
+        }
+        result = recompute_summary_statistics("IG", payload, wrong_platform)
+        by_metric = {c["metric"]: c for c in result["checks"]}
+        # With the wrong-named fields, the recompute reports
+        # missing_value — proves it's reading the canonical names.
+        assert by_metric["IG.volatility"]["flag"] == "missing_value"
+        assert by_metric["IG.sharpe"]["flag"] == "missing_value"
 
     def test_missing_asset_returns_warning(self):
         from tools.audit_layer2_deterministic import (
@@ -408,6 +504,75 @@ class TestRecomputeRollingCorrelation:
         assert len(result["checks"]) == 1
         assert result["checks"][0]["status"] == "warning"
         assert result["checks"][0]["flag"] == "no_data"
+
+    def test_nested_platform_shape_resolves_correctly(self):
+        """Canonical shape: {pre_2022: {equity_ig, equity_hy}, ...}."""
+        from tools.audit_layer2_deterministic import (
+            recompute_rolling_correlation,
+        )
+        n = 30
+        idx = pd.date_range("2019-01-31", periods=n, freq="ME")
+        rng = np.random.default_rng(99)
+        eq = rng.normal(0.008, 0.04, n).tolist()
+        ig = rng.normal(0.003, 0.02, n).tolist()
+        hy = rng.normal(0.005, 0.03, n).tolist()
+        payload = {
+            "raw_data": {"asset_returns": {
+                "equity": eq, "ig": ig, "hy": hy,
+                "rf": [0.0] * n,
+                "dates": [d.isoformat() for d in idx],
+            }},
+            "platform_computed": {"rolling_correlation": {
+                # The canonical shape analytics emits.
+                "pre_2022":  {"equity_ig": 0.123, "equity_hy": 0.456},
+                "post_2022": {"equity_ig": 0.789, "equity_hy": 0.234},
+            }},
+        }
+        result = recompute_rolling_correlation(payload)
+        # Each check's platform_value comes back as the float from the
+        # nested payload (rounded by _compare). No missing_value.
+        by_metric = {c["metric"]: c for c in result["checks"]}
+        for metric in ("equity_ig.pre_2022", "equity_ig.post_2022",
+                       "equity_hy.pre_2022", "equity_hy.post_2022"):
+            assert by_metric[metric]["platform_value"] is not None, (
+                f"{metric}: platform_value should resolve via nested "
+                f"lookup, got {by_metric[metric]}"
+            )
+
+    def test_flat_key_fallback_resolves_period_dot_pair(self):
+        """Legacy/alternative flat-key shape: 'pre_2022.equity_ig'."""
+        from tools.audit_layer2_deterministic import (
+            recompute_rolling_correlation,
+        )
+        n = 30
+        idx = pd.date_range("2019-01-31", periods=n, freq="ME")
+        rng = np.random.default_rng(101)
+        eq = rng.normal(0.008, 0.04, n).tolist()
+        ig = rng.normal(0.003, 0.02, n).tolist()
+        hy = rng.normal(0.005, 0.03, n).tolist()
+        payload = {
+            "raw_data": {"asset_returns": {
+                "equity": eq, "ig": ig, "hy": hy,
+                "rf": [0.0] * n,
+                "dates": [d.isoformat() for d in idx],
+            }},
+            "platform_computed": {"rolling_correlation": {
+                # Flat-key shape — fallback path.
+                "pre_2022.equity_ig": 0.111,
+                "pre_2022.equity_hy": 0.222,
+                "post_2022.equity_ig": 0.333,
+                "post_2022.equity_hy": 0.444,
+            }},
+        }
+        result = recompute_rolling_correlation(payload)
+        by_metric = {c["metric"]: c for c in result["checks"]}
+        # All four checks resolve via the flat-key fallback.
+        for metric in ("equity_ig.pre_2022", "equity_ig.post_2022",
+                       "equity_hy.pre_2022", "equity_hy.post_2022"):
+            assert by_metric[metric]["platform_value"] is not None, (
+                f"{metric}: flat-key fallback should resolve, "
+                f"got {by_metric[metric]}"
+            )
 
 
 # ── Hash check — TOLERANCE constants are reasonable ──────────────────────────

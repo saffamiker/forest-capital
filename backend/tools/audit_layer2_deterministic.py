@@ -100,6 +100,34 @@ def _compare(
     A sign disagreement is always a FAIL regardless of magnitude
     (a wrong-direction Sharpe is a real bug, not a rounding gap).
     """
+    # Both legitimately None — PASS, not WARN (May 25 2026 fix).
+    # The previous behaviour flagged "both can't compute" as missing
+    # data even when it was actually agreement. The cases this covers:
+    #   - EQUITY.information_ratio / BENCHMARK.information_ratio
+    #     (IR is undefined for the benchmark and the equity asset
+    #     that IS the benchmark — both sides return None and agree)
+    #   - regime split for a strategy whose pre-2022 sub-period has
+    #     fewer than 2 observations (short-history strategies); both
+    #     platform and auditor honour the < 2 month cutoff
+    #   - factor_loadings.mom for a three-factor-fallback strategy
+    #     (no MOM-factor history; both sides record None)
+    if platform is None and auditor is None:
+        return {
+            "metric": metric,
+            "platform_value": None,
+            "auditor_value":  None,
+            "discrepancy_pct": 0.0,
+            "status": "pass",
+            "reasoning": (
+                "Both platform and Python recompute returned None — "
+                "agreement that the value is not computable in this "
+                "context (e.g. information ratio for the benchmark "
+                "itself, pre/post-2022 Sharpe with fewer than 2 months, "
+                "or MOM beta for a three-factor-fallback strategy)."),
+            "flag": "",
+        }
+    # Exactly one side is None — that IS a missing-value warning;
+    # the two sides disagree about whether the value is computable.
     if platform is None or auditor is None:
         return {
             "metric": metric,
@@ -108,8 +136,10 @@ def _compare(
             "discrepancy_pct": None,
             "status": "warning",
             "reasoning": (note
-                          or "One of platform / auditor value was None — "
-                             "the recompute could not be verified."),
+                          or "One of platform / auditor value was None "
+                             "while the other was not — the two sides "
+                             "disagree on whether the value is "
+                             "computable."),
             "flag": "missing_value",
         }
     try:
@@ -298,13 +328,19 @@ def recompute_summary_statistics(
                 None if sd < 1e-12
                 else float(diff.mean() / sd * np.sqrt(12)))
 
+    # Platform field-name map (tools.analytics.summary_statistics).
+    # Two metrics differ from the recompute's natural name:
+    #   volatility  ← stored as  ann_volatility
+    #   sharpe      ← stored as  sharpe_ratio
+    # All other names match. Looking up the wrong key returns None,
+    # which surfaces as a "missing_value" WARN — the May 25 2026 bug.
     checks = [
         _compare(f"{asset}.cagr",
                  platform.get("cagr"), auditor_cagr),
         _compare(f"{asset}.volatility",
-                 platform.get("volatility"), auditor_vol),
+                 platform.get("ann_volatility"), auditor_vol),
         _compare(f"{asset}.sharpe",
-                 platform.get("sharpe"), auditor_sharpe),
+                 platform.get("sharpe_ratio"), auditor_sharpe),
         _compare(f"{asset}.max_drawdown",
                  platform.get("max_drawdown"), auditor_dd),
         _compare(f"{asset}.skewness",
@@ -508,14 +544,25 @@ def recompute_rolling_correlation(
     pre_eq_ig, post_eq_ig = _split_average(eq_ig_roll)
     pre_eq_hy, post_eq_hy = _split_average(eq_hy_roll)
 
-    # The platform's payload shape: {pre_2022: {equity_ig, equity_hy},
-    # post_2022: {equity_ig, equity_hy}}. Tolerant to either flat
-    # key naming or the structured shape.
+    # analytics.rolling_correlation() emits this shape:
+    #   {window_months, regime_break, points: [...],
+    #    pre_2022:  {equity_ig, equity_hy},
+    #    post_2022: {equity_ig, equity_hy}}
+    # _get supports the nested form (the canonical case) AND falls
+    # back to flat dotted keys ("pre_2022.equity_ig") if a future
+    # producer flattens the shape. Both forms surface a value when
+    # available; only a completely-missing key yields None and a
+    # missing-value warning at _compare.
     def _get(period: str, pair: str) -> Any:
-        period_block = platform.get(period) or {}
+        period_block = platform.get(period)
         if isinstance(period_block, dict):
             return period_block.get(pair)
-        return None
+        # Flat-key fallback for legacy/alternative shapes.
+        flat = platform.get(f"{period}.{pair}")
+        if flat is not None:
+            return flat
+        flat = platform.get(f"{pair}.{period}")  # other ordering
+        return flat
 
     checks = [
         _compare("equity_ig.pre_2022",
