@@ -722,7 +722,6 @@ async def compute_in02_attestation() -> dict[str, Any]:
     invoking QAAgent.run_audit and passes the result in via the
     academic_review_attestation argument.
     """
-    import re
     LOOKBACK_DAYS = 14
 
     try:
@@ -766,22 +765,42 @@ async def compute_in02_attestation() -> dict[str, Any]:
             }
 
         row_id, email, ts, summary, metadata = found
-        # The arbiter writes one `### N. Section\n**Rating:** ...`
-        # block per section. Count the well-formed ones via the same
-        # regex agents.academic_review_score uses.
-        section_re = re.compile(
-            r"###?\s*\d+\.[^\n]+", re.MULTILINE)
-        rating_re = re.compile(
-            r"\*\*Rating\s*:\s*\*\*\s*(Strong|Developing|Needs[\s-]?Work)",
-            re.IGNORECASE)
-        headings = section_re.findall(summary or "")
-        ratings = rating_re.findall(summary or "")
-        n_sections = min(len(headings), len(ratings))
-
         when = ts.isoformat() if ts else "?"
         meta = metadata or {}
         overall = (meta.get("overall_rating") if isinstance(meta, dict)
                    else None)
+
+        # Source-of-truth section count (May 26 2026). Two layers:
+        #   1. Trust metadata.sections_rated when the auto-review path
+        #      wrote it. That value was produced by
+        #      compute_review_score() — the canonical scorer — so the
+        #      audit's attestation cannot disagree with the score the
+        #      editor banner already displays.
+        #   2. Fall back to compute_review_score(summary) for older
+        #      rows OR for the manual academic-review endpoint that
+        #      logs response_summary without the metadata block.
+        #      Same canonical scorer, same answer.
+        # The previous local regex was duplicating the parser logic
+        # and missed the rating syntax when the arbiter's section
+        # headings drifted (or carried alternate labels) — symptom
+        # was "parsed only 1 of 5" while compute_review_score saw
+        # all five.
+        n_sections: int | None = None
+        if isinstance(meta, dict):
+            md_count = meta.get("sections_rated")
+            if isinstance(md_count, int) and md_count >= 0:
+                n_sections = md_count
+        if n_sections is None:
+            try:
+                from tools.academic_review_score import compute_review_score
+                scored = compute_review_score(summary or "")
+                n_sections = int(scored.get("sections_rated") or 0)
+                if not overall:
+                    overall = scored.get("rating")
+            except Exception as _exc:  # noqa: BLE001
+                log.warning(
+                    "in02_canonical_score_failed", error=str(_exc))
+                n_sections = 0
 
         if n_sections >= 5:
             return {
