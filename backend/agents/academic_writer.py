@@ -126,15 +126,23 @@ Substitutions:
 - CLASSIC_60_40 → Classic 60/40
 - BENCHMARK → Benchmark (100% Equity)
 The raw identifiers are appropriate in code listings or table \
-column headers ONLY. Prose, captions, headlines, and the [BOB] \
-blocks all use the display names. The post-processing pass will \
-substitute remaining instances at render time, but writing the \
-display name directly is preferred so the prose flows naturally \
-without obvious substitution seams.
+column headers ONLY. Prose, captions and headlines use the display \
+names. The post-processing pass will substitute remaining instances \
+at render time, but writing the display name directly is preferred \
+so the prose flows naturally without obvious substitution seams.
 
-THESE RULES APPLY TO ALL GENERATED CONTENT INCLUDING [BOB] \
-PRE-POPULATED BLOCKS. The reviewer expects the BOB drafts to read in \
-the same voice as the rest of the paper.
+INTERPRETATION GOES INLINE — NOT IN TRAILING BLOCKS. Every analytical \
+claim, "so what" framing, governance question, regime-shift mechanism \
+and forward-looking observation belongs INSIDE the section that owns \
+the topic — Section 2 for results-and-implications, Section 4 for \
+open questions and next-steps framing. Do NOT emit standalone [BOB] \
+blocks, alternative "team voice" paragraphs, or duplicate-content \
+appendices after the References section. The rubric requires the \
+interpretation to be PRESENT in the body of the paper, not deferred \
+to a separate block the reader has to merge themselves. May 26 2026 \
+— this rule replaces the prior instruction to produce [BOB] \
+pre-populated blocks; that pattern was producing orphan paragraphs \
+at the end of the document because no downstream merge step existed.
 
 AUDIENCE:
 Your primary reader is a PORTFOLIO MANAGER who has seen hundreds of strategy \
