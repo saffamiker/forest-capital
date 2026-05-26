@@ -6170,7 +6170,7 @@ async def audit_run(
     """
     from tools.audit_assembler import current_data_hash
     from tools.audit_engine import (
-        get_last_substantive_audit, start_audit,
+        get_last_substantive_audit, is_substantive_audit, start_audit,
     )
     from tools.qa_guard import (
         QA_BUSY_MESSAGE_STATISTICAL, statistical_audit_in_progress,
@@ -6198,13 +6198,27 @@ async def audit_run(
     # SMART CACHE-HIT — only on non-forced runs. The current data
     # fingerprint is the canonical key; if a prior substantive audit
     # verified the same data, serve it instead of redoing the work.
+    #
+    # Belt-and-braces (May 26 2026 follow-up). User reported the
+    # hollow audit #40 was being served despite the SQL filter. The
+    # endpoint now re-validates `last` via is_substantive_audit
+    # BEFORE returning cache_hit; a row that fails the validator
+    # falls through to a forced fresh run regardless of hash match.
+    # The SQL filter inside get_last_substantive_audit + the
+    # Python validator here together guarantee that whatever column
+    # shape audit #40 has cannot slip through.
     if not force:
         try:
             current_hash = (await current_data_hash()) or ""
             last = await get_last_substantive_audit()
-            if (last
-                    and current_hash
-                    and last.get("data_hash") == current_hash):
+            hash_matches = (
+                last is not None
+                and current_hash != ""
+                and last.get("data_hash") == current_hash
+            )
+            if hash_matches and is_substantive_audit(last):
+                # Real cache hit — serve the prior substantive run.
+                # No new audit_runs row is created.
                 log.info(
                     "audit_run_cache_hit",
                     last_audit_id=last.get("id"),
@@ -6233,6 +6247,25 @@ async def audit_run(
                         "layers on identical data."
                     ),
                 }
+            if hash_matches:
+                # Hash matches but the candidate failed the Python
+                # validator (hollow row that slipped past the SQL
+                # filter). Fall through to a forced fresh run — the
+                # diagnostic log records which columns rejected the
+                # row so the operator can see exactly why a "matching"
+                # audit was not served.
+                log.info(
+                    "audit_run_cache_miss_hollow_candidate",
+                    last_audit_id=last.get("id"),
+                    data_hash=current_hash[:12],
+                    total_checks=last.get("total_checks"),
+                    passed=last.get("passed"),
+                    failed=last.get("failed"),
+                    warnings=last.get("warnings"),
+                    layer_1_status=last.get("layer_1_status"),
+                    layer_2_status=last.get("layer_2_status"),
+                    layer_3_status=last.get("layer_3_status"),
+                )
         except Exception as exc:  # noqa: BLE001
             # Cache check is best-effort — any failure falls through
             # to a real run. Logged so the operator sees why a click

@@ -302,12 +302,17 @@ async def get_last_substantive_audit() -> dict[str, Any] | None:
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return None
-        # The SKIP layer statuses we treat as 'this layer did not run'.
-        # 'skipped_no_data' was added by the loud-failure branch in
-        # _execute_audit; 'skip' is what the per-layer audit functions
-        # return when payload.available is False.
-        _SKIPPED_LAYER_VALUES = ("skip", "skipped_no_data", "")
         async with AsyncSessionLocal() as session:
+            # SQL pre-filter — fast path, excludes obvious hollow rows
+            # at the DB. The Python validator below catches anything
+            # the SQL filter doesn't (alternate layer-status spellings,
+            # rows with non-zero total_checks but every layer skipped,
+            # etc). May 26 2026 follow-up — the user reported a hollow
+            # row (audit #40) was slipping past the SQL alone.
+            #
+            # We pull the TOP 5 candidates ordered by id DESC and walk
+            # them in Python so a single hollow row near the head
+            # doesn't shadow a substantive row immediately below it.
             row = await session.execute(text(
                 "SELECT id, triggered_by, triggered_at, "
                 "       triggered_by_email, status, "
@@ -318,26 +323,96 @@ async def get_last_substantive_audit() -> dict[str, Any] | None:
                 "WHERE status = 'complete' "
                 "  AND total_checks > 0 "
                 "  AND COALESCE(layer_1_status, '') NOT IN "
-                "      ('skip', 'skipped_no_data') "
+                "      ('skip', 'skipped', 'skipped_no_data') "
                 "  AND COALESCE(layer_2_status, '') NOT IN "
-                "      ('skip', 'skipped_no_data') "
+                "      ('skip', 'skipped', 'skipped_no_data') "
                 "  AND COALESCE(layer_3_status, '') NOT IN "
-                "      ('skip', 'skipped_no_data') "
-                "ORDER BY id DESC LIMIT 1"))
-            found = row.fetchone()
-        if found is None:
+                "      ('skip', 'skipped', 'skipped_no_data') "
+                "ORDER BY id DESC LIMIT 5"))
+            candidates = row.fetchall()
+        if not candidates:
             return None
-        # Guard the layer-status sanity check at the Python boundary
-        # too — SQL caught the obvious values; this catches any other
-        # marker a future commit might introduce.
-        d = _run_row(found)
-        for k in ("layer_1_status", "layer_2_status", "layer_3_status"):
-            if str(d.get(k) or "").lower() in _SKIPPED_LAYER_VALUES:
-                return None
-        return d
+        for found in candidates:
+            d = _run_row(found)
+            if is_substantive_audit(d):
+                return d
+            # Diagnostic — every hollow row that slipped past the SQL
+            # filter is logged so the operator can see exactly which
+            # column tripped the Python re-check. Helps explain why a
+            # specific audit row isn't being served as a cache hit.
+            log.info(
+                "audit_substantive_rejected",
+                audit_id=d.get("id"),
+                status=d.get("status"),
+                total_checks=d.get("total_checks"),
+                passed=d.get("passed"),
+                failed=d.get("failed"),
+                warnings=d.get("warnings"),
+                layer_1_status=d.get("layer_1_status"),
+                layer_2_status=d.get("layer_2_status"),
+                layer_3_status=d.get("layer_3_status"),
+            )
+        return None
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_substantive_lookup_failed", error=str(exc))
         return None
+
+
+# Layer-status values that mean "this layer did not actually run".
+# Treated case-insensitively. Empty string and None are also rejected
+# — a layer with no recorded status is not evidence that it ran.
+_SKIPPED_LAYER_VALUES: frozenset[str] = frozenset({
+    "skip", "skipped", "skipped_no_data", "no_data", "",
+})
+
+
+def is_substantive_audit(row: dict[str, Any] | None) -> bool:
+    """True iff a candidate audit_runs row represents a real, fully-
+    executed audit run — three layers ran, at least one check landed,
+    no layer's status reads as 'skipped'. Used by
+    get_last_substantive_audit AND by the /api/v1/audit/run endpoint's
+    cache-hit guard so the validator runs on both sides of the call.
+
+    The double-check is deliberate — the SQL filter is fast but the
+    user reported audit #40 (a hollow row) slipping through. Whatever
+    column shape was responsible (an unexpected layer-status spelling,
+    a non-zero total_checks on an otherwise empty run, a NULL where
+    the filter expected a string), this Python check catches it. May
+    26 2026 follow-up.
+    """
+    if not row or not isinstance(row, dict):
+        return False
+    # Status must be 'complete'. The loud-failure branch in
+    # _execute_audit writes 'failed' for hollow runs (post-PR-#173),
+    # so a fresh hollow row would already be excluded here. Legacy
+    # hollow rows (pre-PR-#173) carry status='complete' and need the
+    # downstream checks to catch them.
+    if str(row.get("status") or "").lower() != "complete":
+        return False
+    # Must carry at least one finding. A run with zero total_checks
+    # is not substantive regardless of how every other column reads.
+    tc = row.get("total_checks")
+    if not isinstance(tc, int) or tc <= 0:
+        return False
+    # Defence in depth — passed+failed+warnings should sum to
+    # total_checks on a real run; a row where the sum is zero
+    # despite a non-zero total_checks is corrupt and not substantive.
+    p = row.get("passed") or 0
+    f = row.get("failed") or 0
+    w = row.get("warnings") or 0
+    try:
+        if (int(p) + int(f) + int(w)) <= 0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    # Every layer must have actually run. The check is case-
+    # insensitive and includes the empty-string sentinel that
+    # COALESCE produces for a NULL.
+    for k in ("layer_1_status", "layer_2_status", "layer_3_status"):
+        v = str(row.get(k) or "").strip().lower()
+        if v in _SKIPPED_LAYER_VALUES:
+            return False
+    return True
 
 
 async def get_audit_runs() -> list[dict[str, Any]]:
