@@ -1061,6 +1061,9 @@ async def source_citations(
         query = c.get("search_query", "")
         entry: dict[str, Any] = _empty_citation_entry(cid, query)
         alternatives: list[dict[str, Any]] = []
+        # Types returned by earlier passes — passed into the next
+        # pass's prompt as a diversity steer. May 26 2026.
+        prior_types: list[str] = []
 
         try:
             # ── Pass 1 — trusted domains only ───────────────────────────────
@@ -1083,11 +1086,14 @@ async def source_citations(
                 primary["confidence_score"] = _compute_confidence(
                     1, primary.get("url") or "", off_list=True)
                 alternatives.append(primary)
+                if primary.get("citation_type"):
+                    prior_types.append(str(primary["citation_type"]))
 
             # ── Pass 2 — wider academic ─────────────────────────────────────
             wider = _run_citation_pass(
                 call_claude, SONNET_MODEL,
-                query=query, concept_id=cid, pass_index=2)
+                query=query, concept_id=cid, pass_index=2,
+                prior_types=prior_types)
             entry["passes_run"] = 2
             if wider and wider.get("url"):
                 wider["pass_source"] = "pass_2_academic"
@@ -1105,11 +1111,14 @@ async def source_citations(
                 wider["confidence_score"] = _compute_confidence(
                     2, wider.get("url") or "", off_list=True)
                 alternatives.append(wider)
+                if wider.get("citation_type"):
+                    prior_types.append(str(wider["citation_type"]))
 
             # ── Pass 3 — widest publishable ─────────────────────────────────
             widest = _run_citation_pass(
                 call_claude, SONNET_MODEL,
-                query=query, concept_id=cid, pass_index=3)
+                query=query, concept_id=cid, pass_index=3,
+                prior_types=prior_types)
             entry["passes_run"] = 3
             if widest and widest.get("url") \
                     and _is_publishable_url(widest.get("url") or ""):
@@ -1230,6 +1239,60 @@ def _compute_confidence(pass_index: int, url: str | None,
     return max(0.0, min(1.0, round(base, 2)))
 
 
+# ── Citation-type taxonomy block injected into every pass's system
+# prompt. Names the six recognized citation_type values and gives the
+# LLM a concrete, decision-ready description for each so it can both
+# CLASSIFY the citation it found AND search for the right type for the
+# concept at hand. Added May 26 2026 after the user reported that
+# every Step 2 result was coming back as "theoretical" because the
+# prompt never asked the LLM to think about type.
+_CITATION_TYPE_TAXONOMY: str = (
+    "CITATION TYPES — six values, classify the source you found "
+    "into one. Different concepts call for different types: data-"
+    "anchored claims often need a data_source; regime / period "
+    "claims often need empirical evidence; standards questions need "
+    "regulatory. Match the type to the CLAIM, not just the venue.\n"
+    "  theoretical    — foundational paper or framework introducing "
+    "the concept (Sharpe 1994, Markowitz 1952, Black & Litterman "
+    "1992).\n"
+    "  empirical      — recent study with data demonstrating the "
+    "phenomenon for a specific market and period (NBER working "
+    "papers on post-2022 correlations, JFE articles with explicit "
+    "empirical sections).\n"
+    "  methodological — technique paper or validation reference "
+    "(López de Prado on CPCV, Newey-West, deflated Sharpe).\n"
+    "  regulatory     — standard, guidance or compliance document "
+    "(SEC rule release, Basel III, ESMA guidance, IFRS Foundation, "
+    "FINRA notice).\n"
+    "  data_source    — the actual data provider's documentation "
+    "or series page (fred.stlouisfed.org series page, ICE BofA "
+    "BAML index methodology, S&P / MSCI / Bloomberg index "
+    "documentation, Yahoo Finance series).\n"
+    "  practitioner   — industry analysis or institutional research "
+    "(AQR white paper, CFA Institute analysis, BlackRock / Vanguard "
+    "research piece).\n"
+)
+
+
+def _build_diversity_instruction(prior_types: list[str]) -> str:
+    """Builds a "you already found these types" steer for pass 2 and
+    pass 3 so subsequent passes deliberately broaden the evidence
+    base across the six-type taxonomy rather than returning a second
+    theoretical paper. Pass 1 has no prior context — returns an
+    empty string in that case.
+    """
+    if not prior_types:
+        return ""
+    seen = ", ".join(sorted(set(prior_types)))
+    return (
+        f"DIVERSITY STEER — previous passes for this concept already "
+        f"returned: [{seen}]. PREFER a citation of a DIFFERENT type "
+        f"on this pass so the reviewer sees evidence from multiple "
+        f"angles. Only return the same type again if no equally "
+        f"strong alternative exists in another type. "
+    )
+
+
 def _run_citation_pass(
     call_claude_fn,
     model: str,
@@ -1237,6 +1300,7 @@ def _run_citation_pass(
     query: str,
     concept_id: str,
     pass_index: int,
+    prior_types: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Runs ONE citation search pass with a pass-specific system
     prompt that names the acceptable domain set. Returns the parsed
@@ -1248,6 +1312,12 @@ def _run_citation_pass(
 
     `call_claude_fn` is the Anthropic call wrapper; passed in so the
     caller can mock it in tests without monkeypatching the import.
+
+    `prior_types` — types of citations already found on earlier passes
+    for the same concept. Drives the diversity steer (May 26 2026) so
+    pass 2 / pass 3 deliberately broaden the evidence base across
+    the six-type taxonomy rather than returning a second theoretical
+    paper. Default None = pass 1 behaviour (no steer).
     """
     web_search_tool = {
         "type":     "web_search_20250305",
@@ -1256,34 +1326,50 @@ def _run_citation_pass(
     }
     pass_instructions = {
         1: (
-            "use web_search to find the most appropriate academic "
-            "citation from a TRUSTED domain only — Journal of Finance, "
-            "Journal of Financial Economics, Review of Financial Studies, "
-            "NBER working papers, BIS, the Federal Reserve Board, AQR, "
-            "CFA Institute, SSRN, JSTOR. Return ONLY a JSON object."),
+            "use web_search to find the strongest citation for the "
+            "claim. PRIMARY targets are trusted academic domains — "
+            "Journal of Finance, Journal of Financial Economics, "
+            "Review of Financial Studies, NBER working papers, BIS, "
+            "the Federal Reserve Board, AQR, CFA Institute, SSRN, "
+            "JSTOR. ALSO acceptable if the claim is data-anchored or "
+            "regulatory: fred.stlouisfed.org series pages, ICE BofA / "
+            "BAML index documentation, SEC / Treasury / Basel III "
+            "publications, S&P / MSCI / Bloomberg index methodology. "
+            "Pick whichever the CLAIM demands, not just the canonical "
+            "theoretical reference. Return ONLY a JSON object."),
         2: (
-            "the trusted-domain search returned nothing. Now run a WIDER "
-            "search. ACCEPTABLE sources for this pass: university-hosted "
-            "papers (.edu domains), regional Federal Reserve banks, the "
-            "SEC, Treasury, OECD, World Bank, ECB, Cambridge / Springer / "
-            "MIT Press journals. The result will be flagged for human "
-            "review — pick the most authoritative hit you find. Return "
-            "ONLY a JSON object."),
+            "the first pass returned no usable result or you want to "
+            "broaden the evidence base. Now run a WIDER search. "
+            "ACCEPTABLE sources for this pass: university-hosted "
+            "papers (.edu domains), regional Federal Reserve banks, "
+            "the SEC, Treasury, OECD, World Bank, ECB, Cambridge / "
+            "Springer / MIT Press journals, FRED series pages, ICE "
+            "BofA / index provider documentation, regulatory guidance "
+            "from ESMA / FINRA / IFRS. The result will be flagged for "
+            "human review — pick the most authoritative hit you "
+            "find. Return ONLY a JSON object."),
         3: (
-            "neither the trusted nor the academic search returned a "
-            "result. Run the WIDEST acceptable search now. Anything on "
-            "a .org / .gov / .edu / .int domain that isn't a popular "
-            "finance blog (no Investopedia, Wikipedia, Medium, Seeking "
-            "Alpha, Motley Fool, LinkedIn) is acceptable for this pass. "
-            "The reviewer will decide whether to use it. Return ONLY a "
-            "JSON object."),
+            "neither pass returned a result. Run the WIDEST acceptable "
+            "search now. Anything on a .org / .gov / .edu / .int "
+            "domain that isn't a popular finance blog (no Investopedia, "
+            "Wikipedia, Medium, Seeking Alpha, Motley Fool, LinkedIn) "
+            "is acceptable for this pass. Practitioner research from "
+            "named institutional managers (BlackRock, Vanguard, AQR) "
+            "is also acceptable. The reviewer will decide whether to "
+            "use it. Return ONLY a JSON object."),
     }
+    diversity_steer = _build_diversity_instruction(prior_types or [])
     sys_prompt = (
         "You are a citation finder. " + pass_instructions[pass_index]
-        + " Required JSON fields: author, year, title, "
-        "journal_or_institution, volume_issue_pages, url. Author in "
-        "'Surname, Initials' format; multiple authors joined with "
-        "' and '. "
+        + "\n\n" + _CITATION_TYPE_TAXONOMY
+        + "\n" + diversity_steer
+        + "Required JSON fields: author, year, title, "
+        "journal_or_institution, volume_issue_pages, url, "
+        "citation_type. Author in 'Surname, Initials' format; "
+        "multiple authors joined with ' and '. citation_type MUST "
+        "be one of the six values listed in the CITATION TYPES "
+        "block above — match the type to the source you actually "
+        "found. "
         # ── May 23 2026 — evidence fields. Every successful pass
         # also returns the three fields below so Bob's citation
         # tile shows full evidence, not just metadata. Each is a
@@ -1332,6 +1418,26 @@ def _run_citation_pass(
     parsed = _parse_citation_json(raw)
     if not parsed or parsed.get("unverified"):
         return None
+
+    # citation_type validation (May 26 2026). The prompt asks the LLM
+    # to classify the citation into one of six values. Anything else
+    # falls back to 'theoretical' — same default the persistence layer
+    # already applies for missing values, but logged here so a model
+    # returning a typo is visible in operations rather than silently
+    # collapsing to theoretical.
+    from tools.citation_sourcing import CITATION_TYPES
+    raw_type = parsed.get("citation_type")
+    type_str = (str(raw_type).strip().lower()
+                if raw_type is not None else "")
+    if type_str in CITATION_TYPES:
+        parsed["citation_type"] = type_str
+    else:
+        if raw_type is not None and type_str:
+            log.info("citation_pass_unknown_type",
+                     concept_id=concept_id,
+                     pass_index=pass_index,
+                     returned=type_str)
+        parsed["citation_type"] = "theoretical"
 
     # Per-pass URL classification: pass 1 only counts as verified if
     # the URL is on the trusted list; pass 2 only counts as a primary
