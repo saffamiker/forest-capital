@@ -135,6 +135,73 @@ class TestPostCheckSummary:
         kinds = [f.get("kind") for f in out["flags"]]
         assert "unverified_number" in kinds
 
+    def test_word_count_over_budget_is_warn_only(self):
+        # Follow-up to PR #184 (commit 051e698 + this commit). A
+        # section that lands over budget is a WARNING the reviewer
+        # sees and decides about — it must NOT count toward
+        # flag_count, which hard-gates downloads in main._gate_download.
+        # The rationalizer is best-effort; a still_over section must
+        # remain submittable.
+        from tools.report_generator import _post_check_summary
+        # Build a section with > 110% of its budget (300 word budget →
+        # 400 words). No BOB markers, no unverified numbers, no
+        # inline citations — so the ONLY flag fired is the
+        # word_count_over_budget warning.
+        padded = " ".join(["lorem"] * 400)
+        md = (
+            "## 1. Data\n\nClean.\n\n"
+            f"## 2. Preliminary Results\n\n{padded}\n\n"
+            "## 3. Roles\n\nMichael led the pipeline.\n\n"
+            "## 4. Next Steps\n\nOpen question.\n")
+        out = _post_check_summary(md, {}, {})
+        # The over-budget flag IS present in the flags list (the UI
+        # renders it as a warning badge).
+        kinds = [f.get("kind") for f in out["flags"]]
+        assert "word_count_over_budget" in kinds
+        # But it does NOT contribute to flag_count, so the download
+        # gate stays open.
+        assert out["flag_count"] == 0
+        # Warning count surfaces the warn-only total separately so
+        # the UI can render a non-blocking badge.
+        assert out["warning_count"] >= 1
+
+    def test_word_count_warning_does_not_mask_hard_flags(self):
+        # A draft with BOTH a word_count_over_budget warning AND a
+        # hard-gate flag (bob_block) must still report flag_count >= 1
+        # so the download is blocked on the BOB marker. The warning
+        # is independent of the gate.
+        from tools.report_generator import _post_check_summary
+        padded = " ".join(["lorem"] * 400)
+        md = (
+            "## 1. Data\n\n[BOB — write this paragraph]\n\n"
+            f"## 2. Preliminary Results\n\n{padded}\n\n"
+            "## 3. Roles\n\nMichael.\n\n"
+            "## 4. Next Steps\n\nOpen question.\n")
+        out = _post_check_summary(md, {}, {})
+        # flag_count counts the BOB marker but not the over-budget.
+        assert out["flag_count"] == 1
+        # warning_count carries the over-budget separately.
+        assert out["warning_count"] >= 1
+
+    def test_hard_gate_flag_kinds_constant_is_pinned(self):
+        # Pinning the set so a future addition is an explicit
+        # decision — adding a kind to _HARD_GATE_FLAG_KINDS makes it
+        # download-blocking; adding to _WARN_ONLY_FLAG_KINDS makes
+        # it visible-but-non-blocking.
+        from tools.report_generator import (
+            _HARD_GATE_FLAG_KINDS, _WARN_ONLY_FLAG_KINDS)
+        assert _HARD_GATE_FLAG_KINDS == frozenset({
+            "unverified_number",
+            "citation_unverified",
+            "bob_block",
+        })
+        assert _WARN_ONLY_FLAG_KINDS == frozenset({
+            "word_count_over_budget",
+        })
+        # The two sets are disjoint — a kind can be hard-gate OR
+        # warn-only, never both.
+        assert not (_HARD_GATE_FLAG_KINDS & _WARN_ONLY_FLAG_KINDS)
+
 
 # ── Writer unavailable draft sentinel ───────────────────────────────────────
 
