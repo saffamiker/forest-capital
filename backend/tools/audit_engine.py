@@ -267,6 +267,79 @@ async def get_last_completed_audit_hash() -> str | None:
         return None
 
 
+async def get_last_substantive_audit() -> dict[str, Any] | None:
+    """The most recent COMPLETED audit that actually ran the layers — at
+    least one check landed AND no layer was skipped/no-data. Used by the
+    /api/v1/audit/run endpoint to serve a cache hit when the current
+    data hash matches a prior real run, instead of creating a new
+    hollow audit_runs row with 0 checks.
+
+    May 26 2026 — submission-night fix. Without this, the smart-audit-
+    caching layer at `run_full_audit` correctly skipped re-runs on an
+    unchanged data hash, BUT the manual endpoint did not — every Run
+    Full Audit click on production created a new audit_runs row that
+    then skipped every layer (cache cold for that specific request
+    path) and stored a zero-check 'complete' row. The PDF then
+    rendered "this layer was skipped" everywhere.
+
+    Now the endpoint asks this function first: if a real complete run
+    already exists for the current hash, return it instead of creating
+    a new row. A new row is created only when force=true OR the hash
+    has changed OR no substantive run exists yet.
+
+    "Substantive" gate:
+      status = 'complete'
+      AND total_checks > 0
+      AND no layer reports 'skip' / 'skipped_no_data' / null
+
+    Fail-open: a database error returns None; the endpoint then falls
+    through to start_audit (the existing path), so an outage never
+    blocks a manual audit attempt.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        # The SKIP layer statuses we treat as 'this layer did not run'.
+        # 'skipped_no_data' was added by the loud-failure branch in
+        # _execute_audit; 'skip' is what the per-layer audit functions
+        # return when payload.available is False.
+        _SKIPPED_LAYER_VALUES = ("skip", "skipped_no_data", "")
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(text(
+                "SELECT id, triggered_by, triggered_at, "
+                "       triggered_by_email, status, "
+                "       layer_1_status, layer_2_status, layer_3_status, "
+                "       total_checks, passed, failed, warnings, "
+                "       completed_at, metadata, data_hash "
+                "FROM audit_runs "
+                "WHERE status = 'complete' "
+                "  AND total_checks > 0 "
+                "  AND COALESCE(layer_1_status, '') NOT IN "
+                "      ('skip', 'skipped_no_data') "
+                "  AND COALESCE(layer_2_status, '') NOT IN "
+                "      ('skip', 'skipped_no_data') "
+                "  AND COALESCE(layer_3_status, '') NOT IN "
+                "      ('skip', 'skipped_no_data') "
+                "ORDER BY id DESC LIMIT 1"))
+            found = row.fetchone()
+        if found is None:
+            return None
+        # Guard the layer-status sanity check at the Python boundary
+        # too — SQL caught the obvious values; this catches any other
+        # marker a future commit might introduce.
+        d = _run_row(found)
+        for k in ("layer_1_status", "layer_2_status", "layer_3_status"):
+            if str(d.get(k) or "").lower() in _SKIPPED_LAYER_VALUES:
+                return None
+        return d
+    except Exception as exc:  # noqa: BLE001
+        log.warning("audit_substantive_lookup_failed", error=str(exc))
+        return None
+
+
 async def get_audit_runs() -> list[dict[str, Any]]:
     """Every audit run, newest first — summary rows only (no findings)."""
     try:

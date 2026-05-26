@@ -108,8 +108,13 @@ describe('QAHub — Run Full QA', () => {
     withPerms(TEAM_PERMS, <QAHub />)
     fireEvent.click(screen.getByRole('button', { name: /Run Full QA/ }))
     expect(useQAStore.getState().reload).toHaveBeenCalled()
+    // May 26 2026 — manual click no longer sends force=true. The
+    // endpoint's smart cache-hit logic short-circuits to the prior
+    // substantive audit when the data hash is unchanged; the
+    // frontend leaves force absent so that path can fire. Demo
+    // runs (a separate test) still send force=true to bypass.
     expect(vi.mocked(axios.post)).toHaveBeenCalledWith(
-      '/api/v1/audit/run', { triggered_by: 'manual', force: true },
+      '/api/v1/audit/run', { triggered_by: 'manual' },
     )
   })
 

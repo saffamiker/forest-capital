@@ -6148,8 +6148,30 @@ async def audit_run(
     Sysadmin only — triggering a QA/audit run is restricted to the
     platform sysadmin (Michael); the read-only audit views remain open
     to the project team.
+
+    SMART CACHE-HIT SHORT-CIRCUIT (May 26 2026 submission-night fix):
+    Before claiming a new audit row, compare the current data hash
+    against the last SUBSTANTIVE completed audit (status='complete',
+    total_checks>0, no layer skipped). If the hashes match AND the
+    caller did not pass force=true, return that audit's id+hash as
+    status='cache_hit' WITHOUT creating a new row. The downloadable
+    PDF (GET /audit/runs/{id}/export) then serves the prior real run.
+
+    Why this is the right semantic: re-running the three layers on
+    unchanged data is wasteful AND it was producing hollow rows on
+    production (the per-request strategy_results_cache wasn't warm
+    on the API process when the click hit), each saved as
+    'complete' with 0 checks and rendering "this layer was skipped"
+    in the PDF. The cache-hit path is the user-visible guarantee
+    that "the PDF you download always reflects a real audit run".
+
+    A caller bypasses the cache by sending {"force": true}; demo
+    runs always force.
     """
-    from tools.audit_engine import start_audit
+    from tools.audit_assembler import current_data_hash
+    from tools.audit_engine import (
+        get_last_substantive_audit, start_audit,
+    )
     from tools.qa_guard import (
         QA_BUSY_MESSAGE_STATISTICAL, statistical_audit_in_progress,
     )
@@ -6168,15 +6190,62 @@ async def audit_run(
                        or "manual")
     if triggered_by not in ("manual", "scheduled", "pre_submission", "demo"):
         triggered_by = "manual"
-    # force=true (May 26 2026) — symmetric with /api/qa/audit's force.
-    # The QAHub 'Run Full QA' button passes force=true for a manual
-    # click, so a cold strategy_results_cache is warmed inline rather
-    # than the audit completing silently with 0 checks. Demo runs are
-    # always forced — the operator clicked the button expecting fresh
-    # findings, not a cached or skipped result.
+    # Demo runs always force a fresh run (the operator clicked the
+    # button expecting a live re-execution). Otherwise honour the
+    # caller's explicit force flag; absent → False (cache-hit path).
     force = bool(body.get("force")) or triggered_by == "demo"
+
+    # SMART CACHE-HIT — only on non-forced runs. The current data
+    # fingerprint is the canonical key; if a prior substantive audit
+    # verified the same data, serve it instead of redoing the work.
+    if not force:
+        try:
+            current_hash = (await current_data_hash()) or ""
+            last = await get_last_substantive_audit()
+            if (last
+                    and current_hash
+                    and last.get("data_hash") == current_hash):
+                log.info(
+                    "audit_run_cache_hit",
+                    last_audit_id=last.get("id"),
+                    data_hash=current_hash[:12],
+                    triggered_by=triggered_by,
+                    triggered_by_email=session.get("email", ""),
+                )
+                return {
+                    "status":            "cache_hit",
+                    "audit_id":          last.get("id"),
+                    "data_hash":         current_hash,
+                    "total_checks":      last.get("total_checks"),
+                    "passed":            last.get("passed"),
+                    "failed":            last.get("failed"),
+                    "warnings":          last.get("warnings"),
+                    "layer_1_status":    last.get("layer_1_status"),
+                    "layer_2_status":    last.get("layer_2_status"),
+                    "layer_3_status":    last.get("layer_3_status"),
+                    "completed_at":      last.get("completed_at"),
+                    "message": (
+                        "Data unchanged since the last full audit "
+                        f"(#{last.get('id')}) — serving the prior "
+                        "substantive run. The downloadable PDF "
+                        "reflects that run's results. Pass "
+                        "{\"force\": true} to re-execute all three "
+                        "layers on identical data."
+                    ),
+                }
+        except Exception as exc:  # noqa: BLE001
+            # Cache check is best-effort — any failure falls through
+            # to a real run. Logged so the operator sees why a click
+            # bypassed the cache.
+            log.warning("audit_cache_check_failed", error=str(exc))
+
+    # Fresh run path. force=True on this side guarantees the pre-warm
+    # branch in _execute_audit fires, so the strategy_results_cache is
+    # populated before assemble_audit_payload reads it. When the
+    # caller didn't request force, the cache-hit branch above already
+    # returned — by reaching here we know we want a real run.
     return await start_audit(
-        triggered_by, session.get("email", ""), force=force,
+        triggered_by, session.get("email", ""), force=True,
     )
 
 
