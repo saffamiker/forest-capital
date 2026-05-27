@@ -68,7 +68,13 @@ All output uses American English spelling without exception. Write \
 within a single document.
 
 PUNCTUATION AND STRUCTURE:
-- NO em dashes (—). Use commas, semicolons, or restructure the sentence.
+- NO em dashes — NONE. This applies to every form: the Unicode em
+  dash (—), the en dash used as a break (–), and the ASCII
+  double-hyphen / triple-hyphen substitutes (-- and ---). Use a
+  COMMA, a SEMICOLON, a COLON, or restructure the sentence into
+  two shorter sentences. If you reach for a dash to add an aside,
+  delete the aside instead. This is the single strongest AI tell
+  in academic prose; a draft with any dash break will be flagged.
 - Prefer shorter sentences. If a sentence exceeds 35 words, split it.
 - No parenthetical asides mid-sentence. Move them to a new sentence or a footnote.
 - Oxford commas only when ambiguity requires one, not as a stylistic crutch.
