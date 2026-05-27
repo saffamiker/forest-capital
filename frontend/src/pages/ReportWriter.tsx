@@ -1042,46 +1042,49 @@ export default function ReportWriter() {
   // been populated yet for this generation. Step 2's API response
   // is the snapshot we have at that moment, so the count is
   // accurate enough to gate Step 3/4 from the start.
-  const VERIFIED_CITATION_STATES = useMemo(() => new Set([
-    'verified', 'human_verified', 'search_selected', 'manually_added',
-    'rejected', 'rejected_no_citation',
-  ]), [])
-
-  const liveCitations = useCitationReviewStore((s) => {
+  // May 26 2026 — gate semantic flipped from "untrusted citation
+  // verification" to "unmatched HIGH finding coverage." The user
+  // reported: "After assigning at least one citation to every HIGH
+  // finding, the tile still shows unassigned citations." Cause:
+  // untrustedCitationsCount counted citations whose
+  // verification_status was not in the verified set — which has
+  // nothing to do with whether the citation is MATCHED to a finding.
+  // A citation can be verified-but-unmatched (perfectly fine — not
+  // every sourced citation needs to be used) AND a finding can be
+  // matched-by-one-citation-and-unmatched-by-others (also fine).
+  //
+  // The Step 2b "Adjudicate Citations" tile and the
+  // generateDisabledReason gate now both read finding-match
+  // coverage instead: a gap is a HIGH finding with matched_count
+  // === 0. Findings of rank 'medium' are ignored — consistent with
+  // the seed filter (PR #195) which narrowed the panel to HIGH-only
+  // analytical findings.
+  const liveFindings = useCitationReviewStore((s) => {
     const gid = generation?.id
     if (gid == null) return null
-    const rows = s.citationsByGenerationId[gid]
+    const rows = s.findingsByGenerationId[gid]
     return Array.isArray(rows) && rows.length > 0 ? rows : null
   })
 
-  const untrustedCitationsCount = useMemo(() => {
-    // Prefer the live store — reflects every Accept / Reject /
-    // Manual the user has just performed in the Citation Review
-    // panel. Falls back to Step 2's snapshot only when the store
-    // hasn't yet been populated for this generation_id (i.e.
-    // before Open Review has been clicked or the panel mounted).
-    if (liveCitations) {
-      let count = 0
-      for (const c of liveCitations) {
-        const state = String(c?.verification_status ?? '')
-        if (!VERIFIED_CITATION_STATES.has(state)) count += 1
-      }
-      return count
-    }
-    const raw = stepResults[2]?.payload as
-      Record<string, unknown> | undefined
-    const payload: Record<string, unknown> = raw ?? {}
-    const rawCit = payload['citations'] as
-      Record<string, Record<string, unknown>> | undefined
-    const citations: Record<string, Record<string, unknown>> =
-      rawCit ?? {}
+  const unmatchedHighFindingsCount = useMemo(() => {
+    // No findings loaded yet (citation panel hasn't been opened on
+    // this generation) → return 0 so the tile reads as "complete"
+    // by default. Opening the panel populates the store and the
+    // count re-computes with real data.
+    if (!liveFindings) return 0
     let count = 0
-    for (const c of Object.values(citations)) {
-      const state = String(c?.['verification_status'] ?? '')
-      if (!VERIFIED_CITATION_STATES.has(state)) count += 1
+    for (const f of liveFindings) {
+      // Seed is already HIGH-only on main (PR #195) so the rank
+      // check is technically redundant for now — but the filter is
+      // kept explicit so a future seed expansion can't silently
+      // re-broaden the gate. If MEDIUM findings ever return to the
+      // seed, this gate still ignores them.
+      if (f?.rank !== 'high') continue
+      const matched = Number(f?.matched_count ?? 0)
+      if (matched === 0) count += 1
     }
     return count
-  }, [liveCitations, stepResults, VERIFIED_CITATION_STATES])
+  }, [liveFindings])
 
   // UAT 2026-05-24 — Open Review button loading state. Reads the
   // citationReviewStore's per-generation `inFlight` map; a truthy
@@ -1122,20 +1125,25 @@ export default function ReportWriter() {
         }
       }
     }
-    // May 24 2026 Step 2b — block generation while any citation is
-    // untrusted. Bob adjudicates via the Citation Review panel
-    // (Accept / Reject / Manual add) before reaching the writer.
-    if (untrustedCitationsCount > 0) {
-      return (`${untrustedCitationsCount} untrusted citation`
-        + (untrustedCitationsCount === 1 ? '' : 's')
-        + ' — adjudicate in the Citation Review panel before generation')
+    // May 26 2026 Step 2b — block generation while any HIGH finding
+    // has zero matched citations. The check is finding-match
+    // coverage, NOT citation verification status: a sourced
+    // citation that isn't matched to any finding is fine (not
+    // every sourced citation needs to be used). MEDIUM findings
+    // are ignored, consistent with the HIGH-only seed filter
+    // (PR #195).
+    if (unmatchedHighFindingsCount > 0) {
+      return (`${unmatchedHighFindingsCount} HIGH finding`
+        + (unmatchedHighFindingsCount === 1 ? '' : 's')
+        + ' without a matched citation'
+        + ' — match in the Citation Review panel before generation')
     }
     const s5 = stepResults[5]?.status
     if (s5 !== 'complete' && s5 !== 'warning') return 'Step 5 incomplete'
     const s6 = stepResults[6]?.status
     if (s6 !== 'complete') return 'Step 6 not passing'
     return null
-  }, [stepResults, untrustedCitationsCount])
+  }, [stepResults, unmatchedHighFindingsCount])
 
   const downloadGateLabel = useMemo(() => {
     if (!generation) return 'Generate the draft first'
@@ -1218,7 +1226,7 @@ export default function ReportWriter() {
             onRunStep={confirmedRunStep}
             onGenerate={handleGenerate}
             step2b={{
-              untrustedCount: untrustedCitationsCount,
+              untrustedCount: unmatchedHighFindingsCount,
               onJump: () => {
                 // UAT 2026-05-24 — kick off the citation fetch
                 // EAGERLY when the user clicks Open Review, rather

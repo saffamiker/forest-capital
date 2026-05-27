@@ -196,6 +196,73 @@ describe('RW3 — strict sequential pipeline gating', () => {
     expect(screen.queryByTestId('pipeline-step-2b')).not.toBeNull()
   })
 
+  // May 26 2026 — Step 2b semantic change. The user reported that
+  // after assigning at least one citation to every HIGH finding,
+  // the tile still showed "X untrusted." Cause: untrustedCount
+  // counted citations by verification_status, not by
+  // matched-to-finding state. The prop name 'untrustedCount' is
+  // kept for component-API stability, but its semantic now
+  // carries the unmatched-HIGH-finding count.
+
+  it('Step 2b complete state describes finding-match coverage', () => {
+    _gate({
+      results: {
+        1: { status: 'complete', message: 'done', payload: {} },
+        2: { status: 'complete', message: 'done', payload: {} },
+      },
+      step2b: {
+        untrustedCount: 0,           // 0 unmatched HIGH findings
+        onJump: () => {},
+      },
+    })
+    // The completion message reads as finding-match coverage,
+    // not citation adjudication.
+    expect(screen.getByText(
+      /Every HIGH finding has at least one matched citation/i,
+    )).not.toBeNull()
+  })
+
+  it('Step 2b warning state surfaces unmatched HIGH findings', () => {
+    _gate({
+      results: {
+        1: { status: 'complete', message: 'done', payload: {} },
+        2: { status: 'complete', message: 'done', payload: {} },
+      },
+      step2b: {
+        untrustedCount: 2,           // 2 unmatched HIGH findings
+        onJump: () => {},
+      },
+    })
+    // Inline summary on the Step 2b row.
+    expect(screen.getByText(
+      /2 unmatched findings/i,
+    )).not.toBeNull()
+    // The detail message names HIGH findings, not citations.
+    expect(screen.getByText(
+      /2 HIGH findings without a matched citation/i,
+    )).not.toBeNull()
+  })
+
+  it('Step 3 lock reason names unmatched HIGH findings, not adjudication', () => {
+    _gate({
+      results: {
+        1: { status: 'complete', message: 'done', payload: {} },
+        2: { status: 'complete', message: 'done', payload: {} },
+      },
+      step2b: {
+        untrustedCount: 1,
+        onJump: () => {},
+      },
+    })
+    // Lock indicator on Step 3 explains the gate: HIGH finding
+    // match coverage, not citation adjudication.
+    const lock = screen.queryByTestId('pipeline-step-3-locked')
+    expect(lock).not.toBeNull()
+    const ariaLabel = lock?.getAttribute('aria-label') ?? ''
+    expect(ariaLabel).toMatch(/Match 1 HIGH finding/i)
+    expect(ariaLabel).not.toMatch(/Adjudicate/i)
+  })
+
   it('locked badge does NOT render on a running step', () => {
     // A step that is itself running is disabled, but the user
     // can SEE that it's running — the lock icon would be
