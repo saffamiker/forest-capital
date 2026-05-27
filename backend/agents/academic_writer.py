@@ -68,7 +68,13 @@ All output uses American English spelling without exception. Write \
 within a single document.
 
 PUNCTUATION AND STRUCTURE:
-- NO em dashes (—). Use commas, semicolons, or restructure the sentence.
+- NO em dashes — NONE. This applies to every form: the Unicode em
+  dash (—), the en dash used as a break (–), and the ASCII
+  double-hyphen / triple-hyphen substitutes (-- and ---). Use a
+  COMMA, a SEMICOLON, a COLON, or restructure the sentence into
+  two shorter sentences. If you reach for a dash to add an aside,
+  delete the aside instead. This is the single strongest AI tell
+  in academic prose; a draft with any dash break will be flagged.
 - Prefer shorter sentences. If a sentence exceeds 35 words, split it.
 - No parenthetical asides mid-sentence. Move them to a new sentence or a footnote.
 - Oxford commas only when ambiguity requires one, not as a stylistic crutch.
@@ -113,23 +119,35 @@ ACADEMIC NUMBER + CITATION REGISTER:
 
 STRATEGY DISPLAY NAMES — REQUIRED:
 Always use the human-readable display name when referring to a \
-strategy in prose. Never the SCREAMING_SNAKE_CASE identifier. \
-Substitutions:
-- EQUAL_WEIGHT → Equal-Weight
-- REGIME_SWITCHING → Regime-Switching
-- VOL_TARGETING → Volatility-Targeting
-- MIN_VARIANCE → Minimum-Variance
-- MOMENTUM_ROTATION → Momentum-Rotation
-- MAX_SHARPE_ROLLING → Maximum Sharpe (Rolling)
-- RISK_PARITY → Risk-Parity
-- BLACK_LITTERMAN → Black-Litterman
+strategy in PROSE. NEVER the SCREAMING_SNAKE_CASE identifier in \
+narrative text. The raw identifiers (REGIME_SWITCHING, \
+MOMENTUM_ROTATION, etc.) are permitted ONLY in:
+  - column headers of a strategy comparison table
+  - the appendix's data-provenance section where the technical \
+    identifier is the unambiguous reference
+  - code listings (if any are included verbatim)
+Everywhere else — section headings, body paragraphs, captions, \
+findings, recommendations, the executive summary, the abstract — \
+use the display name.
+
+Mapping:
+- BENCHMARK → Benchmark (S&P 500)
 - CLASSIC_60_40 → Classic 60/40
-- BENCHMARK → Benchmark (100% Equity)
-The raw identifiers are appropriate in code listings or table \
-column headers ONLY. Prose, captions and headlines use the display \
-names. The post-processing pass will substitute remaining instances \
-at render time, but writing the display name directly is preferred \
-so the prose flows naturally without obvious substitution seams.
+- EQUAL_WEIGHT → Equal Weight
+- RISK_PARITY → Risk Parity
+- MIN_VARIANCE → Minimum Variance
+- VOL_TARGETING → Volatility Targeting
+- BLACK_LITTERMAN → Black-Litterman
+- MAX_SHARPE_ROLLING → Maximum Sharpe (Rolling)
+- REGIME_SWITCHING → Regime Switching
+- MOMENTUM_ROTATION → Momentum Rotation
+
+The post-processing pass will substitute remaining instances at \
+render time, but writing the display name DIRECTLY is preferred — \
+a draft where the writer emitted raw IDs and the post-processor \
+swapped them in reads with substitution seams (sentence cadence \
+broken at the swap site). A draft where the writer used the \
+display names from the start reads naturally.
 
 INTERPRETATION GOES INLINE — NOT IN TRAILING BLOCKS. Every analytical \
 claim, "so what" framing, governance question, regime-shift mechanism \
@@ -354,17 +372,27 @@ _AI_DRAFT_BANNER = "AI DRAFT — REQUIRES HUMAN REVIEW\n\n"
 
 import re as _re_for_substitution
 
+# May 26 2026 — display labels updated to spaces (not hyphens) per
+# the report writer style spec. The previous "Equal-Weight" /
+# "Regime-Switching" hyphenation read as a code style; the spaced
+# form ("Equal Weight" / "Regime Switching") is what a reader of an
+# academic paper expects. Black-Litterman keeps its hyphen because
+# Black-Litterman is the conventional proper name (the model is
+# named after two people, not "Black Litterman"). BENCHMARK label
+# also updated from "(100% Equity)" to the more recognisable
+# "(S&P 500)" — the benchmark IS 100% SPY, so naming the index is
+# clearer to a non-technical reader.
 STRATEGY_DISPLAY_NAMES: dict[str, str] = {
-    "EQUAL_WEIGHT":       "Equal-Weight",
-    "REGIME_SWITCHING":   "Regime-Switching",
-    "VOL_TARGETING":      "Volatility-Targeting",
-    "MIN_VARIANCE":       "Minimum-Variance",
-    "MOMENTUM_ROTATION":  "Momentum-Rotation",
+    "EQUAL_WEIGHT":       "Equal Weight",
+    "REGIME_SWITCHING":   "Regime Switching",
+    "VOL_TARGETING":      "Volatility Targeting",
+    "MIN_VARIANCE":       "Minimum Variance",
+    "MOMENTUM_ROTATION":  "Momentum Rotation",
     "MAX_SHARPE_ROLLING": "Maximum Sharpe (Rolling)",
-    "RISK_PARITY":        "Risk-Parity",
+    "RISK_PARITY":        "Risk Parity",
     "BLACK_LITTERMAN":    "Black-Litterman",
     "CLASSIC_60_40":      "Classic 60/40",
-    "BENCHMARK":          "Benchmark (100% Equity)",
+    "BENCHMARK":          "Benchmark (S&P 500)",
 }
 
 # Compile once — invoked on every draft generation. Sort by length

@@ -118,13 +118,17 @@ class TestRW2StrategyNameSubstitution:
         # regression that drops one would let the raw identifier
         # leak through even when the post-processing pass is
         # idempotent (the model would generate the raw form).
+        # May 26 2026 — labels updated to spaces (not hyphens) and
+        # BENCHMARK renamed to "Benchmark (S&P 500)" per the report
+        # writer style spec. Black-Litterman keeps its hyphen
+        # because the name is conventionally hyphenated.
         from agents.academic_writer import _SYSTEM_PROMPT
         assert "STRATEGY DISPLAY NAMES" in _SYSTEM_PROMPT
         for display in (
-            "Equal-Weight", "Regime-Switching", "Volatility-Targeting",
-            "Minimum-Variance", "Momentum-Rotation",
-            "Maximum Sharpe (Rolling)", "Risk-Parity", "Black-Litterman",
-            "Classic 60/40", "Benchmark (100% Equity)",
+            "Equal Weight", "Regime Switching", "Volatility Targeting",
+            "Minimum Variance", "Momentum Rotation",
+            "Maximum Sharpe (Rolling)", "Risk Parity", "Black-Litterman",
+            "Classic 60/40", "Benchmark (S&P 500)",
         ):
             assert display in _SYSTEM_PROMPT, (
                 f"'{display}' missing from prompt — model needs it "
