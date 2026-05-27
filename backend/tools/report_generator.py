@@ -1023,23 +1023,30 @@ async def list_generations_for_user(
     limit: int = 20,
     template_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Lists the most recent generations Bob (or any team member) has
+    """Lists the most recent generations the project team has
     produced, newest first. Used by the Draft selector dropdown so
-    the user can switch back to a prior draft instead of starting
-    fresh every login.
+    any team member can pick up where another left off.
 
-    May 23 2026. report_generations carries no user_email column —
-    ownership is established by JOINing through report_pipeline_audit
-    (triggered_by). A single generation may have multiple audit rows
-    (a Step 7 re-run); DISTINCT ON dedupes so each draft appears
-    once. Newest by generated_at desc.
+    May 26 2026 — draft visibility broadened from per-user to
+    team-wide. The user reported that Bob (logging in to review the
+    midpoint draft Michael generated) saw only "New Draft" because
+    the previous query INNER-JOINed report_pipeline_audit and
+    filtered WHERE a.triggered_by = <Bob's email>. Drafts triggered
+    by Michael's email never surfaced for Bob. The team is collaborating
+    on a single submission — drafts must be shared across team
+    members. The endpoint is still team-only via require_team_member
+    (a viewer cannot list), so the access boundary is preserved at
+    the endpoint level.
+
+    The `email` parameter is kept in the signature for backwards
+    API compatibility but is no longer used as a filter. A future
+    cleanup can drop it; tonight is submission only.
 
     Returns a slim preview shape (id, template_id, flag_count,
     word_count totals, generated_at, first-200-char preview). The
     editor fetches the full paper via get_generation when the user
     actually picks a draft."""
-    if not email:
-        return []
+    _ = email  # retained for signature compatibility; see docstring.
     try:
         from sqlalchemy import text
         from database import AsyncSessionLocal
@@ -1048,25 +1055,25 @@ async def list_generations_for_user(
         # The template_id filter is optional — passing None lists every
         # template's drafts together (useful for the "all my drafts"
         # picker).
-        params: dict[str, Any] = {"e": email, "n": int(limit)}
+        params: dict[str, Any] = {"n": int(limit)}
         tmpl_clause = ""
         if template_id:
-            tmpl_clause = " AND g.template_id = :t"
+            tmpl_clause = " WHERE g.template_id = :t"
             params["t"] = template_id
         async with AsyncSessionLocal() as s:
+            # No JOIN against report_pipeline_audit any more — that
+            # was the source of the per-user scoping. The query now
+            # reads report_generations directly; every draft is
+            # visible to every team member. DISTINCT ON is unnecessary
+            # without the audit-join multiplier.
             r = await s.execute(text(
-                "SELECT * FROM ("
-                "  SELECT DISTINCT ON (g.id) "
-                "    g.id, g.template_id, g.flag_count, g.word_counts, "
-                "    g.generated_at, SUBSTR(g.paper_md, 1, 200) AS preview "
-                "  FROM report_generations g "
-                "  INNER JOIN report_pipeline_audit a "
-                "    ON a.generation_id = g.id "
-                "  WHERE a.triggered_by = :e" + tmpl_clause + " "
-                "  ORDER BY g.id, a.run_at DESC"
-                ") sub "
-                "ORDER BY generated_at DESC NULLS LAST "
-                "LIMIT :n"
+                "SELECT g.id, g.template_id, g.flag_count, "
+                "       g.word_counts, g.generated_at, "
+                "       SUBSTR(g.paper_md, 1, 200) AS preview "
+                "FROM report_generations g"
+                + tmpl_clause +
+                " ORDER BY g.generated_at DESC NULLS LAST "
+                " LIMIT :n"
             ), params)
             rows = r.fetchall()
         out: list[dict[str, Any]] = []
@@ -1169,6 +1176,25 @@ async def _load_citations_for_generation(
                     " url, verification_status, search_query_used "
                     "FROM citations_cache "
                     "ORDER BY concept_id, created_at DESC"))
+            # May 26 2026 — submission fix. The `formatted` field
+            # is what _build_references_md emits as each reference-
+            # list entry. The previous filter generated `formatted`
+            # ONLY when verification_status == "verified" — the
+            # literal automatic trusted-domain state. Citations Bob
+            # adjudicated via Citation Review (human_verified /
+            # search_selected / manually_added) got formatted=None,
+            # and the references builder rendered them as
+            # "(unformatted)". The user reported only 3 citations
+            # visible (the auto-verified set) when many more were
+            # in the cache.
+            #
+            # Mirror the broadened CITATION_VERIFIED_STATES set used
+            # by _build_references_md / citation_quality so every
+            # adjudicated citation gets a real formatted entry.
+            _VERIFIED_STATES = {
+                "verified", "human_verified",
+                "search_selected", "manually_added",
+            }
             for row in r.fetchall():
                 concept_id = row[0]
                 entry = {
@@ -1184,7 +1210,7 @@ async def _load_citations_for_generation(
                 }
                 entry["formatted"] = (
                     _format_citation(entry)
-                    if entry.get("verification_status") == "verified"
+                    if entry.get("verification_status") in _VERIFIED_STATES
                     else None)
                 out[concept_id] = entry
     except Exception as exc:  # noqa: BLE001
@@ -1894,19 +1920,108 @@ async def render_appendix_bytes(generation_id: int) -> bytes | None:
             resolved_data_hash = await get_latest_strategy_hash()
         except Exception:  # noqa: BLE001
             resolved_data_hash = None
+    # May 26 2026 — three live-data fallbacks at appendix-render
+    # time. Cause across all three: the persisted row's snapshot
+    # field (verified_data / team_activity_snapshot /
+    # validation_snapshot) can be empty when the corresponding
+    # data fetch failed at generation time OR when the row pre-
+    # dates the snapshot column. _fmt_value(None) then renders
+    # every table cell as "—". The fixes mirror each other: detect
+    # a hollow snapshot via a sentinel key, fall back to a live
+    # fetch here.
+    #
+    # FALLBACK 1 — team_activity (drives Appendix A team totals
+    # rows + Appendix C member counts).
+    team_activity = gen.get("team_activity_snapshot") or {}
+    _has_team_counts = (
+        isinstance(team_activity, dict)
+        and any(team_activity.get(k) is not None for k in (
+            "team_total_uat_steps", "michael_commits", "bob_uat_steps",
+            "molly_uat_steps",
+        ))
+    )
+    if not _has_team_counts:
+        try:
+            from tools.template_pipeline import fetch_team_activity
+            team_activity = await fetch_team_activity()
+            log.info(
+                "appendix_team_activity_live_fallback",
+                generation_id=generation_id,
+                got_counts=any(team_activity.get(k)
+                               for k in ("team_total_uat_steps",
+                                         "michael_commits")))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "appendix_team_activity_fallback_failed",
+                generation_id=generation_id, error=str(exc))
+            team_activity = team_activity or {}
+
+    # FALLBACK 2 — verified_data (drives Appendix A study-period
+    # rows). Sentinel: study_period_start. If missing, re-run the
+    # same pipeline _assemble_inputs uses at generation time.
+    verified_data = gen.get("verified_data") or {}
+    _has_verified = (
+        isinstance(verified_data, dict)
+        and verified_data.get("study_period_start") is not None
+    )
+    if not _has_verified:
+        try:
+            from tools.analytical_findings import gather_payload_from_db
+            from tools.cache import get_latest_strategy_hash
+            from tools.template_pipeline import live_from_payload
+            live_hash = await get_latest_strategy_hash()
+            payload = await gather_payload_from_db(live_hash)
+            live_verified = live_from_payload(payload)
+            # Preserve any prior keys we DO have; new live values fill gaps.
+            verified_data = {**(verified_data or {}), **live_verified}
+            log.info(
+                "appendix_verified_data_live_fallback",
+                generation_id=generation_id,
+                got_period=verified_data.get(
+                    "study_period_start") is not None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "appendix_verified_data_fallback_failed",
+                generation_id=generation_id, error=str(exc))
+            verified_data = verified_data or {}
+
+    # FALLBACK 3 — validation_summary (drives Appendix D Three-
+    # Layer Audit Results table). Sentinel: layer1_status. If
+    # missing, run _latest_audit_summary at render time.
+    validation_summary = gen.get("validation_snapshot") or {}
+    _has_validation = (
+        isinstance(validation_summary, dict)
+        and validation_summary.get("layer1_status") is not None
+    )
+    if not _has_validation:
+        try:
+            live_validation = await _latest_audit_summary()
+            validation_summary = {
+                **(validation_summary or {}),
+                **(live_validation or {}),
+            }
+            log.info(
+                "appendix_validation_summary_live_fallback",
+                generation_id=generation_id,
+                got_layer1=validation_summary.get(
+                    "layer1_status") is not None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "appendix_validation_summary_fallback_failed",
+                generation_id=generation_id, error=str(exc))
+            validation_summary = validation_summary or {}
+
     context = _build_appendix_context(
-        verified_data=gen.get("verified_data") or {},
-        ranked_findings=gen.get("verified_data", {}).get(
+        verified_data=verified_data,
+        ranked_findings=verified_data.get(
             "ranked_findings", []) or [],
-        team_activity=gen.get("team_activity_snapshot") or {},
-        validation_summary=gen.get("validation_snapshot") or {},
+        team_activity=team_activity,
+        validation_summary=validation_summary,
         citations=citations,
         findings_metadata={
             "computed_at": gen.get("generated_at"),
             "data_hash":   resolved_data_hash,
-            "audit_status": (
-                (gen.get("validation_snapshot") or {})
-                .get("layer3_status")),
+            "audit_status": validation_summary.get("layer3_status"),
         },
     )
     # Pull ranked findings from the findings cache where verified_data

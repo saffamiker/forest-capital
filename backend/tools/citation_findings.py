@@ -442,6 +442,68 @@ async def seed_findings_for_generation(
                     "DELETE FROM findings WHERE generation_id = :g"
                 ), {"g": int(generation_id)})
 
+            # 2b. CARRY FORWARD citation_finding_matches from the
+            # most recent PRIOR generation. May 26 2026 — user-
+            # reported PRIORITY bug: when Bob runs Generate Draft
+            # after adjudicating citations, the new generation_id
+            # has fresh findings rows (different IDs from the old
+            # gen), so the citation_finding_matches Bob created
+            # against the OLD findings don't link to the new ones.
+            # The matches still exist in the DB but reference the
+            # old finding IDs (which are still on the old
+            # generation_id), so the new draft's Citation Review
+            # panel shows every HIGH finding as unmatched. The
+            # team's adjudication work is silently lost.
+            #
+            # The fix: for every match recorded against a finding
+            # in the most recent PRIOR generation, look up the
+            # equivalent finding in THIS generation by (source,
+            # source_id) and insert a new match for the same
+            # citation_id against the new finding_id. ON CONFLICT
+            # DO NOTHING makes the operation idempotent (re-seeding
+            # never double-inserts).
+            #
+            # "Most recent prior" is computed at carry-forward time
+            # from the matches table itself — pick the generation_id
+            # whose findings have the most recent match-and-finding
+            # row pair, excluding the current generation. That keeps
+            # the inheritance chain short (the carry-forward INSERTS
+            # also make the new generation a candidate "prior" for
+            # the NEXT generation) so a long pipeline run accrues
+            # all of Bob's prior adjudications.
+            try:
+                await session.execute(text(
+                    "WITH latest_prior AS ( "
+                    "  SELECT MAX(old_f.generation_id) AS gen_id "
+                    "  FROM citation_finding_matches m "
+                    "  JOIN findings old_f ON old_f.id = m.finding_id "
+                    "  WHERE old_f.generation_id <> :g "
+                    ") "
+                    "INSERT INTO citation_finding_matches "
+                    "  (citation_id, finding_id, matched_by, matched_at) "
+                    "SELECT "
+                    "  m.citation_id, new_f.id, "
+                    "  COALESCE(m.matched_by, 'carry_forward'), "
+                    "  COALESCE(m.matched_at, now()) "
+                    "FROM citation_finding_matches m "
+                    "JOIN findings old_f ON old_f.id = m.finding_id "
+                    "JOIN latest_prior lp ON old_f.generation_id = lp.gen_id "
+                    "JOIN findings new_f "
+                    "  ON new_f.source = old_f.source "
+                    "  AND new_f.source_id = old_f.source_id "
+                    "  AND new_f.generation_id = :g "
+                    "ON CONFLICT (citation_id, finding_id) DO NOTHING"
+                ), {"g": int(generation_id)})
+            except Exception as inherit_exc:  # noqa: BLE001
+                # Carry-forward is best-effort: a schema/permission
+                # issue here must NOT block the seed. Log and move on;
+                # Bob can re-tick the matches manually in the Citation
+                # Review panel.
+                log.warning(
+                    "citation_findings_carry_forward_failed",
+                    generation_id=generation_id,
+                    error=str(inherit_exc))
+
             await session.commit()
 
             # 3. Read back the canonical list (after UPSERT/DELETE)

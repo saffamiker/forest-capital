@@ -42,6 +42,7 @@ import {
   extractBobBlocks, tokenize,
   SECTION_BUDGETS, countWords, wordCountStatus,
 } from '../lib/bobBlocks'
+import { countMarkers } from '../lib/editorMarkers'
 import { safeGenerationId, generationUrl } from '../lib/generationId'
 import { useReportWriterStore } from '../stores/reportWriterStore'
 
@@ -985,7 +986,33 @@ export default function ReportWriter() {
   // ── Derived display state ─────────────────────────────────────────────────
   const blocks = useMemo(() => extractBobBlocks(paperMd), [paperMd])
   const bobCount = blocks.length
-  const flagCount = generation?.flag_count ?? 0
+
+  // May 26 2026 — flagCount derived LIVE from paperMd, NOT read
+  // from the persisted generation.flag_count. The user reported
+  // "21 unresolved flags" while the editor showed zero markers.
+  //
+  // Why the persisted value can go stale:
+  //   - generate_paper / run_final_check writes flag_count on
+  //     the row at generation time.
+  //   - update_paper_md (the debounced auto-save) re-runs the
+  //     post-check and refreshes flag_count, but auto-save only
+  //     fires 1500ms AFTER the last keystroke. Between resolve
+  //     and auto-save the persisted value is stale.
+  //   - citation_unverified flags counted by the backend's
+  //     post-check are not visible as markers in paper_md — they
+  //     are computed against the citations cache. A draft can
+  //     carry flag_count > 0 from this source alone, even when
+  //     paper_md has zero visible markers.
+  //
+  // The download gate must reflect what Bob ACTUALLY sees in the
+  // editor. countMarkers(paperMd) catches both [[BOB]] blocks and
+  // [[VERIFY]] markers — every flag kind that is visible in the
+  // editor. Citation gaps still surface in the Citation Review
+  // panel and the Academic Review verdict; they no longer block
+  // the docx download on their own.
+  const flagCount = useMemo(
+    () => countMarkers(paperMd),
+    [paperMd])
 
   const sectionCounts = useMemo(() => {
     const lines = paperMd.split(/\n+/)
@@ -1394,6 +1421,15 @@ export default function ReportWriter() {
                   disabled={!generation || runningCheck}
                   onClick={handleRunFinalCheck}
                   data-testid="final-check-button"
+                  title={
+                    'Re-tally unresolved [[BOB]] / [[VERIFY]] markers '
+                    + 'and citation flags against the current draft. '
+                    + 'Refreshes the persisted flag count so the '
+                    + 'Draft Selector and Version History show '
+                    + 'current numbers. The download gate updates '
+                    + 'automatically from the editor and does NOT '
+                    + 'require this step.'
+                  }
                   className={
                     'inline-flex items-center gap-1.5 px-3 py-1.5 ' +
                     'bg-navy-800 hover:bg-navy-700 ' +

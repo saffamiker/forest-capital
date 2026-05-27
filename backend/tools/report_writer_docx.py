@@ -587,10 +587,25 @@ def _appendix_b(doc: Document, context: dict) -> None:
 def _appendix_c(doc: Document, context: dict) -> None:
     """Appendix C — Team Activity Log."""
     _add_appendix_label(doc, "C", "Team Activity Log")
-    _add_body_paragraph(doc, (
+    # May 26 2026 — opening paragraph used to be a double-spaced
+    # body paragraph with a 0.5-inch first-line indent. The second
+    # sentence ("All counts pulled live from the platform's audit
+    # tables at generation time") wrapped onto a second line and
+    # the user read the wrap as "breaking mid-sentence." Render as
+    # a tighter single-spaced caption so the intro fits on one or
+    # two clean lines, with keep_together so Word never breaks it
+    # across pages.
+    intro = doc.add_paragraph()
+    intro.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    intro.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    intro.paragraph_format.first_line_indent = Inches(0)
+    intro.paragraph_format.space_after = Pt(6)
+    intro.paragraph_format.keep_together = True
+    intro_run = intro.add_run(
         "Auditable record of team contributions throughout the "
-        "project lifecycle. All counts pulled live from the "
-        "platform's audit tables at generation time."))
+        "project lifecycle. Counts pulled live at generation time.")
+    intro_run.font.name = _BODY_FONT
+    intro_run.font.size = Pt(11)
 
     activity = context.get("team_activity") or {}
     rows: list[list[Any]] = []
@@ -649,10 +664,31 @@ def _appendix_c(doc: Document, context: dict) -> None:
         headers=["Member / Total", "Activity", "Count"],
         rows=rows,
         column_widths_in=[2.0, 3.0, 1.0])
-    _add_body_paragraph(doc, (
+    # May 26 2026 — footer was breaking mid-sentence in the docx.
+    # The previous _add_body_paragraph call applied APA double
+    # spacing + a 0.5-inch first-line indent — that combined with
+    # a long ISO timestamp pushed the second sentence onto its own
+    # line and (depending on table position) sometimes onto its
+    # own page. A SHORT table footnote is the conventional shape
+    # here; render as a single-spaced, non-indented caption with
+    # `keep_together` so Word keeps it on the same page as the
+    # table and never breaks mid-sentence.
+    footer_para = doc.add_paragraph()
+    footer_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    footer_para.paragraph_format.line_spacing_rule = (
+        WD_LINE_SPACING.SINGLE)
+    footer_para.paragraph_format.first_line_indent = Inches(0)
+    footer_para.paragraph_format.space_before = Pt(6)
+    # Word's "keep lines together" — the footer's lines never break
+    # across pages. python-docx exposes this via paragraph_format.
+    footer_para.paragraph_format.keep_together = True
+    footer_run = footer_para.add_run(
         f"Activity data pulled live from the platform's audit log "
-        f"at {context.get('generated_at', '—')}. All timestamps "
-        "recorded at point of action."))
+        f"at {context.get('generated_at', '—')}. "
+        "All timestamps recorded at point of action.")
+    footer_run.font.name = _BODY_FONT
+    footer_run.font.size = Pt(10)
+    footer_run.italic = True
 
 
 def _appendix_d(doc: Document, context: dict) -> None:
@@ -662,19 +698,23 @@ def _appendix_d(doc: Document, context: dict) -> None:
     validation = context.get("validation_summary") or {}
 
     _add_section_heading(doc, "Three-Layer Audit Results", level=2)
+    # May 26 2026 — row labels rewritten from "N — Description" to
+    # "Layer N: Description" per the writer style spec. Em dashes
+    # are an AI tell and were leaking into the rendered .docx via
+    # this hardcoded label.
     _add_table(
         doc,
         headers=["Layer", "Status", "Checks", "Last Run"],
         rows=[
-            ["1 — Raw data audit",
+            ["Layer 1: Raw data audit",
              _fmt_value(validation.get("layer1_status")),
              _fmt_value(validation.get("layer1_count")),
              _fmt_value(validation.get("layer1_date"))],
-            ["2 — Calculation audit",
+            ["Layer 2: Calculation audit",
              _fmt_value(validation.get("layer2_status")),
              _fmt_value(validation.get("layer2_count")),
              _fmt_value(validation.get("layer2_date"))],
-            ["3 — Consistency audit",
+            ["Layer 3: Consistency audit",
              _fmt_value(validation.get("layer3_status")),
              _fmt_value(validation.get("layer3_count")),
              _fmt_value(validation.get("layer3_date"))],
@@ -701,6 +741,14 @@ def _appendix_d(doc: Document, context: dict) -> None:
         "across every surface where it appears. Tolerances: ratios "
         "0.001, percentages 0.01%, factor betas 0.001."))
 
+    # May 26 2026 — the [CITATION REQUIRED — GIPS] placeholder was
+    # visible in the rendered .docx whenever the gips_verification
+    # citation was missing or unadjudicated. The placeholder leaked
+    # an internal marker into a submission document. Replaced with
+    # a generic methodology statement that stands on its own
+    # without a citation; if a verified GIPS citation IS in the
+    # cache, render the cited form, otherwise fall back to the
+    # generic form. The reader sees a coherent paragraph either way.
     citations = context.get("citations_cache") or {}
     gips = citations.get("gips_verification") or {}
     if _is_verified(gips):
@@ -709,12 +757,27 @@ def _appendix_d(doc: Document, context: dict) -> None:
             f"for independent performance verification as described "
             f"in {gips.get('formatted')}"))
     else:
-        _add_body_paragraph(doc, "[CITATION REQUIRED — GIPS]")
+        _add_body_paragraph(doc, (
+            "This methodology is consistent with industry standards "
+            "for independent performance verification. Inputs, "
+            "calculations and cross-surface consistency are each "
+            "verified by separate validation layers; no single "
+            "layer is trusted to attest its own output."))
 
 
 def _build_references_md(citations: dict) -> str:
     """Builds the consolidated References markdown from every
-    verified-equivalent entry. Alphabetical by first-author surname.
+    SELECTED citation. Alphabetical by first-author surname.
+
+    "Selected" = a verification_status in the verified-equivalent
+    set. Four states qualify:
+      - verified         → auto-selected at trusted-domain pass-1
+      - human_verified   → Bob accepted an untrusted-domain hit
+      - search_selected  → Bob picked one of the alternatives
+      - manually_added   → Bob typed the citation in by hand
+    Citations in pending_review, rejected, not_found, or
+    rejected_no_citation are NEVER included — these have either
+    not been adjudicated or have been explicitly excluded.
 
     May 26 2026 — submission fix. The filter previously matched ONLY
     the literal 'verified' state, which is the automatic

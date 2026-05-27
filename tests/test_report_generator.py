@@ -588,6 +588,82 @@ class TestAppendixDocxBuilder:
         assert "Verified, A." in md
         assert "Unverified, B." not in md
 
+    def test_references_includes_every_selected_state(self):
+        """
+        May 26 2026 — submission fix pin. References must include
+        EVERY citation in a "selected" state. Four states qualify:
+          - verified
+          - human_verified
+          - search_selected
+          - manually_added
+        And EXCLUDE every non-selected state:
+          - pending_review (not yet adjudicated)
+          - rejected (Bob said no)
+          - not_found (no source available)
+          - rejected_no_citation (Bob said no citation needed)
+        """
+        from tools.report_writer_docx import _build_references_md
+        ctx = {
+            # Four selected states — all four must render.
+            "a": {
+                "concept_id": "a",
+                "verification_status": "verified",
+                "formatted": "Author A. (2020). Auto-verified.",
+                "author": "Author A.",
+            },
+            "b": {
+                "concept_id": "b",
+                "verification_status": "human_verified",
+                "formatted": "Author B. (2021). Bob accepted.",
+                "author": "Author B.",
+            },
+            "c": {
+                "concept_id": "c",
+                "verification_status": "search_selected",
+                "formatted": "Author C. (2022). Alt selected.",
+                "author": "Author C.",
+            },
+            "d": {
+                "concept_id": "d",
+                "verification_status": "manually_added",
+                "formatted": "Author D. (2023). Manual entry.",
+                "author": "Author D.",
+            },
+            # Four non-selected states — none must render.
+            "e": {
+                "concept_id": "e",
+                "verification_status": "pending_review",
+                "formatted": "Author E. (2024). Not adjudicated.",
+                "author": "Author E.",
+            },
+            "f": {
+                "concept_id": "f",
+                "verification_status": "rejected",
+                "formatted": "Author F. (2024). Rejected.",
+                "author": "Author F.",
+            },
+            "g": {
+                "concept_id": "g",
+                "verification_status": "not_found",
+                "formatted": None,
+                "author": "Author G.",
+            },
+            "h": {
+                "concept_id": "h",
+                "verification_status": "rejected_no_citation",
+                "formatted": None,
+                "author": "Author H.",
+            },
+        }
+        md = _build_references_md(ctx)
+        # Selected — included.
+        for name in ("Author A.", "Author B.", "Author C.", "Author D."):
+            assert name in md, f"{name} (selected) missing from References"
+        # Non-selected — excluded.
+        for name in ("Author E.", "Author F.", "Author G.", "Author H."):
+            assert name not in md, (
+                f"{name} (non-selected) leaked into References")
+
 
 # ── Endpoint contract tests (auth + test-env shapes) ────────────────────────
 
