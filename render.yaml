@@ -5,7 +5,22 @@ services:
     region: oregon
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    # May 26 2026 — bumped uvicorn --timeout-keep-alive from the
+    # default 5s to 300s. Step 7 (Generate Draft) was hitting a
+    # 120s timeout when the 3-pass rationalization loop (PR #198)
+    # pushed total generation time past the default. The keep-alive
+    # cap controls how long uvicorn holds an idle TCP connection
+    # open before closing it; at 5s, a long-running Anthropic
+    # stream that pauses between chunks risks the proxy declaring
+    # the connection dead. 300s matches the rationalization budget
+    # ceiling.
+    #
+    # NOTE: if generation still times out at ~100s the bottleneck
+    # is Render's own HTTP REQUEST timeout (separate from uvicorn's
+    # keep-alive). That setting lives in the Render Dashboard
+    # (Service → Settings → HTTP Request Timeout) and must be bumped
+    # there too — render.yaml has no field for it.
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000 --timeout-keep-alive 300
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
