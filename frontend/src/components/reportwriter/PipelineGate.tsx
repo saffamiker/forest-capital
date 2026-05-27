@@ -104,20 +104,27 @@ export default function PipelineGate({
   // state passed in. 2b is satisfied when 0 untrusted citations
   // remain (status 'complete'); it shows 'warning' while citations
   // still need a decision and 'idle' before Step 2 has run.
+  // May 26 2026 — step2b.untrustedCount now carries the unmatched-
+  // HIGH-finding count from ReportWriter (the prop name is kept for
+  // component-API stability). 'complete' means every HIGH finding
+  // has at least one matched citation; 'warning' lists the count
+  // still needing a match.
   const step2bResult: StepResult | undefined =
     step2b !== undefined && _stepPassed(results, 2)
       ? (step2b.untrustedCount === 0
           ? {
               status: 'complete',
-              message: 'All citations adjudicated.',
+              message: 'Every HIGH finding has at least one matched'
+                + ' citation.',
             }
           : {
               status: 'warning',
-              message: `${step2b.untrustedCount} citation`
+              message: `${step2b.untrustedCount} HIGH finding`
                 + `${step2b.untrustedCount === 1 ? '' : 's'}`
-                + ' still need a decision.',
-              detail: 'Open the Citation Review panel and Accept,'
-                + ' Reject, or Manually add each one.',
+                + ' without a matched citation.',
+              detail: 'Open the Citation Review panel and tick at'
+                + ' least one citation against each unmatched'
+                + ' finding.',
             })
       : undefined
 
@@ -203,12 +210,13 @@ function disabledReasonFor(
   if (step === 3) {
     if (!_stepPassed(results, 1)) return 'Run Step 1 first'
     if (!_stepPassed(results, 2)) return 'Run Step 2 first'
-    // Step 2b — citation adjudication MUST be complete before
-    // Step 3 unlocks. The Citation Review panel surfaces every
-    // untrusted citation with Accept/Reject/Manual-add controls;
-    // Step 2b is satisfied when zero untrusted remain.
+    // Step 2b — finding-match coverage MUST be complete before
+    // Step 3 unlocks. May 26 2026: the gate flipped from citation
+    // adjudication (untrusted verification states) to HIGH finding
+    // match coverage. The count carried in step2b.untrustedCount
+    // is the count of HIGH findings with zero matched citations.
     if (step2b !== undefined && step2b.untrustedCount > 0) {
-      return `Adjudicate ${step2b.untrustedCount} citation`
+      return `Match ${step2b.untrustedCount} HIGH finding`
         + `${step2b.untrustedCount === 1 ? '' : 's'} (Step 2b)`
     }
     return null
@@ -217,7 +225,7 @@ function disabledReasonFor(
     if (!_stepPassed(results, 1)) return 'Run Step 1 first'
     if (!_stepPassed(results, 2)) return 'Run Step 2 first'
     if (step2b !== undefined && step2b.untrustedCount > 0) {
-      return `Adjudicate ${step2b.untrustedCount} citation`
+      return `Match ${step2b.untrustedCount} HIGH finding`
         + `${step2b.untrustedCount === 1 ? '' : 's'} (Step 2b)`
     }
     if (!_stepPassed(results, 3)) return 'Run Step 3 first'
@@ -284,7 +292,15 @@ function Step2bRow({
             </span>
           ) : status === 'warning' ? (
             <span className="ml-1.5 text-2xs text-amber-300">
-              · {untrustedCount} untrusted
+              {/* May 26 2026 — the prop name 'untrustedCount' is kept
+                  for backward compatibility with the component's
+                  existing API, but its semantic now carries the
+                  unmatched-HIGH-finding count from ReportWriter (the
+                  citation-verification gate was replaced with a
+                  finding-match-coverage gate). 'unmatched finding'
+                  is the correct user-facing label. */}
+              · {untrustedCount} unmatched finding
+              {untrustedCount === 1 ? '' : 's'}
             </span>
           ) : null}
         </span>
