@@ -649,10 +649,31 @@ def _appendix_c(doc: Document, context: dict) -> None:
         headers=["Member / Total", "Activity", "Count"],
         rows=rows,
         column_widths_in=[2.0, 3.0, 1.0])
-    _add_body_paragraph(doc, (
+    # May 26 2026 — footer was breaking mid-sentence in the docx.
+    # The previous _add_body_paragraph call applied APA double
+    # spacing + a 0.5-inch first-line indent — that combined with
+    # a long ISO timestamp pushed the second sentence onto its own
+    # line and (depending on table position) sometimes onto its
+    # own page. A SHORT table footnote is the conventional shape
+    # here; render as a single-spaced, non-indented caption with
+    # `keep_together` so Word keeps it on the same page as the
+    # table and never breaks mid-sentence.
+    footer_para = doc.add_paragraph()
+    footer_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    footer_para.paragraph_format.line_spacing_rule = (
+        WD_LINE_SPACING.SINGLE)
+    footer_para.paragraph_format.first_line_indent = Inches(0)
+    footer_para.paragraph_format.space_before = Pt(6)
+    # Word's "keep lines together" — the footer's lines never break
+    # across pages. python-docx exposes this via paragraph_format.
+    footer_para.paragraph_format.keep_together = True
+    footer_run = footer_para.add_run(
         f"Activity data pulled live from the platform's audit log "
-        f"at {context.get('generated_at', '—')}. All timestamps "
-        "recorded at point of action."))
+        f"at {context.get('generated_at', '—')}. "
+        "All timestamps recorded at point of action.")
+    footer_run.font.name = _BODY_FONT
+    footer_run.font.size = Pt(10)
+    footer_run.italic = True
 
 
 def _appendix_d(doc: Document, context: dict) -> None:

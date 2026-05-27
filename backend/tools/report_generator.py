@@ -1023,23 +1023,30 @@ async def list_generations_for_user(
     limit: int = 20,
     template_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Lists the most recent generations Bob (or any team member) has
+    """Lists the most recent generations the project team has
     produced, newest first. Used by the Draft selector dropdown so
-    the user can switch back to a prior draft instead of starting
-    fresh every login.
+    any team member can pick up where another left off.
 
-    May 23 2026. report_generations carries no user_email column —
-    ownership is established by JOINing through report_pipeline_audit
-    (triggered_by). A single generation may have multiple audit rows
-    (a Step 7 re-run); DISTINCT ON dedupes so each draft appears
-    once. Newest by generated_at desc.
+    May 26 2026 — draft visibility broadened from per-user to
+    team-wide. The user reported that Bob (logging in to review the
+    midpoint draft Michael generated) saw only "New Draft" because
+    the previous query INNER-JOINed report_pipeline_audit and
+    filtered WHERE a.triggered_by = <Bob's email>. Drafts triggered
+    by Michael's email never surfaced for Bob. The team is collaborating
+    on a single submission — drafts must be shared across team
+    members. The endpoint is still team-only via require_team_member
+    (a viewer cannot list), so the access boundary is preserved at
+    the endpoint level.
+
+    The `email` parameter is kept in the signature for backwards
+    API compatibility but is no longer used as a filter. A future
+    cleanup can drop it; tonight is submission only.
 
     Returns a slim preview shape (id, template_id, flag_count,
     word_count totals, generated_at, first-200-char preview). The
     editor fetches the full paper via get_generation when the user
     actually picks a draft."""
-    if not email:
-        return []
+    _ = email  # retained for signature compatibility; see docstring.
     try:
         from sqlalchemy import text
         from database import AsyncSessionLocal
@@ -1048,25 +1055,25 @@ async def list_generations_for_user(
         # The template_id filter is optional — passing None lists every
         # template's drafts together (useful for the "all my drafts"
         # picker).
-        params: dict[str, Any] = {"e": email, "n": int(limit)}
+        params: dict[str, Any] = {"n": int(limit)}
         tmpl_clause = ""
         if template_id:
-            tmpl_clause = " AND g.template_id = :t"
+            tmpl_clause = " WHERE g.template_id = :t"
             params["t"] = template_id
         async with AsyncSessionLocal() as s:
+            # No JOIN against report_pipeline_audit any more — that
+            # was the source of the per-user scoping. The query now
+            # reads report_generations directly; every draft is
+            # visible to every team member. DISTINCT ON is unnecessary
+            # without the audit-join multiplier.
             r = await s.execute(text(
-                "SELECT * FROM ("
-                "  SELECT DISTINCT ON (g.id) "
-                "    g.id, g.template_id, g.flag_count, g.word_counts, "
-                "    g.generated_at, SUBSTR(g.paper_md, 1, 200) AS preview "
-                "  FROM report_generations g "
-                "  INNER JOIN report_pipeline_audit a "
-                "    ON a.generation_id = g.id "
-                "  WHERE a.triggered_by = :e" + tmpl_clause + " "
-                "  ORDER BY g.id, a.run_at DESC"
-                ") sub "
-                "ORDER BY generated_at DESC NULLS LAST "
-                "LIMIT :n"
+                "SELECT g.id, g.template_id, g.flag_count, "
+                "       g.word_counts, g.generated_at, "
+                "       SUBSTR(g.paper_md, 1, 200) AS preview "
+                "FROM report_generations g"
+                + tmpl_clause +
+                " ORDER BY g.generated_at DESC NULLS LAST "
+                " LIMIT :n"
             ), params)
             rows = r.fetchall()
         out: list[dict[str, Any]] = []
@@ -1894,11 +1901,48 @@ async def render_appendix_bytes(generation_id: int) -> bytes | None:
             resolved_data_hash = await get_latest_strategy_hash()
         except Exception:  # noqa: BLE001
             resolved_data_hash = None
+    # May 26 2026 — Appendix C "Count" column was rendering all
+    # dashes because team_activity_snapshot on the row was an empty
+    # dict (a fetch_team_activity failure at generation time, or an
+    # older row pre-dating the snapshot column). The fix: if the
+    # persisted snapshot has no per-member counts, fall back to a
+    # LIVE fetch_team_activity call here at appendix-render time.
+    # The .docx then shows the team's current activity totals even
+    # when the row's snapshot is missing.
+    team_activity = gen.get("team_activity_snapshot") or {}
+    # A "populated" snapshot must carry at least ONE of the per-member
+    # count keys with a non-None value. team_total_uat_steps is the
+    # canonical sentinel: every successful fetch_team_activity run
+    # writes it (even when zero), so its absence or None value flags
+    # a hollow snapshot.
+    _has_counts = (
+        isinstance(team_activity, dict)
+        and any(team_activity.get(k) is not None for k in (
+            "team_total_uat_steps", "michael_commits", "bob_uat_steps",
+            "molly_uat_steps",
+        ))
+    )
+    if not _has_counts:
+        try:
+            from tools.template_pipeline import fetch_team_activity
+            team_activity = await fetch_team_activity()
+            log.info(
+                "appendix_c_team_activity_live_fallback",
+                generation_id=generation_id,
+                got_counts=any(team_activity.get(k)
+                               for k in ("team_total_uat_steps",
+                                         "michael_commits")))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "appendix_c_team_activity_fallback_failed",
+                generation_id=generation_id, error=str(exc))
+            team_activity = team_activity or {}
+
     context = _build_appendix_context(
         verified_data=gen.get("verified_data") or {},
         ranked_findings=gen.get("verified_data", {}).get(
             "ranked_findings", []) or [],
-        team_activity=gen.get("team_activity_snapshot") or {},
+        team_activity=team_activity,
         validation_summary=gen.get("validation_snapshot") or {},
         citations=citations,
         findings_metadata={
