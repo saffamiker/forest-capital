@@ -1176,6 +1176,25 @@ async def _load_citations_for_generation(
                     " url, verification_status, search_query_used "
                     "FROM citations_cache "
                     "ORDER BY concept_id, created_at DESC"))
+            # May 26 2026 — submission fix. The `formatted` field
+            # is what _build_references_md emits as each reference-
+            # list entry. The previous filter generated `formatted`
+            # ONLY when verification_status == "verified" — the
+            # literal automatic trusted-domain state. Citations Bob
+            # adjudicated via Citation Review (human_verified /
+            # search_selected / manually_added) got formatted=None,
+            # and the references builder rendered them as
+            # "(unformatted)". The user reported only 3 citations
+            # visible (the auto-verified set) when many more were
+            # in the cache.
+            #
+            # Mirror the broadened CITATION_VERIFIED_STATES set used
+            # by _build_references_md / citation_quality so every
+            # adjudicated citation gets a real formatted entry.
+            _VERIFIED_STATES = {
+                "verified", "human_verified",
+                "search_selected", "manually_added",
+            }
             for row in r.fetchall():
                 concept_id = row[0]
                 entry = {
@@ -1191,7 +1210,7 @@ async def _load_citations_for_generation(
                 }
                 entry["formatted"] = (
                     _format_citation(entry)
-                    if entry.get("verification_status") == "verified"
+                    if entry.get("verification_status") in _VERIFIED_STATES
                     else None)
                 out[concept_id] = entry
     except Exception as exc:  # noqa: BLE001
@@ -1901,56 +1920,108 @@ async def render_appendix_bytes(generation_id: int) -> bytes | None:
             resolved_data_hash = await get_latest_strategy_hash()
         except Exception:  # noqa: BLE001
             resolved_data_hash = None
-    # May 26 2026 — Appendix C "Count" column was rendering all
-    # dashes because team_activity_snapshot on the row was an empty
-    # dict (a fetch_team_activity failure at generation time, or an
-    # older row pre-dating the snapshot column). The fix: if the
-    # persisted snapshot has no per-member counts, fall back to a
-    # LIVE fetch_team_activity call here at appendix-render time.
-    # The .docx then shows the team's current activity totals even
-    # when the row's snapshot is missing.
+    # May 26 2026 — three live-data fallbacks at appendix-render
+    # time. Cause across all three: the persisted row's snapshot
+    # field (verified_data / team_activity_snapshot /
+    # validation_snapshot) can be empty when the corresponding
+    # data fetch failed at generation time OR when the row pre-
+    # dates the snapshot column. _fmt_value(None) then renders
+    # every table cell as "—". The fixes mirror each other: detect
+    # a hollow snapshot via a sentinel key, fall back to a live
+    # fetch here.
+    #
+    # FALLBACK 1 — team_activity (drives Appendix A team totals
+    # rows + Appendix C member counts).
     team_activity = gen.get("team_activity_snapshot") or {}
-    # A "populated" snapshot must carry at least ONE of the per-member
-    # count keys with a non-None value. team_total_uat_steps is the
-    # canonical sentinel: every successful fetch_team_activity run
-    # writes it (even when zero), so its absence or None value flags
-    # a hollow snapshot.
-    _has_counts = (
+    _has_team_counts = (
         isinstance(team_activity, dict)
         and any(team_activity.get(k) is not None for k in (
             "team_total_uat_steps", "michael_commits", "bob_uat_steps",
             "molly_uat_steps",
         ))
     )
-    if not _has_counts:
+    if not _has_team_counts:
         try:
             from tools.template_pipeline import fetch_team_activity
             team_activity = await fetch_team_activity()
             log.info(
-                "appendix_c_team_activity_live_fallback",
+                "appendix_team_activity_live_fallback",
                 generation_id=generation_id,
                 got_counts=any(team_activity.get(k)
                                for k in ("team_total_uat_steps",
                                          "michael_commits")))
         except Exception as exc:  # noqa: BLE001
             log.warning(
-                "appendix_c_team_activity_fallback_failed",
+                "appendix_team_activity_fallback_failed",
                 generation_id=generation_id, error=str(exc))
             team_activity = team_activity or {}
 
+    # FALLBACK 2 — verified_data (drives Appendix A study-period
+    # rows). Sentinel: study_period_start. If missing, re-run the
+    # same pipeline _assemble_inputs uses at generation time.
+    verified_data = gen.get("verified_data") or {}
+    _has_verified = (
+        isinstance(verified_data, dict)
+        and verified_data.get("study_period_start") is not None
+    )
+    if not _has_verified:
+        try:
+            from tools.analytical_findings import gather_payload_from_db
+            from tools.cache import get_latest_strategy_hash
+            from tools.template_pipeline import live_from_payload
+            live_hash = await get_latest_strategy_hash()
+            payload = await gather_payload_from_db(live_hash)
+            live_verified = live_from_payload(payload)
+            # Preserve any prior keys we DO have; new live values fill gaps.
+            verified_data = {**(verified_data or {}), **live_verified}
+            log.info(
+                "appendix_verified_data_live_fallback",
+                generation_id=generation_id,
+                got_period=verified_data.get(
+                    "study_period_start") is not None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "appendix_verified_data_fallback_failed",
+                generation_id=generation_id, error=str(exc))
+            verified_data = verified_data or {}
+
+    # FALLBACK 3 — validation_summary (drives Appendix D Three-
+    # Layer Audit Results table). Sentinel: layer1_status. If
+    # missing, run _latest_audit_summary at render time.
+    validation_summary = gen.get("validation_snapshot") or {}
+    _has_validation = (
+        isinstance(validation_summary, dict)
+        and validation_summary.get("layer1_status") is not None
+    )
+    if not _has_validation:
+        try:
+            live_validation = await _latest_audit_summary()
+            validation_summary = {
+                **(validation_summary or {}),
+                **(live_validation or {}),
+            }
+            log.info(
+                "appendix_validation_summary_live_fallback",
+                generation_id=generation_id,
+                got_layer1=validation_summary.get(
+                    "layer1_status") is not None)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "appendix_validation_summary_fallback_failed",
+                generation_id=generation_id, error=str(exc))
+            validation_summary = validation_summary or {}
+
     context = _build_appendix_context(
-        verified_data=gen.get("verified_data") or {},
-        ranked_findings=gen.get("verified_data", {}).get(
+        verified_data=verified_data,
+        ranked_findings=verified_data.get(
             "ranked_findings", []) or [],
         team_activity=team_activity,
-        validation_summary=gen.get("validation_snapshot") or {},
+        validation_summary=validation_summary,
         citations=citations,
         findings_metadata={
             "computed_at": gen.get("generated_at"),
             "data_hash":   resolved_data_hash,
-            "audit_status": (
-                (gen.get("validation_snapshot") or {})
-                .get("layer3_status")),
+            "audit_status": validation_summary.get("layer3_status"),
         },
     )
     # Pull ranked findings from the findings cache where verified_data
