@@ -1421,6 +1421,15 @@ export default function ReportWriter() {
                   disabled={!generation || runningCheck}
                   onClick={handleRunFinalCheck}
                   data-testid="final-check-button"
+                  title={
+                    'Re-tally unresolved [[BOB]] / [[VERIFY]] markers '
+                    + 'and citation flags against the current draft. '
+                    + 'Refreshes the persisted flag count so the '
+                    + 'Draft Selector and Version History show '
+                    + 'current numbers. The download gate updates '
+                    + 'automatically from the editor and does NOT '
+                    + 'require this step.'
+                  }
                   className={
                     'inline-flex items-center gap-1.5 px-3 py-1.5 ' +
                     'bg-navy-800 hover:bg-navy-700 ' +
