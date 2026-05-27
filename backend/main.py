@@ -8807,19 +8807,24 @@ _PPTX_MEDIA = ("application/vnd.openxmlformats-officedocument."
 # are split by the section they belong in; the Academic Review arbiter
 # scores the same set (agents/academic_review.py).
 _MIDPOINT_S1_KEY_FINDINGS = (
-    # May 25 2026 — TIGHTENED. The prior block was 306 prompt words
-    # covering 4 findings + 6 methodology highlights; against a
-    # 250-300 word output target the model was forced to bloat to
-    # mention everything. One sentence per finding, the three most
-    # distinctive methodology highlights only.
-    # May 26 2026 — added LOGICAL INTEGRITY GUARDRAILS (regime
-    # language + strategy selection language) so Section 1 frames
-    # the post-2022 break as a testable hypothesis and qualifies
-    # strategy-dominance claims with the three-asset universe
-    # constraint.
-    "\n\nKEY FINDINGS — introduce each in one sentence:\n"
+    # May 25 2026 — TIGHTENED to one sentence per finding + the
+    # three most distinctive methodology highlights only.
+    # May 26 2026 (1) — added LOGICAL INTEGRITY GUARDRAILS.
+    # May 26 2026 (2) — added a hard EM-DASH PROHIBITION at the
+    # top of the prompt AND scrubbed every em dash out of the
+    # prompt's own text (commas, colons, restructured sentences).
+    # The model was picking up the em dashes in its own
+    # instructions as licence to use them in output.
+    "\n\nEM-DASH PROHIBITION (HARD CONSTRAINT):\n"
+    "Never use em dashes in any output. Use commas, semicolons, "
+    "colons, or restructure the sentence. This applies to every "
+    "form: the Unicode em dash, the en dash used as a break, and "
+    "the ASCII double-hyphen / triple-hyphen substitutes. A draft "
+    "with any dash break will be flagged.\n\n"
+    "KEY FINDINGS. Introduce each in one sentence.\n"
     "(a) The 2022 equity-IG correlation broke from roughly -0.05 to "
-    "+0.61 — the central finding of the project, developed in Results.\n"
+    "+0.61. This is the central finding of the project and is "
+    "developed in Results.\n"
     "(b) Five strategies (MIN_VARIANCE, BLACK_LITTERMAN, "
     "MAX_SHARPE_ROLLING, MOMENTUM_ROTATION, REGIME_SWITCHING) start "
     "later than the 2002-07 study period because of lookback windows; "
@@ -8835,15 +8840,15 @@ _MIDPOINT_S1_KEY_FINDINGS = (
     "Always frame as a hypothesis:\n"
     "   \"The persistence and magnitude of the post-2022 inversion "
     "strongly suggests a structural regime shift rather than a "
-    "temporary dislocation — a hypothesis to be tested formally in "
-    "the final phase.\"\n\n"
+    "temporary dislocation. It is a hypothesis to be tested formally "
+    "in the final phase.\"\n\n"
     "2. STRATEGY SELECTION LANGUAGE\n"
     "   When no single strategy dominates across crisis windows, "
     "always qualify with the asset universe constraint:\n"
     "   \"Given the constraints of our three-asset universe, dynamic "
     "weighting across regimes is the most viable mechanism for alpha "
     "generation when asset selection is restricted.\"\n\n"
-    "METHODOLOGY HIGHLIGHTS — name explicitly: Carhart four-factor "
+    "METHODOLOGY HIGHLIGHTS. Name explicitly: Carhart four-factor "
     "attribution (MOM included), Benjamini-Hochberg FDR correction at "
     "q < 0.005, and true one-way drift-inclusive portfolio turnover."
 )
@@ -8854,15 +8859,20 @@ _MIDPOINT_S1_KEY_FINDINGS = (
 # highlighted; the Academic Review arbiter flags any that survive into a
 # submitted draft. Applied via _apply_draft_caveats so a task that
 # already carries one form is not given a second, conflicting copy.
+# May 26 2026 — scrubbed em dashes from the caveat prompt strings.
+# Same reason as the S1 / S2 / _SYSTEM_PROMPT scrub: a prompt that
+# contains em dashes in its own text gives the model implicit
+# license to emit them in its output. Caveats now use colons and
+# commas to delimit the same structure.
 _CAVEAT_CITATION = (
-    "\n\nCITATION VERIFICATION — immediately before every external "
+    "\n\nCITATION VERIFICATION. Immediately before every external "
     "citation you include, insert an inline marker of the form "
     "[[VERIFY CITATION: check that Author (Year) exists and supports "
     "this specific claim before submitting]], so no unverified citation "
     "is missed."
 )
 _CAVEAT_STATS = (
-    "\n\nSTATISTIC VERIFICATION — if you are uncertain about any "
+    "\n\nSTATISTIC VERIFICATION. If you are uncertain about any "
     "specific numeric value, do NOT insert it silently; wrap it in an "
     "inline marker of the form [[VERIFY: <the value and what it is>]] "
     "(for example [[VERIFY: Sharpe ratio for Regime Switching = 0.63]]) "
@@ -8890,33 +8900,32 @@ def _apply_draft_caveats(specs: list[dict]) -> list[dict]:
 
 
 _MIDPOINT_S2_KEY_FINDINGS = (
-    # May 25 2026 — TRIMMED to the four most impactful themes per user
-    # spec (regime break, best Sharpe, OOS validation, diversification
-    # benefit). Dropped the FDR-correction and efficient-frontier
-    # concentration findings — interesting but secondary, and pushing
-    # the section above its 250-300 word target. One sentence per
-    # finding maximum.
-    # May 26 2026 — added LOGICAL INTEGRITY GUARDRAILS (regime
-    # language + strategy selection language + equal-weight blend
-    # framing + Markowitz attribution qualification) so Section 2
-    # narrative claims are framed honestly: the post-2022 break as
-    # a testable hypothesis, the active blend as a pre-defined
-    # strategy (not a post-hoc selection), and active-blend
-    # outperformance as a joint product of Markowitz efficiency
-    # AND dynamic factor rotation, not Markowitz alone.
-    "\n\nKEY FINDINGS — present these in this order, ONE SENTENCE EACH:\n"
+    # May 25 2026 — TRIMMED to the four most impactful themes.
+    # May 26 2026 (1) — added LOGICAL INTEGRITY GUARDRAILS.
+    # May 26 2026 (2) — added a hard EM-DASH PROHIBITION at the
+    # top of the prompt AND scrubbed every em dash out of the
+    # prompt's own text. Same rationale as S1: the model was
+    # treating em dashes in the prompt as license to use them in
+    # output.
+    "\n\nEM-DASH PROHIBITION (HARD CONSTRAINT):\n"
+    "Never use em dashes in any output. Use commas, semicolons, "
+    "colons, or restructure the sentence. This applies to every "
+    "form: the Unicode em dash, the en dash used as a break, and "
+    "the ASCII double-hyphen / triple-hyphen substitutes. A draft "
+    "with any dash break will be flagged.\n\n"
+    "KEY FINDINGS. Present these in this order, one sentence each.\n"
     "(1) Regime break: the equity-IG correlation shifted from "
-    "approximately -0.05 (pre-2022) to +0.61 (post-2022) — quote the "
-    "pre/post values from the correlation_pre_post data and connect to "
-    "the divergence in strategy performance.\n"
-    "(2) Best Sharpe: Regime Switching delivered the highest full-period "
-    "risk-adjusted return (approximately 0.63 vs the benchmark's 0.52) "
-    "by adapting to the correlation break — cite the actual values from "
-    "the summary_statistics data.\n"
+    "approximately -0.05 (pre-2022) to +0.61 (post-2022). Quote the "
+    "pre/post values from the correlation_pre_post data and connect "
+    "to the divergence in strategy performance.\n"
+    "(2) Best Sharpe: Regime Switching delivered the highest "
+    "full-period risk-adjusted return, approximately 0.63 versus the "
+    "benchmark's 0.52, by adapting to the correlation break. Cite "
+    "the actual values from the summary_statistics data.\n"
     "(3) OOS validation: in the post-2022 holdout window Regime "
-    "Switching's Sharpe (approximately 0.2483) materially exceeded the "
-    "benchmark's, confirming the result is not an in-sample artefact — "
-    "cite the regime_conditional data.\n"
+    "Switching's Sharpe (approximately 0.2483) materially exceeded "
+    "the benchmark's, confirming the result is not an in-sample "
+    "artefact. Cite the regime_conditional data.\n"
     "(4) Diversification benefit: static 60/40 underperformed in the "
     "post-break period because the IG correlation flip removed the "
     "diversification cushion; the dynamic regime-aware strategies "
@@ -8927,8 +8936,8 @@ _MIDPOINT_S2_KEY_FINDINGS = (
     "Always frame as a hypothesis:\n"
     "   \"The persistence and magnitude of the post-2022 inversion "
     "strongly suggests a structural regime shift rather than a "
-    "temporary dislocation — a hypothesis to be tested formally in "
-    "the final phase.\"\n\n"
+    "temporary dislocation. It is a hypothesis to be tested formally "
+    "in the final phase.\"\n\n"
     "2. STRATEGY SELECTION LANGUAGE\n"
     "   When no single strategy dominates across crisis windows, "
     "always qualify with the asset universe constraint:\n"
@@ -8937,7 +8946,7 @@ _MIDPOINT_S2_KEY_FINDINGS = (
     "generation when asset selection is restricted.\"\n\n"
     "3. EQUAL-WEIGHT BLEND\n"
     "   The equal-weight blend is a predefined strategy baked into "
-    "the model logic — not constructed post-hoc after observing "
+    "the model logic, NOT constructed post-hoc after observing "
     "constituent performance. Frame it as a legitimate ex-ante "
     "strategy:\n"
     "   \"The equal-weight blend of active strategies was defined as "
@@ -8949,8 +8958,8 @@ _MIDPOINT_S2_KEY_FINDINGS = (
     "Markowitz diversification. Always qualify with factor exposure:\n"
     "   \"While Markowitz theory predicts efficiency gains from "
     "combining differentiated return streams, the active blend's "
-    "outperformance is also driven by dynamic factor rotation — "
-    "specifically mitigating beta and duration exposure during the "
+    "outperformance is also driven by dynamic factor rotation. "
+    "Specifically, mitigating beta and duration exposure during the "
     "2022 rate shock.\""
 )
 

@@ -419,58 +419,33 @@ async def seed_findings_for_generation(
                     "sev": r.get("severity"),
                 })
 
-            # 2. DELETE findings rows that didn't make it into the
-            # current seed. Their (source, source_id) tuples are no
-            # longer present, so the matches cascade-delete with them.
-            # See KNOWN LIMITATION in migration 045's docstring.
-            if all_rows:
-                # Build the IN (...) clause via tuples.
-                pairs_sql = ", ".join(
-                    f"(:src_{i}, :sid_{i})" for i in range(len(all_rows)))
-                params: dict[str, Any] = {"g": int(generation_id)}
-                for i, r in enumerate(all_rows):
-                    params[f"src_{i}"] = r["source"]
-                    params[f"sid_{i}"] = r["source_id"]
-                await session.execute(text(
-                    f"DELETE FROM findings "
-                    f"WHERE generation_id = :g "
-                    f"  AND (source, source_id) NOT IN ({pairs_sql})"
-                ), params)
-            else:
-                # No fresh findings — clear the table for this gen.
-                await session.execute(text(
-                    "DELETE FROM findings WHERE generation_id = :g"
-                ), {"g": int(generation_id)})
-
-            # 2b. CARRY FORWARD citation_finding_matches from the
-            # most recent PRIOR generation. May 26 2026 — user-
-            # reported PRIORITY bug: when Bob runs Generate Draft
-            # after adjudicating citations, the new generation_id
-            # has fresh findings rows (different IDs from the old
-            # gen), so the citation_finding_matches Bob created
-            # against the OLD findings don't link to the new ones.
-            # The matches still exist in the DB but reference the
-            # old finding IDs (which are still on the old
-            # generation_id), so the new draft's Citation Review
-            # panel shows every HIGH finding as unmatched. The
-            # team's adjudication work is silently lost.
+            # 1b. CARRY FORWARD citation_finding_matches from the
+            # most recent PRIOR generation BEFORE the DELETE step.
+            # May 26 2026 — user-reported PRIORITY bug: when Generate
+            # Draft creates a new generation_id, the team's previously
+            # adjudicated matches don't link to the new generation's
+            # findings (different IDs even when source/source_id match).
+            # The references section in the appendix is built from
+            # matched citations, so without carry-forward the
+            # references list is also empty.
             #
-            # The fix: for every match recorded against a finding
-            # in the most recent PRIOR generation, look up the
-            # equivalent finding in THIS generation by (source,
-            # source_id) and insert a new match for the same
-            # citation_id against the new finding_id. ON CONFLICT
-            # DO NOTHING makes the operation idempotent (re-seeding
-            # never double-inserts).
+            # Order is critical. This INSERT runs:
+            #   AFTER step 1 (new findings exist to JOIN on), and
+            #   BEFORE step 2 (the DELETE step that could CASCADE old
+            #     match rows if a finding ever drops out of the seed).
+            #
+            # JOIN logic: for every match against a finding in the
+            # most recent prior generation, find the equivalent
+            # finding in the current generation by (source, source_id)
+            # and INSERT a new match for the same citation_id against
+            # the new finding_id. ON CONFLICT DO NOTHING makes the
+            # operation idempotent — re-seeding never double-inserts.
             #
             # "Most recent prior" is computed at carry-forward time
-            # from the matches table itself — pick the generation_id
-            # whose findings have the most recent match-and-finding
-            # row pair, excluding the current generation. That keeps
-            # the inheritance chain short (the carry-forward INSERTS
-            # also make the new generation a candidate "prior" for
-            # the NEXT generation) so a long pipeline run accrues
-            # all of Bob's prior adjudications.
+            # from the matches table itself: the largest generation_id
+            # in the findings table that ISN'T this one. That chains
+            # forward across generations so a sequence of Generate
+            # Draft runs accrues all prior adjudications.
             try:
                 await session.execute(text(
                     "WITH latest_prior AS ( "
@@ -495,14 +470,42 @@ async def seed_findings_for_generation(
                     "ON CONFLICT (citation_id, finding_id) DO NOTHING"
                 ), {"g": int(generation_id)})
             except Exception as inherit_exc:  # noqa: BLE001
-                # Carry-forward is best-effort: a schema/permission
-                # issue here must NOT block the seed. Log and move on;
-                # Bob can re-tick the matches manually in the Citation
-                # Review panel.
+                # Carry-forward is best-effort. A schema or
+                # permission issue here must NOT block the seed;
+                # the team can re-tick matches manually.
                 log.warning(
                     "citation_findings_carry_forward_failed",
                     generation_id=generation_id,
                     error=str(inherit_exc))
+
+            # 2. DELETE findings rows that didn't make it into the
+            # current seed. Their (source, source_id) tuples are no
+            # longer present, so the matches cascade-delete with them.
+            # See KNOWN LIMITATION in migration 045's docstring.
+            if all_rows:
+                # Build the IN (...) clause via tuples.
+                pairs_sql = ", ".join(
+                    f"(:src_{i}, :sid_{i})" for i in range(len(all_rows)))
+                params: dict[str, Any] = {"g": int(generation_id)}
+                for i, r in enumerate(all_rows):
+                    params[f"src_{i}"] = r["source"]
+                    params[f"sid_{i}"] = r["source_id"]
+                await session.execute(text(
+                    f"DELETE FROM findings "
+                    f"WHERE generation_id = :g "
+                    f"  AND (source, source_id) NOT IN ({pairs_sql})"
+                ), params)
+            else:
+                # No fresh findings — clear the table for this gen.
+                await session.execute(text(
+                    "DELETE FROM findings WHERE generation_id = :g"
+                ), {"g": int(generation_id)})
+
+            # (Carry-forward moved BEFORE the DELETE — see step 1b
+            # above. May 26 2026 user instruction: copy matches into
+            # the new generation_id BEFORE the CASCADE delete could
+            # ever run against the old findings. The earlier
+            # placement here is intentionally removed.)
 
             await session.commit()
 

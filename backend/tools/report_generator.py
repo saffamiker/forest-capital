@@ -1162,7 +1162,7 @@ async def _load_citations_for_generation(
         async with AsyncSessionLocal() as s:
             if generation_id is not None:
                 r = await s.execute(text(
-                    "SELECT concept_id, author, year, title, "
+                    "SELECT id, concept_id, author, year, title, "
                     " journal_or_institution, volume_issue_pages, "
                     " url, verification_status, search_query_used "
                     "FROM citations_cache "
@@ -1171,7 +1171,7 @@ async def _load_citations_for_generation(
             else:
                 r = await s.execute(text(
                     "SELECT DISTINCT ON (concept_id) "
-                    " concept_id, author, year, title, "
+                    " id, concept_id, author, year, title, "
                     " journal_or_institution, volume_issue_pages, "
                     " url, verification_status, search_query_used "
                     "FROM citations_cache "
@@ -1860,7 +1860,26 @@ async def render_paper_bytes(generation_id: int) -> bytes | None:
         return None
     from tools.template_pipeline import _format_citation  # noqa: F401
     citations = await _load_citations_for_generation(generation_id)
-    refs_md = _references_md(citations)
+    # May 26 2026 — narrow the References list to ONLY citations
+    # matched against a finding in this generation. "Selected" =
+    # the team explicitly ticked the citation against a finding in
+    # the Citation Review panel; the references list reflects
+    # exactly that set, not every adjudicated citation in the
+    # cache. Without matched citations surviving the seed (see
+    # carry-forward in citation_findings.seed_findings_for_
+    # generation, step 1b) the references list would be empty —
+    # PR #203's carry-forward fix unblocks this path.
+    matched_ids = await _matched_citation_ids_for_generation(
+        generation_id)
+    refs_citations = (
+        _narrow_to_matched(citations, matched_ids)
+        if matched_ids else citations
+    )
+    # If the team has matches recorded, render only those.
+    # Otherwise render the full verified set (fallback for
+    # generations where Bob hasn't ticked any match yet, e.g. a
+    # fresh draft before Citation Review has been opened).
+    refs_md = _references_md(refs_citations)
 
     # Look up the template's format_spec to decide which renderer.
     memo_style = False
@@ -2024,8 +2043,20 @@ async def render_appendix_bytes(generation_id: int) -> bytes | None:
             "audit_status": validation_summary.get("layer3_status"),
         },
     )
+    # May 26 2026 — attach the MATCHED subset of citations alongside
+    # the full citations_cache. build_appendix_docx renders the
+    # References list from matched_citations when present; the full
+    # citations_cache is still used for Appendix A's methodological
+    # references + Appendix D's GIPS reference (which look up
+    # specific concept IDs).
+    matched_ids = await _matched_citation_ids_for_generation(
+        generation_id)
+    if matched_ids:
+        context["matched_citations"] = _narrow_to_matched(
+            citations, matched_ids)
+
     # Pull ranked findings from the findings cache where verified_data
-    # didn't carry them — earlier generations may not.
+    # didn't carry them. Earlier generations may not.
     if not context["ranked_findings"]:
         from tools.analytical_findings import get_latest_findings
         row = await get_latest_findings()
@@ -2238,14 +2269,82 @@ async def run_academic_review(
     return payload
 
 
+_VERIFIED_CITATION_STATES = frozenset({
+    # Mirrors template_pipeline.CITATION_VERIFIED_STATES.
+    "verified",          # automatic trusted-domain hit
+    "human_verified",    # reviewer accepted an untrusted-domain hit
+    "search_selected",   # reviewer accepted one of the alternatives
+    "manually_added",    # reviewer typed the citation in manually
+})
+
+
 def _references_md(citations: dict[str, Any]) -> str:
-    """Builds an alphabetical References block from verified
-    citations only. The appendix renders its own; the paper docx
-    appends this one at the end of the body."""
+    """Builds an alphabetical References block from SELECTED
+    citations. "Selected" means a citation Bob (or the team) has
+    actively engaged with via the Citation Review panel: any of
+    the four verified-equivalent states. The paper docx appends
+    this block; the appendix renders its own.
+
+    May 26 2026 — broadened from the literal 'verified' state to
+    the full CITATION_VERIFIED_STATES set; the literal-only filter
+    silently dropped human-adjudicated citations.
+    """
     verified = [
         c for c in (citations or {}).values()
-        if c.get("verification_status") == "verified"]
+        if c.get("verification_status") in _VERIFIED_CITATION_STATES]
     if not verified:
         return ""
     verified.sort(key=lambda c: (c.get("author") or "").lower())
     return "\n\n".join(c.get("formatted") or "" for c in verified)
+
+
+async def _matched_citation_ids_for_generation(
+    generation_id: int,
+) -> set[int]:
+    """Returns the set of citation IDs that have at least one
+    citation_finding_matches row against a finding belonging to
+    this generation. Used to narrow the References list to ONLY
+    matched citations: citations the team explicitly ticked
+    against a finding in the Citation Review panel.
+
+    Returns the empty set on any DB error or when no matches
+    exist; the caller treats an empty set as "no filter applied"
+    or "no references to render" depending on context.
+    """
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return set()
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "SELECT DISTINCT m.citation_id "
+                "FROM citation_finding_matches m "
+                "JOIN findings f ON f.id = m.finding_id "
+                "WHERE f.generation_id = :g"
+            ), {"g": int(generation_id)})
+            return {int(row[0]) for row in r.fetchall()}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("matched_citation_ids_lookup_failed",
+                    generation_id=generation_id, error=str(exc))
+        return set()
+
+
+def _narrow_to_matched(
+    citations: dict[str, dict[str, Any]],
+    matched_ids: set[int],
+) -> dict[str, dict[str, Any]]:
+    """Returns the subset of `citations` whose row id is in
+    `matched_ids`. Used to filter the References list to only the
+    citations the team matched against a finding.
+
+    If `matched_ids` is empty, returns an empty dict — explicitly
+    "no matched citations, render no references." The caller's
+    fallback for "no matches recorded yet" sits one layer up.
+    """
+    if not matched_ids:
+        return {}
+    return {
+        cid: c for cid, c in (citations or {}).items()
+        if isinstance(c.get("id"), int) and c["id"] in matched_ids
+    }
