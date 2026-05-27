@@ -622,6 +622,15 @@ export default function ReportWriter() {
   }, [setAuditId, setBadge, setPipelineStartedAt])
 
   // ── Generation ────────────────────────────────────────────────────────────
+  //
+  // May 26 2026 — switched from a synchronous axios.post to an SSE
+  // fetch consumer. The backend endpoint now STREAMS phase frames
+  // (`generate_started` → periodic `generate_progress` → final
+  // `generate_complete` or `generate_error`) so the request stays
+  // alive past Render's ~120s gateway timeout. The 3-pass
+  // rationalization loop (PR #198) pushed total generation time
+  // past the cap and was 502-ing — same shape the council endpoint
+  // hit before its own SSE conversion (line 4438 in main.py).
   const handleGenerate = async (): Promise<void> => {
     if (generating) return
     setError(null)
@@ -630,10 +639,15 @@ export default function ReportWriter() {
     setStep(7, { status: 'running', message: 'Generating draft…' })
     const t0 = performance.now()
     try {
-      const res = await axios.post<GenerationResponse>(
-        `/api/v1/reports/templates/${templateId}/generate`)
+      const data = await _streamGenerate(templateId, (elapsed) => {
+        // Surface progress on the Step 7 row so Bob sees the
+        // generation is alive during the rationalization passes.
+        setStep(7, {
+          status: 'running',
+          message: `Generating draft… ${elapsed}s elapsed`,
+        })
+      })
       const ms = Math.round(performance.now() - t0)
-      const data = res.data
       setGeneration(data)
       setPaperMd(data.paper_md || '')
       const bobCount = data.bob_block_count ?? 0
@@ -669,7 +683,19 @@ export default function ReportWriter() {
       const ms = Math.round(performance.now() - t0)
       let msg = 'Generation failed.'
       let thesisDetail: string | null = null
-      if (axios.isAxiosError(err)) {
+      // _streamGenerate throws GenerateStreamError when the backend
+      // emits a `generate_error` frame; the legacy axios.isAxiosError
+      // branch is kept as a defensive fallback for network-level
+      // failures that abort the stream before any frame lands.
+      if (err instanceof GenerateStreamError) {
+        if (err.errorCode === 'thesis_validation_blocked') {
+          msg = 'Thesis validation blocked generation. See Step 6.'
+          const reasons = err.thesisBlockerReasons ?? []
+          thesisDetail = reasons.join(' · ')
+        } else {
+          msg = err.message || msg
+        }
+      } else if (axios.isAxiosError(err)) {
         const detail = err.response?.data?.detail
         if (typeof detail === 'string') {
           msg = detail
@@ -1559,6 +1585,142 @@ function PendingRerunDialog({
       </div>
     </div>
   )
+}
+
+
+// ── Step 7 SSE stream consumer ──────────────────────────────────────────────
+//
+// May 26 2026 — the /api/v1/reports/templates/{id}/generate endpoint
+// now streams Server-Sent Events. Frame sequence:
+//   data: {"type": "generate_started", ...}
+//   data: {"type": "generate_progress", "elapsed_seconds": N}    (every ~10s)
+//   data: {"type": "generate_complete", ...GenerationResponse}
+//   data: [DONE]
+// On error: a `generate_error` frame replaces `generate_complete`.
+//
+// The consumer below uses fetch + ReadableStream rather than axios
+// because axios's stream support in the browser is awkward and we
+// already need EventSource-style parsing. Exported separately from
+// handleGenerate so the per-step runner doesn't need to know about
+// the streaming wire format.
+
+export class GenerateStreamError extends Error {
+  readonly errorCode: string | null
+  readonly status: number | null
+  readonly thesisBlockerReasons: string[] | null
+  constructor(opts: {
+    message: string
+    errorCode?: string | null
+    status?: number | null
+    thesisBlockerReasons?: string[] | null
+  }) {
+    super(opts.message)
+    this.name = 'GenerateStreamError'
+    this.errorCode = opts.errorCode ?? null
+    this.status = opts.status ?? null
+    this.thesisBlockerReasons = opts.thesisBlockerReasons ?? null
+  }
+}
+
+export async function _streamGenerate(
+  templateId: string,
+  onProgress?: (elapsedSeconds: number) => void,
+): Promise<GenerationResponse> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Accept': 'text/event-stream',
+  }
+  const apiKey = axios.defaults.headers.common['X-API-Key']
+  if (typeof apiKey === 'string' && apiKey) {
+    headers['X-API-Key'] = apiKey
+  }
+  const resp = await fetch(
+    `/api/v1/reports/templates/${templateId}/generate`,
+    { method: 'POST', headers })
+  if (!resp.ok || !resp.body) {
+    // A non-2xx response means the request was rejected BEFORE the
+    // stream started (auth, rate limit, request validation). Surface
+    // as a normal error so the catch-block can route appropriately.
+    let detail: string | null = null
+    try {
+      const body = await resp.json()
+      detail = typeof body?.detail === 'string'
+        ? body.detail
+        : JSON.stringify(body?.detail ?? body)
+    } catch {
+      detail = `HTTP ${resp.status}`
+    }
+    throw new GenerateStreamError({
+      message: detail || `HTTP ${resp.status}`,
+      status: resp.status,
+    })
+  }
+  const reader = resp.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let completePayload: GenerationResponse | null = null
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    // SSE frames are separated by blank lines (\n\n). Each frame's
+    // payload line is `data: ...`. The [DONE] sentinel ends the
+    // stream.
+    let frameBreak = buffer.indexOf('\n\n')
+    while (frameBreak !== -1) {
+      const frame = buffer.slice(0, frameBreak)
+      buffer = buffer.slice(frameBreak + 2)
+      frameBreak = buffer.indexOf('\n\n')
+      const line = frame.split('\n')
+        .find((l) => l.startsWith('data:'))
+      if (!line) continue
+      const raw = line.slice(5).trim()
+      if (raw === '[DONE]') {
+        if (completePayload) return completePayload
+        throw new GenerateStreamError({
+          message: 'Stream ended without a result.',
+        })
+      }
+      let parsed: Record<string, unknown>
+      try { parsed = JSON.parse(raw) }
+      catch { continue }
+      const type = String(parsed['type'] ?? '')
+      if (type === 'generate_progress' && onProgress) {
+        const elapsed = Number(parsed['elapsed_seconds'] ?? 0)
+        onProgress(elapsed)
+      } else if (type === 'generate_complete') {
+        // The complete frame carries the full GenerationResponse
+        // shape (id, template_id, paper_md, appendix_md, flags,
+        // bob_blocks, verified_data, etc.) flattened into the
+        // frame payload alongside `type`. Strip the type field and
+        // hand the rest back.
+        const { type: _t, ...rest } = parsed
+        void _t
+        completePayload = rest as unknown as GenerationResponse
+      } else if (type === 'generate_error') {
+        throw new GenerateStreamError({
+          message: String(parsed['message'] ?? 'Generation failed.'),
+          errorCode: typeof parsed['error'] === 'string'
+            ? (parsed['error'] as string) : null,
+          status: typeof parsed['status'] === 'number'
+            ? (parsed['status'] as number) : null,
+          thesisBlockerReasons: Array.isArray(
+            (parsed['thesis_validation'] as Record<string, unknown>
+              | undefined)?.['blocker_reasons'])
+            ? ((parsed['thesis_validation'] as
+                { blocker_reasons: string[] }).blocker_reasons)
+            : null,
+        })
+      }
+    }
+  }
+  // Stream closed without a [DONE] sentinel — most likely the
+  // connection was severed mid-flight. Surface as an error so the
+  // catch-block can record the failure.
+  if (completePayload) return completePayload
+  throw new GenerateStreamError({
+    message: 'Connection closed before generation completed.',
+  })
 }
 
 
