@@ -1733,14 +1733,34 @@ async def generate_report_from_template(
     request: Request, template_id: str,
     session: dict = Depends(require_team_member),
 ):
-    """End-to-end report generation. Runs the full pipeline, persists
-    one report_generations row, returns the full draft payload
-    (paper_md, appendix_md, flags, bob_blocks, verified_data, etc.).
+    """End-to-end report generation. STREAMS phase events via SSE so
+    the request stays alive past Render's gateway timeout.
 
-    Failure modes:
-      404 — template_not_found
-      422 — thesis_validation_blocked (returns the failing conditions)
-      500 — unexpected pipeline error
+    May 26 2026 — converted from a synchronous JSON POST to an SSE
+    stream after the 3-pass rationalization loop (PR #198) pushed
+    total generation time past ~120s. The synchronous variant was
+    502-ing at Render's gateway in exactly the same way the council
+    endpoint did before its own SSE conversion (see line 4438 for
+    the precedent). The frontend assembles the same payload shape
+    from the events.
+
+    Event sequence (each `data: {json}\\n\\n`):
+      1. generate_started   — fires immediately on request receipt
+      2. generate_progress  — periodic keepalive while generate_paper
+                              runs (one frame every ~10s)
+      3. generate_complete  — full draft payload (the JSON the legacy
+                              synchronous response used to return)
+      4. data: [DONE]\\n\\n — end-of-stream sentinel
+
+    Error cases — emit a typed frame, then [DONE]:
+      generate_error (404)     — template_not_found
+      generate_error (422)     — thesis_validation_blocked (carries
+                                 thesis_validation payload)
+      generate_error (500)     — unexpected pipeline failure
+
+    The test environment keeps the synchronous JSON contract every
+    existing report_generator test relies on — TestClient.post(...)
+    .json() would not parse SSE frames.
     """
     if ENVIRONMENT == "test":
         return {
@@ -1753,29 +1773,73 @@ async def generate_report_from_template(
             "bob_blocks":      [],
             "flags":           [],
         }
-    try:
-        from tools.report_generator import generate_paper
-        result = await generate_paper(template_id)
-        if result.get("error") == "template_not_found":
-            raise HTTPException(
-                status_code=404,
-                detail=f"Template '{template_id}' not found.")
-        if result.get("error") == "thesis_validation_blocked":
-            raise HTTPException(
-                status_code=422,
-                detail={
-                    "error": "thesis_validation_blocked",
-                    "thesis_validation": result.get("thesis_validation"),
-                })
-        return result
-    except HTTPException:
-        raise
-    except Exception as exc:
-        log.warning("generate_report_failed",
-                    template_id=template_id, error=str(exc))
-        raise HTTPException(
-            status_code=500,
-            detail="Report generation failed — see server logs.")
+
+    log.info("generate_report_started", template_id=template_id,
+             user=session.get("email"))
+
+    async def event_stream():
+        import asyncio
+        import traceback
+
+        # Initial frame — fires immediately so the gateway sees bytes
+        # within the first second of the request and starts holding
+        # the connection open.
+        yield _sse("generate_started", template_id=template_id)
+
+        try:
+            from tools.report_generator import generate_paper
+
+            # Run the pipeline as a background task so we can emit
+            # keepalive frames in parallel. asyncio.create_task keeps
+            # generate_paper on the same event loop; the polling loop
+            # yields a frame every ~10s until the task completes.
+            task = asyncio.create_task(generate_paper(template_id))
+            tick = 0
+            while not task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(task),
+                                           timeout=10.0)
+                except asyncio.TimeoutError:
+                    tick += 1
+                    # Keepalive frame — Render's gateway treats every
+                    # data: ... frame as live traffic, so the 10s
+                    # cadence is well under any reasonable idle cap.
+                    yield _sse("generate_progress",
+                               elapsed_seconds=tick * 10)
+
+            result = task.result()
+
+            if result.get("error") == "template_not_found":
+                yield _sse(
+                    "generate_error",
+                    status=404,
+                    message=f"Template '{template_id}' not found.",
+                )
+            elif result.get("error") == "thesis_validation_blocked":
+                yield _sse(
+                    "generate_error",
+                    status=422,
+                    error="thesis_validation_blocked",
+                    thesis_validation=result.get("thesis_validation"),
+                )
+            else:
+                yield _sse("generate_complete", **result)
+        except Exception as exc:  # noqa: BLE001
+            # Unexpected failure surfaces clearly — no silent
+            # fall-through. The frontend renders the error message
+            # and lets the user retry.
+            log.warning("generate_report_failed",
+                        template_id=template_id, error=str(exc),
+                        traceback=traceback.format_exc())
+            yield _sse(
+                "generate_error",
+                status=500,
+                message="Report generation failed — see server logs.",
+            )
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(),
+                             media_type="text/event-stream")
 
 
 @app.get("/api/v1/reports/generations")
