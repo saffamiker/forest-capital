@@ -1703,6 +1703,13 @@ export async function _streamGenerate(
   const decoder = new TextDecoder()
   let buffer = ''
   let completePayload: GenerationResponse | null = null
+  // The stream reader pattern terminates via `break` inside the loop
+  // when the underlying ReadableStream signals done. eslint's
+  // no-constant-condition rule flags `while (true)` defensively, but
+  // this is the canonical TextDecoder + ReadableStream consumer
+  // shape (the same one the council SSE consumer uses). Disable on
+  // the next line.
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     const { value, done } = await reader.read()
     if (done) break
