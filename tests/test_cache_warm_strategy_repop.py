@@ -630,4 +630,5 @@ class TestDefaultWarmFnRepopulatesStrategies:
         # CIO recommendation has no live context in the test env.
         assert result == {"academic_analytics": False,
                           "efficient_frontier": False,
-                          "cio_recommendation": False}
+                          "cio_recommendation": False,
+                          "performance_chart": False}
