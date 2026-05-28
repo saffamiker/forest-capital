@@ -8,9 +8,6 @@ import { AlertTriangle, RefreshCw, X } from 'lucide-react'
 import RegimeIndicator from './RegimeIndicator'
 import EfficientFrontier from './EfficientFrontier'
 import StrategyCard from './StrategyCard'
-import CIORecommendationCard from './CIORecommendationCard'
-import ForwardConfidenceChart from './ForwardConfidenceChart'
-import PerformanceRecordLink from './PerformanceRecordLink'
 import type { StrategyResult } from '../types/strategies'
 import { useStrategiesStore } from '../stores/strategiesStore'
 import { useDashboardDataStore } from '../stores/dashboardDataStore'
@@ -384,14 +381,6 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-0">
-      {/* Landing-page past/present/future arc, above the fold:
-          present (CIO live recommendation), future (forward confidence
-          projection), past (Council Performance Record preview). Each is
-          self-fetching and degrades to its own empty state. */}
-      <CIORecommendationCard />
-      <ForwardConfidenceChart />
-      <PerformanceRecordLink />
-
       {/* Regime indicator — shows spinner until FRED resolves, never blocks charts */}
       {regimeLoading ? (
         <div className="border-b border-border bg-navy-800/50 px-6 py-2.5 flex items-center gap-2">

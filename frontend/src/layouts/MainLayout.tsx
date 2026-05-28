@@ -44,9 +44,9 @@ const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Analysis',
     items: [
-      { to: '/',                     label: 'Dashboard',            icon: LayoutDashboard, end: true },
-      { to: '/performance-record',   label: 'Performance Record',   icon: TrendingUp },
+      { to: '/',                     label: 'Investment Outlook',   icon: LayoutDashboard, end: true },
       { to: '/analytics',            label: 'Analytics',            icon: LineChart },
+      { to: '/performance-record',   label: 'Council Record',       icon: TrendingUp },
       { to: '/statistical-evidence', label: 'Statistical Evidence', icon: BarChart3 },
       { to: '/regime-analysis',      label: 'Regime Analysis',      icon: Activity },
     ],

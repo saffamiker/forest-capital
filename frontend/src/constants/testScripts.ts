@@ -76,7 +76,13 @@ export interface TestScript {
 // Layer 4 forward confidence chart (three simulated series + outperform
 // probabilities), and the combined-layout / Performance-Record-link
 // checks.
-export const TEST_SCRIPT_VERSION = 6
+// v7 (May 28 2026) — site restructure: / now serves Investment Outlook
+// (not the dashboard); the dashboard merged into Analytics at /analytics.
+// All Testers' dashboard-anchor steps (strategy-table, efficient-frontier,
+// cumulative) repointed to /analytics; nav-order step updated. Molly gains
+// interaction-pattern steps (info icons + explainer, chart tooltips,
+// loading / error / responsive) and a nav-order check.
+export const TEST_SCRIPT_VERSION = 7
 
 const allTesters: TestScript = {
   id: 'all_testers_v1',
@@ -122,9 +128,9 @@ const allTesters: TestScript = {
       id: 'nav_order', route: '/', target: '[data-tour="nav-dashboard"]',
       title: 'Navigation order',
       instruction: 'Look at the top navigation bar.',
-      expectedResult: 'Items appear in order: Dashboard → Analytics → '
-        + 'Statistical Evidence → Regime Analysis → Council → QA Audit → '
-        + 'Reports.',
+      expectedResult: 'Items appear in order: Investment Outlook → '
+        + 'Analytics → Council Record → Statistical Evidence → Regime '
+        + 'Analysis → Council → QA Audit → Reports.',
       allowSkip: true,
     },
     {
@@ -160,44 +166,46 @@ const allTesters: TestScript = {
         + 'bar.',
       allowSkip: true,
     },
-    // ── Dashboard ──────────────────────────────────────────────────────
+    // ── Analytics (the merged dashboard, now at /analytics) ────────────
     {
-      id: 'dash_loads', route: '/', target: null,
-      title: 'Dashboard loads',
-      instruction: 'Open the Dashboard.',
-      expectedResult: 'The page loads with no visible errors.',
+      id: 'dash_loads', route: '/analytics', target: null,
+      title: 'Analytics page loads',
+      instruction: 'Open Analytics (second in the nav).',
+      expectedResult: 'The page loads with no visible errors. It holds the '
+        + 'former dashboard content (strategy table, frontier, stress '
+        + 'tests) plus the academic analytics below.',
       allowSkip: true,
     },
     {
-      id: 'dash_cumulative', route: '/', target: null,
+      id: 'dash_cumulative', route: '/analytics', target: null,
       title: 'Cumulative return chart renders',
-      instruction: 'Look at the cumulative returns chart on the Dashboard.',
+      instruction: 'Look at the cumulative returns chart on Analytics.',
       expectedResult: 'The chart renders with real data — it is not empty.',
       allowSkip: true,
     },
     {
-      id: 'dash_strategy_table', route: '/', target: '[data-tour="strategy-table"]',
+      id: 'dash_strategy_table', route: '/analytics', target: '[data-tour="strategy-table"]',
       title: 'Strategy table shows 10 strategies',
       instruction: 'Look at the strategy comparison table.',
       expectedResult: 'All 10 strategies are listed.',
       allowSkip: true,
     },
     {
-      id: 'dash_frontier', route: '/', target: '[data-tour="efficient-frontier"]',
+      id: 'dash_frontier', route: '/analytics', target: '[data-tour="efficient-frontier"]',
       title: 'Efficient frontier curve',
       instruction: 'Look at the efficient frontier chart.',
       expectedResult: 'The frontier curve is smooth and hyperbolic.',
       allowSkip: true,
     },
     {
-      id: 'dash_export_buttons', route: '/', target: null,
+      id: 'dash_export_buttons', route: '/analytics', target: null,
       title: 'Chart export buttons present',
-      instruction: 'Look at the top-right of each Dashboard chart.',
+      instruction: 'Look at the top-right of each Analytics chart.',
       expectedResult: 'Every chart has an export button.',
       allowSkip: true,
     },
     {
-      id: 'dash_info_hover', route: '/', target: '[data-tour="strategy-table"]',
+      id: 'dash_info_hover', route: '/analytics', target: '[data-tour="strategy-table"]',
       title: 'InfoIcon hover tooltip',
       instruction: 'Hover an ⓘ icon next to a strategy name or column '
         + 'header.',
@@ -205,7 +213,7 @@ const allTesters: TestScript = {
       allowSkip: true,
     },
     {
-      id: 'dash_info_click', route: '/', target: '[data-tour="strategy-table"]',
+      id: 'dash_info_click', route: '/analytics', target: '[data-tour="strategy-table"]',
       title: 'InfoIcon click opens explainer',
       instruction: 'Click an ⓘ icon.',
       expectedResult: 'The ExplainerPanel drawer opens and streams an '
@@ -213,7 +221,7 @@ const allTesters: TestScript = {
       allowSkip: true,
     },
     {
-      id: 'dash_ask_council', route: '/', target: null,
+      id: 'dash_ask_council', route: '/analytics', target: null,
       title: 'Explainer → Ask the Council prefill',
       instruction: 'In the ExplainerPanel, click "Ask the Council about '
         + 'this".',
@@ -1770,6 +1778,62 @@ const molly: TestScript = {
         + 'Performance Record preview) render together without layout '
         + 'breaks at both widths, and the preview links to '
         + '/performance-record.',
+      allowSkip: false,
+    },
+    // ── Investment Outlook interaction patterns (v7) ───────────────────
+    {
+      id: 'molly_outlook_nav_order', route: '/', target: null,
+      title: 'Nav front door is Investment Outlook',
+      instruction: 'Open the site root and read the nav order.',
+      expectedResult: 'The root / serves Investment Outlook (not the '
+        + 'analytics dashboard), and the nav reads Investment Outlook, '
+        + 'then Analytics, then Council Record.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_outlook_info_icons', route: '/', target: null,
+      title: 'Info icons on Outlook technical terms',
+      instruction: 'On the Investment Outlook page, find the ⓘ icons next '
+        + 'to the regime label, confidence, the recommendation structure, '
+        + 'key risk, the CFA disclosure, the forward chart title, and '
+        + 'P(blend outperforms).',
+      expectedResult: 'An ⓘ icon is present on each technical term.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_outlook_explainer', route: '/', target: null,
+      title: 'Info icon opens context-aware explainer',
+      instruction: 'Click an ⓘ icon (e.g. on the regime label), then click '
+        + 'one on a different term (e.g. P(outperform)).',
+      expectedResult: 'Clicking opens the explainer drawer, and the text is '
+        + 'relevant to the specific term clicked (different per term).',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_outlook_chart_tooltips', route: '/', target: null,
+      title: 'Forward chart hover tooltips',
+      instruction: 'Hover the forward confidence chart on desktop.',
+      expectedResult: 'A tooltip appears at the hovered point showing the '
+        + 'series values for that horizon.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_outlook_loading_error', route: '/', target: null,
+      title: 'Outlook loading and empty/error states',
+      instruction: 'Reload the Investment Outlook page and watch each tile '
+        + 'load; note behaviour if a tile has no data.',
+      expectedResult: 'Tiles show a loading state during fetch, then either '
+        + 'the data or a graceful empty/error state, consistent with the '
+        + 'rest of the platform (no blank boxes or raw errors).',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_outlook_responsive', route: '/', target: null,
+      title: 'Outlook responsive on mobile',
+      instruction: 'View the Investment Outlook page at a narrow (mobile) '
+        + 'width.',
+      expectedResult: 'All three components reflow cleanly with no '
+        + 'horizontal overflow or broken layout.',
       allowSkip: false,
     },
   ],

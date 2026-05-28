@@ -2818,9 +2818,14 @@ async def get_play_by_play(session: dict = Depends(require_auth)):
             if note:
                 ev["key_limitation"] = note
         cumulative = await get_cached_performance_chart()
+        # Diagnostic: log the raw count so a "table has rows but the page
+        # shows empty" report is resolvable from the Render logs.
+        log.info("play_by_play_endpoint_read", n_events=len(events),
+                 available=bool(events), has_cumulative=bool(cumulative))
         return {
             "available": bool(events),
             "events": events,
+            "event_count": len(events),
             "scorecard": scorecard(events) if events else None,
             "key_limitations": KEY_LIMITATION_NOTES,
             "cumulative": cumulative,

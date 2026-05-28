@@ -18,6 +18,7 @@ import {
   ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import { Loader2 } from 'lucide-react'
+import InfoIcon from './InfoIcon'
 
 interface Band { median: number; p05: number; p95: number }
 type SeriesBands = Record<string, Band>   // horizon -> band
@@ -109,11 +110,17 @@ export default function ForwardConfidenceChart() {
   return (
     <div className="card p-5 m-4 md:m-6 border-l-2 border-electric">
       <div className="flex items-start justify-between gap-4 flex-wrap">
-        <div className="text-2xs text-muted uppercase tracking-wide">
+        <div className="text-2xs text-muted uppercase tracking-wide flex items-center gap-1">
           Forward Confidence Projection
+          <InfoIcon tooltipKey="monte_carlo_reference"
+                    metricLabel="Forward Monte Carlo simulation" />
+          <InfoIcon tooltipKey="confidence_band"
+                    metricLabel="90% confidence band" />
         </div>
-        <div className="text-2xs text-muted font-mono text-right">
-          Regime {proj.regime || '—'} · confidence {conf} · As of {asOf(proj._computed_at)}
+        <div className="text-2xs text-muted font-mono text-right flex items-center gap-1">
+          Regime {proj.regime || '—'}
+          <InfoIcon tooltipKey="regime_label" metricLabel="Current regime" />
+          · confidence {conf} · As of {asOf(proj._computed_at)}
         </div>
       </div>
 
@@ -149,7 +156,11 @@ export default function ForwardConfidenceChart() {
           <table className="text-sm w-full max-w-xl">
             <thead>
               <tr className="text-muted text-2xs uppercase">
-                <th className="text-left font-medium">P(blend outperforms)</th>
+                <th className="text-left font-medium">
+                  P(blend outperforms)
+                  <InfoIcon tooltipKey="p_outperform"
+                            metricLabel="Probability the blend outperforms" />
+                </th>
                 {horizons.map((h) => (
                   <th key={h} className="text-right font-medium">{h}mo</th>
                 ))}
@@ -176,7 +187,8 @@ export default function ForwardConfidenceChart() {
       )}
 
       <p className="mt-4 pt-3 border-t border-border text-2xs text-muted italic">
-        {LIMITATION}
+        <InfoIcon tooltipKey="hmm_reference" metricLabel="Hidden Markov Model" />
+        {' '}{LIMITATION}
       </p>
     </div>
   )

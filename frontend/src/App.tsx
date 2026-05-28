@@ -6,10 +6,10 @@ import axios from 'axios'
 import LoginPage from './pages/LoginPage'
 import AuthVerify from './pages/AuthVerify'
 import MainLayout from './layouts/MainLayout'
-import Dashboard from './components/Dashboard'
 import CouncilDebate from './components/CouncilDebate'
 import QAHub from './pages/QAHub'
-import AcademicAnalytics from './pages/AcademicAnalytics'
+import InvestmentOutlook from './pages/InvestmentOutlook'
+import Analytics from './pages/Analytics'
 import PerformanceRecord from './pages/PerformanceRecord'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
@@ -280,7 +280,7 @@ export default function App() {
                   </RequireAuth>
                 }
               >
-                <Route index element={<Dashboard />} />
+                <Route index element={<InvestmentOutlook />} />
                 <Route path="statistical-evidence"
                   element={
                     <Suspense fallback={<_PageLoadingFallback />}>
@@ -293,7 +293,7 @@ export default function App() {
                       <RegimeAnalysis />
                     </Suspense>
                   } />
-                <Route path="analytics" element={<AcademicAnalytics />} />
+                <Route path="analytics" element={<Analytics />} />
                 <Route path="performance-record" element={<PerformanceRecord />} />
                 <Route path="council" element={<CouncilDebate />} />
                 <Route path="qa" element={<QAHub />} />

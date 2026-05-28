@@ -29,6 +29,54 @@ const STRATEGY_TOOLTIPS: Record<string, string> = Object.fromEntries(
 )
 
 export const EXPLAINER_TOOLTIPS: Record<string, string> = {
+  // ── Investment Outlook — CIO card + forward chart ──────────────────────────
+  regime_label:
+    'The market regime the HMM currently reads from return and volatility '
+    + 'patterns: BULL (trending up), BEAR (risk-off), or TRANSITION '
+    + '(unsettled). The regime-conditional blend tilts accordingly.',
+  posterior_probability:
+    'The HMM posterior: the probability the market is in each regime right '
+    + 'now. The confidence figure is the posterior for the current regime; '
+    + 'a low value means the regime read is uncertain.',
+  ess_warning:
+    'Kish effective sample size. When the months that inform a regime are '
+    + 'few, its covariance is under-determined and the blend falls back '
+    + 'toward equal weight. A low-ESS flag means treat that regime read '
+    + 'with caution.',
+  recommendation_structure:
+    'Every recommendation carries four parts: the signal (what the data '
+    + 'says), the recommendation (what to do), the dissenting view (the '
+    + 'strongest counter-argument), and the key risk. This mirrors the CFA '
+    + 'Institute disclosure spirit: full disclosure, balanced presentation.',
+  key_risk:
+    'The single biggest threat to the recommendation: the one thing that '
+    + 'would hurt it most if it happened. Distinct from the dissenting '
+    + 'view, which is a standing counter-argument.',
+  cfa_disclosure:
+    'Educational use within the FNA 670 practicum, not investment advice. '
+    + 'Simulated and backtested results do not guarantee future '
+    + 'performance; material limitations are disclosed on the card.',
+  hmm_reference:
+    'Hidden Markov Model. It learns market regimes from return and '
+    + 'volatility patterns rather than fixed rules, and gives a probability '
+    + 'for each regime each month instead of a hard label.',
+  monte_carlo_reference:
+    'A forward simulation of thousands of paths. Each path walks the regime '
+    + 'forward through the HMM transition matrix and draws monthly returns '
+    + 'from the regime-conditional distribution. It is a confidence range, '
+    + 'not a forecast.',
+  confidence_band:
+    'The shaded range is the 90% band: 90% of simulated paths land between '
+    + 'the 5th and 95th percentile lines. The median is the central '
+    + 'expectation, not a prediction.',
+  p_outperform:
+    'The share of simulated paths on which the regime-conditional blend '
+    + 'ends the horizon ahead of the baseline. 50% is a coin flip; higher '
+    + 'means the blend wins on more paths.',
+  value_added_sharpe:
+    'The blend Sharpe minus the baseline Sharpe over the window. A positive '
+    + 'figure means more return per unit of risk than the baseline; the '
+    + 'short-window figures are directional, not significance-tested.',
   // ── Analytics page — charts ────────────────────────────────────────────────
   cumulative_return_chart:
     'Shows how $1 invested in each strategy at inception would have grown '
