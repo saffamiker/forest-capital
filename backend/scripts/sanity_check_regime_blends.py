@@ -57,6 +57,86 @@ def _fmt_weights(blend: dict[str, float], top: int = 10) -> str:
     return "\n".join(lines)
 
 
+def _print_sensitivity(strategy_results, hmm_result, caps=(0.30, 0.40, 0.50)):
+    """Re-run the blends at several per-strategy caps so we can see how
+    binding the 0.40 diversification constraint is. If the same
+    strategy tops every regime at every cap level, the tilt is driven
+    by the moments (a genuine finding), not by the constraint."""
+    from tools.regime_meta_optimizer import compute_regime_blends
+
+    print("-" * 68)
+    print("BOX-CONSTRAINT SENSITIVITY  (top 3 by weight per regime)")
+    print("-" * 68)
+    for cap in caps:
+        built = compute_regime_blends(
+            strategy_results, hmm_result, max_weight=cap)
+        if built.get("error"):
+            print(f"  cap {cap:.2f}: error {built['error']}")
+            continue
+        print(f"  cap = {cap:.2f}")
+        for regime in ("BULL", "BEAR", "TRANSITION"):
+            blend = built["blends"].get(regime)
+            if not blend:
+                continue
+            rows = sorted(blend.items(), key=lambda kv: kv[1],
+                          reverse=True)[:3]
+            # Count how many strategies sit AT the cap (binding).
+            at_cap = sum(1 for _, w in blend.items()
+                         if abs(w - cap) < 1e-3)
+            top3 = "  ".join(f"{n}={w:.3f}" for n, w in rows)
+            ew = "  [EW]" if regime in built["fallback"] else ""
+            print(f"    {regime:<11} {top3}   ({at_cap} at cap){ew}")
+        print()
+
+
+def _print_dominance(strategy_results, hmm_result, built):
+    """Per-regime Sharpe ranking next to the blend weight. Answers the
+    faculty question: is the top-weighted strategy genuinely the
+    highest-Sharpe one in that regime (a finding), or is it loaded to
+    the cap despite a mid-pack Sharpe (a covariance / constraint
+    effect worth understanding)?"""
+    from tools.regime_meta_optimizer import regime_strategy_diagnostics
+
+    diag = regime_strategy_diagnostics(strategy_results, hmm_result)
+    if diag.get("error"):
+        print(f"regime_strategy_diagnostics error: {diag['error']}")
+        return
+    cap = built.get("max_weight", 0.40)
+    print("-" * 68)
+    print("MOMENTUM-DOMINANCE CHECK  (Sharpe rank vs blend weight)")
+    print(f"  Sharpe is raw return/vol within each regime, annualised. "
+          f"Cap = {cap:.2f}.")
+    print("-" * 68)
+    for regime in ("BULL", "BEAR", "TRANSITION"):
+        rinfo = diag["regimes"].get(regime)
+        if not rinfo:
+            continue
+        blend = (built.get("blends") or {}).get(regime, {})
+        per = rinfo["per_strategy"]
+        # Sort by Sharpe rank ascending (rank 1 = best).
+        ordered = sorted(per.items(), key=lambda kv: kv[1]["rank"])
+        top = rinfo.get("top_sharpe")
+        print(f"  {regime}  (top Sharpe: {top})")
+        print(f"    {'strategy':<22} {'rank':>4} {'sharpe':>8} "
+              f"{'meanA':>8} {'volA':>7} {'weight':>8}")
+        for name, m in ordered[:6]:
+            w = blend.get(name, 0.0)
+            flag = " <-CAP" if abs(w - cap) < 1e-3 else ""
+            print(f"    {name:<22} {m['rank']:>4} "
+                  f"{m['sharpe_ann']:>8.3f} {m['mean_ann']:>8.3f} "
+                  f"{m['vol_ann']:>7.3f} {w:>8.3f}{flag}")
+        # The one-line verdict the reviewer wants.
+        top_weighted = max(blend.items(), key=lambda kv: kv[1],
+                           default=(None, 0.0))[0] if blend else None
+        if top_weighted and top_weighted == top:
+            print(f"    -> top weight IS top Sharpe: genuine tilt (a)")
+        elif top_weighted:
+            tw_rank = per.get(top_weighted, {}).get("rank", "?")
+            print(f"    -> top weight is {top_weighted} (Sharpe rank "
+                  f"{tw_rank}): covariance/constraint-driven, review (b)")
+        print()
+
+
 async def _real_inputs():
     """Pull the real production inputs. Returns
     (strategy_results, hmm_result, current_regime) or raises."""
@@ -158,6 +238,7 @@ def main() -> int:
 
     from tools.regime_meta_optimizer import (
         compute_regime_blends, probability_weighted_blend,
+        regime_strategy_diagnostics,
     )
 
     built = compute_regime_blends(strategy_results, hmm_result)
@@ -166,11 +247,12 @@ def main() -> int:
         return 1
 
     print("=" * 68)
-    print(f"REGIME-CONDITIONAL META-PORTFOLIO BLENDS — {banner}")
+    print(f"REGIME-CONDITIONAL META-PORTFOLIO BLENDS -- {banner}")
     print("=" * 68)
     print(f"Strategies in matrix : {len(built['names'])}")
     print(f"Common months        : {built['n_months']}")
     print(f"Effective N / regime : {built['effective_n']}")
+    print(f"Box constraint       : {built.get('box_constraint_note')}")
     if built["fallback"]:
         print(f"Equal-weight fallback: {built['fallback']}")
     print()
@@ -194,6 +276,11 @@ def main() -> int:
               f"(ESS = {ess_map[lowest]}) -- most likely to fall back "
               f"to equal weight.")
         print()
+
+    # Faculty pre-emption: is the cap binding, and is the dominant
+    # strategy genuinely top-Sharpe or a covariance/constraint effect?
+    _print_sensitivity(strategy_results, hmm_result)
+    _print_dominance(strategy_results, hmm_result, built)
 
     # Current regime + posterior + live blend.
     posterior = current.get("hmm_probabilities") or {}

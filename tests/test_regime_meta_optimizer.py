@@ -305,3 +305,79 @@ class TestProbabilityWeightedBlend:
         assert set(live.keys()) == set(built["names"])
         assert sum(live.values()) == pytest.approx(1.0, abs=1e-5)
         assert all(v >= -1e-9 for v in live.values())
+
+
+# ── box-constraint surfacing + sensitivity ──────────────────────────────────
+
+
+class TestBoxConstraint:
+
+    def test_output_echoes_cap_and_note(self):
+        out = rmo.compute_regime_blends(
+            _strategy_results(120, 6), _hmm_result(120),
+            min_effective_n=0.0)
+        assert out["max_weight"] == rmo._META_MAX_WEIGHT
+        note = out["box_constraint_note"]
+        assert "diversification constraint" in note
+        assert "institutional mandate" in note
+        # The cap is echoed as a percentage in the note.
+        assert f"{rmo._META_MAX_WEIGHT:.0%}" in note
+
+    def test_lower_cap_forces_more_strategies(self):
+        # A tighter cap cannot be met by fewer strategies, so the count
+        # of non-zero weights must not fall when the cap drops.
+        res = _strategy_results(120, 6)
+        hmm = _hmm_result(120)
+        wide = rmo.compute_regime_blends(
+            res, hmm, max_weight=0.50, min_effective_n=0.0)
+        tight = rmo.compute_regime_blends(
+            res, hmm, max_weight=0.30, min_effective_n=0.0)
+        for regime in wide["blends"]:
+            n_wide = sum(1 for w in wide["blends"][regime].values()
+                         if w > 1e-6)
+            n_tight = sum(1 for w in tight["blends"][regime].values()
+                          if w > 1e-6)
+            assert n_tight >= n_wide
+            # No weight may exceed the tighter cap (within rounding).
+            assert max(tight["blends"][regime].values()) <= 0.30 + 1e-6
+
+    def test_note_reflects_custom_cap(self):
+        out = rmo.compute_regime_blends(
+            _strategy_results(120, 6), _hmm_result(120),
+            max_weight=0.30, min_effective_n=0.0)
+        assert out["max_weight"] == 0.30
+        assert "30%" in out["box_constraint_note"]
+
+
+# ── regime_strategy_diagnostics ─────────────────────────────────────────────
+
+
+class TestRegimeStrategyDiagnostics:
+
+    def test_shape_and_ranks(self):
+        diag = rmo.regime_strategy_diagnostics(
+            _strategy_results(120, 6), _hmm_result(120))
+        assert "error" not in diag
+        assert len(diag["names"]) == 6
+        for regime, info in diag["regimes"].items():
+            per = info["per_strategy"]
+            assert len(per) == 6
+            # Ranks are a permutation of 1..6.
+            ranks = sorted(m["rank"] for m in per.values())
+            assert ranks == list(range(1, 7))
+            # top_sharpe is the rank-1 strategy.
+            top = info["top_sharpe"]
+            assert per[top]["rank"] == 1
+            # The top_sharpe strategy has the maximum sharpe_ann.
+            best = max(per.values(), key=lambda m: m["sharpe_ann"])
+            assert per[top]["sharpe_ann"] == pytest.approx(
+                best["sharpe_ann"])
+
+    def test_insufficient_data_errors(self):
+        out = rmo.regime_strategy_diagnostics({}, _hmm_result(60))
+        assert out["error"] == "insufficient_strategy_return_data"
+
+    def test_no_posteriors_errors(self):
+        out = rmo.regime_strategy_diagnostics(
+            _strategy_results(60, 5), {})
+        assert out["error"] == "no_regime_posteriors"

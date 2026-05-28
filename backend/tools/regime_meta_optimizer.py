@@ -59,13 +59,26 @@ log = structlog.get_logger(__name__)
 REGIMES = ("BULL", "BEAR", "TRANSITION")
 
 # Per-strategy cap at the meta level. 0.40 (the project's MAX_WEIGHT)
-# keeps any single strategy from dominating the blend while still
-# allowing genuine concentration when a regime strongly favours one
-# strategy. A minimum of 3 strategies is therefore always required to
-# reach a fully-invested blend, which is a healthy diversification
-# floor for a meta-portfolio of ten.
+# is a DIVERSIFICATION CONSTRAINT consistent with an institutional
+# mandate: no single strategy may exceed 40% of the meta-portfolio,
+# regardless of how strongly a regime favours it. The cap forces a
+# minimum of three strategies into any fully-invested blend and stops
+# the optimizer from collapsing a ten-strategy meta-portfolio onto a
+# single highest-Sharpe strategy. The cap is echoed in the
+# compute_regime_blends output (max_weight + box_constraint_note) so
+# the constraint is auditable, and it is a parameter so a sensitivity
+# sweep (e.g. 0.30 / 0.40 / 0.50) can probe how binding it is.
 _META_MAX_WEIGHT = MAX_WEIGHT
 _META_MIN_WEIGHT = MIN_WEIGHT
+
+
+def _box_constraint_note(max_weight: float) -> str:
+    """Human-readable justification for the per-strategy cap, echoed in
+    the blend output so a reviewer sees the mandate behind the number."""
+    return (
+        f"Maximum {max_weight:.0%} in any single strategy: a "
+        f"diversification constraint consistent with an institutional "
+        f"mandate.")
 
 try:
     import cvxpy as cp
@@ -310,6 +323,7 @@ def compute_regime_blends(
     *,
     exclude: tuple[str, ...] = (),
     risk_aversion: float = RISK_AVERSION,
+    max_weight: float = _META_MAX_WEIGHT,
     min_effective_n: float | None = None,
 ) -> dict:
     """Top-level Layer 2 entry point. Produces one mean-variance blend
@@ -326,8 +340,14 @@ def compute_regime_blends(
         },
         "effective_n": {regime: float},  # Kish ESS per regime
         "fallback":   [regime, ...],     # regimes that fell back to EW
+        "max_weight": float,             # the per-strategy cap applied
+        "box_constraint_note": str,      # plain-English justification
       }
     or {"error": "..."} when the inputs cannot produce a matrix.
+
+    max_weight — the per-strategy diversification cap (institutional
+    mandate; see _META_MAX_WEIGHT). Exposed so a sensitivity sweep can
+    re-run the blends at 0.30 / 0.40 / 0.50 to probe how binding it is.
 
     min_effective_n — when a regime's Kish effective sample size is
     below this, its covariance is treated as under-determined and the
@@ -362,7 +382,8 @@ def compute_regime_blends(
             fallback.append(regime)
         else:
             w = meta_mean_variance(
-                mu, cov, risk_aversion=risk_aversion)
+                mu, cov, risk_aversion=risk_aversion,
+                max_weight=max_weight)
             # meta_mean_variance falls back internally to EW on solver
             # trouble; detect that so the caller knows.
             if np.allclose(w, _equal_weight(n)):
@@ -379,7 +400,96 @@ def compute_regime_blends(
         "blends": blends,
         "effective_n": effective,
         "fallback": fallback,
+        "max_weight": max_weight,
+        "box_constraint_note": _box_constraint_note(max_weight),
     }
+
+
+def regime_strategy_diagnostics(
+    strategy_results: dict[str, dict],
+    hmm_result: dict,
+    *,
+    exclude: tuple[str, ...] = (),
+    annualization: int = 12,
+) -> dict:
+    """Per-regime, per-strategy moment diagnostics — the evidence that
+    separates a GENUINE highest-Sharpe finding from a constraint or
+    covariance artifact when one strategy keeps hitting the cap.
+
+    For each regime it reports every strategy's regime-conditional
+    annualised mean, volatility and Sharpe (mean·A / vol·√A), the
+    Sharpe rank, and the single highest-Sharpe strategy. The caller
+    pairs this with the blend weights: if the top-WEIGHTED strategy is
+    also the top-SHARPE strategy, the load is a genuine finding (a). If
+    a strategy is loaded to the cap while ranking mid-pack on Sharpe,
+    mean-variance is loading it for its low covariance with the rest
+    (a diversification effect, not necessarily an artifact) — the
+    covariance row makes that visible rather than leaving it to
+    guesswork (b).
+
+    Sharpe here is a RAW return / vol ratio (no risk-free subtraction)
+    — it matches the optimizer's mu, which is raw return, and serves
+    only as a within-regime ranking, not a reported performance figure.
+
+    Returns:
+      {
+        "names": [...],
+        "regimes": {
+          "BULL": {
+            "effective_n": float,
+            "top_sharpe": name,
+            "per_strategy": {
+              name: {"mean_ann", "vol_ann", "sharpe_ann", "rank"}
+            },
+          }, ...
+        },
+      }
+    or {"error": "..."} mirroring compute_regime_blends.
+    """
+    names, dates, matrix = build_strategy_matrix(
+        strategy_results, exclude=exclude)
+    if not names:
+        return {"error": "insufficient_strategy_return_data"}
+    posteriors = align_regime_posteriors(dates, hmm_result)
+    if not posteriors:
+        return {"error": "no_regime_posteriors"}
+
+    a = float(annualization)
+    sqrt_a = np.sqrt(a)
+    regimes: dict[str, dict] = {}
+    for regime in REGIMES:
+        post = posteriors.get(regime)
+        if post is None:
+            continue
+        mu, cov, ess = regime_conditional_moments(matrix, post)
+        vol = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+        mean_ann = mu * a
+        vol_ann = vol * sqrt_a
+        with np.errstate(divide="ignore", invalid="ignore"):
+            sharpe_ann = np.where(vol > 0, (mu * a) / (vol * sqrt_a), 0.0)
+        # Rank 1 = highest Sharpe. argsort descending, then invert.
+        order = np.argsort(-sharpe_ann)
+        rank = np.empty(len(names), dtype=int)
+        for r, idx in enumerate(order):
+            rank[idx] = r + 1
+        per_strategy = {
+            names[i]: {
+                "mean_ann": round(float(mean_ann[i]), 6),
+                "vol_ann": round(float(vol_ann[i]), 6),
+                "sharpe_ann": round(float(sharpe_ann[i]), 4),
+                "rank": int(rank[i]),
+            }
+            for i in range(len(names))
+        }
+        regimes[regime] = {
+            "effective_n": round(float(ess), 2),
+            "top_sharpe": names[int(order[0])] if len(order) else None,
+            "per_strategy": per_strategy,
+        }
+
+    if not regimes:
+        return {"error": "no_regime_diagnostics_computed"}
+    return {"names": names, "regimes": regimes}
 
 
 def probability_weighted_blend(
