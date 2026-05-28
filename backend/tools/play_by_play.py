@@ -717,22 +717,45 @@ async def persist_events(rows: list[dict], *, data_hash: str | None = None) -> i
     return written
 
 
+_STORED_COLS = (
+    "event_id", "event_date", "trigger", "regime", "posterior",
+    "blend_weights", "recommendation", "dissenting_view", "performance",
+    "verdict", "value_added_sharpe", "hmm_fit", "n_train_months",
+    "data_hash",
+)
+
+
 async def load_stored_events() -> list[dict]:
     """Every persisted event row, ordered by event_date. The read path
-    behind the Council Performance Record page / slide. Fail-open to []."""
+    behind the Council Performance Record page / slide.
+
+    There is NO is_frozen filter: a play_by_play_events row only exists
+    once it was a complete, settled fact (is_persistable gate at write
+    time), so row existence IS the frozen flag. The WHERE computed_at IS
+    NOT NULL guard is belt-and-braces (every persisted row has the
+    server-default timestamp). Columns are mapped by explicit index
+    rather than result.keys() to match the proven cache.py read pattern.
+    Logs the row count so a "page shows empty but table has rows" report
+    is diagnosable from the Render logs. Fail-open to []."""
     if not _DB_AVAILABLE:
+        log.warning("play_by_play_load_db_unavailable")
         return []
     try:
         from sqlalchemy import text
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
-            rows = await session.execute(text(
-                "SELECT event_id, event_date, trigger, regime, posterior, "
-                "       blend_weights, recommendation, dissenting_view, "
-                "       performance, verdict, value_added_sharpe, hmm_fit, "
-                "       n_train_months, data_hash "
-                "FROM play_by_play_events ORDER BY event_date"))
-            cols = list(rows.keys())
-            return [dict(zip(cols, r)) for r in rows.fetchall()]
+            result = await session.execute(text(
+                "SELECT " + ", ".join(_STORED_COLS) + " "
+                "FROM play_by_play_events "
+                "WHERE computed_at IS NOT NULL ORDER BY event_date"))
+            fetched = result.fetchall()
+            out: list[dict] = []
+            for r in fetched:
+                row = {_STORED_COLS[i]: r[i] for i in range(len(_STORED_COLS))}
+                if row.get("event_date") is not None:
+                    row["event_date"] = str(row["event_date"])
+                out.append(row)
+            log.info("play_by_play_load_ok", n_events=len(out))
+            return out
     except Exception as exc:  # noqa: BLE001
         log.warning("play_by_play_load_error", error=str(exc))
         return []

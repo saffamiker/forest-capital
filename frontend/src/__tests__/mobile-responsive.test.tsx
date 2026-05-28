@@ -149,7 +149,7 @@ describe('Mobile navigation drawer', () => {
     const drawer = screen.getByTestId('nav-drawer')
     expect(drawer).toBeInTheDocument()
     // The grouped nav items are present inside the drawer.
-    expect(within(drawer).getByText('Dashboard')).toBeInTheDocument()
+    expect(within(drawer).getByText('Investment Outlook')).toBeInTheDocument()
     expect(within(drawer).getByText('Council')).toBeInTheDocument()
   })
 

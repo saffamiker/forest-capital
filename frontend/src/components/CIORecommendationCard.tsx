@@ -11,6 +11,7 @@
  */
 import { useEffect, useState } from 'react'
 import { ChevronDown, ChevronRight, Loader2, AlertTriangle } from 'lucide-react'
+import InfoIcon from './InfoIcon'
 
 interface Confidence {
   regime?: string | null
@@ -97,15 +98,25 @@ export default function CIORecommendationCard() {
     <div className="card p-5 m-4 md:m-6 border-l-2 border-electric">
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <div className="text-2xs text-muted uppercase tracking-wide">
+          <div className="text-2xs text-muted uppercase tracking-wide flex items-center gap-1">
             CIO Live Recommendation
+            <InfoIcon tooltipKey="recommendation_structure"
+                      metricLabel="Four-component recommendation structure" />
           </div>
           <div className="flex items-baseline gap-3 mt-1">
             <span className={`text-2xl font-bold ${tone}`}>{regime}</span>
+            <InfoIcon tooltipKey="regime_label" metricLabel="Current regime"
+                      currentValue={regime} />
             <span className="text-sm text-muted font-mono">
               confidence {probPct}
+              <InfoIcon tooltipKey="posterior_probability"
+                        metricLabel="Regime posterior confidence"
+                        currentValue={probPct} />
               {conf.ess_warning ? (
-                <span className="ml-2 text-warning">· low ESS</span>
+                <span className="ml-2 text-warning">· low ESS
+                  <InfoIcon tooltipKey="ess_warning"
+                            metricLabel="Effective sample size warning" />
+                </span>
               ) : null}
             </span>
           </div>
@@ -130,8 +141,11 @@ export default function CIORecommendationCard() {
         {rec.key_risk && (
           <p className="flex gap-1.5">
             <AlertTriangle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
-            <span><span className="text-muted">Key risk: </span>
-              {rec.key_risk}</span>
+            <span>
+              <span className="text-muted">Key risk: </span>
+              <InfoIcon tooltipKey="key_risk" metricLabel="Key risk" />
+              {rec.key_risk}
+            </span>
           </p>
         )}
       </div>
@@ -156,7 +170,8 @@ export default function CIORecommendationCard() {
       )}
 
       <p className="mt-4 pt-3 border-t border-border text-2xs text-muted italic">
-        {CFA_DISCLOSURE}
+        <InfoIcon tooltipKey="cfa_disclosure" metricLabel="CFA disclosure" />
+        {' '}{CFA_DISCLOSURE}
       </p>
     </div>
   )

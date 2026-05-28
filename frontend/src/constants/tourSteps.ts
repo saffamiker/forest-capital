@@ -54,8 +54,8 @@ export const TOUR_STEPS: TourStep[] = [
   {
     target: '[data-tour="nav-dashboard"]',
     placement: 'bottom',
-    route: '/',
-    title: 'Dashboard — Your Command Centre',
+    route: '/analytics',
+    title: 'Analytics — Your Command Centre',
     body: [
       'Ten portfolio strategies ranked by risk-adjusted performance, all '
       + 'measured against the 100% equity benchmark.',
@@ -68,7 +68,7 @@ export const TOUR_STEPS: TourStep[] = [
   {
     target: '[data-tour="strategy-table"]',
     placement: 'top',
-    route: '/',
+    route: '/analytics',
     title: 'Strategy Rankings',
     body: [
       'Each row is a fully backtested portfolio strategy spanning 282 '
@@ -86,7 +86,7 @@ export const TOUR_STEPS: TourStep[] = [
   {
     target: '[data-tour="efficient-frontier"]',
     placement: 'top',
-    route: '/',
+    route: '/analytics',
     title: 'Efficient Frontier',
     body: [
       'The theoretical optimum — the maximum return achievable for each '
