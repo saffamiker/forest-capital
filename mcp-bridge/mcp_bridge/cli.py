@@ -35,22 +35,41 @@ from .config import config_path, load_config, write_default_config
 
 
 def _cmd_init(_args: argparse.Namespace) -> int:
-    """Generates a fresh URL-safe token, writes the config file,
-    prints both so the operator can paste the token into the
-    claude.ai connector configuration. Existing config IS
-    overwritten — operator can keep the old token by editing the
-    file directly instead of running init twice."""
+    """Generates a fresh bearer token AND OAuth client credentials,
+    writes the config file, and prints everything the operator needs
+    to register the bridge with claude.ai's connector UI. Existing
+    config IS overwritten — operator can keep the old values by
+    editing the file directly instead of running init twice."""
     token = secrets.token_urlsafe(32)
-    p = write_default_config(token=token)
+    client_id = "mcp-bridge-" + secrets.token_urlsafe(8)
+    client_secret = secrets.token_urlsafe(32)
+    p = write_default_config(token=token, extra={
+        "oauth_client_id": client_id,
+        "oauth_client_secret": client_secret,
+    })
     print(f"Wrote {p}")
     print()
-    print("Bearer token (paste into the claude.ai MCP connector "
-          "Authorization header):")
+    print("=" * 64)
+    print("claude.ai 'Add Custom Connector' — OAuth 2.1 (current UI)")
+    print("=" * 64)
+    print()
+    print("  Server URL:    https://<your-tunnel-url>/mcp")
+    print(f"  Client ID:     {client_id}")
+    print(f"  Client Secret: {client_secret}")
+    print()
+    print("claude.ai discovers /authorize + /token automatically via")
+    print("the bridge's /.well-known/oauth-* metadata. No header field")
+    print("needed — the OAuth flow issues the bearer token below.")
+    print()
+    print("-" * 64)
+    print("Bearer token (CLI / direct-header use, e.g. .mcp.json on")
+    print("the desktop Claude Code side):")
     print()
     print(f"  {token}")
     print()
-    print("Worker daemon is DISABLED by default. To enable hands-off "
-          "execution edit the config file:")
+    print("-" * 64)
+    print("Worker daemon is DISABLED by default. To enable hands-off")
+    print("execution edit the config file:")
     print()
     print('  { "auth_token": "...", "worker_enabled": true }')
     print()
