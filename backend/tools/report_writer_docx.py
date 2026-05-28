@@ -819,13 +819,22 @@ def build_appendix_docx(context: dict) -> bytes:
     after Appendix D with hanging-indent APA entries.
 
     context schema:
-      verified_data:       dict — for Appendix A statistics + footers
-      ranked_findings:     list — for Appendix B
-      team_activity:       dict — for Appendix C
-      validation_summary:  dict — for Appendix D
-      citations_cache:     dict — for inline references + References
-      findings_metadata:   dict — computed_at, data_hash, audit_status
-      generated_at:        str  — for Appendix C footer
+      verified_data:       dict, for Appendix A statistics
+      ranked_findings:     list, for Appendix B
+      team_activity:       dict, for Appendix C
+      validation_summary:  dict, for Appendix D
+      citations_cache:     dict, FULL citation set, used by Appendix A's
+                           methodological references + Appendix D's
+                           GIPS reference (specific concept IDs only)
+      matched_citations:   dict, the SUBSET of citations_cache whose
+                           row id appears in citation_finding_matches
+                           for this generation. The References list at
+                           the end of the appendix renders ONLY these.
+                           Falls back to citations_cache when absent
+                           or empty (a fresh draft where the team has
+                           not yet ticked any match).
+      findings_metadata:   dict, computed_at + data_hash + audit_status
+      generated_at:        str, for Appendix C footer
     """
     doc = _new_apa_document()
 
@@ -834,7 +843,15 @@ def build_appendix_docx(context: dict) -> bytes:
     _appendix_c(doc, context)
     _appendix_d(doc, context)
 
-    refs_md = _build_references_md(context.get("citations_cache") or {})
+    # References list — narrow to matched citations when the team has
+    # ticked any in Citation Review; otherwise fall back to the full
+    # verified set so a fresh draft still renders a References block.
+    refs_source = (
+        context.get("matched_citations")
+        or context.get("citations_cache")
+        or {}
+    )
+    refs_md = _build_references_md(refs_source)
     _add_page_break(doc)
     _add_section_heading(doc, "References", level=1)
     if refs_md:
