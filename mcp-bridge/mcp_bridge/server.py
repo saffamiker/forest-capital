@@ -96,18 +96,36 @@ def create_app(cfg: BridgeConfig | None = None) -> FastAPI:
         """Bearer-token gate on every protected route. Skipped only
         when cfg.auth_token is empty (localhost dev mode). The 401
         body is intentionally generic — no enumeration of which
-        token would have worked."""
+        token would have worked.
+
+        On a 401 the response carries a WWW-Authenticate header
+        pointing at the protected-resource metadata (RFC 9728). That
+        is how an OAuth client (claude.ai) DISCOVERS the authorization
+        server when it hits /mcp without a token: it reads the
+        resource_metadata URL, fetches the AS metadata, and runs the
+        authorize/token flow. Without the header the OAuth connector
+        cannot bootstrap from a bare /mcp call."""
         token = app.state.cfg.auth_token
         if not token:
             return
+        base = str(request.base_url).rstrip("/")
+        proto = request.headers.get("x-forwarded-proto")
+        fwd_host = request.headers.get("x-forwarded-host")
+        if proto and fwd_host:
+            base = f"{proto}://{fwd_host}".rstrip("/")
+        challenge = (
+            'Bearer resource_metadata='
+            f'"{base}/.well-known/oauth-protected-resource"')
         header = request.headers.get("authorization", "")
         if not header.lower().startswith("bearer "):
             raise HTTPException(
-                status_code=401, detail="Missing bearer token.")
+                status_code=401, detail="Missing bearer token.",
+                headers={"WWW-Authenticate": challenge})
         provided = header.split(" ", 1)[1].strip()
         if provided != token:
             raise HTTPException(
-                status_code=401, detail="Invalid bearer token.")
+                status_code=401, detail="Invalid bearer token.",
+                headers={"WWW-Authenticate": challenge})
 
     # ── Public operational endpoint (no auth) ──────────────────────────
 
@@ -219,6 +237,14 @@ def create_app(cfg: BridgeConfig | None = None) -> FastAPI:
             # back as a structured RPC error rather than a 500
             # HTML page. The bridge stays usable from mobile.
             return _rpc_error(None, _RPC_INTERNAL_ERROR, str(exc))
+
+    # ── OAuth 2.1 shim — claude.ai connector registration ──────────────
+    # Discovery (/.well-known/*), /authorize, /token. The token /token
+    # issues IS cfg.auth_token, so require_token above validates it
+    # unchanged. These routes are deliberately UNauthenticated (they
+    # ARE the auth handshake). See oauth.py.
+    from .oauth import register_oauth_routes
+    register_oauth_routes(app, cfg)
 
     return app
 

@@ -61,6 +61,19 @@ class BridgeConfig:
     # moment the bridge is exposed via a tunnel.
     auth_token: str = ""
 
+    # ── OAuth 2.1 (claude.ai connector) ────────────────────────────────
+    # claude.ai's Add Custom Connector UI registers a remote MCP server
+    # via OAuth 2.1, not a static bearer header. The bridge exposes a
+    # minimal OAuth surface (discovery metadata + /authorize + /token)
+    # so the connector flow completes; the token /token issues IS
+    # auth_token, so require_token is unchanged. `bridge init`
+    # generates these; the operator pastes them into the claude.ai
+    # connector's Client ID / Client Secret fields. Empty values
+    # disable the OAuth surface (bearer-header-only mode, the
+    # pre-OAuth behaviour).
+    oauth_client_id: str = ""
+    oauth_client_secret: str = ""
+
     # ── Storage ────────────────────────────────────────────────────────
     db_path: str = str(Path.home() / ".local" / "share" /
                         "mcp-bridge" / "queue.db")
@@ -127,6 +140,11 @@ def load_config() -> BridgeConfig:
     cfg.port = _env_int("MCP_BRIDGE_PORT", cfg.port)
     if os.getenv("MCP_BRIDGE_AUTH_TOKEN") is not None:
         cfg.auth_token = os.environ["MCP_BRIDGE_AUTH_TOKEN"]
+    if os.getenv("MCP_BRIDGE_OAUTH_CLIENT_ID") is not None:
+        cfg.oauth_client_id = os.environ["MCP_BRIDGE_OAUTH_CLIENT_ID"]
+    if os.getenv("MCP_BRIDGE_OAUTH_CLIENT_SECRET") is not None:
+        cfg.oauth_client_secret = os.environ[
+            "MCP_BRIDGE_OAUTH_CLIENT_SECRET"]
     if os.getenv("MCP_BRIDGE_DB_PATH"):
         cfg.db_path = os.environ["MCP_BRIDGE_DB_PATH"]
     if os.getenv("MCP_BRIDGE_WORKER_ENABLED") is not None:

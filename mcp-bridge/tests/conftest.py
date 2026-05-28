@@ -38,9 +38,15 @@ def cfg(tmp_queue_path: str, monkeypatch: pytest.MonkeyPatch):
         "MCP_BRIDGE_MAX_PROMPT_BYTES",
     ):
         monkeypatch.delenv(k, raising=False)
+    for k in (
+        "MCP_BRIDGE_OAUTH_CLIENT_ID", "MCP_BRIDGE_OAUTH_CLIENT_SECRET",
+    ):
+        monkeypatch.delenv(k, raising=False)
     return BridgeConfig(
         db_path=tmp_queue_path,
         auth_token="test-token",
+        oauth_client_id="test-client-id",
+        oauth_client_secret="test-client-secret",
         worker_enabled=False,
         worker_poll_interval_s=0.01,
         worker_prompt_timeout_s=5,
