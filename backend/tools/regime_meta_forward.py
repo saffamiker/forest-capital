@@ -63,6 +63,11 @@ log = structlog.get_logger(__name__)
 # matched benchmark path, so the outperformance probability is reported
 # as None rather than fabricated.
 _BENCHMARK_ID = "BENCHMARK"
+# The classic 60/40 comparison series. Like the benchmark, it is
+# simulated from its FULL-HISTORY return distribution (no regime
+# conditioning) so the chart contrasts the regime-aware blend against
+# two regime-agnostic baselines.
+_CLASSIC_6040_ID = "CLASSIC_60_40"
 
 # Persistence fallback: when no transition matrix is supplied, a regime
 # is assumed to persist with probability 0.8 and otherwise move to one of
@@ -257,87 +262,102 @@ def forward_monte_carlo(
     # 6. Initial-regime distribution from the current posterior.
     init_dist = _initial_distribution(current_posterior, present)
 
-    # Precompute per-regime portfolio + benchmark return parameters so the
-    # inner simulation loop only draws, never recomputes moments. The
-    # variance is clipped at zero: a degenerate regime covariance can
-    # produce a tiny negative quadratic form through floating point, which
-    # would make the Normal scale invalid.
-    bench_idx = names.index(_BENCHMARK_ID) if _BENCHMARK_ID in names else None
+    # Per-regime BLEND return parameters (the regime-path series), and the
+    # FULL-HISTORY unconditional parameters for the two comparison series.
+    # The blend is regime-conditional; the benchmark and classic 60/40 use
+    # their full-history mean/std with NO regime conditioning, so the chart
+    # contrasts a regime-aware path against two regime-agnostic baselines.
+    # Variance is clipped at zero: a degenerate regime covariance can
+    # produce a tiny negative quadratic form through floating point.
     port_mean = np.empty(len(present))
     port_std = np.empty(len(present))
-    bench_mean = np.empty(len(present))
-    bench_std = np.empty(len(present))
     for i, r in enumerate(present):
         mu_r, cov_r = moments[r]
         wv = wvecs[r]
         port_mean[i] = float(wv @ mu_r)
-        port_var = float(wv @ cov_r @ wv)
-        port_std[i] = np.sqrt(max(port_var, 0.0))
-        if bench_idx is not None:
-            bench_mean[i] = float(mu_r[bench_idx])
-            bench_std[i] = np.sqrt(max(float(cov_r[bench_idx, bench_idx]), 0.0))
+        port_std[i] = np.sqrt(max(float(wv @ cov_r @ wv), 0.0))
+
+    def _full_history_params(strat_id: str) -> tuple[float, float] | None:
+        if strat_id not in names:
+            return None
+        col = matrix[:, names.index(strat_id)]
+        sd = float(np.std(col, ddof=1)) if col.size > 1 else 0.0
+        return float(np.mean(col)), sd
+
+    bench_params = _full_history_params(_BENCHMARK_ID)
+    classic_params = _full_history_params(_CLASSIC_6040_ID)
 
     horizon_list = [int(h) for h in horizons if int(h) >= 1]
     if not horizon_list:
         return {"error": "no_valid_horizons"}
     max_h = max(horizon_list)
+    horizon_set = set(horizon_list)
 
-    # 6/7. Seeded forward simulation. Vectorised across paths, looped over
-    #    months: at each step every path's current regime indexes its
-    #    return parameters, a Normal draw produces that month's blend (and
-    #    matched benchmark) return, and returns are compounded into the
-    #    cumulative growth factor along each path.
+    # Seeded forward simulation. The blend walks a regime path (its
+    # monthly return drawn from the current regime's blend distribution);
+    # the benchmark and classic series draw i.i.d. from their full-history
+    # distribution each month. All three compound along the same paths.
     rng = np.random.default_rng(seed)
     k = len(present)
     regime_state = rng.choice(k, size=n_paths, p=init_dist)
 
-    # Cumulative GROWTH factors (product of 1+r); converted to cumulative
-    # return (factor - 1) at the recorded horizons.
     blend_growth = np.ones(n_paths)
-    bench_growth = np.ones(n_paths) if bench_idx is not None else None
-    horizon_set = set(horizon_list)
+    bench_growth = np.ones(n_paths) if bench_params else None
+    classic_growth = np.ones(n_paths) if classic_params else None
     blend_cum: dict[int, np.ndarray] = {}
     bench_cum: dict[int, np.ndarray] = {}
+    classic_cum: dict[int, np.ndarray] = {}
 
     for month in range(1, max_h + 1):
-        means = port_mean[regime_state]
-        stds = port_std[regime_state]
-        blend_growth = blend_growth * (1.0 + rng.normal(means, stds))
-        if bench_idx is not None:
-            b_means = bench_mean[regime_state]
-            b_stds = bench_std[regime_state]
-            bench_growth = bench_growth * (1.0 + rng.normal(b_means, b_stds))
+        blend_growth = blend_growth * (1.0 + rng.normal(
+            port_mean[regime_state], port_std[regime_state]))
+        if bench_params:
+            bench_growth = bench_growth * (1.0 + rng.normal(
+                bench_params[0], bench_params[1], n_paths))
+        if classic_params:
+            classic_growth = classic_growth * (1.0 + rng.normal(
+                classic_params[0], classic_params[1], n_paths))
         if month in horizon_set:
             blend_cum[month] = blend_growth - 1.0
-            if bench_idx is not None:
+            if bench_params:
                 bench_cum[month] = bench_growth - 1.0
-        # Step the regime forward for next month. Each path transitions
-        # from its current state by that state's row of the transition
-        # matrix. Done after recording so month h reflects h regime draws.
+            if classic_params:
+                classic_cum[month] = classic_growth - 1.0
+        # Step the regime forward (after recording, so month h reflects h
+        # regime draws). Only the blend path depends on the regime.
         if month < max_h:
             regime_state = _step_regimes(rng, regime_state, transition)
 
-    # 8. Summarise each horizon: median and the 90% band, plus the
-    #    matched-path outperformance probability when the benchmark is in
-    #    the universe.
-    bands: dict[str, dict] = {}
-    for h in horizon_list:
-        cum = blend_cum[h]
-        band = {
-            "median": round(float(np.median(cum)), 6),
-            "p05": round(float(np.percentile(cum, 5)), 6),
-            "p95": round(float(np.percentile(cum, 95)), 6),
-        }
-        if bench_idx is not None:
-            band["p_outperform_benchmark"] = round(
-                float(np.mean(cum > bench_cum[h])), 6)
-        else:
-            band["p_outperform_benchmark"] = None
-        bands[str(h)] = band
+    def _band(cum_by_h: dict[int, np.ndarray]) -> dict:
+        return {str(h): {
+            "median": round(float(np.median(cum_by_h[h])), 6),
+            "p05": round(float(np.percentile(cum_by_h[h], 5)), 6),
+            "p95": round(float(np.percentile(cum_by_h[h], 95)), 6),
+        } for h in horizon_list}
 
-    # The live allocation the bands describe: the probability-weighted mix
-    # of the frozen blends under the current posterior. Reported so the
-    # presentation can show the weights alongside their projected path.
+    # Per-series 90% bands. Each series carries its own median + band so
+    # the chart can draw all three with their uncertainty.
+    bands: dict[str, dict] = {"blend": _band(blend_cum)}
+    if bench_params:
+        bands["benchmark"] = _band(bench_cum)
+    if classic_params:
+        bands["classic_6040"] = _band(classic_cum)
+
+    # Paired outperformance probabilities: P(blend cumulative > comparison
+    # cumulative) per horizon, comparing the blend path against each
+    # baseline on the same path index.
+    p_outperform: dict[str, dict] = {}
+    if bench_params:
+        p_outperform["benchmark"] = {
+            str(h): round(float(np.mean(blend_cum[h] > bench_cum[h])), 6)
+            for h in horizon_list}
+    if classic_params:
+        p_outperform["classic_6040"] = {
+            str(h): round(float(np.mean(blend_cum[h] > classic_cum[h])), 6)
+            for h in horizon_list}
+
+    # The live allocation the blend bands describe: the probability-
+    # weighted mix of the frozen blends under the current posterior.
     blend_weights = probability_weighted_blend(
         blends, current_posterior if isinstance(current_posterior, dict)
         else {})
@@ -349,6 +369,7 @@ def forward_monte_carlo(
         "horizons_months": horizon_list,
         "blend_weights": blend_weights,
         "bands": bands,
+        "p_outperform": p_outperform,
         "transition_source": transition_source,
     }
 
@@ -378,3 +399,79 @@ def _step_regimes(
     # the draw is the next regime.
     next_state = (draws[:, None] < rows).argmax(axis=1)
     return next_state.astype(regime_state.dtype)
+
+
+# ── data_hash-cached refresh (warm pipeline) + read ─────────────────────────
+
+_FORWARD_METRIC_KIND = "forward_projection"
+
+
+async def refresh_forward_projection(data_hash: str) -> bool:
+    """Render-side: fit the HMM on the live equity series, read the
+    current regime posterior, run the forward Monte Carlo, and cache the
+    bands under metric_kind 'forward_projection' keyed by data_hash. Fired
+    by the same warm pipeline as the analytics and CIO refresh, so the
+    landing-page chart is served from cache and never recomputes the
+    10,000-path simulation on a page read. Fail-open. DB / detector
+    imports are lazy so this module stays import-clean without them."""
+    try:
+        import pandas as pd
+        from tools.cache import get_latest_strategy_cache, get_monthly_returns
+        from tools.precomputed_analytics import set_metric
+        from tools.regime_detector import (
+            detect_current_regime, fit_hmm_historical,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("forward_projection_imports_unavailable", error=str(exc))
+        return False
+    try:
+        sr = await get_latest_strategy_cache()
+        monthly = await get_monthly_returns()
+        if not sr or not monthly or not monthly.get("equity") \
+                or not monthly.get("dates"):
+            return False
+        idx = pd.to_datetime(monthly["dates"])
+        equity = pd.Series(monthly["equity"], index=idx).sort_index()
+        hmm = fit_hmm_historical(equity)
+        if not hmm or hmm.get("error"):
+            log.warning("forward_projection_hmm_failed",
+                        error=(hmm or {}).get("error"))
+            return False
+        current = detect_current_regime() or {}
+        posterior = current.get("hmm_probabilities") or {}
+        # Seed derived from data_hash, not a fixed integer: the simulation
+        # is reproducible for a given data_hash (same data -> same chart)
+        # but refreshes automatically when new market data moves the hash.
+        import hashlib
+        seed = int(hashlib.sha256(
+            (data_hash or "forward").encode()).hexdigest()[:8], 16)
+        bands = forward_monte_carlo(sr, hmm, posterior, seed=seed)
+        if bands.get("error"):
+            log.warning("forward_projection_compute_failed",
+                        error=bands["error"])
+            return False
+        bands["regime"] = current.get("hmm_regime")
+        bands["regime_probability"] = (
+            posterior.get(current.get("hmm_regime"))
+            if current.get("hmm_regime") else None)
+        await set_metric(data_hash or "", _FORWARD_METRIC_KIND, bands,
+                         source="forward_monte_carlo")
+        log.info("forward_projection_cached",
+                 horizons=bands.get("horizons_months"),
+                 transition=bands.get("transition_source"))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("forward_projection_refresh_failed", error=str(exc))
+        return False
+
+
+async def get_cached_forward_projection() -> dict | None:
+    """The latest cached forward-projection bands for the read endpoint.
+    Fail-open to None so the chart renders its empty state before the
+    first warm computes one."""
+    try:
+        from tools.precomputed_analytics import get_latest_metric
+        return await get_latest_metric(_FORWARD_METRIC_KIND)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("forward_projection_read_error", error=str(exc))
+        return None

@@ -1,0 +1,183 @@
+/**
+ * Forward Confidence Chart — the "future" panel of the landing-page arc,
+ * rendered second (after the CIO card).
+ *
+ * Reads GET /api/v1/forward-projection (the Layer 4 forward Monte Carlo,
+ * data_hash-cached; the 10,000-path simulation never runs on a read).
+ * Plots three simulated series over 1/3/6/12 months, each with a median
+ * line and its 90% band (p05/p95): the regime-conditional blend
+ * (regime-path), the benchmark and the classic 60/40 (both from their
+ * full-history distribution, no regime conditioning). Below the chart it
+ * shows P(blend outperforms) each baseline at every horizon, the current
+ * regime + confidence, the not-a-forecast limitation, and an "as of"
+ * staleness indicator. Graceful empty state before the first warm.
+ */
+import { useEffect, useState } from 'react'
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  ResponsiveContainer, ReferenceLine,
+} from 'recharts'
+import { Loader2 } from 'lucide-react'
+
+interface Band { median: number; p05: number; p95: number }
+type SeriesBands = Record<string, Band>   // horizon -> band
+interface Projection {
+  horizons_months?: number[]
+  bands?: Record<string, SeriesBands>      // series -> horizon -> band
+  p_outperform?: Record<string, Record<string, number>>
+  regime?: string | null
+  regime_probability?: number | null
+  transition_source?: string
+  _computed_at?: string | null
+}
+interface Payload { available: boolean; projection: Projection | null }
+
+const SERIES: { key: string; label: string; color: string }[] = [
+  { key: 'blend', label: 'Regime-conditional blend', color: '#3b82f6' },
+  { key: 'benchmark', label: 'Benchmark (S&P 500)', color: '#ef4444' },
+  { key: 'classic_6040', label: 'Classic 60/40', color: '#94a3b8' },
+]
+
+const LIMITATION =
+  'Forward simulation uses the HMM transition matrix and ' +
+  'regime-conditional return distributions. Not a forecast.'
+
+const pct = (x: number | null | undefined): string =>
+  x === null || x === undefined ? '—' : `${(x * 100).toFixed(0)}%`
+
+function asOf(ts?: string | null): string {
+  if (!ts) return 'latest warm'
+  const d = new Date(ts)
+  return isNaN(d.getTime()) ? ts : d.toLocaleString()
+}
+
+export default function ForwardConfidenceChart() {
+  const [data, setData] = useState<Payload | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    let alive = true
+    fetch('/api/v1/forward-projection', { credentials: 'include' })
+      .then((r) => r.json())
+      .then((d) => { if (alive) { setData(d); setLoading(false) } })
+      .catch(() => { if (alive) { setData({ available: false, projection: null }); setLoading(false) } })
+    return () => { alive = false }
+  }, [])
+
+  if (loading) {
+    return (
+      <div className="card p-5 m-4 md:m-6 flex items-center gap-2 text-muted">
+        <Loader2 className="w-4 h-4 animate-spin" />
+        Loading the forward confidence projection…
+      </div>
+    )
+  }
+
+  const proj = data?.projection
+  if (!data?.available || !proj || !proj.bands?.blend) {
+    return (
+      <div className="card p-5 m-4 md:m-6 text-muted text-sm">
+        <div className="text-2xs uppercase tracking-wide mb-1">
+          Forward Confidence Projection
+        </div>
+        The forward simulation has not been computed yet. It is generated
+        on the next analytics warm and will appear here once cached.
+      </div>
+    )
+  }
+
+  const horizons = proj.horizons_months || [1, 3, 6, 12]
+  const present = SERIES.filter((s) => proj.bands?.[s.key])
+
+  // One row per horizon, flattened to <series>_median / _p05 / _p95.
+  const rows = horizons.map((h) => {
+    const row: Record<string, number | string> = { month: `${h}mo` }
+    for (const s of present) {
+      const b = proj.bands?.[s.key]?.[String(h)]
+      if (b) {
+        row[`${s.key}_median`] = b.median
+        row[`${s.key}_p05`] = b.p05
+        row[`${s.key}_p95`] = b.p95
+      }
+    }
+    return row
+  })
+
+  const conf = typeof proj.regime_probability === 'number'
+    ? `${(proj.regime_probability * 100).toFixed(0)}%` : '—'
+
+  return (
+    <div className="card p-5 m-4 md:m-6 border-l-2 border-electric">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="text-2xs text-muted uppercase tracking-wide">
+          Forward Confidence Projection
+        </div>
+        <div className="text-2xs text-muted font-mono text-right">
+          Regime {proj.regime || '—'} · confidence {conf} · As of {asOf(proj._computed_at)}
+        </div>
+      </div>
+
+      <div className="mt-4">
+        <ResponsiveContainer width="100%" height={300}>
+          <LineChart data={rows} margin={{ top: 8, right: 16, bottom: 4, left: 8 }}>
+            <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
+            <XAxis dataKey="month" tick={{ fill: '#64748b', fontSize: 11 }} />
+            <YAxis tickFormatter={(v) => `${(v * 100).toFixed(0)}%`}
+                   tick={{ fill: '#64748b', fontSize: 11 }} />
+            <Tooltip
+              contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c' }}
+              formatter={(v: number) => `${(v * 100).toFixed(1)}%`} />
+            <Legend />
+            <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1} />
+            {present.map((s) => [
+              <Line key={`${s.key}_m`} type="monotone" dataKey={`${s.key}_median`}
+                    name={s.label} stroke={s.color} strokeWidth={2} dot={false} />,
+              <Line key={`${s.key}_hi`} type="monotone" dataKey={`${s.key}_p95`}
+                    name={`${s.label} p95`} stroke={s.color} strokeWidth={1}
+                    strokeDasharray="3 3" dot={false} legendType="none" />,
+              <Line key={`${s.key}_lo`} type="monotone" dataKey={`${s.key}_p05`}
+                    name={`${s.label} p05`} stroke={s.color} strokeWidth={1}
+                    strokeDasharray="3 3" dot={false} legendType="none" />,
+            ])}
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      {/* P(blend outperforms) at each horizon */}
+      {proj.p_outperform && (
+        <div className="mt-4 overflow-x-auto">
+          <table className="text-sm w-full max-w-xl">
+            <thead>
+              <tr className="text-muted text-2xs uppercase">
+                <th className="text-left font-medium">P(blend outperforms)</th>
+                {horizons.map((h) => (
+                  <th key={h} className="text-right font-medium">{h}mo</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="font-mono text-xs">
+              {(['benchmark', 'classic_6040'] as const).map((base) => (
+                proj.p_outperform?.[base] ? (
+                  <tr key={base}>
+                    <td className="text-left text-text font-sans">
+                      vs {base === 'benchmark' ? 'Benchmark' : 'Classic 60/40'}
+                    </td>
+                    {horizons.map((h) => (
+                      <td key={h} className="text-right text-text">
+                        {pct(proj.p_outperform?.[base]?.[String(h)])}
+                      </td>
+                    ))}
+                  </tr>
+                ) : null
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p className="mt-4 pt-3 border-t border-border text-2xs text-muted italic">
+        {LIMITATION}
+      </p>
+    </div>
+  )
+}

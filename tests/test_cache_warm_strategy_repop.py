@@ -631,4 +631,5 @@ class TestDefaultWarmFnRepopulatesStrategies:
         assert result == {"academic_analytics": False,
                           "efficient_frontier": False,
                           "cio_recommendation": False,
-                          "performance_chart": False}
+                          "performance_chart": False,
+                          "forward_projection": False}
