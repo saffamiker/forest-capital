@@ -10,6 +10,7 @@ import Dashboard from './components/Dashboard'
 import CouncilDebate from './components/CouncilDebate'
 import QAHub from './pages/QAHub'
 import AcademicAnalytics from './pages/AcademicAnalytics'
+import PerformanceRecord from './pages/PerformanceRecord'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
 
@@ -293,6 +294,7 @@ export default function App() {
                     </Suspense>
                   } />
                 <Route path="analytics" element={<AcademicAnalytics />} />
+                <Route path="performance-record" element={<PerformanceRecord />} />
                 <Route path="council" element={<CouncilDebate />} />
                 <Route path="qa" element={<QAHub />} />
                 <Route path="peer-review"
