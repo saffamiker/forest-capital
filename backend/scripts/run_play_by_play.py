@@ -53,28 +53,55 @@ async def _real_inputs():
     return strategy_results, equity
 
 
+async def _compute_and_store():
+    """The event_id cache flow: skip events already persisted, compute
+    only the new ones (LLM fires once each), persist the complete rows,
+    and return the durable stored set for display."""
+    strategy_results, equity = await _real_inputs()
+    from tools.play_by_play import (
+        get_persisted_event_ids, llm_event_recommendation, load_stored_events,
+        persist_events, run_play_by_play,
+    )
+    existing = await get_persisted_event_ids()
+    new_rows = run_play_by_play(
+        strategy_results, equity,
+        existing_event_ids=existing,
+        recommend_fn=llm_event_recommendation)
+    written = await persist_events(new_rows)
+    stored = await load_stored_events()
+    return {
+        "equity_months": equity.shape[0],
+        "n_strategies": len(strategy_results),
+        "n_cached": len(existing),
+        "n_computed": len(new_rows),
+        "n_persisted": written,
+        "display": stored if stored else new_rows,
+    }
+
+
 def main() -> int:
     try:
-        strategy_results, equity = asyncio.run(_real_inputs())
+        res = asyncio.run(_compute_and_store())
     except Exception as exc:  # noqa: BLE001
         print(f"[!] Real inputs unavailable ({exc}).")
         print("[!] Run on Render (DB + hmmlearn present).")
         return 1
 
-    from tools.play_by_play import run_play_by_play
-
-    rows = run_play_by_play(strategy_results, equity)
-
+    display = res["display"]
     print("=" * 72)
     print("PLAY-BY-PLAY VALIDATION  --  point-in-time, no look-ahead")
     print("=" * 72)
-    print(f"Equity months available: {equity.shape[0]}   "
-          f"Strategies: {len(strategy_results)}")
-    print("30/60/90 days = 1/2/3 forward months (monthly data).")
+    print(f"Equity months: {res['equity_months']}   "
+          f"Strategies: {res['n_strategies']}")
+    print(f"Cached (skipped): {res['n_cached']}   "
+          f"Computed this run: {res['n_computed']}   "
+          f"Persisted: {res['n_persisted']}")
+    print("30/60/90 days = 1/2/3 forward months (monthly data). "
+          "Cached events are never recomputed.")
     print()
 
     n_evaluable = 0
-    for r in rows:
+    for r in display:
         print("-" * 72)
         print(f"{r['event_id']}   ({r['event_date']})")
         print(f"  {r['trigger']}")
@@ -104,7 +131,7 @@ def main() -> int:
         print()
 
     print("=" * 72)
-    print(f"Evaluable events: {n_evaluable} / {len(rows)}")
+    print(f"Evaluable events: {n_evaluable} / {len(display)}")
     print("=" * 72)
     return 0 if n_evaluable else 1
 

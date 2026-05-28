@@ -140,3 +140,73 @@ class TestHelpers:
         assert pbp._annualised_sharpe(np.array([0.01, 0.01])) is None  # 0 var
         assert pbp._annualised_sharpe(
             np.array([0.02, -0.01, 0.03])) is not None
+
+
+class TestCacheAndPersistence:
+
+    def test_run_skips_existing_event_ids(self):
+        res = _results({
+            "STRAT_A": [0.01] * 12, "BENCHMARK": [0.01] * 12,
+            "CLASSIC_60_40": [0.005] * 12})
+        eq = pd.Series([0.01] * 12,
+                       index=pd.to_datetime(_dates(12)))
+        all_ids = {e["event_id"] for e in pbp.EVENTS}
+        # Every event cached -> nothing recomputed.
+        assert pbp.run_play_by_play(
+            res, eq, existing_event_ids=all_ids) == []
+        # All but one cached -> exactly the one uncached event is attempted.
+        one_left = all_ids - {pbp.EVENTS[0]["event_id"]}
+        out = pbp.run_play_by_play(res, eq, existing_event_ids=one_left)
+        assert len(out) == 1
+        assert out[0]["event_id"] == pbp.EVENTS[0]["event_id"]
+
+    def test_is_persistable_gate(self):
+        complete = {"regime": "BEAR",
+                    "performance": {"blend": {"d30": 0.01, "d60": 0.02,
+                                              "d90": 0.03}}}
+        assert pbp.is_persistable(complete) is True
+        assert pbp.is_persistable({"error": "x"}) is False
+        assert pbp.is_persistable({"regime": None}) is False
+        # Forward window not yet complete -> not frozen.
+        assert pbp.is_persistable(
+            {"regime": "BULL",
+             "performance": {"blend": {"d30": 0.01, "d90": None}}}) is False
+
+    def test_evaluate_event_uses_recommend_fn(self, monkeypatch):
+        # Stub the Render-side HMM step so evaluate_event reaches the
+        # recommendation; verify the injected recommend_fn is used and
+        # receives the event.
+        monkeypatch.setattr(pbp, "point_in_time_blend", lambda *a, **k: {
+            "regime": "BEAR",
+            "posterior": {"bull": 0.1, "bear": 0.7, "transition": 0.2},
+            "blend_weights": {"STRAT_A": 1.0},
+            "n_train_months": 100})
+        res = _results({
+            "STRAT_A": [0.0] * 6 + [0.02, 0.01, 0.0],
+            "BENCHMARK": [0.0] * 6 + [0.0, 0.0, 0.0],
+            "CLASSIC_60_40": [0.0] * 6 + [0.0, 0.0, 0.0]})
+        seen = {}
+
+        def fake_rec(event, regime, posterior, blend_weights):
+            seen["event_id"] = event["event_id"]
+            seen["regime"] = regime
+            return {"recommendation": "REC", "dissenting_view": "DIS"}
+
+        row = pbp.evaluate_event(
+            pbp.EVENTS[0], res, pd.Series(dtype=float),
+            recommend_fn=fake_rec)
+        assert row["recommendation"] == "REC"
+        assert row["dissenting_view"] == "DIS"
+        assert seen["event_id"] == pbp.EVENTS[0]["event_id"]
+        assert seen["regime"] == "BEAR"
+
+    def test_llm_recommendation_fails_open_to_deterministic(self):
+        # No API key in the test environment -> call_claude raises ->
+        # falls back to the deterministic recommendation.
+        out = pbp.llm_event_recommendation(
+            pbp.EVENTS[0], "BEAR",
+            {"bull": 0.1, "bear": 0.7, "transition": 0.2},
+            {"MIN_VARIANCE": 0.5, "VOL_TARGETING": 0.5})
+        assert out["recommendation"] and out["dissenting_view"]
+        assert "—" not in out["recommendation"]
+        assert "—" not in out["dissenting_view"]
