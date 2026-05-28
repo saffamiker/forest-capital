@@ -10,6 +10,7 @@
 import { Children, isValidElement } from 'react'
 import type { ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import { renderWithMacroCitations } from './MacroCitation'
 
 interface MarkdownProps {
@@ -53,6 +54,16 @@ export default function Markdown({ content, className = '' }: MarkdownProps) {
   return (
     <div className={`markdown-body text-sm text-slate-300 leading-relaxed space-y-2 ${className}`}>
       <ReactMarkdown
+        // remark-gfm enables GitHub Flavored Markdown — most
+        // importantly TABLES (| col | col | with --- separators),
+        // which are a GFM extension, not standard markdown. Without
+        // it react-markdown emits the pipe syntax as raw text. The
+        // `table` component renderer below has been wired since the
+        // UI/UX pass; this plugin is what actually produces table
+        // nodes for it to render. (GFM also enables strikethrough,
+        // task lists, and autolinks — all safe additions for agent
+        // output.)
+        remarkPlugins={[remarkGfm]}
         components={{
           p: ({ children }) => <p>{withMacroCitations(children)}</p>,
           h1: ({ children }) => (
@@ -126,15 +137,31 @@ export default function Markdown({ content, className = '' }: MarkdownProps) {
               {children}
             </pre>
           ),
-          // GFM tables (if remark-gfm is added later) — wrap in a
+          // GFM tables (remark-gfm enabled above). Wrap in a
           // horizontally-scrollable container so the table's
           // intrinsic min-width doesn't force the parent drawer to
           // scroll. The wrap keeps the prose around the table
           // wrapping normally; ONLY the table is allowed to scroll.
           table: ({ children }) => (
             <div className="my-2 max-w-full overflow-x-auto">
-              <table className="text-xs">{children}</table>
+              <table className="text-xs border-collapse w-full">
+                {children}
+              </table>
             </div>
+          ),
+          thead: ({ children }) => (
+            <thead className="border-b border-border">{children}</thead>
+          ),
+          th: ({ children }) => (
+            <th className="text-left text-white font-semibold
+                           px-2 py-1 align-top">
+              {withMacroCitations(children)}
+            </th>
+          ),
+          td: ({ children }) => (
+            <td className="px-2 py-1 align-top border-t border-border/50">
+              {withMacroCitations(children)}
+            </td>
           ),
           a: ({ children, href }) => (
             <a
