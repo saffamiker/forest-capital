@@ -1171,6 +1171,81 @@ async def source_citations(
         return_exceptions=False)
     for cid, entry in results:
         out[cid] = entry
+
+    # May 27 2026 — curated-citation injection. For concepts with a
+    # known canonical citation, guarantee that citation is present
+    # as the VERIFIED primary regardless of what the web-search
+    # passes returned. The web-search result (if any) is demoted to
+    # an alternative so the reviewer can still see and pick it. This
+    # is how a hand-curated reference (e.g. Ang & Bekaert 2004 for
+    # regime-conditional allocation) becomes available for sourcing
+    # in the Citation Review panel for every generation, mapped to
+    # the relevant concept_id, without depending on the search
+    # surfacing it.
+    out = _apply_curated_citations(out)
+    return out
+
+
+# Canonical citations mapped to concept_id. Each entry is the
+# authoritative reference for that concept; source_citations
+# injects it as the verified primary so it is always available in
+# the Citation Review panel and the references list. Added May 27
+# 2026 — the regime_switching concept's canonical reference is
+# Ang & Bekaert (2004), the standard citation for regime-
+# conditional portfolio construction / HMM-based strategy
+# selection / dynamic allocation.
+_CURATED_CITATIONS: dict[str, dict[str, Any]] = {
+    "regime_switching": {
+        "author": "Ang, A., & Bekaert, G.",
+        "year": "2004",
+        "title": "How Regimes Affect Asset Allocation",
+        "journal_or_institution": "Financial Analysts Journal",
+        "volume_issue_pages": "60(2), 86-99",
+        "url": "https://doi.org/10.2469/faj.v60.n2.2612",
+    },
+}
+
+
+def _apply_curated_citations(
+    out: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Overlays each curated citation onto its concept's entry as the
+    verified primary, demoting any web-search primary to an
+    alternative. A concept with no entry yet (it wasn't in the
+    template's concept list) gets a fresh verified entry so the
+    curated citation is still surfaced.
+
+    Pure, idempotent: re-running on an already-curated dict produces
+    the same result (the curated primary's url/title match, so no
+    duplicate alternative is appended)."""
+    for cid, curated in _CURATED_CITATIONS.items():
+        existing = out.get(cid)
+        entry: dict[str, Any] = (
+            existing if isinstance(existing, dict)
+            else _empty_citation_entry(cid, ""))
+        alts = list(entry.get("alternatives") or [])
+        # Demote a DIFFERENT existing primary (one with a URL that
+        # isn't the curated URL) to an alternative so the reviewer
+        # can still pick it. An already-curated primary is left as is.
+        prev_url = (entry.get("url") or "").strip()
+        curated_url = (curated.get("url") or "").strip()
+        if prev_url and prev_url != curated_url:
+            demoted = {
+                k: entry.get(k) for k in (
+                    "author", "year", "title",
+                    "journal_or_institution", "volume_issue_pages",
+                    "url", "confidence_score",
+                )
+            }
+            demoted["pass_source"] = "web_search_demoted"
+            if not any((a.get("url") or "") == prev_url for a in alts):
+                alts.append(demoted)
+        entry.update(curated)
+        entry["verification_status"] = CITATION_STATE_VERIFIED
+        entry["trust_flag"] = "curated"
+        entry["formatted"] = _format_citation(entry)
+        entry["alternatives"] = alts
+        out[cid] = entry
     return out
 
 

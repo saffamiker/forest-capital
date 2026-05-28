@@ -1,4 +1,14 @@
 {
+  "ang_bekaert_2004": {
+    "author": "Ang, A., & Bekaert, G.",
+    "year": 2004,
+    "title": "How Regimes Affect Asset Allocation",
+    "source": "Financial Analysts Journal, 60(2), 86-99",
+    "apa": "Ang, A., & Bekaert, G. (2004). How Regimes Affect Asset Allocation. Financial Analysts Journal, 60(2), 86-99. https://doi.org/10.2469/faj.v60.n2.2612",
+    "url": "https://www.tandfonline.com/doi/abs/10.2469/faj.v60.n2.2612",
+    "doi": "10.2469/faj.v60.n2.2612",
+    "use_for": ["regime-conditional portfolio construction", "regime switching", "dynamic asset allocation", "HMM-based strategy selection"]
+  },
   "sharpe_1994": {
     "author": "Sharpe, W. F.",
     "year": 1994,
