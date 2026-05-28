@@ -421,9 +421,26 @@ async def _default_warm_fn() -> dict[str, bool]:
     sentinel = latest_hash or "BOOT-WARM"
     aa = await get_precomputed(sentinel, "academic_analytics")
     ef = await get_precomputed(sentinel, "efficient_frontier")
+
+    # ── Live CIO recommendation ───────────────────────────────────────
+    # The data has just been refreshed, so the data_hash may have moved.
+    # Fire the live CIO recommendation through the SAME hash-change
+    # pipeline: it serves from cache when the data_hash is unchanged and
+    # fires the council LLM once when it moved. Fail-open and isolated so
+    # a recommendation hiccup never fails the analytics warm (it is the
+    # primary purpose of this function).
+    cio_landed = False
+    try:
+        from tools.cio_recommendation import refresh_cio_recommendation
+        cio = await refresh_cio_recommendation()
+        cio_landed = not bool((cio or {}).get("error"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cio_recommendation_warm_failed", error=str(exc))
+
     return {
         "academic_analytics":  bool(aa),
         "efficient_frontier":  bool(ef),
+        "cio_recommendation":  cio_landed,
     }
 
 

@@ -625,7 +625,9 @@ class TestDefaultWarmFnRepopulatesStrategies:
             "refresh_all_analytics must run even when the backtester "
             "rerun fails; the analytics layer should not be blocked by "
             "a transient pipeline error.")
-        # The warm returns a `landed` dict; both entries report False
-        # because the patched get_precomputed returned None.
+        # The warm returns a `landed` dict; all entries report False
+        # because the patched get_precomputed returned None and the
+        # CIO recommendation has no live context in the test env.
         assert result == {"academic_analytics": False,
-                          "efficient_frontier": False}
+                          "efficient_frontier": False,
+                          "cio_recommendation": False}

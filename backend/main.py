@@ -2776,6 +2776,26 @@ async def _read_cached_metric_or_fallback(
         return await fallback()
 
 
+@app.get("/api/v1/recommendation")
+async def get_cio_recommendation(session: dict = Depends(require_auth)):
+    """The live CIO recommendation behind the landing page. Served from
+    the cio_recommendations cache — the four-component object the
+    hash-change pipeline last computed for the current data. Read-only;
+    the recompute is never triggered here (it fires from the analytics
+    warm pipeline on a data_hash change). Returns {available, ...} so the
+    frontend renders an empty state cleanly before the first compute."""
+    if ENVIRONMENT == "test":
+        return {"available": False, "recommendation": None}
+    try:
+        from tools.cio_recommendation import get_latest_recommendation
+        rec = await get_latest_recommendation()
+        return {"available": bool(rec), "recommendation": rec}
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.warning("cio_recommendation_read_failed", ref=ref, error=str(exc))
+        return {"available": False, "recommendation": None, "ref": ref}
+
+
 @app.get("/api/v1/analytics/config")
 async def get_analytics_config(session: dict = Depends(require_auth)):
     """
