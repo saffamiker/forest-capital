@@ -2796,6 +2796,39 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
         return {"available": False, "recommendation": None, "ref": ref}
 
 
+@app.get("/api/v1/play-by-play")
+async def get_play_by_play(session: dict = Depends(require_auth)):
+    """The nine stored point-in-time event evaluations behind the Council
+    Performance Record page, read-only. Serves the frozen rows from
+    play_by_play_events plus the aggregate scorecard and the curated
+    key-limitation notes (Liberation Day). Never recomputes — the events
+    are written once by run_play_by_play.py. Returns {available, ...} so
+    the page renders an empty state cleanly before the first run."""
+    if ENVIRONMENT == "test":
+        return {"available": False, "events": [], "scorecard": None,
+                "key_limitations": {}}
+    try:
+        from tools.play_by_play import (
+            KEY_LIMITATION_NOTES, load_stored_events, scorecard,
+        )
+        events = await load_stored_events()
+        for ev in events:
+            note = KEY_LIMITATION_NOTES.get(ev.get("event_id"))
+            if note:
+                ev["key_limitation"] = note
+        return {
+            "available": bool(events),
+            "events": events,
+            "scorecard": scorecard(events) if events else None,
+            "key_limitations": KEY_LIMITATION_NOTES,
+        }
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.warning("play_by_play_read_failed", ref=ref, error=str(exc))
+        return {"available": False, "events": [], "scorecard": None,
+                "key_limitations": {}, "ref": ref}
+
+
 @app.get("/api/v1/analytics/config")
 async def get_analytics_config(session: dict = Depends(require_auth)):
     """
