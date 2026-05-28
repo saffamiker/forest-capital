@@ -3,6 +3,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle, BarChart3,
   Activity, FileText, LineChart, Menu, X, LogOut, ClipboardCheck,
+  TrendingUp,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../App'
@@ -53,6 +54,7 @@ const NAV_GROUPS: NavGroup[] = [
     label: 'AI and Review',
     items: [
       { to: '/council',     label: 'Council',     icon: Users },
+      { to: '/performance-record', label: 'Performance Record', icon: TrendingUp },
       { to: '/qa',          label: 'QA Audit',    icon: ShieldCheck },
       // ── May 23 2026 — item 7. Peer Review surfaces two flows:
       // (A) upload another team's midpoint paper for a structured

@@ -121,6 +121,26 @@ EVENTS: tuple[dict[str, str], ...] = (
                 "sharp risk-off repricing across equities and credit."},
 )
 
+# Curated key-limitation annotations surfaced by the read endpoint and
+# flagged prominently in the UI. Liberation Day is the model's clearest
+# limitation: the regime filter read the April-2025 tariff shock as a
+# risk-off regime and positioned defensively, then missed the sharp
+# relief rally that followed, for a negative value-added. The dissenting
+# view recorded at the event predicted exactly this overfitting to the
+# shock. Stated plainly rather than buried: the council's edge is
+# capital preservation in genuine bear regimes, not calling sharp
+# V-shaped reversals.
+KEY_LIMITATION_NOTES: dict[str, str] = {
+    "liberation_day_2025_04": (
+        "Key limitation. The regime filter classified the April 2025 "
+        "tariff shock as a risk-off regime and positioned defensively, "
+        "then missed the subsequent relief rally, for a negative "
+        "value-added over the forward window. The dissenting view "
+        "recorded at the event predicted this overfitting to the shock. "
+        "The council's edge is capital preservation in sustained bear "
+        "regimes, not calling sharp V-shaped reversals."),
+}
+
 
 # ── pure forward-performance maths (fully unit-tested) ───────────────────────
 
@@ -473,7 +493,16 @@ def is_persistable(row: dict) -> bool:
     if row.get("error") or row.get("regime") is None:
         return False
     perf = row.get("performance") or {}
-    return (perf.get("blend") or {}).get("d90") is not None
+    d90 = (perf.get("blend") or {}).get("d90")
+    # d90 must be a FINITE number. None means the forward window has not
+    # elapsed; NaN means a degenerate computation (it would be sanitised
+    # to null on write and freeze an incomplete fact). Either way the
+    # event is not yet a settled historical fact and is recomputed next
+    # run rather than frozen.
+    try:
+        return bool(d90 is not None and np.isfinite(float(d90)))
+    except (TypeError, ValueError):
+        return False
 
 
 def run_play_by_play(
@@ -575,6 +604,38 @@ def llm_event_recommendation(
 # ── persistence: event_id cache, write-once, never recompute ─────────────────
 
 
+def _finite_or_none(x):
+    """A float that is finite, else None. NaN / Inf reaching a numeric
+    column or a JSONB cast is what crashed svb_2023_03 (its short early
+    training window produced a degenerate weight); coercing to None keeps
+    the row persistable as settled history with a null where the value
+    was undefined."""
+    try:
+        xf = float(x)
+    except (TypeError, ValueError):
+        return None
+    return xf if np.isfinite(xf) else None
+
+
+def _json_safe(obj) -> str:
+    """json.dumps with NaN / Inf replaced by null. Postgres rejects the
+    literal NaN that Python's json emits by default ('{"w": NaN}' is not
+    valid JSON), failing the CAST AS JSONB. Recursively sanitising to
+    null makes any degenerate value storable rather than fatal."""
+    import json
+
+    def _clean(v):
+        if isinstance(v, float):
+            return v if np.isfinite(v) else None
+        if isinstance(v, dict):
+            return {k: _clean(x) for k, x in v.items()}
+        if isinstance(v, (list, tuple)):
+            return [_clean(x) for x in v]
+        return v
+
+    return json.dumps(_clean(obj))
+
+
 async def get_persisted_event_ids() -> set[str]:
     """event_ids already in play_by_play_events. The run skips these
     entirely. Fail-open to an empty set (a DB problem means 'nothing
@@ -621,24 +682,36 @@ async def persist_events(rows: list[dict], *, data_hash: str | None = None) -> i
             for r in rows:
                 if not is_persistable(r):
                     continue
-                await session.execute(stmt, {
-                    "event_id": r["event_id"],
-                    "event_date": r["event_date"],
-                    "trigger": r["trigger"],
-                    "regime": r.get("regime"),
-                    "posterior": json.dumps(r.get("posterior")),
-                    "blend_weights": json.dumps(r.get("blend_weights")),
-                    "recommendation": r.get("recommendation"),
-                    "dissenting_view": r.get("dissenting_view"),
-                    "performance": json.dumps(r.get("performance")),
-                    "verdict": r.get("verdict"),
-                    "value_added_sharpe": r.get("value_added_sharpe"),
-                    "hmm_fit": r.get("hmm_fit", "point_in_time"),
-                    "n_train_months": r.get("n_train_months"),
-                    "data_hash": data_hash,
-                })
-                written += 1
-            await session.commit()
+                # Commit each row in its OWN transaction. A single shared
+                # commit meant one bad row (e.g. a NaN that fails the
+                # JSONB cast) aborted the whole batch and blocked the
+                # other eight; per-row commit + rollback isolates the
+                # failure so the rest still persist.
+                try:
+                    await session.execute(stmt, {
+                        "event_id": r["event_id"],
+                        "event_date": r["event_date"],
+                        "trigger": r["trigger"],
+                        "regime": r.get("regime"),
+                        "posterior": _json_safe(r.get("posterior")),
+                        "blend_weights": _json_safe(r.get("blend_weights")),
+                        "recommendation": r.get("recommendation"),
+                        "dissenting_view": r.get("dissenting_view"),
+                        "performance": _json_safe(r.get("performance")),
+                        "verdict": r.get("verdict"),
+                        "value_added_sharpe": _finite_or_none(
+                            r.get("value_added_sharpe")),
+                        "hmm_fit": r.get("hmm_fit", "point_in_time"),
+                        "n_train_months": r.get("n_train_months"),
+                        "data_hash": data_hash,
+                    })
+                    await session.commit()
+                    written += 1
+                except Exception as row_exc:  # noqa: BLE001
+                    await session.rollback()
+                    log.warning("play_by_play_persist_row_error",
+                                event_id=r.get("event_id"),
+                                error=str(row_exc))
     except Exception as exc:  # noqa: BLE001
         log.warning("play_by_play_persist_error", error=str(exc))
     return written
@@ -663,3 +736,30 @@ async def load_stored_events() -> list[dict]:
     except Exception as exc:  # noqa: BLE001
         log.warning("play_by_play_load_error", error=str(exc))
         return []
+
+
+def scorecard(rows: list[dict]) -> dict:
+    """Aggregate verdict across the evaluated events. Honest framing,
+    not a win-rate boast: the count of events where the blend added
+    value, out of those evaluable, plus the standing interpretation that
+    the council's value is capital preservation in bear regimes rather
+    than bull-market outperformance. Pure; computed from the stored
+    rows so the UI and the agents read the same numbers."""
+    evaluable = [r for r in rows
+                 if r.get("value_added_sharpe") is not None]
+    value_added = [r for r in evaluable
+                   if (r.get("value_added_sharpe") or 0.0) > 0]
+    return {
+        "n_total": len(rows),
+        "n_evaluable": len(evaluable),
+        "n_value_added": len(value_added),
+        "value_added_event_ids": [r["event_id"] for r in value_added],
+        "framing": (
+            "The regime-conditional council added value in "
+            f"{len(value_added)} of {len(evaluable)} evaluated events. "
+            "Its edge is capital preservation in genuine bear regimes, "
+            "not bull-market outperformance: it positions defensively "
+            "when the regime turns and gives back relative ground in "
+            "sharp risk-on reversals (see the Liberation Day "
+            "limitation)."),
+    }

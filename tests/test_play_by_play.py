@@ -210,3 +210,55 @@ class TestCacheAndPersistence:
         assert out["recommendation"] and out["dissenting_view"]
         assert "—" not in out["recommendation"]
         assert "—" not in out["dissenting_view"]
+
+
+class TestPersistHardening:
+
+    def test_json_safe_replaces_nan_inf_with_null(self):
+        import json
+        out = pbp._json_safe({"a": float("nan"), "b": float("inf"),
+                              "c": 0.4, "d": {"e": float("-inf")},
+                              "f": [1.0, float("nan")]})
+        loaded = json.loads(out)  # must be valid JSON (no NaN tokens)
+        assert loaded["a"] is None
+        assert loaded["b"] is None
+        assert loaded["c"] == 0.4
+        assert loaded["d"]["e"] is None
+        assert loaded["f"] == [1.0, None]
+
+    def test_finite_or_none(self):
+        assert pbp._finite_or_none(0.5) == 0.5
+        assert pbp._finite_or_none(float("nan")) is None
+        assert pbp._finite_or_none(float("inf")) is None
+        assert pbp._finite_or_none(None) is None
+        assert pbp._finite_or_none("x") is None
+
+    def test_is_persistable_rejects_nan_d90(self):
+        assert pbp.is_persistable(
+            {"regime": "BEAR",
+             "performance": {"blend": {"d90": float("nan")}}}) is False
+        assert pbp.is_persistable(
+            {"regime": "BEAR",
+             "performance": {"blend": {"d90": 0.03}}}) is True
+
+
+class TestScorecard:
+
+    def test_counts_value_added_and_frames_honestly(self):
+        rows = [
+            {"event_id": "a", "value_added_sharpe": 0.5},
+            {"event_id": "b", "value_added_sharpe": -2.31},
+            {"event_id": "c", "value_added_sharpe": 0.1},
+            {"event_id": "d", "value_added_sharpe": None},  # not evaluable
+        ]
+        sc = pbp.scorecard(rows)
+        assert sc["n_total"] == 4
+        assert sc["n_evaluable"] == 3
+        assert sc["n_value_added"] == 2
+        assert set(sc["value_added_event_ids"]) == {"a", "c"}
+        assert "capital preservation" in sc["framing"]
+
+    def test_liberation_day_limitation_note_present(self):
+        note = pbp.KEY_LIMITATION_NOTES["liberation_day_2025_04"]
+        assert "relief rally" in note
+        assert "—" not in note
