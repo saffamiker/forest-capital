@@ -445,3 +445,63 @@ class TestNoPipelineWiring:
         # there is the intended use, not a violation.
         from tools.citation_sourcing import CITATION_TYPES
         assert len(CITATION_TYPES) == 6
+
+
+class TestCuratedCitations:
+    """May 27 2026 — curated citations injected by source_citations.
+    Ang & Bekaert (2004) is the canonical reference for regime-
+    conditional allocation and must always be the verified primary
+    for the regime_switching concept, available in the Citation
+    Review panel and the references list."""
+
+    def test_regime_switching_has_curated_citation(self):
+        from tools.template_pipeline import _CURATED_CITATIONS
+        assert "regime_switching" in _CURATED_CITATIONS
+        c = _CURATED_CITATIONS["regime_switching"]
+        assert c["author"] == "Ang, A., & Bekaert, G."
+        assert c["year"] == "2004"
+        assert "Regimes" in c["title"]
+
+    def test_curated_overlays_as_verified_primary(self):
+        from tools.template_pipeline import (
+            _apply_curated_citations, CITATION_STATE_VERIFIED,
+        )
+        # A web-search result that should be DEMOTED to an alternative.
+        out = {
+            "regime_switching": {
+                "concept_id": "regime_switching",
+                "author": "Other, X.", "year": "2010",
+                "title": "Some other paper",
+                "url": "https://example.com/other",
+                "journal_or_institution": "J", "volume_issue_pages": "1(1)",
+                "verification_status": "verified", "alternatives": [],
+            }
+        }
+        res = _apply_curated_citations(out)
+        e = res["regime_switching"]
+        assert e["author"] == "Ang, A., & Bekaert, G."
+        assert e["verification_status"] == CITATION_STATE_VERIFIED
+        assert e["trust_flag"] == "curated"
+        assert "Ang, A., & Bekaert, G." in e["formatted"]
+        # The displaced web-search result survives as an alternative.
+        assert any(a.get("url") == "https://example.com/other"
+                   for a in e["alternatives"])
+
+    def test_curated_injects_when_concept_absent(self):
+        # A concept with no search result yet still gets the curated
+        # citation as a fresh verified entry.
+        from tools.template_pipeline import (
+            _apply_curated_citations, CITATION_STATE_VERIFIED,
+        )
+        res = _apply_curated_citations({})
+        e = res["regime_switching"]
+        assert e["verification_status"] == CITATION_STATE_VERIFIED
+        assert e["author"] == "Ang, A., & Bekaert, G."
+
+    def test_curated_injection_is_idempotent(self):
+        from tools.template_pipeline import _apply_curated_citations
+        once = _apply_curated_citations({})
+        twice = _apply_curated_citations(once)
+        # No duplicate alternative accrues on re-run.
+        assert (len(once["regime_switching"]["alternatives"])
+                == len(twice["regime_switching"]["alternatives"]))
