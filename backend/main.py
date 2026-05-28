@@ -9680,6 +9680,33 @@ async def export_executive_brief(
     return _start_generation_job("executive_brief", session, request)
 
 
+# Four-component recommendation structure required on every recommendation
+# in the executive brief. Mirrors the CFA Institute disclosure spirit:
+# full disclosure, balanced presentation, material limitations stated.
+# No em dashes (project-wide prose rule).
+_BRIEF_RECOMMENDATION_STRUCTURE = (
+    "\n\nEvery recommendation you make in this section must include all "
+    "four components, clearly labelled:\n"
+    "1. THE SIGNAL: what the data says, in one specific, quantified "
+    "sentence.\n"
+    "2. THE CONFIDENCE: how certain we are. Reference the regime "
+    "posterior probability and the Kish effective sample size (ESS). "
+    "Flag explicitly if the ESS is low.\n"
+    "3. THE DISSENTING VIEW: the strongest honest counter-argument. It "
+    "must reference a specific, named limitation, not a generic hedge. "
+    "If the recommendation is sensitive to the 40% box constraint or to "
+    "the regime sample size, say so explicitly.\n"
+    "4. THE LIMITATIONS: what the model cannot see. Always include all "
+    "four of: the three-asset universe constraint; the post-2022 sample "
+    "size (40 months, about 14% of the full window); transaction costs "
+    "not yet applied; and the absence of formal statistical significance "
+    "(economic significance only).\n"
+    "This structure meets the spirit of CFA Institute disclosure "
+    "standards. Never surface a recommendation without all four "
+    "components present."
+)
+
+
 async def _generate_brief_document(
     email: str,
 ) -> tuple[bytes, str, str, int | None]:
@@ -9691,7 +9718,9 @@ async def _generate_brief_document(
     A title page, then Executive Summary, Methodology Overview, four Key
     Findings (with the regime-conditional, summary-statistics, drawdown
     and factor-loadings tables embedded), Limitations and Risks, and
-    Final Recommendations.
+    Final Recommendations. The Executive Summary and Final
+    Recommendations sections carry the four-component recommendation
+    structure (_BRIEF_RECOMMENDATION_STRUCTURE).
     """
     import asyncio
     from datetime import date
@@ -9710,13 +9739,14 @@ async def _generate_brief_document(
              "agent_id": "brief_exec_summary",
              "task": (
                  "Write the Executive Summary of an investment brief — about "
-                 "180 words, for a senior investment audience. State the "
+                 "220 words, for a senior investment audience. State the "
                  "central question (does diversification across equities and "
                  "fixed income improve risk-adjusted performance, and does "
                  "that answer change after 2022), the key finding (the 2022 "
                  "equity-bond correlation break), the best-performing "
                  "strategies with their metrics, and the strategic "
-                 "recommendation."),
+                 "recommendation."
+                 + _BRIEF_RECOMMENDATION_STRUCTURE),
              "context": {"summary_statistics": data["summary_statistics"],
                          "regime_conditional": data["regime_conditional"],
                          "study_period": data["study_period"]}},
@@ -9779,9 +9809,10 @@ async def _generate_brief_document(
             {"key": "recommendations", "available": avail, "pending": pending,
              "agent_id": "brief_recommendations",
              "task": (
-                 "Write the Final Recommendations section — about 160 words. "
+                 "Write the Final Recommendations section — about 320 words. "
                  "Give a strategic allocation recommendation grounded in the "
-                 "results, with supporting evidence."),
+                 "results, with supporting evidence."
+                 + _BRIEF_RECOMMENDATION_STRUCTURE),
              "context": {"regime_conditional": data["regime_conditional"],
                          "summary_statistics": data["summary_statistics"]}},
         ]
