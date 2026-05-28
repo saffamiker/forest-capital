@@ -71,7 +71,12 @@ export interface TestScript {
 //     All Testers' section
 //   - access_test_panel permission visibility after PR #185 back-fill —
 //     2 tests in Michael's section
-export const TEST_SCRIPT_VERSION = 5
+// v6 (May 28 2026) — landing-page past/present/future arc: 12 new tests
+// in Molly's section covering the CIO Live Recommendation card, the
+// Layer 4 forward confidence chart (three simulated series + outperform
+// probabilities), and the combined-layout / Performance-Record-link
+// checks.
+export const TEST_SCRIPT_VERSION = 6
 
 const allTesters: TestScript = {
   id: 'all_testers_v1',
@@ -1658,6 +1663,114 @@ const molly: TestScript = {
       expectedResult: 'Filters narrow the list correctly (by status, '
         + 'severity, or type).',
       allowSkip: true,
+    },
+    // ── Landing-page past/present/future arc (v6) ──────────────────────
+    {
+      id: 'molly_cio_card_renders', route: '/', target: null,
+      title: 'CIO Live Recommendation card renders',
+      instruction: 'On the landing page, find the CIO Live Recommendation '
+        + 'card as the first component, above the fold.',
+      expectedResult: 'The CIO Live Recommendation card is the first thing '
+        + 'on the landing page, before the regime banner and charts.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_cio_card_regime', route: '/', target: null,
+      title: 'CIO card regime and confidence',
+      instruction: 'Read the regime label and confidence on the CIO card.',
+      expectedResult: 'The regime label (BULL, BEAR, or TRANSITION) and a '
+        + 'confidence percentage are both displayed.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_cio_card_fields', route: '/', target: null,
+      title: 'CIO card four narrative fields',
+      instruction: 'Read the CIO card body.',
+      expectedResult: 'Signal, Recommendation, Dissenting view, and Key '
+        + 'risk are all present, each one sentence.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_cio_card_limitations', route: '/', target: null,
+      title: 'CIO card limitations collapse',
+      instruction: 'Click the Limitations toggle on the CIO card.',
+      expectedResult: 'The limitations panel is collapsible and expands to '
+        + 'show the four mandatory limitations.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_cio_card_asof_cfa', route: '/', target: null,
+      title: 'CIO card staleness and disclosure',
+      instruction: 'Look at the top-right and bottom of the CIO card.',
+      expectedResult: 'An "As of <timestamp>" indicator and the CFA-style '
+        + 'disclosure statement are both visible.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_cio_card_empty', route: '/', target: null,
+      title: 'CIO card empty state',
+      instruction: 'If the recommendation has not been computed yet, note '
+        + 'how the card behaves (otherwise skip).',
+      expectedResult: 'When uncached, the card shows a graceful empty state '
+        + 'rather than an error or a blank box.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_forward_chart_renders', route: '/', target: null,
+      title: 'Forward confidence chart, three series',
+      instruction: 'Find the Forward Confidence Projection chart (second '
+        + 'landing component). Inspect the lines and legend.',
+      expectedResult: 'Three colour-coded series each with a median line '
+        + 'and 90% band are present and named in the legend: '
+        + 'regime-conditional blend, benchmark (S&P 500), classic 60/40.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_forward_chart_bands', route: '/', target: null,
+      title: 'Forward chart confidence bounds',
+      instruction: 'Look at each series on the forward chart.',
+      expectedResult: 'Upper (95th) and lower (5th) bounds are visible for '
+        + 'each of the three series.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_forward_chart_prob', route: '/', target: null,
+      title: 'Forward chart outperformance probabilities',
+      instruction: 'Read the probability table below the forward chart.',
+      expectedResult: 'P(blend outperforms benchmark) and P(blend '
+        + 'outperforms 60/40) are shown at 1, 3, 6, and 12 months, every '
+        + 'figure between 0% and 100%.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_forward_chart_meta', route: '/', target: null,
+      title: 'Forward chart regime, limitation, timestamp',
+      instruction: 'Read the forward chart header and footer.',
+      expectedResult: 'The current regime + confidence, the "Not a '
+        + 'forecast" limitation note, and an "As of <timestamp>" indicator '
+        + 'are all present.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_forward_chart_empty', route: '/', target: null,
+      title: 'Forward chart empty state',
+      instruction: 'If the forward simulation has not been computed yet, '
+        + 'note the chart behaviour (otherwise skip).',
+      expectedResult: 'When uncomputed, the chart shows a graceful empty '
+        + 'state rather than an error or a blank box.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_landing_arc_layout', route: '/', target: null,
+      title: 'Landing arc layout and Performance Record link',
+      instruction: 'View the landing page on both desktop and a narrow '
+        + '(mobile) width. Then click the Council Performance Record '
+        + 'preview card.',
+      expectedResult: 'All three components (CIO card, forward chart, '
+        + 'Performance Record preview) render together without layout '
+        + 'breaks at both widths, and the preview links to '
+        + '/performance-record.',
+      allowSkip: false,
     },
   ],
 }

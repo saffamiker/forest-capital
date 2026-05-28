@@ -108,13 +108,22 @@ def _deterministic_recommendation(context: dict) -> dict:
               f"{f' (P={prob:.0%})' if isinstance(prob, float) else ''}, "
               f"and the regime-conditional allocation tilts toward "
               f"{tops_str}.")
+    recommendation = (
+        f"Hold the regime-conditional blend for the {regime} state, "
+        f"weighted toward {tops_str}, and rebalance as the regime read "
+        f"updates with next month's data.")
     dissent = (
         "The allocation depends on the regime read being correct; an HMM "
         "misclassification at a turning point would not be corrected until "
         "next month's data, and the bond sleeve assumes the post-2022 "
         "equity-bond correlation does not invert further.")
+    key_risk = (
+        "A sharp regime reversal between monthly reads: the blend would "
+        "stay positioned for the prior regime for up to a month, the same "
+        "lag that cost the council on the April 2025 tariff reversal.")
     return {
         "signal": signal,
+        "recommendation": recommendation,
         "confidence": {
             "regime": regime,
             "probability": round(prob, 4) if isinstance(prob, float) else None,
@@ -122,6 +131,7 @@ def _deterministic_recommendation(context: dict) -> dict:
             "ess_warning": bool(context.get("ess_warning")),
         },
         "dissenting_view": dissent,
+        "key_risk": key_risk,
         "limitations": list(MANDATORY_LIMITATIONS),
         "_model": _DETERMINISTIC,
     }
@@ -169,6 +179,18 @@ def generate_recommendation(context: dict, macro_context: str = "") -> dict:
         if not (data.get("signal") and data.get("dissenting_view")
                 and isinstance(data.get("confidence"), dict)):
             raise ValueError("incomplete recommendation JSON")
+        # recommendation and key_risk are required by the card. If the
+        # model omitted either, backfill from the deterministic version so
+        # the card always has every field rather than failing the whole
+        # call over a missing line.
+        if not data.get("recommendation") or not data.get("key_risk"):
+            fallback = _deterministic_recommendation(context)
+            data.setdefault("recommendation", fallback["recommendation"])
+            data.setdefault("key_risk", fallback["key_risk"])
+            if not data.get("recommendation"):
+                data["recommendation"] = fallback["recommendation"]
+            if not data.get("key_risk"):
+                data["key_risk"] = fallback["key_risk"]
         data["_model"] = SONNET_MODEL
         return data
     except Exception as exc:  # noqa: BLE001

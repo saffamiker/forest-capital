@@ -2832,6 +2832,26 @@ async def get_play_by_play(session: dict = Depends(require_auth)):
                 "key_limitations": {}, "ref": ref}
 
 
+@app.get("/api/v1/forward-projection")
+async def get_forward_projection(session: dict = Depends(require_auth)):
+    """The Layer 4 forward Monte Carlo confidence bands for the landing
+    page (blend / benchmark / classic 60/40, each with a 90% band, plus
+    P(blend outperforms each baseline) at 1/3/6/12 months). Served from
+    the data_hash-cached `forward_projection` metric; never recomputes the
+    simulation on a read. Returns {available, ...} for a clean empty
+    state before the first warm."""
+    if ENVIRONMENT == "test":
+        return {"available": False, "projection": None}
+    try:
+        from tools.regime_meta_forward import get_cached_forward_projection
+        proj = await get_cached_forward_projection()
+        return {"available": bool(proj), "projection": proj}
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.warning("forward_projection_read_failed", ref=ref, error=str(exc))
+        return {"available": False, "projection": None, "ref": ref}
+
+
 @app.get("/api/v1/analytics/config")
 async def get_analytics_config(session: dict = Depends(require_auth)):
     """

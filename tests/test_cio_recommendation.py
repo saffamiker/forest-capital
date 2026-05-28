@@ -90,6 +90,10 @@ class TestGenerateRecommendation:
         rec = cio.generate_recommendation(ctx, macro_context="")
         assert rec["_model"] == cio._DETERMINISTIC
         assert rec["signal"] and rec["dissenting_view"]
+        # the card's four one-sentence fields are all present
+        assert rec["recommendation"] and rec["key_risk"]
+        assert "—" not in rec["recommendation"]
+        assert "—" not in rec["key_risk"]
         # confidence carries the four sub-fields
         assert set(rec["confidence"].keys()) == {
             "regime", "probability", "ess", "ess_warning"}
@@ -118,3 +122,4 @@ class TestGenerateRecommendation:
         assert rec["limitations"] == list(MANDATORY_LIMITATIONS)
         assert rec["confidence"]["regime"] == "BULL"
         assert rec["confidence"]["ess_warning"] is False
+        assert rec["recommendation"] and rec["key_risk"]

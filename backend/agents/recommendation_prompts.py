@@ -40,7 +40,8 @@ MANDATORY_LIMITATIONS: tuple[str, ...] = (
 # of truth. ess_warning is true when the live regime's Kish ESS is
 # below the optimizer's fallback floor (2 x N strategies).
 RECOMMENDATION_SCHEMA: dict = {
-    "signal": "<one sentence, quantified>",
+    "signal": "<one sentence, quantified: what the data says>",
+    "recommendation": "<one sentence: what to do about it>",
     "confidence": {
         "regime": "BULL | BEAR | TRANSITION",
         "probability": "0.0-1.0 (the live HMM posterior for `regime`)",
@@ -48,6 +49,7 @@ RECOMMENDATION_SCHEMA: dict = {
         "ess_warning": "true | false (true when ess is below floor)",
     },
     "dissenting_view": "<one sentence, a specific named limitation>",
+    "key_risk": "<one sentence: the single biggest risk to this call>",
     "limitations": "list[str] — the four MANDATORY_LIMITATIONS",
 }
 
@@ -63,6 +65,8 @@ The JSON object must have exactly these keys:
 
 {
   "signal": "<one sentence. What the data says. Specific and quantified.>",
+  "recommendation": "<one sentence. What to do about it: how to be \
+positioned given the signal.>",
   "confidence": {
     "regime": "BULL | BEAR | TRANSITION",
     "probability": <float 0.0-1.0, the live posterior for that regime>,
@@ -73,11 +77,17 @@ The JSON object must have exactly these keys:
 Reference a SPECIFIC, NAMED limitation, never a generic hedge. If the \
 recommendation is sensitive to the 40% box constraint or to the regime \
 sample size, say so.>",
+  "key_risk": "<one sentence. The single biggest risk to this call, the \
+one thing that would most hurt the recommendation if it happened.>",
   "limitations": [ <the four mandatory limitations, verbatim, as strings> ]
 }
 
 Rules:
+- signal is what the data says; recommendation is what to do about it; \
+they are distinct, both required, both one sentence.
 - dissenting_view is REQUIRED and must name a concrete limitation.
+- key_risk is REQUIRED: the single biggest threat to the call, distinct \
+from the dissenting view.
 - limitations must contain all four mandatory disclosures, unaltered.
 - Set ess_warning true whenever the live regime's ESS is below the floor; \
 when true, the signal must be hedged, not stated with full confidence.

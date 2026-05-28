@@ -449,11 +449,25 @@ async def _default_warm_fn() -> dict[str, bool]:
     except Exception as exc:  # noqa: BLE001
         log.warning("performance_chart_warm_failed", error=str(exc))
 
+    # ── Layer 4 forward Monte Carlo confidence bands ──────────────────
+    # The forward projection (blend / benchmark / classic 60/40, each
+    # with a 90% band) is precomputed once per data_hash and served from
+    # cache by GET /api/v1/forward-projection, so the 10,000-path
+    # simulation never runs on a page read. Seed is derived from the
+    # data_hash inside refresh, so it regenerates with new data. Fail-open.
+    forward_landed = False
+    try:
+        from tools.regime_meta_forward import refresh_forward_projection
+        forward_landed = await refresh_forward_projection(latest_hash or "")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("forward_projection_warm_failed", error=str(exc))
+
     return {
         "academic_analytics":  bool(aa),
         "efficient_frontier":  bool(ef),
         "cio_recommendation":  cio_landed,
         "performance_chart":   chart_landed,
+        "forward_projection":  forward_landed,
     }
 
 
