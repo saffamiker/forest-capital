@@ -262,3 +262,61 @@ class TestScorecard:
         note = pbp.KEY_LIMITATION_NOTES["liberation_day_2025_04"]
         assert "relief rally" in note
         assert "—" not in note
+
+
+class TestPerformanceChart:
+
+    def _wide_results(self, n=96, start="2018-01-31", seed=3):
+        rng = np.random.default_rng(seed)
+        ds = [d.date().isoformat()
+              for d in pd.date_range(start, periods=n, freq="ME")]
+        profiles = {"BENCHMARK": (0.006, 0.043),
+                    "CLASSIC_60_40": (0.004, 0.028),
+                    "MIN_VARIANCE": (0.003, 0.016),
+                    "VOL_TARGETING": (0.004, 0.018),
+                    "RISK_PARITY": (0.004, 0.022)}
+        out = {}
+        for name, (m, v) in profiles.items():
+            r = rng.normal(m, v, n)
+            out[name] = {"monthly_returns": [[ds[t], round(float(r[t]), 6)]
+                                             for t in range(n)]}
+        return out, ds
+
+    def _hmm(self, ds):
+        n = len(ds)
+        half = n // 2
+        bull = [0.8] * half + [0.2] * (n - half)
+        bear = [0.1] * half + [0.7] * (n - half)
+        trans = [round(1 - b - e, 6) for b, e in zip(bull, bear)]
+        return {"dates": ds, "historical_probs": {
+            "BULL": bull, "BEAR": bear, "TRANSITION": trans}}
+
+    def test_chart_series_shape_and_markers(self):
+        res, ds = self._wide_results()
+        chart = pbp.compute_performance_chart(
+            res, self._hmm(ds), split_date="2022-01-01")
+        assert chart["series"], "expected a non-empty series"
+        # Every point is post-2022 and carries the three lines.
+        for pt in chart["series"]:
+            assert pt["date"] >= "2022-01-01"
+            assert "regime_conditional" in pt
+            assert "benchmark" in pt
+            assert "classic_6040" in pt
+        # Event markers fall within the series window.
+        lo, hi = chart["series"][0]["date"], chart["series"][-1]["date"]
+        for m in chart["event_markers"]:
+            assert lo <= m <= hi
+
+    def test_chart_empty_on_degenerate_window(self):
+        # Split after the data ends -> OOS errors -> empty chart.
+        res, ds = self._wide_results()
+        chart = pbp.compute_performance_chart(
+            res, self._hmm(ds), split_date="2099-01-01")
+        assert chart == {}
+
+    def test_cumulative_helper(self):
+        cum = pbp._cumulative([0.1, 0.1, float("nan"), 0.0])
+        assert cum[0] == pytest.approx(0.1)
+        assert cum[1] == pytest.approx(0.21)
+        assert cum[2] is None          # non-finite breaks the line
+        assert cum[3] == pytest.approx(0.21)  # resumes from last growth

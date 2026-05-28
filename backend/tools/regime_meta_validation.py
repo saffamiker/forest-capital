@@ -185,11 +185,17 @@ def out_of_sample_validation(
     min_effective_n: float | None = None,
     risk_free: dict | float | None = None,
     annualization: int = 12,
+    return_series: bool = False,
 ) -> dict:
     """Train regime-conditional blends on the pre-split window, freeze
     them, apply to the post-split window, and compare the out-of-sample
     Sharpe against the equal-weight blend, the benchmark, and Regime
     Switching alone.
+
+    return_series — when True, also returns the per-month blend return
+    stream and the test dates (`blend_monthly`, `test_dates`) so a caller
+    can build the cumulative OOS path for a chart without re-running the
+    optimization.
 
     Returns:
       {
@@ -318,7 +324,7 @@ def out_of_sample_validation(
             f"{', '.join(beaten) if beaten else 'none'}. Trails: "
             f"{', '.join(lost) if lost else 'none'}.")
 
-    return {
+    result = {
         "split_date": str(split.date()),
         "n_train_months": n_train,
         "n_test_months": n_test,
@@ -331,3 +337,7 @@ def out_of_sample_validation(
         "oos": oos,
         "verdict": verdict,
     }
+    if return_series:
+        result["test_dates"] = [str(d.date()) for d in test_dates]
+        result["blend_monthly"] = [round(float(x), 8) for x in blend_ret]
+    return result

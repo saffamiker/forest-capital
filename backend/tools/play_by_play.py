@@ -763,3 +763,128 @@ def scorecard(rows: list[dict]) -> dict:
             "sharp risk-on reversals (see the Liberation Day "
             "limitation)."),
     }
+
+
+# ── cumulative chart series (precomputed, data_hash-cached) ──────────────────
+
+_CHART_METRIC_KIND = "performance_chart"
+
+
+def _cumulative(returns) -> list[float | None]:
+    """Cumulative return (product of 1+r, minus 1) along a monthly
+    series. A non-finite month does not advance the curve and records a
+    null at that point so the chart line breaks cleanly rather than
+    jumping."""
+    out: list[float | None] = []
+    growth = 1.0
+    for r in returns:
+        try:
+            rf = float(r)
+        except (TypeError, ValueError):
+            out.append(None)
+            continue
+        if not np.isfinite(rf):
+            out.append(None)
+            continue
+        growth *= (1.0 + rf)
+        out.append(round(growth - 1.0, 6))
+    return out
+
+
+def compute_performance_chart(
+    strategy_results: dict,
+    hmm_result: dict,
+    *,
+    split_date: str = "2022-01-01",
+) -> dict:
+    """PURE: the post-split cumulative return series for the Council
+    Performance Record chart. The regime-conditional blend is the Layer 3
+    out-of-sample path (train pre-split, apply post-split); the benchmark
+    and the classic 60/40 are their raw returns over the same months.
+    Returns {series: [{date, regime_conditional, benchmark,
+    classic_6040}], event_markers: [iso, ...]} or {} when the OOS path is
+    unavailable. Pure given strategy_results + hmm_result, so it is unit-
+    tested without a live HMM fit."""
+    from tools.regime_meta_validation import out_of_sample_validation
+
+    oos = out_of_sample_validation(
+        strategy_results, hmm_result, split_date=split_date,
+        return_series=True)
+    dates = oos.get("test_dates") or []
+    blend_monthly = oos.get("blend_monthly") or []
+    if oos.get("error") or not dates or len(blend_monthly) != len(dates):
+        return {}
+
+    idx = pd.to_datetime(dates)
+    bench = _series_for(strategy_results, _BENCHMARK_ID)
+    classic = _series_for(strategy_results, _CLASSIC_6040_ID)
+    bench_m = (bench.reindex(idx).to_numpy()
+               if bench is not None else [None] * len(dates))
+    classic_m = (classic.reindex(idx).to_numpy()
+                 if classic is not None else [None] * len(dates))
+
+    blend_cum = _cumulative(blend_monthly)
+    bench_cum = _cumulative(bench_m)
+    classic_cum = _cumulative(classic_m)
+    series = [
+        {"date": dates[t],
+         "regime_conditional": blend_cum[t],
+         "benchmark": bench_cum[t],
+         "classic_6040": classic_cum[t]}
+        for t in range(len(dates))
+    ]
+    lo, hi = dates[0], dates[-1]
+    markers = [e["event_date"] for e in EVENTS if lo <= e["event_date"] <= hi]
+    return {"series": series, "event_markers": markers}
+
+
+async def refresh_performance_chart(data_hash: str) -> bool:
+    """Render-side: fit the HMM on the live equity series, compute the
+    post-2022 chart, and cache it under metric_kind 'performance_chart'
+    keyed by data_hash. Fired by the same warm pipeline that refreshes
+    the analytics and CIO recommendation; the read endpoint serves the
+    cached row so no OOS recompute ever runs on a page load. Fail-open."""
+    try:
+        from tools.cache import get_latest_strategy_cache, get_monthly_returns
+        from tools.precomputed_analytics import set_metric
+        from tools.regime_detector import fit_hmm_historical
+    except Exception as exc:  # noqa: BLE001
+        log.warning("performance_chart_imports_unavailable", error=str(exc))
+        return False
+    try:
+        sr = await get_latest_strategy_cache()
+        monthly = await get_monthly_returns()
+        if not sr or not monthly or not monthly.get("equity") \
+                or not monthly.get("dates"):
+            return False
+        idx = pd.to_datetime(monthly["dates"])
+        equity = pd.Series(monthly["equity"], index=idx).sort_index()
+        hmm = fit_hmm_historical(equity)
+        if not hmm or hmm.get("error"):
+            log.warning("performance_chart_hmm_failed",
+                        error=(hmm or {}).get("error"))
+            return False
+        chart = compute_performance_chart(sr, hmm)
+        if not chart.get("series"):
+            return False
+        await set_metric(data_hash or "", _CHART_METRIC_KIND, chart,
+                         source="play_by_play")
+        log.info("performance_chart_cached",
+                 points=len(chart["series"]),
+                 markers=len(chart.get("event_markers") or []))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("performance_chart_refresh_failed", error=str(exc))
+        return False
+
+
+async def get_cached_performance_chart() -> dict | None:
+    """The latest cached chart series for the read endpoint. Fail-open to
+    None so the page renders its empty state cleanly before the first
+    warm computes one."""
+    try:
+        from tools.precomputed_analytics import get_latest_metric
+        return await get_latest_metric(_CHART_METRIC_KIND)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("performance_chart_read_error", error=str(exc))
+        return None
