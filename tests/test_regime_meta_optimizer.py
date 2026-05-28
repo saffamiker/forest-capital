@@ -373,6 +373,21 @@ class TestRegimeStrategyDiagnostics:
             assert per[top]["sharpe_ann"] == pytest.approx(
                 best["sharpe_ann"])
 
+    def test_correlation_matrix_present_and_diagonal_one(self):
+        diag = rmo.regime_strategy_diagnostics(
+            _strategy_results(120, 6), _hmm_result(120))
+        names = diag["names"]
+        for info in diag["regimes"].values():
+            corr = info["corr"]
+            # Full N x N lookup, symmetric, unit diagonal.
+            assert set(corr.keys()) == set(names)
+            for a in names:
+                assert corr[a][a] == pytest.approx(1.0, abs=1e-6)
+                for b in names:
+                    assert corr[a][b] == pytest.approx(
+                        corr[b][a], abs=1e-6)
+                    assert -1.0 - 1e-6 <= corr[a][b] <= 1.0 + 1e-6
+
     def test_insufficient_data_errors(self):
         out = rmo.regime_strategy_diagnostics({}, _hmm_result(60))
         assert out["error"] == "insufficient_strategy_return_data"

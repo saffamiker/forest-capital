@@ -467,6 +467,14 @@ def regime_strategy_diagnostics(
         vol_ann = vol * sqrt_a
         with np.errstate(divide="ignore", invalid="ignore"):
             sharpe_ann = np.where(vol > 0, (mu * a) / (vol * sqrt_a), 0.0)
+        # Regime-conditional correlation matrix. This is the evidence
+        # that explains a high-Sharpe strategy receiving zero weight:
+        # mean-variance correctly deprioritises a strategy that is
+        # highly correlated with the ones already in the blend (it adds
+        # return but no diversification). corr_ij = cov_ij/(σ_i·σ_j).
+        with np.errstate(divide="ignore", invalid="ignore"):
+            outer = np.outer(vol, vol)
+            corr_mat = np.where(outer > 0, cov / outer, 0.0)
         # Rank 1 = highest Sharpe. argsort descending, then invert.
         order = np.argsort(-sharpe_ann)
         rank = np.empty(len(names), dtype=int)
@@ -481,10 +489,18 @@ def regime_strategy_diagnostics(
             }
             for i in range(len(names))
         }
+        corr = {
+            names[i]: {
+                names[j]: round(float(corr_mat[i, j]), 4)
+                for j in range(len(names))
+            }
+            for i in range(len(names))
+        }
         regimes[regime] = {
             "effective_n": round(float(ess), 2),
             "top_sharpe": names[int(order[0])] if len(order) else None,
             "per_strategy": per_strategy,
+            "corr": corr,
         }
 
     if not regimes:

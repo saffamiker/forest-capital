@@ -134,6 +134,33 @@ def _print_dominance(strategy_results, hmm_result, built):
             tw_rank = per.get(top_weighted, {}).get("rank", "?")
             print(f"    -> top weight is {top_weighted} (Sharpe rank "
                   f"{tw_rank}): covariance/constraint-driven, review (b)")
+            # WHY is the top-Sharpe strategy displaced? Show its
+            # regime-conditional correlation with the strategies that
+            # took the weight. High correlation == no diversification
+            # to add == the optimizer correctly deprioritises it.
+            corr = rinfo.get("corr", {})
+            displacers = [
+                n for n, _ in sorted(
+                    blend.items(), key=lambda kv: kv[1], reverse=True)
+                if blend.get(n, 0.0) > 1e-6 and n != top
+            ][:3]
+            row = corr.get(top, {})
+            if top and displacers and row:
+                pairs = "; ".join(
+                    f"{d}={row.get(d, float('nan')):.2f}"
+                    for d in displacers)
+                print(f"       corr({top} vs displacers): {pairs}")
+                vals = [row.get(d) for d in displacers
+                        if row.get(d) is not None]
+                if vals and (sum(vals) / len(vals)) > 0.70:
+                    print(f"       -> high correlation ("
+                          f"{sum(vals) / len(vals):.2f} avg): {top} adds "
+                          f"return but no diversification; the optimizer "
+                          f"correctly deprioritises it. Not a bug.")
+                elif vals:
+                    print(f"       -> low/moderate correlation ("
+                          f"{sum(vals) / len(vals):.2f} avg): displacement "
+                          f"is mean/constraint-driven, worth a closer look.")
         print()
 
 
