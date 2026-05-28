@@ -364,13 +364,51 @@ def compute_regime_blends(
     if not posteriors:
         return {"error": "no_regime_posteriors"}
 
+    blends, effective, fallback = blends_from_matrix(
+        names, matrix, posteriors,
+        risk_aversion=risk_aversion, max_weight=max_weight,
+        min_effective_n=min_effective_n)
+    if not blends:
+        return {"error": "no_regime_blends_computed"}
+
+    return {
+        "names": names,
+        "n_months": int(len(dates)),
+        "blends": blends,
+        "effective_n": effective,
+        "fallback": fallback,
+        "max_weight": max_weight,
+        "box_constraint_note": _box_constraint_note(max_weight),
+    }
+
+
+def blends_from_matrix(
+    names: list[str],
+    matrix: np.ndarray,
+    posteriors: dict[str, np.ndarray],
+    *,
+    risk_aversion: float = RISK_AVERSION,
+    max_weight: float = _META_MAX_WEIGHT,
+    min_effective_n: float | None = None,
+) -> tuple[dict[str, dict[str, float]], dict[str, float], list[str]]:
+    """Compute one mean-variance blend per regime from a PREBUILT
+    matrix and its aligned posteriors. Shared by compute_regime_blends
+    (full window) and the Layer 3 out-of-sample validation (which builds
+    them from the pre-split TRAIN window only). Keeping this in one place
+    guarantees the OOS-trained blends are produced by exactly the same
+    code as the production blends — no train/production drift.
+
+    Returns (blends, effective_n, fallback):
+      blends      — {regime: {name: weight}}, each summing to 1
+      effective_n — {regime: Kish ESS}
+      fallback    — regimes that fell back to equal weight (low ESS or
+                    solver trouble)
+    """
     n = len(names)
     floor = (2.0 * n) if min_effective_n is None else min_effective_n
-
     blends: dict[str, dict[str, float]] = {}
     effective: dict[str, float] = {}
     fallback: list[str] = []
-
     for regime in REGIMES:
         post = posteriors.get(regime)
         if post is None:
@@ -390,19 +428,7 @@ def compute_regime_blends(
                 fallback.append(regime)
         blends[regime] = {names[i]: round(float(w[i]), 6)
                           for i in range(n)}
-
-    if not blends:
-        return {"error": "no_regime_blends_computed"}
-
-    return {
-        "names": names,
-        "n_months": int(len(dates)),
-        "blends": blends,
-        "effective_n": effective,
-        "fallback": fallback,
-        "max_weight": max_weight,
-        "box_constraint_note": _box_constraint_note(max_weight),
-    }
+    return blends, effective, fallback
 
 
 def regime_strategy_diagnostics(

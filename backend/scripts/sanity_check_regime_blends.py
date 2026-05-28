@@ -164,9 +164,63 @@ def _print_dominance(strategy_results, hmm_result, built):
         print()
 
 
+def _print_oos(strategy_results, hmm_result, rf_map, split_date="2022-01-01"):
+    """Layer 3: train the regime-conditional blends on the pre-2022
+    window, freeze them, apply to post-2022, and compare the
+    out-of-sample Sharpe against equal weight, the benchmark, and
+    Regime Switching alone. The reference Sharpes are recomputed here
+    over the same window so they can be checked against the known
+    targets (EW 0.7136 / benchmark 0.5255 / Regime Switching 0.6211);
+    if they match, the regime-conditional number is trustworthy."""
+    from tools.regime_meta_validation import out_of_sample_validation
+
+    res = out_of_sample_validation(
+        strategy_results, hmm_result, split_date=split_date,
+        risk_free=rf_map)
+    print("-" * 68)
+    print(f"LAYER 3 -- OUT-OF-SAMPLE VALIDATION (split {split_date})")
+    print("-" * 68)
+    if res.get("error"):
+        print(f"  error: {res['error']}")
+        print()
+        return
+    print(f"  Train months: {res['n_train_months']}   "
+          f"Test months: {res['n_test_months']}   "
+          f"HMM fit: {res['hmm_fit']}   rf: {res['risk_free']}")
+    if res.get("train_fallback"):
+        print(f"  Train EW fallback regimes: {res['train_fallback']}")
+    print()
+    oos = res["oos"]
+    targets = {"equal_weight": 0.7136, "benchmark": 0.5255,
+               "regime_switching": 0.6211}
+    print(f"    {'series':<22} {'sharpe':>8} {'CAGR':>8} {'volA':>7} "
+          f"{'target':>8}")
+    order = ["regime_conditional", "equal_weight", "benchmark",
+             "regime_switching"]
+    for key in order:
+        b = oos.get(key)
+        if not b:
+            continue
+        sh = b["sharpe"]
+        cg = b["cagr"]
+        vol = b["vol_ann"]
+        tgt = targets.get(key)
+        sh_s = "   --" if sh is None else f"{sh:8.4f}"
+        cg_s = "   --" if cg is None else f"{cg:8.4f}"
+        vol_s = "  --" if vol is None else f"{vol:7.4f}"
+        tgt_s = "" if tgt is None else f"{tgt:8.4f}"
+        print(f"    {key:<22} {sh_s} {cg_s} {vol_s} {tgt_s}")
+    print()
+    print(f"  {res['verdict']['summary']}")
+    print()
+
+
 async def _real_inputs():
-    """Pull the real production inputs. Returns
-    (strategy_results, hmm_result, current_regime) or raises."""
+    """Pull the real production inputs. Returns (strategy_results,
+    hmm_result, current_regime, rf_map) or raises. rf_map is the monthly
+    DTB3 risk-free rate keyed by iso date, threaded into the Layer 3 OOS
+    Sharpe so the baselines use the same time-varying rate as the rest
+    of the platform."""
     from tools.cache import get_latest_strategy_cache, get_monthly_returns
 
     strategy_results = await get_latest_strategy_cache()
@@ -187,8 +241,12 @@ async def _real_inputs():
     if hmm_result.get("error"):
         raise RuntimeError(f"HMM fit failed: {hmm_result['error']}")
 
+    rf_map = None
+    if monthly.get("rf"):
+        rf_map = {d: r for d, r in zip(monthly["dates"], monthly["rf"])}
+
     current = detect_current_regime()
-    return strategy_results, hmm_result, current
+    return strategy_results, hmm_result, current, rf_map
 
 
 def _synthetic_inputs():
@@ -240,18 +298,18 @@ def _synthetic_inputs():
         "hmm_probabilities": {"BULL": 0.18, "TRANSITION": 0.22,
                               "BEAR": 0.60},
     }
-    return strategy_results, hmm_result, current
+    return strategy_results, hmm_result, current, None  # rf_map None
 
 
 def main() -> int:
     synthetic = "--synthetic" in sys.argv
     banner = "REAL PRODUCTION DATA"
     if synthetic:
-        strategy_results, hmm_result, current = _synthetic_inputs()
+        strategy_results, hmm_result, current, rf_map = _synthetic_inputs()
         banner = "SYNTHETIC FIXTURE (illustrative only — run on Render for real)"
     else:
         try:
-            strategy_results, hmm_result, current = asyncio.run(
+            strategy_results, hmm_result, current, rf_map = asyncio.run(
                 _real_inputs())
         except Exception as exc:  # noqa: BLE001
             print(f"[!] Real inputs unavailable ({exc}).")
@@ -259,7 +317,7 @@ def main() -> int:
                   "output shape is reviewable.")
             print("[!] Run on Render (DB + hmmlearn present) for the "
                   "real weights.\n")
-            strategy_results, hmm_result, current = _synthetic_inputs()
+            strategy_results, hmm_result, current, rf_map = _synthetic_inputs()
             banner = ("SYNTHETIC FIXTURE (illustrative only — real "
                       "inputs were unavailable)")
 
@@ -308,6 +366,9 @@ def main() -> int:
     # strategy genuinely top-Sharpe or a covariance/constraint effect?
     _print_sensitivity(strategy_results, hmm_result)
     _print_dominance(strategy_results, hmm_result, built)
+
+    # Layer 3: out-of-sample validation (train pre-2022, test post-2022).
+    _print_oos(strategy_results, hmm_result, rf_map)
 
     # Current regime + posterior + live blend.
     posterior = current.get("hmm_probabilities") or {}
