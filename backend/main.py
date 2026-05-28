@@ -2809,18 +2809,21 @@ async def get_play_by_play(session: dict = Depends(require_auth)):
                 "key_limitations": {}}
     try:
         from tools.play_by_play import (
-            KEY_LIMITATION_NOTES, load_stored_events, scorecard,
+            KEY_LIMITATION_NOTES, get_cached_performance_chart,
+            load_stored_events, scorecard,
         )
         events = await load_stored_events()
         for ev in events:
             note = KEY_LIMITATION_NOTES.get(ev.get("event_id"))
             if note:
                 ev["key_limitation"] = note
+        cumulative = await get_cached_performance_chart()
         return {
             "available": bool(events),
             "events": events,
             "scorecard": scorecard(events) if events else None,
             "key_limitations": KEY_LIMITATION_NOTES,
+            "cumulative": cumulative,
         }
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]

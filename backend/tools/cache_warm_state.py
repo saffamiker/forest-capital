@@ -437,10 +437,23 @@ async def _default_warm_fn() -> dict[str, bool]:
     except Exception as exc:  # noqa: BLE001
         log.warning("cio_recommendation_warm_failed", error=str(exc))
 
+    # ── Performance Record cumulative chart ───────────────────────────
+    # The post-2022 cumulative series (regime-conditional blend /
+    # benchmark / classic 60/40) is precomputed once per data_hash here
+    # and served from cache by GET /api/v1/play-by-play, so no OOS
+    # recompute ever runs on a page read. Fail-open and isolated.
+    chart_landed = False
+    try:
+        from tools.play_by_play import refresh_performance_chart
+        chart_landed = await refresh_performance_chart(latest_hash or "")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("performance_chart_warm_failed", error=str(exc))
+
     return {
         "academic_analytics":  bool(aa),
         "efficient_frontier":  bool(ef),
         "cio_recommendation":  cio_landed,
+        "performance_chart":   chart_landed,
     }
 
 
