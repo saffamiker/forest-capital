@@ -263,6 +263,193 @@ async def get_latest_recommendation() -> dict | None:
         return None
 
 
+# ── regime-aware cache key (recommendation prose) ──────────────────────────
+#
+# The narrative prose (signal / recommendation / dissenting view) is keyed on
+# the COMPOSITE {data_hash}_{regime}_{confidence_bucket} so a regime flip or
+# a confidence move that crosses a 10pp bucket boundary regenerates the
+# prose, while day-to-day posterior noise within a bucket stays a cache hit.
+# Stored in the same `data_hash` VARCHAR column — no schema change. Bare-
+# data_hash rows from earlier writes remain valid and are served as the
+# fallback by get_endpoint_recommendation when no composite-key row exists.
+
+
+def _confidence_bucket(confidence: float | None) -> int | None:
+    """Round confidence (0..1) to the nearest 10 percentage points,
+    round-half-up. Returns None when confidence is missing."""
+    if confidence is None:
+        return None
+    try:
+        pct = max(0.0, min(1.0, float(confidence))) * 100.0
+    except (TypeError, ValueError):
+        return None
+    # +5 then integer-divide by 10 gives round-half-up (positives only).
+    return int((pct + 5) // 10) * 10
+
+
+def regime_cache_key(
+    data_hash: str, regime: str | None, confidence: float | None,
+) -> str:
+    """Composite cache key for the recommendation prose:
+    {data_hash}_{regime}_{bucket}. Falls back to the bare data_hash when
+    regime or confidence is missing — the existing read path (latest by
+    computed_at) still works for those rows, and a later warm with full
+    regime/confidence info writes a proper composite-keyed row."""
+    if not data_hash:
+        return ""
+    bucket = _confidence_bucket(confidence)
+    if not regime or bucket is None:
+        return data_hash
+    return f"{data_hash}_{regime}_{bucket}"
+
+
+def _parse_cache_key(key: str | None) -> tuple[str | None, str | None, int | None]:
+    """Inverse of regime_cache_key. Bare-hash keys (no underscores in the
+    SHA prefix) yield (hash, None, None). Composite keys yield all three.
+    Robust to extra underscores in the regime token (rejoins the middle)."""
+    if not key:
+        return None, None, None
+    parts = key.split("_")
+    if len(parts) < 3:
+        return key, None, None
+    # bucket = last segment (digits); regime = everything between hash and bucket.
+    try:
+        bucket = int(parts[-1])
+    except ValueError:
+        return key, None, None
+    return parts[0], "_".join(parts[1:-1]) or None, bucket
+
+
+def _miss_reason(
+    target_key: str, latest_key: str | None,
+    data_hash: str, regime: str | None, confidence: float | None,
+) -> str:
+    """Classify a cache miss by comparing the requested composite key
+    against the latest cached key. Used in the cio_recommendation_cache_miss
+    log so the trigger is observable in production."""
+    if not latest_key:
+        return "no_cached_recommendation"
+    latest_hash, latest_regime, latest_bucket = _parse_cache_key(latest_key)
+    if latest_hash != data_hash:
+        return "data_hash_change"
+    if (latest_regime or None) != (regime or None):
+        return "regime_shift"
+    if latest_bucket != _confidence_bucket(confidence):
+        return "confidence_shift"
+    return "unknown"
+
+
+# In-process guard: a flapping regime / bucket boundary near 85% should
+# not fire a fresh LLM call on every endpoint read. The first miss schedules
+# a regenerate; subsequent misses for the same composite key are no-ops
+# until that task finishes.
+_inflight_keys: set[str] = set()
+# Hold strong references so a fire-and-forget task is not GC'd mid-run.
+_bg_tasks: set = set()
+
+
+async def _regenerate_under_key(key: str) -> None:
+    """Run the full live-context + generation flow and persist under the
+    supplied composite key. Fail-open. The inflight key is cleared in the
+    finally block so a later miss can retry."""
+    try:
+        built = await _build_live_context()
+        if built.get("error"):
+            log.warning("cio_recommendation_regenerate_context_unavailable",
+                        key=key, error=built["error"])
+            return
+        rec = generate_recommendation(built["context"], built["macro"])
+        if rec.get("error"):
+            log.warning("cio_recommendation_regenerate_generate_failed",
+                        key=key, error=rec.get("error"))
+            return
+        await _persist(key, rec, built["context"].get("regime"))
+        log.info("cio_recommendation_regenerated", key=key,
+                 model=rec.get("_model"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cio_recommendation_regenerate_failed",
+                    key=key, error=str(exc))
+    finally:
+        _inflight_keys.discard(key)
+
+
+def schedule_regime_aware_refresh(
+    data_hash: str, regime: str | None, confidence: float | None, *,
+    reason: str,
+) -> None:
+    """Schedule a background regenerate of the recommendation prose under
+    the live regime-aware key. Logs the miss reason
+    (regime_shift / confidence_shift / data_hash_change / unknown) so what
+    triggered the regenerate is observable. No-op if a regenerate for the
+    same key is already in flight."""
+    key = regime_cache_key(data_hash, regime, confidence)
+    if not key or key in _inflight_keys:
+        return
+    log.info(
+        "cio_recommendation_cache_miss",
+        reason=reason,
+        data_hash=data_hash[:8] if data_hash else "",
+        regime=regime,
+        bucket=_confidence_bucket(confidence),
+        key=key,
+    )
+    _inflight_keys.add(key)
+    try:
+        import asyncio
+        task = asyncio.create_task(_regenerate_under_key(key))
+        _bg_tasks.add(task)
+        task.add_done_callback(_bg_tasks.discard)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cio_recommendation_regenerate_schedule_failed",
+                    key=key, error=str(exc))
+        _inflight_keys.discard(key)
+
+
+async def get_endpoint_recommendation() -> dict | None:
+    """Read path used by /api/v1/recommendation.
+
+    Resolves the LIVE regime + confidence-bucket from detect_current_regime()
+    and the current data_hash, then prefers a cached row stored under the
+    composite key. On a cache miss, returns the most recent cached row
+    (whatever its key) and schedules a background regenerate under the live
+    key — so the tile stays fast and the next read serves the fresh prose.
+    Fail-open to get_latest_recommendation() at every step."""
+    try:
+        import asyncio
+        from tools.regime_detector import detect_current_regime
+    except Exception:  # noqa: BLE001
+        return await get_latest_recommendation()
+    try:
+        live = await asyncio.to_thread(detect_current_regime)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cio_recommendation_live_regime_unavailable",
+                    error=str(exc))
+        return await get_latest_recommendation()
+    regime = (live or {}).get("hmm_regime")
+    probs = (live or {}).get("hmm_probabilities") or {}
+    confidence = probs.get(regime) if regime else None
+    data_hash = await _current_data_hash()
+    if not data_hash:
+        return await get_latest_recommendation()
+    target_key = regime_cache_key(data_hash, regime, confidence)
+    # Try the composite-key cache (falls through to None on bare-hash keys
+    # too, since the bare data_hash IS the composite when regime is None).
+    rec = await get_cached_for_hash(target_key)
+    if rec is not None:
+        return rec
+    latest = await get_latest_recommendation()
+    # Schedule background regenerate (only when we have enough to compose
+    # a real composite key — otherwise the legacy bare-hash row is correct
+    # by definition).
+    if regime and confidence is not None:
+        reason = _miss_reason(
+            target_key, (latest or {}).get("data_hash"),
+            data_hash, regime, confidence)
+        schedule_regime_aware_refresh(
+            data_hash, regime, confidence, reason=reason)
+    return latest
+
+
 async def _persist(data_hash: str, rec: dict, regime: str | None) -> None:
     if not _DB_AVAILABLE or not data_hash:
         return
@@ -333,30 +520,38 @@ async def _build_live_context() -> dict:
 
 
 async def refresh_cio_recommendation(*, force: bool = False) -> dict:
-    """The hash-pipeline entry point. Serve the cached recommendation
-    when the current data_hash already has one; otherwise build the live
-    context, fire the single LLM call, persist under the data_hash, and
-    return it. force=True recomputes even on a cache hit (not used by the
-    pipeline; available for an operator backfill). Fail-open."""
+    """The hash-pipeline entry point. Builds the live context, composes the
+    regime-aware cache key (data_hash + regime + confidence bucket), and
+    serves the cached recommendation when that exact composite key already
+    has a row. Otherwise fires the single LLM call and persists under the
+    composite key. force=True recomputes even on a cache hit (operator
+    backfill). Fail-open. _build_live_context is cheap (HMM fit + regime
+    detect both use in-process caches), so always building first is a fair
+    trade for picking up regime/bucket changes in the warm path."""
     data_hash = await _current_data_hash()
-    if not force:
-        cached = await get_cached_for_hash(data_hash)
-        if cached:
-            cached["cache"] = "hit"
-            return cached
-
     built = await _build_live_context()
     if built.get("error"):
         log.warning("cio_recommendation_context_unavailable",
                     error=built["error"])
         return built
+    regime = built["context"].get("regime")
+    confidence = built["context"].get("probability")
+    key = regime_cache_key(data_hash, regime, confidence)
+    if not force:
+        cached = await get_cached_for_hash(key)
+        if cached:
+            cached["cache"] = "hit"
+            return cached
     rec = generate_recommendation(built["context"], built["macro"])
     if rec.get("error"):
         return rec
-    await _persist(data_hash, rec, built["context"].get("regime"))
+    await _persist(key, rec, regime)
     rec["cache"] = "miss"
-    rec["data_hash"] = data_hash
+    rec["data_hash"] = key
     log.info("cio_recommendation_computed",
              data_hash=data_hash[:8] if data_hash else "",
+             regime=regime,
+             bucket=_confidence_bucket(confidence),
+             key=key,
              model=rec.get("_model"))
     return rec
