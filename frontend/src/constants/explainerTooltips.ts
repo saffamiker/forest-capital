@@ -279,6 +279,12 @@ export const EXPLAINER_TOOLTIPS: Record<string, string> = {
     + 'bonds that maximises the Sharpe ratio. Dynamic strategies that plot '
     + 'above this point outperform the theoretical static optimum.',
 
+  // ── Council Performance Record — summary banner ───────────────────────────
+  council_record_sharpe:
+    'Sharpe ratio measures return per unit of risk. Higher is better. The '
+    + 'post-2022 period is the true out-of-sample test window — the model '
+    + 'was trained on pre-2022 data only.',
+
   // ── Dashboard page — strategy names (derived from strategyMetadata) ────────
   ...STRATEGY_TOOLTIPS,
 }
