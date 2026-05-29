@@ -30,7 +30,7 @@ import { DARK_CHART_THEME } from '../lib/exportTheme'
 // Stacked activity types for chart 1 — page_view is the lightest layer.
 // Test attestations are their own distinct stack colour.
 const STACK_KINDS: { key: ActivityKind; label: string; color: string }[] = [
-  { key: 'commit',          label: 'Commits',          color: '#6366f1' },
+  { key: 'commit',          label: 'Development Entries', color: '#6366f1' },
   { key: 'council',         label: 'Council',          color: '#3b82f6' },
   { key: 'academic_review', label: 'Academic Review',  color: '#f59e0b' },
   { key: 'document_upload', label: 'Uploads',          color: '#0d9488' },
@@ -236,7 +236,7 @@ export default function TeamActivityCharts({
   const chartContribution = (
       <ChartCard
         title="Platform Interaction Split"
-        subtitle="Share of substantive platform interactions — council sessions, academic review runs, and document uploads. Development contributions (commits, migrations, deployments) are tracked separately in Team Activity."
+        subtitle="Share of substantive platform interactions — council sessions, academic review runs, and document uploads. Development contributions (development entries and platform releases) are tracked separately in Team Activity."
         presentMode={presentMode}
         theme={theme}
       >
