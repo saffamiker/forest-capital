@@ -224,11 +224,21 @@ Monte Carlo confidence bands
 values from the context block (the live HMM posterior). State the regime name \
 and the confidence as a percentage. Do not invent or assume these.
 - The live blend reflects the current-regime weighting
+- Constraint framework: 40% strategy ceiling, 5% floor; 50% asset ceiling, \
+5% floor
+- In the current TRANSITION regime both Min Variance and Risk Parity are at \
+the 40% ceiling -- the blend is at maximum permissible defensiveness
+- Constraint is intentional: it enforces diversification and fiduciary \
+implementability over pure optimization
 Required table:
 Headers: Strategy | BULL | BEAR | TRANSITION | Current Live Weight
 Rows: MIN_VARIANCE, RISK_PARITY, EQUAL_WEIGHT. For the Current Live Weight \
 column use the blend_weights values from the context block — do not invent them.
 Chart: efficient_frontier with the current live blend position marked
+Speaker notes: explain that the binding constraint is a feature, not a bug. \
+A real portfolio manager cannot put 80% in one strategy. The 0.8576 OOS \
+Sharpe is the constrained result -- the academically honest figure for \
+institutional application.
 
 Slide 7 -- Historical Event Validation (play-by-play)
 Required bullets:
