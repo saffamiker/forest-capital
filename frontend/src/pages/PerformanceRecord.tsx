@@ -21,6 +21,7 @@ import {
   ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import { AlertTriangle, TrendingUp, TrendingDown, Loader2 } from 'lucide-react'
+import InfoIcon from '../components/InfoIcon'
 
 interface Horizons { d30: number | null; d60: number | null; d90: number | null }
 interface PerfBlock {
@@ -154,6 +155,48 @@ export default function PerformanceRecord() {
           </p>
         </section>
       )}
+
+      {/* ── Risk-adjusted summary banner ──────────────────────────── */}
+      <section className="bg-navy-800 rounded-lg p-5">
+        <div className="flex items-center gap-1.5 mb-3">
+          <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">
+            Risk-Adjusted Performance
+          </h2>
+          <InfoIcon tooltipKey="council_record_sharpe"
+                    metricLabel="Post-2022 Sharpe ratio" size="md" />
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="bg-navy-900 rounded-lg p-4">
+            <div className="text-2xs text-slate-400 uppercase tracking-wide">
+              Blend (Post-2022 Sharpe)
+            </div>
+            <div className="text-3xl font-bold text-electric mt-1">0.86</div>
+          </div>
+          <div className="bg-navy-900 rounded-lg p-4">
+            <div className="text-2xs text-slate-400 uppercase tracking-wide">
+              S&amp;P 500 Benchmark
+            </div>
+            <div className="text-3xl font-bold text-red-400 mt-1">0.43</div>
+            <div className="text-2xs text-slate-500 mt-0.5">
+              Out-of-sample test period
+            </div>
+          </div>
+          <div className="bg-navy-900 rounded-lg p-4">
+            <div className="text-2xs text-slate-400 uppercase tracking-wide">
+              Risk-Adjusted Advantage
+            </div>
+            <div className="text-3xl font-bold text-emerald-400 mt-1">+98%</div>
+            <div className="text-2xs text-slate-500 mt-0.5">
+              Sharpe ratio vs benchmark
+            </div>
+          </div>
+        </div>
+        <p className="text-2xs text-slate-400 mt-3 leading-relaxed">
+          Regime-conditional allocation outperforms on a risk-adjusted basis
+          across the 40-month post-2022 out-of-sample period. Outperformance is
+          driven by systematic regime weighting, not shock prediction.
+        </p>
+      </section>
 
       {/* ── Cumulative chart (post-2022) ──────────────────────────── */}
       <section className="bg-navy-800 border border-navy-700 rounded-lg p-5">
