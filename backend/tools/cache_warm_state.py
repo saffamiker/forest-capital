@@ -462,12 +462,25 @@ async def _default_warm_fn() -> dict[str, bool]:
     except Exception as exc:  # noqa: BLE001
         log.warning("forward_projection_warm_failed", error=str(exc))
 
+    # ── OOS transaction-cost sensitivity ──────────────────────────────
+    # The 10/15/20 bps net-Sharpe sensitivity (and the material-rebalance
+    # count) over the post-2022 OOS window, served from cache by GET
+    # /api/v1/oos-cost-sensitivity for the Council Performance Record
+    # banner. Reuses the same HMM fit as the forward projection. Fail-open.
+    cost_landed = False
+    try:
+        from tools.regime_meta_validation import refresh_oos_cost_sensitivity
+        cost_landed = await refresh_oos_cost_sensitivity(latest_hash or "")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("oos_cost_sensitivity_warm_failed", error=str(exc))
+
     return {
         "academic_analytics":  bool(aa),
         "efficient_frontier":  bool(ef),
         "cio_recommendation":  cio_landed,
         "performance_chart":   chart_landed,
         "forward_projection":  forward_landed,
+        "oos_cost_sensitivity": cost_landed,
     }
 
 

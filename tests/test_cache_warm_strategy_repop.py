@@ -632,4 +632,5 @@ class TestDefaultWarmFnRepopulatesStrategies:
                           "efficient_frontier": False,
                           "cio_recommendation": False,
                           "performance_chart": False,
-                          "forward_projection": False}
+                          "forward_projection": False,
+                          "oos_cost_sensitivity": False}

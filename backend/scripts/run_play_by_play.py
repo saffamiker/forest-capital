@@ -25,6 +25,20 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("ENVIRONMENT", "production")
 
+# ── FUTURE SCHEDULED EVENT (not yet evaluable — do NOT add to EVENTS yet) ────
+#   event_id: april_recovery_2026_04   date: 2026-04-01
+#   trigger: sharp risk-on recovery rally in April 2026 following extended
+#            tariff uncertainty; a defensively-positioned TRANSITION blend
+#            would be expected to give back relative ground.
+#   Hold until evaluable in August 2026: the forward 30/60/90-day window is
+#   the May / June / July 2026 monthly returns, which only settle once those
+#   calendar months close. The play-by-play forward performance also reads
+#   the strategy monthly series (locked at Dec 2025), which auto-extends with
+#   live data as months close — so this event needs both the window elapsed
+#   AND the monthly series extended into mid-2026 before it yields a verdict.
+#   Add it to tools.play_by_play.EVENTS and re-run this script after the
+#   July 2026 month-close.
+
 
 def _fmt_pct(x) -> str:
     return "  n/a" if x is None else f"{x * 100:+6.2f}%"
