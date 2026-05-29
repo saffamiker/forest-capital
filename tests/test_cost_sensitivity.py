@@ -7,8 +7,50 @@ the chart. All deterministic; no HMM fit, no DB, no network.
 import pytest
 
 from tools.regime_meta_validation import (
-    build_rebalance_events, compute_cost_sensitivity, count_material_rebalances,
+    _implied_asset_path, build_rebalance_events, compute_cost_sensitivity,
+    count_material_rebalances,
 )
+
+
+def test_implied_asset_path_weighted_and_normalised():
+    sr = {
+        "BENCHMARK": {"weight_schedule": [
+            {"date": "2022-01-31", "weights": {"equity": 1.0, "ig": 0.0, "hy": 0.0}}]},
+        "MIN_VARIANCE": {"weight_schedule": [
+            {"date": "2022-01-31", "weights": {"equity": 0.2, "ig": 0.6, "hy": 0.2}}]},
+    }
+    path = _implied_asset_path(
+        sr, ["BENCHMARK", "MIN_VARIANCE"],
+        [{"BENCHMARK": 0.5, "MIN_VARIANCE": 0.5}], ["2022-01-31"])
+    aa = path[0]
+    # 0.5*1.0 + 0.5*0.2 = 0.6 equity; 0.5*0.6 = 0.3 ig; 0.5*0.2 = 0.1 hy.
+    assert aa["equity"] == pytest.approx(0.6)
+    assert aa["ig"] == pytest.approx(0.3)
+    assert aa["hy"] == pytest.approx(0.1)
+    # Every row totals 100%.
+    assert aa["equity"] + aa["ig"] + aa["hy"] == pytest.approx(1.0)
+
+
+def test_build_rebalance_events_with_asset_path():
+    weights = [
+        {"BENCHMARK": 0.5, "MIN_VARIANCE": 0.5},
+        {"BENCHMARK": 0.2, "MIN_VARIANCE": 0.8},
+    ]
+    asset_path = [
+        {"equity": 0.60, "ig": 0.30, "hy": 0.10},
+        {"equity": 0.36, "ig": 0.48, "hy": 0.16},
+    ]
+    events = build_rebalance_events(
+        weights, ["2022-01-31", "2022-02-28"], ["BULL", "BEAR"],
+        asset_path=asset_path)
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["asset_allocation"] == asset_path[1]
+    # Largest asset change vs prior month: equity |0.36-0.60| = 0.24.
+    assert ev["largest_asset_change"]["asset"] == "equity"
+    assert ev["largest_asset_change"]["change"] == pytest.approx(0.24)
+    # All strategy weights are carried (Section 2 renders every column).
+    assert set(ev["weights"]) == {"BENCHMARK", "MIN_VARIANCE"}
 
 
 def test_build_rebalance_events_rows():
