@@ -10,6 +10,7 @@
  * server-provided; a graceful empty state shows before the first warm.
  */
 import { useEffect, useState } from 'react'
+import axios from 'axios'
 import { ChevronDown, ChevronRight, Loader2, AlertTriangle } from 'lucide-react'
 import InfoIcon from './InfoIcon'
 
@@ -58,9 +59,11 @@ export default function CIORecommendationCard() {
 
   useEffect(() => {
     let alive = true
-    fetch('/api/v1/recommendation', { credentials: 'include' })
-      .then((r) => r.json())
-      .then((d) => { if (alive) { setData(d); setLoading(false) } })
+    // axios (not raw fetch) so the X-API-Key auth header rides along via the
+    // global default + request interceptor — a raw fetch sends no credentials
+    // header, 401s, and silently renders the empty state.
+    axios.get<Payload>('/api/v1/recommendation')
+      .then((r) => { if (alive) { setData(r.data); setLoading(false) } })
       .catch(() => { if (alive) { setData({ available: false, recommendation: null }); setLoading(false) } })
     return () => { alive = false }
   }, [])
