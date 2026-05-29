@@ -385,20 +385,76 @@ def count_material_rebalances(
     return n
 
 
+def _implied_asset_path(
+    strategy_results: dict,
+    names: list[str],
+    blend_weights_monthly: list[dict],
+    test_dates: list[str],
+) -> list[dict]:
+    """Per-month implied asset allocation {equity, ig, hy} of the blend:
+    the sum over strategies of (blend weight × that strategy's underlying
+    asset weights), forward-filling each strategy's quarterly
+    weight_schedule to the monthly test dates. Renormalised so each row
+    totals 1.0 (a strategy cached before weight-schedule persistence
+    contributes nothing; renormalising keeps the row at 100%). Pure."""
+    if not blend_weights_monthly or not test_dates:
+        return []
+    test_dt = [pd.Timestamp(d) for d in test_dates]
+    # Forward-fill each strategy's asset weights to the test months.
+    asset_by_name: dict[str, list[dict]] = {}
+    for name in names:
+        sched = ((strategy_results or {}).get(name) or {}).get(
+            "weight_schedule") or []
+        entries = sorted(
+            ((pd.Timestamp(e["date"]), e.get("weights") or {})
+             for e in sched if e.get("date")),
+            key=lambda x: x[0])
+        series: list[dict] = []
+        j = 0
+        cur = {"equity": 0.0, "ig": 0.0, "hy": 0.0}
+        for d in test_dt:
+            while j < len(entries) and entries[j][0] <= d:
+                cur = entries[j][1]
+                j += 1
+            series.append(cur)
+        asset_by_name[name] = series
+
+    out: list[dict] = []
+    for t in range(len(test_dt)):
+        agg = {"equity": 0.0, "ig": 0.0, "hy": 0.0}
+        bw = blend_weights_monthly[t] if t < len(blend_weights_monthly) else {}
+        for name in names:
+            w = float(bw.get(name, 0.0))
+            if w == 0.0:
+                continue
+            aw = asset_by_name.get(name, [])
+            row_aw = aw[t] if t < len(aw) else {}
+            for a in ("equity", "ig", "hy"):
+                agg[a] += w * float(row_aw.get(a, 0.0))
+        total = agg["equity"] + agg["ig"] + agg["hy"]
+        if total > 0:
+            agg = {a: agg[a] / total for a in agg}
+        out.append({a: round(agg[a], 6) for a in ("equity", "ig", "hy")})
+    return out
+
+
 def build_rebalance_events(
     blend_weights_monthly: list[dict],
     test_dates: list[str],
     blend_regime_monthly: list,
     threshold: float = 0.02,
+    asset_path: list[dict] | None = None,
 ) -> list[dict]:
     """One row per material rebalancing month (a month whose blend weights
     shifted by more than `threshold` in ANY single strategy vs the prior
     month). The first month seeds the position and is never an event. Each
-    row carries the date, the dominant regime that month, the NEW weights,
-    and the total shift (sum of absolute weight changes across strategies).
-    Pure; built from the per-month series the OOS validation already
-    produces, so it is cached alongside the cost sensitivity rather than
-    recomputed on a read."""
+    row carries the date, the dominant regime that month, the NEW strategy
+    weights (all strategies), and the total shift (sum of absolute weight
+    changes across strategies). When asset_path is supplied, the row also
+    carries the implied asset allocation that month and the single largest
+    asset-class change vs the prior month. Pure; built from the per-month
+    series the OOS validation already produces, so it is cached alongside
+    the cost sensitivity rather than recomputed on a read."""
     events: list[dict] = []
     prev: dict | None = None
     for t, w in enumerate(blend_weights_monthly or []):
@@ -410,12 +466,25 @@ def build_rebalance_events(
                 regime = (blend_regime_monthly[t]
                           if t < len(blend_regime_monthly or []) else None)
                 date = test_dates[t] if t < len(test_dates or []) else None
-                events.append({
+                row = {
                     "date": date,
                     "regime": regime,
                     "weights": {k: round(float(w.get(k, 0.0)), 4) for k in w},
                     "total_shift": round(sum(deltas), 4),
-                })
+                }
+                if asset_path and t < len(asset_path):
+                    aa = asset_path[t]
+                    row["asset_allocation"] = aa
+                    if t - 1 >= 0 and (t - 1) < len(asset_path):
+                        prev_aa = asset_path[t - 1]
+                        changes = {
+                            a: abs(float(aa.get(a, 0.0))
+                                   - float(prev_aa.get(a, 0.0)))
+                            for a in ("equity", "ig", "hy")}
+                        la = max(changes, key=lambda a: changes[a])
+                        row["largest_asset_change"] = {
+                            "asset": la, "change": round(changes[la], 4)}
+                events.append(row)
         prev = w
     return events
 
@@ -528,13 +597,19 @@ async def refresh_oos_cost_sensitivity(data_hash: str) -> bool:
             benchmark_sharpe=bench.get("sharpe"),
             n_test_months=val.get("n_test_months", 0),
         )
-        # Per-event rebalancing history (date / regime / weights / total
-        # shift) cached alongside the scalar sensitivity so the Rebalancing
-        # History table reads it straight from this metric.
+        # Per-event rebalancing history (date / regime / strategy weights /
+        # implied asset allocation / largest asset change) cached alongside
+        # the scalar sensitivity so the two Rebalancing History tables read
+        # it straight from this metric. The implied asset path multiplies
+        # each strategy's blend weight by its underlying asset allocation.
+        bwm = val.get("blend_weights_monthly", [])
+        names = val.get("names") or (list(bwm[0].keys()) if bwm else [])
+        asset_path = _implied_asset_path(
+            sr, names, bwm, val.get("test_dates", []))
         result["rebalance_events"] = build_rebalance_events(
-            val.get("blend_weights_monthly", []),
-            val.get("test_dates", []),
+            bwm, val.get("test_dates", []),
             val.get("blend_regime_monthly", []),
+            asset_path=asset_path,
         )
         await set_metric(data_hash or "", _COST_METRIC_KIND, result,
                          source="oos_cost_sensitivity")

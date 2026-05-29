@@ -146,6 +146,31 @@ interface RebalanceEvent {
   regime: string | null
   weights: Record<string, number>
   total_shift: number
+  asset_allocation?: { equity: number; ig: number; hy: number }
+  largest_asset_change?: { asset: string; change: number }
+}
+
+// Compact column labels for the per-strategy weights table.
+const STRATEGY_SHORT: Record<string, string> = {
+  BENCHMARK: 'Benchmark',
+  CLASSIC_60_40: '60/40',
+  EQUAL_WEIGHT: 'Equal Wt',
+  RISK_PARITY: 'Risk Parity',
+  MIN_VARIANCE: 'Min Var',
+  BLACK_LITTERMAN: 'Black-Litt',
+  MOMENTUM_ROTATION: 'Momentum',
+  REGIME_SWITCHING: 'Regime Sw',
+  VOL_TARGETING: 'Vol Target',
+  MAX_SHARPE_ROLLING: 'Max Sharpe',
+}
+// Preferred display order; any key not listed falls to the end, alphabetical.
+const STRATEGY_ORDER = [
+  'BENCHMARK', 'CLASSIC_60_40', 'EQUAL_WEIGHT', 'RISK_PARITY', 'MIN_VARIANCE',
+  'BLACK_LITTERMAN', 'MOMENTUM_ROTATION', 'REGIME_SWITCHING', 'VOL_TARGETING',
+  'MAX_SHARPE_ROLLING',
+]
+const ASSET_LABEL: Record<string, string> = {
+  equity: 'Equity', ig: 'IG Bonds', hy: 'HY Bonds',
 }
 interface CostSensitivity {
   n_rebalances: number
@@ -376,72 +401,125 @@ export default function PerformanceRecord() {
         )
       })()}
 
-      {/* ── Rebalancing history (per-event detail) ────────────────── */}
+      {/* ── Rebalancing history — two sections ─────────────────────── */}
       {cost && cost.rebalance_events && cost.rebalance_events.length > 0 && (() => {
         const events = [...cost.rebalance_events]
           .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''))
         const n = cost.rebalance_events.length
         const avgGap = n > 0 ? (cost.n_test_months / n) : null
-        const wpct = (w: Record<string, number>, k: string): string =>
-          `${((w[k] ?? 0) * 100).toFixed(0)}%`
+        const subtitle = (
+          'Events where blend weights shifted more than 2% in any strategy. '
+          + 'Transaction costs applied at each.')
+        const footer = (
+          `${n} rebalancing events over ${cost.n_test_months} months.`
+          + (avgGap !== null
+            ? ` Average ${avgGap.toFixed(1)} months between rebalances.` : ''))
+        // Strategy columns: preferred order first, then any extras alphabetically.
+        const stratCols = Array.from(
+          new Set(events.flatMap((e) => Object.keys(e.weights))))
+          .sort((a, b) => {
+            const ia = STRATEGY_ORDER.indexOf(a)
+            const ib = STRATEGY_ORDER.indexOf(b)
+            if (ia !== -1 && ib !== -1) return ia - ib
+            if (ia !== -1) return -1
+            if (ib !== -1) return 1
+            return a.localeCompare(b)
+          })
+        const hasAsset = events.some((e) => e.asset_allocation)
+        const a1 = (x: number | undefined): string =>
+          `${((x ?? 0) * 100).toFixed(1)}%`
         return (
-          <section className="bg-navy-800 rounded-lg p-5">
-            <div className="flex items-center gap-1.5">
-              <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">
-                Rebalancing History
-              </h2>
-              <InfoIcon tooltipKey="rebalancing_events"
-                        metricLabel="Rebalancing events" size="md" />
-            </div>
-            <p className="text-2xs text-slate-500 mt-1 leading-relaxed">
-              Events where blend weights shifted more than 2% in any strategy.
-              Transaction costs applied at each.
-            </p>
-            <div className="overflow-x-auto mt-3">
-              <table className="text-sm w-full">
-                <thead>
-                  <tr className="text-slate-400 text-2xs uppercase">
-                    <th className="text-left font-medium py-1">Date</th>
-                    <th className="text-left font-medium py-1">Regime</th>
-                    <th className="text-right font-medium py-1">Min Variance</th>
-                    <th className="text-right font-medium py-1">Risk Parity</th>
-                    <th className="text-right font-medium py-1">Equal Weight</th>
-                    <th className="text-right font-medium py-1">Total Shift</th>
-                  </tr>
-                </thead>
-                <tbody className="font-mono text-xs">
-                  {events.map((ev, i) => (
-                    <tr key={`${ev.date}-${i}`} className="border-t border-navy-700">
-                      <td className="text-left text-slate-300 py-1.5">
-                        {fmtDate(ev.date)}
-                      </td>
-                      <td className="text-left text-slate-300 font-sans py-1.5">
-                        {ev.regime ?? '—'}
-                      </td>
-                      <td className="text-right text-slate-300 py-1.5">
-                        {wpct(ev.weights, 'MIN_VARIANCE')}
-                      </td>
-                      <td className="text-right text-slate-300 py-1.5">
-                        {wpct(ev.weights, 'RISK_PARITY')}
-                      </td>
-                      <td className="text-right text-slate-300 py-1.5">
-                        {wpct(ev.weights, 'EQUAL_WEIGHT')}
-                      </td>
-                      <td className="text-right text-electric py-1.5">
-                        {(ev.total_shift * 100).toFixed(1)}%
-                      </td>
+          <>
+            {/* SECTION 1 — Implied Asset Allocation */}
+            {hasAsset && (
+              <section className="bg-navy-800 rounded-lg p-5">
+                <div className="flex items-center gap-1.5">
+                  <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">
+                    Implied Asset Allocation
+                  </h2>
+                  <InfoIcon tooltipKey="rebalancing_events"
+                            metricLabel="Rebalancing events" size="md" />
+                </div>
+                <p className="text-2xs text-slate-500 mt-1 leading-relaxed">{subtitle}</p>
+                <div className="overflow-x-auto mt-3">
+                  <table className="text-sm w-full">
+                    <thead>
+                      <tr className="text-slate-400 text-2xs uppercase">
+                        <th className="text-left font-medium py-1">Date</th>
+                        <th className="text-left font-medium py-1">Regime</th>
+                        <th className="text-right font-medium py-1">Equity %</th>
+                        <th className="text-right font-medium py-1">IG Bonds %</th>
+                        <th className="text-right font-medium py-1">HY Bonds %</th>
+                        <th className="text-right font-medium py-1">Largest Change</th>
+                      </tr>
+                    </thead>
+                    <tbody className="font-mono text-xs">
+                      {events.map((ev, i) => {
+                        const aa = ev.asset_allocation
+                        const lc = ev.largest_asset_change
+                        return (
+                          <tr key={`aa-${ev.date}-${i}`} className="border-t border-navy-700">
+                            <td className="text-left text-slate-300 py-1.5">{fmtDate(ev.date)}</td>
+                            <td className="text-left text-slate-300 font-sans py-1.5">{ev.regime ?? '—'}</td>
+                            <td className="text-right text-slate-300 py-1.5">{a1(aa?.equity)}</td>
+                            <td className="text-right text-slate-300 py-1.5">{a1(aa?.ig)}</td>
+                            <td className="text-right text-slate-300 py-1.5">{a1(aa?.hy)}</td>
+                            <td className="text-right text-electric py-1.5">
+                              {lc ? `${ASSET_LABEL[lc.asset] ?? lc.asset} ${(lc.change * 100).toFixed(1)}%` : '—'}
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                <p className="text-2xs text-slate-500 mt-3">{footer}</p>
+              </section>
+            )}
+
+            {/* SECTION 2 — Strategy Blend Weights */}
+            <section className="bg-navy-800 rounded-lg p-5">
+              <div className="flex items-center gap-1.5">
+                <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">
+                  Strategy Blend Weights
+                </h2>
+                <InfoIcon tooltipKey="rebalancing_events"
+                          metricLabel="Rebalancing events" size="md" />
+              </div>
+              <p className="text-2xs text-slate-500 mt-1 leading-relaxed">
+                {subtitle} All strategy weights sum to 100%.
+              </p>
+              <div className="overflow-x-auto mt-3">
+                <table className="text-sm w-full">
+                  <thead>
+                    <tr className="text-slate-400 text-2xs uppercase">
+                      <th className="text-left font-medium py-1 sticky left-0 bg-navy-800">Date</th>
+                      <th className="text-left font-medium py-1">Regime</th>
+                      {stratCols.map((k) => (
+                        <th key={k} className="text-right font-medium py-1 px-1.5">
+                          {STRATEGY_SHORT[k] ?? k}
+                        </th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-            <p className="text-2xs text-slate-500 mt-3">
-              {n} rebalancing events over {cost.n_test_months} months.
-              {avgGap !== null
-                ? ` Average ${avgGap.toFixed(1)} months between rebalances.`
-                : ''}
-            </p>
-          </section>
+                  </thead>
+                  <tbody className="font-mono text-xs">
+                    {events.map((ev, i) => (
+                      <tr key={`sw-${ev.date}-${i}`} className="border-t border-navy-700">
+                        <td className="text-left text-slate-300 py-1.5 sticky left-0 bg-navy-800">{fmtDate(ev.date)}</td>
+                        <td className="text-left text-slate-300 font-sans py-1.5">{ev.regime ?? '—'}</td>
+                        {stratCols.map((k) => (
+                          <td key={k} className="text-right text-slate-300 py-1.5 px-1.5">
+                            {((ev.weights[k] ?? 0) * 100).toFixed(0)}%
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-2xs text-slate-500 mt-3">{footer}</p>
+            </section>
+          </>
         )
       })()}
 
