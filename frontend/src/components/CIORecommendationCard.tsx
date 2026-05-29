@@ -48,8 +48,16 @@ const CFA_DISCLOSURE =
 
 function asOf(ts?: string | null): string {
   if (!ts) return 'unknown'
-  const d = new Date(ts)
-  return isNaN(d.getTime()) ? ts : d.toLocaleString()
+  // Backend timestamps are UTC. Normalise to ISO and, when the string
+  // carries no timezone marker, treat it as UTC ('Z') so the browser
+  // converts to the user's local zone instead of misreading the UTC clock
+  // as local. Render with the timezone abbreviation so it is unambiguous.
+  let s = String(ts).trim().replace(' ', 'T')
+  if (!/[zZ]$|[+-]\d{2}:?\d{2}$/.test(s)) s += 'Z'
+  const d = new Date(s)
+  return isNaN(d.getTime())
+    ? String(ts)
+    : d.toLocaleString(undefined, { timeZoneName: 'short' })
 }
 
 export default function CIORecommendationCard() {

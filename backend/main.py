@@ -2776,6 +2776,32 @@ async def _read_cached_metric_or_fallback(
         return await fallback()
 
 
+async def _overlay_live_regime(target: dict, *, prob_key: str = "probability") -> None:
+    """Write the LIVE regime label + posterior confidence onto `target`
+    (`target["regime"]` and `target[prob_key]`), from a fresh
+    detect_current_regime() read. Both landing tiles call this so they show
+    one identical, current confidence — not the value frozen into each
+    tile's data_hash cache at a different warm time. detect_current_regime()
+    has a 15-minute in-process cache (shared with the dashboard regime
+    banner), so this is the platform's live regime read, not a per-tile
+    cache. Fail-open: any error leaves the cached values untouched."""
+    if not isinstance(target, dict):
+        return
+    try:
+        import asyncio
+        from tools.regime_detector import detect_current_regime
+        live = await asyncio.to_thread(detect_current_regime)
+        regime = (live or {}).get("hmm_regime")
+        if not regime:
+            return
+        conf = ((live or {}).get("hmm_probabilities") or {}).get(regime)
+        target["regime"] = regime
+        if isinstance(conf, (int, float)):
+            target[prob_key] = conf
+    except Exception as exc:  # noqa: BLE001
+        log.warning("live_regime_overlay_failed", error=str(exc))
+
+
 @app.get("/api/v1/recommendation")
 async def get_cio_recommendation(session: dict = Depends(require_auth)):
     """The live CIO recommendation behind the landing page. Served from
@@ -2789,6 +2815,18 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
     try:
         from tools.cio_recommendation import get_latest_recommendation
         rec = await get_latest_recommendation()
+        # Overlay the LIVE regime read so the headline regime label +
+        # confidence are never the data_hash-stale cached values, and match
+        # the Forward Projection tile exactly (both read the same
+        # detect_current_regime() 15-minute in-process regime cache). The
+        # cached recommendation/dissent/limitations text is unchanged — the
+        # card reads regime + probability from rec.confidence.
+        if rec:
+            conf = rec.get("confidence")
+            if not isinstance(conf, dict):
+                conf = {}
+                rec["confidence"] = conf
+            await _overlay_live_regime(conf, prob_key="probability")
         return {"available": bool(rec), "recommendation": rec}
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
@@ -2850,6 +2888,12 @@ async def get_forward_projection(session: dict = Depends(require_auth)):
     try:
         from tools.regime_meta_forward import get_cached_forward_projection
         proj = await get_cached_forward_projection()
+        # Overlay the LIVE regime read onto the cached bands so the regime
+        # label + confidence match the CIO card (same source) rather than
+        # the data_hash-stale value the simulation was cached with. The
+        # simulation bands / p_outperform stay as cached.
+        if proj:
+            await _overlay_live_regime(proj, proj, prob_key="regime_probability")
         return {"available": bool(proj), "projection": proj}
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
