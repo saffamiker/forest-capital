@@ -141,12 +141,19 @@ interface CostScenario {
   net_sharpe: number | null
   vs_benchmark_pct: number | null
 }
+interface RebalanceEvent {
+  date: string | null
+  regime: string | null
+  weights: Record<string, number>
+  total_shift: number
+}
 interface CostSensitivity {
   n_rebalances: number
   gross_sharpe: number | null
   benchmark_sharpe: number | null
   n_test_months: number
   scenarios: CostScenario[]
+  rebalance_events?: RebalanceEvent[]
 }
 interface CostPayload {
   available: boolean
@@ -364,6 +371,75 @@ export default function PerformanceRecord() {
               One-way transaction cost applied at each material rebalance
               (&gt;2% weight shift in any single strategy). Net Sharpe stays
               above the S&amp;P 500 benchmark at every cost assumption.
+            </p>
+          </section>
+        )
+      })()}
+
+      {/* ── Rebalancing history (per-event detail) ────────────────── */}
+      {cost && cost.rebalance_events && cost.rebalance_events.length > 0 && (() => {
+        const events = [...cost.rebalance_events]
+          .sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''))
+        const n = cost.rebalance_events.length
+        const avgGap = n > 0 ? (cost.n_test_months / n) : null
+        const wpct = (w: Record<string, number>, k: string): string =>
+          `${((w[k] ?? 0) * 100).toFixed(0)}%`
+        return (
+          <section className="bg-navy-800 rounded-lg p-5">
+            <div className="flex items-center gap-1.5">
+              <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">
+                Rebalancing History
+              </h2>
+              <InfoIcon tooltipKey="rebalancing_events"
+                        metricLabel="Rebalancing events" size="md" />
+            </div>
+            <p className="text-2xs text-slate-500 mt-1 leading-relaxed">
+              Events where blend weights shifted more than 2% in any strategy.
+              Transaction costs applied at each.
+            </p>
+            <div className="overflow-x-auto mt-3">
+              <table className="text-sm w-full">
+                <thead>
+                  <tr className="text-slate-400 text-2xs uppercase">
+                    <th className="text-left font-medium py-1">Date</th>
+                    <th className="text-left font-medium py-1">Regime</th>
+                    <th className="text-right font-medium py-1">Min Variance</th>
+                    <th className="text-right font-medium py-1">Risk Parity</th>
+                    <th className="text-right font-medium py-1">Equal Weight</th>
+                    <th className="text-right font-medium py-1">Total Shift</th>
+                  </tr>
+                </thead>
+                <tbody className="font-mono text-xs">
+                  {events.map((ev, i) => (
+                    <tr key={`${ev.date}-${i}`} className="border-t border-navy-700">
+                      <td className="text-left text-slate-300 py-1.5">
+                        {fmtDate(ev.date)}
+                      </td>
+                      <td className="text-left text-slate-300 font-sans py-1.5">
+                        {ev.regime ?? '—'}
+                      </td>
+                      <td className="text-right text-slate-300 py-1.5">
+                        {wpct(ev.weights, 'MIN_VARIANCE')}
+                      </td>
+                      <td className="text-right text-slate-300 py-1.5">
+                        {wpct(ev.weights, 'RISK_PARITY')}
+                      </td>
+                      <td className="text-right text-slate-300 py-1.5">
+                        {wpct(ev.weights, 'EQUAL_WEIGHT')}
+                      </td>
+                      <td className="text-right text-electric py-1.5">
+                        {(ev.total_shift * 100).toFixed(1)}%
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <p className="text-2xs text-slate-500 mt-3">
+              {n} rebalancing events over {cost.n_test_months} months.
+              {avgGap !== null
+                ? ` Average ${avgGap.toFixed(1)} months between rebalances.`
+                : ''}
             </p>
           </section>
         )

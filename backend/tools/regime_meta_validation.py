@@ -270,6 +270,7 @@ def out_of_sample_validation(
     # regimes that have a frozen blend, then realise the blend return.
     blend_ret = np.zeros(n_test)
     weight_path: list[np.ndarray] = []
+    regime_path: list[str | None] = []
     for t in range(n_test):
         num = np.zeros(n)
         denom = 0.0
@@ -280,6 +281,14 @@ def out_of_sample_validation(
         w_t = (num / denom) if denom > 0 else np.full(n, 1.0 / n)
         weight_path.append(w_t)
         blend_ret[t] = float(w_t @ test_matrix[t])
+        # Dominant regime that month — argmax of the posterior over all
+        # regimes (not just those with a frozen blend), for the rebalancing
+        # history. None when no posterior is present.
+        if test_post:
+            regime_path.append(max(
+                test_post, key=lambda r: float(test_post[r][t])))
+        else:
+            regime_path.append(None)
 
     rf_test = _rf_for_dates(risk_free, test_dates)
 
@@ -349,6 +358,9 @@ def out_of_sample_validation(
             {names[i]: round(float(w[i]), 6) for i in range(n)}
             for w in weight_path
         ]
+        # Per-month dominant regime, aligned to test_dates — the regime
+        # column of the rebalancing-history table.
+        result["blend_regime_monthly"] = list(regime_path)
     return result
 
 
@@ -371,6 +383,41 @@ def count_material_rebalances(
                 n += 1
         prev = w
     return n
+
+
+def build_rebalance_events(
+    blend_weights_monthly: list[dict],
+    test_dates: list[str],
+    blend_regime_monthly: list,
+    threshold: float = 0.02,
+) -> list[dict]:
+    """One row per material rebalancing month (a month whose blend weights
+    shifted by more than `threshold` in ANY single strategy vs the prior
+    month). The first month seeds the position and is never an event. Each
+    row carries the date, the dominant regime that month, the NEW weights,
+    and the total shift (sum of absolute weight changes across strategies).
+    Pure; built from the per-month series the OOS validation already
+    produces, so it is cached alongside the cost sensitivity rather than
+    recomputed on a read."""
+    events: list[dict] = []
+    prev: dict | None = None
+    for t, w in enumerate(blend_weights_monthly or []):
+        if prev is not None:
+            keys = set(w) | set(prev)
+            deltas = [abs(float(w.get(k, 0.0)) - float(prev.get(k, 0.0)))
+                      for k in keys]
+            if any(d > threshold for d in deltas):
+                regime = (blend_regime_monthly[t]
+                          if t < len(blend_regime_monthly or []) else None)
+                date = test_dates[t] if t < len(test_dates or []) else None
+                events.append({
+                    "date": date,
+                    "regime": regime,
+                    "weights": {k: round(float(w.get(k, 0.0)), 4) for k in w},
+                    "total_shift": round(sum(deltas), 4),
+                })
+        prev = w
+    return events
 
 
 def compute_cost_sensitivity(
@@ -480,6 +527,14 @@ async def refresh_oos_cost_sensitivity(data_hash: str) -> bool:
             oos_vol=rc.get("vol_ann"),
             benchmark_sharpe=bench.get("sharpe"),
             n_test_months=val.get("n_test_months", 0),
+        )
+        # Per-event rebalancing history (date / regime / weights / total
+        # shift) cached alongside the scalar sensitivity so the Rebalancing
+        # History table reads it straight from this metric.
+        result["rebalance_events"] = build_rebalance_events(
+            val.get("blend_weights_monthly", []),
+            val.get("test_dates", []),
+            val.get("blend_regime_monthly", []),
         )
         await set_metric(data_hash or "", _COST_METRIC_KIND, result,
                          source="oos_cost_sensitivity")

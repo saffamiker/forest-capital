@@ -291,6 +291,12 @@ export const EXPLAINER_TOOLTIPS: Record<string, string> = {
     + 'is the gross Sharpe minus the annualized cost drag (one-way bps per '
     + 'rebalance), so the figure stays comparable with the gross Sharpe above.',
 
+  rebalancing_events:
+    'A rebalancing event occurs when the regime-conditional optimizer shifts '
+    + 'blend weights by more than 2% in response to a change in the HMM '
+    + 'posterior probability. Each event incurs a transaction cost applied in '
+    + 'the sensitivity analysis above.',
+
   // ── Dashboard page — strategy names (derived from strategyMetadata) ────────
   ...STRATEGY_TOOLTIPS,
 }
