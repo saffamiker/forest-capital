@@ -37,6 +37,40 @@ def _fmt_weights(blend, top=4) -> str:
     return "  ".join(f"{n}={w:.2f}" for n, w in rows[:top] if w > 0.01)
 
 
+def _db_host() -> str:
+    """The DATABASE_URL host (credentials masked), so a run can confirm
+    the shell is pointed at the SAME database the web service reads — a
+    script-vs-service DB mismatch writes rows the UI never sees."""
+    url = os.getenv("DATABASE_URL", "")
+    try:
+        import re
+        m = re.search(r"@([^/?]+)", url)
+        return m.group(1) if m else "(no host in DATABASE_URL)"
+    except Exception:  # noqa: BLE001
+        return "(unknown)"
+
+
+async def _verify_row_count() -> int | None:
+    """COUNT(*) of play_by_play_events in a FRESH session — the
+    verification that the persist actually committed. Returns None if the
+    DB is unreachable. This is the guard against the '9/9 evaluable but
+    0 rows' failure mode: the run now prints the real landed count."""
+    try:
+        from sqlalchemy import text
+
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(
+                text("SELECT COUNT(*) FROM play_by_play_events"))
+            found = row.fetchone()
+            return int(found[0]) if found else 0
+    except Exception as exc:  # noqa: BLE001
+        print(f"[!] Row-count verification query failed: {exc}")
+        return None
+
+
 async def _real_inputs():
     """(strategy_results, equity_series) from production, or raise."""
     import pandas as pd
@@ -69,12 +103,18 @@ async def _compute_and_store():
         recommend_fn=llm_event_recommendation)
     written = await persist_events(new_rows)
     stored = await load_stored_events()
+    # Verification: a FRESH session counts the rows that actually landed,
+    # so the run confirms the writes committed — the root-cause guard for
+    # the "computes 9/9 but 0 rows in the table" failure mode.
+    db_count = await _verify_row_count()
     return {
         "equity_months": equity.shape[0],
         "n_strategies": len(strategy_results),
         "n_cached": len(existing),
         "n_computed": len(new_rows),
         "n_persisted": written,
+        "db_count": db_count,
+        "db_host": _db_host(),
         "display": stored if stored else new_rows,
     }
 
@@ -96,6 +136,19 @@ def main() -> int:
     print(f"Cached (skipped): {res['n_cached']}   "
           f"Computed this run: {res['n_computed']}   "
           f"Persisted: {res['n_persisted']}")
+    # Verification — the count of rows that ACTUALLY landed, read back in a
+    # fresh session. This is the line that confirms writes committed.
+    db_count = res.get("db_count")
+    print(f"DB row count after persist: "
+          f"{'(unreachable)' if db_count is None else db_count}   "
+          f"(DB host: {res.get('db_host')})")
+    if (res["n_computed"] or res["n_cached"]) and db_count == 0:
+        print("[!] Computed events but 0 rows in the table. Inspect the "
+              "'play_by_play_skip_not_persistable' and "
+              "'play_by_play_persist_summary' log lines above for the reason "
+              "(forward-window/d90 incomplete, regime null, or insert errors), "
+              "and confirm this shell's DATABASE_URL host matches the web "
+              "service's.")
     print("30/60/90 days = 1/2/3 forward months (monthly data). "
           "Cached events are never recomputed.")
     print()

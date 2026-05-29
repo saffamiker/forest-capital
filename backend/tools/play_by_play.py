@@ -637,31 +637,70 @@ def _json_safe(obj) -> str:
 
 
 async def get_persisted_event_ids() -> set[str]:
-    """event_ids already in play_by_play_events. The run skips these
-    entirely. Fail-open to an empty set (a DB problem means 'nothing
+    """event_ids of COMPLETE persisted rows — the run skips only these.
+
+    A row counts as a settled, never-recompute fact only when its regime
+    resolved, its performance block exists, AND the forward 90-day figure
+    is present — the same completeness is_persistable enforces at write
+    time. An INCOMPLETE row (regime null, no performance, or a null
+    blend.d90 — left by a degraded or partial earlier run) is deliberately
+    NOT treated as cached, so the event is recomputed on the next run and
+    its row upgraded in place (persist_events does ON CONFLICT DO UPDATE).
+    This is what makes a failed event retryable while a settled fact stays
+    frozen. Fail-open to an empty set (a DB problem means 'nothing
     cached', so the run recomputes rather than silently doing nothing)."""
     if not _DB_AVAILABLE:
         return set()
     try:
         from sqlalchemy import text
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
-            rows = await session.execute(
-                text("SELECT event_id FROM play_by_play_events"))
+            rows = await session.execute(text(
+                "SELECT event_id FROM play_by_play_events "
+                "WHERE regime IS NOT NULL "
+                "AND performance IS NOT NULL "
+                "AND (performance->'blend'->>'d90') IS NOT NULL"))
             return {r[0] for r in rows.fetchall()}
     except Exception as exc:  # noqa: BLE001
         log.warning("play_by_play_existing_read_error", error=str(exc))
         return set()
 
 
+def _skip_reason(row: dict) -> str:
+    """Why a row is not persistable — logged per skip so a '0 rows landed'
+    production run is diagnosable from the logs rather than silent."""
+    if row.get("error"):
+        return f"error:{row['error']}"
+    if row.get("regime") is None:
+        return "regime_none"
+    d90 = ((row.get("performance") or {}).get("blend") or {}).get("d90")
+    if d90 is None:
+        return "blend_d90_none (forward window incomplete)"
+    try:
+        if not np.isfinite(float(d90)):
+            return "blend_d90_nan"
+    except (TypeError, ValueError):
+        return "blend_d90_non_numeric"
+    return "unknown"
+
+
 async def persist_events(rows: list[dict], *, data_hash: str | None = None) -> int:
     """INSERT each COMPLETE row (is_persistable) into play_by_play_events.
-    ON CONFLICT (event_id) DO NOTHING: the event_id cache is write-once,
-    so even a racing second run never overwrites a frozen historical
-    fact. Returns the number of rows written. Fail-open: a DB error logs
-    and returns the count written so far."""
+
+    ON CONFLICT (event_id) DO UPDATE: a COMPLETE row is never recomputed
+    (get_persisted_event_ids skips it), so the only conflict that ever
+    fires is an INCOMPLETE row from a degraded earlier run being upgraded
+    to a settled fact — failed events are retryable, settled facts stay
+    frozen. Each row commits in its OWN transaction (a single shared commit
+    let one bad row abort the whole batch), and every commit is explicit.
+
+    Instrumented: each non-persistable row logs its skip reason, and a
+    persist summary (rows_in / persistable / written) is logged at the end,
+    so a run that computes events but writes zero rows is diagnosable from
+    the logs. Returns the number written. Fail-open."""
     if not _DB_AVAILABLE:
+        log.warning("play_by_play_persist_db_unavailable", rows_in=len(rows))
         return 0
-    import json
+    import json  # noqa: F401 — kept for parity with the JSONB cast helpers
 
     from sqlalchemy import text
     stmt = text(
@@ -675,18 +714,35 @@ async def persist_events(rows: list[dict], *, data_hash: str | None = None) -> i
         " :recommendation, :dissenting_view, CAST(:performance AS JSONB), "
         " :verdict, :value_added_sharpe, :hmm_fit, :n_train_months, "
         " :data_hash) "
-        "ON CONFLICT (event_id) DO NOTHING")
+        "ON CONFLICT (event_id) DO UPDATE SET "
+        " event_date = EXCLUDED.event_date, "
+        " trigger = EXCLUDED.trigger, "
+        " regime = EXCLUDED.regime, "
+        " posterior = EXCLUDED.posterior, "
+        " blend_weights = EXCLUDED.blend_weights, "
+        " recommendation = EXCLUDED.recommendation, "
+        " dissenting_view = EXCLUDED.dissenting_view, "
+        " performance = EXCLUDED.performance, "
+        " verdict = EXCLUDED.verdict, "
+        " value_added_sharpe = EXCLUDED.value_added_sharpe, "
+        " hmm_fit = EXCLUDED.hmm_fit, "
+        " n_train_months = EXCLUDED.n_train_months, "
+        " data_hash = EXCLUDED.data_hash, "
+        " computed_at = now()")
     written = 0
+    n_persistable = 0
     try:
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
             for r in rows:
                 if not is_persistable(r):
+                    log.warning("play_by_play_skip_not_persistable",
+                                event_id=r.get("event_id"),
+                                reason=_skip_reason(r))
                     continue
-                # Commit each row in its OWN transaction. A single shared
-                # commit meant one bad row (e.g. a NaN that fails the
-                # JSONB cast) aborted the whole batch and blocked the
-                # other eight; per-row commit + rollback isolates the
-                # failure so the rest still persist.
+                n_persistable += 1
+                # Commit each row in its OWN transaction so one bad row
+                # (e.g. a NaN that fails the JSONB cast) cannot abort the
+                # batch and block the rest.
                 try:
                     await session.execute(stmt, {
                         "event_id": r["event_id"],
@@ -714,6 +770,8 @@ async def persist_events(rows: list[dict], *, data_hash: str | None = None) -> i
                                 error=str(row_exc))
     except Exception as exc:  # noqa: BLE001
         log.warning("play_by_play_persist_error", error=str(exc))
+    log.info("play_by_play_persist_summary",
+             rows_in=len(rows), persistable=n_persistable, written=written)
     return written
 
 
