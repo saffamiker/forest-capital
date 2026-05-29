@@ -13,12 +13,13 @@
  * staleness indicator. Graceful empty state before the first warm.
  */
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine,
 } from 'recharts'
-import { Loader2 } from 'lucide-react'
+import { Loader2, MessageSquare } from 'lucide-react'
 import InfoIcon from './InfoIcon'
 
 interface Band { median: number; p05: number; p95: number }
@@ -62,8 +63,21 @@ function asOf(ts?: string | null): string {
 }
 
 export default function ForwardConfidenceChart() {
+  const navigate = useNavigate()
   const [data, setData] = useState<Payload | null>(null)
   const [loading, setLoading] = useState(true)
+
+  // Hand off to the council with the "prediction" scope so the
+  // deliberation injects the cached forward projection (P(outperform),
+  // transition matrix, blend). Question pre-filled and editable.
+  const askCouncil = () =>
+    navigate('/council', {
+      state: {
+        prefillQuestion:
+          'What drives the outperformance probability at 12 months?',
+        contextScope: 'prediction',
+      },
+    })
 
   useEffect(() => {
     let alive = true
@@ -196,6 +210,15 @@ export default function ForwardConfidenceChart() {
           </table>
         </div>
       )}
+
+      <button
+        type="button"
+        onClick={askCouncil}
+        className="mt-4 inline-flex items-center gap-1.5 text-xs text-electric
+                   hover:underline min-h-[44px] sm:min-h-0">
+        <MessageSquare className="w-3.5 h-3.5" />
+        Ask about this
+      </button>
 
       <p className="mt-4 pt-3 border-t border-border text-2xs text-muted italic">
         <InfoIcon tooltipKey="hmm_reference" metricLabel="Hidden Markov Model" />

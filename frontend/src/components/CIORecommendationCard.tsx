@@ -10,8 +10,9 @@
  * server-provided; a graceful empty state shows before the first warm.
  */
 import { useEffect, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
-import { ChevronDown, ChevronRight, Loader2, AlertTriangle } from 'lucide-react'
+import { ChevronDown, ChevronRight, Loader2, AlertTriangle, MessageSquare } from 'lucide-react'
 import InfoIcon from './InfoIcon'
 
 interface Confidence {
@@ -61,9 +62,21 @@ function asOf(ts?: string | null): string {
 }
 
 export default function CIORecommendationCard() {
+  const navigate = useNavigate()
   const [data, setData] = useState<Payload | null>(null)
   const [loading, setLoading] = useState(true)
   const [showLimitations, setShowLimitations] = useState(false)
+
+  // Hand off to the council with the "recommendation" scope so the
+  // deliberation injects this tile's live cached data (regime, blend,
+  // dissent). The question is pre-filled and editable, never auto-sent.
+  const askCouncil = () =>
+    navigate('/council', {
+      state: {
+        prefillQuestion: 'Why is the blend positioned defensively right now?',
+        contextScope: 'recommendation',
+      },
+    })
 
   useEffect(() => {
     let alive = true
@@ -160,6 +173,15 @@ export default function CIORecommendationCard() {
           </p>
         )}
       </div>
+
+      <button
+        type="button"
+        onClick={askCouncil}
+        className="mt-4 inline-flex items-center gap-1.5 text-xs text-electric
+                   hover:underline min-h-[44px] sm:min-h-0">
+        <MessageSquare className="w-3.5 h-3.5" />
+        Ask about this
+      </button>
 
       {limitations.length > 0 && (
         <div className="mt-4">

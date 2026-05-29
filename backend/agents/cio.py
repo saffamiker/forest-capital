@@ -365,6 +365,7 @@ class CIO:
         query: str,
         strategy_results: dict[str, Any],
         history: dict[str, Any] | None = None,
+        live_context: dict[str, Any] | None = None,
     ) -> Iterator[tuple[str, Any, ...]]:
         """
         Phase-by-phase generator variant of deliberate().
@@ -459,7 +460,7 @@ class CIO:
         _tag_agent("cio")
         draft_consensus = self._compile_draft_consensus(
             query, equity_report, fi_report, risk_report, quant_report,
-            strategy_results,
+            strategy_results, live_context=live_context,
         )
         yield ("draft_ready", draft_consensus)
 
@@ -483,7 +484,7 @@ class CIO:
         cio_synthesis = self._synthesise(
             query, draft_consensus, gemini_report, grok_report,
             equity_report, fi_report, risk_report, quant_report,
-            strategy_results,
+            strategy_results, live_context=live_context,
         )
         synthesis_text = (
             cio_synthesis.get("technical_findings", {})
@@ -520,6 +521,7 @@ class CIO:
         risk_report: dict[str, Any],
         quant_report: dict[str, Any],
         strategy_results: dict[str, Any],
+        live_context: dict[str, Any] | None = None,
     ) -> str:
         """
         Asks Opus to synthesise the four specialist reports into a draft.
@@ -532,27 +534,30 @@ class CIO:
         significant = self._get_significant(strategy_results)
         n_sig = len(significant)
 
-        context = json.dumps(
-            {
-                "query": query,
-                "significant_strategies": significant,
-                "equity_summary": equity_report.get("summary", ""),
-                "fi_summary": fi_report.get("summary", ""),
-                "risk_summary": risk_report.get("summary", ""),
-                "quant_summary": quant_report.get("summary", ""),
-                "risk_technical": {
-                    k: v
-                    for k, v in risk_report.get("technical_findings", {}).items()
-                    if k in ("n_strategies_significant", "significant_strategies",
-                             "worst_drawdown", "best_sharpe")
-                },
-                "fi_correlation": fi_report.get("technical_findings", {}).get(
-                    "breakdown_detected"
-                ),
+        context_block: dict[str, Any] = {
+            "query": query,
+            "significant_strategies": significant,
+            "equity_summary": equity_report.get("summary", ""),
+            "fi_summary": fi_report.get("summary", ""),
+            "risk_summary": risk_report.get("summary", ""),
+            "quant_summary": quant_report.get("summary", ""),
+            "risk_technical": {
+                k: v
+                for k, v in risk_report.get("technical_findings", {}).items()
+                if k in ("n_strategies_significant", "significant_strategies",
+                         "worst_drawdown", "best_sharpe")
             },
-            indent=2,
-            default=str,
-        )
+            "fi_correlation": fi_report.get("technical_findings", {}).get(
+                "breakdown_detected"
+            ),
+        }
+        # page_context — the live cached data for the page the question was
+        # asked from (recommendation / performance / prediction). Present
+        # only when the request carried a context_scope; otherwise omitted
+        # and the draft is unchanged from the pre-scope behaviour.
+        if live_context:
+            context_block["page_context"] = live_context
+        context = json.dumps(context_block, indent=2, default=str)
 
         user_message = (
             f"Based on these specialist reports, compile a draft consensus "
@@ -588,6 +593,7 @@ class CIO:
         risk_report: dict[str, Any],
         quant_report: dict[str, Any],
         strategy_results: dict[str, Any],
+        live_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Final CIO synthesis — engages with both Gemini and Grok before recommending.
@@ -596,6 +602,12 @@ class CIO:
         specialist data simultaneously. Any concern raised by BOTH dissenters
         is flagged as a hard caveat. Single-dissenter concerns are still
         addressed but carry less weight.
+
+        When the question was asked from a council-facing page,
+        live_context carries that page's live cached data (the
+        recommendation / performance / prediction scope). It is injected
+        into the DATA block as page_context and the user message tells the
+        CIO to ground its answer in it.
         """
         significant = self._get_significant(strategy_results)
         gemini_objections = gemini_report.get("technical_findings", {}).get(
@@ -605,26 +617,29 @@ class CIO:
             "objections", []
         )
 
-        context = json.dumps(
-            {
-                "query": query,
-                "draft_consensus": draft_consensus,
-                "gemini_objections": gemini_objections,
-                "grok_objections": grok_objections,
-                "significant_strategies": significant,
-                "specialist_summaries": {
-                    "equity": equity_report.get("summary", ""),
-                    "fixed_income": fi_report.get("summary", ""),
-                    "risk": risk_report.get("summary", ""),
-                    "quant": quant_report.get("summary", ""),
-                },
-                "quant_technical": {
-                    k: v
-                    for k, v in quant_report.get("technical_findings", {}).items()
-                    if k in ("most_stable_strategy", "flagged_for_overfitting",
-                             "transaction_cost_bps_applied")
-                },
+        context_block: dict[str, Any] = {
+            "query": query,
+            "draft_consensus": draft_consensus,
+            "gemini_objections": gemini_objections,
+            "grok_objections": grok_objections,
+            "significant_strategies": significant,
+            "specialist_summaries": {
+                "equity": equity_report.get("summary", ""),
+                "fixed_income": fi_report.get("summary", ""),
+                "risk": risk_report.get("summary", ""),
+                "quant": quant_report.get("summary", ""),
             },
+            "quant_technical": {
+                k: v
+                for k, v in quant_report.get("technical_findings", {}).items()
+                if k in ("most_stable_strategy", "flagged_for_overfitting",
+                         "transaction_cost_bps_applied")
+            },
+        }
+        if live_context:
+            context_block["page_context"] = live_context
+        context = json.dumps(
+            context_block,
             indent=2,
             default=str,
         )
@@ -677,8 +692,19 @@ class CIO:
             "For a STRATEGY question — use the numbered template "
             "below.\n\n"
         ) if query and query.strip() else ""
+        # When the question came from a council-facing page, the DATA block
+        # carries a page_context with the live numbers the user is looking
+        # at. Tell the CIO to ground its answer in those numbers.
+        page_context_line = (
+            "The user is asking from a council-facing page. The DATA block "
+            "includes a `page_context` object with the LIVE cached numbers "
+            "shown on that page (the current regime read and blend, the "
+            "play-by-play track record, or the forward projection). Ground "
+            "your answer in those specific figures — quote them — rather "
+            "than answering in the abstract.\n\n"
+        ) if live_context else ""
         user_message = (
-            f"{query_line}"
+            f"{query_line}{page_context_line}"
             "You have reviewed four specialist reports and received TWO independent "
             "challenges — Gemini (blind spots) and Grok (stress test). "
             "When the question is STRATEGY-flavoured, produce the "
