@@ -7,8 +7,34 @@ the chart. All deterministic; no HMM fit, no DB, no network.
 import pytest
 
 from tools.regime_meta_validation import (
-    compute_cost_sensitivity, count_material_rebalances,
+    build_rebalance_events, compute_cost_sensitivity, count_material_rebalances,
 )
+
+
+def test_build_rebalance_events_rows():
+    weights = [
+        {"MIN_VARIANCE": 0.40, "RISK_PARITY": 0.40, "EQUAL_WEIGHT": 0.20},
+        {"MIN_VARIANCE": 0.50, "RISK_PARITY": 0.34, "EQUAL_WEIGHT": 0.16},
+        {"MIN_VARIANCE": 0.50, "RISK_PARITY": 0.34, "EQUAL_WEIGHT": 0.16},
+    ]
+    dates = ["2022-01-31", "2022-02-28", "2022-03-31"]
+    regimes = ["BULL", "TRANSITION", "TRANSITION"]
+    events = build_rebalance_events(weights, dates, regimes)
+    # First month seeds; month 3 unchanged -> exactly one event (month 2).
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["date"] == "2022-02-28"
+    assert ev["regime"] == "TRANSITION"
+    assert ev["weights"]["MIN_VARIANCE"] == 0.50
+    # total shift = |0.10| + |-0.06| + |-0.04| = 0.20.
+    assert ev["total_shift"] == pytest.approx(0.20, abs=1e-6)
+
+
+def test_build_rebalance_events_threshold_and_empty():
+    # A 2.0% shift is not > 2% -> no event.
+    weights = [{"A": 0.40}, {"A": 0.42}]
+    assert build_rebalance_events(weights, ["d0", "d1"], [None, None]) == []
+    assert build_rebalance_events([], [], []) == []
 
 
 def test_count_material_rebalances_first_month_seeds():
