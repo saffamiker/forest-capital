@@ -269,6 +269,7 @@ def out_of_sample_validation(
     # TEST: month-by-month, allocate by that month's posterior over the
     # regimes that have a frozen blend, then realise the blend return.
     blend_ret = np.zeros(n_test)
+    weight_path: list[np.ndarray] = []
     for t in range(n_test):
         num = np.zeros(n)
         denom = 0.0
@@ -277,6 +278,7 @@ def out_of_sample_validation(
             num += p * wv
             denom += p
         w_t = (num / denom) if denom > 0 else np.full(n, 1.0 / n)
+        weight_path.append(w_t)
         blend_ret[t] = float(w_t @ test_matrix[t])
 
     rf_test = _rf_for_dates(risk_free, test_dates)
@@ -340,4 +342,162 @@ def out_of_sample_validation(
     if return_series:
         result["test_dates"] = [str(d.date()) for d in test_dates]
         result["blend_monthly"] = [round(float(x), 8) for x in blend_ret]
+        # Per-month blend weight vector ({name: weight}) — lets a caller
+        # count rebalancing events (a material month-over-month weight
+        # shift) for the transaction-cost sensitivity analysis.
+        result["blend_weights_monthly"] = [
+            {names[i]: round(float(w[i]), 6) for i in range(n)}
+            for w in weight_path
+        ]
     return result
+
+
+# ── Transaction-cost sensitivity (pure; testable without an HMM) ─────────────
+
+def count_material_rebalances(
+    blend_weights_monthly: list[dict],
+    threshold: float = 0.02,
+) -> int:
+    """A rebalancing event is a month whose blend weights shifted by more
+    than `threshold` (2% by default) in ANY single strategy versus the
+    prior month. The first month seeds the position and is not counted."""
+    n = 0
+    prev: dict | None = None
+    for w in (blend_weights_monthly or []):
+        if prev is not None:
+            keys = set(w) | set(prev)
+            if any(abs(float(w.get(k, 0.0)) - float(prev.get(k, 0.0))) > threshold
+                   for k in keys):
+                n += 1
+        prev = w
+    return n
+
+
+def compute_cost_sensitivity(
+    *,
+    blend_weights_monthly: list[dict],
+    gross_sharpe: float | None,
+    oos_vol: float | None,
+    benchmark_sharpe: float | None,
+    n_test_months: int,
+    cost_bps: tuple[int, ...] = (10, 15, 20),
+    threshold: float = 0.02,
+) -> dict:
+    """Transaction-cost sensitivity of the regime-conditional blend over the
+    out-of-sample window. Pure given its inputs.
+
+    For each cost assumption: total cost drag = n_rebalances * bps * 1e-4
+    (a fraction over the whole window); annualised drag = total / n_years;
+    net Sharpe = gross Sharpe minus the annualised drag in Sharpe units
+    (annualised_drag / oos_vol) — which is exactly (gross_excess - drag) /
+    oos_vol, so the net figure stays consistent with the displayed gross
+    Sharpe. vs-benchmark is net_sharpe / benchmark_sharpe - 1."""
+    n_rebalances = count_material_rebalances(blend_weights_monthly, threshold)
+    n_years = (n_test_months / 12.0) if n_test_months else None
+    scenarios: list[dict] = []
+    for bps in cost_bps:
+        total_drag = n_rebalances * bps * 0.0001
+        ann_drag = (total_drag / n_years) if n_years else None
+        net_sharpe = (
+            round(gross_sharpe - ann_drag / oos_vol, 4)
+            if (gross_sharpe is not None and ann_drag is not None and oos_vol)
+            else None)
+        vs_bench = (
+            round(net_sharpe / benchmark_sharpe - 1.0, 4)
+            if (net_sharpe is not None and benchmark_sharpe)
+            else None)
+        scenarios.append({
+            "bps": bps,
+            "total_cost_drag": round(total_drag, 6),
+            "net_sharpe": net_sharpe,
+            "vs_benchmark_pct": vs_bench,
+        })
+    return {
+        "n_rebalances": n_rebalances,
+        "material_threshold": threshold,
+        "gross_sharpe": gross_sharpe,
+        "oos_vol": oos_vol,
+        "benchmark_sharpe": benchmark_sharpe,
+        "n_test_months": n_test_months,
+        "cost_bps": list(cost_bps),
+        "scenarios": scenarios,
+    }
+
+
+# ── data_hash-cached refresh (warm pipeline) + read ─────────────────────────
+
+_COST_METRIC_KIND = "oos_cost_sensitivity"
+
+
+async def refresh_oos_cost_sensitivity(data_hash: str) -> bool:
+    """Render-side: fit the HMM on the live equity series, run the OOS
+    validation with the per-month weight path, count material rebalances,
+    compute the 10/15/20 bps transaction-cost sensitivity, and cache it
+    under metric_kind 'oos_cost_sensitivity'. Fired by the same warm
+    pipeline as the forward projection; the HMM fit reuses the detector's
+    in-process cache (same equity series), so it adds no extra Baum-Welch
+    run. Fail-open — any failure leaves the previous cached value."""
+    try:
+        from tools.cache import get_latest_strategy_cache, get_monthly_returns
+        from tools.precomputed_analytics import set_metric
+        from tools.regime_detector import fit_hmm_historical
+    except Exception as exc:  # noqa: BLE001
+        log.warning("oos_cost_sensitivity_imports_unavailable", error=str(exc))
+        return False
+    try:
+        sr = await get_latest_strategy_cache()
+        monthly = await get_monthly_returns()
+        if not sr or not monthly or not monthly.get("equity") \
+                or not monthly.get("dates"):
+            return False
+        idx = pd.to_datetime(monthly["dates"])
+        equity = pd.Series(monthly["equity"], index=idx).sort_index()
+        hmm = fit_hmm_historical(equity)
+        if not hmm or hmm.get("error"):
+            log.warning("oos_cost_sensitivity_hmm_failed",
+                        error=(hmm or {}).get("error"))
+            return False
+        # Risk-free as a {iso_date: monthly_rate} map so the OOS Sharpe
+        # matches the headline (DTB3-based) gross Sharpe.
+        rf_map = None
+        dates = monthly.get("dates") or []
+        rf = monthly.get("rf") or []
+        if dates and rf and len(dates) == len(rf):
+            rf_map = {str(d): float(v) for d, v in zip(dates, rf)
+                      if v is not None}
+        val = out_of_sample_validation(
+            sr, hmm, return_series=True, risk_free=rf_map)
+        if val.get("error"):
+            log.warning("oos_cost_sensitivity_validation_failed",
+                        error=val["error"])
+            return False
+        oos = val.get("oos", {})
+        rc = oos.get("regime_conditional", {})
+        bench = oos.get("benchmark", {})
+        result = compute_cost_sensitivity(
+            blend_weights_monthly=val.get("blend_weights_monthly", []),
+            gross_sharpe=rc.get("sharpe"),
+            oos_vol=rc.get("vol_ann"),
+            benchmark_sharpe=bench.get("sharpe"),
+            n_test_months=val.get("n_test_months", 0),
+        )
+        await set_metric(data_hash or "", _COST_METRIC_KIND, result,
+                         source="oos_cost_sensitivity")
+        log.info("oos_cost_sensitivity_cached",
+                 n_rebalances=result["n_rebalances"])
+        return True
+    except Exception as exc:  # noqa: BLE001
+        log.warning("oos_cost_sensitivity_refresh_failed", error=str(exc))
+        return False
+
+
+async def get_cached_cost_sensitivity() -> dict | None:
+    """The latest cached OOS transaction-cost sensitivity for the read
+    endpoint. Fail-open to None so the banner hides the section before the
+    first warm computes one."""
+    try:
+        from tools.precomputed_analytics import get_latest_metric
+        return await get_latest_metric(_COST_METRIC_KIND)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("oos_cost_sensitivity_read_error", error=str(exc))
+        return None

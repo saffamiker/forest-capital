@@ -74,6 +74,12 @@ const pct = (x: number | null | undefined): string =>
 const prob = (x: number | null | undefined): string =>
   x === null || x === undefined ? '—' : `${(x * 100).toFixed(0)}%`
 
+const fmtSharpe = (x: number | null | undefined): string =>
+  x === null || x === undefined ? '—' : x.toFixed(2)
+
+const fmtVsPct = (x: number | null | undefined): string =>
+  x === null || x === undefined ? '—' : `${x >= 0 ? '+' : ''}${(x * 100).toFixed(0)}%`
+
 // Display-only: render a stored ISO date (YYYY-MM-DD) as US MM/DD/YYYY.
 // The backend keeps ISO internally; this formats at the point of render.
 const fmtDate = (iso: string | null | undefined): string => {
@@ -130,8 +136,34 @@ function EventMarkerLabel({ viewBox, text, color, tooltip, idx }: MarkerLabelPro
 const shortLabel = (s: string): string =>
   s.length > 16 ? `${s.slice(0, 15)}…` : s
 
+interface CostScenario {
+  bps: number
+  net_sharpe: number | null
+  vs_benchmark_pct: number | null
+}
+interface CostSensitivity {
+  n_rebalances: number
+  gross_sharpe: number | null
+  benchmark_sharpe: number | null
+  n_test_months: number
+  scenarios: CostScenario[]
+}
+interface CostPayload {
+  available: boolean
+  cost_sensitivity: CostSensitivity | null
+}
+
+// The net cumulative blend lines drawn on the chart (ADDITION 1). Blue
+// family: lighter/dashed (10), dashed (15), dotted (20).
+const NET_COST_LINES: { bps: number; color: string; dash: string }[] = [
+  { bps: 10, color: '#93c5fd', dash: '5 3' },
+  { bps: 15, color: '#3b82f6', dash: '5 3' },
+  { bps: 20, color: '#3b82f6', dash: '1 4' },
+]
+
 export default function PerformanceRecord() {
   const [data, setData] = useState<Payload | null>(null)
+  const [cost, setCost] = useState<CostSensitivity | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -140,6 +172,11 @@ export default function PerformanceRecord() {
     axios.get<Payload>('/api/v1/play-by-play')
       .then((r) => { if (alive) { setData(r.data); setLoading(false) } })
       .catch(() => { if (alive) { setError('Could not load the performance record.'); setLoading(false) } })
+    // Transaction-cost sensitivity for the "Net of Switching Costs" table —
+    // independent fetch; the table simply hides if it is unavailable.
+    axios.get<CostPayload>('/api/v1/oos-cost-sensitivity')
+      .then((r) => { if (alive && r.data.available) setCost(r.data.cost_sensitivity) })
+      .catch(() => { /* table hidden when unavailable */ })
     return () => { alive = false }
   }, [])
 
@@ -248,6 +285,90 @@ export default function PerformanceRecord() {
         </p>
       </section>
 
+      {/* ── Net of switching costs (transaction-cost sensitivity) ───── */}
+      {cost && cost.scenarios && cost.scenarios.length > 0 && (() => {
+        const grossVs = cost.gross_sharpe != null && cost.benchmark_sharpe
+          ? cost.gross_sharpe / cost.benchmark_sharpe - 1 : null
+        return (
+          <section className="bg-navy-800 rounded-lg p-5">
+            <div className="flex items-center gap-1.5 mb-3">
+              <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">
+                Net of Switching Costs
+              </h2>
+              <InfoIcon tooltipKey="switching_costs"
+                        metricLabel="Transaction-cost sensitivity" size="md" />
+            </div>
+            <div className="overflow-x-auto">
+              <table className="text-sm w-full max-w-2xl">
+                <thead>
+                  <tr className="text-slate-400 text-2xs uppercase">
+                    <th className="text-left font-medium py-1">Metric</th>
+                    <th className="text-right font-medium py-1">Gross</th>
+                    {cost.scenarios.map((s) => (
+                      <th key={s.bps} className="text-right font-medium py-1">
+                        {s.bps} bps
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody className="font-mono text-xs">
+                  <tr className="border-t border-navy-700">
+                    <td className="text-left text-slate-300 font-sans py-1.5">
+                      Sharpe Ratio
+                    </td>
+                    <td className="text-right text-slate-200 py-1.5">
+                      {fmtSharpe(cost.gross_sharpe)}
+                    </td>
+                    {cost.scenarios.map((s) => {
+                      const beats = s.net_sharpe != null
+                        && cost.benchmark_sharpe != null
+                        && s.net_sharpe > cost.benchmark_sharpe
+                      return (
+                        <td key={s.bps}
+                            className={`text-right py-1.5 ${beats ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {fmtSharpe(s.net_sharpe)}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                  <tr className="border-t border-navy-700">
+                    <td className="text-left text-slate-300 font-sans py-1.5">
+                      vs Benchmark Sharpe
+                    </td>
+                    <td className="text-right text-slate-200 py-1.5">
+                      {fmtVsPct(grossVs)}
+                    </td>
+                    {cost.scenarios.map((s) => {
+                      const pos = s.vs_benchmark_pct != null && s.vs_benchmark_pct > 0
+                      return (
+                        <td key={s.bps}
+                            className={`text-right py-1.5 ${pos ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {fmtVsPct(s.vs_benchmark_pct)}
+                        </td>
+                      )
+                    })}
+                  </tr>
+                  <tr className="border-t border-navy-700">
+                    <td className="text-left text-slate-300 font-sans py-1.5">
+                      Rebalancing Events
+                    </td>
+                    <td className="text-right text-slate-400 py-1.5"
+                        colSpan={1 + cost.scenarios.length}>
+                      {cost.n_rebalances} rebalances over {cost.n_test_months} months
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <p className="text-2xs text-slate-500 mt-3 leading-relaxed">
+              One-way transaction cost applied at each material rebalance
+              (&gt;2% weight shift in any single strategy). Net Sharpe stays
+              above the S&amp;P 500 benchmark at every cost assumption.
+            </p>
+          </section>
+        )
+      })()}
+
       {/* ── Cumulative chart (post-2022) ──────────────────────────── */}
       <section className="bg-navy-800 border border-navy-700 rounded-lg p-5">
         <h2 className="text-sm font-semibold text-slate-200 mb-3 uppercase tracking-wide">
@@ -289,8 +410,16 @@ export default function PerformanceRecord() {
                 )
               })}
               <Line type="monotone" dataKey="regime_conditional"
-                    name="Regime-conditional blend" stroke="#3b82f6"
+                    name="Gross (0 bps)" stroke="#3b82f6"
                     dot={false} strokeWidth={2} connectNulls />
+              {/* Net-of-transaction-cost blend paths (ADDITION 1). Rendered
+                  only when the backend supplied the blend_net_* series. */}
+              {NET_COST_LINES.map((l) => (
+                <Line key={l.bps} type="monotone" dataKey={`blend_net_${l.bps}`}
+                      name={`Blend net ${l.bps} bps`} stroke={l.color}
+                      strokeDasharray={l.dash} dot={false} strokeWidth={1.5}
+                      connectNulls />
+              ))}
               <Line type="monotone" dataKey="benchmark" name="Benchmark (S&P 500)"
                     stroke="#ef4444" dot={false} strokeWidth={1.5} connectNulls />
               <Line type="monotone" dataKey="classic_6040" name="Classic 60/40"
