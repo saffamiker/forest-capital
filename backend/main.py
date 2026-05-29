@@ -2813,8 +2813,15 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
     if ENVIRONMENT == "test":
         return {"available": False, "recommendation": None}
     try:
-        from tools.cio_recommendation import get_latest_recommendation
-        rec = await get_latest_recommendation()
+        # Read the recommendation by its REGIME-AWARE composite cache key
+        # ({data_hash}_{regime}_{bucket}) so a regime flip or a confidence
+        # move that crosses a 10pp bucket boundary serves the appropriate
+        # prose. On a miss, get_endpoint_recommendation returns the most
+        # recent cached row (whatever its key) AND schedules a background
+        # regenerate under the new composite key — the next read serves the
+        # fresh prose without blocking this one.
+        from tools.cio_recommendation import get_endpoint_recommendation
+        rec = await get_endpoint_recommendation()
         # Overlay the LIVE regime read so the headline regime label +
         # confidence are never the data_hash-stale cached values, and match
         # the Forward Projection tile exactly (both read the same
