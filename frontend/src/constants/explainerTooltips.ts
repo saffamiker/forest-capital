@@ -285,6 +285,12 @@ export const EXPLAINER_TOOLTIPS: Record<string, string> = {
     + 'post-2022 period is the true out-of-sample test window — the model '
     + 'was trained on pre-2022 data only.',
 
+  switching_costs:
+    'Transaction costs applied at each rebalance event — a month where the '
+    + 'blend weights shifted more than 2% in any single strategy. Net Sharpe '
+    + 'is the gross Sharpe minus the annualized cost drag (one-way bps per '
+    + 'rebalance), so the figure stays comparable with the gross Sharpe above.',
+
   // ── Dashboard page — strategy names (derived from strategyMetadata) ────────
   ...STRATEGY_TOOLTIPS,
 }

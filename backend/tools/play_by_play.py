@@ -70,6 +70,10 @@ _CLASSIC_6040_ID = "CLASSIC_60_40"
 # 30 / 60 / 90 days map to 1 / 2 / 3 forward months on monthly data.
 _HORIZON_MONTHS = {"d30": 1, "d60": 2, "d90": 3}
 
+# Transaction-cost assumptions (one-way bps per rebalance) shown as net
+# cumulative blend lines on the chart and in the net-of-costs table.
+_COST_BPS = (10, 15, 20)
+
 # The nine events. Dates are anchored to the event MONTH-END: the
 # point-in-time posterior incorporates that month's return (the event is
 # already realised by month-end, no look-ahead) and the forward window
@@ -909,10 +913,12 @@ def compute_performance_chart(
     Performance Record chart. The regime-conditional blend is the Layer 3
     out-of-sample path (train pre-split, apply post-split); the benchmark
     and the classic 60/40 are their raw returns over the same months.
-    Returns {series: [{date, regime_conditional, benchmark,
-    classic_6040}], event_markers: [iso, ...]} or {} when the OOS path is
-    unavailable. Pure given strategy_results + hmm_result, so it is unit-
-    tested without a live HMM fit."""
+    Returns {series: [{date, regime_conditional, benchmark, classic_6040,
+    blend_net_10/15/20}], event_markers: [iso, ...]} or {} when the OOS
+    path is unavailable. The blend_net_* series apply transaction-cost drag
+    at each material rebalance month (ADDITION 1). Pure given
+    strategy_results + hmm_result, so it is unit-tested without a live HMM
+    fit."""
     from tools.regime_meta_validation import out_of_sample_validation
 
     oos = out_of_sample_validation(
@@ -934,13 +940,40 @@ def compute_performance_chart(
     blend_cum = _cumulative(blend_monthly)
     bench_cum = _cumulative(bench_m)
     classic_cum = _cumulative(classic_m)
-    series = [
-        {"date": dates[t],
-         "regime_conditional": blend_cum[t],
-         "benchmark": bench_cum[t],
-         "classic_6040": classic_cum[t]}
-        for t in range(len(dates))
-    ]
+
+    # Net-of-transaction-cost blend paths (ADDITION 1). A one-way cost drag
+    # of bps*1e-4 is subtracted from the blend's return in each month whose
+    # weights shifted materially (>2% in any single strategy) versus the
+    # prior month; the first month seeds the position and is never a
+    # rebalance. Consistent with the scalar cost-sensitivity table, whose
+    # total drag is ~ n_rebalances * bps * 1e-4. Computed only when the
+    # per-month weight path is present (older caches omit it -> no net
+    # lines, and the chart simply shows the gross line).
+    bw = oos.get("blend_weights_monthly") or []
+    net_cum: dict[int, list] = {}
+    if len(bw) == len(blend_monthly) and bw:
+        rebal = [False] * len(blend_monthly)
+        for t in range(1, len(bw)):
+            keys = set(bw[t]) | set(bw[t - 1])
+            if any(abs(float(bw[t].get(k, 0.0)) - float(bw[t - 1].get(k, 0.0)))
+                   > 0.02 for k in keys):
+                rebal[t] = True
+        for bps in _COST_BPS:
+            drag = bps * 0.0001
+            net_monthly = [blend_monthly[t] - (drag if rebal[t] else 0.0)
+                           for t in range(len(blend_monthly))]
+            net_cum[bps] = _cumulative(net_monthly)
+
+    series = []
+    for t in range(len(dates)):
+        point = {"date": dates[t],
+                 "regime_conditional": blend_cum[t],
+                 "benchmark": bench_cum[t],
+                 "classic_6040": classic_cum[t]}
+        for bps in _COST_BPS:
+            if bps in net_cum:
+                point[f"blend_net_{bps}"] = net_cum[bps][t]
+        series.append(point)
     lo, hi = dates[0], dates[-1]
     markers = [e["event_date"] for e in EVENTS if lo <= e["event_date"] <= hi]
     return {"series": series, "event_markers": markers}

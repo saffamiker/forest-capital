@@ -2875,6 +2875,27 @@ async def get_play_by_play(session: dict = Depends(require_auth)):
                 "key_limitations": {}, "ref": ref}
 
 
+@app.get("/api/v1/oos-cost-sensitivity")
+async def get_oos_cost_sensitivity(session: dict = Depends(require_auth)):
+    """Transaction-cost sensitivity of the regime-conditional blend over
+    the post-2022 OOS window — net Sharpe + vs-benchmark at 10/15/20 bps
+    per rebalance and the material-rebalance count — behind the Council
+    Performance Record "Net of Switching Costs" table. Served from the
+    data_hash-cached 'oos_cost_sensitivity' metric; never recomputes on a
+    read. Returns {available, ...} for a clean empty state before the
+    first warm."""
+    if ENVIRONMENT == "test":
+        return {"available": False, "cost_sensitivity": None}
+    try:
+        from tools.regime_meta_validation import get_cached_cost_sensitivity
+        cost = await get_cached_cost_sensitivity()
+        return {"available": bool(cost), "cost_sensitivity": cost}
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.warning("oos_cost_sensitivity_read_failed", ref=ref, error=str(exc))
+        return {"available": False, "cost_sensitivity": None, "ref": ref}
+
+
 @app.get("/api/v1/forward-projection")
 async def get_forward_projection(session: dict = Depends(require_auth)):
     """The Layer 4 forward Monte Carlo confidence bands for the landing
