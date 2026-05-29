@@ -84,6 +84,44 @@ function topWeights(w: Record<string, number> | null): string {
     .join('  ·  ')
 }
 
+// Rotated, colour-coded label drawn at the top of each event marker line on
+// the cumulative chart. recharts clones this element and injects `viewBox`
+// (the plotting area, with x = the marker's pixel position). Green when the
+// council added value at the event, muted red otherwise. A full-height
+// transparent hit-rect plus the text share an SVG <title>, so hovering the
+// line OR the label shows the event tooltip (name / date / verdict / value).
+interface MarkerLabelProps {
+  viewBox?: { x?: number; y?: number; width?: number; height?: number }
+  text: string
+  color: string
+  tooltip: string
+  idx: number
+}
+function EventMarkerLabel({ viewBox, text, color, tooltip, idx }: MarkerLabelProps) {
+  const x = viewBox?.x
+  if (x === undefined) return null
+  const top = viewBox?.y ?? 0
+  const h = viewBox?.height ?? 0
+  // Alternate the baseline so adjacent events (e.g. the 2022 cluster) do
+  // not overprint each other.
+  const ty = top - (idx % 2 === 0 ? 4 : 18)
+  return (
+    <g style={{ cursor: 'default' }}>
+      <title>{tooltip}</title>
+      <rect x={x - 5} y={top} width={10} height={h} fill="transparent" />
+      <text x={x} y={ty} fill={color} fontSize={10} textAnchor="start"
+            transform={`rotate(-45, ${x}, ${ty})`}>
+        {text}
+      </text>
+    </g>
+  )
+}
+
+// Short, rotation-friendly label from the event id; full detail goes in the
+// hover tooltip.
+const shortLabel = (s: string): string =>
+  s.length > 16 ? `${s.slice(0, 15)}…` : s
+
 export default function PerformanceRecord() {
   const [data, setData] = useState<Payload | null>(null)
   const [loading, setLoading] = useState(true)
@@ -125,6 +163,10 @@ export default function PerformanceRecord() {
 
   const sc = data.scorecard
   const cum = data.cumulative
+  // Marker date -> event row, so each cumulative-chart marker line can show
+  // the event's name, verdict, and value-added Sharpe (the markers are
+  // placed at event dates, which match the stored event_date exactly).
+  const eventByDate = new Map((data.events || []).map((e) => [e.event_date, e]))
 
   return (
     <div className="p-6 space-y-6 max-w-6xl">
@@ -204,9 +246,9 @@ export default function PerformanceRecord() {
           Cumulative return, post-2022
         </h2>
         {cum && cum.series.length > 0 ? (
-          <ResponsiveContainer width="100%" height={320}>
+          <ResponsiveContainer width="100%" height={360}>
             <LineChart data={cum.series}
-                       margin={{ top: 8, right: 16, bottom: 8, left: 8 }}>
+                       margin={{ top: 48, right: 16, bottom: 8, left: 8 }}>
               <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
               <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }}
                      minTickGap={40} />
@@ -217,10 +259,27 @@ export default function PerformanceRecord() {
                 formatter={(v: number) => `${(v * 100).toFixed(1)}%`} />
               <Legend />
               <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1} />
-              {(cum.event_markers || []).map((d) => (
-                <ReferenceLine key={d} x={d} stroke="#f59e0b"
-                               strokeDasharray="2 2" />
-              ))}
+              {(cum.event_markers || []).map((d, i) => {
+                const ev = eventByDate.get(d)
+                const va = ev?.value_added_sharpe ?? null
+                const added = va !== null && va > 0
+                // Green when the council added value at this event; muted
+                // red when it did not (value-added Sharpe <= 0).
+                const labelColor = added ? '#34d399' : '#f87171'
+                const vaStr = va === null ? '—' : `${va >= 0 ? '+' : ''}${va.toFixed(2)}`
+                const tip = ev
+                  ? `${ev.event_id}\n${ev.event_date}`
+                    + `${ev.verdict ? `\n${ev.verdict}` : ''}`
+                    + `\nValue added Sharpe: ${vaStr}`
+                  : d
+                return (
+                  <ReferenceLine key={d} x={d} stroke="#f59e0b"
+                                 strokeDasharray="2 2"
+                                 label={<EventMarkerLabel
+                                   text={ev ? shortLabel(ev.event_id) : d}
+                                   color={labelColor} tooltip={tip} idx={i} />} />
+                )
+              })}
               <Line type="monotone" dataKey="regime_conditional"
                     name="Regime-conditional blend" stroke="#3b82f6"
                     dot={false} strokeWidth={2} connectNulls />
