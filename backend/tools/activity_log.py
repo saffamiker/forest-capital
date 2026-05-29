@@ -455,6 +455,26 @@ async def get_team_activity(
 
     merged.sort(key=lambda e: e.get("timestamp") or "", reverse=True)
     page = merged[offset:offset + limit]
+
+    # Attach a plain-English summary to each commit row on this page — the
+    # primary, non-technical label the Team Activity report shows above the
+    # muted git message. Cached by SHA (one Haiku call per page of uncached
+    # rows); fail-open so a summarisation error never affects the timeline.
+    try:
+        commit_evs = [e for e in page
+                      if e.get("kind") == "commit" and e.get("sha")]
+        if commit_evs:
+            from tools.commit_summaries import summarize_commits
+            summaries = await summarize_commits(
+                [{"sha": e["sha"], "message": e.get("message", "")}
+                 for e in commit_evs])
+            for e in commit_evs:
+                s = summaries.get(e["sha"])
+                if s:
+                    e["plain_summary"] = s
+    except Exception as exc:  # noqa: BLE001
+        log.warning("team_activity_plain_summary_failed", error=str(exc))
+
     return {"events": page, "total_returned": len(page),
             "limit": limit, "offset": offset}
 
@@ -658,6 +678,36 @@ async def _read_page_views(session, text, session_type, date_from, date_to,
 
 # ── Reads — summary ───────────────────────────────────────────────────────────
 
+# The true merged-PR ("Platform Release") count comes from the GitHub API,
+# not the partially-synced commit_activity table. Cached in-process for an
+# hour so the Team Activity summary does not call GitHub on every load (and
+# stays within the search-API rate limit). A stale-but-non-None cached value
+# is preferred over None on a transient API failure.
+_pr_count_cache: dict[str, Any] = {"count": None, "ts": 0.0}
+_PR_COUNT_TTL_SECONDS = 3600.0
+
+
+async def get_merged_pr_count() -> int | None:
+    """Total merged PRs against main, via the GitHub API, cached for an hour.
+    None when no GITHUB_TOKEN is configured or the API has never succeeded."""
+    import time
+    now = time.time()
+    cached = _pr_count_cache["count"]
+    if cached is not None and now - _pr_count_cache["ts"] < _PR_COUNT_TTL_SECONDS:
+        return cached
+    try:
+        from config import GITHUB_REPO, GITHUB_TOKEN
+        from tools.github_sync import fetch_merged_pr_count
+        count = await fetch_merged_pr_count(GITHUB_REPO, GITHUB_TOKEN)
+        if count is not None:
+            _pr_count_cache["count"] = count
+            _pr_count_cache["ts"] = now
+            return count
+    except Exception as exc:  # noqa: BLE001
+        log.warning("merged_pr_count_unavailable", error=str(exc))
+    return cached  # last good value (or None if never fetched)
+
+
 async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
     """
     Per-member interaction and commit counts, the most-consulted agents,
@@ -671,6 +721,7 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
         "most_active_agents": [], "last_academic_review": None,
         "total_interactions": 0, "analytical_sessions_only": analytical_only,
         "test_coverage": {"steps_attested": 0, "testers": 0},
+        "platform_releases": None,
     }
     if not _DB_AVAILABLE:
         return empty
@@ -793,6 +844,9 @@ async def get_activity_summary(analytical_only: bool = True) -> dict[str, Any]:
             # without the migration-014 test_results table cannot poison
             # the rest of the summary.
             "test_coverage": await _test_coverage(),
+            # The true merged-release count, live from the GitHub API
+            # (hour-cached) — the local commit table is only partially synced.
+            "platform_releases": await get_merged_pr_count(),
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("activity_summary_failed", error=str(exc))
