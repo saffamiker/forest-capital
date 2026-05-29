@@ -28,6 +28,10 @@ interface Recommendation {
   dissenting_view?: string | null
   key_risk?: string | null
   limitations?: string[] | null
+  // Live regime-conditional blend weights, overlaid from the cached
+  // forward projection so the tile can show the blend + flag a binding
+  // concentration constraint. Absent before the first warm.
+  blend_weights?: Record<string, number> | null
   computed_at?: string | null
   model?: string | null
 }
@@ -35,6 +39,20 @@ interface Payload {
   available: boolean
   recommendation: Recommendation | null
 }
+
+// Box constraints the meta-portfolio optimizer operates under. Static
+// disclosure — these are config invariants, not live values.
+const PORTFOLIO_CONSTRAINTS: { label: string; value: string }[] = [
+  { label: 'Strategy ceiling', value: '40% max per strategy' },
+  { label: 'Strategy floor', value: '5% min per strategy' },
+  { label: 'Asset ceiling', value: '50% max per asset class' },
+  { label: 'Asset floor', value: '5% min per asset class' },
+  { label: 'Rebalance trigger', value: 'Regime posterior shift' },
+]
+
+// The blend is at/near the 40% concentration ceiling when any single
+// strategy weight reaches 38%.
+const NEAR_CEILING = 0.38
 
 const REGIME_TONE: Record<string, string> = {
   BULL: 'text-positive',
@@ -117,6 +135,13 @@ export default function CIORecommendationCard() {
   const probPct = typeof conf.probability === 'number'
     ? `${(conf.probability * 100).toFixed(0)}%` : '—'
   const limitations = rec.limitations || []
+  const blendTop = rec.blend_weights
+    ? Object.entries(rec.blend_weights)
+        .filter(([, v]) => v > 0.01)
+        .sort((a, b) => b[1] - a[1])
+    : []
+  // The strategy at/near the 40% concentration ceiling (>=38%), if any.
+  const nearCeiling = blendTop.find(([, v]) => v >= NEAR_CEILING)
 
   return (
     <div className="card p-5 m-4 md:m-6 border-l-2 border-electric">
@@ -172,6 +197,45 @@ export default function CIORecommendationCard() {
             </span>
           </p>
         )}
+      </div>
+
+      {/* Live regime-conditional blend (top weights) */}
+      {blendTop.length > 0 && (
+        <p className="mt-3 text-sm">
+          <span className="text-muted">Blend: </span>
+          <span className="font-mono text-xs text-slate-300">
+            {blendTop.slice(0, 4)
+              .map(([n, v]) => `${n} ${(v * 100).toFixed(0)}%`)
+              .join('  ·  ')}
+          </span>
+        </p>
+      )}
+
+      {/* ── Portfolio Constraints (standing disclosure) ───────────── */}
+      <div className="mt-4">
+        <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
+          Portfolio Constraints
+        </div>
+        <table className="text-xs w-full max-w-sm">
+          <tbody>
+            {PORTFOLIO_CONSTRAINTS.map((c) => (
+              <tr key={c.label}>
+                <td className="text-left text-muted py-0.5 pr-4">{c.label}</td>
+                <td className="text-right text-slate-300 font-mono py-0.5">
+                  {c.value}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <p className={`mt-2 text-2xs leading-relaxed ${
+          nearCeiling ? 'text-warning' : 'text-muted'}`}>
+          {nearCeiling
+            ? `Note: ${nearCeiling[0]} is at or near the concentration `
+              + 'ceiling. The blend cannot increase defensiveness further '
+              + 'without a constraint relaxation.'
+            : 'No constraints currently binding.'}
+        </p>
       </div>
 
       <button
