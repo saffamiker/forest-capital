@@ -8868,7 +8868,7 @@ async def export_package(
 #
 # POST /api/v1/export/midpoint-paper     → 3-page midpoint submission (.docx)
 # POST /api/v1/export/executive-brief    → 5-page executive brief (.docx)
-# POST /api/v1/export/presentation-deck  → 16-slide final deck (.pptx)
+# POST /api/v1/export/presentation-deck  → 10-slide final deck (.pptx)
 #
 # Each assembles a graded deliverable as a FIRST DRAFT for Bob to refine:
 # every figure is real platform data (tools/academic_export.gather_document_
@@ -9952,98 +9952,190 @@ async def export_presentation_deck(
     return _start_generation_job("presentation_deck", session, request)
 
 
+def _parse_deck_slides(raw: str) -> list:
+    """Parse the slide JSON from the deck-generation harness output.
+    Fence-tolerant. Returns the slides list, or [] on any failure (the
+    builder then emits the canonical ten slides with [DATA PENDING] bodies,
+    so a parse failure never produces a broken deck)."""
+    import json
+    text = (raw or "").strip()
+    if "{" not in text:
+        return []  # e.g. the test-env [DATA PENDING] passthrough
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text[:4].lower() == "json":
+            text = text[4:]
+    try:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            return []
+        obj = json.loads(text[start:end + 1])
+        slides = obj.get("slides") if isinstance(obj, dict) else None
+        return slides if isinstance(slides, list) else []
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_json_parse_failed", error=str(exc))
+        return []
+
+
+def _render_deck_slide_charts(
+    data: dict, blend_weights: dict, blend_series: list,
+) -> dict:
+    """Render the per-slide deck charts (sync; called in a thread). Returns
+    {slide_number: png|None}. Every renderer is fail-open and individually
+    guarded — a None becomes a [DATA PENDING] note in the deck, never a
+    failure. Charts on slides 2, 3, 4, 6, 8 per academic_deck.SLIDE_CHARTS."""
+    from tools.academic_deck import _STATIC_STRATEGIES
+    from tools.chart_render import (
+        render_cumulative_returns, render_efficient_frontier,
+        render_rolling_correlation, render_strategy_comparison,
+    )
+
+    def _safe(fn):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deck_chart_render_failed", error=str(exc))
+            return None
+
+    return {
+        2: _safe(lambda: render_rolling_correlation(data)),
+        3: _safe(lambda: render_cumulative_returns(
+            data, only=_STATIC_STRATEGIES,
+            title="Static Strategies - Growth of $1")),
+        4: _safe(lambda: render_strategy_comparison(
+            data, strategy_type="dynamic")),
+        6: _safe(lambda: render_efficient_frontier(
+            data, blend_weights=blend_weights)),
+        # Slide 8 — post-2022, three series: the regime-conditional blend
+        # (injected from the cached performance chart), benchmark, equal weight.
+        8: _safe(lambda: render_cumulative_returns(
+            data, only={"BENCHMARK", "EQUAL_WEIGHT"}, period="post2022",
+            extra_series=({"Regime-Conditional Blend": blend_series}
+                          if blend_series else None),
+            title="Out-of-Sample Cumulative Return (post-2022)")),
+    }
+
+
 async def _generate_deck_document(
     email: str,
 ) -> tuple[bytes, str, str, int | None]:
     """
-    Generates the 16-slide final presentation deck. Returns (file bytes,
+    Generates the 10-slide final presentation deck. Returns (file bytes,
     filename, media type, editor draft id). Raises on failure — the job
     wrapper records it.
 
-    A professional navy/white theme — deliberately not the platform's
-    dark UI. Charts are rendered server-side as light-mode PNGs with
-    matplotlib; a chart whose data or matplotlib is unavailable degrades
-    to a [DATA PENDING] note. The conclusions, recommendations, thesis
-    and AI-leverage prose run through the Academic Writer harness.
+    JSON-driven (May 28 2026 rebuild): a single Academic Writer call
+    (academic_deck.deck_generation_prompt() through the harness) returns
+    content for all ten slides; build_presentation_deck lays them out in a
+    professional navy/white theme with per-slide charts rendered server-side
+    as light-mode PNGs. Regime state on Slide 6 is LIVE-SOURCED from
+    detect_current_regime() (via the CIO live context), never a constant, so
+    the slide reflects the current HMM posterior. Every degradation — a cold
+    cache, an unparseable JSON, a missing chart — falls back to a
+    [DATA PENDING] note rather than failing the deck.
     """
     import asyncio
     from datetime import date
 
-    from tools.academic_deck import build_presentation_deck, render_deck_charts
-    from tools.academic_export import DATA_PENDING, gather_document_data
+    from tools.academic_deck import (
+        CORRELATION_POST_2022, CORRELATION_PRE_2022,
+        OOS_SHARPE_BENCHMARK, OOS_SHARPE_EQUAL_WEIGHT,
+        OOS_SHARPE_REGIME_CONDITIONAL, PLAY_BY_PLAY_EVENTS,
+        build_presentation_deck, deck_generation_prompt,
+    )
+    from tools.academic_export import gather_document_data, harness_narrative
 
     try:
         data = await gather_document_data()
-        avail = data["available"]
-        pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
-                   "dashboard once, then regenerate the deck.")
 
-        # Sensitivity is a heavier compute — best-effort, memoised. A
-        # failure (or the test environment) leaves the slide [DATA PENDING].
-        sensitivity: dict | None = None
-        if avail and ENVIRONMENT != "test":
-            try:
-                from tools.data_fetcher import get_full_history
-                from tools.sensitivity import compute_sensitivity
-                sensitivity = await asyncio.to_thread(
-                    lambda: compute_sensitivity(get_full_history()))
-            except Exception as exc:  # noqa: BLE001
-                log.warning("deck_sensitivity_unavailable", error=str(exc))
+        # ── Live regime context (Slide 6) — current_regime / regime_confidence
+        #    / blend_weights from detect_current_regime() + the regime blend,
+        #    the SAME source the Forward Projection tile and CIO card use, so
+        #    the slide never carries a stale constant. Fail-open to None. ─────
+        current_regime = None
+        regime_confidence = None
+        blend_weights: dict = {}
+        try:
+            from tools.cio_recommendation import _build_live_context
+            built = await _build_live_context()
+            if not built.get("error"):
+                ctx = built["context"]
+                current_regime = ctx.get("regime")
+                regime_confidence = ctx.get("probability")
+                blend_weights = ctx.get("blend_weights") or {}
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deck_regime_context_unavailable", error=str(exc))
 
-        specs = [
-            {"key": "thesis", "available": avail, "pending": pending,
-             "agent_id": "deck_thesis",
-             "task": (
-                 "Write a single-sentence thesis statement — at most 30 "
-                 "words — on what the 2022 equity-bond correlation break "
-                 "means for diversification. Return only the sentence."),
-             "context": {"correlation_pre_post": {
-                 "pre_2022": data["rolling_correlation"].get("pre_2022"),
-                 "post_2022": data["rolling_correlation"].get("post_2022")}}},
-            {"key": "conclusions", "available": avail, "pending": pending,
-             "agent_id": "deck_conclusions",
-             "task": (
-                 "Write exactly five concise conclusion bullet points for a "
-                 "presentation slide — one per line, each starting with "
-                 "'- ', each under 22 words. They must directly address "
-                 "whether diversification improves risk-adjusted performance "
-                 "and whether 2022 changed the answer."),
-             "context": {"regime_conditional": data["regime_conditional"],
-                         "summary_statistics": data["summary_statistics"]}},
-            {"key": "recommendations", "available": avail, "pending": pending,
-             "agent_id": "deck_recommendations",
-             "task": (
-                 "Write a strategic allocation recommendation as four to "
-                 "five concise bullet points for a presentation slide — one "
-                 "per line, each starting with '- ', each under 22 words, "
-                 "grounded in the supplied results."),
-             "context": {"regime_conditional": data["regime_conditional"],
-                         "summary_statistics": data["summary_statistics"]}},
-            {"key": "ai_leverage", "available": True,
-             "agent_id": "deck_ai_leverage",
-             "task": (
-                 "Write a brief two-to-three-sentence narrative on how the "
-                 "team used AI to build and check this work: a multi-model "
-                 "council (Claude, Gemini, Grok), a generator-evaluator "
-                 "quality harness, and an academic-review quality gate. End "
-                 "on the idea that the AI interrogated the work so faculty "
-                 "can."),
-             "context": {"team_summary": data["team_summary"]}},
-        ]
-        narratives = await _generate_narratives(
-            specs, n_strategies=len(data.get("strategy_results") or {}))
-        charts = await asyncio.to_thread(render_deck_charts, data, sensitivity)
+        # ── Play-by-play frozen events (Slide 7) + the post-2022 blend series
+        #    for the Slide 8 chart, both from the play_by_play layer. ─────────
+        play_by_play_events: list = []
+        blend_series: list = []
+        try:
+            from tools.play_by_play import (
+                get_cached_performance_chart, load_stored_events,
+            )
+            play_by_play_events = await load_stored_events()
+            pc = await get_cached_performance_chart()
+            if pc and pc.get("series"):
+                blend_series = [
+                    (p.get("date"), p.get("regime_conditional"))
+                    for p in pc["series"]
+                    if p.get("regime_conditional") is not None]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deck_play_by_play_unavailable", error=str(exc))
+
+        # ── Generation context block. The slide specs instruct the model to
+        #    read these; the validated constants are injected so it never
+        #    invents them, and the live regime values come from above. ────────
+        rc = data.get("rolling_correlation") or {}
+        context = {
+            "study_period": data.get("study_period"),
+            "summary_statistics": data.get("summary_statistics"),
+            "strategy_performance": data.get("regime_conditional"),
+            "drawdown_comparison": data.get("drawdown_comparison"),
+            "factor_loadings": data.get("factor_loadings"),
+            "rolling_correlation": {"pre_2022": rc.get("pre_2022"),
+                                    "post_2022": rc.get("post_2022")},
+            "current_regime": current_regime,
+            "regime_confidence": regime_confidence,
+            "blend_weights": blend_weights,
+            "play_by_play_events": [
+                {"event_id": e.get("event_id"),
+                 "event_date": e.get("event_date"),
+                 "trigger": e.get("trigger"), "regime": e.get("regime"),
+                 "verdict": e.get("verdict"),
+                 "value_added_sharpe": e.get("value_added_sharpe")}
+                for e in play_by_play_events],
+            "validated_constants": {
+                "oos_sharpe_regime_conditional": OOS_SHARPE_REGIME_CONDITIONAL,
+                "oos_sharpe_benchmark": OOS_SHARPE_BENCHMARK,
+                "oos_sharpe_equal_weight": OOS_SHARPE_EQUAL_WEIGHT,
+                "correlation_pre_2022": CORRELATION_PRE_2022,
+                "correlation_post_2022": CORRELATION_POST_2022,
+                "play_by_play_events": PLAY_BY_PLAY_EVENTS,
+            },
+        }
+
+        # Single Academic Writer generation through the harness → slide JSON.
+        raw = await asyncio.to_thread(
+            harness_narrative, "presentation_deck", deck_generation_prompt(),
+            context, max_tokens=4000,
+            n_strategies=len(data.get("strategy_results") or {}))
+        slides = _parse_deck_slides(raw)
+
+        charts = await asyncio.to_thread(
+            _render_deck_slide_charts, data, blend_weights, blend_series)
         pptx_bytes = await asyncio.to_thread(
-            build_presentation_deck, data, narratives, charts)
+            build_presentation_deck, slides, charts)
 
         # Load the generated deck into a presentation_deck editor draft so
-        # Molly can open it directly in the slide editor; the draft_id
-        # rides back in the X-Draft-Id header. Never fails the download.
+        # Molly can open it in the canvas editor; draft_id rides back in the
+        # X-Draft-Id header. Never fails the download.
         draft_id: int | None = None
         try:
-            from tools.editor_content import deck_to_editor
+            from tools.editor_content import deck_slides_to_editor
             from tools.editor_drafts import create_draft
-            content_json, content_text = deck_to_editor(narratives)
+            content_json, content_text = deck_slides_to_editor(slides)
             draft = await create_draft(
                 "presentation_deck", email,
                 f"Presentation Deck — {date.today().isoformat()}",

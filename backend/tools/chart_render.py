@@ -513,3 +513,273 @@ async def render_chart_png(
 
     _render_cache[cache_key] = (png, now)
     return png
+
+
+# ── Deck-specific renderers (May 28 2026 deck rebuild) ────────────────────────
+#
+# Sync, light-mode matplotlib renderers for the rebuilt 10-slide deck. Unlike
+# render_chart_png (async, canvas-oriented), these take the gather_document_data
+# bundle directly and return PNG bytes or None (fail-open), so the deck builder
+# embeds a per-slide chart and degrades to a [DATA PENDING] note when a chart's
+# source data is absent. main._render_deck_slide_charts calls them inside a
+# thread. They are deck-only — deliberately NOT in AVAILABLE_CHARTS.
+
+_DECK_INK = "#1A1A2E"
+_DECK_GREY = "#4A4A6A"
+_DECK_GRID = "#E2E8F0"
+_DECK_ACCENT = "#1D4ED8"
+_DECK_AMBER = "#B45309"
+_DECK_GREEN = "#059669"
+_DECK_SLATE = "#64748B"
+_DECK_SERIES = ["#1D4ED8", "#059669", "#B45309", "#7C3AED", "#DB2777",
+                "#0891B2", "#CA8A04", "#15803D", "#9333EA", "#374151"]
+_DECK_REGIME_BREAK = "2022-01-01"
+
+
+def _deck_mpl():
+    """Lazy matplotlib (Agg) import. Returns pyplot, or None when matplotlib
+    is unavailable — the chart then degrades to a [DATA PENDING] note."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        return plt
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_renderer_matplotlib_unavailable", error=str(exc))
+        return None
+
+
+def _deck_finish(plt, fig) -> bytes:
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def _deck_style(ax) -> None:
+    ax.set_facecolor("white")
+    ax.grid(True, color=_DECK_GRID, linewidth=0.7)
+    ax.tick_params(colors=_DECK_GREY, labelsize=9)
+    for spine in ax.spines.values():
+        spine.set_color(_DECK_GRID)
+    ax.title.set_color(_DECK_INK)
+    ax.xaxis.label.set_color(_DECK_GREY)
+    ax.yaxis.label.set_color(_DECK_GREY)
+
+
+def _norm_name(name: Any) -> str:
+    """Normalise a strategy label to its ID form for matching (display names
+    and IDs both collapse to UPPER_SNAKE)."""
+    return str(name or "").upper().replace(" ", "_").replace("-", "_")
+
+
+def render_rolling_correlation(data: dict[str, Any]) -> bytes | None:
+    """Slide 2 — equity-bond rolling correlation with the 2022 break marked."""
+    rc = (data or {}).get("rolling_correlation") or {}
+    pts = rc.get("points") or []
+    if not pts:
+        return None
+    plt = _deck_mpl()
+    if plt is None:
+        return None
+    try:
+        import pandas as pd
+        dates = [pd.to_datetime(p["date"]) for p in pts]
+        fig, ax = plt.subplots(figsize=(8, 4.2))
+        ax.plot(dates, [p.get("equity_ig") for p in pts], color=_DECK_ACCENT,
+                linewidth=1.6, label="Equity vs IG bonds")
+        ax.plot(dates, [p.get("equity_hy") for p in pts], color=_DECK_GREEN,
+                linewidth=1.6, label="Equity vs HY bonds")
+        ax.axhline(0, color=_DECK_GREY, linewidth=0.8)
+        brk = rc.get("regime_break") or _DECK_REGIME_BREAK
+        ax.axvline(pd.to_datetime(brk), color=_DECK_AMBER, linestyle="--",
+                   linewidth=1.4, label="2022 regime break")
+        ax.set_title("Rolling 12-Month Equity-Bond Correlation", fontsize=11)
+        ax.set_ylabel("Correlation")
+        ax.legend(fontsize=8, frameon=False)
+        _deck_style(ax)
+        return _deck_finish(plt, fig)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_render_rolling_correlation_failed", error=str(exc))
+        return None
+
+
+def render_cumulative_returns(
+    data: dict[str, Any], *,
+    only: list[str] | set[str] | None = None,
+    period: str | None = None,
+    extra_series: dict[str, list] | None = None,
+    title: str | None = None,
+) -> bytes | None:
+    """Slides 3 & 8 — growth-of-$1 lines. `only` filters to a set of strategy
+    names (e.g. the static strategies); period='post2022' filters to the
+    post-2022 window and rebases each series to 1.0 at its first month;
+    extra_series injects caller-supplied series (e.g. the regime-conditional
+    blend) as {label: [(date, value), ...]}."""
+    cr = (data or {}).get("cumulative_returns") or {}
+    pts = cr.get("points") or []
+    strategies = cr.get("strategies") or []
+    if not pts and not extra_series:
+        return None
+    plt = _deck_mpl()
+    if plt is None:
+        return None
+    try:
+        import pandas as pd
+        only_norm = {_norm_name(n) for n in only} if only else None
+        sel = [s for s in strategies
+               if only_norm is None or _norm_name(s) in only_norm]
+        rows = pts
+        if period == "post2022":
+            rows = [p for p in pts if str(p.get("date")) >= _DECK_REGIME_BREAK]
+        if not rows:
+            return None
+        dates = [pd.to_datetime(p["date"]) for p in rows]
+        fig, ax = plt.subplots(figsize=(8, 4.4))
+        ci = 0
+
+        def _plot(label, vals):
+            nonlocal ci
+            ys = list(vals)
+            if period == "post2022":
+                base = next((v for v in ys if isinstance(v, (int, float))), None)
+                if base:
+                    ys = [v / base if isinstance(v, (int, float)) else None
+                          for v in ys]
+            ax.plot(dates, ys, color=_DECK_SERIES[ci % len(_DECK_SERIES)],
+                    linewidth=1.4, label=label)
+            ci += 1
+
+        for s in sel:
+            _plot(s, [p.get(s) for p in rows])
+        for label, pairs in (extra_series or {}).items():
+            m = {str(d): v for d, v in (pairs or [])}
+            _plot(label, [m.get(str(p.get("date"))) for p in rows])
+        if ci == 0:
+            plt.close(fig)
+            return None
+        ax.set_title(title or "Cumulative Total Return - Growth of $1",
+                     fontsize=11)
+        ax.set_ylabel("Growth of $1")
+        ax.legend(fontsize=7, frameon=False, ncol=2)
+        _deck_style(ax)
+        return _deck_finish(plt, fig)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_render_cumulative_returns_failed", error=str(exc))
+        return None
+
+
+def render_strategy_comparison(
+    data: dict[str, Any], *, strategy_type: str = "dynamic",
+) -> bytes | None:
+    """Slide 4 — post-2022 Sharpe bar per strategy of the given type, with the
+    benchmark post-2022 Sharpe as a reference line."""
+    rows_in = (data or {}).get("regime_conditional") or []
+    if not rows_in:
+        return None
+    plt = _deck_mpl()
+    if plt is None:
+        return None
+    try:
+        from tools.academic_deck import (
+            _DYNAMIC_STRATEGIES, _STATIC_STRATEGIES,
+        )
+        wanted = {_norm_name(n) for n in (
+            _DYNAMIC_STRATEGIES if strategy_type == "dynamic"
+            else _STATIC_STRATEGIES)}
+        bars = [(r.get("strategy"), r.get("post_2022_sharpe")) for r in rows_in
+                if _norm_name(r.get("strategy")) in wanted
+                and isinstance(r.get("post_2022_sharpe"), (int, float))]
+        if not bars:
+            return None
+        bars.sort(key=lambda kv: kv[1], reverse=True)
+        names = [b[0] for b in bars]
+        vals = [b[1] for b in bars]
+        bench = next(
+            (r.get("post_2022_sharpe") for r in rows_in
+             if _norm_name(r.get("strategy")) == "BENCHMARK"
+             and isinstance(r.get("post_2022_sharpe"), (int, float))), None)
+        fig, ax = plt.subplots(figsize=(8, 4.4))
+        ax.bar(range(len(names)), vals, color=_DECK_ACCENT, zorder=3)
+        ax.set_xticks(range(len(names)))
+        ax.set_xticklabels(names, rotation=30, ha="right", fontsize=8)
+        if bench is not None:
+            ax.axhline(bench, color=_DECK_AMBER, linestyle="--", linewidth=1.4,
+                       label=f"Benchmark ({bench:.2f})")
+            ax.legend(fontsize=8, frameon=False)
+        ax.set_title(f"Post-2022 Sharpe - {strategy_type.title()} Strategies",
+                     fontsize=11)
+        ax.set_ylabel("Post-2022 Sharpe")
+        _deck_style(ax)
+        return _deck_finish(plt, fig)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_render_strategy_comparison_failed", error=str(exc))
+        return None
+
+
+def render_efficient_frontier(
+    data: dict[str, Any], *, blend_weights: dict[str, float] | None = None,
+) -> bytes | None:
+    """Slide 6 — strategy risk-return scatter (the achievable frontier of the
+    strategy universe), static / dynamic / benchmark distinguished. When
+    blend_weights are supplied the live regime-conditional blend is marked at
+    the weighted average of its constituents' (vol, return) — an approximation
+    (true blend vol is lower, given diversification), labelled as such."""
+    results = (data or {}).get("strategy_results") or {}
+    if not results:
+        return None
+    plt = _deck_mpl()
+    if plt is None:
+        return None
+    try:
+        from tools.academic_deck import (
+            _DYNAMIC_STRATEGIES, _STATIC_STRATEGIES,
+        )
+        static = {_norm_name(n) for n in _STATIC_STRATEGIES}
+        dynamic = {_norm_name(n) for n in _DYNAMIC_STRATEGIES}
+        pts = []
+        for name, r in results.items():
+            vol, cagr = r.get("volatility"), r.get("cagr")
+            if not (isinstance(vol, (int, float)) and isinstance(cagr, (int, float))):
+                continue
+            nm = _norm_name(r.get("strategy_name") or name)
+            grp = ("benchmark" if nm == "BENCHMARK"
+                   else "static" if nm in static
+                   else "dynamic" if nm in dynamic else "other")
+            pts.append((nm, vol * 100, cagr * 100, grp))
+        if not pts:
+            return None
+        fig, ax = plt.subplots(figsize=(8, 4.6))
+        colors = {"static": _DECK_SLATE, "dynamic": _DECK_ACCENT,
+                  "benchmark": _DECK_AMBER, "other": _DECK_GREY}
+        for grp in ("static", "dynamic", "benchmark", "other"):
+            g = [p for p in pts if p[3] == grp]
+            if g:
+                ax.scatter([p[1] for p in g], [p[2] for p in g], s=70,
+                           color=colors[grp], label=grp.title(), zorder=3)
+        for nm, x, y, _grp in pts:
+            ax.annotate(nm, (x, y), fontsize=6, color=_DECK_GREY,
+                        xytext=(4, 4), textcoords="offset points")
+        if blend_weights:
+            bw = {_norm_name(k): v for k, v in blend_weights.items()
+                  if isinstance(v, (int, float)) and v > 0}
+            bx = by = tw = 0.0
+            for nm, x, y, _grp in pts:
+                w = bw.get(nm)
+                if w:
+                    bx += w * x
+                    by += w * y
+                    tw += w
+            if tw > 0:
+                ax.scatter([bx / tw], [by / tw], s=200, marker="*",
+                           color=_DECK_GREEN, zorder=5, edgecolors="white",
+                           label="Live blend (approx.)")
+        ax.set_title("Strategy Risk-Return Frontier", fontsize=11)
+        ax.set_xlabel("Annualised volatility (%)")
+        ax.set_ylabel("CAGR (%)")
+        ax.legend(fontsize=7, frameon=False)
+        _deck_style(ax)
+        return _deck_finish(plt, fig)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_render_efficient_frontier_failed", error=str(exc))
+        return None

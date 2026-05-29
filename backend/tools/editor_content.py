@@ -206,6 +206,46 @@ def deck_to_editor(
     return content_json, content_text
 
 
+def deck_slides_to_editor(
+    slides: Any,
+) -> tuple[dict[str, Any], str]:
+    """Editor content for the rebuilt 10-slide deck (May 28 2026).
+
+    Maps the AI slide JSON (slide_number / title / bullets / table_data /
+    speaker_notes) onto the canvas element schema (migration 022) so a freshly
+    generated deck opens in the Konva editor. Always emits the canonical ten
+    slides (via academic_deck._normalize_slides) so a missing/unparseable JSON
+    still produces a complete, openable deck. The AI speaker_notes carry into
+    each slide; content_text concatenates every slide for Academic Review.
+    """
+    from tools.academic_deck import SLIDE_TITLES, _normalize_slides
+
+    norm = _normalize_slides(slides)
+    canvas_slides: list[dict[str, Any]] = []
+    text_lines: list[str] = []
+    for i, sl in enumerate(norm, start=1):
+        title = sl.get("title") or SLIDE_TITLES[i - 1]
+        bullets = sl.get("bullets") or []
+        body = "\n".join(f"- {b}" for b in bullets)
+        td = sl.get("table_data")
+        if isinstance(td, dict) and td.get("rows"):
+            headers = [str(h) for h in (td.get("headers") or [])]
+            if headers:
+                body += "\n\n" + " | ".join(headers)
+            for row in (td.get("rows") or [])[:12]:
+                body += "\n" + " | ".join(str(c) for c in row)
+        cs = _canvas_slide(i, title, body)
+        notes = str(sl.get("speaker_notes") or "").strip()
+        if notes:
+            cs["speaker_notes"] = notes
+        canvas_slides.append(cs)
+        text_lines.append(f"Slide {i}: {title}")
+        if body:
+            text_lines.append(body)
+        text_lines.append("")
+    return {"slides": canvas_slides}, "\n".join(text_lines).strip()
+
+
 def _word_count_warning_block(
     validation: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[str]]:
