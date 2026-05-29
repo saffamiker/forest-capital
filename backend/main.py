@@ -9891,12 +9891,20 @@ async def _generate_brief_document(
             {"key": "methodology", "available": True,
              "agent_id": "brief_methodology",
              "task": (
-                 "Write the Methodology Overview — about 280 words. Cover the "
+                 "Write the Methodology Overview — about 300 words. Cover the "
                  "data sources and study period, the portfolio constraints "
                  "(long-only, fully invested, no cash), the ten strategies "
                  "(static versus dynamic), the Carhart four-factor model, the "
                  "benchmark definition (100% S&P 500), and the key "
-                 "assumptions."),
+                 "assumptions. State the meta-portfolio optimizer's box "
+                 "constraints explicitly, in substance: a maximum 40% and "
+                 "minimum 5% allocation per strategy, and a maximum 50% and "
+                 "minimum 5% allocation per underlying asset class; these "
+                 "constraints enforce diversification and practical "
+                 "implementability; and in the current TRANSITION regime both "
+                 "the Min Variance and Risk Parity strategies sit at the "
+                 "concentration ceiling, representing the maximum permissible "
+                 "defensive tilt."),
              "context": {"study_period": data["study_period"],
                          "strategy_metadata": data.get("strategy_metadata"),
                          "risk_free_rate": data["risk_free_rate"]}},
