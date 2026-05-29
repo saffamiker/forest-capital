@@ -82,7 +82,13 @@ export interface TestScript {
 // cumulative) repointed to /analytics; nav-order step updated. Molly gains
 // interaction-pattern steps (info icons + explainer, chart tooltips,
 // loading / error / responsive) and a nav-order check.
-export const TEST_SCRIPT_VERSION = 7
+// v8 (May 29 2026) — Molly gains 18 Rebalancing History steps on the
+// Council Performance Record page: Section 1 (Implied Asset Allocation —
+// 100% rows, regime contrast, Largest Change, US dates, sort) and Section
+// 2 (Strategy Blend Weights — all strategies, 100% rows, BULL vs
+// BEAR/TRANSITION defensive weighting, Total Shift sanity), plus
+// cross-section parity and responsive/tooltip checks.
+export const TEST_SCRIPT_VERSION = 8
 
 const allTesters: TestScript = {
   id: 'all_testers_v1',
@@ -1835,6 +1841,166 @@ const molly: TestScript = {
       expectedResult: 'All three components reflow cleanly with no '
         + 'horizontal overflow or broken layout.',
       allowSkip: false,
+    },
+
+    // ── Rebalancing History — Section 1: Implied Asset Allocation ──────
+    {
+      id: 'molly_rebal_aa_renders', route: '/performance-record', target: null,
+      title: 'Implied Asset Allocation table renders',
+      instruction: 'On the Council Performance Record page, scroll to the '
+        + '"Implied Asset Allocation" table — it sits directly below the '
+        + '"Net of Switching Costs" table.',
+      expectedResult: 'The Implied Asset Allocation table is present below '
+        + 'Net of Switching Costs.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_aa_columns', route: '/performance-record', target: null,
+      title: 'Three asset columns present',
+      instruction: 'Read the Implied Asset Allocation column headers.',
+      expectedResult: 'Equity, IG Bonds, and HY Bonds columns are all '
+        + 'present (alongside Date, Regime, and Largest Change).',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_aa_sum100', route: '/performance-record', target: null,
+      title: 'Asset rows sum to 100%',
+      instruction: 'Spot-check at least three rows: add Equity % + IG Bonds '
+        + '% + HY Bonds %.',
+      expectedResult: 'Every checked row sums to 100% (allow ±0.1% for '
+        + 'rounding).',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_rebal_aa_nonzero', route: '/performance-record', target: null,
+      title: 'No all-zero asset row',
+      instruction: 'Scan the asset columns down every row.',
+      expectedResult: 'No row shows 0% across all three asset columns.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_aa_regime_diff', route: '/performance-record', target: null,
+      title: 'Allocation differs by regime',
+      instruction: 'Compare the asset allocation on a BULL-regime row '
+        + 'against a BEAR-regime row.',
+      expectedResult: 'BULL rows show a materially different (more '
+        + 'equity-tilted) allocation than BEAR rows.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_aa_largest_change', route: '/performance-record', target: null,
+      title: 'Largest Change column',
+      instruction: 'Read the Largest Change column on the rebalancing rows.',
+      expectedResult: 'Largest Change is present and non-zero on rebalancing '
+        + 'rows, naming an asset class and a percentage-point move.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_aa_dates', route: '/performance-record', target: null,
+      title: 'Dates in MM/DD/YYYY',
+      instruction: 'Read the Date column of the Implied Asset Allocation '
+        + 'table.',
+      expectedResult: 'Dates display in US MM/DD/YYYY format.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_aa_sort', route: '/performance-record', target: null,
+      title: 'Sorted newest first',
+      instruction: 'Read the dates top to bottom.',
+      expectedResult: 'Rows are sorted newest first (most recent date at '
+        + 'the top).',
+      allowSkip: true,
+    },
+
+    // ── Rebalancing History — Section 2: Strategy Blend Weights ────────
+    {
+      id: 'molly_rebal_sw_all_strategies', route: '/performance-record', target: null,
+      title: 'All strategies present as columns',
+      instruction: 'Scroll the "Strategy Blend Weights" table horizontally '
+        + 'and read every strategy column header.',
+      expectedResult: 'All ten strategies appear as columns (Benchmark, '
+        + '60/40, Equal Wt, Risk Parity, Min Var, Black-Litt, Momentum, '
+        + 'Regime Sw, Vol Target, Max Sharpe).',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_sw_sum100', route: '/performance-record', target: null,
+      title: 'Strategy rows sum to 100%',
+      instruction: 'Spot-check at least three rows: add every strategy '
+        + 'weight across the row.',
+      expectedResult: 'Every checked row sums to 100% (allow ±1% for '
+        + 'whole-number rounding across ten columns).',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_rebal_sw_bull_low', route: '/performance-record', target: null,
+      title: 'BULL: low defensive weights',
+      instruction: 'On a BULL-regime row, read the Min Var and Risk Parity '
+        + 'columns.',
+      expectedResult: 'In BULL, Min Variance and Risk Parity show near-zero '
+        + 'weights.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_sw_bear_high', route: '/performance-record', target: null,
+      title: 'BEAR/TRANSITION: elevated defensive weights',
+      instruction: 'On a BEAR or TRANSITION row, read the Min Var and Risk '
+        + 'Parity columns.',
+      expectedResult: 'In BEAR/TRANSITION, Min Variance and Risk Parity show '
+        + 'elevated weights relative to BULL rows.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_sw_no_blank', route: '/performance-record', target: null,
+      title: 'No blank strategy cell',
+      instruction: 'Scan every cell of the Strategy Blend Weights table.',
+      expectedResult: 'No strategy column is blank or missing on any row '
+        + '(a 0% weight shows "0%", never empty).',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_sw_total_shift', route: '/performance-record', target: null,
+      title: 'Total Shift is reasonable',
+      instruction: 'Read the Total Shift column on each row.',
+      expectedResult: 'Total Shift shows a reasonable value (roughly 1%–'
+        + '100%). Flag any row showing 0% or greater than 100%.',
+      allowSkip: true,
+    },
+
+    // ── Rebalancing History — both sections ────────────────────────────
+    {
+      id: 'molly_rebal_row_parity', route: '/performance-record', target: null,
+      title: 'Row count matches between sections',
+      instruction: 'Count the data rows in Implied Asset Allocation and in '
+        + 'Strategy Blend Weights.',
+      expectedResult: 'Both tables have the same number of rows (the same '
+        + 'rebalancing events).',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_rebal_date_parity', route: '/performance-record', target: null,
+      title: 'Dates match between sections',
+      instruction: 'Compare the Date column of the two tables row by row.',
+      expectedResult: 'The dates match exactly between the two sections.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_responsive', route: '/performance-record', target: null,
+      title: 'No layout break (desktop + mobile)',
+      instruction: 'View both rebalancing tables on a desktop width and a '
+        + 'narrow (mobile) width.',
+      expectedResult: 'Both tables scroll horizontally without breaking the '
+        + 'page layout on either width (no overflow off-screen, no clipped '
+        + 'content).',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_rebal_tooltips', route: '/performance-record', target: null,
+      title: 'Info-icon tooltips present',
+      instruction: 'Hover the ⓘ next to each rebalancing table heading.',
+      expectedResult: 'Both sections show a readable tooltip explaining what '
+        + 'a rebalancing event is.',
+      allowSkip: true,
     },
   ],
 }

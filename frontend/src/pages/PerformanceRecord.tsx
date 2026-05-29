@@ -500,6 +500,7 @@ export default function PerformanceRecord() {
                           {STRATEGY_SHORT[k] ?? k}
                         </th>
                       ))}
+                      <th className="text-right font-medium py-1 px-1.5">Total Shift</th>
                     </tr>
                   </thead>
                   <tbody className="font-mono text-xs">
@@ -512,6 +513,9 @@ export default function PerformanceRecord() {
                             {((ev.weights[k] ?? 0) * 100).toFixed(0)}%
                           </td>
                         ))}
+                        <td className="text-right text-electric py-1.5 px-1.5">
+                          {(ev.total_shift * 100).toFixed(1)}%
+                        </td>
                       </tr>
                     ))}
                   </tbody>
