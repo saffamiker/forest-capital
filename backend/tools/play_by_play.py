@@ -810,8 +810,9 @@ _STORED_COLS = (
 
 
 async def load_stored_events() -> list[dict]:
-    """Every persisted event row, ordered by event_date. The read path
-    behind the Council Performance Record page / slide.
+    """Every persisted event row, newest first (event_date DESC). The read
+    path behind the Council Performance Record page / slide; the tiles and
+    the API response therefore list the most recent event first.
 
     There is NO is_frozen filter: a play_by_play_events row only exists
     once it was a complete, settled fact (is_persistable gate at write
@@ -830,7 +831,7 @@ async def load_stored_events() -> list[dict]:
             result = await session.execute(text(
                 "SELECT " + ", ".join(_STORED_COLS) + " "
                 "FROM play_by_play_events "
-                "WHERE computed_at IS NOT NULL ORDER BY event_date"))
+                "WHERE computed_at IS NOT NULL ORDER BY event_date DESC"))
             fetched = result.fetchall()
             out: list[dict] = []
             for r in fetched:

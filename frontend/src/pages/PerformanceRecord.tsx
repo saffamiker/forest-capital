@@ -74,6 +74,14 @@ const pct = (x: number | null | undefined): string =>
 const prob = (x: number | null | undefined): string =>
   x === null || x === undefined ? '—' : `${(x * 100).toFixed(0)}%`
 
+// Display-only: render a stored ISO date (YYYY-MM-DD) as US MM/DD/YYYY.
+// The backend keeps ISO internally; this formats at the point of render.
+const fmtDate = (iso: string | null | undefined): string => {
+  if (!iso) return '—'
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(iso))
+  return m ? `${m[2]}/${m[3]}/${m[1]}` : String(iso)
+}
+
 function topWeights(w: Record<string, number> | null): string {
   if (!w) return '—'
   return Object.entries(w)
@@ -268,7 +276,7 @@ export default function PerformanceRecord() {
                 const labelColor = added ? '#34d399' : '#f87171'
                 const vaStr = va === null ? '—' : `${va >= 0 ? '+' : ''}${va.toFixed(2)}`
                 const tip = ev
-                  ? `${ev.event_id}\n${ev.event_date}`
+                  ? `${ev.event_id}\n${fmtDate(ev.event_date)}`
                     + `${ev.verdict ? `\n${ev.verdict}` : ''}`
                     + `\nValue added Sharpe: ${vaStr}`
                   : d
@@ -312,7 +320,7 @@ export default function PerformanceRecord() {
                   <h3 className="text-base font-semibold text-white">
                     {ev.event_id}
                   </h3>
-                  <p className="text-xs text-slate-500">{ev.event_date}</p>
+                  <p className="text-xs text-slate-500">{fmtDate(ev.event_date)}</p>
                 </div>
                 <div className={`flex items-center gap-1 text-sm font-medium ${
                   added ? 'text-emerald-400' : 'text-red-400'}`}>
