@@ -2893,7 +2893,7 @@ async def get_forward_projection(session: dict = Depends(require_auth)):
         # the data_hash-stale value the simulation was cached with. The
         # simulation bands / p_outperform stay as cached.
         if proj:
-            await _overlay_live_regime(proj, proj, prob_key="regime_probability")
+            await _overlay_live_regime(proj, prob_key="regime_probability")
         return {"available": bool(proj), "projection": proj}
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
