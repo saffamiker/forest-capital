@@ -241,6 +241,24 @@ class TestPersistHardening:
             {"regime": "BEAR",
              "performance": {"blend": {"d90": 0.03}}}) is True
 
+    def test_as_date_coerces_event_date_for_asyncpg(self):
+        # asyncpg rejects an ISO string for a DATE column — the EVENTS
+        # registry carries event_date as a string, so the INSERT binding
+        # MUST coerce it to a datetime.date. This was the bug that emptied
+        # every prior production run (the per-row INSERT rolled back on the
+        # string). Pin the coercion across every input shape.
+        from datetime import date, datetime
+
+        import pandas as pd
+        assert pbp._as_date("2023-03-31") == date(2023, 3, 31)
+        assert isinstance(pbp._as_date("2023-03-31"), date)
+        assert pbp._as_date(date(2024, 1, 1)) == date(2024, 1, 1)
+        assert pbp._as_date(datetime(2024, 1, 1, 12, 0)) == date(2024, 1, 1)
+        assert pbp._as_date(pd.Timestamp("2025-04-30")) == date(2025, 4, 30)
+        # Every EVENTS registry date converts to a real date object.
+        for ev in pbp.EVENTS:
+            assert isinstance(pbp._as_date(ev["event_date"]), date)
+
 
 class TestScorecard:
 

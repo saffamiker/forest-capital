@@ -636,6 +636,30 @@ def _json_safe(obj) -> str:
     return json.dumps(_clean(obj))
 
 
+def _as_date(value):
+    """Coerce an event_date to a datetime.date for the INSERT.
+
+    asyncpg is strict about types: a DATE column argument must be a
+    datetime.date instance — a string like '2023-03-31' raises
+    `invalid input for query argument` and rolls the row back. The EVENTS
+    registry carries event_date as an ISO string, so it MUST be converted
+    here, at the INSERT binding (the only place a Python date is required).
+    THIS is the bug that emptied every prior production run: the per-row
+    INSERT failed on the string and was caught as play_by_play_persist_row_
+    error, leaving written=0. A datetime / pandas.Timestamp passes through
+    via .date(); an unparseable value is returned as-is so the row guard
+    surfaces it rather than silently masking a new shape."""
+    from datetime import date, datetime
+    if isinstance(value, datetime):   # also catches pandas.Timestamp
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        return datetime.strptime(str(value), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return value
+
+
 async def get_persisted_event_ids() -> set[str]:
     """event_ids of COMPLETE persisted rows — the run skips only these.
 
@@ -746,7 +770,9 @@ async def persist_events(rows: list[dict], *, data_hash: str | None = None) -> i
                 try:
                     await session.execute(stmt, {
                         "event_id": r["event_id"],
-                        "event_date": r["event_date"],
+                        # asyncpg requires a datetime.date for the DATE
+                        # column — the ISO string would roll the row back.
+                        "event_date": _as_date(r["event_date"]),
                         "trigger": r["trigger"],
                         "regime": r.get("regime"),
                         "posterior": _json_safe(r.get("posterior")),
