@@ -351,12 +351,19 @@ def classify_hmm_regime(
     # Feature matrix: [return, abs(return)]
     X = np.column_stack([clean.values, np.abs(clean.values)])
 
+    # Aligned with fit_hmm_historical (n_iter=500, tol=1e-5) so the LIVE
+    # regime classification this function drives uses the SAME convergence
+    # settings as the validated out-of-sample machinery — the live tile and
+    # the OOS Sharpe must not diverge on a parameter difference. Changing
+    # this affects ONLY the live tile (detect_current_regime); the play-by-
+    # play and the OOS validation fit with fit_hmm_historical and are
+    # untouched, so neither needs a rerun.
     model = GaussianHMM(
         n_components=n_states,
         covariance_type="diag",
-        n_iter=200,
+        n_iter=500,
         random_state=seed,
-        tol=1e-4,
+        tol=1e-5,
     )
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
