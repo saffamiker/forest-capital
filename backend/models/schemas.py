@@ -37,6 +37,13 @@ class LogoutRequest(BaseModel):
 class CouncilQueryRequest(BaseModel):
     query: str
     include_agents: Optional[list[str]] = None
+    # Optional page scope — when the question was asked from one of the
+    # council-facing landing pages, the frontend passes the scope so the
+    # endpoint injects that page's live cached data into the deliberation.
+    # One of: "recommendation" | "performance" | "prediction". An unknown
+    # value is ignored (no injection), so a stale frontend never 422s a
+    # legitimate question.
+    context_scope: Optional[str] = None
 
 
 class AgentMessage(BaseModel):

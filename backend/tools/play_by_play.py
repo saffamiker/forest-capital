@@ -875,6 +875,11 @@ def scorecard(rows: list[dict]) -> dict:
 # ── cumulative chart series (precomputed, data_hash-cached) ──────────────────
 
 _CHART_METRIC_KIND = "performance_chart"
+# Discrete cache of the out-of-sample Sharpe headline + the 2/9 value-add
+# count, written alongside the chart in the warm pipeline so the Council
+# Performance Record banner and the council's "performance" scope can read
+# the scalars without re-running the OOS validation on a page load.
+_OOS_SUMMARY_METRIC_KIND = "oos_summary"
 
 
 def _cumulative(returns) -> list[float | None]:
@@ -976,6 +981,32 @@ async def refresh_performance_chart(data_hash: str) -> bool:
             return False
         await set_metric(data_hash or "", _CHART_METRIC_KIND, chart,
                          source="play_by_play")
+        # Gap A — cache the OOS Sharpe headline + the 2/9 value-add count as
+        # a discrete metric so the banner and the council "performance"
+        # scope read the scalars from cache, not by re-running the OOS
+        # validation on a page load. Fail-open: a failure here never blocks
+        # the chart cache that already succeeded above.
+        try:
+            from tools.regime_meta_validation import out_of_sample_validation
+            oos = out_of_sample_validation(sr, hmm)
+            block = (oos or {}).get("oos") or {}
+            events = await load_stored_events()
+            sc = scorecard(events) if events else {}
+            summary = {
+                "blend": (block.get("regime_conditional") or {}).get("sharpe"),
+                "benchmark": (block.get("benchmark") or {}).get("sharpe"),
+                "equal_weight": (block.get("equal_weight") or {}).get("sharpe"),
+                "value_add_events": sc.get("n_value_added"),
+                "total_events": sc.get("n_total"),
+            }
+            if summary["blend"] is not None:
+                await set_metric(data_hash or "", _OOS_SUMMARY_METRIC_KIND,
+                                 summary, source="play_by_play")
+                log.info("oos_summary_cached", **{
+                    k: summary[k] for k in ("blend", "benchmark",
+                                            "value_add_events", "total_events")})
+        except Exception as exc:  # noqa: BLE001
+            log.warning("oos_summary_cache_failed", error=str(exc))
         log.info("performance_chart_cached",
                  points=len(chart["series"]),
                  markers=len(chart.get("event_markers") or []))
@@ -994,4 +1025,16 @@ async def get_cached_performance_chart() -> dict | None:
         return await get_latest_metric(_CHART_METRIC_KIND)
     except Exception as exc:  # noqa: BLE001
         log.warning("performance_chart_read_error", error=str(exc))
+        return None
+
+
+async def get_cached_oos_summary() -> dict | None:
+    """The latest cached OOS Sharpe summary (blend / benchmark /
+    equal_weight Sharpe + the value-add event count). Fail-open to None so
+    a reader that runs before the first warm simply omits the scalars."""
+    try:
+        from tools.precomputed_analytics import get_latest_metric
+        return await get_latest_metric(_OOS_SUMMARY_METRIC_KIND)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("oos_summary_read_error", error=str(exc))
         return None

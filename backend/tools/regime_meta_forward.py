@@ -362,6 +362,19 @@ def forward_monte_carlo(
         blends, current_posterior if isinstance(current_posterior, dict)
         else {})
 
+    # Gap B — expose the regime transition matrix as a labelled, JSON-
+    # friendly nested dict {from_regime: {to_regime: prob}} so the cached
+    # forward_projection metric carries the persistence model that drives
+    # the simulation. The council's "prediction" scope reads it to explain
+    # what would happen under a regime change.
+    transition_matrix = {
+        present[i]: {
+            present[j]: round(float(transition[i][j]), 6)
+            for j in range(len(present))
+        }
+        for i in range(len(present))
+    }
+
     return {
         "names": names,
         "n_paths": int(n_paths),
@@ -371,6 +384,7 @@ def forward_monte_carlo(
         "bands": bands,
         "p_outperform": p_outperform,
         "transition_source": transition_source,
+        "transition_matrix": transition_matrix,
     }
 
 

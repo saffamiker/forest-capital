@@ -4749,6 +4749,18 @@ async def council_query(
             strategy_results = await asyncio.to_thread(
                 run_all_strategies, history)
 
+            # Page-scoped live context — when the question was asked from
+            # a council-facing landing page, resolve that page's live
+            # cached data (recommendation / performance / prediction) and
+            # thread it into the deliberation. None for an unscoped or
+            # unknown scope, so the existing behaviour is unchanged.
+            from tools.council_live_context import get_scope_context
+            live_context = await get_scope_context(body.context_scope)
+            if live_context:
+                log.info("council_scope_context_injected",
+                         scope=body.context_scope,
+                         keys=list(live_context.keys()))
+
             # Capture every specialist's harness run + every agent
             # call's token usage. Seeded before the generator runs so
             # the copied thread contexts share the accumulator lists.
@@ -4756,7 +4768,8 @@ async def council_query(
             start_usage_capture()
 
             cio = CIO()
-            gen = cio.deliberate_streaming(query, strategy_results, history)
+            gen = cio.deliberate_streaming(
+                query, strategy_results, history, live_context=live_context)
             sentinel = object()
             while True:
                 # Each next(gen) runs a phase — specialists fan-out,

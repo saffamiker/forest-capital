@@ -6,8 +6,8 @@
  */
 import { useEffect, useState } from 'react'
 import axios from 'axios'
-import { Link } from 'react-router-dom'
-import { ArrowRight } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
+import { ArrowRight, MessageSquare } from 'lucide-react'
 
 interface Scorecard {
   n_total?: number
@@ -18,7 +18,20 @@ interface Scorecard {
 interface Payload { available: boolean; scorecard: Scorecard | null }
 
 export default function PerformanceRecordLink() {
+  const navigate = useNavigate()
   const [data, setData] = useState<Payload | null>(null)
+
+  // Hand off to the council with the "performance" scope so the
+  // deliberation injects the cached play-by-play events + OOS summary.
+  // Rendered as a sibling button (not nested in the card's anchor).
+  const askCouncil = () =>
+    navigate('/council', {
+      state: {
+        prefillQuestion:
+          'How does 2/9 event accuracy reconcile with cumulative outperformance?',
+        contextScope: 'performance',
+      },
+    })
 
   useEffect(() => {
     let alive = true
@@ -34,9 +47,10 @@ export default function PerformanceRecordLink() {
   const sc = data?.scorecard
 
   return (
+    <div className="m-4 md:m-6">
     <Link
       to="/performance-record"
-      className="card p-5 m-4 md:m-6 border-l-2 border-electric block
+      className="card p-5 border-l-2 border-electric block
                  hover:bg-navy-700/40 transition-colors">
       <div className="flex items-start justify-between gap-4">
         <div>
@@ -69,5 +83,14 @@ export default function PerformanceRecordLink() {
         View the full record →
       </span>
     </Link>
+    <button
+      type="button"
+      onClick={askCouncil}
+      className="mt-2 inline-flex items-center gap-1.5 text-xs text-electric
+                 hover:underline min-h-[44px] sm:min-h-0">
+      <MessageSquare className="w-3.5 h-3.5" />
+      Ask about this
+    </button>
+    </div>
   )
 }
