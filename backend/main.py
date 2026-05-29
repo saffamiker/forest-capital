@@ -2827,6 +2827,18 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
                 conf = {}
                 rec["confidence"] = conf
             await _overlay_live_regime(conf, prob_key="probability")
+            # Surface the live regime-conditional blend weights (from the
+            # cached forward projection — the same prob-weighted blend) so
+            # the tile can show the blend and flag a binding concentration
+            # constraint. Fail-open: the constraints table still renders its
+            # static rows without the weights, just no binding note.
+            try:
+                from tools.regime_meta_forward import get_cached_forward_projection
+                proj = await get_cached_forward_projection()
+                if proj and proj.get("blend_weights"):
+                    rec["blend_weights"] = proj["blend_weights"]
+            except Exception as exc:  # noqa: BLE001
+                log.warning("recommendation_blend_overlay_failed", error=str(exc))
         return {"available": bool(rec), "recommendation": rec}
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
