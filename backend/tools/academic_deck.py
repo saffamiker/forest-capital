@@ -1,28 +1,33 @@
 """
 tools/academic_deck.py
 
-Assembles the 16-slide final presentation deck (.pptx) from a data
-bundle, a set of generated narrative sections, and light-mode chart
-images.
+Assembles the 10-slide final presentation deck (.pptx) from AI-generated
+slide JSON and light-mode chart images.
 
-Two halves:
+The deck rebuild (May 28 2026) is JSON-driven: a single Academic Writer
+call (deck_generation_prompt() through harness_narrative()) returns
+content for all ten slides — {slide_number, title, bullets, table_data,
+speaker_notes} — and build_presentation_deck() lays them out. The ten
+canonical SLIDE_TITLES and per-slide chart roles (SLIDE_CHARTS) are
+fixed; the AI fills the content from the live data context.
 
-  render_deck_charts()  — renders the deck's charts as light-mode PNGs
-    with matplotlib (white background, navy ink — NOT the platform's dark
-    theme). matplotlib is a declared dependency but is imported lazily
-    and guarded: if it is unavailable, or the underlying data is missing,
-    the renderer returns None for that chart and the slide falls back to
-    a [DATA PENDING] note. (The platform's recharts charts cannot be
-    rasterised server-side — there is no browser — and the Option B
-    export-package endpoint only zips client-rendered PNGs; an inline
-    matplotlib render is the spec's named fallback.)
+  render_deck_charts()  — renders the legacy five canvas/deck charts as
+    light-mode PNGs with matplotlib (white background, navy ink — NOT the
+    platform's dark theme). Kept because chart_render.py's canvas-render
+    path depends on it; the rebuilt deck renders its per-slide charts
+    through the chart_render deck renderers instead. matplotlib is lazy
+    and guarded — unavailable matplotlib / missing data returns None and
+    the slide degrades to a [DATA PENDING] note.
 
-  build_presentation_deck()  — lays out the 16 slides in a professional
-    navy/white theme and returns the .pptx bytes. Pure assembly: no LLM
-    calls, no database reads.
+  build_presentation_deck(slides, charts)  — lays out the ten slides in a
+    professional navy/white theme and returns the .pptx bytes. Pure
+    assembly: no LLM calls, no database reads. Always emits exactly ten
+    slides with the canonical titles; a missing slide / table / chart
+    degrades to a [DATA PENDING] note rather than failing.
 
-Every slide carries the AI DRAFT footer — the deck is a first draft for
-the team to refine before the July 1 presentation.
+Every slide carries the AI DRAFT footer and a speaker-notes verification
+caveat — the deck is a first draft for the team to refine before the
+July 1 presentation.
 """
 from __future__ import annotations
 
@@ -43,6 +48,244 @@ from tools.academic_export import (
 )
 
 log = structlog.get_logger(__name__)
+
+# ── Validated production constants (May 28 2026 deck rebuild) ─────────────────
+# These are the validated, authoritative figures for the 10-slide final deck.
+# They are injected into the generation context block so the AI never has to
+# invent them, and they backstop the slide-spec text. Performance numbers for
+# the strategy tables are NOT here — those come live from gather_document_data().
+OOS_SHARPE_REGIME_CONDITIONAL = 0.8576
+OOS_SHARPE_BENCHMARK = 0.4341
+OOS_SHARPE_EQUAL_WEIGHT = 0.1264
+CORRELATION_PRE_2022 = -0.05
+CORRELATION_POST_2022 = 0.57
+PLAY_BY_PLAY_EVENTS = 9
+
+# Regime state is LIVE-SOURCED, never a constant. The current regime, its HMM
+# posterior confidence, and the live blend weights drift as new monthly data
+# lands, so they would go stale before the presentation. They are wired into
+# the deck context block at generation time from detect_current_regime() (the
+# same source the Forward Projection tile and CIO card use). Slide 6's spec
+# below instructs the model to read current_regime / regime_confidence /
+# blend_weights from the context rather than any baked-in value.
+
+# The real platform universe — confirmed May 28 2026. The earlier-draft
+# TLT / DJP / Trend Following / Dynamic Risk Parity names are NOT used.
+_STATIC_STRATEGIES = ["CLASSIC_60_40", "EQUAL_WEIGHT", "RISK_PARITY",
+                      "BLACK_LITTERMAN"]
+_DYNAMIC_STRATEGIES = ["MOMENTUM_ROTATION", "REGIME_SWITCHING", "VOL_TARGETING",
+                       "MIN_VARIANCE", "MAX_SHARPE_ROLLING"]
+
+# The ten canonical slide titles, in order. The builder always emits exactly
+# these ten slides with these titles — when the AI JSON is missing or
+# unparseable (the test environment, or an LLM outage) the slide still appears
+# with its canonical title and a [DATA PENDING] body. SLIDE_CHARTS maps a slide
+# number to the deck-chart role the builder embeds on it.
+SLIDE_TITLES = [
+    "Portfolio Construction and Strategy Universe",   # 1
+    "The 2022 Correlation Break",                     # 2
+    "Static Strategy Performance",                    # 3
+    "Dynamic Strategy Performance",                   # 4
+    "The AI Council Framework",                       # 5
+    "Regime-Conditional Optimizer",                   # 6
+    "Historical Event Validation",                    # 7
+    "Out-of-Sample Validation",                       # 8
+    "Limitations and Risks",                          # 9
+    "Strategic Conclusions",                          # 10
+]
+DECK_SLIDE_COUNT = len(SLIDE_TITLES)
+
+# slide_number → chart role. The role string is resolved to a chart_render
+# renderer + arguments in main._render_deck_slide_charts. Slides not listed
+# carry no chart.
+SLIDE_CHARTS: dict[int, str] = {
+    2: "rolling_correlation",
+    3: "cumulative_static",
+    4: "strategy_comparison_dynamic",
+    6: "efficient_frontier",
+    8: "cumulative_post2022",
+}
+
+
+# ── Generation prompt (passed verbatim to harness_narrative) ──────────────────
+# DECK_GENERATION_PROMPT is the preamble; SLIDE_SPECIFICATIONS lists the ten
+# slides' required content. deck_generation_prompt() concatenates them — the
+# full text handed to harness_narrative() as the generation task.
+DECK_GENERATION_PROMPT = """\
+You are generating content for a 10-slide investment research presentation \
+for FNA 670 (Financial Strategies and Analytics). The audience is Dr. \
+Katerina Panttser and peer reviewers. Runtime is 18-20 minutes.
+
+The team is:
+Michael Ruurds -- lead engineer, system architecture, AI council
+Bob Thao -- quantitative analysis, factor models, statistical testing
+Molly Murdock -- presentation, visualization, peer review
+
+Using ONLY the data provided in the context block, generate structured slide \
+content for all 10 slides. Do not invent numbers. If a value is missing from \
+context, write [DATA PENDING].
+
+For each slide return:
+- title (concise, specific)
+- 3-5 bullet points (factual, specific, no filler phrases)
+- table_data (if applicable): column headers + row data as JSON
+- speaker_notes (3-5 sentences, the narrative arc for that slide)
+
+Respond only in JSON. No preamble, no markdown fences. Structure:
+{
+  "slides": [
+    {
+      "slide_number": 1,
+      "title": "...",
+      "bullets": ["...", "..."],
+      "table_data": null or {
+        "headers": [...],
+        "rows": [[...], ...]
+      },
+      "speaker_notes": "..."
+    }
+  ]
+}
+"""
+
+# The slide specifications. Constants are interpolated; performance numbers for
+# the strategy tables are deliberately left for gather_document_data() to
+# supply (the prompt instructs the model to pull them from context, never
+# hardcode them). Strategy names are the real platform names.
+SLIDE_SPECIFICATIONS = f"""\
+SLIDE SPECIFICATIONS
+
+Slide 1 -- Portfolio Construction and Strategy Universe
+Required bullets:
+- Three-asset universe: equities, investment-grade bonds, high-yield bonds
+- Ten strategies: four static, five dynamic, plus the 100% equity benchmark \
+as reference
+- Constraint framework: 5% floor, 50% ceiling per asset
+- Study period: full history through the December 2025 data lock
+Required table:
+Headers: Strategy | Type | Description
+Rows: one row per strategy.
+  Static: {", ".join(_STATIC_STRATEGIES)}
+  Dynamic: {", ".join(_DYNAMIC_STRATEGIES)}
+  BENCHMARK is the 100% equity reference — include it as a separate row \
+labelled "Reference", not as one of the nine strategies.
+Chart: none
+
+Slide 2 -- The 2022 Correlation Break (the central finding)
+Required bullets:
+- Equity-bond correlation moved from {CORRELATION_PRE_2022:+.2f} pre-2022 to \
+{CORRELATION_POST_2022:+.2f} post-2022
+- The traditional 60/40 diversification assumption no longer holds
+- This structural break motivates the entire study period and methodology
+Chart: rolling_correlation, with a vertical reference line on the 2022 break
+Required table: none
+
+Slide 3 -- Static Strategy Performance
+Required bullets:
+- Four static strategies evaluated against the benchmark
+- Full post-2022 out-of-sample period
+- Benchmark post-2022 Sharpe: {OOS_SHARPE_BENCHMARK}
+Required table:
+Headers: Strategy | Sharpe | Ann. Return | Volatility | Max DD
+Rows: the four static strategies plus a benchmark row. Pull every performance \
+value from the strategy_performance section of the context — do not invent any.
+Chart: cumulative_returns filtered to the static strategies only
+
+Slide 4 -- Dynamic Strategy Performance
+Required bullets:
+- Five dynamic strategies evaluated
+- Each strategy's rules-based signal generation stated explicitly
+- Best dynamic result referenced by name and Sharpe
+Required table:
+Headers: Strategy | Sharpe | Ann. Return | Volatility | Max DD
+Rows: the five dynamic strategies plus a benchmark row. Pull every value from \
+the strategy_performance section of the context.
+Chart: strategy_comparison (dynamic strategies only, benchmark as a reference \
+line)
+
+Slide 5 -- The AI Council Framework
+Required bullets:
+- Generator-evaluator harness: four agents, structured reasoning
+- Agents: CIO, Contrarian Analyst, Academic Advisor, Arbiter
+- Dissenting views are surfaced explicitly, not averaged away
+- What the AI did: structured analysis, regime-signal evaluation, dissent
+- What the humans did: interpret outputs, make allocation decisions, validate
+Required table:
+Headers: Agent | Role | Function
+Rows: one row per agent (CIO, Contrarian Analyst, Academic Advisor, Arbiter)
+Chart: none
+
+Slide 6 -- Regime-Conditional Optimizer
+Required bullets:
+- Four-layer architecture: Layer 1 HMM regime detection, Layer 2 \
+regime-conditional weights, Layer 3 out-of-sample validation, Layer 4 \
+Monte Carlo confidence bands
+- Current regime and confidence: use the current_regime and regime_confidence \
+values from the context block (the live HMM posterior). State the regime name \
+and the confidence as a percentage. Do not invent or assume these.
+- The live blend reflects the current-regime weighting
+Required table:
+Headers: Strategy | BULL | BEAR | TRANSITION | Current Live Weight
+Rows: MIN_VARIANCE, RISK_PARITY, EQUAL_WEIGHT. For the Current Live Weight \
+column use the blend_weights values from the context block — do not invent them.
+Chart: efficient_frontier with the current live blend position marked
+
+Slide 7 -- Historical Event Validation (play-by-play)
+Required bullets:
+- {PLAY_BY_PLAY_EVENTS} named market events tested across 2022-2025
+- Council reasoning was frozen in the database at the time of each event
+- Events include the March 2023 banking panic, the Q3 2023 "higher for \
+longer" repricing, and the Q4 2023-2024 everything rally
+- Validation compares each council call against the actual market outcome
+Required table:
+Headers: Event | Date | Council Signal | Market Outcome | Correct
+Rows: all {PLAY_BY_PLAY_EVENTS} events, pulled from the play_by_play_events \
+rows in the context.
+Chart: none
+
+Slide 8 -- Out-of-Sample Validation
+Required bullets:
+- Training: the full pre-2022 history
+- Test: post-2022 live production data
+- Regime-conditional Sharpe: {OOS_SHARPE_REGIME_CONDITIONAL}
+- vs benchmark: {OOS_SHARPE_BENCHMARK}
+- vs equal weight: {OOS_SHARPE_EQUAL_WEIGHT}
+Required table:
+Headers: Strategy | OOS Sharpe | OOS Return | OOS Volatility
+Rows: Regime-Conditional Blend, Benchmark, Equal Weight
+Chart: cumulative_returns over the post-2022 period, three series only \
+(regime-conditional, benchmark, equal weight)
+
+Slide 9 -- Limitations and Risks
+Required bullets:
+- Three-asset universe: concentration risk, no international exposure
+- Post-2022 test period: only ~40 months, a single regime cycle
+- Transaction costs: not yet incorporated (estimated 15-20 bps)
+- Statistical significance: 0 of 10 strategies pass all five Tier 1 gates at \
+p < 0.005 (FDR-corrected, Benjamin et al. 2018). Economic outperformance is \
+present; statistical certainty is not.
+- Regime model risk: the HMM parameters are estimated on historical data
+Chart: none. Required table: none
+
+Slide 10 -- Strategic Conclusions
+Required bullets:
+- Regime-conditional construction is the first-order portfolio problem in a \
+structurally shifted correlation environment
+- The AI council enables systematic dissent, explicit uncertainty, and \
+traceable reasoning
+- Roadmap: Fama-French factor attribution, predictive regime modeling, an \
+expanded asset universe
+- Governance: a four-component disclosure structure suitable for a fiduciary \
+context
+Chart: none. Required table: none
+"""
+
+
+def deck_generation_prompt() -> str:
+    """The full generation task text — preamble plus slide specifications —
+    handed to harness_narrative() as the deck-generation instruction."""
+    return f"{DECK_GENERATION_PROMPT}\n\n{SLIDE_SPECIFICATIONS}"
+
 
 # ── Professional navy/white theme — deliberately NOT the platform dark UI ─────
 _NAVY = RGBColor(0x1A, 0x2A, 0x4A)
@@ -432,261 +675,130 @@ def _footer(slide, idx: int, total: int) -> None:
 
 # ── Deck builder ──────────────────────────────────────────────────────────────
 
+_DATA_PENDING_BULLET = (
+    "[DATA PENDING] — generated from live analytics; warm the caches "
+    "and regenerate the deck.")
+
+
+def _normalize_slides(raw_slides: Any) -> list[dict[str, Any]]:
+    """Map the AI's slide list onto exactly DECK_SLIDE_COUNT slides indexed
+    1..10, each with a title. A missing or invalid slide keeps its canonical
+    title and a [DATA PENDING] body, so the deck always has all ten slides
+    even when the generation JSON is absent (test env / LLM outage)."""
+    by_num: dict[int, dict[str, Any]] = {}
+    for s in (raw_slides or []):
+        if not isinstance(s, dict):
+            continue
+        n = s.get("slide_number")
+        if isinstance(n, int) and 1 <= n <= DECK_SLIDE_COUNT and n not in by_num:
+            by_num[n] = s
+    out: list[dict[str, Any]] = []
+    for n in range(1, DECK_SLIDE_COUNT + 1):
+        s = dict(by_num.get(n) or {})
+        s["slide_number"] = n
+        if not str(s.get("title") or "").strip():
+            s["title"] = SLIDE_TITLES[n - 1]
+        bullets = [str(b).strip() for b in (s.get("bullets") or [])
+                   if str(b).strip()]
+        s["bullets"] = bullets or [_DATA_PENDING_BULLET]
+        out.append(s)
+    return out
+
+
+def _slide_table(sl: dict[str, Any]) -> tuple[list[str], list[list[str]]]:
+    """Extract (headers, rows-of-strings) from a slide's table_data, or
+    ([], []) when the slide carries no usable table."""
+    td = sl.get("table_data")
+    if not isinstance(td, dict):
+        return [], []
+    headers = [str(h) for h in (td.get("headers") or [])]
+    rows = [[str(c) for c in r] for r in (td.get("rows") or [])
+            if isinstance(r, (list, tuple))]
+    return (headers, rows) if headers and rows else ([], [])
+
+
+def _render_content_slide(prs, sl, chart_png, idx, total) -> None:
+    """Lay out one content slide: title bar, bullets, optional table, optional
+    chart. Adds exactly one slide. Slides in SLIDE_CHARTS always reserve a
+    chart slot — a None PNG degrades to a [DATA PENDING] note. Fully guarded so
+    a malformed slide never raises out of the builder."""
+    s = _blank(prs)
+    _bg(s, _WHITE)
+    title = sl.get("title") or SLIDE_TITLES[idx - 1]
+    try:
+        _title_bar(s, title)
+        bullets = sl.get("bullets") or [_DATA_PENDING_BULLET]
+        headers, rows = _slide_table(sl)
+        has_table = bool(headers and rows)
+        has_chart = idx in SLIDE_CHARTS
+        role = SLIDE_CHARTS.get(idx, "chart")
+
+        if has_chart and has_table:
+            _bullets(s, bullets, left=Inches(0.6), top=Inches(1.15),
+                     width=Inches(12.1), height=Inches(1.55), size=13)
+            _table(s, headers, rows, left=Inches(0.6), top=Inches(2.85),
+                   width=Inches(6.1), max_rows=11)
+            _image(s, chart_png, left=Inches(7.0), top=Inches(2.85),
+                   width=Inches(5.8), fallback=role)
+        elif has_chart:
+            _bullets(s, bullets, left=Inches(0.6), top=Inches(1.4),
+                     width=Inches(4.9), height=Inches(5.2), size=15)
+            _image(s, chart_png, left=Inches(5.7), top=Inches(1.5),
+                   width=Inches(7.1), fallback=role)
+        elif has_table:
+            _bullets(s, bullets, left=Inches(0.6), top=Inches(1.25),
+                     width=Inches(12.1), height=Inches(1.95), size=14)
+            _table(s, headers, rows, left=Inches(0.6), top=Inches(3.35),
+                   width=Inches(12.1), max_rows=12)
+        else:
+            _bullets(s, bullets, left=Inches(0.7), top=Inches(1.7),
+                     width=Inches(11.9), height=Inches(5.0), size=18)
+    except Exception as exc:  # noqa: BLE001 — one bad slide never fails the deck
+        log.warning("deck_slide_body_failed", slide=idx, error=str(exc))
+
+    _footer(s, idx, total)
+
+
 def build_presentation_deck(
-    data: dict[str, Any],
-    narratives: dict[str, str],
-    charts: dict[str, bytes | None],
+    slides: Any,
+    charts: dict[int, bytes | None] | None = None,
 ) -> bytes:
     """
-    Lays out the 16-slide final presentation deck and returns the .pptx
-    bytes. narratives supplies the conclusions, recommendations, thesis
-    and AI-leverage prose; charts supplies the light-mode PNGs from
-    render_deck_charts(). Pure assembly — no LLM, no DB.
+    Lays out the 10-slide final presentation deck and returns the .pptx bytes.
+
+    `slides` is the parsed AI JSON — a list of
+    {slide_number, title, bullets, table_data, speaker_notes} dicts produced by
+    deck_generation_prompt() through harness_narrative(). `charts` maps a slide
+    number to its pre-rendered light-mode PNG (main renders them with the
+    chart_render deck renderers, since that path is async — the sync builder
+    only embeds the bytes).
+
+    The builder always emits exactly ten slides with the canonical SLIDE_TITLES:
+    a missing slide, a missing table, or a missing chart each degrade to a
+    [DATA PENDING] note, never an exception. Every slide carries the AI DRAFT
+    footer and a speaker-notes verification caveat; slide 1 additionally carries
+    the review warning + submission checklist.
     """
+    charts = charts or {}
     prs = Presentation()
     prs.slide_width = _SLIDE_W
     prs.slide_height = _SLIDE_H
-    total = 16
+    total = DECK_SLIDE_COUNT
 
-    period = data.get("study_period", {})
-    team = data.get("team_summary", {}) or {}
-    commits = (team.get("commits") or {}).get("total", 0)
-    n_council = sum(m.get("council_interactions", 0)
-                    for m in team.get("per_member", []))
-    n_reviews = sum(m.get("academic_review_sessions", 0)
-                    for m in team.get("per_member", []))
+    norm = _normalize_slides(slides)
+    for i, sl in enumerate(norm):
+        _render_content_slide(prs, sl, charts.get(i + 1), i + 1, total)
 
-    def _bullet_list(key: str, fallback: list[str]) -> list[str]:
-        """Splits a generated narrative into bullet lines, or uses a fallback."""
-        text = narratives.get(key, "")
-        lines = [ln.strip() for ln in text.split("\n")
-                 if ln.strip() and "[DATA PENDING]" not in ln]
-        return lines if lines else fallback
-
-    # ── Slide 1 — Title ───────────────────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _NAVY)
-    _textbox(s, Inches(1.0), Inches(2.4), Inches(11.3), Inches(1.6),
-             "Asset Allocation Strategies and Risk-Adjusted Performance",
-             size=40, bold=True, color=_WHITE, align=PP_ALIGN.CENTER)
-    _textbox(s, Inches(1.0), Inches(4.2), Inches(11.3), Inches(0.6),
-             "Forest Capital / McColl School of Business",
-             size=22, color=RGBColor(0x9C, 0xB3, 0xD6), align=PP_ALIGN.CENTER)
-    _textbox(s, Inches(1.0), Inches(4.9), Inches(11.3), Inches(0.5),
-             "FNA 670 — Summer 2026", size=18,
-             color=RGBColor(0x9C, 0xB3, 0xD6), align=PP_ALIGN.CENTER)
-    _footer(s, 1, total)
-
-    # ── Slide 2 — Agenda ──────────────────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Agenda")
-    _bullets(s, [
-        "The Question", "Data and Methodology", "The 2022 Regime Break",
-        "Static Allocation Results", "Dynamic Allocation Results",
-        "Factor Analysis", "Portfolio Optimisation",
-        "Conclusions and Recommendations", "How We Built This",
-    ])
-    _footer(s, 2, total)
-
-    # ── Slide 3 — The Question ────────────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "The Question")
-    _textbox(s, Inches(0.8), Inches(1.6), Inches(11.7), Inches(2.0),
-             "“Does diversification across equities and fixed income improve "
-             "risk-adjusted performance — and does that answer change after "
-             "2022?”", size=26, bold=True, color=_NAVY)
-    _bullets(s, [
-        "Benchmark: 100% S&P 500 equity index.",
-        "Key constraint: long-only, fully invested — no cash, no leverage.",
-        "Study period: "
-        f"{period.get('start', '—')} to {period.get('end', '—')} "
-        f"({period.get('n_months', 0)} monthly observations).",
-    ], top=Inches(3.9), height=Inches(2.8))
-    _footer(s, 3, total)
-
-    # ── Slide 4 — Data and Methodology ────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Data and Methodology")
-    _bullets(s, [
-        "Aligned monthly returns: equity, investment-grade and high-yield "
-        "bonds — the three-asset universe.",
-        f"Study period {period.get('start', '—')} to "
-        f"{period.get('end', '—')} ({period.get('n_months', 0)} months).",
-        "Ten strategies — five static (e.g. 60/40, risk parity) and five "
-        "dynamic (e.g. regime switching, momentum rotation).",
-        "Constraints: long-only, fully invested, quarterly rebalancing.",
-        "Attribution: Carhart four-factor model (MKT-RF, SMB, HML, MOM).",
-        "Benchmark: 100% S&P 500.",
-    ])
-    _footer(s, 4, total)
-
-    # ── Slide 5 — The 2022 Regime Break ───────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "The 2022 Regime Break")
-    _image(s, charts.get("rolling_correlation"), left=Inches(0.6),
-           top=Inches(1.3), width=Inches(8.2), fallback="rolling correlation")
-    rc = data.get("rolling_correlation") or {}
-    pre = (rc.get("pre_2022") or {}).get("equity_ig")
-    post = (rc.get("post_2022") or {}).get("equity_ig")
-    _callout(s, Inches(9.1), Inches(1.5), Inches(3.6), Inches(1.3),
-             "Pre-2022 equity–IG correlation",
-             f"{pre:+.2f}" if isinstance(pre, (int, float)) else "—")
-    _callout(s, Inches(9.1), Inches(3.0), Inches(3.6), Inches(1.3),
-             "Post-2022 equity–IG correlation",
-             f"{post:+.2f}" if isinstance(post, (int, float)) else "—",
-             color=_AMBER)
-    thesis = narratives.get("thesis", "")
-    if thesis and "[DATA PENDING]" not in thesis:
-        _textbox(s, Inches(9.1), Inches(4.5), Inches(3.6), Inches(2.2),
-                 thesis, size=13, color=_INK)
-    _footer(s, 5, total)
-
-    # ── Slide 6 — Static Allocation Results ───────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Static Allocation Results")
-    h, r = table_summary_statistics(data.get("summary_statistics", []))
-    _table(s, h, r, top=Inches(1.4), width=Inches(8.0))
-    _textbox(s, Inches(9.0), Inches(1.5), Inches(3.7), Inches(4.5),
-             "Summary statistics across the asset classes. Static "
-             "diversification reduces volatility and drawdown but, post-2022, "
-             "no longer reliably improves the risk-adjusted return over a "
-             "100% equity benchmark.", size=14, color=_INK)
-    _footer(s, 6, total)
-
-    # ── Slide 7 — Dynamic Allocation Results ──────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Dynamic Allocation Results")
-    h, r = table_regime_conditional(data.get("regime_conditional", []))
-    _table(s, h, r, top=Inches(1.3), width=Inches(12.0))
-    _textbox(s, Inches(0.7), Inches(6.4), Inches(12.0), Inches(0.6),
-             "Sorted by post-2022 Sharpe — the strategies that held up once "
-             "equity–bond diversification stopped working.",
-             size=13, color=_GREY)
-    _footer(s, 7, total)
-
-    # ── Slide 8 — Cumulative Returns ──────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Cumulative Returns — Growth of $1")
-    _image(s, charts.get("cumulative_returns"), left=Inches(1.6),
-           top=Inches(1.3), width=Inches(10.0), fallback="cumulative returns")
-    _footer(s, 8, total)
-
-    # ── Slide 9 — Risk-Return Profile ─────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Risk–Return Profile")
-    _image(s, charts.get("risk_return"), left=Inches(1.6), top=Inches(1.3),
-           width=Inches(10.0), fallback="risk-return")
-    _textbox(s, Inches(1.6), Inches(6.5), Inches(10.0), Inches(0.5),
-             "Each point is one strategy; the highest-Sharpe strategy is "
-             "marked. Strategies toward the upper-left are the most "
-             "efficient.", size=13, color=_GREY)
-    _footer(s, 9, total)
-
-    # ── Slide 10 — Factor Analysis ────────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Factor Analysis")
-    h, r = table_factor_loadings(data.get("factor_loadings", []))
-    _table(s, h, r, top=Inches(1.3), width=Inches(12.0))
-    _textbox(s, Inches(0.7), Inches(6.4), Inches(12.0), Inches(0.6),
-             "Carhart four-factor loadings — a trailing * marks significance "
-             "at p < .05. Alpha is annualised.", size=13, color=_GREY)
-    _footer(s, 10, total)
-
-    # ── Slide 11 — Drawdown Analysis ──────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Drawdown Analysis")
-    h, r = table_drawdown(data.get("drawdown_comparison", []))
-    _table(s, h, r, top=Inches(1.4), width=Inches(9.0))
-    _textbox(s, Inches(10.0), Inches(1.5), Inches(2.8), Inches(4.5),
-             "Worst peak-to-trough loss and the months taken to recover a "
-             "prior high. The deepest loss is listed first.",
-             size=14, color=_INK)
-    _footer(s, 11, total)
-
-    # ── Slide 12 — Sensitivity Analysis ───────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Sensitivity Analysis")
-    _image(s, charts.get("sensitivity"), left=Inches(1.6), top=Inches(1.3),
-           width=Inches(10.0), fallback="sensitivity")
-    _textbox(s, Inches(1.6), Inches(6.5), Inches(10.0), Inches(0.5),
-             "Sharpe ratio as each dynamic strategy's key parameter is swept "
-             "— flat curves indicate the result is not an artefact of one "
-             "parameter choice.", size=13, color=_GREY)
-    _footer(s, 12, total)
-
-    # ── Slide 13 — Conclusions ────────────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Conclusions")
-    _bullets(s, _bullet_list("conclusions", [
-        "[DATA PENDING] — conclusions are generated from the live results; "
-        "warm the analytics caches and regenerate the deck.",
-    ]))
-    _footer(s, 13, total)
-
-    # ── Slide 14 — Recommendations ────────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "Recommendations")
-    _bullets(s, _bullet_list("recommendations", [
-        "[DATA PENDING] — the strategic recommendation is generated from the "
-        "live results; warm the analytics caches and regenerate the deck.",
-    ]))
-    _footer(s, 14, total)
-
-    # ── Slide 15 — How We Built This ──────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _WHITE)
-    _title_bar(s, "How We Built This — AI Leverage")
-    _image(s, charts.get("team_activity"), left=Inches(0.6), top=Inches(1.3),
-           width=Inches(7.2), fallback="team activity")
-    _callout(s, Inches(8.2), Inches(1.4), Inches(2.3), Inches(1.0),
-             "Council sessions", str(n_council))
-    _callout(s, Inches(10.7), Inches(1.4), Inches(2.3), Inches(1.0),
-             "Academic reviews", str(n_reviews), color=_NAVY_SOFT)
-    _callout(s, Inches(8.2), Inches(2.6), Inches(2.3), Inches(1.0),
-             "Commits", str(commits), color=_AMBER)
-    ai_text = narratives.get("ai_leverage", "")
-    if "[DATA PENDING]" in ai_text or not ai_text:
-        ai_text = ("A multi-model AI council, a generator-evaluator quality "
-                   "harness and an academic-review gate interrogated this "
-                   "work — so faculty can.")
-    _textbox(s, Inches(8.2), Inches(3.9), Inches(4.6), Inches(2.8),
-             ai_text, size=14, color=_INK)
-    _footer(s, 15, total)
-
-    # ── Slide 16 — Questions ──────────────────────────────────────────────
-    s = _blank(prs)
-    _bg(s, _NAVY)
-    _textbox(s, Inches(1.0), Inches(2.8), Inches(11.3), Inches(1.2),
-             "Questions", size=44, bold=True, color=_WHITE,
-             align=PP_ALIGN.CENTER)
-    _textbox(s, Inches(1.0), Inches(4.1), Inches(11.3), Inches(0.6),
-             "Thank you", size=22, color=RGBColor(0x9C, 0xB3, 0xD6),
-             align=PP_ALIGN.CENTER)
-    _textbox(s, Inches(1.0), Inches(4.8), Inches(11.3), Inches(0.5),
-             "Forest Capital Practicum Team · [contact information]",
-             size=14, color=RGBColor(0x9C, 0xB3, 0xD6), align=PP_ALIGN.CENTER)
-    _footer(s, 16, total)
-
-    # CAVEAT 4 — a verification note on every slide's speaker notes; the
-    # title slide (index 0) additionally carries the review warning and
-    # the submission checklist (CAVEAT 1 + CAVEAT 5).
+    # Speaker notes — the AI narrative, prefixed with the verification caveat.
+    # Slide 1 carries the full review warning + submission checklist (CAVEAT
+    # 1 + 5); every other slide carries the per-slide verify note (CAVEAT 4).
+    # The caveat is always non-empty, so every slide has speaker notes.
     for i, slide in enumerate(prs.slides):
-        note = _DECK_TITLE_NOTE if i == 0 else _MOLLY_VERIFY_NOTE
+        ai_notes = str(norm[i].get("speaker_notes") or "").strip()
+        caveat = _DECK_TITLE_NOTE if i == 0 else _MOLLY_VERIFY_NOTE
+        text = caveat + (f"\n\n{ai_notes}" if ai_notes else "")
         try:
-            slide.notes_slide.notes_text_frame.text = note
+            slide.notes_slide.notes_text_frame.text = text
         except Exception:  # noqa: BLE001 — a notes failure never fails the deck
             pass
 
