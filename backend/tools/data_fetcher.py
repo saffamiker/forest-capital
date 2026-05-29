@@ -43,6 +43,8 @@ from config import (
     CACHE_EXPIRY_HOURS,
     RISK_FREE_RATE_FALLBACK,
     FRED_SERIES,
+    FRED_TIMEOUT_SECONDS,
+    ENVIRONMENT,
     BENCHMARK,
 )
 from logger import get_logger
@@ -186,34 +188,30 @@ def _extract_yfinance_close(raw: pd.DataFrame, tickers: list[str]) -> pd.DataFra
     return df
 
 
-def _fred_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
-    """
-    Internal FRED wrapper using FRED's public CSV endpoint — patched in tests.
-    Appends FRED_API_KEY when set to avoid anonymous-tier rate limits in production.
-    Only used for VIXCLS, DGS2, and DFF (fed funds). DGS10 comes from the
-    Excel file — fetching it here would duplicate and potentially contradict
-    the authoritative Excel source.
-    """
-    # `requests` is imported at module level so tests can monkey-patch
-    # tools.data_fetcher.requests for HTTP-mock tests.
+# Official FRED API (key-authenticated JSON) and the anonymous graph CSV.
+# The graph CSV endpoint (fredgraph.csv) is browser-oriented and has been
+# observed to 404 intermittently from datacenter IPs (Render). The documented
+# api.stlouisfed.org endpoint is the supported programmatic path and is the
+# primary source whenever a FRED_API_KEY is available.
+_FRED_API_BASE = "https://api.stlouisfed.org/fred/series/observations"
+_FRED_CSV_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 
-    fred_key = os.getenv("FRED_API_KEY")
-    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
-    if fred_key:
-        url = f"{url}&api_key={fred_key}"
-    log.info("fred_fetch", series_id=series_id, start=start, end=end)
+# yfinance alternative sources for the two market-traded series. These are
+# the same instruments by a different vendor, so they are a genuine fallback
+# (not a proxy) when FRED is unreachable. ^TNX quotes the 10-Year yield ×10
+# (e.g. 42.5 → 4.25%), so it is scaled by 0.1 to recover the FRED DGS10 units.
+_FRED_YF_FALLBACK = {"VIXCLS": "^VIX", "DGS10": "^TNX"}
+_FRED_YF_SCALE = {"^TNX": 0.1}
 
-    # 60-second timeout — FRED can be slow under load in production
-    response = requests.get(url, timeout=60)
-    response.raise_for_status()
 
-    # index_col=0 sets DATE as index directly; parse manually afterward.
-    # Using index_col + parse_dates with the same column name fails in pandas
-    # because index_col removes the column before parse_dates can act on it.
-    df = pd.read_csv(io.StringIO(response.text), index_col=0)
+def _fred_finalise(
+    df: pd.DataFrame, series_id: str, start: str, end: str
+) -> pd.DataFrame:
+    """Common post-processing for every FRED source: datetime index, drop the
+    '.' missing-value sentinel, coerce to float, window, and reject empties."""
     df.index = pd.to_datetime(df.index)
     df.index.name = "DATE"
-    # FRED uses "." as a missing-value sentinel in CSV output
+    # FRED uses "." as a missing-value sentinel in both CSV and JSON output
     df.replace(".", np.nan, inplace=True)
     df = df.astype(float)
 
@@ -223,12 +221,126 @@ def _fred_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
         df = df[df.index <= end]
 
     df = df.dropna()
-
     if df.empty:
         raise ValueError(f"FRED returned no data for {series_id}")
-
-    log.info("fred_fetch_complete", series_id=series_id, rows=len(df))
     return df
+
+
+def _fred_api_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
+    """Official api.stlouisfed.org JSON endpoint — requires FRED_API_KEY.
+    This is the documented programmatic path and the one that resolves the
+    fredgraph.csv 404s seen from Render's outbound IPs."""
+    fred_key = os.getenv("FRED_API_KEY")
+    if not fred_key:
+        raise RuntimeError("FRED_API_KEY not set — official API unavailable")
+
+    params = [f"series_id={series_id}", f"api_key={fred_key}", "file_type=json"]
+    if start:
+        params.append(f"observation_start={start}")
+    if end:
+        params.append(f"observation_end={end}")
+    url = f"{_FRED_API_BASE}?{'&'.join(params)}"
+
+    response = requests.get(url, timeout=FRED_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+    payload = response.json()
+    observations = payload["observations"]
+    if not isinstance(observations, list):
+        raise ValueError(f"unexpected FRED API payload for {series_id}")
+
+    records = {obs["date"]: obs["value"] for obs in observations}
+    df = pd.DataFrame.from_dict(records, orient="index", columns=[series_id])
+    return _fred_finalise(df, series_id, start, end)
+
+
+def _fred_csv_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
+    """Anonymous fredgraph.csv endpoint. FRED_API_KEY is appended when set."""
+    fred_key = os.getenv("FRED_API_KEY")
+    url = f"{_FRED_CSV_BASE}?id={series_id}"
+    if fred_key:
+        url = f"{url}&api_key={fred_key}"
+
+    response = requests.get(url, timeout=FRED_TIMEOUT_SECONDS)
+    response.raise_for_status()
+
+    # index_col=0 sets DATE as index directly; parse manually afterward.
+    # Using index_col + parse_dates with the same column name fails in pandas
+    # because index_col removes the column before parse_dates can act on it.
+    df = pd.read_csv(io.StringIO(response.text), index_col=0)
+    return _fred_finalise(df, series_id, start, end)
+
+
+def _fred_yf_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
+    """yfinance alternative source for VIXCLS (^VIX) and DGS10 (^TNX)."""
+    yf_ticker = _FRED_YF_FALLBACK.get(series_id)
+    if yf_ticker is None:
+        raise ValueError(f"no yfinance fallback configured for {series_id}")
+
+    df = _yfinance_fetch([yf_ticker], start, end)
+    scale = _FRED_YF_SCALE.get(yf_ticker, 1.0)
+    if scale != 1.0:
+        df = df * scale
+    df.index.name = "DATE"
+    df = df.dropna()
+    if df.empty:
+        raise ValueError(f"yfinance fallback returned no data for {series_id}")
+    return df
+
+
+def _fred_fetch(series_id: str, start: str, end: str) -> pd.DataFrame:
+    """
+    Resilient FRED fetch with three layered sources, tried in order:
+      1. Official api.stlouisfed.org JSON  (when FRED_API_KEY is set)
+      2. Anonymous fredgraph.csv           (key appended when available)
+      3. yfinance alternative source       (^VIX / ^TNX; production only)
+
+    Why three layers: the graph CSV endpoint 404s intermittently from Render's
+    datacenter IPs, so the documented JSON API is preferred. yfinance is a
+    last-resort same-instrument fallback for the two market-traded series. It
+    is restricted to production so the test suite (which mocks requests.get)
+    and local runs never make a real network call — a FRED failure there
+    propagates so callers' graceful-degradation paths and tests both hold.
+
+    `requests` is imported at module level so tests can monkey-patch
+    tools.data_fetcher.requests for HTTP-mock tests.
+    """
+    log.info("fred_fetch", series_id=series_id, start=start, end=end)
+    errors: list[tuple[str, Exception]] = []
+
+    if os.getenv("FRED_API_KEY"):
+        try:
+            df = _fred_api_fetch(series_id, start, end)
+            log.info("fred_fetch_complete", series_id=series_id, rows=len(df), source="api")
+            return df
+        except Exception as exc:
+            errors.append(("api", exc))
+            log.warning("fred_api_failed", series_id=series_id, error=str(exc))
+
+    try:
+        df = _fred_csv_fetch(series_id, start, end)
+        log.info("fred_fetch_complete", series_id=series_id, rows=len(df), source="csv")
+        return df
+    except Exception as exc:
+        errors.append(("csv", exc))
+        log.warning("fred_csv_failed", series_id=series_id, error=str(exc))
+
+    if ENVIRONMENT == "production" and series_id in _FRED_YF_FALLBACK:
+        try:
+            df = _fred_yf_fetch(series_id, start, end)
+            log.info(
+                "fred_fetch_complete", series_id=series_id, rows=len(df), source="yfinance"
+            )
+            return df
+        except Exception as exc:
+            errors.append(("yfinance", exc))
+            log.warning("fred_yf_failed", series_id=series_id, error=str(exc))
+
+    # Every source exhausted — re-raise the last failure so the type is
+    # preserved (e.g. requests.Timeout propagates as Timeout, not a generic).
+    if errors:
+        raise errors[-1][1]
+    raise ValueError(f"FRED fetch failed for {series_id}")
 
 
 _KEN_FRENCH_FF3_ZIP_URL = (
