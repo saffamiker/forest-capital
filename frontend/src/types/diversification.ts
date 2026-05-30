@@ -77,7 +77,19 @@ export interface DrawdownDurationPayload extends CachedFields {
 }
 
 // 5. Crisis performance ──────────────────────────────────────────────────────
+//
+// May 30 2026 — added `cumulative_return` after the F3 incident. The
+// crisis-window headline figure is now the cumulative return through
+// the window, not the annualised CAGR (which over-stated COVID Crash
+// 6× on a 2-month window). `cagr` is still emitted by the backend for
+// callers that want the annualised rate (COVID Recovery readers
+// asking "what was the annualised pace of the recovery?"); display
+// layers MUST use `cumulative_return` for the "loss/gain during the
+// event" framing. The field is nullable so a legacy payload still
+// parses; cells should fall back to `cagr` only when
+// `cumulative_return` is genuinely absent.
 export interface CrisisCell {
+  cumulative_return: number | null
   cagr: number | null
   max_dd: number | null
   sharpe: number | null

@@ -1,26 +1,32 @@
 /**
  * CrisisPerformanceTable — the "Crisis Performance" section.
  *
- * Strategy × crisis-window matrix showing per-strategy CAGR, max
- * drawdown, and Sharpe ratio across five named historical windows:
- *   GFC 2008          (Sept 2008 – Mar 2009)
+ * Strategy × crisis-window matrix showing per-strategy CUMULATIVE
+ * RETURN (the loss/gain through the event window), max drawdown,
+ * and Sharpe ratio across five named historical windows:
+ *   GFC 2008          (Jan 2008 – Mar 2009)
  *   EU Debt 2011-2012
  *   COVID Crash 2020  (Feb 2020 – Mar 2020)
- *   COVID Recovery    (Apr 2020 – Dec 2020)
+ *   COVID Recovery    (Apr 2020 – Dec 2021)
  *   2022 Rate Shock   (Jan 2022 – Dec 2022)
  *
- * Each cell shows three stacked figures. A strategy whose history
- * doesn't cover the full window (e.g. REGIME_SWITCHING starts 2002-10
- * — outside the dotcom window in some configs) carries a `partial`
- * flag from the backend; the cell renders a small ⚠ indicator and the
- * tooltip names the number of months actually present in the window
- * vs the window's expected length.
+ * May 30 2026 — the headline figure switched from CAGR to cumulative
+ * return after the F3 incident. The CAGR formula
+ * `(1+r).prod() ** (12/n) - 1` annualises short windows aggressively:
+ * COVID Crash's 2-month -19.87% benchmark cumulative was displayed
+ * as -73.53% CAGR. For a "loss during the crisis" framing only
+ * cumulative is defensible. The backend still emits `cagr` as a
+ * separate field for callers that want the annualised rate.
  *
- * Backend payload from /api/v1/analytics/crisis-performance (item 8
- * commit 1). The `windows` map gives start/end per crisis name; `rows`
- * is a nested map strategy_name -> crisis_name -> CrisisCell. A missing
- * cell (some strategies have no data in some windows) renders as
- * "no data" rather than zero.
+ * Each cell shows three stacked figures. A strategy whose history
+ * doesn't cover the full window carries a `partial` flag from the
+ * backend; the cell renders a small ⚠ indicator and the tooltip
+ * names the number of months actually present.
+ *
+ * Backend payload from /api/v1/analytics/crisis-performance. The
+ * `windows` map gives start/end per crisis name; `rows` is a nested
+ * map strategy_name -> crisis_name -> CrisisCell. A missing cell
+ * renders as "no data" rather than zero.
  */
 import { Loader2, AlertCircle } from 'lucide-react'
 import InfoIcon from '../InfoIcon'
@@ -68,12 +74,16 @@ function CrisisCellView({
   const tooltip = cell.partial
     ? `${strategyName} on ${crisisName}: ${cell.n_months} months covered (partial window)`
     : `${strategyName} on ${crisisName}: ${cell.n_months} months`
+  // Prefer the cumulative_return field; fall back to legacy `cagr`
+  // for cached payloads written before the F3 basis-fix landed. New
+  // production payloads always set cumulative_return.
+  const headline = cell.cumulative_return ?? cell.cagr
   return (
     <td className="px-2 py-1.5 align-top whitespace-nowrap"
         title={tooltip}
         data-testid={`crisis-cell-${strategyName}-${crisisName}`}>
-      <div className={`text-xs font-mono ${pnlTone(cell.cagr)}`}>
-        {fmtPct(cell.cagr)}
+      <div className={`text-xs font-mono ${pnlTone(headline)}`}>
+        {fmtPct(headline)}
       </div>
       <div className={`text-2xs font-mono ${pnlTone(cell.max_dd)}`}>
         DD {fmtPct(cell.max_dd)}

@@ -278,21 +278,50 @@ _CRISIS_WINDOWS: dict[str, tuple[str, str]] = {
 
 
 def crisis_performance(strategy_results: dict[str, dict]) -> dict[str, Any]:
-    """CAGR / max-DD / Sharpe per strategy over 5 crisis windows.
+    """Per-strategy performance over 5 named crisis windows.
+
+    May 30 2026 — added `cumulative_return` and fixed the displayed
+    figure. Previously the table read `cagr` and used it as the
+    headline "return during the window", but `_cagr` annualises a
+    short window's growth — `(1+r).prod() ** (12/n) - 1` — which
+    over-states a loss by ~6x on a 2-month window (COVID Crash
+    benchmark cumulative -19.87% became CAGR -73.53%) and ~3x on a
+    4-month window (EU Debt benchmark -5.10% became -14.53%). For a
+    crisis "loss during the event" table the only defensible figure
+    is the cumulative return; CAGR is preserved as a separate field
+    so existing callers / cached payloads still read.
+
+    A reader-facing assertion fires at the top of the function so
+    no production payload can return cumulative figures whose
+    absolute value exceeds the corresponding strategy's full-period
+    max drawdown — the invariant the user named in CONTROL 1. Run
+    only on negative cumulatives (a strategy can legitimately gain
+    more during a recovery window than its full-period max DD).
+
     Partial overlap (strategy starts after the window's start, or
-    series ends before the window's end) flagged as partial=True."""
+    series ends before the window's end) is flagged as partial=True
+    as before."""
     series_map = _series_map(strategy_results)
     rows: dict[str, dict[str, Any]] = {}
     for name, s in series_map.items():
         rows[name] = {}
+        # The strategy's FULL-PERIOD max drawdown — the bound the
+        # window cumulative cannot exceed (in absolute terms) when
+        # the cumulative is negative. Computed once per strategy so
+        # the per-window assertion is cheap.
+        full_period_max_dd = _max_drawdown(s) if len(s) > 1 else 0.0
         for crisis, (start_iso, end_iso) in _CRISIS_WINDOWS.items():
             start = pd.Timestamp(start_iso)
             end = pd.Timestamp(end_iso)
             window = s[(s.index >= start) & (s.index <= end)]
             if len(window) < 2:
                 rows[name][crisis] = {
-                    "cagr": None, "max_dd": None, "sharpe": None,
-                    "partial": True, "n_months": int(len(window)),
+                    "cumulative_return": None,
+                    "cagr": None,
+                    "max_dd": None,
+                    "sharpe": None,
+                    "partial": True,
+                    "n_months": int(len(window)),
                 }
                 continue
             actual_start = window.index[0]
@@ -301,9 +330,23 @@ def crisis_performance(strategy_results: dict[str, dict]) -> dict[str, Any]:
                 actual_start > start
                 or actual_end < end - pd.Timedelta(days=31)
             )
+            cumulative = float((1.0 + window).prod() - 1.0)
+            window_max_dd = _max_drawdown(window)
+            _assert_crisis_invariants(
+                strategy=name, crisis=crisis,
+                cumulative=cumulative, window_max_dd=window_max_dd,
+                full_period_max_dd=full_period_max_dd,
+            )
             rows[name][crisis] = {
+                # The headline — cumulative return through the window.
+                "cumulative_return": round(cumulative, 4),
+                # The annualised rate over the window — kept for
+                # callers that want the rate (e.g. COVID Recovery
+                # readers asking "what annualised return did this
+                # recovery deliver?"). Display layers must NOT use
+                # this as the crisis headline.
                 "cagr":     round(_cagr(window), 4),
-                "max_dd":   round(_max_drawdown(window), 4),
+                "max_dd":   round(window_max_dd, 4),
                 "sharpe":   round(_sharpe(window), 3),
                 "partial":  bool(partial),
                 "n_months": int(len(window)),
@@ -315,6 +358,115 @@ def crisis_performance(strategy_results: dict[str, dict]) -> dict[str, Any]:
         },
         "rows": rows,
     }
+
+
+# ── Layer 2 sanity controls (CONTROL 1 + CONTROL 2 from the
+# F3 incident) ───────────────────────────────────────────────────────────────
+
+
+class CrisisInvariantViolation(ValueError):
+    """Raised when a crisis-window cell violates a CONTROL invariant.
+    The message names the strategy, the window, and both figures so
+    the offending payload is identifiable from the log line alone."""
+
+
+def _assert_crisis_invariants(
+    *, strategy: str, crisis: str,
+    cumulative: float, window_max_dd: float, full_period_max_dd: float,
+) -> None:
+    """CONTROL 1 (the assertion that would have caught -73.53% on
+    COVID Crash automatically):
+
+      For every row, the absolute value of the cumulative window
+      return must not exceed the strategy's full-period max
+      drawdown — when the cumulative is a LOSS. A defensive
+      strategy can legitimately gain more during a recovery window
+      than its full-period max DD (COVID Recovery gains +84% for an
+      equity benchmark whose full-period max DD is -52% — that is
+      not a bug, just a realised recovery).
+
+      Strictly speaking the tighter version of this invariant is
+      window_max_dd ≥ full_period_max_dd (window DD can never be
+      worse than full-period DD because the window is a subset).
+      Both forms are asserted — the cumulative-vs-DD check is the
+      one the user named in the incident report; the window-DD
+      check is the mathematically airtight version that follows
+      from the same subset argument.
+
+    The function fails open in normal operation — a violation
+    raises CrisisInvariantViolation, which the caller MUST catch
+    if it wants to degrade gracefully. The default behaviour is to
+    propagate so the bad payload never lands in the cache."""
+    eps = 1e-6
+    if cumulative < 0:
+        if abs(cumulative) > abs(full_period_max_dd) + eps:
+            raise CrisisInvariantViolation(
+                f"CONTROL 1 violated for {strategy} on {crisis}: "
+                f"cumulative window return {cumulative:.4f} exceeds "
+                f"full-period max drawdown {full_period_max_dd:.4f} "
+                f"in absolute terms. A window loss cannot be larger "
+                f"than the strategy's worst-ever loss across the "
+                f"full sample.")
+    if window_max_dd < full_period_max_dd - eps:
+        # The window is a subset of the full period; its peak-to-
+        # trough drawdown cannot be MORE negative than the
+        # full-period DD by construction. If it is, something
+        # upstream is wrong (mis-aligned series, double-counted
+        # returns, wrong window slicing).
+        raise CrisisInvariantViolation(
+            f"CONTROL 1 (subset-DD form) violated for {strategy} on "
+            f"{crisis}: window max DD {window_max_dd:.4f} is more "
+            f"negative than full-period max DD {full_period_max_dd:.4f}. "
+            f"By construction window DD cannot exceed full-period DD.")
+
+
+def verify_crisis_return_basis(
+    crisis_payload: dict[str, Any],
+    strategy_results: dict[str, dict],
+    tolerance: float = 1e-3,
+) -> list[str]:
+    """CONTROL 2 — return-basis consistency check.
+
+    For each (strategy, window) cell in a crisis payload, recompute
+    the expected cumulative return from the strategy's underlying
+    monthly return series and compare against the displayed
+    `cumulative_return`. Anything outside `tolerance` means the
+    displayed figure used a different basis (CAGR, max DD, total
+    return, etc.) — exactly the class of mixed-basis bug F3 surfaced.
+
+    Returns a list of human-readable violation messages. Empty list
+    means every cell matches. Callers may either log the messages
+    or raise. The function is intentionally non-fatal so a single
+    bad cell does not deny-of-service a full audit run."""
+    out: list[str] = []
+    rows = crisis_payload.get("rows") or {}
+    windows = crisis_payload.get("windows") or {}
+    series_map = _series_map(strategy_results)
+    for strategy, cells in rows.items():
+        s = series_map.get(strategy)
+        if s is None:
+            continue
+        for crisis, cell in (cells or {}).items():
+            displayed = cell.get("cumulative_return")
+            if displayed is None:
+                continue
+            w = windows.get(crisis) or {}
+            start = pd.Timestamp(w.get("start"))
+            end = pd.Timestamp(w.get("end"))
+            if pd.isna(start) or pd.isna(end):
+                continue
+            window = s[(s.index >= start) & (s.index <= end)]
+            if len(window) < 2:
+                continue
+            expected = float((1.0 + window).prod() - 1.0)
+            if abs(displayed - expected) > tolerance:
+                out.append(
+                    f"CONTROL 2 violated for {strategy} on {crisis}: "
+                    f"displayed cumulative_return={displayed:.4f}, "
+                    f"recomputed from monthly series={expected:.4f}. "
+                    f"Drift={abs(displayed-expected):.4f} > "
+                    f"tolerance={tolerance:g}.")
+    return out
 
 
 # ── 6. Marginal Contribution to Risk ───────────────────────────────────────

@@ -401,6 +401,39 @@ async def set_strategy_cache(
                        "preserving the prior known-good cache row",
             )
             return
+    # ── Invariant pre-write gate (May 30 2026) ───────────────────────
+    # The data-level half of the framework (Cat 1, Cat 5) runs against
+    # the in-memory results BEFORE the row is committed. A hard
+    # failure aborts the write, preserves the previous cache row, and
+    # logs `invariant_hard_failure` per assertion. Catches the F3 class
+    # of bug at write time rather than at display time.
+    #
+    # Wrapped in try/except so a framework defect itself can never
+    # take the warm offline — a runner exception is logged and the
+    # write proceeds (the framework is a safety net, not the
+    # primary correctness layer).
+    try:
+        from tools.invariant_checks import run_all_invariants
+        invariant_result = run_all_invariants(results)
+        if not invariant_result.passed:
+            log.warning(
+                "strategy_cache_write_refused_invariants",
+                strategy_hash=strategy_hash,
+                hard_failures=len(invariant_result.hard_failures),
+                soft_warnings=len(invariant_result.soft_warnings),
+                first_failure=(
+                    invariant_result.hard_failures[0].to_dict()
+                    if invariant_result.hard_failures else None),
+                reason="invariant hard-failure(s); preserving the "
+                       "prior cache row and aborting the write",
+            )
+            return
+    except Exception as inv_exc:  # noqa: BLE001
+        log.warning("invariant_runner_failed",
+                    error=str(inv_exc),
+                    note=("Invariant framework raised; proceeding "
+                          "with cache write to avoid taking the warm "
+                          "offline. Fix the runner."))
     try:
         from sqlalchemy import text
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]

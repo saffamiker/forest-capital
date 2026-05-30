@@ -903,24 +903,35 @@ def _finding_8_crisis_performance(crisis: dict | None) -> dict:
     rows = crisis.get("rows") or {}
     # rows is strategy_name -> crisis_name -> CrisisCell.
 
-    # Per-window best/worst by return + benchmark.
+    # Per-window best/worst by cumulative window return + benchmark.
+    # May 30 2026 — switched from `cagr` to `cumulative_return` after
+    # the F3 incident: `_cagr` annualises a 2-month COVID Crash window
+    # 6× and turned a -19.87% loss into a -73.53% headline. The
+    # cumulative return is the only basis a "loss during the event"
+    # framing supports. Cells written before the basis-fix landed
+    # carry no `cumulative_return` field; the legacy `cagr` is the
+    # fallback then, NOT for new payloads.
     per_window: dict[str, dict] = {}
     beat_in_all_windows: set[str] = set(rows.keys()) if rows else set()
     for w in (windows.keys() if windows else []):
         per_window[w] = {"best": None, "worst": None, "benchmark": None}
         bench_cell = (rows.get("BENCHMARK") or {}).get(w) or {}
-        bench_ret = bench_cell.get("cagr")
+        bench_ret = bench_cell.get("cumulative_return")
+        if bench_ret is None:
+            bench_ret = bench_cell.get("cagr")  # legacy fallback
         per_window[w]["benchmark"] = bench_ret
-        # Find strategies present in this window with a CAGR figure.
+        # Find strategies present in this window with a return figure.
         present = []
         beat_this = set()
         for name, cells in rows.items():
             cell = cells.get(w) or {}
-            cagr = cell.get("cagr")
-            if cagr is None:
+            ret = cell.get("cumulative_return")
+            if ret is None:
+                ret = cell.get("cagr")  # legacy fallback
+            if ret is None:
                 continue
-            present.append((name, cagr))
-            if name != "BENCHMARK" and bench_ret is not None and cagr > bench_ret:
+            present.append((name, ret))
+            if name != "BENCHMARK" and bench_ret is not None and ret > bench_ret:
                 beat_this.add(name)
         if not present:
             continue
