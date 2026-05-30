@@ -304,8 +304,29 @@ def test_polling_other_users_job_returns_404(monkeypatch):
 def test_endpoint_is_session_only_does_not_touch_saved_drafts(monkeypatch):
     """The endpoint must never reach the editor_drafts or paper_versions
     persistence layer; sabotaging those getters to raise loudly proves
-    the upload path never calls them."""
-    seen = _patch_harness(monkeypatch)
+    the upload path never calls them.
+
+    Mock-at-the-boundary: `run_defense_prep_with_harness` is patched
+    with a `unittest.mock.patch` context manager (not pytest's
+    monkeypatch) so the patch unambiguously survives the polling
+    loop. This test verifies SESSION ISOLATION, not output quality —
+    it must never wait on real LLM inference. The patched function
+    captures the context block (so the inline assertion below can
+    check the upload was threaded through) and returns a minimal
+    valid markdown string instantly, letting the background task
+    reach the `complete` terminal state inside the 5 s poll
+    window."""
+    from unittest.mock import patch
+
+    captured: dict[str, str] = {}
+
+    def _instant_verdict(context_block: str) -> str:
+        # Capture the context for the post-completion assertion;
+        # return a deterministic, syntactically-valid Q&A sheet so
+        # the job's `_result_text` is non-empty.
+        captured["context_block"] = context_block
+        return ("### Anticipated Q&A\n\n"
+                "**Q1.** Session-isolation test — canned answer.")
 
     def _boom(*_a, **_k):
         raise AssertionError(
@@ -323,16 +344,25 @@ def test_endpoint_is_session_only_does_not_touch_saved_drafts(monkeypatch):
         pass
 
     raw = _docx_bytes("Document body that the panel should ground in.")
-    res = client.post(
-        "/api/council/defense-prep",
-        headers=TEAM_HEADERS,
-        files={"file": ("paper.docx", raw,
-                        "application/vnd.openxmlformats-officedocument."
-                        "wordprocessingml.document")},
-    )
-    assert res.status_code == 202
-    job_id = res.json()["job_id"]
-    final = _wait_for_terminal(job_id)
+    # The patch is a context manager scoped to the POST + poll, so it
+    # cannot be undone by a teardown that fires while the background
+    # task is still mid-flight. `agents.peer_review` is the source
+    # module — `from agents.peer_review import run_defense_prep_with_
+    # harness` inside the background task looks up the patched
+    # attribute on every call, so the mock catches regardless of how
+    # the import was wired.
+    with patch("agents.peer_review.run_defense_prep_with_harness",
+               side_effect=_instant_verdict):
+        res = client.post(
+            "/api/council/defense-prep",
+            headers=TEAM_HEADERS,
+            files={"file": ("paper.docx", raw,
+                            "application/vnd.openxmlformats-officedocument."
+                            "wordprocessingml.document")},
+        )
+        assert res.status_code == 202
+        job_id = res.json()["job_id"]
+        final = _wait_for_terminal(job_id)
     assert final["status"] == "complete"
     assert "Document body that the panel should ground in." \
-        in seen["context_block"]
+        in captured.get("context_block", "")
