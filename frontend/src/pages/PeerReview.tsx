@@ -4,21 +4,26 @@
  * Two tabs:
  *   A — Peer Review Assistant: upload another team's midpoint
  *       submission (PDF / DOCX / MD), stream a 3-4 minute review
- *       script back. Tone: critical but professional.
- *   B — Thesis Defense Prep: auto-loads the team's most recent
- *       midpoint draft, generates a mock-panel Q&A prep sheet
- *       across technical / academic / governance categories.
+ *       script back. Tone: critical but professional. Uses the
+ *       same SSE wire pattern as /api/council/academic-review.
+ *   B — Thesis Defense Prep: upload the team's own midpoint draft
+ *       (PDF / DOCX), generate a mock-panel Q&A prep sheet across
+ *       technical / academic / governance categories.
  *
- * Both flows talk to harness-gated Opus endpoints that stream the
- * verdict via Server-Sent Events. The same SSE wire pattern as
- * /api/council/academic-review (arbiter_chunk frames + a [DONE]
- * sentinel) so a future refactor can share a consumer helper.
+ * Defense Prep — May 30 2026 — switched from synchronous SSE to a
+ * background-job pattern after Render's gateway killed long Opus +
+ * harness runs at the ~100s idle timeout. The flow is now:
+ *   POST /api/council/defense-prep   → 202 + job_id
+ *   GET  /api/v1/defense-prep/{id}   polled every 3s until terminal
+ * Status progresses pending → running → complete | failed, and a
+ * cancel button stops the polling locally (the server task keeps
+ * running, but the user no longer waits).
  *
  * Results live in peerReviewStore so a navigate-away-and-back
  * round-trip is instant — the user keeps the last verdict until
  * they fire a fresh run.
  */
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   AlertCircle, ClipboardCheck, FileText, GraduationCap,
   Loader2, Upload, X,
@@ -397,23 +402,49 @@ function ThesisDefensePrep() {
     reset()
   }, [reset])
 
+  // ── POST → 202 → poll architecture ────────────────────────────────────
+  //
+  // May 30 2026 — the previous synchronous SSE flow was timing out on
+  // Render. Opus + harness runs take 30-180s; the gateway killed the
+  // SSE connection at ~100s when no bytes flowed between the draft_meta
+  // first byte and the first arbiter_chunk byte.
+  //
+  // The new pattern decouples the HTTP response from the LLM work:
+  //   1. POST /api/council/defense-prep with the file → 202 + job_id
+  //   2. Poll GET /api/v1/defense-prep/{job_id} every 3s
+  //   3. status: pending | running | complete | failed
+  //   4. On complete: render result_text; on failed: render error.
+  // Cancel from the UI aborts polling immediately — the background
+  // task on the server keeps running (no cancel endpoint today) but
+  // the user is no longer billed by the wait.
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const cancelledRef = useRef(false)
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current !== null) {
+      clearInterval(pollRef.current)
+      pollRef.current = null
+    }
+  }, [])
+
   const onRun = useCallback(async () => {
     if (!file) return
+    cancelledRef.current = false
     start()
     const controller = new AbortController()
     abortRef.current = controller
+    const token = localStorage.getItem('fc_session_token') ?? ''
+    let jobId = ''
     try {
-      const token = localStorage.getItem('fc_session_token') ?? ''
       const form = new FormData()
       form.append('file', file)
       const res = await fetch('/api/council/defense-prep', {
         method: 'POST',
-        // No Content-Type — the browser sets multipart boundaries.
         headers: { 'X-API-Key': token },
         body: form,
         signal: controller.signal,
       })
-      if (!res.ok || !res.body) {
+      if (res.status !== 202) {
         let detail = `Request failed (${res.status})`
         try {
           const body = await res.json()
@@ -421,59 +452,93 @@ function ThesisDefensePrep() {
         } catch { /* not JSON */ }
         throw new Error(detail)
       }
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        let sep: number
-        while ((sep = buffer.indexOf('\n\n')) !== -1) {
-          const frame = buffer.slice(0, sep).trim()
-          buffer = buffer.slice(sep + 2)
-          if (!frame.startsWith('data:')) continue
-          const payload = frame.slice(5).trim()
-          if (payload === '[DONE]') {
-            finish()
-            continue
-          }
-          let evt: {
-            type?: string
-            title?: string
-            word_count?: number
-            updated_at?: string | null
-            text?: string
-            message?: string
-          }
-          try {
-            evt = JSON.parse(payload)
-          } catch {
-            continue
-          }
-          if (evt.type === 'draft_meta') {
-            setMeta({
-              title: evt.title ?? 'Draft',
-              word_count: evt.word_count ?? 0,
-              updated_at: evt.updated_at ?? null,
-            })
-          } else if (evt.type === 'arbiter_chunk') {
-            appendChunk(evt.text ?? '')
-          } else if (evt.type === 'error') {
-            fail(evt.message ?? 'Defense prep failed.')
-          }
-        }
+      const body = await res.json() as {
+        job_id: string
+        status: string
+        filename: string
+        word_count: number
       }
-      finish()
+      jobId = body.job_id
+      // The polling lifetime shows the uploaded filename + extracted
+      // word count from the start, so the user has something to read
+      // while the background task is still running.
+      setMeta({
+        title: body.filename,
+        word_count: body.word_count,
+        updated_at: null,
+      })
     } catch (err) {
+      abortRef.current = null
       if (controller.signal.aborted) return
       fail(err instanceof Error ? err.message : 'Defense prep failed.')
-    } finally {
-      abortRef.current = null
+      return
     }
-  }, [file, start, setMeta, appendChunk, finish, fail])
+
+    // The POST is done; the abort controller has nothing more to
+    // cancel. Polling fires every 3s until terminal.
+    abortRef.current = null
+    const pollOnce = async () => {
+      if (cancelledRef.current) return
+      try {
+        const res = await fetch(`/api/v1/defense-prep/${jobId}`, {
+          headers: { 'X-API-Key': token },
+        })
+        if (!res.ok) {
+          // 404 means the job was pruned (TTL) or the server restarted.
+          // Either way, the run is gone — surface a clear failure so
+          // the user knows to retry rather than spin forever.
+          throw new Error(
+            res.status === 404
+              ? 'Defense prep job is no longer available. Run again.'
+              : `Poll failed (${res.status})`)
+        }
+        const payload = await res.json() as {
+          status: 'pending' | 'running' | 'complete' | 'failed' | 'cancelled'
+          result_text: string | null
+          error: string | null
+        }
+        if (payload.status === 'complete') {
+          stopPolling()
+          // The verdict text arrives whole rather than streamed; one
+          // append followed by finish() drives the same render path
+          // the SSE flow used.
+          appendChunk(payload.result_text ?? '')
+          finish()
+        } else if (payload.status === 'failed') {
+          stopPolling()
+          fail(payload.error ?? 'Defense prep failed.')
+        } else if (payload.status === 'cancelled') {
+          stopPolling()
+          fail('Defense prep was cancelled.')
+        }
+        // pending | running — keep polling.
+      } catch (err) {
+        stopPolling()
+        if (cancelledRef.current) return
+        fail(err instanceof Error ? err.message : 'Defense prep failed.')
+      }
+    }
+    pollRef.current = setInterval(pollOnce, 3000)
+    // Fire the first poll immediately too — the background task
+    // sometimes completes within seconds (cached / short docs), and a
+    // 3s wait for the first read would feel sluggish.
+    void pollOnce()
+  }, [file, start, setMeta, appendChunk, finish, fail, stopPolling])
+
+  const onCancel = useCallback(() => {
+    cancelledRef.current = true
+    if (abortRef.current) abortRef.current.abort()
+    abortRef.current = null
+    stopPolling()
+    fail('Defense prep was cancelled.')
+  }, [fail, stopPolling])
+
+  // Belt-and-braces: clear the polling interval on unmount so a
+  // background timer cannot fire against an unmounted component.
+  useEffect(() => () => {
+    cancelledRef.current = true
+    stopPolling()
+  }, [stopPolling])
 
   // No auto-run on mount — Defense Prep burns Opus tokens, so it
   // fires on an explicit click. The uploaded document is the only
@@ -555,7 +620,7 @@ function ThesisDefensePrep() {
           {slot.loading ? (
             <button
               type="button"
-              onClick={() => abortRef.current?.abort()}
+              onClick={onCancel}
               data-testid="defense-prep-cancel"
               className={
                 'px-2 py-1.5 rounded text-xs '

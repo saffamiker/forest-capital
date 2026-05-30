@@ -5193,6 +5193,87 @@ async def council_peer_review(
 # categories (technical, academic, governance). No file upload —
 # the draft is the source of truth.
 
+# ── Defense Prep — async background job pattern ─────────────────────────────
+#
+# May 30 2026 — the synchronous SSE flow was timing out on Render. A long
+# Opus + harness generation could leave the connection idle for >100s
+# between the draft_meta byte and the first arbiter_chunk byte, and the
+# gateway killed it. Same shape as the document-generation jobs (see
+# tools/generation_jobs.py): POST 202 + job_id → background task → poll
+# GET /api/v1/defense-prep/{id}.
+_defense_prep_bg_tasks: set = set()
+
+
+async def _run_defense_prep_job(
+    job_id: str, filename: str, draft_text: str,
+    user_email: str, session: dict, ip: str,
+) -> None:
+    """Background task: build the context, run the harness, persist the
+    verdict on the job. Fail-open — any exception flips the job to
+    `failed` with a readable error so the polling frontend can render it
+    inline rather than spinning forever."""
+    import asyncio
+    from agents.peer_review import (
+        build_defense_prep_context_block,
+        render_defense_prep_context_block,
+        run_defense_prep_with_harness,
+    )
+    from tools.activity_log import log_agent_interaction
+    from tools.generation_jobs import update_job
+    from datetime import datetime, timezone
+
+    update_job(job_id, status="running")
+    try:
+        ctx = build_defense_prep_context_block(
+            "Forest Capital (team draft)", draft_text,
+            source_name=filename)
+        context_block = render_defense_prep_context_block(ctx)
+        verdict = await asyncio.to_thread(
+            run_defense_prep_with_harness, context_block)
+        update_job(
+            job_id,
+            status="complete",
+            completed_at=datetime.now(timezone.utc),
+            _result_text=verdict,
+        )
+        log.info("defense_prep_complete", job_id=job_id, source="upload",
+                 filename=filename, draft_chars=len(draft_text),
+                 verdict_chars=len(verdict))
+        # The endpoint returned 202 long before this task started; there
+        # is no Request object to thread through to _log_interaction_bg.
+        # Call log_agent_interaction directly so the activity log row
+        # still lands. Fail-open inside the helper.
+        try:
+            await log_agent_interaction(
+                user_email=user_email,
+                interaction_type="defense_prep",
+                session_id=session.get("session_id"),
+                session_type=session.get("session_type"),
+                ip_address=ip,
+                user_agent=None,
+                agents_involved=["thesis_defense_prep"],
+                question_text=None,
+                response_summary=verdict,
+                metadata={
+                    "source":      "upload",
+                    "filename":    filename,
+                    "draft_chars": len(draft_text),
+                    "job_id":      job_id,
+                },
+            )
+        except Exception as log_exc:  # noqa: BLE001
+            log.warning("defense_prep_activity_log_failed",
+                        job_id=job_id, error=str(log_exc))
+    except Exception as exc:  # noqa: BLE001
+        log.error("defense_prep_failed", job_id=job_id, error=str(exc))
+        update_job(
+            job_id,
+            status="failed",
+            completed_at=datetime.now(timezone.utc),
+            error="Defense prep failed: " + str(exc),
+        )
+
+
 @app.post("/api/council/defense-prep")
 @limiter.limit("10/minute")
 async def council_defense_prep(
@@ -5200,124 +5281,116 @@ async def council_defense_prep(
     file: UploadFile = File(...),
     session: dict = Depends(require_team_member),
 ):
-    """Streams a mock-panel Q&A prep sheet against an uploaded academic
-    document.
+    """Validates an uploaded .pdf or .docx, creates a Defense Prep job,
+    spawns the LLM run on a background task, and returns 202 + job_id
+    immediately. The frontend polls GET /api/v1/defense-prep/{id} every
+    few seconds and renders status / result / error as they land.
 
-    May 30 2026 — the saved-draft path (editor_drafts / paper_versions
-    Final-marker) was REPLACED with an explicit document upload. The
-    caller posts a multipart upload (one .pdf or .docx); the endpoint
-    extracts text in-memory, injects it as the LABELLED PRIMARY context
-    block (clearly tagged "SUBMITTED ACADEMIC DOCUMENT" so the model
-    grounds every answer in it), and streams the Q&A verdict back. The
-    uploaded bytes are NEVER persisted — session-only, no DB write.
+    Upload validation is SYNCHRONOUS — empty / oversize / unsupported
+    extensions return 422 with a JSON detail, NEVER a job_id. The
+    uploaded bytes are extracted in-memory and never persisted.
 
-    Request: multipart/form-data with one `file` field (.pdf or .docx).
-
-    SSE wire format:
-      data: {"type": "draft_meta", "title": "<filename>",
-              "word_count": N, "source": "upload"}
-      data: {"type": "arbiter_chunk", "text": "..."}     (repeated)
-      data: [DONE]
-      or  data: {"type": "error", "message": "..."} + [DONE]
+    Returns: 202 with {"job_id": "...", "status": "pending"}.
     """
     import asyncio
-    from agents.peer_review import (
-        build_defense_prep_context_block,
-        chunk_arbiter_text,
-        render_defense_prep_context_block,
-        run_defense_prep_with_harness,
-    )
-    from tools.academic_context import extract_uploaded_text
+    from datetime import datetime, timezone
 
-    # Read the upload into memory ONCE (session-only — never written to
-    # disk or the DB). 10 MB cap matches the academic_documents upload
-    # ceiling; a larger paper than that is almost certainly a mistake.
+    from tools.academic_context import extract_uploaded_text
+    from tools.generation_jobs import create_job, update_job
+
     filename = (file.filename or "upload").strip()
     try:
         raw = await file.read()
     except Exception as exc:  # noqa: BLE001
         log.warning("defense_prep_upload_read_failed",
                     filename=filename, error=str(exc))
-        raw = b""
+        raise HTTPException(
+            status_code=422,
+            detail="Could not read the uploaded file. Try again.")
     if not raw:
-        async def _empty_stream():
-            yield _sse(
-                "error",
-                message="The uploaded file was empty. Choose a .pdf or "
-                        ".docx with content and try again.")
-            yield "data: [DONE]\n\n"
-        return StreamingResponse(_empty_stream(),
-                                 media_type="text/event-stream")
+        raise HTTPException(
+            status_code=422,
+            detail="The uploaded file was empty. Choose a .pdf or .docx "
+                   "with content and try again.")
     if len(raw) > 10 * 1024 * 1024:
-        async def _too_large_stream():
-            yield _sse(
-                "error",
-                message="The uploaded file exceeds the 10 MB limit. "
-                        "Trim the document or split it before retrying.")
-            yield "data: [DONE]\n\n"
-        return StreamingResponse(_too_large_stream(),
-                                 media_type="text/event-stream")
-
-    # Extract text by extension. Unsupported extensions surface as a
-    # clear SSE error rather than a 4xx so the frontend can render the
-    # message inline alongside the upload tile.
+        raise HTTPException(
+            status_code=422,
+            detail="The uploaded file exceeds the 10 MB limit. Trim the "
+                   "document or split it before retrying.")
     try:
         draft_text = extract_uploaded_text(filename, raw)
     except ValueError as exc:
-        # Capture the message before the except block exits — Python
-        # unbinds `exc` at block end, so the inline async generator
-        # below would otherwise see an unbound name when iterated.
-        bad_type_msg = str(exc)
+        raise HTTPException(status_code=422, detail=str(exc))
 
-        async def _bad_type_stream():
-            yield _sse("error", message=bad_type_msg)
-            yield "data: [DONE]\n\n"
-        return StreamingResponse(_bad_type_stream(),
-                                 media_type="text/event-stream")
+    job = create_job("defense_prep", session["email"])
+    update_job(
+        job["job_id"],
+        _filename=filename,
+        _draft_chars=len(draft_text),
+        _word_count=len(draft_text.split()),
+        _result_text=None,
+    )
+    ip = ""
+    try:
+        ip = (request.client.host if request.client else "") or ""
+    except Exception:  # noqa: BLE001
+        ip = ""
+    task = asyncio.create_task(
+        _run_defense_prep_job(
+            job["job_id"], filename, draft_text,
+            session["email"], session, ip))
+    update_job(job["job_id"], _task=task,
+               created_at=datetime.now(timezone.utc))
+    _defense_prep_bg_tasks.add(task)
+    task.add_done_callback(_defense_prep_bg_tasks.discard)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "job_id":     job["job_id"],
+            "status":     "pending",
+            "filename":   filename,
+            "word_count": len(draft_text.split()),
+        })
 
-    async def event_stream():
-        try:
-            yield _sse(
-                "draft_meta",
-                title=filename,
-                word_count=len(draft_text.split()),
-                source="upload",
-            )
 
-            ctx_dict = build_defense_prep_context_block(
-                "Forest Capital (team draft)", draft_text,
-                source_name=filename)
-            context_block = render_defense_prep_context_block(ctx_dict)
+@app.get("/api/v1/defense-prep/{job_id}")
+async def get_defense_prep_job(
+    job_id: str, session: dict = Depends(require_team_member),
+):
+    """Polling endpoint for the Defense Prep job created above. Returns:
+      pending  / running                — the LLM is still working;
+      complete with result_text          — the Q&A verdict is ready;
+      failed   with error                — readable reason for inline UX.
+    Owner-only: a job_id belongs to the user that created it."""
+    from datetime import datetime
 
-            verdict = await asyncio.to_thread(
-                run_defense_prep_with_harness, context_block)
-            for chunk in chunk_arbiter_text(verdict):
-                yield _sse("arbiter_chunk", text=chunk)
-            log.info(
-                "defense_prep_complete",
-                source="upload",
-                filename=filename,
-                draft_chars=len(draft_text),
-                verdict_chars=len(verdict))
-            _log_interaction_bg(
-                request, session, "defense_prep",
-                agents_involved=["thesis_defense_prep"],
-                response_summary=verdict,
-                metadata={
-                    "source":      "upload",
-                    "filename":    filename,
-                    "draft_chars": len(draft_text),
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.error("defense_prep_failed", error=str(exc))
-            yield _sse(
-                "error",
-                message="Defense prep failed — please retry.")
-        yield "data: [DONE]\n\n"
+    from tools.generation_jobs import get_job
 
-    return StreamingResponse(event_stream(),
-                              media_type="text/event-stream")
+    job = get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("document_type") != "defense_prep":
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.get("owner_email") != session.get("email"):
+        raise HTTPException(status_code=404, detail="Job not found.")
+    created_at = job.get("created_at")
+    completed_at = job.get("completed_at")
+    elapsed = None
+    if created_at is not None:
+        end = completed_at if completed_at else datetime.now(created_at.tzinfo)
+        elapsed = round((end - created_at).total_seconds(), 1)
+    return {
+        "job_id":       job["job_id"],
+        "status":       job["status"],
+        "filename":     job.get("_filename"),
+        "word_count":   job.get("_word_count"),
+        "result_text":  (job.get("_result_text")
+                         if job["status"] == "complete" else None),
+        "error":        job.get("error") if job["status"] == "failed" else None,
+        "created_at":   created_at.isoformat() if created_at else None,
+        "completed_at": completed_at.isoformat() if completed_at else None,
+        "elapsed_seconds": elapsed,
+    }
 
 
 # ── Inline metric explainer ───────────────────────────────────────────────────

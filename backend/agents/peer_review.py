@@ -511,6 +511,134 @@ def _peer_review_system_prompt() -> str:
     )
 
 
+# Full per-term primer text — kept out of the initial-generation system
+# prompt to reduce per-call input tokens (and overall generation latency,
+# the proximate cause of the May 30 Defense Prep timeout on Render). The
+# initial system prompt lists the term INDEX only; the full text below is
+# available to a future follow-up Q&A endpoint that detects a primer
+# question and injects only the relevant per-term block.
+_DEFENSE_PREP_FULL_PRIMERS = (
+    "TECHNICAL PRIMERS — FULL DEFINITIONS.\n"
+    "Each primer follows the same shape: what it measures or does, why "
+    "it matters for this study, and an honest limitation. A primer never "
+    "defines a term using the term itself.\n\n"
+
+    "SHARPE RATIO. Measures average excess return per unit of total "
+    "volatility — return per unit of risk taken. Why for this study: "
+    "the headline yardstick the panel will compare the regime-conditional "
+    "blend against the benchmark on. Limitation: assumes symmetric "
+    "returns, so a strategy with frequent small gains and rare large "
+    "losses looks better than it deserves.\n\n"
+
+    "CVaR (Conditional Value-at-Risk). Measures the average loss across "
+    "the worst-case slice of outcomes (the worst 1% of months at "
+    "CVaR-99). Why: captures left-tail (downside) risk that variance and "
+    "Sharpe both ignore. Limitation: estimated from a finite sample "
+    "(~286 monthly observations here), so the deepest-tail figure "
+    "carries real uncertainty.\n\n"
+
+    "CAGR (Compound Annual Growth Rate). The constant annual growth "
+    "rate that, compounded over the period, would produce the observed "
+    "cumulative return. Why: a single, comparable, compounding-aware "
+    "annual headline. Limitation: hides the path — a smooth journey and "
+    "a violently volatile one can share the same CAGR.\n\n"
+
+    "MAXIMUM DRAWDOWN. The largest peak-to-trough decline an investor "
+    "in the strategy would have actually lived through. Why: the loss "
+    "number that drives behavioural risk — whether the holder sticks "
+    "with the strategy through the trough. Limitation: a single "
+    "realised history, not a forecast of the next worst case.\n\n"
+
+    "CORRELATION. Measures how two return series move together on a -1 "
+    "to +1 scale. Why: the equity-bond figure shifted from around -0.05 "
+    "pre-2022 to +0.57 post-2022, which is the central finding driving "
+    "the rest of the study. Limitation: a linear, average measure — can "
+    "miss state-dependent or tail-dependent comovement that only "
+    "appears in stress.\n\n"
+
+    "COVARIANCE. The joint variability of two return series in their "
+    "native units (the building block of the variance of a weighted "
+    "portfolio). Why: feeds the optimiser directly — Min Variance and "
+    "Max Sharpe Rolling allocate against the rolling 36-month "
+    "covariance matrix. Limitation: estimated covariance is noisy, "
+    "especially for short windows.\n\n"
+
+    "EFFICIENT FRONTIER. The set of portfolios that achieve the highest "
+    "expected return for each level of risk (or the lowest risk for "
+    "each expected return). Why: visualises whether the "
+    "regime-conditional blend is doing useful work or being dominated "
+    "by simpler static mixes. Limitation: a single-period mean-variance "
+    "snapshot — no path awareness and no regime conditioning of its "
+    "own.\n\n"
+
+    "BETA and FACTOR EXPOSURE. Beta measures how sensitively a "
+    "strategy's returns move with a benchmark; factor exposure "
+    "generalises this to named risk drivers (market, size, value, "
+    "momentum). Why: separates active skill from passive loadings on "
+    "common factors. Limitation: regression coefficients drift through "
+    "time, so a single beta or factor loading is an average that can "
+    "mask regime-dependent behaviour.\n\n"
+
+    "MOMENTUM STRATEGY. Rotates into assets that have outperformed over "
+    "a recent lookback window, on the premise that short-horizon trends "
+    "persist. Why: a long-documented anomaly and one of the dynamic "
+    "strategies tested here. Limitation: vulnerable to sharp reversals "
+    "when a trend breaks — the OOS window contains such an event.\n\n"
+
+    "VOLATILITY TARGETING. Scales portfolio exposure up or down each "
+    "month so realised volatility hits a fixed target. Why: delivers a "
+    "more stable risk experience to the holder across calm and "
+    "turbulent regimes. Limitation: necessarily lags realised "
+    "volatility shifts — it tends to de-risk after the move it was "
+    "meant to dampen has already happened.\n\n"
+
+    "RISK PARITY. Allocates so each asset contributes EQUALLY to total "
+    "portfolio risk — not equal dollar weight. Why: corrects 60/40's "
+    "equity-risk dominance without leverage; bonds carry more weight "
+    "than they would on a market-cap basis. Limitation: leans on the "
+    "historical risk profile, which moved sharply in 2022 and changed "
+    "the implied allocation.\n\n"
+
+    "REGIME SWITCHING. Allocates differently in different market states "
+    "(BULL, BEAR, TRANSITION) using a model to infer the current state "
+    "from observable returns. Why: lets the portfolio adapt to "
+    "structural breaks rather than holding one allocation through every "
+    "environment. Limitation: only as good as the regime-inference "
+    "model — a misclassified turning point costs real money.\n\n"
+
+    "REBALANCING. Periodically returns the portfolio to its target "
+    "weights as price moves drift it away. Why: enforces the strategy "
+    "— without rebalancing, the winning asset slowly takes over and the "
+    "design dissolves. Limitation: each rebalance carries a transaction "
+    "cost (tested at 10/15/20 bps per event in the sensitivity "
+    "analysis).\n\n"
+
+    "BACKTESTING vs OUT-OF-SAMPLE TESTING. Backtesting runs the "
+    "strategy on historical data; out-of-sample testing runs it on a "
+    "separate period that was NOT used to design the strategy. Why: "
+    "in-sample results can be overfit — the OOS window is the honest "
+    "test of whether the rule generalises. Limitation: even an OOS "
+    "result is one realised history, not a guarantee about the next "
+    "period.\n\n"
+
+    "STATISTICAL SIGNIFICANCE. A measure of how unlikely the observed "
+    "effect would be if the strategy had no real edge and the result "
+    "came from chance alone. Why: separates a genuine outperformance "
+    "from a lucky draw. Limitation: depends heavily on sample size — "
+    "with this study's window, the outperformance is real in magnitude "
+    "but our sample is too small to prove it statistically, which we "
+    "disclose explicitly.\n\n"
+
+    "BLACK-LITTERMAN MODEL. Combines the market-implied equilibrium "
+    "returns with the user's own views to produce more stable, "
+    "optimisation-ready return estimates. Why: addresses mean-variance "
+    "optimisation's extreme sensitivity to noisy mean estimates; one of "
+    "the static blended strategies tested here. Limitation: the views "
+    "themselves are subjective — without strong views the model "
+    "collapses back toward market-cap weights."
+)
+
+
 def _defense_prep_system_prompt() -> str:
     return (
         # ── ROLE ────────────────────────────────────────────────────────
@@ -640,135 +768,24 @@ def _defense_prep_system_prompt() -> str:
         "uncertainty, which is why we use 99% CVaR as an approximation "
         "rather than claiming precision.\n\n"
 
-        # ── TECHNICAL PRIMERS — REFERENCE BLOCK ────────────────────────
-        "TECHNICAL PRIMERS — REFERENCE BLOCK.\n"
-        "When a primer question is asked on any of the terms below, "
-        "draw on these definitions. Each follows the same shape: what "
-        "it measures or does, why it matters for this study, and an "
-        "honest limitation. Never define a term using the term itself.\n\n"
-
-        "SHARPE RATIO. Measures average excess return per unit of "
-        "total volatility — return per unit of risk taken. Why for "
-        "this study: the headline yardstick the panel will compare "
-        "the regime-conditional blend against the benchmark on. "
-        "Limitation: assumes symmetric returns, so a strategy with "
-        "frequent small gains and rare large losses looks better than "
-        "it deserves.\n\n"
-
-        "CVaR (Conditional Value-at-Risk). Measures the average loss "
-        "across the worst-case slice of outcomes (the worst 1% of "
-        "months at CVaR-99). Why: captures left-tail (downside) risk "
-        "that variance and Sharpe both ignore. Limitation: estimated "
-        "from a finite sample (~286 monthly observations here), so "
-        "the deepest-tail figure carries real uncertainty.\n\n"
-
-        "CAGR (Compound Annual Growth Rate). The constant annual "
-        "growth rate that, compounded over the period, would produce "
-        "the observed cumulative return. Why: a single, comparable, "
-        "compounding-aware annual headline. Limitation: hides the "
-        "path — a smooth journey and a violently volatile one can "
-        "share the same CAGR.\n\n"
-
-        "MAXIMUM DRAWDOWN. The largest peak-to-trough decline an "
-        "investor in the strategy would have actually lived through. "
-        "Why: the loss number that drives behavioural risk — whether "
-        "the holder sticks with the strategy through the trough. "
-        "Limitation: a single realised history, not a forecast of "
-        "the next worst case.\n\n"
-
-        "CORRELATION. Measures how two return series move together on "
-        "a -1 to +1 scale. Why: the equity-bond figure shifted from "
-        "around -0.05 pre-2022 to +0.57 post-2022, which is the "
-        "central finding driving the rest of the study. Limitation: "
-        "a linear, average measure — can miss state-dependent or "
-        "tail-dependent comovement that only appears in stress.\n\n"
-
-        "COVARIANCE. The joint variability of two return series in "
-        "their native units (the building block of the variance of a "
-        "weighted portfolio). Why: feeds the optimiser directly — "
-        "Min Variance and Max Sharpe Rolling allocate against the "
-        "rolling 36-month covariance matrix. Limitation: estimated "
-        "covariance is noisy, especially for short windows.\n\n"
-
-        "EFFICIENT FRONTIER. The set of portfolios that achieve the "
-        "highest expected return for each level of risk (or the "
-        "lowest risk for each expected return). Why: visualises "
-        "whether the regime-conditional blend is doing useful work "
-        "or being dominated by simpler static mixes. Limitation: a "
-        "single-period mean-variance snapshot — no path awareness "
-        "and no regime conditioning of its own.\n\n"
-
-        "BETA and FACTOR EXPOSURE. Beta measures how sensitively a "
-        "strategy's returns move with a benchmark; factor exposure "
-        "generalises this to named risk drivers (market, size, value, "
-        "momentum). Why: separates active skill from passive "
-        "loadings on common factors. Limitation: regression "
-        "coefficients drift through time, so a single beta or factor "
-        "loading is an average that can mask regime-dependent "
-        "behaviour.\n\n"
-
-        "MOMENTUM STRATEGY. Rotates into assets that have outperformed "
-        "over a recent lookback window, on the premise that short-"
-        "horizon trends persist. Why: a long-documented anomaly and "
-        "one of the dynamic strategies tested here. Limitation: "
-        "vulnerable to sharp reversals when a trend breaks — the OOS "
-        "window contains such an event.\n\n"
-
-        "VOLATILITY TARGETING. Scales portfolio exposure up or down "
-        "each month so realised volatility hits a fixed target. Why: "
-        "delivers a more stable risk experience to the holder across "
-        "calm and turbulent regimes. Limitation: necessarily lags "
-        "realised volatility shifts — it tends to de-risk after the "
-        "move it was meant to dampen has already happened.\n\n"
-
-        "RISK PARITY. Allocates so each asset contributes EQUALLY to "
-        "total portfolio risk — not equal dollar weight. Why: "
-        "corrects 60/40's equity-risk dominance without leverage; "
-        "bonds carry more weight than they would on a market-cap "
-        "basis. Limitation: leans on the historical risk profile, "
-        "which moved sharply in 2022 and changed the implied "
-        "allocation.\n\n"
-
-        "REGIME SWITCHING. Allocates differently in different market "
-        "states (BULL, BEAR, TRANSITION) using a model to infer the "
-        "current state from observable returns. Why: lets the "
-        "portfolio adapt to structural breaks rather than holding "
-        "one allocation through every environment. Limitation: only "
-        "as good as the regime-inference model — a misclassified "
-        "turning point costs real money.\n\n"
-
-        "REBALANCING. Periodically returns the portfolio to its "
-        "target weights as price moves drift it away. Why: enforces "
-        "the strategy — without rebalancing, the winning asset "
-        "slowly takes over and the design dissolves. Limitation: "
-        "each rebalance carries a transaction cost (tested at "
-        "10/15/20 bps per event in the sensitivity analysis).\n\n"
-
-        "BACKTESTING vs OUT-OF-SAMPLE TESTING. Backtesting runs the "
-        "strategy on historical data; out-of-sample testing runs it "
-        "on a separate period that was NOT used to design the "
-        "strategy. Why: in-sample results can be overfit — the OOS "
-        "window is the honest test of whether the rule generalises. "
-        "Limitation: even an OOS result is one realised history, "
-        "not a guarantee about the next period.\n\n"
-
-        "STATISTICAL SIGNIFICANCE. A measure of how unlikely the "
-        "observed effect would be if the strategy had no real edge "
-        "and the result came from chance alone. Why: separates a "
-        "genuine outperformance from a lucky draw. Limitation: "
-        "depends heavily on sample size — with this study's window, "
-        "the outperformance is real in magnitude but our sample is "
-        "too small to prove it statistically, which we disclose "
-        "explicitly.\n\n"
-
-        "BLACK-LITTERMAN MODEL. Combines the market-implied "
-        "equilibrium returns with the user's own views to produce "
-        "more stable, optimisation-ready return estimates. Why: "
-        "addresses mean-variance optimisation's extreme sensitivity "
-        "to noisy mean estimates; one of the static blended "
-        "strategies tested here. Limitation: the views themselves "
-        "are subjective — without strong views the model collapses "
-        "back toward market-cap weights.\n\n"
+        # ── TECHNICAL PRIMERS — CONDENSED INDEX ────────────────────────
+        # Initial-generation context kept lean: the index lists every term
+        # the team can defend from first principles, but the full per-term
+        # definitions live in _DEFENSE_PREP_FULL_PRIMERS (this module) and
+        # are injected only on a follow-up question that explicitly asks
+        # for a definition. Saves ~4kB of input on every initial run.
+        "TECHNICAL PRIMERS — INDEX.\n"
+        "The team is briefed on the following terms and can defend each "
+        "from first principles when asked: Sharpe ratio, CVaR, CAGR, "
+        "maximum drawdown, correlation, covariance, efficient frontier, "
+        "beta and factor exposure, momentum strategy, volatility "
+        "targeting, risk parity, regime switching, rebalancing, "
+        "backtesting vs out-of-sample testing, statistical significance, "
+        "Black-Litterman model. When a Q&A item touches one of these, "
+        "anchor in plain English and the PEER FRAMING language rules "
+        "above (or PROFESSOR FRAMING for the five named technical "
+        "topics). Full definitions are available on demand for a "
+        "follow-up question that explicitly asks for one.\n\n"
 
         # ── RESPONSE BALANCE ────────────────────────────────────────────
         "RESPONSE BALANCE. Answer at TWO levels simultaneously:\n"

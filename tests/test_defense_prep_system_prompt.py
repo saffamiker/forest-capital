@@ -31,6 +31,17 @@ def prompt() -> str:
     return _defense_prep_system_prompt()
 
 
+@pytest.fixture(scope="module")
+def full_primers() -> str:
+    """The full 16-term primer reference text. Stored as a module-level
+    constant rather than embedded in the system prompt so the initial
+    generation context stays lean (~6.9 kB vs ~12.3 kB); the full text
+    is injected only on a follow-up question that explicitly asks for
+    a definition."""
+    from agents.peer_review import _DEFENSE_PREP_FULL_PRIMERS
+    return _DEFENSE_PREP_FULL_PRIMERS
+
+
 # ── A. Response balance + DO NOT list + closing audience clause ────────────
 
 def test_response_balance_two_levels_named(prompt):
@@ -122,19 +133,46 @@ PRIMER_TERMS = [
 ]
 
 
-def test_primer_reference_block_present(prompt):
-    assert "TECHNICAL PRIMERS" in prompt
-    # The user's "shape" instruction the primers must follow.
-    assert "Never define a term using the term itself" in prompt
+def test_primer_index_present_in_system_prompt(prompt):
+    """The condensed INDEX is part of the initial-generation system
+    prompt — the full per-term definitions are NOT (they live in
+    _DEFENSE_PREP_FULL_PRIMERS, injected only on demand)."""
+    assert "TECHNICAL PRIMERS — INDEX" in prompt
+    # All 16 term names are listed in the index, comma-separated, so
+    # the panel knows the briefed vocabulary without paying the full
+    # context cost on every initial run.
+    for term_phrase in (
+        "Sharpe ratio", "CVaR", "CAGR", "maximum drawdown",
+        "correlation", "covariance", "efficient frontier",
+        "beta and factor exposure", "momentum strategy",
+        "volatility targeting", "risk parity", "regime switching",
+        "rebalancing", "backtesting vs out-of-sample testing",
+        "statistical significance", "Black-Litterman model",
+    ):
+        assert term_phrase in prompt, \
+            f"Index missing term phrase: {term_phrase!r}"
+    # The system prompt does NOT carry the full reference block —
+    # that lives in the on-demand constant.
+    assert "TECHNICAL PRIMERS — FULL DEFINITIONS" not in prompt
+    assert "Never define a term using the term itself" not in prompt
+
+
+def test_full_primers_carry_shape_instruction(full_primers):
+    """The shape instruction lives with the full definitions, since
+    that is where each definition is written."""
+    assert "TECHNICAL PRIMERS — FULL DEFINITIONS" in full_primers
+    # The shape instruction names the never-defines-self rule.
+    assert "never defines a term using the term itself" in full_primers
 
 
 @pytest.mark.parametrize("term", PRIMER_TERMS)
-def test_each_primer_term_has_a_primer(prompt, term):
-    """All 16 terms specified in the spec must have a primer entry."""
-    assert term in prompt, f"Primer missing for: {term}"
+def test_each_primer_term_has_a_primer(full_primers, term):
+    """All 16 terms specified in the spec must have a primer entry
+    in the on-demand reference block."""
+    assert term in full_primers, f"Primer missing for: {term}"
 
 
-def test_each_primer_carries_a_limitation(prompt):
+def test_each_primer_carries_a_limitation(full_primers):
     """Every primer must include an honest limitation. We assert the
     presence of the cohort of limitation keywords the primers use —
     one strong signal each, not a per-term assertion."""
@@ -155,4 +193,13 @@ def test_each_primer_carries_a_limitation(prompt):
         "too small to prove it statistically",  # Stat sig (peer + primer)
         "subjective",                         # Black-Litterman limitation
     ):
-        assert kw in prompt, f"Limitation keyword missing: {kw!r}"
+        assert kw in full_primers, f"Limitation keyword missing: {kw!r}"
+
+
+def test_system_prompt_is_lean(prompt):
+    """The initial-generation system prompt must stay under ~10 kB to
+    keep Opus per-call tokens predictable. With full primers it was
+    ~12.3 kB; with the condensed index it should be ~7 kB. Bound: 10."""
+    assert len(prompt) < 10_000, (
+        f"System prompt grew to {len(prompt)} chars — primers may have "
+        f"crept back in. Keep the index, expand on demand only.")

@@ -137,11 +137,19 @@ describe('Peer Review Assistant tab', () => {
 
 describe('Thesis Defense Prep tab', () => {
 
-  it('renders a run button (no file upload required)', () => {
+  it('renders a run button (disabled until a file is uploaded)', () => {
+    // May 30 2026 — Defense Prep was switched from saved-draft DB
+    // lookup to an explicit upload, then to a POST→202 + GET polling
+    // background-job pattern to survive Render's gateway timeout.
+    // The run button is gated on a chosen file regardless.
     render(<PeerReview />)
     fireEvent.click(screen.getByTestId('defense-prep-tab'))
-    expect(screen.getByTestId('defense-prep-run')).toBeTruthy()
+    const run = screen.getByTestId('defense-prep-run') as HTMLButtonElement
+    expect(run.disabled).toBe(true)
+    // The Tab A file input is off-DOM; Tab B has its own (data-testid
+    // defense-prep-file-input).
     expect(screen.queryByTestId('peer-review-file-input')).toBeNull()
+    expect(screen.getByTestId('defense-prep-file-input')).toBeTruthy()
   })
 
   it('renders the verdict card when the defense-prep slot has content', () => {

@@ -355,24 +355,25 @@ class TestPeerReviewWireFormat:
 
 
 class TestDefensePrepWireFormat:
-    """May 30 2026 — Defense Prep was switched from a saved-draft DB
-    lookup (editor_drafts / paper_versions Final marker) to an explicit
-    multipart upload, session-only. The wire format keeps the same
-    draft_meta + arbiter_chunk + [DONE] event sequence, but draft_meta
-    now carries the uploaded filename + source="upload", and a missing
-    file is a FastAPI 422 (not an SSE error frame), since `file:
-    UploadFile = File(...)` is a required form field."""
+    """May 30 2026 — Defense Prep switched from synchronous SSE to a
+    background-job pattern after Render's gateway killed long Opus +
+    harness runs at the ~100s idle timeout. The wire format is now
+    POST → 202 + job_id, then GET /api/v1/defense-prep/{id} polled
+    by the frontend every 3s until status reaches a terminal state.
+    A missing file is still a synchronous 422 (FastAPI's File(...)
+    required-form rejection) and an unsupported file type is a
+    synchronous 422 — neither path creates a job."""
 
     def test_defense_prep_missing_file_returns_422(self):
         client, team, _ = _client()
         r = client.post("/api/council/defense-prep", headers=team)
         # `file` is a required multipart field — FastAPI rejects with 422
-        # before any handler logic runs (no SSE stream).
+        # before any handler logic runs.
         assert r.status_code == 422
 
-    def test_defense_prep_with_upload_streams_chunks(self):
+    def test_defense_prep_with_upload_returns_202_with_job_id(self):
         # An in-memory .docx upload feeds the endpoint; the harness is
-        # patched so the endpoint completes without an LLM call.
+        # patched so the background task completes without an LLM call.
         from docx import Document
         from agents import peer_review
         buf = io.BytesIO()
@@ -388,16 +389,34 @@ class TestDefensePrepWireFormat:
                 files={"file": ("midpoint.docx", buf.getvalue(),
                                 "application/vnd.openxmlformats-"
                                 "officedocument.wordprocessingml.document")})
-        assert r.status_code == 200
-        frames = _parse_sse_frames(r.text)
-        # First frame is draft_meta carrying the uploaded filename + source.
-        assert frames[0]["type"] == "draft_meta"
-        assert frames[0]["title"] == "midpoint.docx"
-        assert frames[0]["source"] == "upload"
-        assert frames[0]["word_count"] > 0
-        chunks = [f for f in frames if f.get("type") == "arbiter_chunk"]
-        assert len(chunks) >= 1
-        assert frames[-1]["type"] == "__done__"
+        # POST 202 + job_id is the new success contract — the LLM run
+        # is decoupled from the HTTP response to survive Render's
+        # gateway timeout on long generations.
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert isinstance(body["job_id"], str) and body["job_id"]
+        assert body["status"] == "pending"
+        assert body["filename"] == "midpoint.docx"
+        assert body["word_count"] > 0
+
+        # The polling endpoint resolves to `complete` and returns the
+        # verdict text once the background task lands.
+        import time
+        deadline = time.monotonic() + 5.0
+        final = None
+        while time.monotonic() < deadline:
+            poll = client.get(
+                f"/api/v1/defense-prep/{body['job_id']}", headers=team)
+            assert poll.status_code == 200
+            payload = poll.json()
+            if payload["status"] in ("complete", "failed", "cancelled"):
+                final = payload
+                break
+            time.sleep(0.05)
+        assert final is not None, "polling did not reach terminal state"
+        assert final["status"] == "complete"
+        assert "Anticipated Q&A" in (final["result_text"] or "")
+        assert final["error"] is None
 
 
 # ── 7. Activity-log interaction types registered ───────────────────────────
