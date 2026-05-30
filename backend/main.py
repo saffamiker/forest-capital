@@ -3145,6 +3145,28 @@ async def get_admin_data_status(session: dict = Depends(require_auth)):
     return await get_data_status()
 
 
+@app.get("/api/v1/admin/invariants")
+async def get_admin_invariants(session: dict = Depends(require_auth)):
+    """May 30 2026 — surfaces the latest invariant-framework run
+    summary. Backs the "Invariant Checks" health indicator in
+    Settings → Data and Study Period.
+
+    Returns either {"available": false, "ran_at": null} when no run
+    has happened yet (cold deploy) or a full summary with per-
+    violation breakdown for the admin to inspect. The framework
+    runs on every analytics warm via set_strategy_cache."""
+    from tools.invariant_checks import get_latest_result
+    latest = get_latest_result()
+    if latest is None:
+        return {
+            "available": False,
+            "ran_at": None,
+            "note": "No invariant run has landed yet — the framework "
+                    "fires on the next analytics warm.",
+        }
+    return {"available": True, **latest}
+
+
 @app.get("/api/v1/admin/team-activity/merge-commit-authors")
 async def get_merge_commit_authors_diagnostic(
     session: dict = Depends(require_sysadmin),
