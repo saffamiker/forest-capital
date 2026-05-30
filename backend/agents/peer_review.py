@@ -728,19 +728,39 @@ def build_defense_prep_context_block(
     team_name: str,
     draft_text: str,
     categories: list[str] | None = None,
+    source_name: str | None = None,
 ) -> dict[str, Any]:
-    """Context for the Thesis Defense Prep flow. The team's OWN
-    submitted draft text is the primary input; the categories
-    drive the Q&A structure."""
+    """Context for the Thesis Defense Prep flow. The team's OWN submitted
+    document is the primary input; the categories drive the Q&A structure.
+    `source_name` is the uploaded filename (when supplied) and is surfaced
+    in the labelled block header so the model knows exactly which document
+    it's answering from."""
     return {
-        "team_name":  team_name,
-        "draft_text": draft_text,
-        "categories": categories or DEFENSE_CATEGORIES,
+        "team_name":   team_name,
+        "draft_text":  draft_text,
+        "categories":  categories or DEFENSE_CATEGORIES,
+        "source_name": source_name,
     }
 
 
 def render_defense_prep_context_block(ctx: dict[str, Any]) -> str:
+    """Render the context block with the SUBMITTED DOCUMENT first and
+    clearly labelled as the primary source — the model must ground every
+    Q&A answer in this text, not in cached project context. The team /
+    category framing follows so the Q&A structure is consistent."""
+    source = ctx.get("source_name")
+    header = (
+        f"=== SUBMITTED ACADEMIC DOCUMENT: {source} ==="
+        if source else "=== SUBMITTED ACADEMIC DOCUMENT ===")
     lines: list[str] = [
+        header,
+        "The following is the submitted academic document. Answer all "
+        "questions using this as the primary source.",
+        "",
+        "--- BEGIN SUBMITTED DOCUMENT ---",
+        ctx.get("draft_text", "(no draft text available)"),
+        "--- END SUBMITTED DOCUMENT ---",
+        "",
         "=== TEAM SUBMISSION ===",
         f"Team: {ctx.get('team_name', '(unnamed)')}",
         "",
@@ -748,8 +768,4 @@ def render_defense_prep_context_block(ctx: dict[str, Any]) -> str:
     ]
     for i, cat in enumerate(ctx.get("categories", DEFENSE_CATEGORIES), 1):
         lines.append(f"  {i}. {cat}")
-    lines.append("")
-    lines.append("--- BEGIN TEAM DRAFT TEXT ---")
-    lines.append(ctx.get("draft_text", "(no draft text available)"))
-    lines.append("--- END TEAM DRAFT TEXT ---")
     return "\n".join(lines)

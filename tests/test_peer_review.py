@@ -13,8 +13,10 @@ Pins the Peer Review Assistant + Thesis Defense Prep flows:
   - the SSE wire format matches the spec — submission_meta /
     arbiter_chunk / [DONE] for Feature A; draft_meta / arbiter_
     chunk / [DONE] for Feature B; error frames carry a message
-  - Defense Prep emits an error frame (not a 500) when the
-    caller has no current midpoint_paper draft
+  - Defense Prep accepts an explicit multipart upload (replaces the
+    saved-draft DB lookup): a missing file is FastAPI 422, a real
+    .docx upload streams draft_meta(title=filename, source="upload")
+    + arbiter_chunk(s) + [DONE]
 """
 from __future__ import annotations
 
@@ -353,47 +355,46 @@ class TestPeerReviewWireFormat:
 
 
 class TestDefensePrepWireFormat:
+    """May 30 2026 — Defense Prep was switched from a saved-draft DB
+    lookup (editor_drafts / paper_versions Final marker) to an explicit
+    multipart upload, session-only. The wire format keeps the same
+    draft_meta + arbiter_chunk + [DONE] event sequence, but draft_meta
+    now carries the uploaded filename + source="upload", and a missing
+    file is a FastAPI 422 (not an SSE error frame), since `file:
+    UploadFile = File(...)` is a required form field."""
 
-    def test_defense_prep_no_draft_emits_error_frame(self):
-        # No editor_drafts row exists for the test user, so the
-        # endpoint emits an error frame + [DONE] rather than
-        # running the agent against empty input.
+    def test_defense_prep_missing_file_returns_422(self):
         client, team, _ = _client()
         r = client.post("/api/council/defense-prep", headers=team)
-        assert r.status_code == 200
-        frames = _parse_sse_frames(r.text)
-        assert frames, "no SSE frames emitted"
-        # Must include an error frame that names the missing draft.
-        error_frames = [f for f in frames if f.get("type") == "error"]
-        assert len(error_frames) == 1
-        assert "draft" in error_frames[0]["message"].lower()
-        assert frames[-1]["type"] == "__done__"
+        # `file` is a required multipart field — FastAPI rejects with 422
+        # before any handler logic runs (no SSE stream).
+        assert r.status_code == 422
 
-    def test_defense_prep_with_draft_streams_chunks(self):
-        # Patch get_current_draft so the endpoint sees a draft and
-        # runs the (mocked) agent. The patch returns the shape
-        # editor_drafts.get_current_draft would.
+    def test_defense_prep_with_upload_streams_chunks(self):
+        # An in-memory .docx upload feeds the endpoint; the harness is
+        # patched so the endpoint completes without an LLM call.
+        from docx import Document
+        from agents import peer_review
+        buf = io.BytesIO()
+        doc = Document()
+        doc.add_paragraph("The 2022 correlation break in detail.")
+        doc.save(buf)
         client, team, _ = _client()
-        fake_draft = {
-            "id": 1,
-            "title": "Midpoint draft v3",
-            "content_text": "The 2022 correlation break in detail.",
-            "word_count": 1200,
-            "updated_at": "2026-05-23T10:00:00Z",
-        }
-        with patch(
-            "tools.editor_drafts.get_current_draft",
-            new=AsyncMock(return_value=fake_draft),
-        ):
+        with patch.object(
+            peer_review, "run_defense_prep_with_harness",
+            return_value="### Anticipated Q&A\n\n**Q1.** Canned answer."):
             r = client.post(
-                "/api/council/defense-prep", headers=team)
+                "/api/council/defense-prep", headers=team,
+                files={"file": ("midpoint.docx", buf.getvalue(),
+                                "application/vnd.openxmlformats-"
+                                "officedocument.wordprocessingml.document")})
         assert r.status_code == 200
         frames = _parse_sse_frames(r.text)
-        # First frame is draft_meta carrying the title + word count.
+        # First frame is draft_meta carrying the uploaded filename + source.
         assert frames[0]["type"] == "draft_meta"
-        assert frames[0]["title"] == "Midpoint draft v3"
-        assert frames[0]["word_count"] == 1200
-        # At least one arbiter_chunk in the middle.
+        assert frames[0]["title"] == "midpoint.docx"
+        assert frames[0]["source"] == "upload"
+        assert frames[0]["word_count"] > 0
         chunks = [f for f in frames if f.get("type") == "arbiter_chunk"]
         assert len(chunks) >= 1
         assert frames[-1]["type"] == "__done__"

@@ -93,6 +93,40 @@ def extract_document_text(filename: str, raw: bytes) -> str:
     return text
 
 
+def extract_docx_text(raw: bytes) -> str:
+    """Extract plain text from a .docx file via python-docx — joins every
+    paragraph with a blank line in between, preserving paragraph breaks but
+    stripping Word-specific formatting. Used by the Thesis Defense Prep
+    upload flow alongside extract_document_text (PDF). Raises ValueError
+    when the docx yields no extractable text."""
+    try:
+        from docx import Document
+    except ImportError as exc:  # pragma: no cover
+        raise ValueError(
+            "DOCX support unavailable — python-docx not installed") from exc
+    doc = Document(io.BytesIO(raw))
+    text = "\n\n".join(p.text for p in doc.paragraphs if p.text).strip()
+    if not text:
+        raise ValueError(
+            "No text could be extracted from the .docx — the document "
+            "appears empty.")
+    return text
+
+
+def extract_uploaded_text(filename: str, raw: bytes) -> str:
+    """Extract text from an uploaded document by extension (PDF or docx).
+    Extension-based by design (browser MIME types are inconsistent for
+    Word documents). Raises ValueError for any other extension so the
+    caller can return a clear 415/422."""
+    name = (filename or "").lower()
+    if name.endswith(".pdf"):
+        return extract_document_text(filename, raw)
+    if name.endswith(".docx"):
+        return extract_docx_text(raw)
+    raise ValueError(
+        f"Unsupported file type for {filename!r}. Upload a .pdf or .docx.")
+
+
 # ── Formatting ────────────────────────────────────────────────────────────────
 
 def format_academic_context(docs: list[dict]) -> str:
