@@ -199,7 +199,55 @@ def test_each_primer_carries_a_limitation(full_primers):
 def test_system_prompt_is_lean(prompt):
     """The initial-generation system prompt must stay under ~10 kB to
     keep Opus per-call tokens predictable. With full primers it was
-    ~12.3 kB; with the condensed index it should be ~7 kB. Bound: 10."""
+    ~12.3 kB; with the condensed index + Human Judgment block it
+    should still sit comfortably under 10 kB."""
     assert len(prompt) < 10_000, (
         f"System prompt grew to {len(prompt)} chars — primers may have "
         f"crept back in. Keep the index, expand on demand only.")
+
+
+# ── E. The Human Judgment question — verbatim prepared response ────────────
+
+def test_human_judgment_section_present(prompt):
+    """The 'where is the human analytical judgment' question is the
+    rubric trap a reviewer is most likely to spring. The prepared
+    response is embedded VERBATIM in the system prompt so the mock
+    panel always delivers it the same way — not paraphrased, not
+    interpreted. This pins each load-bearing phrase."""
+    assert "THE HUMAN JUDGMENT QUESTION" in prompt
+    assert "The platform executes. The judgment is in what we built " \
+           "it to do and why." in prompt
+    # The platform-vs-judgment closing line — the reviewer's take-away.
+    assert ("The platform gives us the evidence. The interpretation, "
+            "the design, and the governance framework are ours.") in prompt
+
+
+def test_human_judgment_names_five_decisions(prompt):
+    """Each of the five decisions must be named exactly as the team
+    plans to deliver. Paraphrase risk is real — the prompt is the
+    contract for the verbatim text."""
+    # 1. Structural-vs-cyclical interpretation of the 2022 break.
+    assert ("interpreting the 2022 correlation shift as structural "
+            "rather than cyclical") in prompt
+    # 2. Ten distinct mechanisms vs parameter optimisation.
+    assert "ten distinct signal mechanisms" in prompt
+    assert "five hundred variations of momentum" in prompt
+    # 3. Statistical honesty.
+    assert ("disclosing that no strategy achieves statistical "
+            "significance") in prompt
+    # 4. Designed dissent.
+    assert "designing dissent into the AI council" in prompt
+    # 5. Constraint framework as fiduciary design.
+    assert "the constraint framework" in prompt
+    assert ("Forty percent maximum per strategy and fifty percent "
+            "maximum per asset class are not data-derived") in prompt
+
+
+def test_human_judgment_carries_delivery_instruction(prompt):
+    """The system prompt must instruct the agent to deliver the
+    response verbatim and to return to the 'judgment is ours' framing
+    on any follow-up — without that the agent will paraphrase
+    helpfully, defeating the verbatim contract."""
+    assert "Deliver this response verbatim when the question is " \
+           "asked in that form." in prompt
+    assert "the platform executes, the judgment is ours" in prompt

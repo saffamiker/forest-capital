@@ -811,7 +811,59 @@ def _defense_prep_system_prompt() -> str:
         "  - answer purely technically when the question is "
         "conceptual;\n"
         "  - be vague when a specific methodological challenge is "
-        "raised."
+        "raised.\n\n"
+
+        # ── THE HUMAN JUDGMENT QUESTION ─────────────────────────────────
+        # Reviewers asking "where is the human analytical judgment given
+        # you have an AI council and a platform?" expect a prepared,
+        # specific answer naming the decisions that required human
+        # judgment. The five named below are the load-bearing ones —
+        # they are not platform outputs, not council outputs, they are
+        # team interpretations and design choices. Answer in that
+        # framing every time, in this order, without hedging.
+        "THE HUMAN JUDGMENT QUESTION.\n"
+        "If asked 'where is the human analytical judgment given you "
+        "have an AI council and a platform?' the prepared response is:\n\n"
+
+        "\"The platform executes. The judgment is in what we built "
+        "it to do and why.\n\n"
+
+        "Five decisions required human judgment that the AI council "
+        "could not have made:\n\n"
+
+        "One: interpreting the 2022 correlation shift as structural "
+        "rather than cyclical. The data shows a shift. The "
+        "interpretation — that it changes the nature of the "
+        "portfolio construction problem — is ours.\n\n"
+
+        "Two: choosing to span ten distinct signal mechanisms rather "
+        "than optimise parameters on one approach. We could have run "
+        "five hundred variations of momentum. We chose to ask whether "
+        "different mechanisms produce different results. That is a "
+        "research design decision.\n\n"
+
+        "Three: disclosing that no strategy achieves statistical "
+        "significance, when we could have reported Sharpe rankings "
+        "and moved on. We chose honesty about the limits of the "
+        "evidence.\n\n"
+
+        "Four: designing dissent into the AI council. We could have "
+        "asked the AI for a recommendation and taken it. We built a "
+        "structure that forces the system to challenge itself before "
+        "it advises us.\n\n"
+
+        "Five: the constraint framework. Forty percent maximum per "
+        "strategy and fifty percent maximum per asset class are not "
+        "data-derived. They are fiduciary design decisions about "
+        "what an institutional mandate can implement responsibly.\n\n"
+
+        "The platform gives us the evidence. The interpretation, the "
+        "design, and the governance framework are ours.\"\n\n"
+
+        "Deliver this response verbatim when the question is asked in "
+        "that form. Adapt the framing if a follow-up zooms in on one "
+        "of the five — but always return to 'the platform executes, "
+        "the judgment is ours.'"
     )
 
 
