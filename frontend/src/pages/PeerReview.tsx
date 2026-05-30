@@ -382,16 +382,35 @@ function ThesisDefensePrep() {
   const reset = usePeerReviewStore((s) => s.resetDefensePrep)
 
   const abortRef = useRef<AbortController | null>(null)
+  // Session-only — the uploaded document is held in component state and
+  // sent via FormData; it is never persisted on the server.
+  const [file, setFile] = useState<File | null>(null)
+
+  const onPickFile = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      setFile(e.target.files?.[0] ?? null)
+      reset()
+    }, [reset])
+
+  const onRemove = useCallback(() => {
+    setFile(null)
+    reset()
+  }, [reset])
 
   const onRun = useCallback(async () => {
+    if (!file) return
     start()
     const controller = new AbortController()
     abortRef.current = controller
     try {
       const token = localStorage.getItem('fc_session_token') ?? ''
+      const form = new FormData()
+      form.append('file', file)
       const res = await fetch('/api/council/defense-prep', {
         method: 'POST',
+        // No Content-Type — the browser sets multipart boundaries.
         headers: { 'X-API-Key': token },
+        body: form,
         signal: controller.signal,
       })
       if (!res.ok || !res.body) {
@@ -454,33 +473,78 @@ function ThesisDefensePrep() {
     } finally {
       abortRef.current = null
     }
-  }, [start, setMeta, appendChunk, finish, fail])
+  }, [file, start, setMeta, appendChunk, finish, fail])
 
   // No auto-run on mount — Defense Prep burns Opus tokens, so it
-  // fires on an explicit click. The draft IS auto-detected (the
-  // endpoint reads get_current_draft server-side), but the click
-  // is the user's "yes, run this now" gesture.
+  // fires on an explicit click. The uploaded document is the only
+  // source; the click is the user's "yes, run this now" gesture.
 
   return (
     <section className="space-y-4">
       <div className="bg-navy-900 border border-navy-700 rounded p-4 space-y-3">
         <h2 className="text-white font-semibold text-sm flex items-center gap-1.5">
           <GraduationCap className="w-4 h-4 text-warning" />
-          Mock panel Q&amp;A — against your current draft
+          Mock panel Q&amp;A — against your uploaded document
         </h2>
         <p className="text-text-secondary text-xs">
-          Auto-loads your most-recent midpoint paper draft from the
-          editor. Generates anticipated questions across three
+          Upload the document you want to defend (.pdf or .docx). The
+          mock panel answers from this document only — nothing is saved
+          on the server. Generates anticipated questions across three
           categories — technical, academic, governance — with
           rehearsable responses for each.
         </p>
+
+        {/* Upload area / file status */}
+        {!file ? (
+          <label
+            data-testid="defense-prep-file-input"
+            className={
+              'flex items-center gap-2 px-3 py-2 border border-dashed '
+              + 'border-navy-600 rounded text-text-secondary text-xs '
+              + 'hover:bg-navy-800/40 cursor-pointer w-fit'
+            }>
+            <Upload className="w-3.5 h-3.5 text-electric-blue" />
+            <span>Choose a .pdf or .docx</span>
+            <input
+              type="file"
+              accept=".pdf,.docx"
+              className="hidden"
+              onChange={onPickFile}
+            />
+          </label>
+        ) : (
+          <div className="flex items-center gap-2 text-xs">
+            <FileText className="w-3.5 h-3.5 text-electric-blue shrink-0" />
+            <span
+              data-testid="defense-prep-filename"
+              className="text-white truncate max-w-[28rem]">
+              Answering from: {file.name}
+            </span>
+            <button
+              type="button"
+              onClick={onRemove}
+              data-testid="defense-prep-remove"
+              className={
+                'ml-2 px-2 py-0.5 rounded border border-navy-600 '
+                + 'text-text-secondary hover:bg-navy-800'
+              }>
+              Remove
+            </button>
+          </div>
+        )}
+        {!file ? (
+          <p className="text-text-secondary text-xs italic">
+            Upload a document before asking questions.
+          </p>
+        ) : null}
 
         <div className="flex items-center gap-2 pt-1">
           <button
             type="button"
             onClick={onRun}
-            disabled={slot.loading}
+            disabled={!file || slot.loading}
             data-testid="defense-prep-run"
+            title={!file ? 'Upload a .pdf or .docx first' : undefined}
             className={
               'px-3 py-1.5 rounded text-xs font-medium '
               + 'bg-warning text-navy-950 hover:bg-warning/90 '
@@ -533,7 +597,7 @@ function ThesisDefensePrep() {
           }
           meta={
             slot.draftMeta
-              ? `${slot.draftMeta.word_count.toLocaleString()} words · updated ${formatUpdatedAt(slot.draftMeta.updated_at)}`
+              ? `${slot.draftMeta.word_count.toLocaleString()} words · uploaded`
               : null
           }
           verdict={slot.verdict}
@@ -609,16 +673,3 @@ function ErrorCard({ message }: { message: string }) {
 }
 
 
-function formatUpdatedAt(iso: string | null): string {
-  if (!iso) return '—'
-  try {
-    const d = new Date(iso)
-    if (Number.isNaN(d.getTime())) return iso
-    return d.toLocaleString('en-US', {
-      month: 'short', day: 'numeric',
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    })
-  } catch {
-    return iso
-  }
-}

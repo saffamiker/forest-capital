@@ -5197,114 +5197,97 @@ async def council_peer_review(
 @limiter.limit("10/minute")
 async def council_defense_prep(
     request: Request,
+    file: UploadFile = File(...),
     session: dict = Depends(require_team_member),
 ):
-    """Streams a mock-panel Q&A prep sheet for the calling user's
-    paper.
+    """Streams a mock-panel Q&A prep sheet against an uploaded academic
+    document.
 
-    May 24 2026 (P5 — Final Submission marker): if the request body
-    carries `generation_id`, Defense Prep references the
-    Final-marked version of THAT generation when one exists
-    (falling back to the most recent saved version). Otherwise it
-    auto-fetches the user's most-recent midpoint_paper editor
-    draft via get_current_draft (the prior behaviour).
+    May 30 2026 — the saved-draft path (editor_drafts / paper_versions
+    Final-marker) was REPLACED with an explicit document upload. The
+    caller posts a multipart upload (one .pdf or .docx); the endpoint
+    extracts text in-memory, injects it as the LABELLED PRIMARY context
+    block (clearly tagged "SUBMITTED ACADEMIC DOCUMENT" so the model
+    grounds every answer in it), and streams the Q&A verdict back. The
+    uploaded bytes are NEVER persisted — session-only, no DB write.
 
-    The body shape:
-      {generation_id?: int}    optional; when present pins the
-                               canonical version per migration 040.
+    Request: multipart/form-data with one `file` field (.pdf or .docx).
 
     SSE wire format:
-      data: {"type": "draft_meta", "title": "...",
-              "word_count": N, "updated_at": "...",
-              "source": "final_marker" | "most_recent" | "editor_draft"}
+      data: {"type": "draft_meta", "title": "<filename>",
+              "word_count": N, "source": "upload"}
       data: {"type": "arbiter_chunk", "text": "..."}     (repeated)
       data: [DONE]
+      or  data: {"type": "error", "message": "..."} + [DONE]
     """
     import asyncio
     from agents.peer_review import (
         build_defense_prep_context_block,
+        chunk_arbiter_text,
         render_defense_prep_context_block,
         run_defense_prep_with_harness,
-        chunk_arbiter_text,
     )
+    from tools.academic_context import extract_uploaded_text
 
-    # Optional generation_id from the request body — when present,
-    # the Final-marked version takes precedence over the editor
-    # draft. Read defensively: a missing body or non-JSON body
-    # falls through to the prior editor-draft path.
-    generation_id: int | None = None
+    # Read the upload into memory ONCE (session-only — never written to
+    # disk or the DB). 10 MB cap matches the academic_documents upload
+    # ceiling; a larger paper than that is almost certainly a mistake.
+    filename = (file.filename or "upload").strip()
     try:
-        body = await request.json()
-        if isinstance(body, dict) and body.get("generation_id") is not None:
-            generation_id = int(body["generation_id"])
-    except Exception:
-        generation_id = None
-
-    # Resolve the draft BEFORE opening the stream so a 404-style
-    # error frame fires immediately rather than mid-flow.
-    draft = None
-    source = "editor_draft"
-    try:
-        if generation_id is not None:
-            from tools.paper_versions import (
-                get_canonical_version, get_final_version,
-            )
-            canonical = await get_canonical_version(generation_id)
-            if canonical:
-                final = await get_final_version(generation_id)
-                source = ("final_marker"
-                          if final is not None else "most_recent")
-                draft = {
-                    "content_text": canonical.get("paper_md") or "",
-                    "title":        (canonical.get("label")
-                                       or f"Generation {generation_id} "
-                                          f"v{canonical.get('version_number')}"),
-                    "word_count":   sum(
-                        int(v) for v in
-                        (canonical.get("word_counts") or {}).values()
-                        if isinstance(v, (int, float))
-                    ),
-                    "updated_at":   canonical.get("saved_at"),
-                }
-        if draft is None:
-            from tools.editor_drafts import get_current_draft
-            draft = await get_current_draft(
-                owner_email=session.get("email") or "",
-                document_type="midpoint_paper")
-            source = "editor_draft"
+        raw = await file.read()
     except Exception as exc:  # noqa: BLE001
-        log.warning("defense_prep_draft_lookup_failed",
-                    error=str(exc))
-
-    async def event_stream():
-        if not draft or not (draft.get("content_text") or "").strip():
-            # No draft — surface the gap rather than running the
-            # agent against empty input. The frontend renders the
-            # error and offers a "Open editor" link.
+        log.warning("defense_prep_upload_read_failed",
+                    filename=filename, error=str(exc))
+        raw = b""
+    if not raw:
+        async def _empty_stream():
             yield _sse(
                 "error",
-                message=(
-                    "No midpoint paper draft found. Generate or "
-                    "open a draft in the Reports editor first, "
-                    "then re-run Defense Prep."))
+                message="The uploaded file was empty. Choose a .pdf or "
+                        ".docx with content and try again.")
             yield "data: [DONE]\n\n"
-            return
-        draft_text = draft["content_text"] or ""
-        title = draft.get("title") or "Midpoint paper draft"
+        return StreamingResponse(_empty_stream(),
+                                 media_type="text/event-stream")
+    if len(raw) > 10 * 1024 * 1024:
+        async def _too_large_stream():
+            yield _sse(
+                "error",
+                message="The uploaded file exceeds the 10 MB limit. "
+                        "Trim the document or split it before retrying.")
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(_too_large_stream(),
+                                 media_type="text/event-stream")
 
+    # Extract text by extension. Unsupported extensions surface as a
+    # clear SSE error rather than a 4xx so the frontend can render the
+    # message inline alongside the upload tile.
+    try:
+        draft_text = extract_uploaded_text(filename, raw)
+    except ValueError as exc:
+        # Capture the message before the except block exits — Python
+        # unbinds `exc` at block end, so the inline async generator
+        # below would otherwise see an unbound name when iterated.
+        bad_type_msg = str(exc)
+
+        async def _bad_type_stream():
+            yield _sse("error", message=bad_type_msg)
+            yield "data: [DONE]\n\n"
+        return StreamingResponse(_bad_type_stream(),
+                                 media_type="text/event-stream")
+
+    async def event_stream():
         try:
             yield _sse(
                 "draft_meta",
-                title=title,
-                word_count=draft.get("word_count") or 0,
-                updated_at=draft.get("updated_at") or None,
-                source=source,
+                title=filename,
+                word_count=len(draft_text.split()),
+                source="upload",
             )
 
             ctx_dict = build_defense_prep_context_block(
-                "Forest Capital (team draft)", draft_text)
-            context_block = render_defense_prep_context_block(
-                ctx_dict)
+                "Forest Capital (team draft)", draft_text,
+                source_name=filename)
+            context_block = render_defense_prep_context_block(ctx_dict)
 
             verdict = await asyncio.to_thread(
                 run_defense_prep_with_harness, context_block)
@@ -5312,7 +5295,8 @@ async def council_defense_prep(
                 yield _sse("arbiter_chunk", text=chunk)
             log.info(
                 "defense_prep_complete",
-                draft_id=draft.get("id"),
+                source="upload",
+                filename=filename,
                 draft_chars=len(draft_text),
                 verdict_chars=len(verdict))
             _log_interaction_bg(
@@ -5320,7 +5304,8 @@ async def council_defense_prep(
                 agents_involved=["thesis_defense_prep"],
                 response_summary=verdict,
                 metadata={
-                    "draft_id":   draft.get("id"),
+                    "source":      "upload",
+                    "filename":    filename,
                     "draft_chars": len(draft_text),
                 },
             )
