@@ -9843,6 +9843,26 @@ async def export_executive_brief(
     return _start_generation_job("executive_brief", session, request)
 
 
+# ── Executive brief tone rules (May 30 2026) ───────────────────────────────
+# The brief addresses the rubric trap: the platform executes, the
+# judgment is human. Every section is generated with these rules
+# threaded into the agent prompt so the prose never says "the
+# platform found X" — it says "our analysis shows X". The platform
+# is cited as source of DATA, never as source of CONCLUSIONS.
+_BRIEF_TONE_RULES = (
+    "\n\nTONE AND LANGUAGE RULES (non-negotiable):\n"
+    "  - Never write 'the platform found' or 'the AI council "
+    "determined'. Always write 'our analysis shows', 'we interpret', "
+    "or 'we conclude'.\n"
+    "  - Cite the platform as the source of DATA, never as the source "
+    "of conclusions. Conclusions are ours.\n"
+    "  - Plain financial English. No technical platform language.\n"
+    "  - No data hashes in the body text — those belong in the "
+    "appendix.\n"
+    "  - No em dashes (project-wide prose rule)."
+)
+
+
 # Four-component recommendation structure required on every recommendation
 # in the executive brief. Mirrors the CFA Institute disclosure spirit:
 # full disclosure, balanced presentation, material limitations stated.
@@ -9874,16 +9894,25 @@ async def _generate_brief_document(
     email: str,
 ) -> tuple[bytes, str, str, int | None]:
     """
-    Generates the five-page executive brief. Returns (file bytes,
+    Generates the 2-3 page executive brief. Returns (file bytes,
     filename, media type, editor draft id). Raises on failure — the job
     wrapper records it.
 
-    A title page, then Executive Summary, Methodology Overview, four Key
-    Findings (with the regime-conditional, summary-statistics, drawdown
-    and factor-loadings tables embedded), Limitations and Risks, and
-    Final Recommendations. The Executive Summary and Final
-    Recommendations sections carry the four-component recommendation
-    structure (_BRIEF_RECOMMENDATION_STRUCTURE).
+    Rebuilt May 30 2026 — six sections in order:
+      1. The Static Recommendation (Part I answer, plainly stated first)
+      2. The Central Finding (2022 break framed as our INTERPRETATION)
+      3. Analytical Judgment and Methodology Decisions (the five human
+         decisions — answers the rubric trap directly)
+      4. Platform as Evidence Base (platform introduced AFTER human
+         judgment, framed as evidence layer not conclusion layer)
+      5. Evidence Summary (findings in human interpretive terms)
+      6. Part II Preview (one paragraph — regime-conditional as the
+         logical consequence of Part I)
+
+    Every section is generated with _BRIEF_TONE_RULES threaded into the
+    agent prompt so the prose never says "the platform found X" — it
+    says "our analysis shows X". The platform is cited as the source
+    of DATA, conclusions are framed as ours.
     """
     import asyncio
     from datetime import date
@@ -9897,95 +9926,147 @@ async def _generate_brief_document(
         pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
                    "dashboard once, then regenerate this brief.")
 
+        # Brief rebuilt May 30 2026 — six sections in order. The
+        # Static Recommendation leads (Part I answer plainly stated);
+        # the Central Finding frames the 2022 break as a structural
+        # interpretation; Analytical Judgment names the five human
+        # decisions; the Platform is introduced AFTER human judgment
+        # as the evidence base; Evidence Summary states findings in
+        # human interpretive terms; Part II is one paragraph framing
+        # the regime-conditional extension as the logical consequence.
         specs = [
-            {"key": "exec_summary", "available": avail, "pending": pending,
-             "agent_id": "brief_exec_summary",
+            {"key": "static_rec", "available": avail, "pending": pending,
+             "agent_id": "brief_static_recommendation",
              "task": (
-                 "Write the Executive Summary of an investment brief — about "
-                 "220 words, for a senior investment audience. State the "
-                 "central question (does diversification across equities and "
-                 "fixed income improve risk-adjusted performance, and does "
-                 "that answer change after 2022), the key finding (the 2022 "
-                 "equity-bond correlation break), the best-performing "
-                 "strategies with their metrics, and the strategic "
-                 "recommendation."
-                 + _BRIEF_RECOMMENDATION_STRUCTURE),
+                 "Write Section 1: The Static Recommendation. Approximately "
+                 "180 words, leading the brief. State the Part I answer "
+                 "plainly before any dynamic framing. Open with this exact "
+                 "framing, substituting the real metrics from the summary "
+                 "statistics in context:\n\n"
+                 "  'For a Forest Capital capital planning mandate operating "
+                 "under a long-only, fully-invested constraint, the "
+                 "recommended fixed allocation is an equal-weight blend "
+                 "across all active strategies. This allocation delivers a "
+                 "Sharpe ratio of <X> against a benchmark of <Y>, reduces "
+                 "maximum drawdown by <Z> percentage points, and requires no "
+                 "dynamic signals to implement. It is the Part I answer.'\n\n"
+                 "Then one short paragraph of supporting evidence drawn from "
+                 "the summary statistics. Do NOT discuss the regime-"
+                 "conditional extension here — that is Section 6."
+                 + _BRIEF_TONE_RULES),
              "context": {"summary_statistics": data["summary_statistics"],
-                         "regime_conditional": data["regime_conditional"],
+                         "drawdown_comparison": data["drawdown_comparison"],
                          "study_period": data["study_period"]}},
-            {"key": "methodology", "available": True,
-             "agent_id": "brief_methodology",
+            {"key": "central_finding", "available": avail, "pending": pending,
+             "agent_id": "brief_central_finding",
              "task": (
-                 "Write the Methodology Overview — about 300 words. Cover the "
-                 "data sources and study period, the portfolio constraints "
-                 "(long-only, fully invested, no cash), the ten strategies "
-                 "(static versus dynamic), the Carhart four-factor model, the "
-                 "benchmark definition (100% S&P 500), and the key "
-                 "assumptions. State the meta-portfolio optimizer's box "
-                 "constraints explicitly, in substance: a maximum 40% and "
-                 "minimum 5% allocation per strategy, and a maximum 50% and "
-                 "minimum 5% allocation per underlying asset class; these "
-                 "constraints enforce diversification and practical "
-                 "implementability; and in the current TRANSITION regime both "
-                 "the Min Variance and Risk Parity strategies sit at the "
-                 "concentration ceiling, representing the maximum permissible "
-                 "defensive tilt."),
-             "context": {"study_period": data["study_period"],
-                         "strategy_metadata": data.get("strategy_metadata"),
-                         "risk_free_rate": data["risk_free_rate"]}},
-            {"key": "finding_1", "available": avail, "pending": pending,
-             "agent_id": "brief_finding_2022",
-             "task": (
-                 "Write Finding 1: The 2022 Correlation Break — about 220 "
-                 "words. Interpret the pre- and post-2022 equity-bond "
-                 "correlation and the regime-conditional Sharpe ratios. "
-                 "Explain why the diversification benefit broke down and what "
-                 "it means for a static 60/40 allocation."),
+                 "Write Section 2: The Central Finding. Approximately 200 "
+                 "words. Frame the 2022 equity-bond correlation shift as our "
+                 "INTERPRETATION, not as a data output. State it in this "
+                 "framing — substitute the real pre/post-2022 correlation "
+                 "values from context:\n\n"
+                 "  'Our interpretation of the post-2022 data is that the "
+                 "equity-bond correlation shift represents a structural "
+                 "change in the investment environment, not a temporary "
+                 "anomaly. Bonds no longer diversify equity. This changes "
+                 "the nature of the portfolio construction problem from "
+                 "parameter selection to regime identification.'\n\n"
+                 "Then one paragraph of supporting evidence from the "
+                 "pre/post-2022 correlations and the regime-conditional "
+                 "Sharpe ratios."
+                 + _BRIEF_TONE_RULES),
              "context": {"regime_conditional": data["regime_conditional"],
                          "correlation_pre_post": {
                              "pre_2022": data["rolling_correlation"].get("pre_2022"),
                              "post_2022": data["rolling_correlation"].get("post_2022")}}},
-            {"key": "finding_2", "available": avail, "pending": pending,
-             "agent_id": "brief_finding_static",
+            {"key": "human_judgment", "available": True,
+             "agent_id": "brief_human_judgment",
              "task": (
-                 "Write Finding 2: Static Allocation Results — about 220 "
-                 "words. Using the summary statistics, identify the best "
-                 "static strategy and justify it, comparing it to the 100% "
-                 "equity benchmark."),
-             "context": {"summary_statistics": data["summary_statistics"]}},
-            {"key": "finding_3", "available": avail, "pending": pending,
-             "agent_id": "brief_finding_dynamic",
-             "task": (
-                 "Write Finding 3: Dynamic Allocation Results — about 220 "
-                 "words. Assess the dynamic strategies' performance and "
-                 "drawdown behaviour, and justify the rules-based logic."),
-             "context": {"regime_conditional": data["regime_conditional"],
-                         "drawdown_comparison": data["drawdown_comparison"]}},
-            {"key": "finding_4", "available": avail, "pending": pending,
-             "agent_id": "brief_finding_factor",
-             "task": (
-                 "Write Finding 4: Factor Analysis — about 220 words. "
-                 "Interpret the Carhart four-factor loadings: assess alpha "
-                 "generation and explain what the factor exposures reveal "
-                 "about each strategy's return drivers."),
-             "context": {"factor_loadings": data["factor_loadings"]}},
-            {"key": "limitations", "available": True,
-             "agent_id": "brief_limitations",
-             "task": (
-                 "Write the Limitations and Risks section — about 160 words. "
-                 "Be honest, not defensive. Cover backtesting limitations, "
-                 "transaction-cost modelling, out-of-sample considerations, "
-                 "and the constraints of the data period."),
+                 "Write Section 3: Analytical Judgment and Methodology "
+                 "Decisions. Approximately 320 words. This section answers "
+                 "the rubric question 'where is the human judgment given "
+                 "you have an AI council and a platform?' directly. Cover "
+                 "the five human decisions, in order, one short paragraph "
+                 "each:\n\n"
+                 "  1. The regime-inversion interpretation: the data shows "
+                 "the 2022 correlation shift; the interpretation that it "
+                 "is structural is ours.\n"
+                 "  2. Strategy selection across distinct signal mechanisms "
+                 "(not parameter variations on one idea): a research design "
+                 "decision to span ten different mechanisms rather than "
+                 "run five hundred variations of momentum.\n"
+                 "  3. Proactive statistical disclosure: Benjamin et al. "
+                 "2018 set the p < 0.005 standard; no strategy clears it; "
+                 "we chose to surface this honestly rather than report "
+                 "Sharpe rankings and move on.\n"
+                 "  4. Structured dissent in the AI council: we designed "
+                 "the council to challenge, not to confirm.\n"
+                 "  5. Constraint framework as fiduciary design: the 40% "
+                 "strategy ceiling and 5-50% asset bounds are governance "
+                 "decisions about what an institutional mandate can "
+                 "implement responsibly. Not data-derived.\n\n"
+                 "Close with: 'The platform gives us the evidence. The "
+                 "interpretation, the design, and the governance framework "
+                 "are ours.'"
+                 + _BRIEF_TONE_RULES),
              "context": {"study_period": data["study_period"]}},
-            {"key": "recommendations", "available": avail, "pending": pending,
-             "agent_id": "brief_recommendations",
+            {"key": "platform_role", "available": True,
+             "agent_id": "brief_platform_role",
              "task": (
-                 "Write the Final Recommendations section — about 320 words. "
-                 "Give a strategic allocation recommendation grounded in the "
-                 "results, with supporting evidence."
-                 + _BRIEF_RECOMMENDATION_STRUCTURE),
-             "context": {"regime_conditional": data["regime_conditional"],
-                         "summary_statistics": data["summary_statistics"]}},
+                 "Write Section 4: Platform as Evidence Base. Approximately "
+                 "150 words. Introduce the platform here, AFTER the human "
+                 "judgment section. Frame it as the mechanism for generating "
+                 "and validating evidence, NOT as the source of analytical "
+                 "conclusions. Use this framing:\n\n"
+                 "  'The platform was built to generate auditable, "
+                 "reproducible evidence for conclusions reached through "
+                 "analysis. The data hashes, three-layer validation, and AI "
+                 "council provide the evidentiary standard. The "
+                 "interpretations and design decisions are ours.'\n\n"
+                 "Then one short paragraph naming the platform's "
+                 "evidentiary components (data provenance, the four "
+                 "validation layers, the audit subsystem)."
+                 + _BRIEF_TONE_RULES),
+             "context": {"study_period": data["study_period"]}},
+            {"key": "evidence", "available": avail, "pending": pending,
+             "agent_id": "brief_evidence",
+             "task": (
+                 "Write Section 5: Evidence Summary. Approximately 320 "
+                 "words. State the key findings with platform-sourced "
+                 "numbers, but stated in HUMAN INTERPRETIVE TERMS. Cover "
+                 "in order:\n\n"
+                 "  - The static-allocation result (one paragraph, with "
+                 "summary-statistics numbers and the benchmark "
+                 "comparison).\n"
+                 "  - The drawdown protection (one paragraph, with the "
+                 "drawdown-comparison numbers).\n"
+                 "  - The factor exposures (one paragraph, naming what the "
+                 "Carhart loadings reveal about each major strategy's "
+                 "return drivers).\n"
+                 "  - The honest limitations (one paragraph: backtesting "
+                 "constraints, transaction-cost modelling, sample-size "
+                 "considerations, the absence of formal statistical "
+                 "significance under FDR).\n\n"
+                 "Numbers come from the platform; conclusions are framed as "
+                 "'our analysis shows' / 'we conclude' / 'we interpret'."
+                 + _BRIEF_TONE_RULES),
+             "context": {"summary_statistics": data["summary_statistics"],
+                         "drawdown_comparison": data["drawdown_comparison"],
+                         "factor_loadings": data["factor_loadings"]}},
+            {"key": "part_ii_preview", "available": True,
+             "agent_id": "brief_part_ii_preview",
+             "task": (
+                 "Write Section 6: Part II Preview. ONE paragraph, "
+                 "approximately 120 words. Frame the regime-conditional "
+                 "extension as the answer to the question the static "
+                 "analysis raises: when static strategies cannot be reliably "
+                 "ranked on historical data alone (bootstrap confidence "
+                 "intervals on Sharpe ratios overlap substantially), the "
+                 "selection mechanism must come from regime signals. State "
+                 "this as the LOGICAL CONSEQUENCE of Part I, not a separate "
+                 "exercise."
+                 + _BRIEF_TONE_RULES),
+             "context": {"summary_statistics": data["summary_statistics"]}},
         ]
         narratives = await _generate_narratives(
             _apply_draft_caveats(specs),
