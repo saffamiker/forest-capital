@@ -143,19 +143,36 @@ class TestDocumentGenerationContract:
         assert "[DATA PENDING]" in text
 
     def test_executive_brief_document_is_a_valid_docx_with_headings(self):
+        """May 30 2026 — the brief was rebuilt for the six-section
+        rubric-trap-aware structure (Static Recommendation leads,
+        Central Finding, Analytical Judgment, Platform as Evidence
+        Base, Evidence Summary, Part II Preview). The old headings
+        (Executive Summary, Methodology Overview, Key Findings,
+        Limitations and Risks, Final Recommendations) are retired."""
         import main
         docx_bytes, filename, media, _draft = _run(
             main._generate_brief_document(TEAM_EMAIL))
         assert _DOCX_CT in media
         assert filename.endswith(".docx")
         text = _docx_text(docx_bytes)
-        assert "Executive Summary" in text
-        assert "Methodology Overview" in text
-        assert "Key Findings" in text
-        assert "Limitations and Risks" in text
-        assert "Final Recommendations" in text
-        # May 26 2026 — the three judgement-section [[BOB]] callouts
-        # (FRAMING / JUDGEMENT / RECOMMENDATION) were removed.
+        # All six new section headings present in order.
+        assert "1. The Static Recommendation" in text
+        assert "2. The Central Finding" in text
+        assert "3. Analytical Judgment and Methodology Decisions" in text
+        assert "4. Platform as Evidence Base" in text
+        assert "5. Evidence Summary" in text
+        assert "6. Part II Preview" in text
+        # And the section order is preserved.
+        idx = [text.index(h) for h in (
+            "1. The Static Recommendation",
+            "2. The Central Finding",
+            "3. Analytical Judgment and Methodology Decisions",
+            "4. Platform as Evidence Base",
+            "5. Evidence Summary",
+            "6. Part II Preview",
+        )]
+        assert idx == sorted(idx)
+        # The retired pre-rebuild [[BOB]] callouts must not creep back.
         for banned in (
             "BOB — YOUR FRAMING",
             "BOB — YOUR JUDGEMENT",

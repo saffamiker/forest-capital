@@ -526,11 +526,19 @@ def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> by
 
 def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> bytes:
     """
-    The five-page executive brief for a senior investment audience. A
-    title page, then Executive Summary, Methodology Overview, four Key
-    Findings (with the regime-conditional, summary-statistics and factor-
-    loadings tables embedded), Limitations and Risks, and Final
-    Recommendations.
+    The 2-3 page executive brief for a senior investment audience.
+
+    Rebuilt May 30 2026 — six sections in order:
+      1. The Static Recommendation (Part I answer, stated plainly first)
+      2. The Central Finding (2022 break as structural interpretation)
+      3. Analytical Judgment and Methodology Decisions (the five
+         human decisions — answers the rubric trap)
+      4. Platform as Evidence Base (platform introduced AFTER the
+         human judgment, framed as the evidence layer)
+      5. Evidence Summary (key findings stated in human interpretive
+         terms, with platform-sourced numbers)
+      6. Part II Preview (regime-conditional extension as the logical
+         consequence of Part I)
     """
     doc = _new_document()
 
@@ -552,60 +560,52 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
     _add_review_warning_box(doc)
     doc.add_page_break()
 
-    _add_heading(doc, "Executive Summary")
-    _add_body(doc, narratives.get("exec_summary", "[DATA PENDING]"))
-    # Workstream D — one-line audit-readiness sentence appended to the
-    # AI-generated Executive Summary so an investment-audience reader
-    # sees the audit verdict without having to flip to the appendix.
-    # Deterministic — never AI-generated, identical across runs against
-    # the same audit state.
+    # Section 1 — The Static Recommendation (leads).
+    _add_heading(doc, "1. The Static Recommendation")
+    _add_body(doc, narratives.get("static_rec", "[DATA PENDING]"))
+    # Audit-readiness one-liner — deterministic, surfaces the audit
+    # verdict to the investment audience without flipping to appendix.
     from tools.audit_summary import audit_summary_sentence
     audit_line = audit_summary_sentence(data.get("audit_disclosures") or {})
     if audit_line:
         _add_body(doc, audit_line)
+    h, r = table_summary_statistics(data.get("summary_statistics", []))
+    _add_table(doc, "Table 1. Summary Statistics by Asset Class", h, r)
 
-    _add_heading(doc, "Methodology Overview")
-    _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
-    # Workstream D — body paragraph framing the audit subsystem's
-    # role in the methodology. Same deterministic source.
+    # Section 2 — The Central Finding.
+    _add_heading(doc, "2. The Central Finding")
+    _add_body(doc, narratives.get("central_finding", "[DATA PENDING]"))
+    h, r = table_regime_conditional(data.get("regime_conditional", []))
+    _add_table(doc, "Table 2. Regime-Conditional Performance "
+                     "(Pre- vs Post-2022)", h, r)
+
+    # Section 3 — Analytical Judgment (the five human decisions).
+    _add_heading(doc, "3. Analytical Judgment and Methodology Decisions")
+    _add_body(doc, narratives.get("human_judgment", "[DATA PENDING]"))
+
+    # Section 4 — Platform as Evidence Base. Audit body paragraph
+    # belongs here, framing the platform's role.
+    _add_heading(doc, "4. Platform as Evidence Base")
+    _add_body(doc, narratives.get("platform_role", "[DATA PENDING]"))
     from tools.audit_summary import audit_body_paragraph
     audit_para = audit_body_paragraph(data.get("audit_disclosures") or {})
     if audit_para:
         _add_body(doc, audit_para)
 
-    _add_heading(doc, "Key Findings and Insights")
-
-    _add_heading(doc, "Finding 1: The 2022 Correlation Break", size=12)
-    _add_body(doc, narratives.get("finding_1", "[DATA PENDING]"))
-    h, r = table_regime_conditional(data.get("regime_conditional", []))
-    _add_table(doc, "Table 1. Regime-Conditional Performance "
-                     "(Pre- vs Post-2022)", h, r)
-
-    _add_heading(doc, "Finding 2: Static Allocation Results", size=12)
-    _add_body(doc, narratives.get("finding_2", "[DATA PENDING]"))
-    h, r = table_summary_statistics(data.get("summary_statistics", []))
-    _add_table(doc, "Table 2. Summary Statistics by Asset Class", h, r)
-
-    _add_heading(doc, "Finding 3: Dynamic Allocation Results", size=12)
-    _add_body(doc, narratives.get("finding_3", "[DATA PENDING]"))
+    # Section 5 — Evidence Summary.
+    _add_heading(doc, "5. Evidence Summary")
+    _add_body(doc, narratives.get("evidence", "[DATA PENDING]"))
     h, r = table_drawdown(data.get("drawdown_comparison", []))
     _add_table(doc, "Table 3. Drawdown and Recovery by Strategy", h, r)
-
-    _add_heading(doc, "Finding 4: Factor Analysis", size=12)
-    _add_body(doc, narratives.get("finding_4", "[DATA PENDING]"))
     h, r = table_factor_loadings(data.get("factor_loadings", []))
     _add_table(doc, "Table 4. Carhart Four-Factor Loadings "
                      "(* significant at p < .05)", h, r)
 
-    _add_heading(doc, "Limitations and Risks")
-    _add_body(doc, narratives.get("limitations", "[DATA PENDING]"))
+    # Section 6 — Part II Preview.
+    _add_heading(doc, "6. Part II Preview")
+    _add_body(doc, narratives.get("part_ii_preview", "[DATA PENDING]"))
 
-    _add_heading(doc, "Final Recommendations")
-    _add_body(doc, narratives.get("recommendations", "[DATA PENDING]"))
-
-    # Workstream D — Audit Disclosure Appendix. Mirrors the midpoint
-    # paper's appendix so the same disclosure record travels with both
-    # graded deliverables.
+    # Audit Disclosure Appendix carries the platform's audit trail.
     _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
 
     _add_submission_checklist(doc)
