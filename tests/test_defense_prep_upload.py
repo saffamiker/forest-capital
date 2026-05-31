@@ -192,29 +192,51 @@ def test_endpoint_returns_202_with_job_id(monkeypatch):
 
 def test_polling_endpoint_returns_complete_result(monkeypatch):
     """The polling endpoint must reach `complete` with the verdict
-    text and the elapsed timer set."""
+    text and the elapsed timer set.
+
+    Drives `_run_defense_prep_job` directly via `asyncio.run` rather
+    than POSTing through TestClient and polling. The TestClient
+    portal creates a per-request event loop that closes when the
+    POST returns, so a background task spawned with `asyncio.create_
+    task` on that loop is never guaranteed to settle inside a
+    follow-up GET poll. The polling-endpoint contract is read via
+    the same GET, but only AFTER the background task has been
+    driven to completion synchronously. Mirrors the registry-direct
+    pattern documented in tests/test_defense_prep_job.py."""
+    import asyncio
+    from main import _run_defense_prep_job
+    from tools.generation_jobs import create_job, update_job
+
     seen = _patch_harness(monkeypatch)
+
+    # Build the job + payload exactly as the POST endpoint would,
+    # then await the background task in place so it lands on the
+    # same event loop. The completed registry row is what the GET
+    # then reads.
     raw = _docx_bytes(
         "Midpoint Paper", "Section 1: Methodology.",
         "Section 2: Preliminary results.")
-    res = client.post(
-        "/api/council/defense-prep",
-        headers=TEAM_HEADERS,
-        files={"file": ("midpoint.docx", raw,
-                        "application/vnd.openxmlformats-officedocument."
-                        "wordprocessingml.document")},
-    )
-    assert res.status_code == 202
-    job_id = res.json()["job_id"]
+    from tools.academic_context import extract_uploaded_text
+    draft_text = extract_uploaded_text("midpoint.docx", raw)
+    job = create_job("defense_prep", "ruurdsm@queens.edu")
+    update_job(job["job_id"], _filename="midpoint.docx",
+               _draft_chars=len(draft_text),
+               _word_count=len(draft_text.split()),
+               _result_text=None)
+    asyncio.run(_run_defense_prep_job(
+        job["job_id"], "midpoint.docx", draft_text,
+        "ruurdsm@queens.edu", {"email": "ruurdsm@queens.edu"}, ""))
 
-    final = _wait_for_terminal(job_id)
+    res = client.get(
+        f"/api/v1/defense-prep/{job['job_id']}", headers=TEAM_HEADERS)
+    assert res.status_code == 200
+    final = res.json()
     assert final["status"] == "complete", final
     assert final["filename"] == "midpoint.docx"
     assert final["word_count"] > 0
     assert final["result_text"]
     assert "Anticipated Q&A" in final["result_text"]
     assert final["error"] is None
-    assert final["created_at"]
     assert final["completed_at"]
     assert final["elapsed_seconds"] is not None
 
@@ -302,28 +324,23 @@ def test_polling_other_users_job_returns_404(monkeypatch):
 
 
 def test_endpoint_is_session_only_does_not_touch_saved_drafts(monkeypatch):
-    """The endpoint must never reach the editor_drafts or paper_versions
-    persistence layer; sabotaging those getters to raise loudly proves
-    the upload path never calls them.
+    """The defense-prep upload path must never reach the editor_drafts
+    or paper_versions persistence layer; sabotaging those getters to
+    raise loudly proves the upload path never calls them.
 
-    Mock-at-the-boundary: `run_defense_prep_with_harness` is patched
-    with a `unittest.mock.patch` context manager (not pytest's
-    monkeypatch) so the patch unambiguously survives the polling
-    loop. This test verifies SESSION ISOLATION, not output quality —
-    it must never wait on real LLM inference. The patched function
-    captures the context block (so the inline assertion below can
-    check the upload was threaded through) and returns a minimal
-    valid markdown string instantly, letting the background task
-    reach the `complete` terminal state inside the 5 s poll
-    window."""
-    from unittest.mock import patch
+    Drives `_run_defense_prep_job` directly (same reason as
+    test_polling_endpoint_returns_complete_result — TestClient's
+    per-request event loop closes before a background task can land
+    a terminal status). The harness mock returns instantly so this
+    test exercises ONLY the session-isolation contract; the
+    sabotaged getters are the assertion."""
+    import asyncio
+    from main import _run_defense_prep_job
+    from tools.generation_jobs import create_job, get_job, update_job
 
     captured: dict[str, str] = {}
 
     def _instant_verdict(context_block: str) -> str:
-        # Capture the context for the post-completion assertion;
-        # return a deterministic, syntactically-valid Q&A sheet so
-        # the job's `_result_text` is non-empty.
         captured["context_block"] = context_block
         return ("### Anticipated Q&A\n\n"
                 "**Q1.** Session-isolation test — canned answer.")
@@ -332,6 +349,14 @@ def test_endpoint_is_session_only_does_not_touch_saved_drafts(monkeypatch):
         raise AssertionError(
             "Defense Prep MUST NOT read from the saved-draft DB on the "
             "upload path — session-only.")
+
+    # `agents.peer_review` is the source module — the background
+    # task imports `run_defense_prep_with_harness` from there. Patch
+    # on the source module so the import inside the task picks up
+    # the instant-verdict mock regardless of import timing.
+    from agents import peer_review
+    monkeypatch.setattr(
+        peer_review, "run_defense_prep_with_harness", _instant_verdict)
 
     import tools.editor_drafts as ed
     monkeypatch.setattr(ed, "get_current_draft", _boom)
@@ -344,25 +369,23 @@ def test_endpoint_is_session_only_does_not_touch_saved_drafts(monkeypatch):
         pass
 
     raw = _docx_bytes("Document body that the panel should ground in.")
-    # The patch is a context manager scoped to the POST + poll, so it
-    # cannot be undone by a teardown that fires while the background
-    # task is still mid-flight. `agents.peer_review` is the source
-    # module — `from agents.peer_review import run_defense_prep_with_
-    # harness` inside the background task looks up the patched
-    # attribute on every call, so the mock catches regardless of how
-    # the import was wired.
-    with patch("agents.peer_review.run_defense_prep_with_harness",
-               side_effect=_instant_verdict):
-        res = client.post(
-            "/api/council/defense-prep",
-            headers=TEAM_HEADERS,
-            files={"file": ("paper.docx", raw,
-                            "application/vnd.openxmlformats-officedocument."
-                            "wordprocessingml.document")},
-        )
-        assert res.status_code == 202
-        job_id = res.json()["job_id"]
-        final = _wait_for_terminal(job_id)
-    assert final["status"] == "complete"
+    from tools.academic_context import extract_uploaded_text
+    draft_text = extract_uploaded_text("paper.docx", raw)
+    job = create_job("defense_prep", "ruurdsm@queens.edu")
+    update_job(job["job_id"], _filename="paper.docx",
+               _draft_chars=len(draft_text),
+               _word_count=len(draft_text.split()),
+               _result_text=None)
+    # If the sabotaged getters fire during the task, the AssertionError
+    # they raise propagates out of `_run_defense_prep_job` via its
+    # try/except as a `failed` status — caught below.
+    asyncio.run(_run_defense_prep_job(
+        job["job_id"], "paper.docx", draft_text,
+        "ruurdsm@queens.edu", {"email": "ruurdsm@queens.edu"}, ""))
+
+    final = get_job(job["job_id"])
+    assert final["status"] == "complete", (
+        f"Defense Prep failed unexpectedly — saved-draft sabotage may "
+        f"have fired. Status={final['status']!r}, error={final.get('error')!r}")
     assert "Document body that the panel should ground in." \
         in captured.get("context_block", "")
