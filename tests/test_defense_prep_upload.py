@@ -23,7 +23,6 @@ import asyncio
 import io
 import os
 import sys
-import time
 
 import pytest
 from docx import Document
@@ -70,25 +69,14 @@ def _docx_bytes(*paragraphs: str) -> bytes:
     return buf.getvalue()
 
 
-def _wait_for_terminal(job_id: str, timeout: float = 5.0) -> dict:
-    """Poll the GET endpoint until status is complete | failed | cancelled
-    or the timeout expires. Returns the final job payload."""
-    deadline = time.monotonic() + timeout
-    last = None
-    while time.monotonic() < deadline:
-        res = client.get(
-            f"/api/v1/defense-prep/{job_id}", headers=TEAM_HEADERS)
-        assert res.status_code == 200, res.text
-        last = res.json()
-        if last["status"] in ("complete", "failed", "cancelled"):
-            return last
-        # Let the spawned background task make progress — TestClient
-        # drives the asyncio loop per-request, so a small sleep on the
-        # test thread lets the task complete between polls.
-        time.sleep(0.05)
-    raise AssertionError(
-        f"job {job_id} did not reach terminal state within {timeout}s; "
-        f"last status={last}")
+# NOTE — May 31 2026: a _wait_for_terminal poll helper used to live
+# here. It was removed because the polling pattern itself doesn't
+# work under TestClient: the portal creates a per-request event
+# loop that closes when the POST returns, so a background task
+# spawned via asyncio.create_task inside the POST handler never
+# gets driven to completion. Tests that need to verify the
+# completed state of a defense-prep job call _run_defense_prep_job
+# directly via asyncio.run instead.
 
 
 # ── extractors (pure) ──────────────────────────────────────────────────────

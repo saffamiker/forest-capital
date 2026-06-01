@@ -259,42 +259,81 @@ def check_1a_window_return_le_full_max_dd(
 def check_1b_sharpe_consistent_with_components(
     strategy_results: dict[str, dict],
     *,
-    risk_free_rate: float | None = None,
+    risk_free_rate: "float | pd.Series | None" = None,
     tolerance: float = 0.02,
 ) -> tuple[list[InvariantViolation], int]:
-    """1b — Sharpe ≈ (CAGR - rf) / annualised_vol within 0.02 tolerance.
-    The Sharpe stored on a strategy result must be reconstructible
-    from the components also stored on the same result."""
+    """1b — stored Sharpe must match an independent recomputation using
+    the EXACT same formula the backtester uses (tools/backtester._m_
+    sharpe), within 0.02 tolerance.
+
+    May 31 2026 — rewritten to fix a false-positive that blocked every
+    cache write. The previous form computed `(CAGR - 0) / annualised_vol`,
+    which differs from the backtester's actual formula on two
+    counts: (a) the backtester uses MONTHLY ARITHMETIC MEAN annualised
+    by sqrt(12), not the geometric CAGR, and (b) the backtester uses
+    the ACTUAL DTB3 risk-free rate aligned to each month, not zero.
+    Across 23 years the geometric-vs-arithmetic gap alone can move
+    Sharpe by 0.05-0.10, far outside the 0.02 tolerance — so 1b
+    fired on every strategy and refused every write.
+
+    The corrected formula, mirroring _m_sharpe:
+      excess  = monthly_returns - rf_aligned
+      sharpe  = mean(excess) / std(excess, ddof=1) * sqrt(12)
+
+    rf_aligned is the per-month risk-free series passed in via
+    `risk_free_rate`. When the caller supplies a pd.Series, it is
+    forward-fill-aligned to each strategy's monthly_returns index
+    (same convention as backtester._m_rf_align). When a scalar is
+    supplied it's broadcast as a constant monthly rate. When None
+    is supplied the check is SKIPPED — recomputing without the
+    real rf produces a misleading result, and a false positive is
+    worse than a missing check.
+    """
     vios: list[InvariantViolation] = []
     n = 0
+    # No rf available → the recompute is not faithful to the
+    # backtester. Skip the entire check rather than fall back to
+    # rf=0 (which is what produced the original false positive).
+    if risk_free_rate is None:
+        return vios, n
     for name, res in (strategy_results or {}).items():
         s = _monthly_series(res)
         if len(s) < 24:
             continue
-        n += 1
         stored = res.get("sharpe_ratio")
         if stored is None:
             continue
-        cagr = res.get("cagr")
-        if cagr is None:
-            cagr = _cagr(s)
-        vol = res.get("volatility")
-        if vol is None or vol <= 0:
-            vol = _annual_vol(s)
-            if vol <= 0:
-                continue
-        rf = risk_free_rate if risk_free_rate is not None else 0.0
-        implied = (float(cagr) - float(rf)) / float(vol)
+        n += 1
+        # Align rf to the strategy's monthly index, the same way the
+        # backtester does (forward-fill on missing, mean on still-
+        # missing). A scalar rate is broadcast as a constant.
+        if isinstance(risk_free_rate, (int, float)):
+            rf_aligned = pd.Series(
+                float(risk_free_rate), index=s.index)
+        else:
+            rf_aligned = (risk_free_rate
+                          .reindex(s.index)
+                          .ffill()
+                          .bfill())
+            if rf_aligned.isna().any():
+                rf_aligned = rf_aligned.fillna(
+                    float(risk_free_rate.mean()))
+        excess = s - rf_aligned
+        std_excess = float(excess.std(ddof=1))
+        if std_excess <= 0:
+            continue
+        implied = float(excess.mean() / std_excess * math.sqrt(12))
         if abs(float(stored) - implied) > tolerance:
             vios.append(InvariantViolation(
                 code="1b", severity="hard", category=1,
                 entity=name, metric="sharpe_ratio",
-                expected=f"(CAGR - rf)/vol = "
-                         f"({cagr:.4f} - {rf:.4f})/{vol:.4f} = "
-                         f"{implied:.4f}",
+                expected=f"mean(excess)/std(excess)*sqrt(12) = "
+                         f"{implied:.4f} "
+                         f"(arithmetic monthly, actual rf, ddof=1)",
                 actual=f"{float(stored):.4f}",
                 detail=("Stored Sharpe drifted from a recompute "
-                        "via its own components beyond the "
+                        "using the backtester's exact monthly-"
+                        "arithmetic formula beyond the "
                         f"{tolerance:g} tolerance.")))
     return vios, n
 
@@ -1122,7 +1161,7 @@ def run_all_invariants(
     bootstrap_payload: dict[str, Any] | None = None,
     asset_returns: dict[str, list[float]] | None = None,
     macro_series: dict[str, Iterable[float]] | None = None,
-    risk_free_rate: float | None = None,
+    risk_free_rate: "float | pd.Series | None" = None,
     tangency_sharpe: float | None = None,
     oos_split: str = "2022-01-01",
     data_start: str | None = None,

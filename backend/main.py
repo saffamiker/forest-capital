@@ -829,8 +829,13 @@ async def compare_strategies(request: Request, session: dict = Depends(require_a
             results_dict = await asyncio.to_thread(run_all_strategies, history)
             ranked = sorted(results_dict.values(), key=lambda r: r.get("sharpe_ratio", 0.0), reverse=True)
 
-            # Write-through: persist for next cold start or Render restart
-            await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
+            # Write-through: persist for next cold start or Render restart.
+            # Thread risk_free_monthly through so the invariant framework's
+            # 1b Sharpe-recomputation check uses the actual DTB3 series the
+            # backtester used (anything else produces false positives).
+            await set_strategy_cache(
+                strategy_hash, results_dict, n_observations=n_rows,
+                risk_free_monthly=history.get("risk_free_monthly"))
 
             cache_label = "miss" if not cached else "schema_refresh"
             return {"strategies": ranked, "ranked_by": "sharpe_ratio", "cache": cache_label, "data_range": data_range}
@@ -905,10 +910,14 @@ async def get_chart_data(request: Request, session: dict = Depends(require_auth)
                 )
             results_dict = run_all_strategies(history)
             # Write-through so the next /charts/data hit AND the next
-            # /compare hit both find a schema-compatible entry.
+            # /compare hit both find a schema-compatible entry. rf
+            # threaded so invariant 1b can recompute Sharpe against
+            # the same series the backtester used.
             try:
                 from tools.cache import set_strategy_cache
-                await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
+                await set_strategy_cache(
+                    strategy_hash, results_dict, n_observations=n_rows,
+                    risk_free_monthly=history.get("risk_free_monthly"))
             except Exception as exc:
                 log.warning("chart_data_cache_write_failed", error=str(exc))
 

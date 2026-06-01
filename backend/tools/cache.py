@@ -365,6 +365,8 @@ async def set_strategy_cache(
     strategy_hash: str,
     results: dict[str, Any],
     n_observations: int | None = None,
+    *,
+    risk_free_monthly: Any = None,
 ) -> None:
     """
     Upserts strategy results into the cache.  Called after recomputation
@@ -414,7 +416,8 @@ async def set_strategy_cache(
     # primary correctness layer).
     try:
         from tools.invariant_checks import run_all_invariants
-        invariant_result = run_all_invariants(results)
+        invariant_result = run_all_invariants(
+            results, risk_free_rate=risk_free_monthly)
         if not invariant_result.passed:
             log.warning(
                 "strategy_cache_write_refused_invariants",

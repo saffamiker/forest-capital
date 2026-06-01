@@ -1228,7 +1228,9 @@ async def _prewarm_strategy_cache(run_id: int) -> None:
         return
 
     try:
-        await set_strategy_cache(strategy_hash, results_dict, n_observations=n_rows)
+        await set_strategy_cache(
+            strategy_hash, results_dict, n_observations=n_rows,
+            risk_free_monthly=history.get("risk_free_monthly"))
     except Exception as exc:  # noqa: BLE001
         log.warning("audit_prewarm_cache_write_failed",
                     run_id=run_id, error=str(exc),

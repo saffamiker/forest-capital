@@ -60,7 +60,7 @@ catch.
 | Code | What it checks | Why it matters | Catches |
 |------|---------------|----------------|---------|
 | 1a | Crisis-window cumulative loss ≤ full-period max DD (per strategy) | A loss inside the period cannot exceed the worst-ever loss across the full period | F3: COVID Crash -73.53% > full-period -52.56% |
-| 1b | Stored Sharpe ≈ (CAGR - rf) / vol within 0.02 | The headline metric must be reconstructible from its components | Component drift / wrong rf application |
+| 1b | Stored Sharpe ≈ `mean(excess) / std(excess, ddof=1) * sqrt(12)` within 0.02, using the actual DTB3 rf series the backtester used | The headline metric must be reconstructible via the backtester's exact monthly-arithmetic formula | Component drift / wrong rf application. SKIPPED when no rf series is supplied to the runner (rf=0 fallback produced false positives that blocked every cache write on May 31 2026). |
 | 1c | Max DD ≤ worst single monthly return | DD contains at least the worst month | Bad DD computation or stale field |
 | 1d | CVaR99 ≤ CVaR95 | The 1% tail is a subset of the 5% tail | CVaR swap / wrong quantile direction |
 | 1e | Every weight schedule sums to 1 ± 0.001 | Fully-invested constraint | Bad rebalance, unnormalised weights |

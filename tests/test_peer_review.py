@@ -372,15 +372,36 @@ class TestDefensePrepWireFormat:
         assert r.status_code == 422
 
     def test_defense_prep_with_upload_returns_202_with_job_id(self):
-        # An in-memory .docx upload feeds the endpoint; the harness is
-        # patched so the background task completes without an LLM call.
+        """POST → 202 + job_id contract, then verify completion by
+        driving _run_defense_prep_job directly via asyncio.run.
+
+        May 31 2026 — the previous form mocked the harness and then
+        polled GET /api/v1/defense-prep/{id} for up to 5s, but
+        TestClient's portal creates a per-request event loop that
+        closes when the POST returns. The background task spawned
+        by asyncio.create_task on that loop never gets driven to
+        completion before the loop dies, so the GET polls see
+        status='running' indefinitely and the 5s deadline fires.
+        The mock catches but the task lives on a dead loop. PR #243
+        landed the same fix on test_defense_prep_upload.py; this
+        test is the last remaining instance of the broken pattern."""
+        import asyncio
         from docx import Document
         from agents import peer_review
+        from main import _run_defense_prep_job
+        from tools.academic_context import extract_uploaded_text
+        from tools.generation_jobs import create_job, get_job, update_job
+
         buf = io.BytesIO()
         doc = Document()
         doc.add_paragraph("The 2022 correlation break in detail.")
         doc.save(buf)
         client, team, _ = _client()
+
+        # Step 1 — verify the POST contract: 202 + job_id + initial
+        # state. Harness mocked so the background task (which fires
+        # on the per-request loop and may or may not complete before
+        # the response returns) cannot trigger a real LLM call.
         with patch.object(
             peer_review, "run_defense_prep_with_harness",
             return_value="### Anticipated Q&A\n\n**Q1.** Canned answer."):
@@ -389,9 +410,6 @@ class TestDefensePrepWireFormat:
                 files={"file": ("midpoint.docx", buf.getvalue(),
                                 "application/vnd.openxmlformats-"
                                 "officedocument.wordprocessingml.document")})
-        # POST 202 + job_id is the new success contract — the LLM run
-        # is decoupled from the HTTP response to survive Render's
-        # gateway timeout on long generations.
         assert r.status_code == 202, r.text
         body = r.json()
         assert isinstance(body["job_id"], str) and body["job_id"]
@@ -399,24 +417,34 @@ class TestDefensePrepWireFormat:
         assert body["filename"] == "midpoint.docx"
         assert body["word_count"] > 0
 
-        # The polling endpoint resolves to `complete` and returns the
-        # verdict text once the background task lands.
-        import time
-        deadline = time.monotonic() + 5.0
-        final = None
-        while time.monotonic() < deadline:
-            poll = client.get(
-                f"/api/v1/defense-prep/{body['job_id']}", headers=team)
-            assert poll.status_code == 200
-            payload = poll.json()
-            if payload["status"] in ("complete", "failed", "cancelled"):
-                final = payload
-                break
-            time.sleep(0.05)
-        assert final is not None, "polling did not reach terminal state"
+        # Step 2 — verify the completion contract by driving the
+        # background task synchronously on a fresh event loop. The
+        # asyncio.run call awaits the task to true completion, which
+        # the TestClient portal cannot guarantee.
+        raw = buf.getvalue()
+        draft_text = extract_uploaded_text("midpoint.docx", raw)
+        job = create_job("defense_prep", "thaob@queens.edu")
+        update_job(job["job_id"], _filename="midpoint.docx",
+                   _draft_chars=len(draft_text),
+                   _word_count=len(draft_text.split()),
+                   _result_text=None)
+        with patch.object(
+            peer_review, "run_defense_prep_with_harness",
+            return_value="### Anticipated Q&A\n\n**Q1.** Canned answer."):
+            asyncio.run(_run_defense_prep_job(
+                job["job_id"], "midpoint.docx", draft_text,
+                "thaob@queens.edu", {"email": "thaob@queens.edu"}, ""))
+
+        # GET endpoint reads the now-completed registry row.
+        poll = client.get(
+            f"/api/v1/defense-prep/{job['job_id']}", headers=team)
+        assert poll.status_code == 200
+        final = poll.json()
         assert final["status"] == "complete"
         assert "Anticipated Q&A" in (final["result_text"] or "")
         assert final["error"] is None
+        # The registry row also reflects completion directly.
+        assert get_job(job["job_id"])["status"] == "complete"
 
 
 # ── 7. Activity-log interaction types registered ───────────────────────────
