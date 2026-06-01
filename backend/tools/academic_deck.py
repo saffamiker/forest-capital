@@ -54,6 +54,15 @@ log = structlog.get_logger(__name__)
 # They are injected into the generation context block so the AI never has to
 # invent them, and they backstop the slide-spec text. Performance numbers for
 # the strategy tables are NOT here — those come live from gather_document_data().
+#
+# ACADEMIC SUBMISSION FIGURES — locked to the December 2025 data lock.
+# DO NOT update to a more-recent dataset for any reason. The June 3
+# cohort peer review and the July 1 panel defend the submitted record;
+# replacing these figures with live performance breaks that record. The
+# live figures (Jan-May 2026 included) are surfaced separately on the
+# Performance Record page (Live Figure row); the brief and the final
+# presentation continue to quote the locked academic figures below.
+# (User directive, May 31 2026.)
 OOS_SHARPE_REGIME_CONDITIONAL = 0.8576
 OOS_SHARPE_BENCHMARK = 0.4341
 OOS_SHARPE_EQUAL_WEIGHT = 0.1264
