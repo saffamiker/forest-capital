@@ -399,7 +399,8 @@ async def _default_warm_fn() -> dict[str, bool]:
             results_dict = await asyncio.to_thread(
                 run_all_strategies, history)
             await set_strategy_cache(
-                strategy_hash, results_dict, n_observations=n_rows)
+                strategy_hash, results_dict, n_observations=n_rows,
+                risk_free_monthly=history.get("risk_free_monthly"))
             log.info(
                 "analytics_cache_warm_backtester_complete",
                 strategy_hash=strategy_hash[:8],

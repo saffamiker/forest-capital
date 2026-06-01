@@ -81,25 +81,95 @@ def test_1a_fires_on_f3_regression():
     assert "TEST/COVID_Crash_2020" in vios[0].entity
 
 
-def test_1b_passes_on_self_consistent_sharpe():
-    series = [0.01, 0.02, -0.005, 0.012, 0.008] * 6
-    payload = _series_payload("TEST", series)
-    # Compute and store consistent fields.
-    s = pd.Series([float(p["return"]) for p in payload["monthly_returns"]])
-    cagr = float((1 + s).prod()) ** (12 / len(s)) - 1
-    vol = float(s.std(ddof=1)) * np.sqrt(12)
-    sharpe = cagr / vol
-    payload.update({"cagr": cagr, "volatility": vol, "sharpe_ratio": sharpe})
-    vios, _ = check_1b_sharpe_consistent_with_components({"TEST": payload})
+def test_1b_passes_on_backtester_formula_sharpe():
+    """May 31 2026 — 1b was rewritten to mirror tools/backtester._m_sharpe
+    exactly: arithmetic mean of (returns - rf_aligned) / std(excess,
+    ddof=1) * sqrt(12). A stored value computed by the SAME formula
+    must pass. Previously 1b used (CAGR - 0)/ann_vol — a different
+    formula — and fired on every real strategy."""
+    rng = np.random.default_rng(seed=11)
+    n = 36
+    series = list(rng.normal(0.006, 0.04, n))
+    rf_values = list(rng.normal(0.002, 0.001, n))
+    payload = _series_payload("TEST", series, start="2020-01-31")
+    s = pd.Series(series)
+    rf_s = pd.Series(rf_values, index=pd.date_range(
+        "2020-01-31", periods=n, freq="ME"))
+    # Backtester's exact formula:
+    excess = s.values - rf_s.values
+    sharpe = float(np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(12))
+    payload["sharpe_ratio"] = sharpe
+    vios, _ = check_1b_sharpe_consistent_with_components(
+        {"TEST": payload}, risk_free_rate=rf_s)
     assert vios == []
 
 
 def test_1b_fires_when_stored_sharpe_drifts():
-    series = [0.01] * 30
-    payload = _series_payload("TEST", series)
-    payload.update({"cagr": 0.10, "volatility": 0.10, "sharpe_ratio": 5.0})
-    vios, _ = check_1b_sharpe_consistent_with_components({"TEST": payload})
+    """The check still fires when a stored Sharpe genuinely disagrees
+    with the recompute beyond the 0.02 tolerance."""
+    rng = np.random.default_rng(seed=42)
+    n = 36
+    series = list(rng.normal(0.006, 0.04, n))
+    rf_s = pd.Series(
+        [0.002] * n,
+        index=pd.date_range("2020-01-31", periods=n, freq="ME"))
+    payload = _series_payload("TEST", series, start="2020-01-31")
+    # Store a Sharpe that's 0.5 off the actual.
+    s = pd.Series(series)
+    excess = s.values - 0.002
+    real_sharpe = float(np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(12))
+    payload["sharpe_ratio"] = real_sharpe + 0.5
+    vios, _ = check_1b_sharpe_consistent_with_components(
+        {"TEST": payload}, risk_free_rate=rf_s)
     assert len(vios) == 1 and vios[0].code == "1b"
+
+
+def test_1b_skipped_when_rf_not_supplied():
+    """Without a real rf series the recompute is not faithful to the
+    backtester. The check skips entirely rather than falling back to
+    rf=0 — fallback produced the false positive that blocked every
+    cache write before this hotfix."""
+    rng = np.random.default_rng(seed=7)
+    series = list(rng.normal(0.006, 0.04, 36))
+    payload = _series_payload("TEST", series, start="2020-01-31")
+    payload["sharpe_ratio"] = 0.5
+    vios, n = check_1b_sharpe_consistent_with_components(
+        {"TEST": payload}, risk_free_rate=None)
+    assert vios == []
+    assert n == 0
+
+
+def test_1b_does_not_fire_on_backtester_realistic_series():
+    """Regression test for the May 31 hotfix. Reproduces the production
+    failure: a strategy whose stored Sharpe was computed by the
+    backtester's arithmetic-monthly formula must NOT trip 1b when 1b
+    is run with the same rf series. The old 1b formula
+    (CAGR - 0)/ann_vol produced a tolerance gap > 0.02 on this exact
+    shape, blocking every cache write across all 10 strategies."""
+    rng = np.random.default_rng(seed=2026)
+    # 23 years of monthly data, equity-like distribution.
+    n = 276
+    series = list(rng.normal(0.0072, 0.045, n))
+    # DTB3-like rf — averages ~2% annual.
+    rf_values = list(np.clip(rng.normal(0.0018, 0.0008, n), 0, 0.005))
+    rf_s = pd.Series(
+        rf_values,
+        index=pd.date_range("2002-01-31", periods=n, freq="ME"))
+    s = pd.Series(series)
+    # Backtester's exact formula — what would actually be stored.
+    excess = s.values - rf_s.values
+    sharpe = float(np.mean(excess) / np.std(excess, ddof=1) * np.sqrt(12))
+    payload = _series_payload("STRAT", series, start="2002-01-31")
+    payload["sharpe_ratio"] = sharpe
+    # Also store CAGR + vol the way the backtester does — these are
+    # NOT used by 1b after the hotfix but their presence in the
+    # payload exercises the realistic shape.
+    payload["cagr"] = float((1 + s).prod()) ** (12 / n) - 1
+    payload["volatility"] = float(s.std(ddof=1)) * np.sqrt(12)
+    vios, _ = check_1b_sharpe_consistent_with_components(
+        {"STRAT": payload}, risk_free_rate=rf_s)
+    assert vios == [], (
+        f"1b false positive on backtester-formula Sharpe: {vios}")
 
 
 def test_1c_fires_when_max_dd_less_negative_than_worst_month():
