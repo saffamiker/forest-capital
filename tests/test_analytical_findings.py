@@ -195,10 +195,15 @@ def _sample_payload() -> dict:
 
 
 class TestComputeFindings:
-    def test_produces_eleven_findings(self):
+    def test_produces_twelve_findings(self):
+        """May 31 2026 — the bootstrap-CI-overlap finding was inserted
+        between FACTOR EXPOSURE and MACRO CONTEXT, taking the count
+        from 11 to 12. The surprises rollup remains the LAST finding
+        and aggregates over every prior; tests that index it use
+        findings[-1]."""
         from tools.analytical_findings import compute_findings_from_payload
         findings, _md = compute_findings_from_payload(_sample_payload())
-        assert len(findings) == 11
+        assert len(findings) == 12
 
     def test_every_finding_has_documented_shape(self):
         from tools.analytical_findings import compute_findings_from_payload
@@ -260,15 +265,18 @@ class TestComputeFindings:
         assert ("VOL_TARGETING" in evidence_text
                 or "BENCHMARK" in evidence_text)
 
-    def test_finding_11_aggregates_prior_surprises(self):
+    def test_surprises_rollup_aggregates_prior_findings(self):
         from tools.analytical_findings import compute_findings_from_payload
         findings, _md = compute_findings_from_payload(_sample_payload())
-        f11 = findings[10]
-        assert f11["title"] == "SURPRISES"
+        # Surprises is always the LAST finding — index by -1 rather
+        # than a fixed position so a future insertion doesn't break
+        # this assertion the way it broke the old `findings[10]`.
+        f_last = findings[-1]
+        assert f_last["title"] == "SURPRISES"
         prior_surprises = [f for f in findings[:-1] if f["surprise"]]
         # The Surprises finding must agree with the prior findings.
         if prior_surprises:
-            assert f11["surprise"] is True
+            assert f_last["surprise"] is True
         else:
             assert f11["surprise"] is False
 
@@ -286,17 +294,24 @@ class TestFailOpenPerFinding:
         assert f3["title"] == "TAIL RISK DIVERGENCE"
         assert "Deferred" in f3["finding"]
         assert f3["nugget_strength"] == "LOW"
-        # The other 10 still landed.
-        assert len(findings) == 11
+        # The other 11 still landed (May 31 2026 — bootstrap-CI-overlap
+        # finding bumped the total from 11 to 12).
+        assert len(findings) == 12
 
     def test_missing_macro_digest_returns_deferred(self):
+        """Index MACRO CONTEXT ALIGNMENT by title rather than position
+        so future-finding inserts (e.g. the bootstrap-CI-overlap
+        finding inserted before MACRO on May 31 2026) don't break this
+        assertion."""
         from tools.analytical_findings import compute_findings_from_payload
         payload = _sample_payload()
         payload["macro_digest"] = None
         findings, _md = compute_findings_from_payload(payload)
-        f10 = findings[9]
-        assert f10["title"] == "MACRO CONTEXT ALIGNMENT"
-        assert "Deferred" in f10["finding"]
+        macro = next(
+            (f for f in findings if f["title"] == "MACRO CONTEXT ALIGNMENT"),
+            None)
+        assert macro is not None, "MACRO CONTEXT ALIGNMENT finding missing"
+        assert "Deferred" in macro["finding"]
 
     def test_empty_strategies_returns_deferred_for_dependent_findings(self):
         from tools.analytical_findings import compute_findings_from_payload

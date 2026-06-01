@@ -551,6 +551,29 @@ async def refresh_academic_analytics(data_hash: str) -> None:
             _REGIME_CONDITIONAL_REQUIRED_FIELDS, data_hash,
         )
 
+        # Bootstrap Sharpe CIs — block bootstrap (length 12, 10k
+        # resamples, seed=42) over the same monthly returns the
+        # summary table is built from. Stored as two rows: the
+        # `bootstrap_ci_sharpe` table (point + CI per strategy, no
+        # samples — light payload for the table column) and
+        # `bootstrap_ci_samples` (down-sampled distribution per
+        # strategy for the density-overlap visualisation). Both
+        # carry the same point + CI values so a chart reading from
+        # either reconstructs the same headline figure.
+        bootstrap_table: list[dict] = []
+        bootstrap_samples: list[dict] = []
+        try:
+            bootstrap_table = an.bootstrap_ci_table(
+                strategies, rf=rf, include_samples=False)
+            bootstrap_samples = an.bootstrap_ci_table(
+                strategies, rf=rf, include_samples=True)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "precomputed_bootstrap_ci_compute_failed",
+                data_hash=short_hash, exc_type=type(exc).__name__,
+                error=str(exc),
+            )
+
         payload = {
             "available": True,
             "study_period": {
@@ -559,6 +582,8 @@ async def refresh_academic_analytics(data_hash: str) -> None:
                 "n_months": len(idx),
             },
             "summary_statistics": an.summary_statistics(asset_series, rf),
+            "bootstrap_ci_sharpe":   bootstrap_table,
+            "bootstrap_ci_samples":  bootstrap_samples,
             "cumulative_returns": an.cumulative_returns(strategies),
             "rolling_correlation": an.rolling_correlation(
                 equity, ig, hy, window=12),
