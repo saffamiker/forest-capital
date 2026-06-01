@@ -1,4 +1,50 @@
 services:
+  # ── Automated email system (June 1 2026) ───────────────────────────
+  # Two cron services land the daily digest + drive the morning warm.
+  # Both shell out to the live web service's manual-trigger endpoints
+  # so the same code path serves cron + manual / test invocations.
+  #
+  # Schedule rationale:
+  #   * 0 10 * * * UTC = 06:00 EDT (current US Eastern, May–Nov).
+  #     During EST (Nov–Mar) this fires at 05:00 ET, an hour earlier.
+  #     The team is in EDT through the July 1 deadline, so the
+  #     summer-aligned schedule is correct for the project window.
+  #   * 0 11 * * * UTC = 07:00 EDT (digest fires AFTER the warm so
+  #     the digest always reflects fresh data).
+  #
+  # The crons use $MASTER_API_KEY as a bearer-of-last-resort. The
+  # endpoints they hit are also manage_users-gated for a logged-in
+  # human; the master key is the cron's standing credential.
+  - type: cron
+    name: forest-capital-warm
+    env: docker
+    region: oregon
+    schedule: "0 10 * * *"
+    dockerCommand: >
+      sh -c 'curl --silent --show-error --fail
+      --max-time 600
+      -X POST
+      -H "X-API-Key: $MASTER_API_KEY"
+      https://forest-capital-api.onrender.com/api/v1/admin/warm-analytics-cache'
+    envVars:
+      - key: MASTER_API_KEY
+        sync: false
+
+  - type: cron
+    name: forest-capital-digest
+    env: docker
+    region: oregon
+    schedule: "0 11 * * *"
+    dockerCommand: >
+      sh -c 'curl --silent --show-error --fail
+      --max-time 120
+      -X POST
+      -H "X-API-Key: $MASTER_API_KEY"
+      https://forest-capital-api.onrender.com/api/v1/admin/send-digest'
+    envVars:
+      - key: MASTER_API_KEY
+        sync: false
+
   - type: web
     name: forest-capital-api
     env: python
@@ -37,6 +83,31 @@ services:
       - key: SENDGRID_API_KEY
         sync: false
       - key: SENDGRID_FROM_EMAIL
+        sync: false
+      # ── Resend + automated email system (June 1 2026) ────────────
+      # RESEND_API_KEY is the platform's primary email key — magic
+      # links (auth.py), the daily team digest (Component 1) and
+      # the immediate hard-failure / soft-warning alert
+      # (Component 2) all route through Resend. The SendGrid keys
+      # above are retained for the historical magic-link path and
+      # can be removed once Resend is the only sender on file.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        sync: false
+      # Comma-separated list of full-team digest recipients (Michael,
+      # Bob, Molly). Read by tools.email_resend.digest_recipients().
+      - key: DIGEST_RECIPIENTS
+        sync: false
+      # Single recipient for the immediate invariant-violation alert
+      # (Michael only). Read by tools.email_resend.alert_recipient().
+      - key: ALERT_RECIPIENT
+        sync: false
+      # PAT for the GitHub API the digest uses to enumerate failing
+      # CI on open PRs and synthesize the platform-releases section.
+      # Already set on Render for the commit-activity webhook; this
+      # entry just declares its existence in the manifest.
+      - key: GITHUB_TOKEN
         sync: false
       - key: FRONTEND_URL
         sync: false

@@ -1235,5 +1235,26 @@ def run_all_invariants(
     from datetime import datetime, timezone
     _latest_result = res.to_dict()
     _latest_timestamp = datetime.now(timezone.utc).isoformat()
+    # Stamp the ran_at timestamp on the cached dict too so the alert
+    # assembler can quote it without recomputing.
+    _latest_result["ran_at"] = _latest_timestamp
+
+    # ── Component 2 — immediate invariant alert ─────────────────────
+    # Fires the moment violations are found. Fail-open: a Resend
+    # outage or a missing ALERT_RECIPIENT env var must not raise back
+    # into the runner. Skipped in test env to avoid spamming a real
+    # inbox during pytest (the email_resend helper has its own
+    # dev-env gate, but we also gate at this layer to keep the
+    # invariant tests deterministic).
+    if res.violations:
+        import os as _os
+        if (_os.environ.get("ENVIRONMENT") or "").lower() != "test":
+            try:
+                from tools.email_alert import send_alert
+                send_alert(_latest_result,
+                           warm_aborted=not res.passed)
+            except Exception as alert_exc:  # noqa: BLE001
+                log.warning("invariant_alert_dispatch_failed",
+                            error=str(alert_exc))
 
     return res
