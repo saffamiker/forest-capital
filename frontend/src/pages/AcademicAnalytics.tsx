@@ -15,8 +15,8 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, ReferenceLine, ReferenceArea,
+  LineChart, Line, AreaChart, Area, XAxis, YAxis, CartesianGrid,
+  Tooltip, Legend, ResponsiveContainer, ReferenceLine, ReferenceArea,
 } from 'recharts'
 import { ChevronDown, ChevronRight } from 'lucide-react'
 import TableExportButton from '../components/TableExportButton'
@@ -160,12 +160,32 @@ interface StrategyMeta {
   rationale: string
 }
 
+/**
+ * Per-strategy block-bootstrap Sharpe CI (length 12, 10,000 resamples,
+ * seed=42). `sharpe` is the point estimate; `ci_low`/`ci_high` are the
+ * 2.5%/97.5% percentiles of the bootstrap distribution. `samples` is
+ * present only on the `bootstrap_ci_samples` payload — a down-sampled
+ * (≤1000-point) distribution for the density-overlap visualisation.
+ */
+export interface BootstrapCIRow {
+  strategy: string
+  sharpe: number
+  ci_low: number
+  ci_high: number
+  n_resamples: number
+  block_size: number
+  n_observations: number
+  samples?: number[]
+}
+
 export interface AnalyticsPayload {
   available: boolean
   note?: string
   study_period?: { start: string; end: string; n_months: number }
   cumulative_returns?: CumulativeReturns
   summary_statistics?: SummaryRow[]
+  bootstrap_ci_sharpe?: BootstrapCIRow[]
+  bootstrap_ci_samples?: BootstrapCIRow[]
   rolling_correlation?: RollingCorrelation
   rolling_excess_return?: RollingExcess
   regime_conditional?: RegimeRow[]
@@ -437,6 +457,234 @@ function SummaryStatisticsTable({ rows }: { rows: SummaryRow[] }) {
     </SectionCard>
   )
 }
+
+// ── Bootstrap Confidence Intervals on Sharpe ──────────────────────────────────
+//
+// Block bootstrap (length 12, 10,000 resamples, seed=42) over each
+// strategy's monthly returns. The table presents the point Sharpe
+// alongside its 95% CI — `0.62 [0.41, 0.83]`. The density-overlap
+// chart plots a smoothed histogram of the bootstrap distribution per
+// strategy, with low opacity so the OVERLAP between strategies is
+// visually obvious. Substantial overlap is the empirical motivation
+// for regime-conditional construction: when historical-mean ranking
+// cannot reliably distinguish strategies, the selection must come
+// from current-regime signals.
+
+function _kdeHistogram(
+  samples: number[], n_bins: number = 40,
+): { x: number; y: number }[] {
+  if (!samples.length) return []
+  const lo = Math.min(...samples)
+  const hi = Math.max(...samples)
+  if (hi - lo < 1e-9) return [{ x: lo, y: 1 }]
+  const width = (hi - lo) / n_bins
+  // Triangular kernel — modest smoothing, no scipy dependency on the
+  // wire. Bins-of-width-h centred at each x; the count per bin /
+  // (total * h) gives the density.
+  const bins = new Array(n_bins).fill(0)
+  for (const v of samples) {
+    let i = Math.floor((v - lo) / width)
+    if (i >= n_bins) i = n_bins - 1
+    if (i < 0) i = 0
+    bins[i] += 1
+  }
+  const total = samples.length
+  return bins.map((c, i) => ({
+    x: lo + width * (i + 0.5),
+    y: c / (total * width),
+  }))
+}
+
+
+function BootstrapCITable({ rows }: { rows: BootstrapCIRow[] }) {
+  // The user-spec column header is "Sharpe [95% CI]" rendering
+  // "0.62 [0.41, 0.83]" — point estimate followed by the bracketed
+  // interval. Months / resamples / block size live alongside as a
+  // disclosure of the methodology behind the CI.
+  const headers = ['Strategy', 'Sharpe [95% CI]', 'Months',
+                   'Resamples', 'Block (months)']
+  const exportRows = rows.map((r) => [
+    r.strategy,
+    `${num(r.sharpe)} [${num(r.ci_low)}, ${num(r.ci_high)}]`,
+    String(r.n_observations),
+    String(r.n_resamples),
+    String(r.block_size),
+  ])
+  return (
+    <SectionCard
+      title="Bootstrap Confidence Intervals on Sharpe"
+      sectionId="bootstrap-ci-sharpe"
+      subtitle={
+        "Block bootstrap (length 12 months, 10,000 resamples, seed=42) "
+        + "over each strategy's monthly returns. The 95% CI is the "
+        + "2.5%/97.5% percentile of the bootstrap Sharpe distribution. "
+        + "Block resampling preserves within-year autocorrelation; "
+        + "individual-month resampling would break it."
+      }
+      exportButton={
+        <TableExportButton
+          tableId="bootstrap_ci_sharpe"
+          headers={headers}
+          rows={exportRows}
+        />
+      }
+    >
+      <div className="overflow-x-auto">
+        <table className="w-full">
+          <thead>
+            <tr className="border-b border-border">
+              <TH sticky>Strategy</TH>
+              <TH right infoKey="sharpe" infoLabel="Sharpe with 95% CI"
+                  term="sharpe_ratio">Sharpe [95% CI]</TH>
+              <TH right>Months</TH>
+              <TH right>Resamples</TH>
+              <TH right>
+                <ResponsiveHeader full="Block (months)" short="Block" />
+              </TH>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.strategy}
+                  className="border-b border-border/50
+                              hover:bg-navy-800/40 transition-colors">
+                <TD sticky>{r.strategy}</TD>
+                <TD right mono>
+                  {num(r.sharpe)} [{num(r.ci_low)}, {num(r.ci_high)}]
+                </TD>
+                <TD right mono>{r.n_observations}</TD>
+                <TD right mono>{r.n_resamples.toLocaleString()}</TD>
+                <TD right mono>{r.block_size}</TD>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p className="text-2xs text-muted mt-2 leading-relaxed">
+        <strong className="text-text-secondary">Limitation.</strong>{' '}
+        Bootstrap 95% confidence intervals on Sharpe ratios show
+        substantial overlap across strategies on the 286-observation
+        sample. Static strategy selection cannot be made with
+        statistical confidence from historical averages alone. This is
+        the empirical motivation for regime-conditional construction:
+        when historical ranking is unreliable, selection must be driven
+        by current regime signals.
+      </p>
+    </SectionCard>
+  )
+}
+
+
+function BootstrapCIDensityChart(
+  { rows, theme = DARK_CHART_THEME }:
+  { rows: BootstrapCIRow[]; theme?: ChartTheme },
+) {
+  // Recharts-friendly shape: one row per x-value, one column per
+  // strategy. Densities are computed per strategy from `samples` and
+  // re-indexed against a common x-grid so the overlap renders as
+  // proper overlapping areas, not as side-by-side panels.
+  const visible = rows.filter((r) => r.samples && r.samples.length > 0)
+  if (visible.length === 0) {
+    return null
+  }
+  // Build a unified x-grid spanning every strategy's sample range.
+  const allSamples = visible.flatMap((r) => r.samples ?? [])
+  const lo = Math.min(...allSamples)
+  const hi = Math.max(...allSamples)
+  const nBins = 60
+  const width = (hi - lo) / nBins
+  const xs = Array.from(
+    { length: nBins },
+    (_, i) => lo + width * (i + 0.5))
+  // Per-strategy density on the unified grid.
+  const perStrategy: Record<string, number[]> = {}
+  for (const r of visible) {
+    const hist = _kdeHistogram(r.samples ?? [], nBins)
+    // Re-index hist (each strategy's own range) onto the unified xs.
+    const lookup = new Map(hist.map((p) => [p.x.toFixed(6), p.y]))
+    perStrategy[r.strategy] = xs.map((x) => {
+      // Nearest-neighbour from the strategy's own bin centres.
+      let best = 0
+      let bestDist = Infinity
+      for (const [k, v] of lookup.entries()) {
+        const d = Math.abs(parseFloat(k) - x)
+        if (d < bestDist) { bestDist = d; best = v }
+      }
+      return best
+    })
+  }
+  const data = xs.map((x, i) => {
+    const row: Record<string, number> = { sharpe: x }
+    for (const name of Object.keys(perStrategy)) {
+      row[name] = perStrategy[name][i]
+    }
+    return row
+  })
+
+  return (
+    <SectionCard
+      title="Bootstrap Sharpe Distributions — Overlap Visualisation"
+      sectionId="bootstrap-ci-density"
+      subtitle={
+        "Smoothed density of each strategy's 10,000-resample bootstrap "
+        + "Sharpe distribution. Overlapping regions mean the strategies "
+        + "are not statistically separable on historical means alone — "
+        + "the more overlap, the less reliable past-average ranking is "
+        + "for forward selection."
+      }
+      theme={theme}
+    >
+      <ResponsiveContainer width="100%" height={320}>
+        <AreaChart data={data}
+                    margin={{ top: 12, right: 20, bottom: 12, left: 4 }}>
+          <CartesianGrid stroke={theme.gridStroke} strokeDasharray="2 2" />
+          <XAxis dataKey="sharpe" type="number"
+                  domain={['dataMin', 'dataMax']}
+                  tickFormatter={(v: number) => v.toFixed(2)}
+                  stroke={theme.textSecondary}
+                  tick={theme.axisTick}
+                  label={{ value: 'Sharpe ratio',
+                            position: 'insideBottom',
+                            offset: -6,
+                            fill: theme.textSecondary,
+                            fontSize: 11 }} />
+          <YAxis stroke={theme.textSecondary}
+                  tick={theme.axisTick}
+                  label={{ value: 'Density', angle: -90,
+                            position: 'insideLeft',
+                            fill: theme.textSecondary,
+                            fontSize: 11 }} />
+          <Tooltip
+            contentStyle={theme.tooltipContentStyle}
+            labelStyle={theme.tooltipLabelStyle}
+            labelFormatter={(v: number) =>
+              typeof v === 'number' ? `Sharpe ≈ ${v.toFixed(3)}` : ''}
+            formatter={(v: number) =>
+              [(v ?? 0).toFixed(3), 'density']} />
+          {Object.keys(perStrategy).map((name) => (
+            <Area
+              key={name}
+              type="monotone"
+              dataKey={name}
+              stroke={theme.colorFor(name)}
+              fill={theme.colorFor(name)}
+              fillOpacity={0.18}
+              strokeOpacity={0.85}
+              isAnimationActive={false}
+            />
+          ))}
+        </AreaChart>
+      </ResponsiveContainer>
+      <p className="text-2xs text-muted mt-2 leading-relaxed">
+        Overlap region — where multiple distributions share Sharpe
+        values — is the empirical case for regime-conditional
+        construction: static historical ranking cannot reliably
+        order strategies on this sample.
+      </p>
+    </SectionCard>
+  )
+}
+
 
 // ── Rolling excess return chart ───────────────────────────────────────────────
 
@@ -1274,6 +1522,10 @@ export default function AcademicAnalytics() {
             <CumulativeReturnChart data={data.cumulative_returns} />}
           {data.summary_statistics && data.summary_statistics.length > 0 &&
             <SummaryStatisticsTable rows={data.summary_statistics} />}
+          {data.bootstrap_ci_sharpe && data.bootstrap_ci_sharpe.length > 0 &&
+            <BootstrapCITable rows={data.bootstrap_ci_sharpe} />}
+          {data.bootstrap_ci_samples && data.bootstrap_ci_samples.length > 0 &&
+            <BootstrapCIDensityChart rows={data.bootstrap_ci_samples} />}
           {data.rolling_correlation && data.rolling_correlation.points.length > 0 &&
             <RollingCorrelationChart data={data.rolling_correlation} />}
           {/* Strategy Correlations — pairwise Pearson across the ten

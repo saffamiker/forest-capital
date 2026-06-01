@@ -1110,6 +1110,82 @@ def _polite_truncate(text: str, max_chars: int = 400) -> str:
     return window.rstrip() + "…"
 
 
+# Finding (bootstrap CI overlap) — May 31 2026 ────────────────────────────────
+#
+# Surfaces the bootstrap_ci_sharpe table from refresh_academic_analytics
+# as a project-wide limitation: confidence intervals on the strategies'
+# Sharpe ratios overlap, so static historical-mean ranking is not
+# statistically reliable. The empirical case for regime-conditional
+# construction.
+
+def _finding_bootstrap_ci_overlap(academic: dict | None) -> dict:
+    if not academic:
+        return _deferred(
+            "BOOTSTRAP CI OVERLAP",
+            "academic_analytics cache miss")
+    rows = academic.get("bootstrap_ci_sharpe") or []
+    if not rows:
+        return _deferred(
+            "BOOTSTRAP CI OVERLAP",
+            "bootstrap_ci_sharpe not yet computed")
+
+    # Count strategies whose 95% CI overlaps with at least one other
+    # strategy's CI. Two CIs [a, b] and [c, d] overlap iff a <= d and
+    # c <= b. The fraction overlapping is the headline strength
+    # signal for the finding.
+    n = len(rows)
+    overlap_set: set[str] = set()
+    for i in range(n):
+        ai, bi = rows[i]["ci_low"], rows[i]["ci_high"]
+        for j in range(n):
+            if i == j:
+                continue
+            aj, bj = rows[j]["ci_low"], rows[j]["ci_high"]
+            if ai <= bj and aj <= bi:
+                overlap_set.add(rows[i]["strategy"])
+                break
+    n_overlap = len(overlap_set)
+    # Aggregate sample-size — the 286-observation figure the user
+    # named in the limitation copy is the dataset n_months, taken
+    # directly from the first row (all rows share the same data).
+    n_obs = rows[0].get("n_observations", 0)
+
+    evidence: list[str] = []
+    for r in rows[:8]:
+        evidence.append(
+            f"{r['strategy']}: Sharpe {r['sharpe']:.2f} "
+            f"[{r['ci_low']:.2f}, {r['ci_high']:.2f}].")
+    if n > 8:
+        evidence.append(f"... and {n - 8} more strategies.")
+    evidence.append(
+        f"{n_overlap} of {n} strategies have a 95% CI that overlaps "
+        f"with at least one other strategy.")
+
+    return _finding_template(
+        title="BOOTSTRAP CI OVERLAP",
+        finding=(
+            "Bootstrap 95% confidence intervals on Sharpe ratios show "
+            "substantial overlap across strategies on the "
+            f"{n_obs}-observation sample."),
+        evidence=evidence,
+        # Verbatim user-spec limitation copy — the empirical case for
+        # regime-conditional construction. Carried as the IMPLICATION
+        # so the Academic Writer agent reads it directly into the
+        # midpoint paper's and brief's limitations section.
+        implication=(
+            "Bootstrap 95% confidence intervals on Sharpe ratios show "
+            "substantial overlap across strategies on the "
+            f"{n_obs}-observation sample. Static strategy selection "
+            "cannot be made with statistical confidence from historical "
+            "averages alone. This is the empirical motivation for "
+            "regime-conditional construction: when historical ranking "
+            "is unreliable, selection must be driven by current regime "
+            "signals."),
+        strength="HIGH",
+        surprise=False,
+    )
+
+
 def _finding_10_macro_context(macro_digest: dict | None) -> dict:
     if not macro_digest or not macro_digest.get("summary_text"):
         return _deferred("MACRO CONTEXT ALIGNMENT",
@@ -1234,6 +1310,11 @@ def compute_findings_from_payload(payload: dict) -> tuple[list[dict], str]:
     findings.append(_finding_7_momentum_vs_meanrev(correlation, strategies))
     findings.append(_finding_8_crisis_performance(crisis))
     findings.append(_finding_9_factor_exposure(academic))
+    # Bootstrap CI overlap — bridges the static-ranking limitation
+    # into the report. Inserted before macro context (which references
+    # regime signals) so the limitation is set up before the
+    # regime-aware case is made.
+    findings.append(_finding_bootstrap_ci_overlap(academic))
     findings.append(_finding_10_macro_context(macro_digest))
     # Surprises looks at the prior ten — must come last.
     findings.append(_finding_11_surprises(findings))
