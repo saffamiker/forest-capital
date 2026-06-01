@@ -276,6 +276,26 @@ export default function PerformanceRecord() {
       )}
 
       {/* ── Risk-adjusted summary banner ──────────────────────────── */}
+      {/*
+        Two figures coexist by design:
+
+          ACADEMIC SUBMISSION  (Dec 2025 data lock — frozen). The
+            figures Bob and Molly defend in the cohort peer review
+            (June 3) and on the July 1 panel. These are NEVER
+            replaced by the live figures in the executive brief or
+            the final presentation — the locked dataset is the
+            submitted record.
+          LIVE PERFORMANCE  (extends through the most recent month
+            available). Shown alongside so the platform reflects
+            ongoing reality without overwriting the submitted
+            record. Use in conversation, not in deliverables.
+
+        The user's directive (May 31 2026): "Do not replace the
+        academic figures with live figures anywhere in the
+        presentation or executive brief." This panel is the only
+        place both are surfaced; every other place that quotes
+        these figures continues to use the academic submission.
+      */}
       <section className="bg-navy-800 rounded-lg p-5">
         <div className="flex items-center gap-1.5 mb-3">
           <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">
@@ -283,6 +303,17 @@ export default function PerformanceRecord() {
           </h2>
           <InfoIcon tooltipKey="council_record_sharpe"
                     metricLabel="Post-2022 Sharpe ratio" size="md" />
+        </div>
+
+        {/* Row 1 — academic submission (locked Dec 2025). */}
+        <div className="mb-2 flex items-center gap-2">
+          <div className="text-2xs font-semibold text-amber-300
+                          uppercase tracking-wide">
+            Academic Submission
+          </div>
+          <div className="text-2xs text-slate-400">
+            (locked December 2025 — defended Jun 3 + Jul 1)
+          </div>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <div className="bg-navy-900 rounded-lg p-4">
@@ -310,10 +341,61 @@ export default function PerformanceRecord() {
             </div>
           </div>
         </div>
+
+        {/* Row 2 — live figure (extends through the most recent
+            month). Visually distinguished by a sky-blue tag and a
+            dashed border so a reader cannot mistake one for the
+            other at a glance. */}
+        <div className="mt-5 mb-2 flex items-center gap-2">
+          <div className="text-2xs font-semibold text-sky-300
+                          uppercase tracking-wide">
+            Live Figure
+          </div>
+          <div className="text-2xs text-slate-400">
+            (through most recent month — includes Jan–May 2026; for
+            discussion only, not for submissions)
+          </div>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div className="bg-navy-900/60 border border-dashed
+                          border-sky-500/30 rounded-lg p-4">
+            <div className="text-2xs text-slate-400 uppercase tracking-wide">
+              Blend (Post-2022 Sharpe)
+            </div>
+            <div className="text-3xl font-bold text-sky-300 mt-1">1.24</div>
+          </div>
+          <div className="bg-navy-900/60 border border-dashed
+                          border-sky-500/30 rounded-lg p-4">
+            <div className="text-2xs text-slate-400 uppercase tracking-wide">
+              S&amp;P 500 Benchmark
+            </div>
+            <div className="text-3xl font-bold text-rose-300 mt-1">0.73</div>
+            <div className="text-2xs text-slate-500 mt-0.5">
+              Out-of-sample through today
+            </div>
+          </div>
+          <div className="bg-navy-900/60 border border-dashed
+                          border-sky-500/30 rounded-lg p-4">
+            <div className="text-2xs text-slate-400 uppercase tracking-wide">
+              Risk-Adjusted Advantage
+            </div>
+            <div className="text-3xl font-bold text-emerald-300 mt-1">+70%</div>
+            <div className="text-2xs text-slate-500 mt-0.5">
+              Sharpe ratio vs benchmark
+            </div>
+          </div>
+        </div>
+
         <p className="text-2xs text-slate-400 mt-3 leading-relaxed">
-          Regime-conditional allocation outperforms on a risk-adjusted basis
-          across the 40-month post-2022 out-of-sample period. Outperformance is
-          driven by systematic regime weighting, not shock prediction.
+          Regime-conditional allocation outperforms on a risk-adjusted
+          basis across the 40-month post-2022 out-of-sample period.
+          Outperformance is driven by systematic regime weighting,
+          not shock prediction. The submitted figures are the
+          December 2025 data lock; the live figures are shown
+          alongside so the platform reflects ongoing performance, but
+          are <strong className="text-slate-300">not used in the
+          executive brief or final presentation</strong> — the
+          academic submission stands as the record.
         </p>
       </section>
 
