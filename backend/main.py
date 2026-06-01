@@ -3176,6 +3176,41 @@ async def get_admin_invariants(session: dict = Depends(require_auth)):
     return {"available": True, **latest}
 
 
+# ── Automated email system — manual triggers (June 1 2026) ────────────────
+
+
+@app.post("/api/v1/admin/send-digest")
+@limiter.limit("6/hour")
+async def admin_send_digest(
+    request: Request,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Component 1 — daily team digest manual trigger. Also called by
+    the Render cron `forest-capital-digest` at 07:00 ET. Returns the
+    Resend message id on success.
+
+    Synchronous send: the assembly + Resend round-trip take a few
+    seconds, well inside the request budget — no need for a job
+    handle. Rate-limited to 6/hour so a sysadmin testing the digest
+    cannot accidentally spam the team."""
+    from tools.email_digest import send_daily_digest
+    return await send_daily_digest()
+
+
+@app.post("/api/v1/admin/test-alert")
+@limiter.limit("6/hour")
+async def admin_test_alert(
+    request: Request,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Component 2 — synthetic invariant alert (Michael only).
+    Fires the alert email using a hand-built violations payload so
+    the wire format + Resend round-trip can be exercised without
+    waiting for a real invariant breach. Rate-limited 6/hour."""
+    from tools.email_alert import send_test_alert
+    return send_test_alert()
+
+
 @app.get("/api/v1/admin/team-activity/merge-commit-authors")
 async def get_merge_commit_authors_diagnostic(
     session: dict = Depends(require_sysadmin),
