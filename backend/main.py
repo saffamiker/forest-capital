@@ -3176,6 +3176,73 @@ async def get_admin_invariants(session: dict = Depends(require_auth)):
     return {"available": True, **latest}
 
 
+@app.get("/api/v1/admin/invariants/history")
+async def get_admin_invariants_history(
+    limit: int = 7,
+    session: dict = Depends(require_auth),
+):
+    """June 2 2026 — last-N invariant verdicts for the /admin/health
+    Cache Warm History section.
+
+    Pure read of the rows PR #252 (set_strategy_cache_invariant_persist)
+    writes to analytics_metrics_cache with metric_kind='invariant_
+    summary'. One row per distinct data_hash, upserted with a fresh
+    computed_at on each warm against the same hash — so the result is
+    effectively "one row per distinct dataset that was warmed, most-
+    recent verdict per dataset."
+
+    No recomputation, no fan-out — a single SELECT plus a JSON
+    projection. Auth-only (not sysadmin) so any team member can read
+    the warm-history strip from the admin panel.
+
+    Fail-open: a DB read failure renders {available: false, rows: []}
+    rather than 500, matching the convention every other admin
+    health endpoint follows."""
+    limit = max(1, min(int(limit or 7), 30))
+    if ENVIRONMENT == "test":
+        return {"available": False, "rows": []}
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return {"available": False, "rows": []}
+        rows: list[dict[str, Any]] = []
+        async with AsyncSessionLocal() as db:
+            r = await db.execute(text(
+                "SELECT data_hash, payload, computed_at "
+                "FROM analytics_metrics_cache "
+                "WHERE metric_kind = 'invariant_summary' "
+                "ORDER BY computed_at DESC "
+                "LIMIT :n"), {"n": limit})
+            for data_hash, payload, computed_at in r.fetchall():
+                # payload is JSONB; SQLAlchemy returns it as dict already
+                # under asyncpg, but tolerate a string fallback (some
+                # SQLAlchemy versions / drivers serialize differently).
+                if isinstance(payload, str):
+                    try:
+                        import json as _json
+                        payload = _json.loads(payload)
+                    except Exception:  # noqa: BLE001
+                        payload = {}
+                payload = payload or {}
+                rows.append({
+                    "computed_at":   (computed_at.isoformat()
+                                      if hasattr(computed_at, "isoformat")
+                                      else str(computed_at)),
+                    "data_hash":     (data_hash or "")[:8],
+                    "passed":        bool(payload.get("passed", True)),
+                    "checks_run":    int(payload.get("checks_run", 0)),
+                    "hard_failures": int(payload.get("hard_failures", 0)),
+                    "soft_warnings": int(payload.get("soft_warnings", 0)),
+                    "ran_at":        payload.get("ran_at"),
+                })
+        return {"available": True, "rows": rows}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("admin_invariants_history_read_failed",
+                    error=str(exc))
+        return {"available": False, "rows": []}
+
+
 # ── Automated email system — manual triggers (June 1 2026) ────────────────
 
 

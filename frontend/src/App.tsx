@@ -13,6 +13,7 @@ import Analytics from './pages/Analytics'
 import PerformanceRecord from './pages/PerformanceRecord'
 import Reports from './pages/Reports'
 import Settings from './pages/Settings'
+import AdminHealth from './pages/AdminHealth'
 
 // Lazy-load the heavy editor + secondary analytics pages — they
 // carry the Konva canvas, the TipTap RichTextEditor, and the
@@ -319,6 +320,7 @@ export default function App() {
                   } />
                 <Route path="reports" element={<Reports />} />
                 <Route path="settings" element={<Settings />} />
+                <Route path="admin/health" element={<AdminHealth />} />
                 <Route path="reports/writer"
                   element={
                     <Suspense fallback={<_PageLoadingFallback />}>
