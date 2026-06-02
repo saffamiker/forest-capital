@@ -19,7 +19,7 @@ from typing import Any
 
 import structlog
 
-from tools.email_resend import alert_recipient, send_email
+from tools.email_resend import ALERT_FROM, alert_recipient, send_email
 
 log = structlog.get_logger(__name__)
 
@@ -231,7 +231,8 @@ def send_alert(
         return {"sent": False, "reason": "ALERT_RECIPIENT unset"}
     msg_id = send_email(
         to=to, subject=subject, html=html, text=text,
-        tag=("invariant-test-alert" if is_test else "invariant-alert"))
+        tag=("invariant-test-alert" if is_test else "invariant-alert"),
+        sender=ALERT_FROM)
     return {
         "sent":       msg_id is not None,
         "message_id": msg_id,

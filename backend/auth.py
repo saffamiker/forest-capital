@@ -391,7 +391,7 @@ async def send_magic_link(email: str, token: str) -> None:
         # AttributeError at import time.
         resend.api_key = os.environ.get("RESEND_API_KEY")
         params: dict = {
-            "from": os.environ.get("RESEND_FROM_EMAIL", "noreply@analyticsdesk.app"),
+            "from": os.environ.get("RESEND_FROM_EMAIL", "digest@analyticsdesk.app"),
             "to": [email],
             "subject": subject,
             "html": html,
@@ -550,7 +550,7 @@ async def send_welcome_email(
 
         resend.api_key = os.environ.get("RESEND_API_KEY")
         params: dict = {
-            "from": os.environ.get("RESEND_FROM_EMAIL", "noreply@analyticsdesk.app"),
+            "from": os.environ.get("RESEND_FROM_EMAIL", "digest@analyticsdesk.app"),
             "to": [email],
             "subject": subject,
             # Welcome email is plain text — Resend accepts `text` as the
