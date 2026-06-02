@@ -52,6 +52,7 @@ SESSION_HEADERS = {"X-API-Key": generate_session_token(TEAM_EMAIL)}
 MIDPOINT = "/api/v1/export/midpoint-paper"
 BRIEF = "/api/v1/export/executive-brief"
 DECK = "/api/v1/export/presentation-deck"
+APPENDIX = "/api/v1/export/analytical-appendix"
 
 _DOCX_CT = "wordprocessingml"
 _PPTX_CT = "presentationml"
@@ -238,8 +239,97 @@ class TestDocumentGenerationContract:
         for s in prs.slides:
             assert s.notes_slide.notes_text_frame.text.strip()
 
-    def test_all_three_require_authentication(self):
-        for endpoint in (MIDPOINT, BRIEF, DECK):
+    def test_analytical_appendix_returns_202_job(self):
+        resp = client.post(APPENDIX, headers=SESSION_HEADERS)
+        assert resp.status_code == 202
+        assert resp.json()["status"] == "pending"
+        assert resp.json()["job_id"]
+
+    def test_analytical_appendix_document_has_eight_sections(self):
+        """The appendix must carry every one of the eight sections
+        regardless of cache state — a cold deploy renders the same
+        document shell with [DATA PENDING] markers in place of live
+        figures, so every section heading appears verbatim."""
+        import main
+        docx_bytes, filename, media, _draft = _run(
+            main._generate_appendix_document(TEAM_EMAIL))
+        assert _DOCX_CT in media
+        assert filename.endswith(".docx")
+        assert "analytical-appendix" in filename
+        text = _docx_text(docx_bytes)
+        section_headings = [
+            "A. Data and Methodology",
+            "B. Full Strategy Performance",
+            "C. Statistical Tests",
+            "D. Bootstrap Confidence Intervals",
+            "E. Factor Loadings",
+            "F. Crisis Window Performance",
+            "G. Transaction Cost Sensitivity",
+            "H. Validation Audit Summary",
+        ]
+        for h in section_headings:
+            assert h in text, f"missing section heading: {h}"
+        # And the section order is preserved A → H.
+        idx = [text.index(h) for h in section_headings]
+        assert idx == sorted(idx), (
+            f"section headings out of order: {idx}")
+        assert "AI DRAFT" in text                # mandatory banner
+        assert "Submission Checklist" in text    # CAVEAT 5
+
+    def test_analytical_appendix_carries_reproducibility_line(self):
+        """The Reproducibility line must surface the data hash + the
+        generation timestamp. In the test env the cache is cold so the
+        hash renders as [DATA PENDING]; the heading and the
+        explanatory copy are still present."""
+        import main
+        docx_bytes, *_ = _run(
+            main._generate_appendix_document(TEAM_EMAIL))
+        text = _docx_text(docx_bytes)
+        assert "Reproducibility" in text
+        assert "Data hash:" in text
+        assert "Generated at:" in text
+        # The cache traceability sentence — the part of the line that
+        # actually explains what the hash anchors.
+        assert "strategy_results_cache" in text
+
+    def test_analytical_appendix_renders_data_hash_when_supplied(self):
+        """Build the document directly to confirm a supplied data hash
+        appears verbatim. The endpoint reads the hash from the cache;
+        the builder renders whatever it is given."""
+        from tools.academic_docx import build_analytical_appendix
+        narratives = {
+            f"appendix_{ltr}": f"Intro for section {ltr.upper()}."
+            for ltr in "abcdefgh"
+        }
+        data = {
+            "summary_statistics": [],
+            "strategy_results": {},
+            "bootstrap_ci_sharpe": [],
+            "factor_loadings": [],
+            "crisis_performance": None,
+            "cost_sensitivity": None,
+            "invariant_summary": None,
+            "audit_disclosures": None,
+            "data_hash": "deadbeef12345678",
+        }
+        docx_bytes = build_analytical_appendix(data, narratives)
+        text = _docx_text(docx_bytes)
+        assert "deadbeef12345678" in text
+
+    def test_analytical_appendix_creates_editor_draft_or_falls_open(self):
+        """The endpoint creates an editor_drafts row alongside the
+        .docx so the document opens in the in-platform editor. In the
+        test env with no live DB the create_draft call fails open and
+        the helper returns draft_id=None — the file is still produced.
+        Either outcome (an integer id or None) is acceptable; what is
+        NOT acceptable is the helper raising."""
+        import main
+        _bytes, _name, _media, draft_id = _run(
+            main._generate_appendix_document(TEAM_EMAIL))
+        assert draft_id is None or isinstance(draft_id, int)
+
+    def test_all_four_require_authentication(self):
+        for endpoint in (MIDPOINT, BRIEF, DECK, APPENDIX):
             assert client.post(endpoint).status_code == 401
 
 

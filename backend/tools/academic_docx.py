@@ -38,8 +38,10 @@ from docx.shared import Inches, Pt, RGBColor
 _VERIFY_RE = re.compile(r"(\[\[VERIFY.*?\]\])")
 
 from tools.academic_export import (
-    table_drawdown, table_factor_loadings, table_regime_conditional,
-    table_summary_statistics,
+    table_bootstrap_ci, table_cost_sensitivity, table_crisis_performance,
+    table_drawdown, table_factor_loadings, table_invariant_summary,
+    table_regime_conditional, table_statistical_tests,
+    table_strategy_performance_full, table_summary_statistics,
 )
 
 _BODY_FONT = "Times New Roman"
@@ -676,6 +678,181 @@ def build_editor_docx(draft: dict[str, Any]) -> bytes:
                         or "[DATA PENDING] — the draft is empty.").strip())
 
     _add_submission_checklist(doc)
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+# ── Analytical Appendix (June 2 2026) ─────────────────────────────────────────
+
+# The Analytical Appendix is the project's evidentiary record — the data
+# that backs every claim in the executive brief and the panel
+# presentation. It is intentionally table-heavy and rhetorically minimal:
+# each section opens with a short Academic Writer-generated paragraph
+# explaining what the data shows, then the data itself in an APA-style
+# table. The eight sections (A through H) map one-to-one to the eight
+# cache reads in tools.academic_export.gather_analytical_appendix_data.
+#
+# Pure assembly — no LLM calls or database reads inside this function.
+# The endpoint in main.py gathers the data and generates the narratives,
+# then hands both to build_analytical_appendix.
+
+
+_APPENDIX_SECTION_TITLES = [
+    "A. Data and Methodology",
+    "B. Full Strategy Performance",
+    "C. Statistical Tests",
+    "D. Bootstrap Confidence Intervals",
+    "E. Factor Loadings",
+    "F. Crisis Window Performance",
+    "G. Transaction Cost Sensitivity",
+    "H. Validation Audit Summary",
+]
+
+
+def _appendix_section_keys() -> list[str]:
+    """The narratives dict key for each appendix section. One key per
+    section letter — the endpoint generates one paragraph per key,
+    and the builder renders it under the matching heading."""
+    return ["appendix_a", "appendix_b", "appendix_c", "appendix_d",
+            "appendix_e", "appendix_f", "appendix_g", "appendix_h"]
+
+
+def _add_reproducibility_line(doc: Document, data_hash: str | None) -> None:
+    """The footer line carrying the data hash + generation timestamp.
+
+    The hash anchors every figure in the appendix to a specific
+    strategy_results_cache row. A reader investigating a number can
+    look the row up by hash and reconstruct the analytics on top of
+    it. Renders at the END of the appendix body (above the submission
+    checklist) so the trailing structure is: tables → reproducibility
+    line → audit disclosure → checklist."""
+    _add_heading(doc, "Reproducibility")
+    hash_display = (data_hash if data_hash else "[DATA PENDING]")
+    body = (
+        f"Data hash: {hash_display}\n"
+        f"Generated at: "
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}\n"
+        "Every figure in this appendix traces to the strategy_results_cache "
+        "row identified by the hash above. The same hash on the analytics "
+        "metric rows confirms the bootstrap CIs, factor loadings, crisis "
+        "performance, and transaction-cost sensitivity were computed from "
+        "the same underlying data as the strategy table."
+    )
+    _add_body(doc, body)
+
+
+def build_analytical_appendix(
+    data: dict[str, Any], narratives: dict[str, str],
+) -> bytes:
+    """
+    The Analytical Appendix — the evidentiary record behind every
+    claim in the executive brief and the panel presentation. Eight
+    sections, each opening with a short Academic Writer paragraph
+    then the data in an APA-style table:
+
+      A. Data and Methodology          — study_period + summary_statistics
+      B. Full Strategy Performance     — strategy_results_cache
+      C. Statistical Tests             — strategy_results_cache (p-values)
+      D. Bootstrap Confidence Intervals — academic_analytics metric
+      E. Factor Loadings               — academic_analytics metric (Carhart)
+      F. Crisis Window Performance     — crisis_performance metric
+      G. Transaction Cost Sensitivity  — oos_cost_sensitivity metric
+      H. Validation Audit Summary      — invariant_summary metric +
+                                         audit_disclosures bundle
+
+    Trailing structure: Reproducibility line (data_hash + timestamp),
+    Audit Disclosure Appendix (statistical audit + methodology QA +
+    intentional overrides — the same renderer the brief uses), and
+    the standard Submission Checklist.
+
+    Pure assembly. No LLM calls. No database reads.
+    """
+    doc = _new_document()
+
+    # ── Title page ────────────────────────────────────────────────────────
+    for _ in range(3):
+        doc.add_paragraph()
+    _add_title_lines(doc, [
+        "Asset Allocation Strategies and Risk-Adjusted Performance",
+    ], big_first=True)
+    doc.add_paragraph()
+    _add_title_lines(doc, [
+        "Analytical Appendix",
+        "FNA 670 — Summer 2026",
+        "Forest Capital / McColl School of Business",
+        date.today().strftime("%B %d, %Y"),
+    ])
+    _ai_draft_notice(doc)
+    _timestamp_line(doc)
+    _add_review_warning_box(doc)
+    doc.add_page_break()
+
+    # ── Section A — Data and Methodology ──────────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[0])
+    _add_body(doc, narratives.get("appendix_a", "[DATA PENDING]"))
+    h, r = table_summary_statistics(data.get("summary_statistics", []))
+    _add_table(doc, "Table A1. Summary Statistics by Asset Class", h, r)
+
+    # ── Section B — Full Strategy Performance ─────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[1])
+    _add_body(doc, narratives.get("appendix_b", "[DATA PENDING]"))
+    h, r = table_strategy_performance_full(
+        data.get("strategy_results") or {})
+    _add_table(doc, "Table B1. Full-Period Performance by Strategy "
+                    "(sorted by Sharpe)", h, r)
+
+    # ── Section C — Statistical Tests ─────────────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[2])
+    _add_body(doc, narratives.get("appendix_c", "[DATA PENDING]"))
+    h, r = table_statistical_tests(data.get("strategy_results") or {})
+    _add_table(doc, "Table C1. Statistical Tests by Strategy "
+                    "(paired-t, FDR-corrected, DSR, PSR, SPA)", h, r)
+
+    # ── Section D — Bootstrap Confidence Intervals ────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[3])
+    _add_body(doc, narratives.get("appendix_d", "[DATA PENDING]"))
+    h, r = table_bootstrap_ci(data.get("bootstrap_ci_sharpe") or [])
+    _add_table(doc, "Table D1. Sharpe Ratio with 95% Bootstrap CI "
+                    "(block bootstrap, length 12, 10,000 resamples)", h, r)
+
+    # ── Section E — Factor Loadings ───────────────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[4])
+    _add_body(doc, narratives.get("appendix_e", "[DATA PENDING]"))
+    h, r = table_factor_loadings(data.get("factor_loadings", []))
+    _add_table(doc, "Table E1. Carhart Four-Factor Loadings by Strategy "
+                    "(* significant at p < .05)", h, r)
+
+    # ── Section F — Crisis Window Performance ─────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[5])
+    _add_body(doc, narratives.get("appendix_f", "[DATA PENDING]"))
+    h, r = table_crisis_performance(data.get("crisis_performance"))
+    _add_table(doc, "Table F1. Cumulative Return by Strategy and "
+                    "Crisis Window († indicates partial-overlap)", h, r)
+
+    # ── Section G — Transaction Cost Sensitivity ──────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[6])
+    _add_body(doc, narratives.get("appendix_g", "[DATA PENDING]"))
+    h, r = table_cost_sensitivity(data.get("cost_sensitivity"))
+    _add_table(doc, "Table G1. Net-of-Cost Sharpe at 10/15/20 bps "
+                    "per Material Rebalance (OOS Window)", h, r)
+
+    # ── Section H — Validation Audit Summary ──────────────────────────────
+    _add_heading(doc, _APPENDIX_SECTION_TITLES[7])
+    _add_body(doc, narratives.get("appendix_h", "[DATA PENDING]"))
+    h, r = table_invariant_summary(data.get("invariant_summary"))
+    _add_table(doc, "Table H1. Latest Warm Invariant Verdict "
+                    "(deterministic detection only — see "
+                    "docs/INVARIANTS.md)", h, r)
+
+    # ── Reproducibility footer line ───────────────────────────────────────
+    _add_reproducibility_line(doc, data.get("data_hash"))
+
+    # ── Audit Disclosure Appendix (reuses the brief renderer) ─────────────
+    _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
+
+    _add_submission_checklist(doc)
+
     buf = BytesIO()
     doc.save(buf)
     return buf.getvalue()
