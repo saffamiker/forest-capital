@@ -271,3 +271,155 @@ def test_status_method_reports_queue_counts(cfg):
     assert counts["pending"] == 3
     assert counts["running"] == 0
     assert counts["complete"] == 0
+
+
+# ── MCP lifecycle handshake ─────────────────────────────────────────────────
+#
+# Claude.ai's "Add Custom Connector" conversation toggle (Anthropic/
+# Toolbox 1.0.0) runs three JSON-RPC calls in order:
+#   1. initialize                     — server returns handshake info
+#   2. notifications/initialized      — client ACK, server replies 202
+#   3. tools/list                     — server returns the tool catalog
+# All three must succeed for the toggle to flip from "couldn't
+# connect" to ON. These tests pin the contract.
+
+
+def test_initialize_returns_protocol_version_capabilities_and_serverinfo(cfg):
+    """The `initialize` response is the spec'd shape: protocolVersion
+    echoed back, tools capability advertised, serverInfo carrying the
+    bridge's name + version."""
+    client = _client(cfg)
+    r = client.post(
+        "/mcp", headers={**_auth(cfg),
+                         "User-Agent": "Anthropic/Toolbox 1.0.0"},
+        json=_rpc("initialize", {
+            "protocolVersion": "2025-11-25",
+            "capabilities":    {},
+            "clientInfo":      {"name": "Anthropic/Toolbox"},
+        }))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["jsonrpc"] == "2.0"
+    assert body["id"] == 1
+    result = body["result"]
+    assert result["protocolVersion"] == "2025-11-25"
+    assert result["capabilities"] == {"tools": {}}
+    assert result["serverInfo"]["name"] == "mcp-bridge"
+    # The bridge ships its version in mcp_bridge/__init__.py; whatever
+    # that string is, it must surface here as a non-empty value so the
+    # client knows what server it's talking to.
+    assert isinstance(result["serverInfo"]["version"], str)
+    assert result["serverInfo"]["version"]
+
+
+def test_notifications_initialized_returns_empty_202(cfg):
+    """`notifications/initialized` is a JSON-RPC NOTIFICATION (no id).
+    The server MUST NOT respond with a JSON-RPC envelope. We return
+    HTTP 202 with a zero-byte body — a strict client would reject a
+    `null`-bodied response as a malformed envelope."""
+    client = _client(cfg)
+    r = client.post(
+        "/mcp", headers=_auth(cfg),
+        json={
+            "jsonrpc": "2.0",
+            "method":  "notifications/initialized",
+            "params":  {},
+        })
+    assert r.status_code == 202
+    # Zero-byte body — not the literal "null".
+    assert r.content == b""
+
+
+def test_unknown_notification_is_silently_accepted(cfg):
+    """JSON-RPC 2.0: a server SHOULD silently ignore unknown
+    notifications. The bridge returns 202 with an empty body and
+    leaves a diagnostic log line behind (covered by the diagnostic
+    logging contract, not this test)."""
+    client = _client(cfg)
+    r = client.post(
+        "/mcp", headers=_auth(cfg),
+        json={
+            "jsonrpc": "2.0",
+            "method":  "notifications/some_future_method",
+            "params":  {},
+        })
+    assert r.status_code == 202
+    assert r.content == b""
+
+
+def test_tools_list_surfaces_three_tools_with_input_schemas(cfg):
+    """`tools/list` returns the three bridge tools in MCP shape:
+      push_prompt — prompt:str (required), session_id:str (optional)
+      get_result  — prompt_id:str (required)
+      status      — no params
+    The names, descriptions, and required-field sets are pinned here
+    because Claude.ai's UI surfaces them verbatim and a silent rename
+    would break the user's saved tool toggles."""
+    client = _client(cfg)
+    r = client.post("/mcp", json=_rpc("tools/list", {}, req_id=2),
+                     headers=_auth(cfg))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["jsonrpc"] == "2.0"
+    assert body["id"] == 2
+    tools = body["result"]["tools"]
+    assert isinstance(tools, list)
+    assert len(tools) == 3
+
+    by_name = {t["name"]: t for t in tools}
+    assert set(by_name) == {"push_prompt", "get_result", "status"}
+
+    push = by_name["push_prompt"]
+    assert "Push a prompt" in push["description"]
+    assert push["inputSchema"]["type"] == "object"
+    assert push["inputSchema"]["properties"]["prompt"]["type"] == "string"
+    assert (push["inputSchema"]["properties"]["session_id"]["type"]
+            == "string")
+    assert push["inputSchema"]["required"] == ["prompt"]
+
+    get_r = by_name["get_result"]
+    assert "Get the result" in get_r["description"]
+    assert (get_r["inputSchema"]["properties"]["prompt_id"]["type"]
+            == "string")
+    assert get_r["inputSchema"]["required"] == ["prompt_id"]
+
+    st = by_name["status"]
+    assert "queue status" in st["description"]
+    assert st["inputSchema"] == {"type": "object", "properties": {}}
+
+
+def test_full_handshake_then_existing_tool_still_works(cfg):
+    """End-to-end: run the three lifecycle calls in order, then prove
+    the existing direct-method dispatch is untouched. This is the
+    contract the user spec'd — the handshake adds new behaviour
+    'alongside the existing push_prompt / get_result / status tool
+    handlers' — those keep working unchanged."""
+    client = _client(cfg)
+    auth = _auth(cfg)
+
+    init = client.post("/mcp", headers=auth, json=_rpc(
+        "initialize", {"protocolVersion": "2025-11-25",
+                        "capabilities": {},
+                        "clientInfo": {"name": "Anthropic/Toolbox"}}))
+    assert init.status_code == 200
+    assert init.json()["result"]["protocolVersion"] == "2025-11-25"
+
+    ack = client.post(
+        "/mcp", headers=auth,
+        json={"jsonrpc": "2.0",
+              "method": "notifications/initialized", "params": {}})
+    assert ack.status_code == 202
+    assert ack.content == b""
+
+    listed = client.post("/mcp", headers=auth,
+                         json=_rpc("tools/list", {}, req_id=2))
+    assert listed.status_code == 200
+    assert len(listed.json()["result"]["tools"]) == 3
+
+    # The direct-method path the local CLI and the mobile relay
+    # already use is unchanged.
+    pushed = client.post("/mcp", headers=auth, json=_rpc(
+        "push_prompt", {"prompt": "post-handshake test"}))
+    assert pushed.status_code == 200
+    assert "result" in pushed.json()
+    assert pushed.json()["result"]["status"] == "pending"
