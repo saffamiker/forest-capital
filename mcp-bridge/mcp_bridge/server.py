@@ -48,6 +48,7 @@ bridge via a tunnel with no token.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -56,6 +57,61 @@ from fastapi.responses import JSONResponse
 from . import __version__
 from .config import BridgeConfig, load_config
 from .queue import Queue
+
+try:
+    import structlog
+    _slog: Any = structlog.get_logger(__name__)
+except Exception:  # noqa: BLE001 — structlog optional for minimal installs
+    _slog = None
+
+
+# ── Diagnostic logging (June 2 2026) ─────────────────────────────────────
+# Claude.ai's "Add Custom Connector" handshake at the SETTINGS level
+# only exercises auth + an OPTIONS / discovery probe. The actual MCP
+# capability negotiation runs when the user toggles the connector ON
+# inside a conversation — at that point Claude.ai issues the JSON-RPC
+# lifecycle calls (`initialize`, `tools/list`, `notifications/...`)
+# that the connector must answer for the toggle to succeed. The user
+# is seeing "couldn't connect" specifically at the conversation toggle,
+# so we need to SEE the request bodies Claude.ai sends in order to
+# know whether the bridge's _METHOD_HANDLERS dispatch table is
+# missing the expected methods.
+#
+# These helpers log every MCP request body, every response envelope,
+# and an explicit method-not-found line. Output is bounded (each
+# field truncated to keep large tool catalogs from flooding the log)
+# and routes through structlog when available, falling back to a
+# print line so the diagnostic survives a minimal install. The same
+# pattern as mcp_bridge/worker.py._log.
+
+_MAX_LOG_FIELD_CHARS = 4000
+
+
+def _log(event: str, **kw: Any) -> None:
+    """structlog when present, print otherwise. Used by every
+    diagnostic site in this module so a single switch (the structlog
+    optional import above) decides the format."""
+    if _slog is not None:
+        try:
+            _slog.info(event, **kw)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+    kvs = " ".join(f"{k}={v!r}" for k, v in kw.items())
+    print(f"[mcp-bridge.server] {event} {kvs}", flush=True)
+
+
+def _truncate_for_log(value: Any) -> str:
+    """JSON-serialise (preserves the wire shape) and cap at
+    _MAX_LOG_FIELD_CHARS so a fat tool catalog doesn't push the
+    operator's terminal to its scrollback ceiling."""
+    try:
+        s = json.dumps(value, default=str, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        s = repr(value)
+    if len(s) > _MAX_LOG_FIELD_CHARS:
+        return s[:_MAX_LOG_FIELD_CHARS] + f"…(+{len(s) - _MAX_LOG_FIELD_CHARS} chars)"
+    return s
 
 
 # Sentinel error codes — JSON-RPC convention is negative integers,
@@ -75,6 +131,25 @@ def create_app(cfg: BridgeConfig | None = None) -> FastAPI:
     with a test config + in-memory or temp-file Queue. The CLI's
     `bridge serve` uses load_config() implicitly."""
     cfg = cfg or load_config()
+    # Log the RESOLVED ABSOLUTE db_path on startup so the operator
+    # can confirm queue.db is being found consistently across
+    # restarts. A relative path resolved against the wrong cwd is
+    # the classic cause of "every restart loses state" — this log
+    # line makes the path discoverable without inspecting the
+    # config loader's output. June 2 2026 diagnostic.
+    try:
+        _abs_db = os.path.abspath(cfg.db_path)
+        _db_exists = os.path.exists(_abs_db)
+        _log("bridge_startup",
+             db_path=cfg.db_path,
+             db_path_absolute=_abs_db,
+             db_file_exists=_db_exists,
+             cwd=os.getcwd(),
+             version=__version__,
+             oauth_configured=bool(cfg.oauth_client_id),
+             worker_enabled=cfg.worker_enabled)
+    except Exception as exc:  # noqa: BLE001 — never abort startup on a log line
+        _log("bridge_startup_log_failed", error=str(exc))
     queue = Queue(cfg.db_path)
     app = FastAPI(
         title="mcp-bridge",
@@ -212,30 +287,72 @@ def create_app(cfg: BridgeConfig | None = None) -> FastAPI:
                             ) -> JSONResponse:
         """Streamable-HTTP MCP entry point. The body is a JSON-RPC
         2.0 envelope; the response is the JSON-RPC reply envelope.
-        Single requests only — no batching in this minimal cut."""
+        Single requests only — no batching in this minimal cut.
+
+        Every request and every response is logged via _log() so the
+        operator can see EXACTLY what Claude.ai sends at the
+        conversation-toggle handshake and what the bridge sends back.
+        See the "Diagnostic logging" block at the top of this module
+        for the rationale and the truncation policy."""
+        # User-Agent + Accept are useful when the client is unclear
+        # (claude.ai vs claude.ai/mobile vs claude-code) — both are
+        # safe to log in full.
+        ua = request.headers.get("user-agent", "")
+        accept = request.headers.get("accept", "")
         try:
             raw = await request.body()
+            # Log the inbound BODY before any branching so a parse
+            # failure or a missing method is still visible.
+            _log("mcp_request_received",
+                 user_agent=ua, accept=accept,
+                 body=_truncate_for_log(
+                     raw.decode("utf-8", errors="replace") if raw else ""))
             try:
                 payload = json.loads(raw.decode("utf-8") or "{}")
             except json.JSONDecodeError:
-                return _rpc_error(None, _RPC_PARSE_ERROR,
-                                   "Parse error.")
+                resp = _rpc_error(None, _RPC_PARSE_ERROR, "Parse error.")
+                _log("mcp_response_sent", req_id=None,
+                     reason="parse_error", body=_truncate_for_log(
+                         {"jsonrpc": "2.0", "id": None,
+                          "error": {"code": _RPC_PARSE_ERROR,
+                                    "message": "Parse error."}}))
+                return resp
             if not isinstance(payload, dict):
+                _log("mcp_response_sent", req_id=None,
+                     reason="envelope_not_object")
                 return _rpc_error(None, _RPC_INVALID_REQUEST,
                                    "JSON-RPC envelope must be an "
                                    "object.")
             req_id = payload.get("id")
             method = payload.get("method")
             params = payload.get("params") or {}
+            _log("mcp_request_parsed",
+                 req_id=req_id, method=method,
+                 params=_truncate_for_log(params))
             if not isinstance(method, str):
+                _log("mcp_response_sent", req_id=req_id,
+                     method=method, reason="method_not_string")
                 return _rpc_error(req_id, _RPC_INVALID_REQUEST,
                                    "method must be a string.")
             if not isinstance(params, dict):
+                _log("mcp_response_sent", req_id=req_id,
+                     method=method, reason="params_not_object")
                 return _rpc_error(req_id, _RPC_INVALID_PARAMS,
                                    "params must be an object.")
 
             handler = _METHOD_HANDLERS.get(method)
             if handler is None:
+                # Explicit log line for the case the user is
+                # investigating — Claude.ai sends MCP lifecycle
+                # methods (initialize, tools/list, …) that the
+                # current dispatch table does not implement. Listing
+                # the known methods inline makes the gap obvious in
+                # the log scan.
+                _log("mcp_method_not_found",
+                     req_id=req_id, method=method,
+                     known_methods=sorted(_METHOD_HANDLERS.keys()))
+                _log("mcp_response_sent", req_id=req_id,
+                     method=method, reason="method_not_found")
                 return _rpc_error(req_id, _RPC_METHOD_NOT_FOUND,
                                    f"Unknown method '{method}'.")
             try:
@@ -244,20 +361,32 @@ def create_app(cfg: BridgeConfig | None = None) -> FastAPI:
                 # Re-shape FastAPI auth/validation errors into
                 # JSON-RPC errors so the client gets a consistent
                 # envelope regardless of failure site.
+                _log("mcp_response_sent", req_id=req_id,
+                     method=method, reason="http_exception",
+                     detail=str(exc.detail))
                 return _rpc_error(req_id, _RPC_TOOL_ERROR,
                                    str(exc.detail))
             except ValueError as exc:
+                _log("mcp_response_sent", req_id=req_id,
+                     method=method, reason="invalid_params",
+                     detail=str(exc))
                 return _rpc_error(req_id, _RPC_INVALID_PARAMS,
                                    str(exc))
-            return JSONResponse({
+            response_body = {
                 "jsonrpc": "2.0",
                 "id":      req_id,
                 "result":  result,
-            })
+            }
+            _log("mcp_response_sent", req_id=req_id, method=method,
+                 reason="success",
+                 body=_truncate_for_log(response_body))
+            return JSONResponse(response_body)
         except Exception as exc:  # noqa: BLE001
             # Last-resort guard — every uncaught exception comes
             # back as a structured RPC error rather than a 500
             # HTML page. The bridge stays usable from mobile.
+            _log("mcp_endpoint_unhandled",
+                 user_agent=ua, error=str(exc))
             return _rpc_error(None, _RPC_INTERNAL_ERROR, str(exc))
 
     # ── OAuth 2.1 shim — claude.ai connector registration ──────────────
