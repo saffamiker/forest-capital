@@ -6,7 +6,7 @@ import type { JSONContent } from '@tiptap/core'
 
 export type EditorDocumentType =
   | 'midpoint_paper' | 'executive_brief' | 'presentation_deck'
-  | 'presentation_script'
+  | 'presentation_script' | 'analytical_appendix'
 
 /** A TipTap document JSON object (paper/brief). */
 export type TipTapDoc = JSONContent

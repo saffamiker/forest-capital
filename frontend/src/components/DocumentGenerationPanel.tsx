@@ -14,8 +14,8 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
-  FileText, Presentation, Download, Loader2, AlertCircle, CheckCircle,
-  PenLine, X,
+  FileText, FileSpreadsheet, Presentation, Download, Loader2, AlertCircle,
+  CheckCircle, PenLine, X,
 } from 'lucide-react'
 import TeamGate from './TeamGate'
 import {
@@ -65,6 +65,18 @@ const DOCS: DocSpec[] = [
       + 'refine in the editor.',
     endpoint: '/api/v1/export/presentation-deck',
     icon: Presentation,
+  },
+  {
+    id: 'appendix',
+    documentType: 'analytical_appendix',
+    title: 'Analytical Appendix',
+    description:
+      'Evidentiary record across eight sections (data, performance, '
+      + 'statistical tests, bootstrap CIs, factors, crisis windows, '
+      + 'cost sensitivity, audit). Every figure traces to the data hash '
+      + 'in the footer.',
+    endpoint: '/api/v1/export/analytical-appendix',
+    icon: FileSpreadsheet,
   },
 ]
 

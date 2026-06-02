@@ -9580,6 +9580,9 @@ async def _generate_async(
         elif document_type == "executive_brief":
             file_bytes, filename, media, draft_id = \
                 await _generate_brief_document(session["email"])
+        elif document_type == "analytical_appendix":
+            file_bytes, filename, media, draft_id = \
+                await _generate_appendix_document(session["email"])
         else:
             file_bytes, filename, media, draft_id = \
                 await _generate_deck_document(session["email"])
@@ -10236,6 +10239,199 @@ async def _generate_brief_document(
         return docx_bytes, filename, _DOCX_MEDIA, draft_id
     except Exception as exc:  # noqa: BLE001
         log.error("executive_brief_generation_error", error=str(exc))
+        raise
+
+
+@app.post("/api/v1/export/analytical-appendix")
+@limiter.limit("6/minute")
+async def export_analytical_appendix(
+    request: Request,
+    body: dict | None = None,
+    session: dict = Depends(require_permission("generate_documents")),
+):
+    """
+    Starts analytical-appendix generation.
+
+    The Analytical Appendix is the evidentiary record behind every
+    claim in the executive brief and the panel presentation — eight
+    sections (A–H) covering data and methodology, full strategy
+    performance, statistical tests, bootstrap CIs, factor loadings,
+    crisis windows, transaction-cost sensitivity, and the validation
+    audit summary. Every figure is pulled from existing caches; the
+    endpoint NEVER recomputes (so a cold deploy renders [DATA PENDING]
+    cleanly rather than blocking on a warm).
+
+    With an editor_draft_id in the body the .docx is built
+    synchronously from that draft (the in-editor Export path).
+    Otherwise generation — eight short Academic Writer paragraphs —
+    runs as a background job and the endpoint returns 202 with a
+    job_id; poll GET /api/v1/jobs/{id}.
+    """
+    editor_draft_id = (body or {}).get("editor_draft_id")
+    if editor_draft_id:
+        return await _editor_export(int(editor_draft_id))
+    await _require_report_ready()
+    return _start_generation_job("analytical_appendix", session, request)
+
+
+# Appendix section narrative tasks — one Academic Writer call per
+# section, each producing ~80-150 words. Deliberately short: the
+# appendix is table-heavy, the prose is scaffolding. Each task pins
+# the section's role and provides the context the writer needs to
+# describe what the table will show.
+_APPENDIX_NARRATIVE_TASKS = {
+    "appendix_a": (
+        "Write a 100-130 word introduction to Section A: Data and "
+        "Methodology, for the project's Analytical Appendix. Name the "
+        "study period (start, end, number of months) and the three "
+        "asset classes (S&P 500 total return for equity, BND for "
+        "investment-grade bonds, BAMLHYH0A0HYM2TRIV with HYG splice "
+        "for high yield, all monthly). Note the risk-free series "
+        "(DTB3, converted monthly). State that the table that follows "
+        "carries the asset-level summary statistics. Plain academic "
+        "prose. No em dashes."),
+    "appendix_b": (
+        "Write a 100-130 word introduction to Section B: Full Strategy "
+        "Performance. Note that the table that follows reports Sharpe, "
+        "CAGR, volatility, Sortino, Calmar, and max drawdown for every "
+        "strategy in the cache, sorted by Sharpe descending. Mention "
+        "that the BENCHMARK row appears alongside the active strategies "
+        "for direct comparison. Plain academic prose. No em dashes."),
+    "appendix_c": (
+        "Write a 100-130 word introduction to Section C: Statistical "
+        "Tests. Note that the table that follows reports the paired-t "
+        "p-value, the FDR-corrected p-value, the Deflated Sharpe Ratio "
+        "p-value, the Probabilistic Sharpe Ratio, and the SPA gate for "
+        "every strategy except the benchmark. State plainly that no "
+        "strategy clears the Benjamin et al. 2018 p < 0.005 threshold "
+        "under FDR correction, and that we surface this honestly rather "
+        "than report Sharpe rankings alone. Plain academic prose. "
+        "No em dashes."),
+    "appendix_d": (
+        "Write a 100-130 word introduction to Section D: Bootstrap "
+        "Confidence Intervals. Note the methodology: block bootstrap "
+        "of length 12 with 10,000 resamples and a fixed seed of 42, "
+        "applied to the monthly excess-return series for every "
+        "strategy. State that the table that follows reports each "
+        "strategy's point Sharpe with its 95% CI, and whether the "
+        "interval overlaps the benchmark's Sharpe. Note that "
+        "substantial overlap is the analytical justification for "
+        "treating static-strategy rankings as inconclusive. Plain "
+        "academic prose. No em dashes."),
+    "appendix_e": (
+        "Write a 100-130 word introduction to Section E: Factor "
+        "Loadings. Note that the table that follows reports the "
+        "annualised alpha and the four Carhart factor coefficients "
+        "(MKT-RF, SMB, HML, MOM) plus R-squared for every strategy, "
+        "with a trailing asterisk on each coefficient significant at "
+        "p < 0.05. State that the table is read for each strategy's "
+        "primary return driver, not for stock-picking alpha. Plain "
+        "academic prose. No em dashes."),
+    "appendix_f": (
+        "Write a 100-130 word introduction to Section F: Crisis Window "
+        "Performance. Note that the table that follows reports each "
+        "strategy's cumulative return through five named crisis windows "
+        "(GFC 2008-2009, EU Debt 2011, COVID Crash, COVID Recovery, "
+        "Rate Shock 2022). State explicitly that the headline figure is "
+        "the cumulative return through the window, NOT the annualised "
+        "CAGR (the F3 fix). A trailing dagger on a cell flags a "
+        "partial-overlap window — the strategy started or ended inside "
+        "the window's date range. Plain academic prose. No em dashes."),
+    "appendix_g": (
+        "Write a 100-130 word introduction to Section G: Transaction "
+        "Cost Sensitivity. Note that the table that follows reports "
+        "the net-of-cost Sharpe of the regime-conditional blend at "
+        "10/15/20 basis points per material rebalance over the "
+        "post-2022 OOS window, alongside the count of material "
+        "rebalances. State that the regime-conditional blend remains "
+        "above the benchmark Sharpe net of plausible transaction "
+        "costs. Plain academic prose. No em dashes."),
+    "appendix_h": (
+        "Write a 100-130 word introduction to Section H: Validation "
+        "Audit Summary. Note that the platform's analytics invariant "
+        "framework runs at the end of every warm and that the "
+        "deterministic-detection contract (no LLM in the detection "
+        "path) is documented in docs/INVARIANTS.md. State that the "
+        "table that follows reports the latest warm's verdict — "
+        "checks run, hard failures, soft warnings, and the run "
+        "timestamp. Note that the audit disclosure appendix that "
+        "follows carries the statistical audit and methodology QA "
+        "history. Plain academic prose. No em dashes."),
+}
+
+
+async def _generate_appendix_document(
+    email: str,
+) -> tuple[bytes, str, str, int | None]:
+    """
+    Generates the Analytical Appendix. Returns
+    (file_bytes, filename, media_type, editor_draft_id).
+
+    The appendix is table-heavy and rhetorically minimal: each
+    section opens with a short Academic Writer paragraph then the
+    cached data in an APA-style table. All eight cache reads happen
+    in gather_analytical_appendix_data; the eight narratives generate
+    concurrently through the harness; build_analytical_appendix
+    assembles them. No recomputation anywhere — a missing cache row
+    degrades that section to [DATA PENDING] rather than blocking.
+    """
+    import asyncio
+    from datetime import date
+
+    from tools.academic_docx import build_analytical_appendix
+    from tools.academic_export import (
+        DATA_PENDING, gather_analytical_appendix_data,
+    )
+
+    try:
+        data = await gather_analytical_appendix_data()
+        avail = data["available"]
+        pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
+                   "dashboard once, then regenerate this appendix.")
+
+        specs = [
+            {
+                "key": key,
+                "agent_id": f"appendix_{key.split('_', 1)[1]}",
+                "task": task,
+                "context": {"study_period": data.get("study_period")},
+                "available": avail,
+                "pending": pending,
+            }
+            for key, task in _APPENDIX_NARRATIVE_TASKS.items()
+        ]
+        narratives = await _generate_narratives(
+            _apply_draft_caveats(specs),
+            n_strategies=len(data.get("strategy_results") or {}))
+        docx_bytes = await asyncio.to_thread(
+            build_analytical_appendix, data, narratives)
+
+        # Load the generated content into an editor draft so the
+        # frontend can open it directly in the editor — same pattern
+        # as the brief / midpoint / deck. The draft_id rides back in
+        # the X-Draft-Id response header. Draft-storage failure never
+        # fails the download.
+        draft_id: int | None = None
+        try:
+            from tools.editor_content import analytical_appendix_to_editor
+            from tools.editor_drafts import create_draft
+            content_json, content_text = analytical_appendix_to_editor(
+                narratives)
+            draft = await create_draft(
+                "analytical_appendix", email,
+                f"Analytical Appendix — {date.today().isoformat()}",
+                content_json, content_text, created_from="generated")
+            if draft is not None:
+                draft_id = draft["id"]
+        except Exception as exc:  # noqa: BLE001
+            log.warning("analytical_appendix_draft_create_failed",
+                        error=str(exc))
+
+        filename = (f"forest-capital-analytical-appendix-"
+                    f"{date.today().isoformat()}.docx")
+        return docx_bytes, filename, _DOCX_MEDIA, draft_id
+    except Exception as exc:  # noqa: BLE001
+        log.error("analytical_appendix_generation_error", error=str(exc))
         raise
 
 

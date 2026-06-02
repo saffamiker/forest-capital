@@ -586,3 +586,263 @@ def table_drawdown(rows_in: list[dict]) -> tuple[list[str], list[list[str]]]:
         for r in rows_in
     ]
     return headers, rows
+
+
+# ── Analytical Appendix tables (June 2 2026) ──────────────────────────────────
+# The Appendix is a different document type from the brief and the midpoint
+# paper: dense, table-heavy, no rhetorical framing. Each helper below maps a
+# cached payload to (headers, rows) the DOCX assembler renders identically
+# to every other table on the platform.
+
+
+def table_strategy_performance_full(
+    strategies: dict[str, dict],
+) -> tuple[list[str], list[list[str]]]:
+    """Section B — Full Strategy Performance.
+
+    Every strategy in the cache, sorted by Sharpe descending so the
+    headline ordering matches the dashboard's strategy table. The
+    benchmark sits in the same table (not in a separate row) so a
+    reader can read every column side-by-side.
+    """
+    headers = ["Strategy", "Sharpe", "CAGR", "Volatility",
+               "Sortino", "Calmar", "Max DD"]
+    items = list(strategies.items())
+    items.sort(
+        key=lambda kv: -float(kv[1].get("sharpe_ratio") or 0))
+    rows = []
+    for name, r in items:
+        rows.append([
+            str(name),
+            format_metric(r.get("sharpe_ratio"), "sharpe_ratio"),
+            format_metric(r.get("cagr"), "cagr"),
+            format_metric(r.get("volatility"), "volatility"),
+            format_metric(r.get("sortino_ratio"), "sortino_ratio"),
+            format_metric(r.get("calmar_ratio"), "calmar_ratio"),
+            format_metric(r.get("max_drawdown"), "max_drawdown"),
+        ])
+    return headers, rows
+
+
+def table_statistical_tests(
+    strategies: dict[str, dict],
+) -> tuple[list[str], list[list[str]]]:
+    """Section C — Statistical Tests.
+
+    Surface every statistical figure the strategy result carries:
+    paired-t p-value, FDR-corrected p-value, Deflated Sharpe Ratio
+    p-value, Probabilistic Sharpe Ratio, and the SPA gate. Skips
+    BENCHMARK (a self-vs-self test is trivially 1.0 and adds no
+    information).
+    """
+    headers = ["Strategy", "p (paired t)", "p (FDR-adj)", "DSR p",
+               "PSR", "SPA pass"]
+    rows = []
+    for name, r in strategies.items():
+        if name == "BENCHMARK":
+            continue
+        spa = r.get("passes_spa")
+        rows.append([
+            str(name),
+            format_metric(r.get("p_value_ttest"), "p_value"),
+            format_metric(r.get("p_value_corrected"), "p_value"),
+            format_metric(r.get("dsr_p_value"), "p_value"),
+            format_metric(r.get("probabilistic_sharpe_ratio"),
+                          "sharpe_ratio"),
+            ("yes" if spa is True else
+             "no" if spa is False else "—"),
+        ])
+    return headers, rows
+
+
+def table_bootstrap_ci(
+    rows_in: list[dict],
+) -> tuple[list[str], list[list[str]]]:
+    """Section D — Bootstrap Confidence Intervals on Sharpe.
+
+    rows_in is the `bootstrap_ci_sharpe` payload from the
+    academic_analytics metric: each entry carries a `strategy`,
+    `point_estimate`, `ci_low`, `ci_high`, and an `overlap_benchmark`
+    flag (true when the CI brackets the benchmark Sharpe).
+    """
+    headers = ["Strategy", "Sharpe", "95% CI low", "95% CI high",
+               "Overlaps benchmark"]
+    rows = []
+    for r in rows_in or []:
+        rows.append([
+            str(r.get("strategy", "—")),
+            format_metric(r.get("point_estimate"), "sharpe_ratio"),
+            format_metric(r.get("ci_low"), "sharpe_ratio"),
+            format_metric(r.get("ci_high"), "sharpe_ratio"),
+            ("yes" if r.get("overlaps_benchmark") is True else
+             "no" if r.get("overlaps_benchmark") is False else "—"),
+        ])
+    return headers, rows
+
+
+def table_crisis_performance(
+    crisis_payload: dict | None,
+) -> tuple[list[str], list[list[str]]]:
+    """Section F — Crisis Window Performance.
+
+    crisis_payload is the `crisis_performance` metric payload:
+    {windows, rows} where rows maps strategy → {crisis_label →
+    {cumulative_return, max_dd, sharpe, partial, n_months}}.
+
+    Columns: Strategy + one column per crisis window, each cell the
+    cumulative return through the window (the F3-fix headline, NOT
+    the annualised CAGR). Partial-overlap windows are flagged with a
+    trailing † so a reader sees the strategy started mid-window.
+    """
+    if not crisis_payload or "rows" not in crisis_payload:
+        return ["Strategy", "(no crisis data)"], []
+    windows = list((crisis_payload.get("windows") or {}).keys())
+    headers = ["Strategy"] + windows
+    rows = []
+    for strategy, by_crisis in (crisis_payload.get("rows") or {}).items():
+        row = [str(strategy)]
+        for w in windows:
+            cell = (by_crisis or {}).get(w) or {}
+            cum = cell.get("cumulative_return")
+            partial = bool(cell.get("partial"))
+            txt = format_metric(cum, "cagr")  # render as %, 4dp
+            if partial and txt != "—":
+                txt = txt + " †"
+            row.append(txt)
+        rows.append(row)
+    return headers, rows
+
+
+def table_cost_sensitivity(
+    cost_payload: dict | None,
+) -> tuple[list[str], list[list[str]]]:
+    """Section G — Transaction Cost Sensitivity.
+
+    cost_payload is the `oos_cost_sensitivity` metric payload, one
+    row per cost assumption (10/15/20 bps). vs_benchmark_pct is a
+    fractional figure (e.g. 0.0532 = +5.32% relative to benchmark
+    Sharpe); the formatter renders it as a percent at 2dp because the
+    headline figure on the dashboard's Net of Switching Costs table
+    uses 2dp.
+    """
+    if not cost_payload or "scenarios" not in cost_payload:
+        return (["Bps per rebalance", "Net Sharpe", "vs Benchmark",
+                 "Material rebalances"], [])
+    headers = ["Bps per rebalance", "Net Sharpe", "vs Benchmark",
+               "Material rebalances"]
+    n_rebal = cost_payload.get("n_rebalances")
+    rows = []
+    for s in (cost_payload.get("scenarios") or []):
+        vs = s.get("vs_benchmark_pct")
+        vs_txt = (f"{vs * 100:+.2f}%" if isinstance(vs, (int, float))
+                  else "—")
+        rows.append([
+            str(s.get("bps", "—")),
+            format_metric(s.get("net_sharpe"), "sharpe_ratio"),
+            vs_txt,
+            (str(n_rebal) if n_rebal is not None else "—"),
+        ])
+    return headers, rows
+
+
+def table_invariant_summary(
+    invariant_payload: dict | None,
+) -> tuple[list[str], list[list[str]]]:
+    """Section H — Validation Audit Summary (the invariant verdict
+    component). Reads the `invariant_summary` metric written by
+    set_strategy_cache on every warm. Empty if the cache row hasn't
+    landed yet (cold deploy)."""
+    headers = ["Field", "Value"]
+    if not invariant_payload:
+        return headers, [["status", "no invariant run on record"]]
+    passed = invariant_payload.get("passed")
+    hf = invariant_payload.get("hard_failures", 0)
+    sw = invariant_payload.get("soft_warnings", 0)
+    cr = invariant_payload.get("checks_run", 0)
+    ran_at = invariant_payload.get("ran_at", "—")
+    rows = [
+        ["Status", "PASS" if passed else "FAIL"],
+        ["Checks run", str(cr)],
+        ["Hard failures", str(hf)],
+        ["Soft warnings", str(sw)],
+        ["Ran at (UTC)", str(ran_at)],
+    ]
+    return headers, rows
+
+
+# ── Analytical Appendix data gather (June 2 2026) ─────────────────────────────
+
+
+async def gather_analytical_appendix_data() -> dict[str, Any]:
+    """
+    Assembles the data bundle behind the eight-section analytical
+    appendix. Builds on gather_document_data() (which already produces
+    summary_statistics, regime_conditional, drawdown_comparison,
+    factor_loadings, strategy_results, and the audit_disclosures
+    bundle) and ADDS four cache reads the appendix needs but the
+    other generators don't:
+
+      - bootstrap_ci_sharpe        from academic_analytics metric
+      - crisis_performance         from crisis_performance metric
+      - oos_cost_sensitivity       from oos_cost_sensitivity metric
+      - invariant_summary          from invariant_summary metric
+                                   (PR #252 writes this on every warm)
+      - data_hash                  the strategy_results_cache hash,
+                                   rendered in the appendix footer for
+                                   reproducibility
+
+    Every cache read is fail-open — a missing row leaves the field
+    None and the DOCX builder degrades that section to a "no data on
+    record" line. The appendix is always assemblable.
+    """
+    bundle = await gather_document_data()
+
+    # ── Bootstrap CI table — lives inside the academic_analytics row.
+    try:
+        from tools.precomputed_analytics import get_latest_metric
+        academic = await get_latest_metric("academic_analytics") or {}
+        bundle["bootstrap_ci_sharpe"] = (
+            academic.get("bootstrap_ci_sharpe") or [])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("appendix_bootstrap_read_failed", error=str(exc))
+        bundle["bootstrap_ci_sharpe"] = []
+
+    # ── Crisis performance.
+    try:
+        from tools.precomputed_analytics import get_latest_metric
+        bundle["crisis_performance"] = (
+            await get_latest_metric("crisis_performance"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("appendix_crisis_read_failed", error=str(exc))
+        bundle["crisis_performance"] = None
+
+    # ── Transaction-cost sensitivity.
+    try:
+        from tools.regime_meta_validation import get_cached_cost_sensitivity
+        bundle["cost_sensitivity"] = await get_cached_cost_sensitivity()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("appendix_cost_sensitivity_read_failed",
+                    error=str(exc))
+        bundle["cost_sensitivity"] = None
+
+    # ── Invariant summary — written on every warm by PR #252.
+    try:
+        from tools.precomputed_analytics import get_latest_metric
+        bundle["invariant_summary"] = (
+            await get_latest_metric("invariant_summary"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("appendix_invariant_read_failed", error=str(exc))
+        bundle["invariant_summary"] = None
+
+    # ── Data hash for the footer. The strategy_results_cache hash is
+    #    the right anchor: every appendix figure traces back to a
+    #    strategy results row (either directly or via the analytics
+    #    metric that was refreshed alongside it).
+    try:
+        from tools.cache import get_latest_strategy_hash
+        bundle["data_hash"] = await get_latest_strategy_hash()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("appendix_data_hash_read_failed", error=str(exc))
+        bundle["data_hash"] = None
+
+    return bundle

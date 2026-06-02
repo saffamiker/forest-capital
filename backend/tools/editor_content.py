@@ -88,6 +88,22 @@ _EXEC_BRIEF_SECTIONS = [
 ]
 
 
+# Analytical Appendix — the eight evidentiary sections. The headings,
+# narrative keys, and ordering mirror tools.academic_docx.
+# build_analytical_appendix exactly, so a draft opened in the editor
+# matches the generated .docx 1:1.
+_ANALYTICAL_APPENDIX_SECTIONS = [
+    ("A. Data and Methodology",          "appendix_a", None),
+    ("B. Full Strategy Performance",     "appendix_b", None),
+    ("C. Statistical Tests",             "appendix_c", None),
+    ("D. Bootstrap Confidence Intervals", "appendix_d", None),
+    ("E. Factor Loadings",               "appendix_e", None),
+    ("F. Crisis Window Performance",     "appendix_f", None),
+    ("G. Transaction Cost Sensitivity",  "appendix_g", None),
+    ("H. Validation Audit Summary",      "appendix_h", None),
+]
+
+
 # The 16 presentation-deck slides — (title, narratives key or None,
 # seed content). Mirrors tools/academic_deck.build_presentation_deck's
 # slide order so a deck draft opened in the editor matches the generated
@@ -334,6 +350,32 @@ def executive_brief_to_editor(
     doc_content: list[dict] = []
     text_lines: list[str] = []
     for heading, key, callout in _EXEC_BRIEF_SECTIONS:
+        nodes, lines = _section_blocks(heading, narratives.get(key, ""),
+                                       callout)
+        doc_content.extend(nodes)
+        text_lines.extend(lines)
+    content_json = {"type": "doc", "content": doc_content}
+    content_text = "\n".join(text_lines).strip()
+    return content_json, content_text
+
+
+def analytical_appendix_to_editor(
+    narratives: dict[str, str],
+) -> tuple[dict[str, Any], str]:
+    """
+    Builds the editor content for a generated analytical appendix.
+
+    Returns (content_json, content_text). The eight evidentiary
+    sections become H1 headings with the Academic Writer's intro
+    paragraph beneath each. Tables are NOT embedded — the in-editor
+    view is the narrative skeleton; the .docx export carries the
+    full data tables alongside it. Bob edits the prose in-editor and
+    the regenerated .docx includes both his edits and the live
+    cached tables.
+    """
+    doc_content: list[dict] = []
+    text_lines: list[str] = []
+    for heading, key, callout in _ANALYTICAL_APPENDIX_SECTIONS:
         nodes, lines = _section_blocks(heading, narratives.get(key, ""),
                                        callout)
         doc_content.extend(nodes)

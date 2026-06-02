@@ -143,6 +143,21 @@ describe('DocumentGenerationPanel — async generation', () => {
         .getByText(/Generating your/)).toBeInTheDocument())
   })
 
+  it('renders the analytical appendix card with its POST endpoint', async () => {
+    mockedAxios.post.mockResolvedValue({
+      data: { job_id: 'j-appx', status: 'pending' } })
+    renderPanel(<DocumentGenerationPanel />)
+    const appxCard = (
+      screen.getByText('Analytical Appendix').closest('.card') as HTMLElement)
+    expect(appxCard).toBeInTheDocument()
+    fireEvent.click(within(appxCard).getByRole('button',
+      { name: /Generate/ }))
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      '/api/v1/export/analytical-appendix')
+    await waitFor(() => expect(
+      within(appxCard).getByText(/Generating your/)).toBeInTheDocument())
+  })
+
   it('shows the error state with Try Again on a failed job', async () => {
     renderPanel(<DocumentGenerationPanel />)
     trackJob({

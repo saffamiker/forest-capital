@@ -39,6 +39,9 @@ const WORD_TARGETS: Record<string, number> = {
   executive_brief: 2000,
   presentation_deck: 0,
   presentation_script: 0,
+  // The Appendix is dense (eight short intro paragraphs + tables) —
+  // the editor surface only holds the prose, not the cached tables.
+  analytical_appendix: 1200,
 }
 
 // A spoken presentation is delivered at ~150 words per minute.
@@ -50,6 +53,7 @@ const EXPORT_ENDPOINT: Record<string, string> = {
   midpoint_paper: '/api/v1/export/midpoint-paper',
   executive_brief: '/api/v1/export/executive-brief',
   presentation_deck: '/api/v1/export/presentation-deck',
+  analytical_appendix: '/api/v1/export/analytical-appendix',
 }
 
 // Walks a TipTap doc into (heading, body-text) sections for the navigator.
