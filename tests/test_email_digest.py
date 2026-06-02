@@ -23,8 +23,14 @@ os.environ.setdefault("SECRET_KEY", "test-secret-key-at-least-32-characters-long
 os.environ.setdefault("MASTER_API_KEY", "test_master_key")
 
 from tools.email_digest import (  # noqa: E402
-    _section_platform_health,
+    _git_authors_for,
+    _hours_ago_utc,
     _section_deadlines,
+    _section_platform_health,
+    _section_platform_usage,
+    _section_team_activity,
+    _section_warm_history,
+    _week_start_utc,
     build_digest_email,
     send_daily_digest,
 )
@@ -93,12 +99,18 @@ async def test_build_digest_email_returns_subject_html_text():
     assert "Platform health" in html
     assert "Platform releases" in html
     assert "Analytics snapshot" in html
+    assert "Platform usage" in html
+    assert "Team activity" in html
+    assert "Warm history" in html
     assert "Open work" in html
     assert "Deadlines" in html
     # Plain-text fallback covers every section too.
     assert "PLATFORM HEALTH" in text
     assert "PLATFORM RELEASES" in text
     assert "ANALYTICS SNAPSHOT" in text
+    assert "PLATFORM USAGE" in text
+    assert "TEAM ACTIVITY" in text
+    assert "WARM HISTORY" in text
     assert "OPEN WORK" in text
     assert "DEADLINES" in text
     # Unsubscribe / opt-out copy per the spec.
@@ -134,3 +146,119 @@ async def test_send_daily_digest_skips_when_no_recipients(monkeypatch):
     # in, so the send still goes through — confirms fail-open contract.
     assert result["sent"] is True
     assert result["recipients"] == ["digest-dev@analyticsdesk.app"]
+
+
+# ── Time-window helpers (US/Eastern WTD) ──────────────────────────────────
+
+
+def test_week_start_anchors_to_eastern_monday():
+    """The WTD window must start at Mon 00:00 ET, NOT UTC. A digest
+    fired Wed 14:00 UTC (= Wed 10:00 ET in summer) should report
+    WTD as starting Mon 04:00 UTC (= Mon 00:00 EDT)."""
+    from datetime import datetime, timezone
+    fixed = datetime(2026, 6, 3, 14, 0, tzinfo=timezone.utc)
+    start = _week_start_utc(fixed)
+    # June 1 2026 is a Monday — EDT (UTC-4) → Mon 00:00 EDT = Mon 04:00 UTC.
+    assert start.isoformat() == "2026-06-01T04:00:00+00:00"
+
+
+def test_week_start_handles_monday_morning_correctly():
+    """Cron fires 11:00 UTC on a Monday (= 07:00 ET). WTD must be
+    today's Mon 00:00 ET, not last week's."""
+    from datetime import datetime, timezone
+    fixed = datetime(2026, 6, 1, 11, 0, tzinfo=timezone.utc)
+    start = _week_start_utc(fixed)
+    assert start.isoformat() == "2026-06-01T04:00:00+00:00"
+
+
+def test_hours_ago_simple():
+    from datetime import datetime, timezone
+    fixed = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+    assert _hours_ago_utc(24, fixed).isoformat() == (
+        "2026-06-01T12:00:00+00:00")
+
+
+def test_git_authors_includes_mapped_personal_email():
+    """Michael commits as mikeruurds@gmail; the digest must count those
+    commits against ruurdsm@queens.edu via GIT_AUTHOR_EMAIL_MAP."""
+    authors = _git_authors_for("ruurdsm@queens.edu")
+    assert "ruurdsm@queens.edu" in authors
+    assert "mikeruurds@gmail.com" in authors
+
+
+def test_git_authors_unmapped_returns_self_only():
+    authors = _git_authors_for("thaob@queens.edu")
+    assert authors == {"thaob@queens.edu"}
+
+
+# ── Section 4 — Platform usage ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_platform_usage_renders_without_db():
+    """No live DB in the test env — the section must fail-open with
+    the table shell present and zeros in every category row, so a
+    cold-deploy digest still sends with a recognisable section."""
+    s = await _section_platform_usage()
+    assert s.title == "Platform usage"
+    assert "Council queries" in s.html
+    assert "Defense Prep" in s.html
+    assert "Peer Review" in s.html
+    assert "Other" in s.html
+    assert "Total" in s.html
+    # Text fallback carries the column headers and the three primary
+    # categories so a plain-text reader sees the structure.
+    assert "PLATFORM USAGE" in s.text
+    assert "Council queries" in s.text
+    assert "24h" in s.text
+    assert "WTD" in s.text
+
+
+# ── Section 5 — Team activity ─────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_team_activity_renders_three_team_members():
+    """Bob, Molly, and Michael always appear in the table — even when
+    every count is zero. The digest is an operational signal that
+    confirms each team member's activity (or lack thereof)."""
+    s = await _section_team_activity()
+    assert s.title == "Team activity"
+    for name in ("Michael", "Bob", "Molly"):
+        assert name in s.html, f"missing {name} in HTML"
+        assert name in s.text, f"missing {name} in text"
+    # Column headers — the four signals the user spec'd.
+    for label in ("Commits", "Doc edits", "UAT", "Logins"):
+        assert label in s.html
+
+
+@pytest.mark.asyncio
+async def test_team_activity_michael_appears_first():
+    """Michael is sysadmin and the lead engineer — the canonical first
+    row of every team-attribution table in the platform. The digest
+    must follow the same convention so a reader scanning columns
+    finds the same identity in the same place every day."""
+    s = await _section_team_activity()
+    michael_pos = s.html.find("Michael")
+    bob_pos = s.html.find("Bob")
+    molly_pos = s.html.find("Molly")
+    assert 0 <= michael_pos < bob_pos
+    assert michael_pos < molly_pos
+
+
+# ── Section 6 — Warm history ──────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_warm_history_renders_empty_state_without_rows():
+    """The section must produce a non-empty 'no warm runs' placeholder
+    when the analytics_metrics_cache has no invariant_summary rows
+    in the last 7 days — same shape as a fresh deploy."""
+    s = await _section_warm_history()
+    assert s.title == "Warm history"
+    # In test env without a populated cache, the placeholder copy
+    # appears in BOTH the HTML and the text fallback.
+    assert "Warm history (last 7 days)" in s.html
+    assert "WARM HISTORY (last 7 days)" in s.text
+    assert ("No warm runs" in s.html
+            or "No warm runs" in s.text)

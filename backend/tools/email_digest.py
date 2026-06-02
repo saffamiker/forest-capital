@@ -8,8 +8,11 @@ content the user spec'd on May 31 2026:
   1. Platform health summary
   2. Recent platform releases (last 24h)
   3. Key analytics snapshot
-  4. Open work
-  5. Deadline tracker
+  4. Platform usage (last 24h / WTD)            ← added June 2 2026
+  5. Team activity (last 24h / WTD)             ← added June 2 2026
+  6. Warm history (last 7 days)                 ← added June 2 2026
+  7. Open work
+  8. Deadline tracker
 
 Every section is fail-open per data source — a missing cache row or
 a transient GitHub API outage degrades that section to a placeholder
@@ -28,11 +31,19 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 import httpx
 import structlog
+
+try:
+    # Python 3.9+ stdlib timezone DB. The digest runs in the Render
+    # container's UTC clock; we need US/Eastern for "this week" so the
+    # WTD window matches the team's actual workweek, not UTC Monday.
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover — Python < 3.9
+    ZoneInfo = None  # type: ignore[assignment]
 
 from tools.email_resend import digest_recipients, send_email
 
@@ -348,7 +359,416 @@ async def _section_analytics_snapshot() -> DigestSection:
                          html=html, text=text)
 
 
-# ── Section 4 — Open work ─────────────────────────────────────────────────
+# ── Time-window helpers (US/Eastern WTD) ──────────────────────────────────
+
+
+def _now_utc() -> datetime:
+    """Wrapper so tests can monkeypatch the digest's notion of 'now'."""
+    return datetime.now(timezone.utc)
+
+
+def _week_start_utc(now: datetime | None = None) -> datetime:
+    """Returns Monday 00:00 US/Eastern, expressed as a UTC-aware
+    datetime suitable for an SQL bound parameter against a
+    TIMESTAMPTZ column.
+
+    Why ET, not UTC: the team works on the US East Coast and the
+    digest cron fires 07:00 ET. Anchoring WTD to UTC Monday would
+    mis-report Sunday-night work as the next week's effort. ET
+    matches the rest of the platform's calendar conventions
+    (deadlines, cron labels, presentation times)."""
+    now = now or _now_utc()
+    if ZoneInfo is None:
+        # Pre-3.9 fallback: anchor to UTC Monday. Tests will not hit
+        # this path; production runs on Render's Python 3.12.
+        et_now = now
+    else:
+        et_now = now.astimezone(ZoneInfo("America/New_York"))
+    # Monday is weekday() == 0.
+    monday_local = et_now - timedelta(days=et_now.weekday())
+    monday_local = datetime.combine(
+        monday_local.date(), time(0, 0, 0),
+        tzinfo=et_now.tzinfo)
+    return monday_local.astimezone(timezone.utc)
+
+
+def _hours_ago_utc(hours: float, now: datetime | None = None) -> datetime:
+    return (now or _now_utc()) - timedelta(hours=hours)
+
+
+# ── Section 4 — Platform usage (last 24h / WTD) ───────────────────────────
+# Reads agent_interactions to surface how the team actually drove the
+# AI council and the support assistants. Three primary categories the
+# user spec'd — council, defense_prep, peer_review — plus an "Other"
+# rollup for the utility interactions (qa, document_upload, explain,
+# explain_data, export, writing_assistant, test_quality_eval, etc.)
+# so the table sums to the true total without flooding it.
+
+
+_PRIMARY_USAGE_TYPES = ("council", "defense_prep", "peer_review")
+
+
+async def _section_platform_usage() -> DigestSection:
+    rows: dict[str, dict[str, int]] = {}
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            raise RuntimeError("AsyncSessionLocal unavailable")
+        now = _now_utc()
+        h24 = _hours_ago_utc(24, now)
+        wk0 = _week_start_utc(now)
+        async with AsyncSessionLocal() as session:
+            # One query per window so the bound timestamps are explicit
+            # and stable across SQL engines. Counts are tiny.
+            for window_key, since in (("h24", h24), ("wtd", wk0)):
+                r = await session.execute(text(
+                    "SELECT interaction_type, COUNT(*) "
+                    "FROM agent_interactions "
+                    "WHERE timestamp >= :since "
+                    "GROUP BY interaction_type"), {"since": since})
+                for itype, count in r.fetchall():
+                    rows.setdefault(itype or "?", {})[window_key] = int(count)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_platform_usage_read_failed", error=str(exc))
+
+    def _total(key: str) -> int:
+        return sum(v.get(key, 0) for v in rows.values())
+
+    def _bucket(key: str) -> int:
+        return rows.get(key, {}).get("h24", 0)
+
+    def _bucket_wtd(key: str) -> int:
+        return rows.get(key, {}).get("wtd", 0)
+
+    primary_counts = [
+        ("Council queries",    "council"),
+        ("Defense Prep",       "defense_prep"),
+        ("Peer Review",        "peer_review"),
+    ]
+    other_h24 = _total("h24") - sum(
+        _bucket(k) for _, k in primary_counts)
+    other_wtd = _total("wtd") - sum(
+        _bucket_wtd(k) for _, k in primary_counts)
+
+    rows_html: list[str] = []
+    rows_text: list[str] = []
+    for label, key in primary_counts:
+        h24 = _bucket(key)
+        wtd = _bucket_wtd(key)
+        rows_html.append(
+            f"<tr>"
+            f"<td style='padding:4px 8px;color:#cbd5e1'>{label}</td>"
+            f"<td style='padding:4px 8px;color:#cbd5e1;text-align:right'>"
+            f"{h24}</td>"
+            f"<td style='padding:4px 8px;color:#94a3b8;text-align:right'>"
+            f"{wtd}</td>"
+            f"</tr>")
+        rows_text.append(f"  {label:<20} {h24:>4}  {wtd:>4}")
+    rows_html.append(
+        f"<tr>"
+        f"<td style='padding:4px 8px;color:#64748b'>Other</td>"
+        f"<td style='padding:4px 8px;color:#64748b;text-align:right'>"
+        f"{max(other_h24, 0)}</td>"
+        f"<td style='padding:4px 8px;color:#64748b;text-align:right'>"
+        f"{max(other_wtd, 0)}</td>"
+        f"</tr>"
+        f"<tr style='border-top:1px solid #1e2d47'>"
+        f"<td style='padding:4px 8px;color:#cbd5e1'><b>Total</b></td>"
+        f"<td style='padding:4px 8px;color:#cbd5e1;text-align:right'>"
+        f"<b>{_total('h24')}</b></td>"
+        f"<td style='padding:4px 8px;color:#cbd5e1;text-align:right'>"
+        f"<b>{_total('wtd')}</b></td>"
+        f"</tr>")
+    rows_text.append(f"  {'Other':<20} {max(other_h24,0):>4}  "
+                     f"{max(other_wtd,0):>4}")
+    rows_text.append(f"  {'-' * 22}{'----':>4}  {'----':>4}")
+    rows_text.append(f"  {'Total':<20} {_total('h24'):>4}  "
+                     f"{_total('wtd'):>4}")
+
+    html = (
+        f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
+        f"Platform usage</h3>"
+        f"<table cellspacing='0' style='font-family:monospace;"
+        f"font-size:12px;border-collapse:collapse'>"
+        f"<thead><tr>"
+        f"<th style='padding:4px 8px;text-align:left;color:#64748b'>"
+        f"Category</th>"
+        f"<th style='padding:4px 8px;text-align:right;color:#64748b'>"
+        f"24h</th>"
+        f"<th style='padding:4px 8px;text-align:right;color:#64748b'>"
+        f"WTD</th>"
+        f"</tr></thead><tbody>"
+        f"{''.join(rows_html)}"
+        f"</tbody></table>")
+    text = (
+        f"PLATFORM USAGE\n"
+        f"  {'Category':<20} {'24h':>4}  {'WTD':>4}\n"
+        + "\n".join(rows_text) + "\n")
+    return DigestSection(title="Platform usage", html=html, text=text)
+
+
+# ── Section 5 — Team activity (last 24h / WTD) ────────────────────────────
+# Per-person counts across four signals: commits (via the GIT_AUTHOR_
+# EMAIL_MAP reverse), doc edits (editor_drafts.updated_at), UAT
+# attempts (test_results.attested_at), and logins (session_events
+# WHERE event_type = 'login'). The team is fixed: Michael, Bob, Molly.
+# Order is sysadmin-first (Michael) then alphabetical — same order
+# the Team Activity dashboard uses.
+
+
+_TEAM_DISPLAY_ORDER: list[tuple[str, str]] = [
+    ("ruurdsm@queens.edu",  "Michael"),
+    ("thaob@queens.edu",    "Bob"),
+    ("murdockm@queens.edu", "Molly"),
+]
+
+
+def _git_authors_for(email: str) -> set[str]:
+    """Reverse of config.GIT_AUTHOR_EMAIL_MAP — every git author email
+    that maps to this platform email, plus the platform email itself
+    (commits authored directly from the platform domain are
+    unmapped). Fail-open to {email} on import failure."""
+    try:
+        from config import GIT_AUTHOR_EMAIL_MAP
+    except Exception:  # noqa: BLE001
+        return {email}
+    authors = {email}
+    for git_email, platform_email in GIT_AUTHOR_EMAIL_MAP.items():
+        if platform_email == email:
+            authors.add(git_email)
+    return authors
+
+
+async def _section_team_activity() -> DigestSection:
+    per_person: dict[str, dict[str, dict[str, int]]] = {
+        email: {"commits": {}, "drafts": {}, "uat": {}, "logins": {}}
+        for email, _ in _TEAM_DISPLAY_ORDER
+    }
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            raise RuntimeError("AsyncSessionLocal unavailable")
+        now = _now_utc()
+        h24 = _hours_ago_utc(24, now)
+        wk0 = _week_start_utc(now)
+        async with AsyncSessionLocal() as session:
+            for email, _ in _TEAM_DISPLAY_ORDER:
+                authors = list(_git_authors_for(email))
+                for window_key, since in (("h24", h24), ("wtd", wk0)):
+                    # Commits — by git author through the reverse map.
+                    r = await session.execute(text(
+                        "SELECT COUNT(*) FROM commit_activity "
+                        "WHERE author = ANY(:authors) "
+                        "AND timestamp >= :since"),
+                        {"authors": authors, "since": since})
+                    per_person[email]["commits"][window_key] = int(
+                        (r.scalar() or 0))
+                    # Doc edits — distinct editor_drafts touched.
+                    r = await session.execute(text(
+                        "SELECT COUNT(DISTINCT id) FROM editor_drafts "
+                        "WHERE owner_email = :e "
+                        "AND updated_at >= :since "
+                        "AND is_deleted = false"),
+                        {"e": email, "since": since})
+                    per_person[email]["drafts"][window_key] = int(
+                        (r.scalar() or 0))
+                    # UAT — count of test_results attestations.
+                    r = await session.execute(text(
+                        "SELECT COUNT(*) FROM test_results "
+                        "WHERE user_email = :e "
+                        "AND attested_at >= :since"),
+                        {"e": email, "since": since})
+                    per_person[email]["uat"][window_key] = int(
+                        (r.scalar() or 0))
+                    # Logins — session_events login events.
+                    r = await session.execute(text(
+                        "SELECT COUNT(*) FROM session_events "
+                        "WHERE user_email = :e "
+                        "AND event_type = 'login' "
+                        "AND timestamp >= :since"),
+                        {"e": email, "since": since})
+                    per_person[email]["logins"][window_key] = int(
+                        (r.scalar() or 0))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_team_activity_read_failed", error=str(exc))
+
+    cols = [
+        ("Commits",  "commits"),
+        ("Doc edits", "drafts"),
+        ("UAT",      "uat"),
+        ("Logins",   "logins"),
+    ]
+    header_html = (
+        "<tr><th style='padding:4px 8px;text-align:left;color:#64748b'>"
+        "Member</th>"
+        + "".join(
+            f"<th style='padding:4px 8px;text-align:right;"
+            f"color:#64748b'>{label}<br/>"
+            f"<span style='font-size:10px;color:#475569'>24h / WTD"
+            f"</span></th>"
+            for label, _ in cols)
+        + "</tr>")
+
+    body_rows_html: list[str] = []
+    body_rows_text: list[str] = []
+    for email, name in _TEAM_DISPLAY_ORDER:
+        cells_html: list[str] = []
+        cells_text: list[str] = []
+        for _, key in cols:
+            stats = per_person[email][key]
+            h = stats.get("h24", 0)
+            w = stats.get("wtd", 0)
+            cells_html.append(
+                f"<td style='padding:4px 8px;text-align:right;"
+                f"color:#cbd5e1;font-family:monospace'>"
+                f"{h} / {w}</td>")
+            cells_text.append(f"{h:>3}/{w:<3}")
+        body_rows_html.append(
+            f"<tr><td style='padding:4px 8px;color:#cbd5e1'>{name}</td>"
+            + "".join(cells_html) + "</tr>")
+        body_rows_text.append(
+            f"  {name:<8} " + "  ".join(cells_text))
+
+    html = (
+        f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
+        f"Team activity</h3>"
+        f"<table cellspacing='0' style='font-size:12px;"
+        f"border-collapse:collapse'>"
+        f"<thead>{header_html}</thead>"
+        f"<tbody>{''.join(body_rows_html)}</tbody></table>")
+    header_text = (
+        f"  {'Member':<8} " +
+        "  ".join(f"{label:<7}" for label, _ in cols))
+    text = (
+        f"TEAM ACTIVITY (24h / WTD)\n"
+        f"{header_text}\n"
+        + "\n".join(body_rows_text) + "\n")
+    return DigestSection(title="Team activity", html=html, text=text)
+
+
+# ── Section 6 — Warm history (last 7 days) ────────────────────────────────
+# Reads analytics_metrics_cache where metric_kind='invariant_summary' —
+# the rows PR #252 (set_strategy_cache_invariant_persist) starts
+# writing on every warm. One row per distinct data_hash, upserted with
+# fresh computed_at on each warm against the same hash. For the digest
+# we show the most recent 10 rows in the last 7 days, oldest at the
+# bottom so a reader scans top-to-bottom newest-first.
+
+
+async def _section_warm_history() -> DigestSection:
+    rows: list[dict[str, Any]] = []
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            raise RuntimeError("AsyncSessionLocal unavailable")
+        since = _hours_ago_utc(24 * 7)
+        async with AsyncSessionLocal() as session:
+            r = await session.execute(text(
+                "SELECT data_hash, payload, computed_at "
+                "FROM analytics_metrics_cache "
+                "WHERE metric_kind = 'invariant_summary' "
+                "AND computed_at >= :since "
+                "ORDER BY computed_at DESC "
+                "LIMIT 10"), {"since": since})
+            for data_hash, payload, computed_at in r.fetchall():
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except Exception:  # noqa: BLE001
+                        payload = {}
+                rows.append({
+                    "data_hash":   (data_hash or "")[:8],
+                    "passed":      bool((payload or {}).get("passed", True)),
+                    "hard":        int((payload or {}).get(
+                        "hard_failures", 0)),
+                    "soft":        int((payload or {}).get(
+                        "soft_warnings", 0)),
+                    "violations":  (payload or {}).get("violations") or [],
+                    "computed_at": computed_at,
+                })
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_warm_history_read_failed", error=str(exc))
+
+    if not rows:
+        html = (
+            f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
+            f"Warm history (last 7 days)</h3>"
+            f"<div style='font-size:12px;color:#64748b'>"
+            f"No warm runs recorded in the last 7 days.</div>")
+        text = (
+            "WARM HISTORY (last 7 days)\n"
+            "  No warm runs recorded.\n")
+        return DigestSection(title="Warm history", html=html, text=text)
+
+    html_rows: list[str] = []
+    text_rows: list[str] = []
+    for row in rows:
+        ts = row["computed_at"]
+        ts_str = (ts.strftime("%Y-%m-%d %H:%M UTC")
+                  if hasattr(ts, "strftime") else str(ts))
+        if row["passed"]:
+            badge_html = (
+                "<span style='color:#22c55e'>✅ passed</span>")
+            badge_text = "✅ passed"
+        elif row["hard"] > 0:
+            badge_html = (
+                f"<span style='color:#ef4444'>❌ "
+                f"{row['hard']} HARD FAILURE"
+                f"{'S' if row['hard'] != 1 else ''}</span>")
+            badge_text = f"❌ {row['hard']} HARD FAILURE(S)"
+        else:
+            badge_html = (
+                f"<span style='color:#f59e0b'>⚠️ "
+                f"{row['soft']} warning"
+                f"{'s' if row['soft'] != 1 else ''}</span>")
+            badge_text = f"⚠️ {row['soft']} warning(s)"
+
+        # First hard failure — the most actionable detail. Soft-only
+        # rows surface the first soft warning's detail so the row
+        # isn't cryptic.
+        detail = ""
+        for v in row["violations"]:
+            if v.get("severity") == "hard":
+                detail = (
+                    f"[{v.get('code')}] {v.get('entity','')} — "
+                    f"{v.get('detail','')}")
+                break
+        if not detail:
+            for v in row["violations"]:
+                if v.get("severity") == "soft":
+                    detail = (
+                        f"[{v.get('code')}] {v.get('entity','')} — "
+                        f"{v.get('detail','')}")
+                    break
+
+        html_rows.append(
+            f"<li style='margin-bottom:6px;font-size:12px;"
+            f"color:#cbd5e1'>"
+            f"<code style='color:#64748b'>{ts_str}</code> &nbsp; "
+            f"{badge_html} &nbsp; "
+            f"<span style='color:#64748b'>hash "
+            f"<code>{row['data_hash']}</code></span>"
+            + (f"<br/><span style='color:#94a3b8;font-size:11px;"
+               f"margin-left:18px'>{detail}</span>" if detail else "")
+            + "</li>")
+        text_rows.append(
+            f"  {ts_str}  {badge_text}  (hash {row['data_hash']})"
+            + (f"\n    {detail}" if detail else ""))
+
+    html = (
+        f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
+        f"Warm history (last 7 days)</h3>"
+        f"<ul style='padding-left:18px;margin:0'>"
+        f"{''.join(html_rows)}"
+        f"</ul>")
+    text = "WARM HISTORY (last 7 days)\n" + "\n".join(text_rows) + "\n"
+    return DigestSection(title="Warm history", html=html, text=text)
+
+
+# ── Section 7 — Open work ─────────────────────────────────────────────────
 
 
 async def _section_open_work() -> DigestSection:
@@ -461,7 +881,7 @@ async def _fetch_failing_open_prs() -> list[tuple[int, str]]:
     return out
 
 
-# ── Section 5 — Deadline tracker ──────────────────────────────────────────
+# ── Section 8 — Deadline tracker ──────────────────────────────────────────
 
 
 def _section_deadlines(today: date | None = None) -> DigestSection:
@@ -542,6 +962,9 @@ async def build_digest_email() -> tuple[str, str, str]:
     sections.append(await _section_platform_health())
     sections.append(await _section_releases())
     sections.append(await _section_analytics_snapshot())
+    sections.append(await _section_platform_usage())
+    sections.append(await _section_team_activity())
+    sections.append(await _section_warm_history())
     sections.append(await _section_open_work())
     sections.append(_section_deadlines(today))
 
