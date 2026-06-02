@@ -98,6 +98,19 @@ def create_app(cfg: BridgeConfig | None = None) -> FastAPI:
         body is intentionally generic — no enumeration of which
         token would have worked.
 
+        Two valid sources, checked in order:
+
+          1. The persistent OAuth TOKEN STORE — bearers minted by
+             /token and saved to queue.db so they survive a bridge
+             restart. Every claude.ai /mcp call lands here.
+          2. The static cfg.auth_token from the config file — used
+             by the local CLI (`bridge push`, `bridge status`) and
+             the worker, which never run the OAuth flow. Acts as the
+             admin / operator token.
+
+        Either path admits the request; only a bearer that fails BOTH
+        produces a 401.
+
         On a 401 the response carries a WWW-Authenticate header
         pointing at the protected-resource metadata (RFC 9728). That
         is how an OAuth client (claude.ai) DISCOVERS the authorization
@@ -105,8 +118,8 @@ def create_app(cfg: BridgeConfig | None = None) -> FastAPI:
         resource_metadata URL, fetches the AS metadata, and runs the
         authorize/token flow. Without the header the OAuth connector
         cannot bootstrap from a bare /mcp call."""
-        token = app.state.cfg.auth_token
-        if not token:
+        static_token = app.state.cfg.auth_token
+        if not static_token:
             return
         base = str(request.base_url).rstrip("/")
         proto = request.headers.get("x-forwarded-proto")
@@ -122,10 +135,19 @@ def create_app(cfg: BridgeConfig | None = None) -> FastAPI:
                 status_code=401, detail="Missing bearer token.",
                 headers={"WWW-Authenticate": challenge})
         provided = header.split(" ", 1)[1].strip()
-        if provided != token:
-            raise HTTPException(
-                status_code=401, detail="Invalid bearer token.",
-                headers={"WWW-Authenticate": challenge})
+        # OAuth-issued tokens first (this is the common path —
+        # claude.ai is the dominant client). The fail-open getattr
+        # keeps tests / old apps that never registered an OAuth store
+        # working — they fall through to the static-token branch.
+        token_store = getattr(app.state, "oauth_token_store", None)
+        if token_store is not None and token_store.validate(provided):
+            return
+        # Static config token — used by the CLI and the worker.
+        if provided == static_token:
+            return
+        raise HTTPException(
+            status_code=401, detail="Invalid bearer token.",
+            headers={"WWW-Authenticate": challenge})
 
     # ── Public operational endpoint (no auth) ──────────────────────────
 
