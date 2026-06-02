@@ -52,7 +52,7 @@ import os
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 from . import __version__
 from .config import BridgeConfig, load_config
@@ -340,6 +340,43 @@ def create_app(cfg: BridgeConfig | None = None) -> FastAPI:
                 return _rpc_error(req_id, _RPC_INVALID_PARAMS,
                                    "params must be an object.")
 
+            # ── Notification path ──────────────────────────────────
+            # JSON-RPC 2.0: a Request without an id is a Notification,
+            # and the server MUST NOT respond. By MCP convention every
+            # `notifications/*` method is a notification (the missing
+            # id is the wire-level signal). We run the handler for
+            # any side effects, then return HTTP 202 with an empty
+            # body so the client knows the message was accepted
+            # without a JSON-RPC envelope coming back.
+            if method.startswith("notifications/"):
+                notif_handler = _NOTIFICATION_HANDLERS.get(method)
+                if notif_handler is not None:
+                    try:
+                        notif_handler(app, params)
+                    except Exception as exc:  # noqa: BLE001
+                        # A notification handler failing is logged but
+                        # never produces a response — the protocol
+                        # forbids it.
+                        _log("mcp_notification_handler_failed",
+                             method=method, error=str(exc))
+                    _log("mcp_response_sent", req_id=req_id,
+                         method=method, reason="notification_accepted")
+                else:
+                    # Unknown notification — silently accept per the
+                    # spec (servers ignore unknown notifications) but
+                    # log it so a missing handler is visible in the
+                    # diagnostic stream.
+                    _log("mcp_unknown_notification", method=method)
+                    _log("mcp_response_sent", req_id=req_id,
+                         method=method,
+                         reason="unknown_notification_ignored")
+                # Truly empty body — not `null`. JSONResponse(None)
+                # serialises to the JSON literal "null" which a strict
+                # client might parse as a JSON-RPC response and reject;
+                # bare Response with no content gives the
+                # zero-byte body MCP's notification path expects.
+                return Response(status_code=202)
+
             handler = _METHOD_HANDLERS.get(method)
             if handler is None:
                 # Explicit log line for the case the user is
@@ -479,6 +516,104 @@ def _h_status(app: FastAPI, _params: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# ── MCP lifecycle handlers (June 2 2026) ──────────────────────────────────
+# Claude.ai's conversation-toggle handshake (Anthropic/Toolbox client)
+# calls three lifecycle methods after auth. Without these the toggle
+# fails with "couldn't connect" because the bridge returns
+# method_not_found on the very first call — see the PR #258 diagnostic
+# log capture.
+#
+# The handlers below answer the protocol calls; the BRIDGE TOOLS
+# themselves (push_prompt / get_result / status) keep their existing
+# direct method dispatch so the local CLI and the mobile relay path
+# stay unchanged. Claude.ai will discover the tools through tools/list
+# and invoke them through tools/call — tools/call is a follow-up; the
+# scope of this commit is the three handshake methods the user spec'd.
+
+# Protocol version Claude.ai sends in its initialize call (Anthropic/
+# Toolbox 1.0.0 → 2025-11-25). We echo it back unchanged; any newer
+# version the client supports will negotiate on its side.
+_MCP_PROTOCOL_VERSION = "2025-11-25"
+
+# Tools exposed to Claude.ai via tools/list. Each entry is the
+# MCP-spec shape: {name, description, inputSchema}. inputSchema is a
+# JSON Schema describing the tool's arguments. The descriptions and
+# schemas match the user's spec verbatim — get_result.prompt_id is
+# typed string here (per the spec) even though the existing
+# _h_get_result handler expects an integer; the existing push_prompt /
+# get_result / status methods remain available via direct method
+# dispatch, and tools/call (which would coerce arguments through
+# these schemas before invoking the handler) is a follow-up.
+_MCP_TOOLS_CATALOG: list[dict[str, Any]] = [
+    {
+        "name": "push_prompt",
+        "description": "Push a prompt to Claude Code's queue for execution",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt":     {"type": "string"},
+                "session_id": {"type": "string"},
+            },
+            "required": ["prompt"],
+        },
+    },
+    {
+        "name": "get_result",
+        "description": "Get the result of a previously pushed prompt",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt_id": {"type": "string"},
+            },
+            "required": ["prompt_id"],
+        },
+    },
+    {
+        "name": "status",
+        "description": "Get queue status including pending prompt count",
+        "inputSchema": {
+            "type":       "object",
+            "properties": {},
+        },
+    },
+]
+
+
+def _h_initialize(_app: FastAPI, _params: dict[str, Any]) -> dict[str, Any]:
+    """MCP `initialize` — the handshake response. Echoes the spec'd
+    protocol version, advertises the tools capability, and identifies
+    the server. The client (Claude.ai / Anthropic Toolbox) follows
+    this with `notifications/initialized` and then `tools/list`."""
+    return {
+        "protocolVersion": _MCP_PROTOCOL_VERSION,
+        "capabilities":    {"tools": {}},
+        "serverInfo": {
+            "name":    "mcp-bridge",
+            "version": __version__,
+        },
+    }
+
+
+def _h_tools_list(_app: FastAPI, _params: dict[str, Any]) -> dict[str, Any]:
+    """MCP `tools/list` — surfaces the three tools the bridge exposes
+    to Claude.ai. The tool catalog is a module-level constant so the
+    same shape is returned on every call regardless of state."""
+    return {"tools": _MCP_TOOLS_CATALOG}
+
+
+def _h_notifications_initialized(
+    _app: FastAPI, _params: dict[str, Any],
+) -> None:
+    """MCP `notifications/initialized` — the client's acknowledgement
+    after a successful handshake. JSON-RPC notifications carry no id
+    and the server MUST NOT respond, so the dispatcher routes this
+    through the notification path (HTTP 202, empty body). The handler
+    itself is a side-effect-free no-op; its presence in
+    _NOTIFICATION_HANDLERS is what lets the dispatcher recognise it
+    as a known notification rather than silently dropping it."""
+    return None
+
+
 _METHOD_HANDLERS = {
     "push_prompt":  _h_push_prompt,
     "get_result":   _h_get_result,
@@ -486,4 +621,18 @@ _METHOD_HANDLERS = {
     "claim_next":   _h_claim_next,
     "post_result":  _h_post_result,
     "status":       _h_status,
+    # MCP lifecycle — see "MCP lifecycle handlers" block above.
+    "initialize":   _h_initialize,
+    "tools/list":   _h_tools_list,
+}
+
+
+# Methods that are NOTIFICATIONS — the client expects no response, the
+# server MUST NOT send one. The /mcp dispatcher returns HTTP 202 with
+# an empty body when the inbound method lands here. Membership in this
+# set is independent of _METHOD_HANDLERS: a method that's recognised
+# as a notification has its handler invoked for the side effect (e.g.
+# logging) but no JSON-RPC envelope is built.
+_NOTIFICATION_HANDLERS = {
+    "notifications/initialized": _h_notifications_initialized,
 }
