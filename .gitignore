@@ -21,3 +21,7 @@ build/
 
 .vercel
 .env*.local
+
+# MCP bridge connector config — carries the bearer token that gates
+# prompt execution on the desktop. Never commit it.
+.mcp.json
