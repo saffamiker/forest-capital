@@ -76,6 +76,19 @@ const TASKS: Record<EditorDocumentType, TaskSet> = {
       'Export the master script for the full team',
     ],
   },
+  analytical_appendix: {
+    owner: 'BOB',
+    note: TRACKING_NOTE,
+    tasks: [
+      'Read through each section\'s introduction paragraph',
+      'Verify every table value against the live Analytics page',
+      'Resolve every amber marker before submitting',
+      'Confirm the data hash in the Reproducibility section matches '
+        + 'the current strategy_results_cache row',
+      'Save a named version before submitting',
+      'Export DOCX for the Analytical Appendix submission',
+    ],
+  },
 }
 
 interface Props {
