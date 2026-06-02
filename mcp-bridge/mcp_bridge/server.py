@@ -614,6 +614,75 @@ def _h_notifications_initialized(
     return None
 
 
+# Maps a tool name (as advertised in tools/list) to the underlying
+# direct-method handler. tools/call routes through this dispatch
+# table so the same code path that serves the CLI's direct method
+# calls also serves Claude.ai's tools/call invocations — single
+# source of truth, no duplicated validation.
+_MCP_TOOL_HANDLERS = {
+    "push_prompt": _h_push_prompt,
+    "get_result":  _h_get_result,
+    "status":      _h_status,
+}
+
+
+def _h_tools_call(app: FastAPI, params: dict[str, Any]) -> dict[str, Any]:
+    """MCP `tools/call` — the invocation path Claude.ai uses inside a
+    conversation after discovering the bridge's tools via tools/list.
+
+    Wraps the underlying handler's return value in the MCP content
+    envelope:
+
+        {"content": [{"type": "text", "text": <JSON-stringified>}]}
+
+    The text payload is the JSON serialisation of the handler's
+    return dict, so Claude.ai's LLM sees a structured response and
+    can extract fields by name. Errors raised by the underlying
+    handler propagate as ValueError → invalid_params on the JSON-RPC
+    envelope (same as direct method dispatch); see the dispatcher's
+    `except ValueError` arm.
+
+    SCHEMA-vs-HANDLER COERCION
+      tools/list advertises get_result.prompt_id as `string` (per the
+      user's June 2 2026 spec), but the underlying _h_get_result
+      expects an `int` — the CLI / mobile path has always called it
+      that way. When the LLM serialises prompt_id as a string (the
+      schema's declared type), coerce digit-strings to int here so
+      the underlying handler still accepts the call. The reverse
+      (int passed where the schema says string) is rare and the
+      underlying handler tolerates int natively, so no coercion
+      needed in that direction. This shim is the entire reconciliation
+      between the MCP-advertised schema and the legacy direct-method
+      contract.
+    """
+    name = params.get("name")
+    arguments = params.get("arguments") or {}
+    if not isinstance(name, str) or not name:
+        raise ValueError(
+            "'name' is required and must be a non-empty string.")
+    if not isinstance(arguments, dict):
+        raise ValueError("'arguments' must be an object.")
+    handler = _MCP_TOOL_HANDLERS.get(name)
+    if handler is None:
+        raise ValueError(
+            f"Unknown tool: '{name}'. Known tools: "
+            f"{sorted(_MCP_TOOL_HANDLERS.keys())}")
+    # Schema/handler reconciliation for get_result.prompt_id.
+    if name == "get_result":
+        pid = arguments.get("prompt_id")
+        if isinstance(pid, str) and pid.lstrip("-").isdigit():
+            arguments = {**arguments, "prompt_id": int(pid)}
+    result = handler(app, arguments)
+    # The handler's return value (a plain dict) → JSON text content.
+    # `default=str` is the same fallback the diagnostic log uses for
+    # any non-JSON-native types in the result.
+    return {
+        "content": [
+            {"type": "text", "text": json.dumps(result, default=str)},
+        ],
+    }
+
+
 _METHOD_HANDLERS = {
     "push_prompt":  _h_push_prompt,
     "get_result":   _h_get_result,
@@ -624,6 +693,7 @@ _METHOD_HANDLERS = {
     # MCP lifecycle — see "MCP lifecycle handlers" block above.
     "initialize":   _h_initialize,
     "tools/list":   _h_tools_list,
+    "tools/call":   _h_tools_call,
 }
 
 
