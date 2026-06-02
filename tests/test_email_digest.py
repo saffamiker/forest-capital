@@ -148,6 +148,26 @@ async def test_send_daily_digest_skips_when_no_recipients(monkeypatch):
     assert result["recipients"] == ["digest-dev@analyticsdesk.app"]
 
 
+@pytest.mark.asyncio
+async def test_send_daily_digest_uses_digest_sender(
+    monkeypatch, capsys,
+):
+    """The daily digest must send from `digest@analyticsdesk.app`,
+    NOT the platform's generic RESEND_FROM_EMAIL. The dev-env path
+    prints the From address; capture it to confirm the per-purpose
+    override took effect even when the env var disagrees."""
+    monkeypatch.setenv("DIGEST_RECIPIENTS", "michael@example.com")
+    # Set RESEND_FROM_EMAIL to something OTHER than the digest mailbox
+    # so the test catches the per-call override (not a coincidental
+    # env-var match).
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "wrong@example.com")
+    result = await send_daily_digest()
+    assert result["sent"] is True
+    out = capsys.readouterr().out
+    assert "From:    digest@analyticsdesk.app" in out
+    assert "wrong@example.com" not in out
+
+
 # ── Time-window helpers (US/Eastern WTD) ──────────────────────────────────
 
 

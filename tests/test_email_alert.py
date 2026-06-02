@@ -147,6 +147,20 @@ def test_send_alert_skips_when_no_violations():
     assert "no violations" in result.get("reason", "").lower()
 
 
+def test_send_alert_uses_alerts_sender(monkeypatch, capsys):
+    """The invariant alert must send from `alerts@analyticsdesk.app`,
+    NOT the platform's generic RESEND_FROM_EMAIL. The dev-env path
+    prints the From address; capture it to confirm the per-purpose
+    override took effect even when the env var disagrees."""
+    monkeypatch.setenv("ALERT_RECIPIENT", "test-michael@example.com")
+    monkeypatch.setenv("RESEND_FROM_EMAIL", "wrong@example.com")
+    result = send_alert(_hard_failure_payload())
+    assert result["sent"] is True
+    out = capsys.readouterr().out
+    assert "From:    alerts@analyticsdesk.app" in out
+    assert "wrong@example.com" not in out
+
+
 def test_send_test_alert_uses_test_marker(monkeypatch):
     """The test endpoint must produce an email distinguishable from
     a real alert at a glance: subject prefixed with [TEST] (not

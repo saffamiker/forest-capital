@@ -45,7 +45,7 @@ try:
 except ImportError:  # pragma: no cover — Python < 3.9
     ZoneInfo = None  # type: ignore[assignment]
 
-from tools.email_resend import digest_recipients, send_email
+from tools.email_resend import DIGEST_FROM, digest_recipients, send_email
 
 log = structlog.get_logger(__name__)
 
@@ -1027,7 +1027,7 @@ async def send_daily_digest() -> dict[str, Any]:
                 "error": "no recipients (DIGEST_RECIPIENTS unset)"}
     msg_id = send_email(
         to=recipients, subject=subject, html=html, text=text,
-        tag="daily-digest")
+        tag="daily-digest", sender=DIGEST_FROM)
     return {
         "sent":        msg_id is not None,
         "message_id":  msg_id,
