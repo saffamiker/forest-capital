@@ -33,16 +33,27 @@ from tools.email_digest import (  # noqa: E402
 # ── Per-section pure assemblers (no DB / network) ─────────────────────────
 
 
-def test_platform_health_renders_without_warm_state():
+@pytest.mark.asyncio
+async def test_platform_health_renders_without_warm_state():
     """The section degrades cleanly when get_warm_state() has not yet
     been hit (cold process state). It must still produce non-empty
-    HTML + text so a digest sent on cold deploy isn't blank."""
-    s = _section_platform_health()
+    HTML + text so a digest sent on cold deploy isn't blank.
+
+    June 2 2026 — the section became async (invariant fallback +
+    alembic_version both read from the DB), so the test awaits."""
+    s = await _section_platform_health()
     assert s.title == "Platform health"
     assert "<table" in s.html
     assert "PLATFORM HEALTH" in s.text
     assert "Last warm:" in s.text
     assert "DB head:" in s.text
+    # The DB-head value renders one of the three permitted states:
+    # a real version_num from alembic_version, or 'unavailable' on
+    # any failure path. The old 'unknown' literal is retired.
+    assert "DB head:" in s.text
+    # In test env without a live DB the value must be 'unavailable',
+    # never 'unknown'.
+    assert "unknown" not in s.text
 
 
 def test_deadlines_renders_known_project_dates():

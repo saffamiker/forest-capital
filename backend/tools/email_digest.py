@@ -60,9 +60,16 @@ class DigestSection:
 # ── Section 1 — Platform health summary ───────────────────────────────────
 
 
-def _section_platform_health() -> DigestSection:
+async def _section_platform_health() -> DigestSection:
     """Cache warm states (6 of them) + last warm timestamp +
-    invariant verdict + alembic head."""
+    invariant verdict + alembic head.
+
+    All three reads are fail-open and now async-capable so the
+    invariant read can fall back to the persisted summary in
+    analytics_metrics_cache when the in-memory cache is empty (a
+    Render redeploy between warm cron and digest cron resets the
+    module-level cache; the persisted row survives). June 2 2026
+    digest fix."""
     try:
         from tools.cache_warm_state import get_warm_state
         warm = get_warm_state().to_dict()
@@ -71,18 +78,30 @@ def _section_platform_health() -> DigestSection:
         warm = {"status": "unknown", "last_success_at": None,
                 "last_landed": {}, "last_attempt_error": str(exc)}
 
+    # Invariant verdict — prefer the in-memory cache, fall back to
+    # the persisted summary (analytics_metrics_cache row written by
+    # set_strategy_cache after each warm). Either path produces the
+    # same {checks_run, hard_failures, soft_warnings, ran_at} shape.
+    inv: dict | None = None
     try:
         from tools.invariant_checks import get_latest_result
         inv = get_latest_result()
     except Exception as exc:  # noqa: BLE001
         log.warning("digest_invariant_read_failed", error=str(exc))
-        inv = None
+    if inv is None:
+        try:
+            from tools.precomputed_analytics import get_latest_metric
+            inv = await get_latest_metric("invariant_summary")
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "digest_invariant_persisted_read_failed",
+                error=str(exc))
 
-    try:
-        head = _alembic_head()
-    except Exception as exc:  # noqa: BLE001
-        log.warning("digest_alembic_head_failed", error=str(exc))
-        head = "unknown"
+    # DB head — query alembic_version directly. The source of truth
+    # lives in the DB, not the filesystem. June 2 2026 digest fix:
+    # the old parents[1] migrations-folder parse was unreliable on
+    # the Render filesystem layout.
+    head = await _alembic_head_from_db()
 
     # Build a status table for the 6 named caches the warm path lands.
     landed = warm.get("last_landed") or {}
@@ -239,24 +258,34 @@ async def _section_analytics_snapshot() -> DigestSection:
     except Exception as exc:  # noqa: BLE001
         log.warning("digest_regime_read_failed", error=str(exc))
 
-    # Blend weights — cio_recommendations cache (cio_recommendation
-    # module). Falls back to None silently.
+    # Blend weights — read from the forward_projection cached metric,
+    # the SAME source the CIO tile and the deck-slide regime context
+    # use (main.py:10362, council_live_context._build_live_context).
+    # The earlier read from cio_recommendations.weights was wrong:
+    # that table is the SHAPER for the human-readable card, not the
+    # canonical source of the live blend. (June 2 2026 digest fix.)
     try:
-        from sqlalchemy import text
-        from database import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
-            r = await session.execute(text(
-                "SELECT weights FROM cio_recommendations "
-                "ORDER BY computed_at DESC LIMIT 1"))
-            row = r.fetchone()
-            if row and row[0]:
-                weights = row[0]
-                if isinstance(weights, str):
-                    try:
-                        weights = json.loads(weights)
-                    except Exception:  # noqa: BLE001
-                        weights = {}
-                blend_weights = weights or {}
+        from tools.regime_meta_forward import (
+            get_cached_forward_projection,
+        )
+        proj = await get_cached_forward_projection()
+        if proj and proj.get("blend_weights"):
+            bw = proj["blend_weights"]
+            if isinstance(bw, str):
+                try:
+                    bw = json.loads(bw)
+                except Exception:  # noqa: BLE001
+                    bw = {}
+            blend_weights = bw or {}
+            # The forward_projection metric also carries the live
+            # regime — prefer it over the regime_signals_cache read
+            # above when both are present, so the digest's regime
+            # label always matches the CIO tile's blend.
+            if proj.get("regime"):
+                regime_label = proj["regime"]
+            rp = proj.get("regime_probability")
+            if rp is not None:
+                regime_conf = float(rp)
     except Exception as exc:  # noqa: BLE001
         log.warning("digest_blend_weights_read_failed", error=str(exc))
 
@@ -475,27 +504,32 @@ def _section_deadlines(today: date | None = None) -> DigestSection:
 # ── Top-level assembler ───────────────────────────────────────────────────
 
 
-def _alembic_head() -> str:
-    """Reads the alembic head SHA without invoking the CLI — parses
-    backend/migrations/versions/*.py for the highest revision id.
-    Conservative: any failure returns 'unknown'."""
+async def _alembic_head_from_db() -> str:
+    """Reads the current migration head from the alembic_version
+    table — the SOURCE OF TRUTH for what migrations have actually
+    landed, not what migration files happen to exist on disk.
+
+    Returns the version_num string on success, "unavailable" when
+    the query fails for any reason (DB unreachable, table missing,
+    permission denied). The previous filesystem-parse implementation
+    was unreliable on Render's container layout — switched to the
+    direct DB query per the June 2 2026 user directive."""
     try:
-        from pathlib import Path
-        d = Path(__file__).resolve().parents[1] / "migrations" / "versions"
-        revs: list[str] = []
-        for p in d.glob("*.py"):
-            for line in p.read_text(encoding="utf-8").splitlines():
-                if line.strip().startswith("revision ="):
-                    rid = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    if rid:
-                        revs.append(rid)
-                    break
-        if not revs:
-            return "unknown"
-        # Migration ids are zero-padded 3-digit strings; lexical sort works.
-        return max(revs)
-    except Exception:  # noqa: BLE001
-        return "unknown"
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return "unavailable"
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(
+                text("SELECT version_num FROM alembic_version LIMIT 1"))
+            r = row.fetchone()
+            if r and r[0]:
+                return str(r[0])
+        return "unavailable"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_alembic_head_db_query_failed",
+                    error=str(exc))
+        return "unavailable"
 
 
 async def build_digest_email() -> tuple[str, str, str]:
@@ -505,7 +539,7 @@ async def build_digest_email() -> tuple[str, str, str]:
     fallback is plain ASCII."""
     today = date.today()
     sections: list[DigestSection] = []
-    sections.append(_section_platform_health())
+    sections.append(await _section_platform_health())
     sections.append(await _section_releases())
     sections.append(await _section_analytics_snapshot())
     sections.append(await _section_open_work())

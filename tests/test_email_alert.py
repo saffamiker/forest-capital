@@ -147,8 +147,59 @@ def test_send_alert_skips_when_no_violations():
     assert "no violations" in result.get("reason", "").lower()
 
 
-def test_send_test_alert_uses_synthetic_payload(monkeypatch):
+def test_send_test_alert_uses_test_marker(monkeypatch):
+    """The test endpoint must produce an email distinguishable from
+    a real alert at a glance: subject prefixed with [TEST] (not
+    [ALERT]) and an explicit test banner in the body. Per the
+    June 2 2026 separation directive."""
     monkeypatch.setenv("ALERT_RECIPIENT", "test-michael@example.com")
     result = send_test_alert()
     assert result["sent"] is True
-    assert "[ALERT]" in result["subject"]
+    assert "[TEST]" in result["subject"]
+    # And NEVER carries the live-alert prefix.
+    assert "[ALERT]" not in result["subject"]
+
+
+def test_build_alert_email_is_test_banner_present():
+    """is_test=True swaps the subject for [TEST] and inserts the
+    explicit test banner verbatim into both HTML and text."""
+    payload = _hard_failure_payload()
+    subject, html, text = build_alert_email(payload, is_test=True)
+    assert subject == "[TEST] AnalyticsDesk — data integrity alert"
+    banner_phrase = (
+        "This is a test alert sent manually from the admin panel. "
+        "No real data issue was detected.")
+    assert banner_phrase in html
+    assert banner_phrase in text
+
+
+def test_build_alert_email_is_test_suppresses_synthetic_rows():
+    """The per-violation rows must NOT render in test mode — a
+    recipient could otherwise mistake the fake values for a real
+    data issue. Instead a single format-confirmation line lands."""
+    payload = _hard_failure_payload()
+    subject, html, text = build_alert_email(payload, is_test=True)
+    confirmation = (
+        "The alert email format and delivery are confirmed working. "
+        "Real alerts will list specific invariant failures here "
+        "with entity, metric, expected, and actual values.")
+    assert confirmation in html
+    assert confirmation in text
+    # The synthetic violation's exact-value strings must NOT leak
+    # into the body (the rows are suppressed entirely).
+    assert "BENCHMARK/COVID_Crash_2020" not in html
+    assert "0.7353" not in html
+
+
+def test_build_alert_email_real_alert_unchanged():
+    """A non-test build (is_test=False, the default) must NOT carry
+    the [TEST] prefix or the test banner. Real alerts stay exactly
+    as Component 2 specified."""
+    payload = _hard_failure_payload()
+    subject, html, text = build_alert_email(payload, is_test=False)
+    assert subject.startswith("[ALERT]")
+    assert "[TEST]" not in subject
+    assert "This is a test alert" not in html
+    assert "This is a test alert" not in text
+    # The real-alert path renders the per-violation rows.
+    assert "BENCHMARK/COVID_Crash_2020" in html

@@ -418,6 +418,24 @@ async def set_strategy_cache(
         from tools.invariant_checks import run_all_invariants
         invariant_result = run_all_invariants(
             results, risk_free_rate=risk_free_monthly)
+        # Persist the summary so a separate process (the daily digest
+        # cron) can read the verdict — module-level `_latest_result`
+        # is in-memory only and gets wiped on every Render redeploy.
+        # Fail-open: a write failure logs and never blocks the cache
+        # path. June 2 2026 digest fix.
+        try:
+            from tools.precomputed_analytics import set_metric
+            payload = invariant_result.to_dict()
+            from datetime import datetime, timezone as _tz
+            payload["ran_at"] = datetime.now(_tz.utc).isoformat()
+            await set_metric(
+                strategy_hash or "BOOT-WARM",
+                "invariant_summary",
+                payload,
+                source="set_strategy_cache_invariant_persist")
+        except Exception as persist_exc:  # noqa: BLE001
+            log.warning("invariant_summary_persist_failed",
+                        error=str(persist_exc))
         if not invariant_result.passed:
             log.warning(
                 "strategy_cache_write_refused_invariants",
