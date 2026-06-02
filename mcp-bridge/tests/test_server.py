@@ -388,6 +388,150 @@ def test_tools_list_surfaces_three_tools_with_input_schemas(cfg):
     assert st["inputSchema"] == {"type": "object", "properties": {}}
 
 
+# ── tools/call — the MCP invocation path ────────────────────────────────────
+
+
+import json as _json  # local alias — keeps the existing _rpc helper isolated
+
+
+def _tools_call(client, cfg, name, arguments=None, rid=10):
+    """Helper — sends a tools/call request and returns the parsed body."""
+    return client.post(
+        "/mcp", headers=_auth(cfg),
+        json=_rpc("tools/call",
+                   {"name": name, "arguments": arguments or {}},
+                   req_id=rid)).json()
+
+
+def test_tools_call_push_prompt_returns_mcp_content_envelope(cfg):
+    """tools/call wraps the underlying handler's dict in the MCP
+    content envelope: {content: [{type: 'text', text: <JSON string>}]}.
+    Claude.ai's LLM parses the text JSON to extract structured fields."""
+    client = _client(cfg)
+    body = _tools_call(client, cfg, "push_prompt",
+                       {"prompt": "hello from claude.ai"}, rid=20)
+    assert body["jsonrpc"] == "2.0"
+    assert body["id"] == 20
+    content = body["result"]["content"]
+    assert isinstance(content, list)
+    assert len(content) == 1
+    assert content[0]["type"] == "text"
+    parsed = _json.loads(content[0]["text"])
+    assert parsed["status"] == "pending"
+    assert isinstance(parsed["prompt_id"], int)
+
+
+def test_tools_call_get_result_coerces_string_prompt_id(cfg):
+    """tools/list advertises get_result.prompt_id as `string` per the
+    user spec, but the underlying _h_get_result expects int. The
+    tools/call dispatcher coerces digit-string → int so the schema
+    Claude.ai sees and the handler the CLI uses stay reconciled."""
+    client = _client(cfg)
+    # Push first so we have a real id to fetch.
+    push = _tools_call(client, cfg, "push_prompt",
+                       {"prompt": "for coercion"}, rid=21)
+    pid = _json.loads(push["result"]["content"][0]["text"])["prompt_id"]
+
+    body = _tools_call(client, cfg, "get_result",
+                       {"prompt_id": str(pid)}, rid=22)
+    parsed = _json.loads(body["result"]["content"][0]["text"])
+    assert parsed["id"] == pid
+    assert parsed["prompt"] == "for coercion"
+    assert parsed["status"] == "pending"
+
+
+def test_tools_call_get_result_also_accepts_int_prompt_id(cfg):
+    """The coercion is one-way (string → int). An int passed
+    directly must still work — the CLI / mobile path has always
+    called with int and that contract is unchanged."""
+    client = _client(cfg)
+    push = _tools_call(client, cfg, "push_prompt",
+                       {"prompt": "native int path"}, rid=23)
+    pid = _json.loads(push["result"]["content"][0]["text"])["prompt_id"]
+
+    body = _tools_call(client, cfg, "get_result",
+                       {"prompt_id": pid}, rid=24)
+    parsed = _json.loads(body["result"]["content"][0]["text"])
+    assert parsed["id"] == pid
+
+
+def test_tools_call_status_returns_queue_snapshot(cfg):
+    """No-argument tool. The status snapshot lands JSON-stringified
+    in the content envelope."""
+    client = _client(cfg)
+    body = _tools_call(client, cfg, "status", {}, rid=25)
+    parsed = _json.loads(body["result"]["content"][0]["text"])
+    assert parsed["alive"] is True
+    assert "counts" in parsed
+    assert parsed["worker_enabled"] is False
+
+
+def test_tools_call_unknown_tool_returns_invalid_params(cfg):
+    """An unknown tool name surfaces as a JSON-RPC invalid_params
+    error (-32602). Claude.ai handles that as a tool-call failure
+    rather than a transport-level error."""
+    client = _client(cfg)
+    body = _tools_call(client, cfg, "frobnicate", {}, rid=26)
+    assert "error" in body
+    assert body["error"]["code"] == -32602
+    # The error message names the tool that was attempted AND lists
+    # what is known — useful in the bridge log + in Claude.ai's
+    # surfaced error pane.
+    assert "frobnicate" in body["error"]["message"]
+    assert "push_prompt" in body["error"]["message"]
+
+
+def test_tools_call_missing_name_returns_error(cfg):
+    client = _client(cfg)
+    body = client.post("/mcp", headers=_auth(cfg),
+                        json=_rpc("tools/call",
+                                  {"arguments": {}}, req_id=27)).json()
+    assert "error" in body
+    assert body["error"]["code"] == -32602
+
+
+def test_tools_call_missing_required_argument_surfaces_handler_error(cfg):
+    """The underlying handler's validation (push_prompt requires a
+    non-empty `prompt`) propagates through tools/call as a JSON-RPC
+    error — the dispatcher's `except ValueError` arm catches it."""
+    client = _client(cfg)
+    body = _tools_call(client, cfg, "push_prompt", {}, rid=28)
+    assert "error" in body
+    assert body["error"]["code"] == -32602
+    assert "prompt" in body["error"]["message"].lower()
+
+
+def test_tools_list_then_tools_call_round_trip(cfg):
+    """End-to-end: list the tools, then invoke each one. This is the
+    flow Claude.ai runs after a successful initialize handshake."""
+    client = _client(cfg)
+    auth = _auth(cfg)
+    listed = client.post(
+        "/mcp", headers=auth,
+        json=_rpc("tools/list", {}, req_id=30)).json()
+    names = [t["name"] for t in listed["result"]["tools"]]
+    assert set(names) == {"push_prompt", "get_result", "status"}
+
+    # Every advertised tool answers a tools/call invocation without
+    # a JSON-RPC error.
+    for i, name in enumerate(names, start=31):
+        # Minimal viable arguments per tool.
+        if name == "push_prompt":
+            args = {"prompt": "roundtrip"}
+        elif name == "get_result":
+            # Need a real id — push first.
+            push = _tools_call(client, cfg, "push_prompt",
+                               {"prompt": "roundtrip-target"}, rid=100)
+            pid = _json.loads(
+                push["result"]["content"][0]["text"])["prompt_id"]
+            args = {"prompt_id": str(pid)}
+        else:
+            args = {}
+        body = _tools_call(client, cfg, name, args, rid=i)
+        assert "error" not in body, f"tools/call {name} failed: {body}"
+        assert body["result"]["content"][0]["type"] == "text"
+
+
 def test_full_handshake_then_existing_tool_still_works(cfg):
     """End-to-end: run the three lifecycle calls in order, then prove
     the existing direct-method dispatch is untouched. This is the
