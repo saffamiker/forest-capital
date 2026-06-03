@@ -182,6 +182,8 @@ class CIO:
         query: str,
         strategy_results: dict[str, Any],
         history: dict[str, Any] | None = None,
+        *,
+        live_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Runs the full council deliberation and returns a CouncilDebateResponse.
@@ -197,6 +199,16 @@ class CIO:
             query:            The user's portfolio analysis question.
             strategy_results: All 10 strategy results from run_all_strategies().
             history:          Full history dict — enables FI correlation analysis.
+            live_context:     Page-scoped or question-bundle context dict
+                              (PR #229 / PR #262). Threaded into the draft
+                              consensus + synthesis prompts as the
+                              `page_context` block. Optional — None matches
+                              the pre-PR-229 behaviour exactly.
+                              June 3 2026 — the streaming variant has
+                              accepted this since PR #229; bringing the
+                              sync path in line so the baseline-capture
+                              script measures apples-to-apples against
+                              the production stream.
         """
         # Phase timing — every log line carries elapsed= seconds since the
         # deliberation began. When a council 502s on Render the last
@@ -234,7 +246,8 @@ class CIO:
             # line (CI catch May 23 2026).
             return self._deliberate_inner(
                 query, strategy_results, history,
-                deliberation_start=deliberation_start)
+                deliberation_start=deliberation_start,
+                live_context=live_context)
         finally:
             clear_active_strategies()
 
@@ -245,6 +258,7 @@ class CIO:
         history: dict[str, Any] | None = None,
         *,
         deliberation_start: float | None = None,
+        live_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """The original deliberation body — wrapped by deliberate()
         so the per-request strategy-context ContextVar is set up
@@ -253,7 +267,11 @@ class CIO:
         deliberation_start — forwarded from deliberate() so the
         elapsed= phase-timing log lines below reference the same
         wall-clock anchor the outer wrapper opened with. Defaults
-        to time.time() when called directly (test paths)."""
+        to time.time() when called directly (test paths).
+
+        live_context — page-scoped or question-bundle context dict
+        (PR #229 / PR #262). Threaded into _compile_draft_consensus
+        and _synthesise as the `page_context` block."""
         if deliberation_start is None:
             deliberation_start = time.time()
         # Step 1-5: Brief the four specialists IN PARALLEL. Each .analyse()
@@ -312,7 +330,8 @@ class CIO:
 
         # Step 6: Compile draft consensus — CIO summarises specialist views
         draft_consensus = self._compile_draft_consensus(
-            query, equity_report, fi_report, risk_report, quant_report, strategy_results
+            query, equity_report, fi_report, risk_report, quant_report,
+            strategy_results, live_context=live_context,
         )
 
         # Step 7-8: dissent — Gemini (blind spots) + Grok (stress test).
@@ -339,6 +358,7 @@ class CIO:
             risk_report,
             quant_report,
             strategy_results,
+            live_context=live_context,
         )
 
         log.info("council_deliberation_complete",
