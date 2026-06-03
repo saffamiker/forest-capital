@@ -279,6 +279,36 @@ def create_app(cfg: BridgeConfig | None = None) -> FastAPI:
             **snap,
         }
 
+    @app.post("/admin/purge-queue")
+    def rest_purge_queue(
+        _: None = Depends(require_token),
+    ) -> dict[str, Any]:
+        """Cancel every pending or running prompt. Operator-facing
+        queue reset — use when the queue gets jammed (worker died
+        mid-prompt, prompts piled up behind a long-running one, etc.)
+        without needing shell access to the SQLite db. Completed and
+        failed rows are preserved; status is logged so an audit
+        trail exists.
+
+        Returns the count of rows cancelled and the post-purge
+        status snapshot so the caller can confirm in one round-trip.
+
+        Auth: same bearer token every other operator endpoint
+        requires. Same trust model — the token holder can read the
+        full queue via /status, so purging is no greater authority.
+        June 3 2026."""
+        cancelled = app.state.queue.purge_pending_and_running()
+        snapshot = app.state.queue.status_snapshot()
+        _log(
+            "purge_queue",
+            cancelled=cancelled,
+            counts=snapshot.get("counts"),
+        )
+        return {
+            "cancelled":         cancelled,
+            "snapshot":          snapshot,
+        }
+
     # ── MCP — JSON-RPC over HTTP POST /mcp ─────────────────────────────
 
     @app.post("/mcp")

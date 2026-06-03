@@ -118,6 +118,88 @@ def test_rest_status_includes_worker_flag(cfg):
     assert body["worker_enabled"] is False  # default off
 
 
+# ── /admin/purge-queue (June 3 2026) ───────────────────────────────────────
+
+
+def test_purge_queue_requires_token(cfg):
+    """Same auth gate as every other operator endpoint — without the
+    bearer token the route 401s. The purge changes queue state so it
+    cannot be public even on localhost."""
+    client = _client(cfg)
+    r = client.post("/admin/purge-queue")
+    assert r.status_code == 401
+
+
+def test_purge_queue_with_wrong_token_returns_401(cfg):
+    client = _client(cfg)
+    r = client.post(
+        "/admin/purge-queue",
+        headers={"Authorization": "Bearer not-the-right-token"})
+    assert r.status_code == 401
+
+
+def test_purge_queue_cancels_pending_rows_and_returns_count(cfg):
+    """The endpoint runs the queue purge and returns the count of
+    rows cancelled plus a fresh status snapshot — one round-trip
+    confirms the action landed."""
+    client = _client(cfg)
+    # Seed two pending prompts.
+    for _ in range(2):
+        r = client.post(
+            "/push", json={"prompt": "x"}, headers=_auth(cfg))
+        assert r.status_code == 200
+    # Purge.
+    r = client.post("/admin/purge-queue", headers=_auth(cfg))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["cancelled"] == 2
+    # The snapshot in the response shows the post-purge state — no
+    # second round-trip needed.
+    assert body["snapshot"]["counts"].get("cancelled") == 2
+    assert body["snapshot"]["counts"].get("pending", 0) == 0
+
+
+def test_purge_queue_idempotent_on_empty_queue(cfg):
+    """A purge against an empty queue is a clean no-op — returns 0,
+    never raises. Lets operator scripts retry safely."""
+    client = _client(cfg)
+    r = client.post("/admin/purge-queue", headers=_auth(cfg))
+    assert r.status_code == 200
+    assert r.json()["cancelled"] == 0
+
+
+def test_purge_queue_preserves_terminal_rows(cfg):
+    """Completed rows are part of the audit trail — the endpoint
+    must NOT touch them. Only in-flight (pending/running) rows
+    flip to cancelled."""
+    client = _client(cfg)
+    # Push + complete a row through the queue API directly.
+    push = client.post(
+        "/push", json={"prompt": "done"}, headers=_auth(cfg))
+    pid = push.json()["prompt_id"]
+    # Drive it to complete via the queue (no public REST drain step,
+    # so reach in via the app's queue handle the same way the worker
+    # does).
+    from mcp_bridge.server import create_app
+    app = create_app(cfg)
+    app.state.queue.claim_next("worker")
+    app.state.queue.post_result(pid, result="ok")
+    # Push one more — that becomes the pending row.
+    client_two = _client(cfg)
+    client_two.post(
+        "/push", json={"prompt": "pending"}, headers=_auth(cfg))
+    r = client_two.post(
+        "/admin/purge-queue", headers=_auth(cfg))
+    body = r.json()
+    # The completed row from BEFORE the second client + the new
+    # pending row from the second client share the same on-disk
+    # SQLite db (cfg.db_path is shared), so we expect cancelled=1
+    # — the new pending row — and complete >= 1 untouched.
+    assert body["cancelled"] == 1
+    counts = body["snapshot"]["counts"]
+    assert counts.get("complete", 0) >= 1
+
+
 # ── MCP tools: each method end to end ──────────────────────────────────────
 
 
