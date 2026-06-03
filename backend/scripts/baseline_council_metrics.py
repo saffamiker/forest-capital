@@ -115,13 +115,24 @@ async def _run_one(question: str, *, dry_run: bool) -> dict:
         }
 
     # Write the council_query_metrics row directly — bypass the API
-    # endpoint so the script stays standalone.
+    # endpoint so the script stays standalone. June 3 2026: mirror the
+    # live event-stream extraction so baseline rows carry the per-CIO
+    # input-token total (migration 052). Without this thread-through
+    # cio_input_tokens defaults to None in the writer and every baseline
+    # row writes NULL, leaving the like-for-like comparison aggregate
+    # unable to compute a baseline mean.
+    per_agent = usage.get("per_agent") or {}
+    cio_input = (
+        per_agent.get("cio", {}).get("input_tokens")
+        if isinstance(per_agent.get("cio"), dict)
+        else None)
     from main import _write_council_query_metric
     from tools.council_question_bundles import QUESTION_TYPE_BASELINE_FULL
     await _write_council_query_metric(
         question_type=QUESTION_TYPE_BASELINE_FULL,
         input_tokens=usage.get("input_tokens"),
         output_tokens=usage.get("output_tokens"),
+        cio_input_tokens=cio_input,
         context_bundle_size=bundle_size,
         synthesis_text=final.get("final_recommendation", "") or "",
     )
@@ -129,6 +140,7 @@ async def _run_one(question: str, *, dry_run: bool) -> dict:
         "question": question,
         "input_tokens": usage.get("input_tokens"),
         "output_tokens": usage.get("output_tokens"),
+        "cio_input_tokens": cio_input,
         "context_bundle_size": bundle_size,
         "recommendation_preview":
             (final.get("final_recommendation") or "")[:200],
