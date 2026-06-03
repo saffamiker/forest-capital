@@ -3243,6 +3243,204 @@ async def get_admin_invariants_history(
         return {"available": False, "rows": []}
 
 
+# ── Council query metrics (June 3 2026) ──────────────────────────────────
+
+
+async def _write_council_query_metric(
+    *,
+    question_type: str,
+    input_tokens: int | None,
+    output_tokens: int | None,
+    context_bundle_size: int,
+    synthesis_text: str,
+) -> None:
+    """Writes one row to council_query_metrics for the just-completed
+    /api/council/query call.
+
+    Reads the live regime ONCE (15-min in-process cache), extracts the
+    recommendation direction from the synthesis prose, computes the
+    refined alignment score, and inserts. Skipped entirely in the
+    test environment (no DB). Fail-open per the wider council
+    endpoint's post-stream-logging convention.
+    """
+    if ENVIRONMENT == "test":
+        return
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return
+
+        # Live regime (the 15-min cache; cheap once warm).
+        hmm_state: str | None = None
+        hmm_confidence: float | None = None
+        try:
+            from tools.regime_detector import detect_current_regime
+            r = detect_current_regime() or {}
+            hmm_state = r.get("hmm_regime")
+            probs = r.get("hmm_probabilities") or {}
+            if hmm_state and isinstance(probs, dict):
+                hmm_confidence = float(probs.get(hmm_state, 0.0))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("council_metric_regime_read_failed",
+                        error=str(exc))
+
+        # Direction extraction + refined alignment score.
+        from tools.council_direction_extractor import (
+            alignment_score, extract_direction,
+        )
+        direction = extract_direction(synthesis_text)
+        score = alignment_score(direction, hmm_state, hmm_confidence)
+
+        # Anchor the row to the dataset that produced it.
+        data_hash: str | None = None
+        try:
+            from tools.cache import get_latest_strategy_hash
+            data_hash = await get_latest_strategy_hash()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("council_metric_hash_read_failed", error=str(exc))
+
+        async with AsyncSessionLocal() as session:
+            await session.execute(text(
+                "INSERT INTO council_query_metrics "
+                "(question_type, input_tokens, output_tokens, "
+                " context_bundle_size, hmm_state, hmm_confidence, "
+                " recommendation_direction, hmm_alignment_score, "
+                " data_hash) VALUES "
+                "(:qt, :it, :ot, :cbs, :hs, :hc, :rd, :as, :dh)"
+            ), {
+                "qt":  question_type,
+                "it":  (int(input_tokens)
+                        if input_tokens is not None else None),
+                "ot":  (int(output_tokens)
+                        if output_tokens is not None else None),
+                "cbs": int(context_bundle_size or 0),
+                "hs":  hmm_state,
+                "hc":  hmm_confidence,
+                "rd":  direction,
+                "as":  score,
+                "dh":  data_hash,
+            })
+            await session.commit()
+        log.info("council_query_metric_written",
+                 question_type=question_type,
+                 input_tokens=input_tokens,
+                 output_tokens=output_tokens,
+                 context_bundle_size=context_bundle_size,
+                 direction=direction,
+                 hmm_state=hmm_state,
+                 alignment_score=score)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("council_query_metric_write_inner_failed",
+                    error=str(exc))
+
+
+@app.get("/api/v1/admin/council-metrics")
+async def get_admin_council_metrics(
+    limit: int = 30,
+    session: dict = Depends(require_auth),
+):
+    """The /admin/council-metrics surface that backs the cost-and-
+    HMM-alignment measurement dashboard.
+
+    Two payloads in one envelope:
+      rows        — the latest N council_query_metrics rows
+      aggregates  — per-question_type averages plus the headline
+                    token_reduction_vs_baseline figure
+
+    Fail-open: a DB unreachable / missing table returns
+    {available:false, rows:[], aggregates:{}} rather than 500.
+    Auth-only — any authenticated user can read. June 3 2026."""
+    limit = max(1, min(int(limit or 30), 200))
+    if ENVIRONMENT == "test":
+        return {"available": False, "rows": [], "aggregates": {}}
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return {"available": False, "rows": [], "aggregates": {}}
+        rows: list[dict[str, Any]] = []
+        per_type: dict[str, dict[str, Any]] = {}
+        baseline_input = None
+        async with AsyncSessionLocal() as db:
+            r = await db.execute(text(
+                "SELECT id, timestamp, question_type, input_tokens, "
+                " output_tokens, context_bundle_size, hmm_state, "
+                " hmm_confidence, recommendation_direction, "
+                " hmm_alignment_score, data_hash "
+                "FROM council_query_metrics "
+                "ORDER BY timestamp DESC LIMIT :n"), {"n": limit})
+            for row in r.fetchall():
+                rows.append({
+                    "id":                     row[0],
+                    "timestamp":              (row[1].isoformat()
+                                               if hasattr(row[1], "isoformat")
+                                               else str(row[1])),
+                    "question_type":          row[2],
+                    "input_tokens":           row[3],
+                    "output_tokens":          row[4],
+                    "context_bundle_size":    row[5],
+                    "hmm_state":              row[6],
+                    "hmm_confidence":         row[7],
+                    "recommendation_direction": row[8],
+                    "hmm_alignment_score":    row[9],
+                    "data_hash":              (row[10] or "")[:8] if row[10] else None,
+                })
+            # Aggregates — one SQL per metric so each remains
+            # independently fail-open on a column type drift.
+            agg_r = await db.execute(text(
+                "SELECT question_type, "
+                " AVG(input_tokens)::float AS avg_input, "
+                " AVG(output_tokens)::float AS avg_output, "
+                " AVG(context_bundle_size)::float AS avg_bundle, "
+                " AVG(hmm_alignment_score)::float AS avg_align, "
+                " COUNT(*)::int AS n_rows "
+                "FROM council_query_metrics "
+                "GROUP BY question_type"))
+            for qt, avg_in, avg_out, avg_bundle, avg_align, n in agg_r.fetchall():
+                per_type[qt] = {
+                    "avg_input_tokens":       avg_in,
+                    "avg_output_tokens":      avg_out,
+                    "avg_context_bundle_size": avg_bundle,
+                    "avg_hmm_alignment_score": avg_align,
+                    "n_rows":                 n,
+                }
+                if qt in ("baseline_full", "full") and avg_in is not None:
+                    # Use the baseline_full average preferentially;
+                    # fall back to the live "full" fallback rows if
+                    # the baseline-capture run hasn't been done yet.
+                    if qt == "baseline_full":
+                        baseline_input = avg_in
+                    elif baseline_input is None:
+                        baseline_input = avg_in
+
+        # token_reduction_vs_baseline per bundle — a single number
+        # per type expressed as (1 - bundle_avg / baseline_avg). Only
+        # populated when a baseline figure is available.
+        reductions: dict[str, float | None] = {}
+        for qt, stats in per_type.items():
+            avg_in = stats.get("avg_input_tokens")
+            if (baseline_input and avg_in and avg_in > 0
+                    and qt not in ("baseline_full", "full")):
+                reductions[qt] = round(
+                    1 - (float(avg_in) / float(baseline_input)), 4)
+            else:
+                reductions[qt] = None
+
+        return {
+            "available": True,
+            "rows": rows,
+            "aggregates": {
+                "per_question_type": per_type,
+                "token_reduction_vs_baseline": reductions,
+                "baseline_avg_input_tokens": baseline_input,
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("admin_council_metrics_read_failed", error=str(exc))
+        return {"available": False, "rows": [], "aggregates": {}}
+
+
 # ── Automated email system — manual triggers (June 1 2026) ────────────────
 
 
@@ -4928,11 +5126,50 @@ async def council_query(
             # thread it into the deliberation. None for an unscoped or
             # unknown scope, so the existing behaviour is unchanged.
             from tools.council_live_context import get_scope_context
-            live_context = await get_scope_context(body.context_scope)
-            if live_context:
+            page_context = await get_scope_context(body.context_scope)
+            if page_context:
                 log.info("council_scope_context_injected",
                          scope=body.context_scope,
-                         keys=list(live_context.keys()))
+                         keys=list(page_context.keys()))
+
+            # ── Question-type bundle (refines PR #229's page scope) ──
+            # The keyword classifier in tools.council_question_bundles
+            # narrows the context to a question-type-specific subset
+            # (regime / recommendation / risk / statistical / forward).
+            # A confident classification REPLACES the wider page
+            # bundle; a low-confidence query falls back to the page
+            # bundle (or to no context if no page was set). The
+            # question_type label is recorded for the metrics row so
+            # the team can quantify the cost reduction afterwards.
+            from tools.council_question_bundles import (
+                QUESTION_TYPE_FULL,
+                classify_question,
+                resolve_bundle,
+            )
+            question_type = classify_question(query)
+            live_context = None
+            if question_type is not None:
+                bundle = await resolve_bundle(question_type)
+                if bundle:
+                    live_context = bundle
+                    log.info("council_question_bundle_injected",
+                             question_type=question_type,
+                             keys=list(bundle.keys()))
+                else:
+                    # Classifier matched but bundle had nothing in
+                    # cache — fall back to the page scope.
+                    log.info("council_question_bundle_empty",
+                             question_type=question_type)
+                    question_type = None
+            if live_context is None:
+                live_context = page_context
+                # Record "full" as the question-type for the metrics
+                # row when we landed on the page bundle (or None) —
+                # the column is non-null in the schema and "full" is
+                # the canonical fallback label.
+                question_type_recorded = QUESTION_TYPE_FULL
+            else:
+                question_type_recorded = question_type
 
             # Capture every specialist's harness run + every agent
             # call's token usage. Seeded before the generator runs so
@@ -5012,6 +5249,30 @@ async def council_query(
                     metadata=({"harness": harness_meta}
                               if harness_meta else None),
                 )
+
+                # ── council_query_metrics row ─────────────────────
+                # One row per query: token totals + bundle size +
+                # live regime + extracted recommendation direction +
+                # the refined alignment score. Fail-open — a metric
+                # write failure logs and never affects the user-
+                # facing stream that already completed.
+                try:
+                    from agents.usage import collect_usage
+                    usage = collect_usage()
+                    bundle_size = (
+                        len(json.dumps(live_context, default=str))
+                        if live_context else 0)
+                    await _write_council_query_metric(
+                        question_type=question_type_recorded,
+                        input_tokens=usage.get("input_tokens"),
+                        output_tokens=usage.get("output_tokens"),
+                        context_bundle_size=bundle_size,
+                        synthesis_text=final_result.get(
+                            "final_recommendation", "") or "",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("council_query_metric_write_failed",
+                                error=str(exc))
         except Exception as exc:  # noqa: BLE001
             # A deliberation failure surfaces clearly — no silent
             # fall-through to mock data. The frontend renders the
