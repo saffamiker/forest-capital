@@ -3253,6 +3253,7 @@ async def _write_council_query_metric(
     output_tokens: int | None,
     context_bundle_size: int,
     synthesis_text: str,
+    cio_input_tokens: int | None = None,
 ) -> None:
     """Writes one row to council_query_metrics for the just-completed
     /api/council/query call.
@@ -3304,16 +3305,19 @@ async def _write_council_query_metric(
             await session.execute(text(
                 "INSERT INTO council_query_metrics "
                 "(question_type, input_tokens, output_tokens, "
-                " context_bundle_size, hmm_state, hmm_confidence, "
+                " cio_input_tokens, context_bundle_size, "
+                " hmm_state, hmm_confidence, "
                 " recommendation_direction, hmm_alignment_score, "
                 " data_hash) VALUES "
-                "(:qt, :it, :ot, :cbs, :hs, :hc, :rd, :as, :dh)"
+                "(:qt, :it, :ot, :cit, :cbs, :hs, :hc, :rd, :as, :dh)"
             ), {
                 "qt":  question_type,
                 "it":  (int(input_tokens)
                         if input_tokens is not None else None),
                 "ot":  (int(output_tokens)
                         if output_tokens is not None else None),
+                "cit": (int(cio_input_tokens)
+                        if cio_input_tokens is not None else None),
                 "cbs": int(context_bundle_size or 0),
                 "hs":  hmm_state,
                 "hc":  hmm_confidence,
@@ -3362,10 +3366,12 @@ async def get_admin_council_metrics(
         rows: list[dict[str, Any]] = []
         per_type: dict[str, dict[str, Any]] = {}
         baseline_input = None
+        baseline_cio = None
         async with AsyncSessionLocal() as db:
             r = await db.execute(text(
                 "SELECT id, timestamp, question_type, input_tokens, "
-                " output_tokens, context_bundle_size, hmm_state, "
+                " output_tokens, cio_input_tokens, "
+                " context_bundle_size, hmm_state, "
                 " hmm_confidence, recommendation_direction, "
                 " hmm_alignment_score, data_hash "
                 "FROM council_query_metrics "
@@ -3379,12 +3385,13 @@ async def get_admin_council_metrics(
                     "question_type":          row[2],
                     "input_tokens":           row[3],
                     "output_tokens":          row[4],
-                    "context_bundle_size":    row[5],
-                    "hmm_state":              row[6],
-                    "hmm_confidence":         row[7],
-                    "recommendation_direction": row[8],
-                    "hmm_alignment_score":    row[9],
-                    "data_hash":              (row[10] or "")[:8] if row[10] else None,
+                    "cio_input_tokens":       row[5],
+                    "context_bundle_size":    row[6],
+                    "hmm_state":              row[7],
+                    "hmm_confidence":         row[8],
+                    "recommendation_direction": row[9],
+                    "hmm_alignment_score":    row[10],
+                    "data_hash":              (row[11] or "")[:8] if row[11] else None,
                 })
             # Aggregates — one SQL per metric so each remains
             # independently fail-open on a column type drift.
@@ -3392,32 +3399,42 @@ async def get_admin_council_metrics(
                 "SELECT question_type, "
                 " AVG(input_tokens)::float AS avg_input, "
                 " AVG(output_tokens)::float AS avg_output, "
+                " AVG(cio_input_tokens)::float AS avg_cio_input, "
                 " AVG(context_bundle_size)::float AS avg_bundle, "
                 " AVG(hmm_alignment_score)::float AS avg_align, "
                 " COUNT(*)::int AS n_rows "
                 "FROM council_query_metrics "
                 "GROUP BY question_type"))
-            for qt, avg_in, avg_out, avg_bundle, avg_align, n in agg_r.fetchall():
+            for (qt, avg_in, avg_out, avg_cio_in, avg_bundle,
+                 avg_align, n) in agg_r.fetchall():
                 per_type[qt] = {
                     "avg_input_tokens":       avg_in,
                     "avg_output_tokens":      avg_out,
+                    "avg_cio_input_tokens":   avg_cio_in,
                     "avg_context_bundle_size": avg_bundle,
                     "avg_hmm_alignment_score": avg_align,
                     "n_rows":                 n,
                 }
-                if qt in ("baseline_full", "full") and avg_in is not None:
-                    # Use the baseline_full average preferentially;
+                if qt in ("baseline_full", "full"):
+                    # Use the baseline_full averages preferentially;
                     # fall back to the live "full" fallback rows if
                     # the baseline-capture run hasn't been done yet.
                     if qt == "baseline_full":
-                        baseline_input = avg_in
-                    elif baseline_input is None:
-                        baseline_input = avg_in
+                        if avg_in is not None:
+                            baseline_input = avg_in
+                        if avg_cio_in is not None:
+                            baseline_cio = avg_cio_in
+                    else:  # "full" — only used when baseline_full empty
+                        if avg_in is not None and baseline_input is None:
+                            baseline_input = avg_in
+                        if avg_cio_in is not None and baseline_cio is None:
+                            baseline_cio = avg_cio_in
 
-        # token_reduction_vs_baseline per bundle — a single number
-        # per type expressed as (1 - bundle_avg / baseline_avg). Only
-        # populated when a baseline figure is available.
+        # Reductions per bundle — two parallel maps. Total-tokens
+        # is noisy (chart-vision dominates); cio_input_tokens is the
+        # like-for-like measurement. Both surfaced.
         reductions: dict[str, float | None] = {}
+        cio_reductions: dict[str, float | None] = {}
         for qt, stats in per_type.items():
             avg_in = stats.get("avg_input_tokens")
             if (baseline_input and avg_in and avg_in > 0
@@ -3426,6 +3443,13 @@ async def get_admin_council_metrics(
                     1 - (float(avg_in) / float(baseline_input)), 4)
             else:
                 reductions[qt] = None
+            avg_cio_in = stats.get("avg_cio_input_tokens")
+            if (baseline_cio and avg_cio_in and avg_cio_in > 0
+                    and qt not in ("baseline_full", "full")):
+                cio_reductions[qt] = round(
+                    1 - (float(avg_cio_in) / float(baseline_cio)), 4)
+            else:
+                cio_reductions[qt] = None
 
         return {
             "available": True,
@@ -3433,7 +3457,9 @@ async def get_admin_council_metrics(
             "aggregates": {
                 "per_question_type": per_type,
                 "token_reduction_vs_baseline": reductions,
+                "cio_token_reduction_vs_baseline": cio_reductions,
                 "baseline_avg_input_tokens": baseline_input,
+                "baseline_avg_cio_input_tokens": baseline_cio,
             },
         }
     except Exception as exc:  # noqa: BLE001
@@ -5351,10 +5377,23 @@ async def council_query(
                     bundle_size = (
                         len(json.dumps(live_context, default=str))
                         if live_context else 0)
+                    # per-agent breakdown — pull the "cio" total
+                    # specifically as the LIKE-FOR-LIKE bundle-impact
+                    # signal. _compile_draft_consensus and _synthesise
+                    # both _tag_agent("cio") before their call_claude,
+                    # so this aggregates both — the only two calls in
+                    # the deliberation whose prompt content the bundle
+                    # changes. June 3 2026 (migration 052).
+                    per_agent = usage.get("per_agent") or {}
+                    cio_input = (
+                        per_agent.get("cio", {}).get("input_tokens")
+                        if isinstance(per_agent.get("cio"), dict)
+                        else None)
                     await _write_council_query_metric(
                         question_type=question_type_recorded,
                         input_tokens=usage.get("input_tokens"),
                         output_tokens=usage.get("output_tokens"),
+                        cio_input_tokens=cio_input,
                         context_bundle_size=bundle_size,
                         synthesis_text=final_result.get(
                             "final_recommendation", "") or "",

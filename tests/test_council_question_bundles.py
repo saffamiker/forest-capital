@@ -115,6 +115,48 @@ class TestClassifyQuestion:
         q = "Should we go risk-on with this allocation recommendation?"
         assert classify_question(q) == QUESTION_TYPE_RECOMMENDATION
 
+    # ── June 3 2026 — keyword expansion to lift natural-language
+    #    hit rate. The original keyword set missed two of the five
+    #    baseline test questions because they only carried one
+    #    keyword each ("regime" / "downside"). The expansion (PR
+    #    council-classifier-followups) adds "market", "what regime",
+    #    "downside risk", "risk profile" etc.
+
+    def test_baseline_regime_question_now_classifies(self):
+        # "What is the current market regime?" — pre-expansion this
+        # only hit "regime" (1) → fell back to None. Post-expansion:
+        # "regime" + "market" = 2 hits.
+        q = "What is the current market regime and how confident are you?"
+        assert classify_question(q) == QUESTION_TYPE_REGIME
+
+    def test_baseline_risk_question_now_classifies(self):
+        # "What is the downside risk profile of the portfolio?" —
+        # pre-expansion this only hit "downside" (1). Post-expansion:
+        # "downside" + "downside risk" + "risk profile" = 3 hits.
+        q = "What is the downside risk profile of the current portfolio?"
+        assert classify_question(q) == QUESTION_TYPE_RISK
+
+    def test_what_regime_phrase_matches(self):
+        # "what regime" is a multi-word keyword added in the
+        # expansion — paired with another REGIME hit it should
+        # classify confidently.
+        q = "What regime are we in given the market environment?"
+        assert classify_question(q) == QUESTION_TYPE_REGIME
+
+    def test_worst_case_phrase_matches(self):
+        # "worst case" is a RISK addition. Paired with another
+        # RISK keyword ("scenario") via a single sentence.
+        q = "What's the worst case scenario for the portfolio?"
+        assert classify_question(q) == QUESTION_TYPE_RISK
+
+    def test_markets_plural_still_not_a_regime_hit(self):
+        # Regression — adding "market" to REGIME must not match the
+        # plural "markets" via substring. \\b...\\b word boundaries
+        # prevent that, so a friendly greeting "Hello, how are the
+        # markets today?" still falls back cleanly to None.
+        q = "Hello, how are the markets today?"
+        assert classify_question(q) is None
+
 
 # ── Bundle resolvers (cold-cache fail-open) ───────────────────────────────
 

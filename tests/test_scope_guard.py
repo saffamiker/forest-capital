@@ -116,6 +116,42 @@ class TestInjectionPrescreen:
         assert result["allowed"] is False
 
 
+class TestSystemPromptContent:
+    """The scope-guard classifier prompt (sent to Haiku in production)
+    must carry the allocation-recommendation example phrases so the
+    "given current conditions" pattern is not mis-classified as a
+    general-current-events query.
+
+    June 3 2026 — added after a live baseline run where the
+    RECOMMENDATION test question ("What allocation does the council
+    recommend given current conditions?") hit a Haiku false positive
+    and was rejected with a generic out-of-scope message. The fix is
+    in the prompt, so a prompt-content test is the right way to pin
+    it (the test env short-circuits the Haiku call entirely)."""
+
+    EXPECTED_PHRASES = (
+        "What allocation does the council recommend?",
+        "What should we allocate given current market conditions?",
+        "Which strategies should we weight more heavily?",
+        "What is the recommended portfolio mix?",
+    )
+
+    def test_examples_present_in_classifier_prompt(self):
+        from scope_guard import _SYSTEM_PROMPT
+        for phrase in self.EXPECTED_PHRASES:
+            assert phrase in _SYSTEM_PROMPT, (
+                f"scope_guard._SYSTEM_PROMPT missing example phrase: "
+                f"{phrase!r}. The allocation-recommendation false "
+                f"positive comes back without it.")
+
+    def test_current_conditions_disambiguation_note_present(self):
+        from scope_guard import _SYSTEM_PROMPT
+        # The note that "current" refers to the regime detector,
+        # not news/current-events, is what breaks the tie for Haiku.
+        assert "current conditions" in _SYSTEM_PROMPT
+        assert "regime" in _SYSTEM_PROMPT.lower()
+
+
 class TestScopeGuardResultSchema:
     """Every result must have the required keys."""
 
