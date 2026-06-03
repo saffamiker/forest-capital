@@ -3441,6 +3441,95 @@ async def get_admin_council_metrics(
         return {"available": False, "rows": [], "aggregates": {}}
 
 
+# ── Document audit (June 3 2026) ─────────────────────────────────────────
+
+
+async def _run_document_audit(
+    content_text: str,
+    document_type: str,
+    email: str,
+) -> dict[str, Any] | None:
+    """Runs the four-check post-generation audit. Returns the
+    flags_by_check dict suitable for editor_drafts.audit_warnings,
+    or None when nothing was flagged (so the column stores NULL).
+
+    Reads the latest strategy_results_cache row ONCE so the numeric
+    cross-reference and consistency checks share the same dataset
+    snapshot. Fail-open per the wider generator: an audit exception
+    logs and returns None, never blocks the document write.
+    """
+    if ENVIRONMENT == "test":
+        return None
+    try:
+        from tools.cache import get_latest_strategy_cache
+        from tools.document_audit import audit_document
+        strategy_cache = await get_latest_strategy_cache()
+        result = audit_document(
+            content_text, document_type,
+            strategy_cache=strategy_cache)
+        log.info("document_audit_executed",
+                 document_type=document_type,
+                 owner=email,
+                 flag_counts=result.flag_counts,
+                 skipped=list(result.skipped.keys()))
+        if not result.has_any_flag:
+            return None
+        return {
+            "flags_by_check": result.flags_by_check,
+            "flag_counts":    result.flag_counts,
+            "skipped":        result.skipped,
+        }
+    except Exception as exc:  # noqa: BLE001
+        log.warning("document_audit_failed",
+                    document_type=document_type, error=str(exc))
+        return None
+
+
+async def _write_audit_metrics(
+    document_type: str,
+    email: str,
+    draft_id: int | None,
+    audit_warnings: dict[str, Any] | None,
+) -> None:
+    """Persist a document_audit_metrics row for the just-completed
+    generation. Reads the live strategy_hash to anchor the row to
+    the dataset that produced the document."""
+    if ENVIRONMENT == "test":
+        return
+    try:
+        from tools.cache import get_latest_strategy_hash
+        from tools.document_audit_metrics import write_metric
+        flag_counts = (
+            (audit_warnings or {}).get("flag_counts")
+            or {"numeric": 0, "direction": 0, "consistency": 0,
+                "citation": 0, "total": 0})
+        data_hash = await get_latest_strategy_hash()
+        await write_metric(
+            document_type=document_type, owner_email=email,
+            draft_id=draft_id, flag_counts=flag_counts,
+            data_hash=data_hash)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("document_audit_metrics_inner_failed",
+                    error=str(exc))
+
+
+@app.get("/api/v1/admin/document-audit-metrics")
+async def get_admin_document_audit_metrics(
+    limit: int = 30,
+    session: dict = Depends(require_auth),
+):
+    """Last-N document audit rows + per-document-type averages.
+    Backs the admin tile that surfaces flag-rate trends so a
+    drift in generation quality (e.g. citation-completeness flags
+    spiking after a prompt change) is visible at a glance.
+
+    Auth-only — any authenticated user can read. Fail-open in
+    the test env to {available:false, rows:[], aggregates:{}}.
+    June 3 2026."""
+    from tools.document_audit_metrics import read_recent
+    return await read_recent(limit=limit)
+
+
 # ── Automated email system — manual triggers (June 1 2026) ────────────────
 
 
@@ -10554,12 +10643,26 @@ async def _generate_brief_document(
             from tools.editor_content import executive_brief_to_editor
             from tools.editor_drafts import create_draft
             content_json, content_text = executive_brief_to_editor(narratives)
+
+            # ── Post-generation audit (June 3 2026) ───────────────
+            # Four deterministic checks against content_text BEFORE
+            # the draft lands in editor_drafts. Flags travel on the
+            # draft's audit_warnings JSONB column so the frontend
+            # banner surfaces them. NEVER blocks the write — the
+            # human reviews and resolves.
+            audit_warnings = await _run_document_audit(
+                content_text, "executive_brief", email)
+
             draft = await create_draft(
                 "executive_brief", email,
                 f"Executive Brief — {date.today().isoformat()}",
-                content_json, content_text, created_from="generated")
+                content_json, content_text,
+                created_from="generated",
+                audit_warnings=audit_warnings)
             if draft is not None:
                 draft_id = draft["id"]
+            await _write_audit_metrics(
+                "executive_brief", email, draft_id, audit_warnings)
         except Exception as exc:  # noqa: BLE001
             log.warning("executive_brief_draft_create_failed", error=str(exc))
 
@@ -10970,12 +11073,22 @@ async def _generate_deck_document(
             from tools.editor_content import deck_slides_to_editor
             from tools.editor_drafts import create_draft
             content_json, content_text = deck_slides_to_editor(slides)
+
+            # Post-generation audit — same four checks as the brief,
+            # see _run_document_audit. NEVER blocks the deck write.
+            audit_warnings = await _run_document_audit(
+                content_text, "presentation_deck", email)
+
             draft = await create_draft(
                 "presentation_deck", email,
                 f"Presentation Deck — {date.today().isoformat()}",
-                content_json, content_text, created_from="generated")
+                content_json, content_text,
+                created_from="generated",
+                audit_warnings=audit_warnings)
             if draft is not None:
                 draft_id = draft["id"]
+            await _write_audit_metrics(
+                "presentation_deck", email, draft_id, audit_warnings)
         except Exception as exc:  # noqa: BLE001
             log.warning("deck_draft_create_failed", error=str(exc))
 

@@ -64,6 +64,31 @@ export interface CanvasDeck {
   slides: CanvasSlide[]
 }
 
+/** Per-check flag detail from the post-generation audit
+ *  (tools.document_audit). Numeric and consistency flags carry
+ *  strategy/metric/value triples; direction flags carry the
+ *  superlative + sentence; citation flags carry the unfound author.
+ *  The exact field set varies per check — the banner renders
+ *  whatever fields are present without strict typing. */
+export type AuditFlag = Record<string, unknown>
+
+export interface AuditWarnings {
+  flags_by_check: {
+    numeric:     AuditFlag[]
+    direction:   AuditFlag[]
+    consistency: AuditFlag[]
+    citation:    AuditFlag[]
+  }
+  flag_counts: {
+    numeric:     number
+    direction:   number
+    consistency: number
+    citation:    number
+    total:       number
+  }
+  skipped?: Record<string, string>
+}
+
 export interface EditorDraft {
   id: number
   document_type: EditorDocumentType
@@ -78,6 +103,9 @@ export interface EditorDraft {
   created_from: 'generated' | 'uploaded' | 'manual'
   created_at: string | null
   updated_at: string | null
+  /** Per-check post-generation audit flag list. NULL on a clean
+   *  run. The frontend renders AuditWarningsBanner when present. */
+  audit_warnings?: AuditWarnings | null
 }
 
 export interface EditorDraftVersion {
