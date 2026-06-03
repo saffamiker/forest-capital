@@ -20,6 +20,7 @@ import CanvasSlideEditor from '../components/editor/CanvasSlideEditor'
 import ChartPicker from '../components/editor/ChartPicker'
 import EditorNavigator from '../components/editor/EditorNavigator'
 import EditorTasksCallout from '../components/editor/EditorTasksCallout'
+import AuditWarningsBanner from '../components/editor/AuditWarningsBanner'
 import PresentationPreview from '../components/editor/PresentationPreview'
 import RehearsalOverlay from '../components/editor/RehearsalOverlay'
 import type { NavSection } from '../components/editor/EditorNavigator'
@@ -726,6 +727,17 @@ export default function DocumentEditor() {
       {/* Tasks callout — the tracking note + the checklist for this
           document type, dismissible per draft. */}
       <EditorTasksCallout documentType={draft.document_type} draftId={id} />
+
+      {/* Post-generation audit banner — surfaces flagged numeric
+          cross-reference / label-direction / cross-section
+          consistency / citation completeness issues from migration
+          051's audit. Informational; never blocks editing. */}
+      {draft.audit_warnings && draft.audit_warnings.flag_counts
+        && draft.audit_warnings.flag_counts.total > 0 && (
+        <AuditWarningsBanner
+          draftId={id}
+          audit={draft.audit_warnings} />
+      )}
 
       {/* Mobile canvas-editor banner — the Konva Stage scales but
           pixel-precise editing is not feasible on touch. The banner

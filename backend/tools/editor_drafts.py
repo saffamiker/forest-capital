@@ -25,7 +25,7 @@ CREATED_FROM = ("generated", "uploaded", "manual")
 _DRAFT_COLS = (
     "id, document_type, owner_email, title, content_json, content_text, "
     "word_count, version, is_current, is_deleted, created_from, "
-    "created_at, updated_at"
+    "created_at, updated_at, audit_warnings"
 )
 _VERSION_COLS = (
     "id, draft_id, version, content_json, content_text, word_count, "
@@ -52,6 +52,7 @@ def _draft_row(r: Any) -> dict[str, Any]:
         "is_deleted": r[9], "created_from": r[10],
         "created_at": r[11].isoformat() if r[11] else None,
         "updated_at": r[12].isoformat() if r[12] else None,
+        "audit_warnings": r[13],
     }
 
 
@@ -132,11 +133,17 @@ async def create_draft(
     document_type: str, owner_email: str, title: str,
     content_json: Any, content_text: str | None,
     created_from: str = "manual",
+    audit_warnings: Any | None = None,
 ) -> dict[str, Any] | None:
     """
     Creates a draft and makes it the current one for this owner +
     document_type — every other draft of the same type is set
     is_current = false, so there is exactly one current draft per type.
+
+    audit_warnings — optional dict carrying the per-check flag list
+    from the post-generation audit (tools.document_audit). Stored as
+    JSONB. Frontend reads it on draft load and renders a banner.
+    None on a clean run.
     """
     try:
         from sqlalchemy import text
@@ -144,6 +151,8 @@ async def create_draft(
         if sf is None:
             return None
         cj = json.dumps(content_json) if content_json is not None else None
+        aw = (json.dumps(audit_warnings)
+              if audit_warnings is not None else None)
         async with sf() as s:
             await s.execute(text(
                 "UPDATE editor_drafts SET is_current = false "
@@ -153,12 +162,14 @@ async def create_draft(
             row = await s.execute(text(
                 "INSERT INTO editor_drafts (document_type, owner_email, "
                 "title, content_json, content_text, word_count, "
-                "created_from, is_current) VALUES (:t, :e, :ti, "
-                "CAST(:cj AS JSONB), :ct, :wc, :cf, true) "
+                "created_from, is_current, audit_warnings) VALUES "
+                "(:t, :e, :ti, CAST(:cj AS JSONB), :ct, :wc, :cf, true, "
+                "CAST(:aw AS JSONB)) "
                 f"RETURNING {_DRAFT_COLS}"),
                 {"t": document_type, "e": owner_email, "ti": title,
                  "cj": cj, "ct": content_text,
-                 "wc": word_count(content_text), "cf": created_from})
+                 "wc": word_count(content_text), "cf": created_from,
+                 "aw": aw})
             found = row.fetchone()
             await s.commit()
             return _draft_row(found) if found else None
