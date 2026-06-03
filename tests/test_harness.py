@@ -136,7 +136,12 @@ class TestHarnessUnit:
         """PR-LLM-2 (May 28 2026) — when the first call returns
         truncated JSON ("Unterminated string at char N"), the
         evaluator retries ONCE with max_tokens=1500. If the retry
-        succeeds, the second call's score is used."""
+        succeeds, the second call's score is used.
+
+        June 3 2026 — the initial cap was bumped from 600 to 1200
+        so the typical evaluator JSON (500-800 tokens) no longer
+        truncates on the common case. The 1500 retry cap stays as
+        the safety net for the arbiter-rubric long-feedback case."""
         from agents.harness import GeneratorEvaluatorHarness
 
         def gen(prompt: str) -> str:
@@ -156,8 +161,8 @@ class TestHarnessUnit:
         with patch("agents.harness.call_claude",
                    side_effect=fake_call_claude):
             result = harness.run(gen, "EVAL", "TASK", "context", "test_agent")
-        # The first call ran at 600; the retry bumped to 1500.
-        assert max_tokens_seen[0] == 600
+        # The first call ran at 1200; the retry bumped to 1500.
+        assert max_tokens_seen[0] == 1200
         assert max_tokens_seen[1] == 1500
         # The second call's score landed.
         assert result.final_score == 8.5
