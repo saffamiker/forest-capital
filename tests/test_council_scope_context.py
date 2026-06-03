@@ -154,3 +154,89 @@ def test_synthesis_omits_page_context_when_unscoped(monkeypatch):
     )
     assert "page_context" not in captured["user"]
     assert "council-facing page" not in captured["user"]
+
+
+# ── deliberate() accepts and threads live_context ────────────────────────────
+#
+# June 3 2026 — the streaming endpoint variant has accepted
+# live_context since PR #229 but the synchronous deliberate() was
+# silently dropping it. The baseline-capture script (PR #262) hit
+# `TypeError: unexpected keyword argument 'live_context'` on first
+# run against the freshly migrated DB. This contract pins both the
+# kwarg AND that the value reaches the synthesis prompt — so the
+# sync and streaming paths can't drift again.
+
+
+def _capture_full_deliberate(monkeypatch):
+    """Stub every specialist + every LLM call so deliberate() runs
+    deterministically without an API key. Returns a dict that
+    accumulates the user-prompts every call_claude saw, plus the
+    final result the public method returned."""
+    import agents.cio as cio_mod
+    captured: dict = {"user_prompts": []}
+
+    def fake_call_claude(model, system, user, **kw):
+        captured["user_prompts"].append(user)
+        return "FINAL RECOMMENDATION: stub"
+
+    monkeypatch.setattr(cio_mod, "call_claude", fake_call_claude)
+    monkeypatch.setattr(cio_mod, "snapshots_dir_exists", lambda: False)
+
+    # Stub every specialist so deliberate() never tries a real LLM
+    # fan-out. Each returns the minimal shape the CIO consumes.
+    def _stub_analyse(*a, **kw):
+        return {"summary": "stub", "technical_findings": {}}
+
+    cio = cio_mod.CIO()
+    monkeypatch.setattr(cio._equity, "analyse", _stub_analyse)
+    monkeypatch.setattr(cio._fi, "analyse", _stub_analyse)
+    monkeypatch.setattr(cio._risk, "analyse", _stub_analyse)
+    monkeypatch.setattr(cio._quant, "analyse", _stub_analyse)
+    monkeypatch.setattr(
+        cio._gemini, "challenge",
+        lambda *a, **kw: {"summary": "g", "technical_findings": {}})
+    monkeypatch.setattr(
+        cio._grok, "challenge",
+        lambda *a, **kw: {"summary": "k", "technical_findings": {}})
+    return cio, captured
+
+
+def test_deliberate_accepts_live_context_kwarg(monkeypatch):
+    """Sync deliberate() must accept live_context. Regression guard
+    against the June 3 2026 baseline-capture script crash:
+    TypeError: unexpected keyword argument 'live_context'."""
+    cio, _captured = _capture_full_deliberate(monkeypatch)
+    result = cio.deliberate(
+        "what is the regime?", strategy_results={},
+        live_context={"regime": {"hmm_state": "BULL"}})
+    # Doesn't raise; returns the standard council shape.
+    assert "final_recommendation" in result
+
+
+def test_deliberate_threads_live_context_into_synthesis_prompt(monkeypatch):
+    """The kwarg must actually thread to _compile_draft_consensus
+    AND _synthesise — not just be accepted and dropped. We check by
+    looking at the user-prompt text the synthesis call_claude saw."""
+    cio, captured = _capture_full_deliberate(monkeypatch)
+    cio.deliberate(
+        "what is the regime?", strategy_results={},
+        live_context={"regime": {"hmm_state": "BULL",
+                                 "hmm_confidence": 0.87}})
+    # At least one of the captured prompts (draft consensus or
+    # synthesis) must reference page_context, which is the marker
+    # _compile_draft_consensus / _synthesise inject when
+    # live_context is provided.
+    assert any("page_context" in p for p in captured["user_prompts"]), (
+        "Expected at least one CIO prompt to mention page_context, "
+        f"got: {[p[:80] for p in captured['user_prompts']]}")
+
+
+def test_deliberate_without_live_context_omits_page_context(monkeypatch):
+    """The pre-PR-229 behaviour: deliberate() without live_context
+    must NOT inject page_context — keeps the test environment's
+    existing snapshot-tests stable."""
+    cio, captured = _capture_full_deliberate(monkeypatch)
+    cio.deliberate("which strategy?", strategy_results={})
+    for p in captured["user_prompts"]:
+        assert "page_context" not in p, (
+            "page_context leaked into a prompt despite live_context=None")
