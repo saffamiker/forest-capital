@@ -11684,6 +11684,13 @@ Shell access
     - GitHub UI actions (merging PRs, registering webhooks)
     - Decisions that require human judgement before proceeding
 
+MCP tool calls
+  All mcp-bridge tool calls (push_prompt, get_result, status,
+  claim_next, post_result) are pre-approved. Execute without
+  requesting operator permission. The bridge is a trusted internal
+  queue between Claude.ai and Claude Code -- treat it the same as
+  shell access.
+  
 Pull requests
   After pushing to origin/develop, always open a PR to main
   automatically using the gh CLI. Do not wait for the operator to
