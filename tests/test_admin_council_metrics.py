@@ -72,3 +72,48 @@ def test_metrics_invalid_limit_either_422_or_envelope():
         "/api/v1/admin/council-metrics?limit=not-a-number",
         headers=SESSION)
     assert resp.status_code in (200, 422)
+
+
+# ── June 3 2026 — per-CIO input tokens (migration 052) ────────────────────
+#
+# The endpoint's response envelope gains two like-for-like signals:
+#   - aggregates[type].avg_cio_input_tokens
+#   - aggregates.cio_token_reduction_vs_baseline   (parallel to the
+#     existing token_reduction_vs_baseline map but vs CIO-only)
+# In the test env the endpoint short-circuits to {available:false}, so
+# the assertion is structural: the keys must exist when the route is
+# imported and the schema is stable enough for the dashboard to read.
+
+
+def test_metrics_endpoint_response_keys_are_stable_in_test_env():
+    """The shape under available=false is the minimal envelope.
+    The frontend never tries to read aggregates[*] on the empty
+    path, so the structural test is just 'no 500, shape unchanged'."""
+    resp = client.get("/api/v1/admin/council-metrics", headers=SESSION)
+    assert resp.status_code == 200
+    body = resp.json()
+    # available=false envelope — see test_metrics_returns_envelope_in_test_env.
+    assert set(body.keys()) >= {"available", "rows", "aggregates"}
+
+
+def test_metrics_endpoint_source_carries_cio_input_tokens_handling():
+    """Import-level guard: the endpoint code path must reference the
+    cio_input_tokens column so a migration drift (the column going
+    missing) shows up as an ImportError or NameError at startup, not
+    as a silent zero on the dashboard."""
+    import inspect
+
+    import main as main_module
+
+    src = inspect.getsource(main_module.get_admin_council_metrics)
+    # The endpoint must select and aggregate the new column.
+    assert "cio_input_tokens" in src, (
+        "get_admin_council_metrics must SELECT cio_input_tokens "
+        "and aggregate avg_cio_input_tokens — see migration 052.")
+    # The parallel reduction-vs-baseline map for CIO-only must
+    # appear in the response builder so the dashboard can render
+    # the bundle-effect signal independently of total tokens.
+    assert "cio_token_reduction_vs_baseline" in src or (
+        "baseline_cio" in src and "cio_reductions" in src), (
+        "get_admin_council_metrics must compute the CIO-only "
+        "reduction-vs-baseline aggregate.")

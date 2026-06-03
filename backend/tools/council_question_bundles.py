@@ -104,6 +104,12 @@ _KEYWORDS: dict[str, frozenset[str]] = {
         "regime", "regimes", "hmm", "bull", "bear", "transition",
         "regime-switching", "macro", "vix", "volatility regime",
         "yield curve", "credit spread",
+        # June 3 2026 — expand to lift the natural-language hit rate.
+        # Baseline run showed "What is the current market regime?"
+        # hit only "regime" alone (below the >=2 threshold), so the
+        # most common regime-style phrasings get more anchors.
+        "market", "macro environment", "vix level",
+        "current state", "what regime",
     }),
     QUESTION_TYPE_RECOMMENDATION: frozenset({
         # NOTE: "blend" was tempting here but it's the project's
@@ -121,6 +127,11 @@ _KEYWORDS: dict[str, frozenset[str]] = {
         "drawdown", "cvar", "var", "tail", "downside", "crisis",
         "stress", "loss", "worst", "skew", "kurtosis",
         "max dd", "crash", "fat tail",
+        # June 3 2026 — expand to lift the natural-language hit rate.
+        # Baseline run showed "What is the downside risk profile?"
+        # hit only "downside" alone (below the >=2 threshold).
+        "downside risk", "risk profile", "tail risk profile",
+        "drawdown risk", "worst case", "scenario",
     }),
     QUESTION_TYPE_STATISTICAL: frozenset({
         "significant", "significance", "p-value", "p value", "pvalue",
