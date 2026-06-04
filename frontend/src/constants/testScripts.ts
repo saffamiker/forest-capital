@@ -88,7 +88,18 @@ export interface TestScript {
 // 2 (Strategy Blend Weights — all strategies, 100% rows, BULL vs
 // BEAR/TRANSITION defensive weighting, Total Shift sanity), plus
 // cross-section parity and responsive/tooltip checks.
-export const TEST_SCRIPT_VERSION = 8
+// v9 (June 3 2026) — covers PR #257 (/admin/health runtime panel),
+// PR #264 (AuditWarningsBanner in the document editor), and PR #265
+// (council-metrics CIO-input aggregate). michael_ruurds_v1 gains six
+// /admin/health steps (Settings quick-link → page load → invariant
+// verdict → Layer 4 → warm history → any-user access) plus one curl
+// check against /api/v1/admin/council-metrics confirming the
+// cio_token_reduction_vs_baseline aggregate is in the response.
+// molly_murdock_v1 gains five AuditWarningsBanner steps wedged between
+// molly_deck and molly_export_zip (open the just-generated draft,
+// banner renders, flag rows show finding+suggestion, expand/collapse,
+// persists on re-open per migration 051).
+export const TEST_SCRIPT_VERSION = 9
 
 const allTesters: TestScript = {
   id: 'all_testers_v1',
@@ -807,6 +818,87 @@ const michael: TestScript = {
         + 'Feedback Backlog / Issue Tracker tabs visible. Data tables '
         + 'populate (not 403). Action buttons (Mark Resolved, etc.) '
         + 'are hidden or 403 on click — sysadmin-only.',
+      allowSkip: true,
+    },
+
+    // ── /admin/health runtime panel — PR #257 (v9, June 3 2026) ─────
+    // Six checks pinning the panel discoverability + every section.
+    // Any authenticated user can read /admin/health; the page is
+    // intentionally NOT sysadmin-gated so non-admin team members can
+    // verify the analytical surface is live before a demo.
+    {
+      id: 'michael_health_nav',
+      route: '/settings', target: '[data-tour="admin-health-runtime-link"]',
+      title: 'Settings → Runtime health panel quick link',
+      instruction: 'In Settings → Data and Study Period, find the '
+        + '"Runtime health panel →" card.',
+      expectedResult: 'The card is visible and shows /admin/health as '
+        + 'the destination on the right.',
+      allowSkip: false,
+    },
+    {
+      id: 'michael_health_loads', route: '/settings', target: null,
+      title: '/admin/health loads on click',
+      instruction: 'Click the Runtime health panel card.',
+      expectedResult: 'The browser navigates to /admin/health and the '
+        + 'page renders without error.',
+      allowSkip: false,
+    },
+    {
+      id: 'michael_health_verdict', route: '/admin/health', target: null,
+      title: 'Top-line invariant verdict shows',
+      instruction: 'Read the top of the /admin/health page.',
+      expectedResult: 'The top-line invariant verdict is visible '
+        + 'showing PASS, WARN, or FAIL.',
+      allowSkip: false,
+    },
+    {
+      id: 'michael_health_layer4', route: '/admin/health', target: null,
+      title: 'Layer 4 data-quality fixtures display',
+      instruction: 'Scroll to the Layer 4 section.',
+      expectedResult: 'Layer 4 display-fixture cards are visible with '
+        + 'a per-fixture status indicator.',
+      allowSkip: false,
+    },
+    {
+      id: 'michael_health_history', route: '/admin/health', target: null,
+      title: 'Warm history shows the last 7 runs',
+      instruction: 'Scroll to the warm-history section.',
+      expectedResult: 'At least one historical row is shown (last 7 '
+        + 'runs).',
+      allowSkip: true,
+    },
+    {
+      id: 'michael_health_any_user', route: '/admin/health', target: null,
+      title: 'Page loads for any authenticated user',
+      instruction: 'Sign in as a non-sysadmin team member (Bob or '
+        + 'Molly) and open /admin/health directly via the URL.',
+      expectedResult: 'The page loads — no 401 / 403, no sysadmin '
+        + 'gate.',
+      allowSkip: true,
+    },
+
+    // ── Council metrics aggregate — PR #265 (v9, June 3 2026) ───────
+    // Sysadmin-gated endpoint, no UI panel exists today, so the
+    // assertion is a curl smoke check from a shell:
+    //   curl -s 'https://analyticsdesk.app/api/v1/admin/council-metrics' \\
+    //        -H 'X-API-Key: <MASTER_API_KEY>' | jq '.aggregates'
+    // confirms the response carries cio_token_reduction_vs_baseline
+    // per question_type — the like-for-like bundle signal PR #265
+    // shipped. The frontend panel that consumes this is post-deadline
+    // backlog; the endpoint contract is testable today.
+    {
+      id: 'michael_council_metrics_curl', route: '/settings', target: null,
+      title: 'Council metrics endpoint: cio_token_reduction_vs_baseline',
+      instruction: 'From a shell with MASTER_API_KEY set, curl '
+        + 'GET /api/v1/admin/council-metrics on the production base '
+        + 'URL with X-API-Key: $MASTER_API_KEY. Inspect the '
+        + 'aggregates block in the response.',
+      expectedResult: 'The endpoint returns 200, and the response '
+        + 'carries cio_token_reduction_vs_baseline keyed per '
+        + 'question_type (regime / recommendation / risk / '
+        + 'statistical / forward) — present even when the value is '
+        + 'null on a cold dataset.',
       allowSkip: true,
     },
   ],
@@ -1546,6 +1638,59 @@ const molly: TestScript = {
         + 'theme, a correct title slide, embedded charts (slide 5 rolling '
         + 'correlation, slide 8 cumulative returns), real activity counts '
         + 'on slide 15, readable text throughout, and no placeholder text.',
+      allowSkip: true,
+    },
+    // ── Audit Warnings Banner — PR #264 (v9, June 3 2026) ──────────────
+    // Five checks pinning the editor-side surface of the four
+    // deterministic document audit checks. The banner reads from
+    // editor_drafts.audit_warnings (migration 051), so its state
+    // persists across re-opens — covered by the last step.
+    {
+      id: 'molly_audit_open', route: '/reports', target: null,
+      title: 'Open freshly-generated draft in the editor',
+      instruction: 'After Generate Presentation Deck completes, click '
+        + 'Open in Editor on the job card (don\'t just Download).',
+      expectedResult: 'The editor loads the just-generated draft at '
+        + '/editor/<id>.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_audit_banner_renders',
+      route: '/reports',
+      target: '[data-testid="audit-warnings-banner"]',
+      title: 'Audit warnings banner renders',
+      instruction: 'Look at the top of the editor under the AI DRAFT '
+        + 'banner.',
+      expectedResult: 'An audit warnings banner is present — either '
+        + 'showing flag rows or a "no warnings" state. Never absent.',
+      allowSkip: false,
+    },
+    {
+      id: 'molly_audit_banner_rows', route: '/reports', target: null,
+      title: 'Each flag carries finding + suggested fix',
+      instruction: 'If the banner shows flag rows, read at least one '
+        + 'row.',
+      expectedResult: 'Each row carries a specific finding (numeric '
+        + 'mismatch, label direction error, cross-section '
+        + 'inconsistency, or missing citation) and a suggested fix.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_audit_banner_toggle', route: '/reports', target: null,
+      title: 'Banner expands and collapses',
+      instruction: 'Click the expand / collapse control on the banner.',
+      expectedResult: 'The banner toggles between collapsed (count '
+        + 'only) and expanded (full flag list) states.',
+      allowSkip: true,
+    },
+    {
+      id: 'molly_audit_banner_persists', route: '/reports', target: null,
+      title: 'Banner state persists across re-open',
+      instruction: 'Close the editor tab. Return to /reports. Re-open '
+        + 'the same draft.',
+      expectedResult: 'The same audit warnings appear again — state is '
+        + 'stored on the draft (editor_drafts.audit_warnings, '
+        + 'migration 051), not in component state.',
       allowSkip: true,
     },
     // ── Export package ─────────────────────────────────────────────────
