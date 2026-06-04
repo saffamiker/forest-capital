@@ -327,14 +327,42 @@ async def recommendation_bundle() -> dict[str, Any] | None:
 
 
 async def risk_bundle() -> dict[str, Any] | None:
-    """RISK bundle — CVaR, max DD, crisis windows, factor exposures,
-    tail risk (skew/kurtosis)."""
+    """RISK bundle — CVaR, max DD, top-3 crisis windows, tail risk
+    (skew/kurtosis).
+
+    June 4 2026 — trimmed after a compare_council_metrics run showed
+    the typed RISK bundle's CIO input tokens DOUBLED vs the baseline
+    full-context bundle (+100.8%), defeating the whole point of
+    classifier routing. Two cuts:
+
+      1. factor_loadings removed entirely. The full 10-strategy × 5-
+         factor regression table (with standard errors + CIs)
+         dominated the bundle size and is rarely the right answer to
+         a downside-risk question — factor exposures speak to
+         performance attribution, not tail risk. If a question
+         genuinely needs the factor lens it'll classify into a
+         different bundle.
+      2. crisis_performance trimmed to the FIRST THREE crisis windows
+         only (chronological order — GFC 2008, COVID 2020, 2022
+         rate-hike per the project's STRESS_SCENARIOS). The 2-window
+         tail (Taper Tantrum + Dot-com) adds breadth but rarely
+         changes a risk verdict, and at 10 strategies × 2 windows ×
+         5 fields = 100 cells per dropped window, the cut is
+         material.
+
+    The 'top 3' selection is structural, not semantic — the metric's
+    windows dict is dict-ordered (insertion order), and the analytics
+    pipeline inserts in chronological order. If the operator ever
+    needs to swap which 3 land here, change the slice below; the
+    rest of the bundle has no opinion."""
     out: dict[str, Any] = {}
 
     try:
         from tools.cache import get_latest_strategy_cache
         strategies = await get_latest_strategy_cache() or {}
         # Compact slice — every strategy's risk-relevant fields only.
+        # Deliberately excludes sharpe_ci_95 / bootstrap CIs (which
+        # speak to performance certainty, not downside risk).
         risk_slice = {}
         for name, r in strategies.items():
             risk_slice[name] = {
@@ -356,19 +384,38 @@ async def risk_bundle() -> dict[str, Any] | None:
         from tools.precomputed_analytics import get_latest_metric
         crisis = await get_latest_metric("crisis_performance")
         if crisis:
-            out["crisis_performance"] = crisis
+            out["crisis_performance"] = _trim_crisis_to_top_n(crisis, 3)
     except Exception as exc:  # noqa: BLE001
         log.warning("question_bundle_risk_crisis_failed", error=str(exc))
 
-    try:
-        from tools.precomputed_analytics import get_latest_metric
-        aa = await get_latest_metric("academic_analytics") or {}
-        if aa.get("factor_loadings"):
-            out["factor_loadings"] = aa["factor_loadings"]
-    except Exception as exc:  # noqa: BLE001
-        log.warning("question_bundle_risk_factor_failed", error=str(exc))
+    # factor_loadings deliberately NOT pulled here — see docstring.
 
     return out or None
+
+
+def _trim_crisis_to_top_n(crisis: dict[str, Any], n: int) -> dict[str, Any]:
+    """Trim a crisis_performance payload to the first N crisis
+    windows. The shape is {windows: {<name>: meta}, rows: {<strategy>:
+    {<name>: {return, max_dd, sharpe, partial, n_months}}}}; both
+    dicts are filtered down to the same N keys so the rows still
+    line up with the windows. June 4 2026 trim for the RISK bundle."""
+    windows = crisis.get("windows") or {}
+    if not windows or n <= 0:
+        return crisis
+    kept_names = list(windows.keys())[:n]
+    kept_set = set(kept_names)
+    rows = crisis.get("rows") or {}
+    trimmed_rows = {
+        strategy: {w: cells for w, cells in (by_crisis or {}).items()
+                   if w in kept_set}
+        for strategy, by_crisis in rows.items()
+    }
+    return {
+        **{k: v for k, v in crisis.items()
+           if k not in ("windows", "rows")},
+        "windows": {k: windows[k] for k in kept_names},
+        "rows":    trimmed_rows,
+    }
 
 
 async def statistical_bundle() -> dict[str, Any] | None:

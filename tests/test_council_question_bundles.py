@@ -201,9 +201,112 @@ class TestBundleResolvers:
     @pytest.mark.asyncio
     async def test_risk_bundle_cold_cache_returns_none(self):
         # No live signal in the risk bundle — it's pure cache reads
-        # (strategy_results_cache + crisis_performance metric +
-        # academic_analytics factor_loadings). All cold in test env.
+        # (strategy_results_cache + crisis_performance metric). All
+        # cold in test env. Note: factor_loadings was REMOVED from
+        # the bundle on June 4 2026 after a compare run showed the
+        # typed RISK CIO tokens doubled vs baseline.
         assert await risk_bundle() is None
+
+
+# ── RISK bundle June 4 2026 trim ──────────────────────────────────────────
+
+
+class TestRiskBundleTrim:
+    """Pins the June 4 2026 trim. The compare_council_metrics --confirm
+    run showed RISK's CIO input tokens DOUBLED vs the baseline full-
+    context bundle (+100.8%), defeating the classifier's whole point.
+    Two cuts: factor_loadings dropped entirely, crisis_performance
+    capped at the first 3 windows."""
+
+    def test_factor_loadings_no_longer_referenced_in_risk_bundle(self):
+        # The previous implementation read academic_analytics ->
+        # factor_loadings into the bundle. The trim removed that
+        # read; this test pins the absence so a later refactor
+        # doesn't quietly reintroduce it.
+        import inspect
+
+        from tools import council_question_bundles as bundles
+
+        src = inspect.getsource(bundles.risk_bundle)
+        assert "factor_loadings" not in src or (
+            "deliberately NOT pulled" in src
+            and "out[\"factor_loadings\"]" not in src), (
+            "risk_bundle must not put factor_loadings on the output "
+            "dict — June 4 2026 trim.")
+
+    def test_trim_crisis_keeps_first_n_windows_only(self):
+        from tools.council_question_bundles import _trim_crisis_to_top_n
+        crisis = {
+            "windows": {
+                "GFC 2008":         {"start": "2008-09", "end": "2009-02"},
+                "COVID 2020":       {"start": "2020-02", "end": "2020-04"},
+                "Rate hike 2022":   {"start": "2022-01", "end": "2022-10"},
+                "Taper Tantrum":    {"start": "2013-05", "end": "2013-09"},
+                "Dot-com":          {"start": "2000-03", "end": "2002-10"},
+            },
+            "rows": {
+                "BENCHMARK": {
+                    "GFC 2008":       {"cumulative_return": -0.50,
+                                       "max_dd": -0.51},
+                    "COVID 2020":     {"cumulative_return": -0.20,
+                                       "max_dd": -0.34},
+                    "Rate hike 2022": {"cumulative_return": -0.18,
+                                       "max_dd": -0.25},
+                    "Taper Tantrum":  {"cumulative_return": -0.03,
+                                       "max_dd": -0.05},
+                    "Dot-com":        {"cumulative_return": -0.44,
+                                       "max_dd": -0.49},
+                },
+            },
+        }
+        trimmed = _trim_crisis_to_top_n(crisis, 3)
+        assert list(trimmed["windows"].keys()) == [
+            "GFC 2008", "COVID 2020", "Rate hike 2022"]
+        # rows[strategy] is trimmed to the same 3 window keys —
+        # never carries Taper Tantrum / Dot-com after the trim.
+        assert set(trimmed["rows"]["BENCHMARK"].keys()) == {
+            "GFC 2008", "COVID 2020", "Rate hike 2022"}
+
+    def test_trim_crisis_no_op_when_below_n(self):
+        # Fewer windows than the cap → return everything, unchanged
+        # ordering. Edge case for a partially-warm cache.
+        from tools.council_question_bundles import _trim_crisis_to_top_n
+        crisis = {
+            "windows": {
+                "GFC 2008":   {"start": "2008-09"},
+                "COVID 2020": {"start": "2020-02"},
+            },
+            "rows": {"BENCHMARK": {"GFC 2008": {}, "COVID 2020": {}}},
+        }
+        trimmed = _trim_crisis_to_top_n(crisis, 3)
+        assert list(trimmed["windows"].keys()) == ["GFC 2008", "COVID 2020"]
+        assert set(trimmed["rows"]["BENCHMARK"].keys()) == {
+            "GFC 2008", "COVID 2020"}
+
+    def test_trim_crisis_preserves_top_level_fields(self):
+        # Anything that isn't `windows` or `rows` (metric metadata,
+        # data hash etc.) survives the trim. Forward-compatible.
+        from tools.council_question_bundles import _trim_crisis_to_top_n
+        crisis = {
+            "computed_at": "2026-06-04T11:00:00Z",
+            "data_hash":   "abc123",
+            "windows": {"A": {}, "B": {}, "C": {}},
+            "rows":    {"S": {"A": {}, "B": {}, "C": {}}},
+        }
+        trimmed = _trim_crisis_to_top_n(crisis, 2)
+        assert trimmed["computed_at"] == "2026-06-04T11:00:00Z"
+        assert trimmed["data_hash"] == "abc123"
+        assert list(trimmed["windows"].keys()) == ["A", "B"]
+
+    def test_trim_crisis_empty_input_passthrough(self):
+        from tools.council_question_bundles import _trim_crisis_to_top_n
+        # Empty windows → passthrough (nothing meaningful to trim).
+        empty = {"windows": {}, "rows": {}}
+        assert _trim_crisis_to_top_n(empty, 3) == empty
+        # n <= 0 → passthrough (avoids returning an empty bundle by
+        # mistake when the caller miscalculates).
+        crisis = {"windows": {"A": {}}, "rows": {}}
+        assert _trim_crisis_to_top_n(crisis, 0) == crisis
 
     @pytest.mark.asyncio
     async def test_statistical_bundle_always_has_fdr_note(self):
