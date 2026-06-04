@@ -429,11 +429,15 @@ def test_unknown_notification_is_silently_accepted(cfg):
     assert r.content == b""
 
 
-def test_tools_list_surfaces_three_tools_with_input_schemas(cfg):
-    """`tools/list` returns the three bridge tools in MCP shape:
+def test_tools_list_surfaces_four_tools_with_input_schemas(cfg):
+    """`tools/list` returns the four bridge tools in MCP shape:
       push_prompt — prompt:str (required), session_id:str (optional)
       get_result  — prompt_id:str (required)
       status      — no params
+      claim_next  — no params (June 4 2026 — exposes the existing
+                    _h_claim_next handler so Claude Code can pull
+                    pending prompts when worker dispatch is unreliable)
+
     The names, descriptions, and required-field sets are pinned here
     because Claude.ai's UI surfaces them verbatim and a silent rename
     would break the user's saved tool toggles."""
@@ -446,10 +450,11 @@ def test_tools_list_surfaces_three_tools_with_input_schemas(cfg):
     assert body["id"] == 2
     tools = body["result"]["tools"]
     assert isinstance(tools, list)
-    assert len(tools) == 3
+    assert len(tools) == 4
 
     by_name = {t["name"]: t for t in tools}
-    assert set(by_name) == {"push_prompt", "get_result", "status"}
+    assert set(by_name) == {
+        "push_prompt", "get_result", "status", "claim_next"}
 
     push = by_name["push_prompt"]
     assert "Push a prompt" in push["description"]
@@ -468,6 +473,11 @@ def test_tools_list_surfaces_three_tools_with_input_schemas(cfg):
     st = by_name["status"]
     assert "queue status" in st["description"]
     assert st["inputSchema"] == {"type": "object", "properties": {}}
+
+    cn = by_name["claim_next"]
+    assert "Claim the next pending prompt" in cn["description"]
+    # No params required — handler defaults claimed_by="live".
+    assert cn["inputSchema"] == {"type": "object", "properties": {}}
 
 
 # ── tools/call — the MCP invocation path ────────────────────────────────────
@@ -563,6 +573,60 @@ def test_tools_call_unknown_tool_returns_invalid_params(cfg):
     assert "push_prompt" in body["error"]["message"]
 
 
+# ── claim_next via tools/call (June 4 2026) ────────────────────────────────
+
+
+def test_tools_call_claim_next_returns_pending_prompt(cfg):
+    """tools/call claim_next returns the oldest pending prompt's full
+    row under the `prompt` key. CC reads prompt_id from
+    result.prompt.id and the actual content from result.prompt.prompt.
+    This is the path that replaces unreliable worker dispatch."""
+    client = _client(cfg)
+    # Seed one pending prompt via the queue API.
+    push = _tools_call(client, cfg, "push_prompt",
+                       {"prompt": "actively pull me"}, rid=30)
+    pushed_id = _json.loads(push["result"]["content"][0]["text"])["prompt_id"]
+
+    body = _tools_call(client, cfg, "claim_next", {}, rid=31)
+    assert "error" not in body
+    parsed = _json.loads(body["result"]["content"][0]["text"])
+    assert parsed["prompt"] is not None
+    assert parsed["prompt"]["id"] == pushed_id
+    assert parsed["prompt"]["prompt"] == "actively pull me"
+    # Row transitions to 'running' the moment it's claimed — same
+    # contract every other consumer of Queue.claim_next relies on.
+    assert parsed["prompt"]["status"] == "running"
+    # claimed_by defaults to "live" since the schema declares no args.
+    assert parsed["prompt"]["claimed_by"] == "live"
+
+
+def test_tools_call_claim_next_returns_null_on_empty_queue(cfg):
+    """An empty queue returns {prompt: null} — Claude Code reads this
+    as 'nothing to do' and stays idle. Never raises."""
+    client = _client(cfg)
+    body = _tools_call(client, cfg, "claim_next", {}, rid=32)
+    assert "error" not in body
+    parsed = _json.loads(body["result"]["content"][0]["text"])
+    assert parsed == {"prompt": None}
+
+
+def test_tools_call_claim_next_is_atomic(cfg):
+    """Two back-to-back tools/call claim_next invocations against a
+    single pending row — the FIRST claims, the SECOND sees an empty
+    queue. The atomicity contract Queue.claim_next holds for the
+    direct-method path holds for tools/call too because tools/call
+    dispatches to the same handler."""
+    client = _client(cfg)
+    _tools_call(client, cfg, "push_prompt",
+                {"prompt": "single row"}, rid=33)
+    first = _tools_call(client, cfg, "claim_next", {}, rid=34)
+    second = _tools_call(client, cfg, "claim_next", {}, rid=35)
+    first_payload = _json.loads(first["result"]["content"][0]["text"])
+    second_payload = _json.loads(second["result"]["content"][0]["text"])
+    assert first_payload["prompt"] is not None
+    assert second_payload["prompt"] is None
+
+
 def test_tools_call_missing_name_returns_error(cfg):
     client = _client(cfg)
     body = client.post("/mcp", headers=_auth(cfg),
@@ -592,11 +656,15 @@ def test_tools_list_then_tools_call_round_trip(cfg):
         "/mcp", headers=auth,
         json=_rpc("tools/list", {}, req_id=30)).json()
     names = [t["name"] for t in listed["result"]["tools"]]
-    assert set(names) == {"push_prompt", "get_result", "status"}
+    assert set(names) == {
+        "push_prompt", "get_result", "status", "claim_next"}
 
     # Every advertised tool answers a tools/call invocation without
-    # a JSON-RPC error.
-    for i, name in enumerate(names, start=31):
+    # a JSON-RPC error. claim_next is exercised LAST so its claim
+    # doesn't mark the row pushed for the get_result roundtrip as
+    # 'running' before get_result fetches it.
+    ordered = ["push_prompt", "get_result", "status", "claim_next"]
+    for i, name in enumerate(ordered, start=31):
         # Minimal viable arguments per tool.
         if name == "push_prompt":
             args = {"prompt": "roundtrip"}
@@ -608,6 +676,7 @@ def test_tools_list_then_tools_call_round_trip(cfg):
                 push["result"]["content"][0]["text"])["prompt_id"]
             args = {"prompt_id": str(pid)}
         else:
+            # status + claim_next both take no required args.
             args = {}
         body = _tools_call(client, cfg, name, args, rid=i)
         assert "error" not in body, f"tools/call {name} failed: {body}"
@@ -640,7 +709,7 @@ def test_full_handshake_then_existing_tool_still_works(cfg):
     listed = client.post("/mcp", headers=auth,
                          json=_rpc("tools/list", {}, req_id=2))
     assert listed.status_code == 200
-    assert len(listed.json()["result"]["tools"]) == 3
+    assert len(listed.json()["result"]["tools"]) == 4
 
     # The direct-method path the local CLI and the mobile relay
     # already use is unchanged.
