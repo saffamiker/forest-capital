@@ -606,6 +606,29 @@ _MCP_TOOLS_CATALOG: list[dict[str, Any]] = [
             "properties": {},
         },
     },
+    {
+        # June 4 2026 — expose claim_next so Claude Code can actively
+        # pull pending prompts when worker dispatch is unreliable. The
+        # handler exists already (_h_claim_next, line 515) for the
+        # CLI / direct-method path; this entry surfaces it to Claude.ai
+        # via tools/list. Args left empty in the schema so the LLM
+        # never has to specify claimed_by — the handler defaults to
+        # "live" which is exactly what a CC-pull-from-queue should
+        # record. The full row (id + prompt + metadata) returns under
+        # the `prompt` key, so the caller reads prompt_id from
+        # result.prompt.id and content from result.prompt.prompt.
+        "name": "claim_next",
+        "description": (
+            "Claim the next pending prompt from the queue for "
+            "execution. Returns the prompt content and prompt_id "
+            "wrapped under the `prompt` key, or {prompt: null} when "
+            "the queue is empty. Use this to actively pull pending "
+            "prompts rather than waiting for worker dispatch."),
+        "inputSchema": {
+            "type":       "object",
+            "properties": {},
+        },
+    },
 ]
 
 
@@ -653,6 +676,11 @@ _MCP_TOOL_HANDLERS = {
     "push_prompt": _h_push_prompt,
     "get_result":  _h_get_result,
     "status":      _h_status,
+    # June 4 2026 — tools/call also routes through here; pairs with
+    # the catalog entry above so an LLM that discovers claim_next via
+    # tools/list can invoke it via tools/call without a second
+    # dispatch path.
+    "claim_next":  _h_claim_next,
 }
 
 
