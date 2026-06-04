@@ -222,6 +222,7 @@ function RuntimeHealthLink() {
     <button
       type="button"
       onClick={() => navigate('/admin/health')}
+      data-tour="admin-health-runtime-link"
       className="w-full text-left text-xs px-3 py-2 rounded border border-border
                  bg-navy-800 hover:bg-navy-700 text-white flex items-center
                  justify-between gap-3">

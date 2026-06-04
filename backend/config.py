@@ -293,7 +293,7 @@ GITHUB_WEBHOOK_SECRET = os.getenv("GITHUB_WEBHOOK_SECRET", "")
 # Increment this by 1 whenever the tour's steps change materially, and ship
 # a changelog entry in the same migration (see migration 013). Version 2
 # corresponds to the initial guided tour built in migration 013.
-TOUR_VERSION = 2
+TOUR_VERSION = 3
 
 # The current UAT test-script version. The guided test runner's scripts
 # live in frontend/src/constants/testScripts.ts, versioned with the code.
@@ -302,7 +302,7 @@ TOUR_VERSION = 2
 # none), the script's steps need re-attestation and a login notification
 # surfaces. Increment by 1 whenever a test script's steps change
 # materially, and bump the matching `version` field in testScripts.ts.
-TEST_SCRIPT_VERSION = 8
+TEST_SCRIPT_VERSION = 9
 
 # ── AI TOKEN COSTS ────────────────────────────────────────────────────────────
 # Per-token USD rates used to estimate the cost of every AI agent call.
