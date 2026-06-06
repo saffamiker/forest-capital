@@ -14,15 +14,17 @@ import type { EfficientFrontierData, FrontierPoint, PortfolioPoint } from '../ty
 import InfoIcon from './InfoIcon'
 import ChartExportButton from './ChartExportButton'
 import type { ChartTheme } from '../lib/exportTheme'
-import { DARK_CHART_THEME } from '../lib/exportTheme'
+import { useChartTheme } from '../lib/useChartTheme'
 
 interface TooltipEntry {
   payload?: FrontierPoint & { strategy?: string }
 }
 
 const CustomTooltip = ({
-  active, payload, theme = DARK_CHART_THEME,
+  active, payload, theme: themeProp,
 }: { active?: boolean; payload?: TooltipEntry[]; theme?: ChartTheme }) => {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   if (!active || !payload?.length) return null
   const d = payload[0]?.payload
   if (!d) return null
@@ -55,8 +57,10 @@ const CustomTooltip = ({
 }
 
 export default function EfficientFrontier({
-  data, theme = DARK_CHART_THEME,
+  data, theme: themeProp,
 }: { data: EfficientFrontierData; theme?: ChartTheme }) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   const {
     frontier_points = [],
     portfolio_points = [],

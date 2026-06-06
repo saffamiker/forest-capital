@@ -25,7 +25,7 @@ import {
 } from 'recharts'
 import type { ActivityEvent, ActivityKind, ActivitySummary } from '../types/activity'
 import type { ChartTheme } from '../lib/exportTheme'
-import { DARK_CHART_THEME } from '../lib/exportTheme'
+import { useChartTheme } from '../lib/useChartTheme'
 
 // Stacked activity types for chart 1 — page_view is the lightest layer.
 // Test attestations are their own distinct stack colour.
@@ -70,7 +70,9 @@ interface ChartCardProps {
   theme?: ChartTheme
 }
 
-function ChartCard({ title, subtitle, children, presentMode, theme = DARK_CHART_THEME }: ChartCardProps) {
+function ChartCard({ title, subtitle, children, presentMode, theme: themeProp }: ChartCardProps) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   const light = theme.mode === 'light'
   return (
     <div
@@ -100,8 +102,10 @@ interface Props {
 }
 
 export default function TeamActivityCharts({
-  events, summary, presentMode, theme = DARK_CHART_THEME,
+  events, summary, presentMode, theme: themeProp,
 }: Props) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   // Chart-1 stack visibility — clicking the legend toggles a type off.
   const [hidden, setHidden] = useState<Set<ActivityKind>>(new Set())
   const toggle = (k: ActivityKind) => {

@@ -17,7 +17,7 @@ import {
   GRID_STROKE, AXIS_TICK, TOOLTIP_CONTENT_STYLE, TOOLTIP_LABEL_STYLE,
   REGIME_BREAK_COLOR,
 } from './chartStyle'
-import { STRATEGY_COLORS } from './strategyColors'
+import { STRATEGY_COLORS, LIGHT_STRATEGY_COLORS } from './strategyColors'
 
 export interface ChartTheme {
   mode: 'dark' | 'light'
@@ -73,22 +73,13 @@ export const DARK_CHART_THEME: ChartTheme = {
   seriesColors: DARK_SERIES,
 }
 
-// ── Light theme — for the academic export package (white background) ──────────
-// Strategy colours are DARKENED versions of the dark-theme hues so all ten
-// stay distinguishable on white (the bright dark-mode yellow / pink / sky
-// would wash out on a printed page).
-export const LIGHT_STRATEGY_COLORS: Record<string, string> = {
-  BENCHMARK:          '#374151',
-  CLASSIC_60_40:      '#2563eb',
-  RISK_PARITY:        '#059669',
-  MIN_VARIANCE:       '#7c3aed',
-  EQUAL_WEIGHT:       '#ea580c',
-  MOMENTUM_ROTATION:  '#db2777',
-  REGIME_SWITCHING:   '#15803d',
-  VOL_TARGETING:      '#1e40af',
-  BLACK_LITTERMAN:    '#b45309',
-  MAX_SHARPE_ROLLING: '#a21caf',
-}
+// ── Light theme — for the academic export package + the live app's
+// light-mode toggle (June 6 2026). LIGHT_STRATEGY_COLORS is the
+// shared source-of-truth set defined in lib/strategyColors.ts;
+// imported above so the same palette flips both the live app and the
+// export package. Strategy colours are DARKENED versions of the dark-
+// theme hues so all ten stay distinguishable on white (the bright
+// dark-mode yellow / pink / sky would wash out on a printed page).
 
 const LIGHT_SERIES = [
   '#2563eb', '#059669', '#7c3aed', '#ea580c', '#db2777',
