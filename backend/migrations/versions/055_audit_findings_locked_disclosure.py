@@ -54,13 +54,20 @@ def upgrade() -> None:
             ),
         ),
     )
+    # ON CONFLICT (version) DO NOTHING (bridge #79 idempotency
+    # safeguard) -- same lesson as migration 054. Versions 72-73
+    # are taken by migration 053; v=74 is now taken by migration
+    # 054 (post-fix). This migration uses v=75. The DO NOTHING
+    # clause makes any future collision a safe re-run rather than
+    # a crashed migration.
     op.execute(sa.text(
         "INSERT INTO changelog "
         "(version, released_at, title, description, "
         " academic_rationale, tour_step_id) "
-        "VALUES (:v, :rel, :t, :d, :a, NULL)"
+        "VALUES (:v, :rel, :t, :d, :a, NULL) "
+        "ON CONFLICT (version) DO NOTHING"
     ).bindparams(
-        v=74,
+        v=75,
         rel=datetime.now(timezone.utc),
         t="Audit findings: capture locked disclosure text",
         d=(
@@ -89,4 +96,4 @@ def downgrade() -> None:
     op.drop_column("audit_findings", "locked_disclosure_text")
     op.execute(sa.text(
         "DELETE FROM changelog WHERE version = :v"
-    ).bindparams(v=74))
+    ).bindparams(v=75))
