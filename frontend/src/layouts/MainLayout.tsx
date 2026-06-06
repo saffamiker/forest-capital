@@ -3,11 +3,12 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle, BarChart3,
   Activity, FileText, LineChart, Menu, X, LogOut, ClipboardCheck,
-  TrendingUp,
+  TrendingUp, Sun, Moon,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import { useAuth } from '../App'
 import { useSession } from '../context/SessionContext'
+import { useTheme } from '../context/ThemeContext'
 import { useActivityTracking } from '../lib/useActivityTracking'
 import { useBrand, BRANDS } from '../context/BrandContext'
 import { useUI } from '../context/UIContext'
@@ -205,6 +206,42 @@ function ModeSelector({ vertical = false, onSelect }: {
         )
       })}
     </div>
+  )
+}
+
+/**
+ * Light / dark theme toggle — desktop-only (the mobile drawer doesn't
+ * need it; demos run on the desktop the projector is plugged into).
+ * Visible and one-click per the July 1 demo spec.
+ *
+ * Icon convention: in DARK mode show the Sun ('switch to light' is the
+ * affordance); in LIGHT mode show the Moon ('switch to dark'). Tooltip
+ * names the action that will happen on click.
+ *
+ * The button itself uses CSS variables (--text-primary / hover state via
+ * bg-navy-700/30) so it flips appearance with the theme without needing
+ * a dark: companion class — the toggle is self-themed.
+ */
+function ThemeToggle() {
+  const { theme, toggleTheme } = useTheme()
+  const isDark = theme === 'dark'
+  return (
+    <button
+      type="button"
+      onClick={toggleTheme}
+      title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+      aria-label={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+      className="flex items-center justify-center min-h-[36px] min-w-[36px]
+                 rounded text-sm text-[color:var(--text-primary)]
+                 hover:bg-navy-700/30 dark:hover:bg-navy-700/30
+                 transition-colors shrink-0"
+    >
+      {isDark ? (
+        <Sun className="w-4 h-4" aria-hidden="true" />
+      ) : (
+        <Moon className="w-4 h-4" aria-hidden="true" />
+      )}
+    </button>
   )
 }
 
@@ -419,11 +456,15 @@ export default function MainLayout() {
               the drawer. (ModeSelector self-hides below lg.) */}
           <ModeSelector />
 
-          {/* Commentary sub-toggle and QA badge — desktop only, to keep
-              the mobile nav bar uncluttered. */}
+          {/* Commentary sub-toggle, QA badge, and theme toggle — desktop
+              only, to keep the mobile nav bar uncluttered. The theme
+              toggle is visible and one-click per the July 1 demo spec
+              (dark themes don't project well; the presenter needs to
+              switch quickly). */}
           <div className="hidden lg:flex items-center gap-3">
             <LearnModeToggle />
             <QAStatusBadge />
+            <ThemeToggle />
           </div>
 
           {/* QA running indicator — a QA audit (methodology or

@@ -2,6 +2,17 @@ import type { Config } from 'tailwindcss'
 
 const config: Config = {
   content: ['./index.html', './src/**/*.{js,jsx,ts,tsx}'],
+  // June 5 2026 — class strategy for the dark/light toggle. The
+  // ThemeContext toggle adds/removes the `dark` class on
+  // document.documentElement. Components that have been migrated to
+  // read CSS variables (--bg-primary / --text-primary) or carry
+  // `dark:` companions flip with the toggle; legacy components keep
+  // their hardcoded navy classes — the toggle leaves them dark in
+  // both modes for now, with a documented follow-up sweep to add
+  // `dark:` variants component-by-component. This first PR delivers
+  // a working toggle for the demo without 500+ LOC of component
+  // refactors in one cut.
+  darkMode: 'class',
   // iOS Safari Layer A — hover:* utilities now compile inside
   // @media (hover: hover) { … }, so a phone tap never makes a hover
   // style fire and stick on the tapped button. Devices that support
