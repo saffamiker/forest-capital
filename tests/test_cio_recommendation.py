@@ -104,6 +104,93 @@ class TestGenerateRecommendation:
         assert "—" not in rec["signal"]
         assert "—" not in rec["dissenting_view"]
 
+
+# ── get_prior_recommendation (June 5 2026) ────────────────────────────────
+
+
+class TestGetPriorRecommendation:
+    """The helper that backs Section C of the transparency structure.
+    Returns the most recent recommendation written under a data_hash
+    that differs from the current one — None when no such row exists.
+    Fail-open contract: any DB error returns None and the caller
+    omits Section C cleanly."""
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_db_unavailable(self, monkeypatch):
+        # Test env has no DB, so _DB_AVAILABLE is False and the helper
+        # short-circuits without ever opening a session. Pins the
+        # fail-open contract.
+        from tools import cio_recommendation as cio_mod
+
+        monkeypatch.setattr(cio_mod, "_DB_AVAILABLE", False)
+        result = await cio_mod.get_prior_recommendation("any-hash-here")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_returns_none_when_current_hash_empty(self):
+        # Empty hash means we can't tell what's "different from current"
+        # so the helper refuses to query (returning the latest row would
+        # mis-attribute it as a prior). Pins the safety check.
+        from tools import cio_recommendation as cio_mod
+
+        assert await cio_mod.get_prior_recommendation("") is None
+        # The async signature is callable — keyword-mistyping check.
+        assert await cio_mod.get_prior_recommendation(None) is None  # type: ignore[arg-type]
+
+    def test_signature_matches_other_readers(self):
+        # The three DB readers (get_cached_for_hash, get_latest_
+        # recommendation, get_prior_recommendation) should follow the
+        # same shape — all async, all returning dict | None, all fail-
+        # open. This pin catches a future signature drift.
+        import inspect
+
+        from tools import cio_recommendation as cio_mod
+
+        sig = inspect.signature(cio_mod.get_prior_recommendation)
+        assert list(sig.parameters.keys()) == ["current_data_hash"]
+        assert inspect.iscoroutinefunction(cio_mod.get_prior_recommendation)
+
+
+# ── CIO system prompt: Section A/B/C mandate (June 5 2026) ────────────────
+
+
+class TestSystemPromptStructureMandate:
+    """The CIO system prompt is the contract for every council output.
+    Section A / B / C are mandatory; this test pins each section's
+    name + the CONDITIONAL nature of Section C so a later prompt
+    refactor doesn't quietly drop the structure."""
+
+    def test_three_sections_named_in_system_prompt(self):
+        from agents.cio import _SYSTEM_PROMPT
+
+        # The three section headers, exactly as the model is told to
+        # write them. A drift on any of these breaks parsing of the
+        # response in the frontend (where the panel reads the section
+        # boundaries).
+        assert "### A. Signal snapshot" in _SYSTEM_PROMPT
+        assert "### B. Weight justification" in _SYSTEM_PROMPT
+        assert "### C. Shift narrative" in _SYSTEM_PROMPT
+
+    def test_section_c_is_conditional(self):
+        from agents.cio import _SYSTEM_PROMPT
+
+        # Section C only fires when a prior recommendation is in the
+        # data block. The CONDITIONAL keyword + the "OMIT Section C
+        # entirely" instruction are the two halves of that contract.
+        assert "CONDITIONAL" in _SYSTEM_PROMPT
+        assert "prior_recommendation" in _SYSTEM_PROMPT
+        assert "OMIT Section C" in _SYSTEM_PROMPT
+
+    def test_meta_questions_skip_the_structure(self):
+        # Meta questions (peer-reviewer anticipation, framing) don't
+        # get A/B/C because they aren't strategy recommendations.
+        # Pinned so a later refactor doesn't accidentally apply the
+        # mandate universally.
+        from agents.cio import _SYSTEM_PROMPT
+
+        assert "META questions" in _SYSTEM_PROMPT
+        assert "skip the A/B/C structure" in _SYSTEM_PROMPT
+
     def test_confidence_mirrors_context(self):
         ctx = cio.compute_context(
             _strategy_results(120, 6), _hmm_result(120), _CURRENT)
