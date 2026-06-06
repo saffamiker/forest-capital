@@ -1,18 +1,20 @@
-"""Executive brief — six-section rubric-trap-aware structure.
+"""Executive brief — six-section structure (June 6 2026 rewrite).
 
-Rebuilt May 30 2026. Pins the six-section contract so a future
-narrative-prompt edit cannot silently drop or reorder the rubric-trap
-answer:
+The midpoint panel feedback was: too academic / no investable
+conclusion / 3-of-5 on the division-of-labor rubric / simplify the
+strategy set. This rewrite replaces the May 30 structure with the
+spec the user pushed through the bridge (#21):
 
-  1. The Static Recommendation     — Part I answer, plainly stated
-  2. The Central Finding           — 2022 break as our INTERPRETATION
-  3. Analytical Judgment           — the five human decisions
-  4. Platform as Evidence Base     — platform AFTER human judgment
-  5. Evidence Summary              — findings in interpretive terms
-  6. Part II Preview               — regime-conditional as logical consequence
+  1. The Answer                — verdict first, no methodology
+  2. The Evidence              — 3 strategies, honest FDR + 2-of-9
+  3. The Methodology           — background, two paragraphs max
+  4. Five Human Decisions      — Bob / Michael / Molly NAMED
+  5. The Recommendation        — LIVE regime + asset-class weights
+  6. Limitations and Part II   — boundaries + extension preview
 
 The brief addresses the rubric's "where is the human judgment" question
-DIRECTLY. The platform is the evidence layer, not the conclusion layer.
+DIRECTLY in Section 4 by naming each team member with their specific
+decision. The platform is the evidence layer, not the conclusion layer.
 Tone rules forbid "the platform found"; mandate "our analysis shows".
 """
 from __future__ import annotations
@@ -39,12 +41,12 @@ def test_brief_sections_in_required_order():
     from tools.editor_content import _EXEC_BRIEF_SECTIONS
     headings = [h for h, _key, _callout in _EXEC_BRIEF_SECTIONS]
     assert headings == [
-        "1. The Static Recommendation",
-        "2. The Central Finding",
-        "3. Analytical Judgment and Methodology Decisions",
-        "4. Platform as Evidence Base",
-        "5. Evidence Summary",
-        "6. Part II Preview",
+        "1. The Answer",
+        "2. The Evidence",
+        "3. The Methodology",
+        "4. Five Human Decisions",
+        "5. The Recommendation",
+        "6. Limitations and Part II",
     ]
 
 
@@ -54,12 +56,12 @@ def test_brief_section_keys_match_narrative_contract():
     from tools.editor_content import _EXEC_BRIEF_SECTIONS
     keys = [key for _h, key, _c in _EXEC_BRIEF_SECTIONS]
     assert keys == [
-        "static_rec",
-        "central_finding",
-        "human_judgment",
-        "platform_role",
-        "evidence",
-        "part_ii_preview",
+        "the_answer",
+        "the_evidence",
+        "methodology",
+        "five_human_decisions",
+        "the_recommendation",
+        "limitations_and_part_ii",
     ]
 
 
@@ -78,12 +80,12 @@ def test_build_executive_brief_renders_all_six_section_headings():
         "audit_disclosures": None,
     }
     narratives = {
-        "static_rec":      "STATIC_REC_PARAGRAPH",
-        "central_finding": "CENTRAL_FINDING_PARAGRAPH",
-        "human_judgment":  "HUMAN_JUDGMENT_PARAGRAPH",
-        "platform_role":   "PLATFORM_ROLE_PARAGRAPH",
-        "evidence":        "EVIDENCE_PARAGRAPH",
-        "part_ii_preview": "PART_II_PARAGRAPH",
+        "the_answer":              "THE_ANSWER_PARAGRAPH",
+        "the_evidence":            "THE_EVIDENCE_PARAGRAPH",
+        "methodology":             "METHODOLOGY_PARAGRAPH",
+        "five_human_decisions":    "FIVE_DECISIONS_PARAGRAPH",
+        "the_recommendation":      "THE_RECOMMENDATION_PARAGRAPH",
+        "limitations_and_part_ii": "LIMITATIONS_PARAGRAPH",
     }
     blob = build_executive_brief(data, narratives)
     # The bytes carry the docx zip; decode the document.xml to read the
@@ -94,32 +96,32 @@ def test_build_executive_brief_renders_all_six_section_headings():
         doc_xml = zf.read("word/document.xml").decode("utf-8")
     # Every section heading present.
     for heading in (
-        "1. The Static Recommendation",
-        "2. The Central Finding",
-        "3. Analytical Judgment and Methodology Decisions",
-        "4. Platform as Evidence Base",
-        "5. Evidence Summary",
-        "6. Part II Preview",
+        "1. The Answer",
+        "2. The Evidence",
+        "3. The Methodology",
+        "4. Five Human Decisions",
+        "5. The Recommendation",
+        "6. Limitations and Part II",
     ):
         assert heading in doc_xml, f"heading missing: {heading}"
     # Every narrative paragraph wired into its section.
     for token in (
-        "STATIC_REC_PARAGRAPH",
-        "CENTRAL_FINDING_PARAGRAPH",
-        "HUMAN_JUDGMENT_PARAGRAPH",
-        "PLATFORM_ROLE_PARAGRAPH",
-        "EVIDENCE_PARAGRAPH",
-        "PART_II_PARAGRAPH",
+        "THE_ANSWER_PARAGRAPH",
+        "THE_EVIDENCE_PARAGRAPH",
+        "METHODOLOGY_PARAGRAPH",
+        "FIVE_DECISIONS_PARAGRAPH",
+        "THE_RECOMMENDATION_PARAGRAPH",
+        "LIMITATIONS_PARAGRAPH",
     ):
         assert token in doc_xml, f"narrative token missing: {token}"
     # Sections must appear in order.
     idx = [doc_xml.index(h) for h in (
-        "1. The Static Recommendation",
-        "2. The Central Finding",
-        "3. Analytical Judgment and Methodology Decisions",
-        "4. Platform as Evidence Base",
-        "5. Evidence Summary",
-        "6. Part II Preview",
+        "1. The Answer",
+        "2. The Evidence",
+        "3. The Methodology",
+        "4. Five Human Decisions",
+        "5. The Recommendation",
+        "6. Limitations and Part II",
     )]
     assert idx == sorted(idx), "Brief sections rendered out of order."
 
@@ -140,7 +142,7 @@ def test_brief_tone_rules_constant_present():
     assert "No em dashes" in _BRIEF_TONE_RULES
 
 
-# ── Static Recommendation lead carries the required framing ───────────────
+# ── Section 1: the verdict-first opening ──────────────────────────────────
 
 
 def _runtime_main_source() -> str:
@@ -163,64 +165,93 @@ def _runtime_main_source() -> str:
     return re.sub(r'"\s*\n\s+"', '', raw)
 
 
-def test_static_recommendation_spec_carries_required_quote():
-    """Section 1 must instruct the agent to use the verbatim
-    'For a Forest Capital capital planning mandate' opening — this
-    is the Part I answer plainly stated, which the rubric requires
-    be surfaced first rather than buried under dynamic framing."""
+def test_the_answer_spec_leads_with_verdict():
+    """Section 1 must instruct the agent to use the verbatim 'Yes. A
+    regime-aware diversified blend outperforms...' opening — the
+    verdict leads, methodology comes later."""
     source = _runtime_main_source()
-    # The Static Recommendation spec quotes the required opening
-    # verbatim so the agent leads the brief with the Part I answer.
-    assert ("For a Forest Capital capital planning mandate operating "
-            "under a long-only, fully-invested constraint") in source
-    # And the explicit framing label.
-    assert "It is the Part I answer." in source
+    assert ("Yes. A regime-aware diversified blend outperforms a 100% "
+            "equity allocation by 27 percentage points of maximum "
+            "drawdown") in source
+    # And the explicit "no methodology yet" instruction.
+    assert "Do NOT discuss the methodology yet" in source
 
 
-def test_central_finding_spec_frames_2022_as_interpretation():
-    """Section 2 must instruct the agent that the 2022 break is OUR
-    interpretation, not a data output."""
+def test_the_evidence_spec_drops_other_strategies():
+    """Section 2 must instruct the agent to compare exactly THREE
+    strategies (benchmark, best static, dynamic blend) and drop the
+    other seven. The locked figures + 2-of-9 + FDR result must be
+    cited verbatim."""
     source = _runtime_main_source()
-    assert ("Our interpretation of the post-2022 data is that the "
-            "equity-bond correlation shift represents a structural "
-            "change") in source
+    assert "exactly THREE strategies" in source
+    # Locked figures.
+    assert "-52.6%" in source
+    assert "-25.3%" in source
+    assert "0.86" in source
+    assert "0.43" in source
+    # Honest validation result.
+    assert "2 of 9 named market events" in source
+    # FDR acknowledgement.
+    assert "FDR" in source or "p < 0.005" in source
+    # The "drop the other 7" rule.
+    assert "DROP the other seven strategies" in source
 
 
-def test_human_judgment_spec_names_five_decisions_in_order():
-    """Section 3 must list the five human decisions verbatim and in
-    delivery order. The rubric trap answer."""
+def test_the_methodology_spec_is_brief():
+    """Section 3 must instruct the agent to keep methodology to TWO
+    PARAGRAPHS MAXIMUM (background, not the centrepiece)."""
     source = _runtime_main_source()
-    # Each of the five decisions is numbered explicitly inside the spec.
-    for marker in (
-        "1. The regime-inversion interpretation",
-        "2. Strategy selection across distinct signal mechanisms",
-        "3. Proactive statistical disclosure",
-        "4. Structured dissent in the AI council",
-        "5. Constraint framework as fiduciary design",
-    ):
-        assert marker in source, f"Decision missing from spec: {marker}"
-    # The closing framing line.
-    assert ("The platform gives us the evidence. The interpretation, "
-            "the design, and the governance framework are ours.") in source
+    assert "TWO PARAGRAPHS MAXIMUM" in source
+    assert "background, not the centrepiece" in source
 
 
-def test_platform_role_spec_introduces_platform_after_judgment():
-    """Section 4 must frame the platform as evidence layer, NOT
-    conclusion layer."""
+def test_five_human_decisions_spec_names_team_members_explicitly():
+    """Section 4 is the critical section addressing the 3/5 division-
+    of-labor score. Each of the five decisions must name Bob Thao,
+    Michael Ruurds, or Molly Murdock explicitly with the format
+    'Decision / Who made it / Why the platform could not make it
+    alone.'"""
     source = _runtime_main_source()
-    assert ("The platform was built to generate auditable, "
-            "reproducible evidence for conclusions reached through "
-            "analysis.") in source
-    assert "The interpretations and design decisions are ours." \
+    # The five specific decision titles with their attributed person.
+    assert "1. Regime hypothesis — Bob Thao" in source
+    assert "2. Economic significance threshold — Bob Thao" in source
+    assert "3. Out-of-sample window design — Michael Ruurds" in source
+    assert "4. Asset scope — Michael Ruurds" in source
+    assert "5. Validation framework — Molly Murdock" in source
+    # The structural instruction.
+    assert ("Decision / Who made it / Why the platform could not make "
+            "it alone") in source
+    # The "do not anonymise" close.
+    assert "do not anonymise" in source.lower() or \
+        "name them every time" in source
+
+
+def test_the_recommendation_spec_uses_live_data():
+    """Section 5 must instruct the agent to pull regime + confidence
+    + asset-class weights from live_recommendation in context, and
+    express the recommendation as ASSET CLASS allocations not
+    strategy names."""
+    source = _runtime_main_source()
+    assert "live_recommendation" in source
+    assert "ASSET CLASS ALLOCATIONS" in source
+    # The "Forest Capital fills each envelope" framing.
+    assert ("Forest Capital fills each envelope with its own security "
+            "selection") in source
+    # The graceful DATA PENDING fallback when live data is cold.
+    assert "[DATA PENDING]" in source or "is not currently available" \
         in source
 
 
-def test_part_ii_preview_spec_frames_as_logical_consequence():
-    """Section 6 must frame the regime-conditional extension as the
-    LOGICAL CONSEQUENCE of Part I, not a separate exercise."""
+def test_limitations_and_part_ii_spec_frames_as_logical_consequence():
+    """Section 6 must frame the Part II extension as the LOGICAL
+    CONSEQUENCE of Part I + cite the bootstrap CI overlap that
+    motivates the regime-conditional construction."""
     source = _runtime_main_source()
-    assert "logical consequence" in source.lower()
-    assert "bootstrap confidence intervals" in source.lower()
+    assert "LOGICAL CONSEQUENCE" in source
+    assert "bootstrap confidence intervals" in source.lower() or \
+        "Bootstrap confidence intervals" in source
+    # Three-asset scope as PROJECT boundary, not architectural.
+    assert "PROJECT boundary" in source or "project boundary" in source.lower()
 
 
 def test_brief_specs_apply_tone_rules_to_every_section():
@@ -233,3 +264,71 @@ def test_brief_specs_apply_tone_rules_to_every_section():
     assert occurrences == 6, (
         f"_BRIEF_TONE_RULES is concatenated in {occurrences} section(s); "
         "every section (6) must apply the tone rules.")
+
+
+# ── Asset-class aggregator (June 6 2026 — shared with digest section 1) ──
+
+
+class TestAggregateBlendToAssetClasses:
+    """The aggregator that takes per-strategy blend weights and produces
+    portfolio-level (equity_pct, bond_pct) shares. Shared between the
+    brief's Section 5 and the daily digest's implied-asset-allocation
+    section."""
+
+    def test_simple_blend_aggregates_correctly(self):
+        from tools.academic_export import aggregate_blend_to_asset_classes
+        blend = {"MIN_VARIANCE": 0.4, "RISK_PARITY": 0.6}
+        strategies = {
+            "MIN_VARIANCE":  {"avg_equity_weight": 0.30,
+                              "avg_bond_weight":   0.70},
+            "RISK_PARITY":   {"avg_equity_weight": 0.50,
+                              "avg_bond_weight":   0.50},
+        }
+        eq, bd = aggregate_blend_to_asset_classes(blend, strategies)
+        assert eq == pytest.approx(0.4 * 0.30 + 0.6 * 0.50, abs=1e-9)
+        assert bd == pytest.approx(0.4 * 0.70 + 0.6 * 0.50, abs=1e-9)
+
+    def test_empty_blend_returns_none(self):
+        from tools.academic_export import aggregate_blend_to_asset_classes
+        assert aggregate_blend_to_asset_classes({}, {"X": {}}) == (None, None)
+
+    def test_empty_strategies_returns_none(self):
+        from tools.academic_export import aggregate_blend_to_asset_classes
+        assert aggregate_blend_to_asset_classes(
+            {"X": 0.5}, {}) == (None, None)
+
+    def test_zero_weights_are_skipped(self):
+        from tools.academic_export import aggregate_blend_to_asset_classes
+        blend = {"A": 0.5, "B": 0.0, "C": 0.5}
+        strategies = {
+            "A": {"avg_equity_weight": 0.5, "avg_bond_weight": 0.5},
+            "B": {"avg_equity_weight": 0.9, "avg_bond_weight": 0.1},
+            "C": {"avg_equity_weight": 0.3, "avg_bond_weight": 0.7},
+        }
+        eq, bd = aggregate_blend_to_asset_classes(blend, strategies)
+        # B is zero-weighted so it contributes nothing.
+        assert eq == pytest.approx(0.5 * 0.5 + 0.5 * 0.3, abs=1e-9)
+        assert bd == pytest.approx(0.5 * 0.5 + 0.5 * 0.7, abs=1e-9)
+
+    def test_strategy_missing_from_strategies_returns_none_when_no_other(self):
+        # When the only blend strategy isn't in strategies, no
+        # contribution lands.
+        from tools.academic_export import aggregate_blend_to_asset_classes
+        assert aggregate_blend_to_asset_classes(
+            {"GHOST": 0.5}, {"X": {"avg_equity_weight": 0.5,
+                                    "avg_bond_weight": 0.5}}
+        ) == (None, None)
+
+    def test_malformed_values_skipped_gracefully(self):
+        # NaN / strings / None values in weights don't crash.
+        from tools.academic_export import aggregate_blend_to_asset_classes
+        blend = {"A": "0.5", "B": None, "C": 0.5}
+        strategies = {
+            "A": {"avg_equity_weight": "0.5", "avg_bond_weight": 0.5},
+            "B": {"avg_equity_weight": 0.5, "avg_bond_weight": 0.5},
+            "C": {"avg_equity_weight": 0.5, "avg_bond_weight": 0.5},
+        }
+        eq, bd = aggregate_blend_to_asset_classes(blend, strategies)
+        # "0.5" coerces to 0.5; None weights skip B.
+        assert eq is not None
+        assert bd is not None

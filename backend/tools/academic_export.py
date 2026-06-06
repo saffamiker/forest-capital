@@ -177,7 +177,139 @@ async def gather_document_data() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_export_docs_read_failed", error=str(exc))
 
+    # ── Live recommendation block (June 6 2026 — brief rewrite) ────────────
+    # Section 5 of the executive brief states the current regime + the
+    # blend expressed as asset-class allocations (equity vs bonds). The
+    # source is the same compute_context() the CIO recommendation panel
+    # uses on the dashboard, so the brief and the dashboard always agree
+    # on the live state. Aggregation to asset-class shares happens here
+    # so the section prompt receives ready-to-quote {equity_pct,
+    # bond_pct} numbers and doesn't try to compute them from per-strategy
+    # weights itself. Fail-open per the rest of the bundle pattern.
+    bundle["live_recommendation"] = await _gather_live_recommendation(
+        bundle.get("strategy_results") or {})
+
     return bundle
+
+
+async def _gather_live_recommendation(
+    strategy_results: dict[str, Any],
+) -> dict[str, Any]:
+    """Fetches the current regime + live blend weights and aggregates
+    the blend to portfolio-level asset-class shares (equity vs bonds).
+
+    The aggregator uses each strategy's `avg_equity_weight` and
+    `avg_bond_weight` from strategy_results_cache; the brief section
+    states the result as "Equity X% / Bonds Y%" rather than splitting
+    bonds further (the IG/HY split isn't persisted to the cache today,
+    and is downstream of strategy choice rather than a separate
+    allocation axis — Forest Capital fills the bond envelope with its
+    own security selection).
+
+    Returns:
+      {
+        regime:         "BULL" | "BEAR" | "TRANSITION" | None,
+        confidence:     float 0..1 or None,
+        blend_weights:  {strategy: float} or {},
+        equity_pct:     float 0..1 or None,
+        bond_pct:       float 0..1 or None,
+        ess:            float or None,
+      }
+
+    On any failure (cold cache, no monthly data, HMM fit error) the
+    helper returns the dict with every value set to None / empty so
+    the brief Section 5 renders a [DATA PENDING] block rather than
+    crashing the generation."""
+    empty = {
+        "regime":        None,
+        "confidence":    None,
+        "blend_weights": {},
+        "equity_pct":    None,
+        "bond_pct":      None,
+        "ess":           None,
+    }
+    try:
+        # Reuse the platform's canonical live-context builder so the
+        # brief and the dashboard agree on the live state. Returns
+        # {"context": {...}, "macro": ...} on success.
+        from tools.cio_recommendation import _build_live_context
+        live = await _build_live_context()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("academic_export_live_recommendation_failed",
+                    error=str(exc))
+        return empty
+    if not live or live.get("error"):
+        return empty
+
+    ctx = live.get("context") or {}
+    regime = ctx.get("regime")
+    confidence = ctx.get("probability")
+    blend_weights = ctx.get("blend_weights") or {}
+    ess = ctx.get("ess")
+
+    equity_pct, bond_pct = aggregate_blend_to_asset_classes(
+        blend_weights, strategy_results)
+
+    return {
+        "regime":        regime,
+        "confidence":    confidence,
+        "blend_weights": blend_weights,
+        "equity_pct":    equity_pct,
+        "bond_pct":      bond_pct,
+        "ess":           ess,
+    }
+
+
+def aggregate_blend_to_asset_classes(
+    blend_weights: dict[str, Any],
+    strategy_results: dict[str, Any],
+) -> tuple[float | None, float | None]:
+    """Aggregate the per-strategy blend weights into portfolio-level
+    asset-class shares (equity vs bonds).
+
+    The math:
+      equity_pct = sum_s ( blend_w_s * avg_equity_weight_s )
+      bond_pct   = sum_s ( blend_w_s * avg_bond_weight_s )
+
+    With a fully-invested blend (sum of blend weights ≈ 1) and fully-
+    invested strategies (eq_s + bond_s ≈ 1 per strategy), the two
+    aggregates sum to ~1 (the small residual is rounding noise across
+    avg_equity_weight + avg_bond_weight not strictly summing to 1 in
+    every strategy result row).
+
+    Returns (None, None) when blend_weights is empty or no strategy
+    contributes a positive (eq + bond) share — the caller renders the
+    [DATA PENDING] section.
+
+    Shared with the daily digest's _section_implied_asset_allocation
+    so the brief and the digest always agree on the per-strategy →
+    portfolio aggregation. June 6 2026."""
+    if not blend_weights or not strategy_results:
+        return None, None
+    equity_acc = 0.0
+    bond_acc = 0.0
+    saw_any = False
+    for strategy, weight in blend_weights.items():
+        try:
+            w = float(weight or 0)
+        except (TypeError, ValueError):
+            continue
+        if w <= 0:
+            continue
+        s = strategy_results.get(strategy) or {}
+        try:
+            eq = float(s.get("avg_equity_weight") or 0)
+            bd = float(s.get("avg_bond_weight") or 0)
+        except (TypeError, ValueError):
+            continue
+        if eq + bd <= 0:
+            continue
+        equity_acc += w * eq
+        bond_acc += w * bd
+        saw_any = True
+    if not saw_any:
+        return None, None
+    return equity_acc, bond_acc
 
 
 _ROLES_BY_EMAIL = {

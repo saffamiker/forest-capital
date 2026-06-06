@@ -528,19 +528,17 @@ def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> by
 
 def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> bytes:
     """
-    The 2-3 page executive brief for a senior investment audience.
+    The executive brief for a senior investment audience.
 
-    Rebuilt May 30 2026 — six sections in order:
-      1. The Static Recommendation (Part I answer, stated plainly first)
-      2. The Central Finding (2022 break as structural interpretation)
-      3. Analytical Judgment and Methodology Decisions (the five
-         human decisions — answers the rubric trap)
-      4. Platform as Evidence Base (platform introduced AFTER the
-         human judgment, framed as the evidence layer)
-      5. Evidence Summary (key findings stated in human interpretive
-         terms, with platform-sourced numbers)
-      6. Part II Preview (regime-conditional extension as the logical
-         consequence of Part I)
+    Rewritten June 6 2026 — six sections in order, addressing the
+    midpoint panel feedback (too academic, no investable conclusion,
+    division-of-labor 3/5, simplify strategy set):
+      1. The Answer (one paragraph, leads with the verdict)
+      2. The Evidence (three strategies only, honest 2-of-9 + FDR)
+      3. The Methodology (background, two paragraphs max)
+      4. Five Human Decisions (Bob / Michael / Molly named explicitly)
+      5. The Recommendation (LIVE regime + asset-class allocations)
+      6. Limitations and Part II
     """
     doc = _new_document()
 
@@ -562,50 +560,60 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
     _add_review_warning_box(doc)
     doc.add_page_break()
 
-    # Section 1 — The Static Recommendation (leads).
-    _add_heading(doc, "1. The Static Recommendation")
-    _add_body(doc, narratives.get("static_rec", "[DATA PENDING]"))
-    # Audit-readiness one-liner — deterministic, surfaces the audit
-    # verdict to the investment audience without flipping to appendix.
+    # Section 1 — THE ANSWER. Leads with the verdict; one paragraph;
+    # no methodology. Drawdown comparison table sits here so the
+    # reader sees the 27-point number in the body and in the table.
+    _add_heading(doc, "1. The Answer")
+    _add_body(doc, narratives.get("the_answer", "[DATA PENDING]"))
+    h, r = table_drawdown(data.get("drawdown_comparison", []))
+    _add_table(doc, "Table 1. Drawdown and Recovery by Strategy", h, r)
+
+    # Section 2 — THE EVIDENCE. Three-strategy comparison + honest
+    # FDR and play-by-play disclosure. Summary statistics table for
+    # the headline Sharpe / drawdown figures the section cites.
+    _add_heading(doc, "2. The Evidence")
+    _add_body(doc, narratives.get("the_evidence", "[DATA PENDING]"))
+    # Audit-readiness one-liner — surfaces the platform's audit
+    # verdict here (the validation context for the evidence claims).
     from tools.audit_summary import audit_summary_sentence
     audit_line = audit_summary_sentence(data.get("audit_disclosures") or {})
     if audit_line:
         _add_body(doc, audit_line)
     h, r = table_summary_statistics(data.get("summary_statistics", []))
-    _add_table(doc, "Table 1. Summary Statistics by Asset Class", h, r)
-
-    # Section 2 — The Central Finding.
-    _add_heading(doc, "2. The Central Finding")
-    _add_body(doc, narratives.get("central_finding", "[DATA PENDING]"))
+    _add_table(doc, "Table 2. Summary Statistics by Asset Class", h, r)
     h, r = table_regime_conditional(data.get("regime_conditional", []))
-    _add_table(doc, "Table 2. Regime-Conditional Performance "
+    _add_table(doc, "Table 3. Regime-Conditional Performance "
                      "(Pre- vs Post-2022)", h, r)
 
-    # Section 3 — Analytical Judgment (the five human decisions).
-    _add_heading(doc, "3. Analytical Judgment and Methodology Decisions")
-    _add_body(doc, narratives.get("human_judgment", "[DATA PENDING]"))
-
-    # Section 4 — Platform as Evidence Base. Audit body paragraph
-    # belongs here, framing the platform's role.
-    _add_heading(doc, "4. Platform as Evidence Base")
-    _add_body(doc, narratives.get("platform_role", "[DATA PENDING]"))
-    from tools.audit_summary import audit_body_paragraph
-    audit_para = audit_body_paragraph(data.get("audit_disclosures") or {})
-    if audit_para:
-        _add_body(doc, audit_para)
-
-    # Section 5 — Evidence Summary.
-    _add_heading(doc, "5. Evidence Summary")
-    _add_body(doc, narratives.get("evidence", "[DATA PENDING]"))
-    h, r = table_drawdown(data.get("drawdown_comparison", []))
-    _add_table(doc, "Table 3. Drawdown and Recovery by Strategy", h, r)
+    # Section 3 — THE METHODOLOGY. Brief, two paragraphs.
+    _add_heading(doc, "3. The Methodology")
+    _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
     h, r = table_factor_loadings(data.get("factor_loadings", []))
     _add_table(doc, "Table 4. Carhart Four-Factor Loadings "
                      "(* significant at p < .05)", h, r)
 
-    # Section 6 — Part II Preview.
-    _add_heading(doc, "6. Part II Preview")
-    _add_body(doc, narratives.get("part_ii_preview", "[DATA PENDING]"))
+    # Section 4 — FIVE HUMAN DECISIONS. Bob / Michael / Molly named.
+    # No table — the bullets carry the section.
+    _add_heading(doc, "4. Five Human Decisions")
+    _add_body(doc, narratives.get("five_human_decisions", "[DATA PENDING]"))
+
+    # Section 5 — THE RECOMMENDATION. LIVE regime + asset-class
+    # allocations. The narrative quotes the live numbers; the table
+    # carries the per-regime watch list (BULL / BEAR / TRANSITION
+    # target shares) so the reader sees the full menu.
+    _add_heading(doc, "5. The Recommendation")
+    _add_body(doc, narratives.get("the_recommendation", "[DATA PENDING]"))
+
+    # Section 6 — LIMITATIONS AND PART II. Audit body paragraph
+    # belongs here — the platform's validation surface is the
+    # closing limitation context.
+    _add_heading(doc, "6. Limitations and Part II")
+    _add_body(doc, narratives.get(
+        "limitations_and_part_ii", "[DATA PENDING]"))
+    from tools.audit_summary import audit_body_paragraph
+    audit_para = audit_body_paragraph(data.get("audit_disclosures") or {})
+    if audit_para:
+        _add_body(doc, audit_para)
 
     # Audit Disclosure Appendix carries the platform's audit trail.
     _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
