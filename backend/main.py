@@ -9826,7 +9826,16 @@ async def _editor_export(editor_draft_id: int) -> Response:
         media, ext = _PPTX_MEDIA, "pptx"
     else:
         from tools.academic_docx import build_editor_docx
-        content = await asyncio.to_thread(build_editor_docx, draft)
+        # Analytical Appendix is table-heavy by design — re-inject the
+        # eight evidence tables after the editor prose so the in-editor
+        # export carries the full evidentiary record. Tables read from
+        # caches (no recompute) via gather_analytical_appendix_data.
+        appendix_data = None
+        if draft.get("document_type") == "analytical_appendix":
+            from tools.academic_export import gather_analytical_appendix_data
+            appendix_data = await gather_analytical_appendix_data()
+        content = await asyncio.to_thread(
+            build_editor_docx, draft, appendix_data)
         media, ext = _DOCX_MEDIA, "docx"
 
     slug = draft["document_type"].replace("_", "-")
