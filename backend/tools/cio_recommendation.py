@@ -61,6 +61,13 @@ def compute_context(
 
     posterior = (current or {}).get("hmm_probabilities") or {}
     regime = (current or {}).get("hmm_regime")
+    # PR #282 added monthly_hmm_regime + hmm_models_agree to
+    # detect_current_regime(). Thread them through compute_context so
+    # the recommendation prose generator and downstream agent context
+    # builders all reference the same structured fields rather than
+    # digging into the raw `current` dict.
+    monthly_regime = (current or {}).get("monthly_hmm_regime")
+    hmm_models_agree = (current or {}).get("hmm_models_agree", True)
     built = compute_regime_blends(strategy_results, hmm_result)
     if built.get("error"):
         return {"error": built["error"]}
@@ -79,6 +86,8 @@ def compute_context(
 
     return {
         "regime": regime,
+        "monthly_regime": monthly_regime,
+        "hmm_models_agree": hmm_models_agree,
         "posterior": {k: round(float(v), 4)
                       for k, v in posterior.items()
                       if v is not None},

@@ -29,6 +29,7 @@ import httpx
 import structlog
 
 from agents._xai_config import build_headers, resolve_xai_config
+from tools.agent_context_block import format_live_context_block as _format_live_context_block
 
 log = structlog.get_logger(__name__)
 
@@ -92,6 +93,7 @@ class ContrarianAnalyst:
         self,
         council_summary: str,
         strategy_results: dict[str, Any],
+        live_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         Stress-tests the council's draft consensus.
@@ -117,7 +119,8 @@ class ContrarianAnalyst:
             return self._mock_challenge(council_summary, strategy_results)
 
         try:
-            evidence = self._build_evidence(council_summary, strategy_results)
+            evidence = self._build_evidence(
+                council_summary, strategy_results, live_context)
             user_prompt = (
                 "Stress-test this council recommendation. Find the strongest case "
                 "AGAINST the consensus. Identify at least two concrete failure modes "
@@ -193,8 +196,15 @@ class ContrarianAnalyst:
         self,
         council_summary: str,
         strategy_results: dict[str, Any],
+        live_context: dict[str, Any] | None = None,
     ) -> str:
-        """Compact metrics summary — keeps the prompt under Grok's context budget."""
+        """Compact metrics summary — keeps the prompt under Grok's
+        context budget.
+
+        When live_context is provided, prepends a REGIME + BLEND block
+        so the dissenter sees the same input state the CIO sees and
+        can avoid reverse-engineering objections from prose alone.
+        """
         metrics = {
             name: {
                 "sharpe": r.get("sharpe_ratio"),
@@ -207,7 +217,11 @@ class ContrarianAnalyst:
             }
             for name, r in strategy_results.items()
         }
-        return json.dumps(metrics, indent=2, default=str)
+        evidence_json = json.dumps(metrics, indent=2, default=str)
+        regime_block = _format_live_context_block(live_context)
+        if regime_block:
+            return f"{regime_block}\n\nMETRICS:\n{evidence_json}"
+        return evidence_json
 
     def _parse_challenge(
         self,

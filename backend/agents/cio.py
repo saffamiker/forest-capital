@@ -380,13 +380,18 @@ class CIO:
 
         # Step 7-8: dissent — Gemini (blind spots) + Grok (stress test).
         # Both run before synthesis so the CIO sees both critiques together
-        # and can flag concerns raised by both as hard caveats.
+        # and can flag concerns raised by both as hard caveats. Each
+        # dissenter now receives live_context so its objections ground in
+        # the same regime / blend / posterior snapshot the CIO consumes
+        # rather than reverse-engineering from the council prose.
         _tag_agent("independent_analyst")
-        gemini_report = self._gemini.challenge(draft_consensus, strategy_results)
+        gemini_report = self._gemini.challenge(
+            draft_consensus, strategy_results, live_context=live_context)
         log.info("gemini_challenge_received",
                  elapsed=round(time.time() - deliberation_start, 2))
         _tag_agent("contrarian_analyst")
-        grok_report = self._grok.challenge(draft_consensus, strategy_results)
+        grok_report = self._grok.challenge(
+            draft_consensus, strategy_results, live_context=live_context)
         log.info("grok_challenge_received",
                  elapsed=round(time.time() - deliberation_start, 2))
 
@@ -530,15 +535,19 @@ class CIO:
         )
         yield ("draft_ready", draft_consensus)
 
-        # Phases 3 + 4: dissent (Gemini, then Grok)
+        # Phases 3 + 4: dissent (Gemini, then Grok). Both receive
+        # live_context so objections ground in the same regime / blend
+        # snapshot the CIO consumes.
         _tag_agent("independent_analyst")
-        gemini_report = self._gemini.challenge(draft_consensus, strategy_results)
+        gemini_report = self._gemini.challenge(
+            draft_consensus, strategy_results, live_context=live_context)
         log.info("gemini_challenge_received",
                  elapsed=round(time.time() - deliberation_start, 2))
         yield ("dissent_complete", "gemini", gemini_report)
 
         _tag_agent("contrarian_analyst")
-        grok_report = self._grok.challenge(draft_consensus, strategy_results)
+        grok_report = self._grok.challenge(
+            draft_consensus, strategy_results, live_context=live_context)
         log.info("grok_challenge_received",
                  elapsed=round(time.time() - deliberation_start, 2))
         yield ("dissent_complete", "grok", grok_report)

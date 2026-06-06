@@ -8077,11 +8077,31 @@ async def advisor_analyse(
 
     try:
         from agents.academic_advisor import AcademicAdvisor
+        # Fetch the live regime + macro digest so the advisor grounds
+        # its grade-aware feedback in the same signal state the CIO
+        # and dissenters see. Both calls fail-open: if regime/macro
+        # are unavailable the advisor degrades to the prior
+        # results-only behaviour rather than refusing.
+        import asyncio
+        regime_data: dict | None = None
+        macro_context: str | None = None
+        try:
+            from tools.regime_detector import detect_current_regime
+            regime_data = await asyncio.to_thread(detect_current_regime)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("advisor_regime_unavailable", error=str(exc))
+        try:
+            from tools.macro_context import get_macro_context
+            macro_context = get_macro_context() or None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("advisor_macro_unavailable", error=str(exc))
         advisor = AcademicAdvisor()
         return advisor.analyse_findings(
             query=body.query,
             deliverable_type=body.deliverable_type,
             strategy_results=body.strategy_results,
+            regime_data=regime_data,
+            macro_context=macro_context,
         )
     except Exception as exc:
         log.error("advisor_analyse_endpoint_error", error=str(exc))
