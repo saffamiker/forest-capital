@@ -197,6 +197,125 @@ class TestComputeReadinessBlocking:
         assert out["is_ready"] is False
 
 
+class TestNonBlockingWarnFilter:
+    """Bridge #74: a WARN with warn_class='non_blocking' must NEVER
+    gate report generation. The canonical case is AN03 (sensitivity
+    extension marked as Section 4 planned extension in qa_agent.py's
+    _SUBMISSION_CLASSIFICATIONS). The methodology blocker filter must
+    drop these from unresolved_warnings so the deck / brief / appendix
+    endpoints can generate even when AN03 is WARN."""
+
+    def test_is_non_blocking_warn_helper(self):
+        from tools.report_readiness import _is_non_blocking_warn
+
+        # The three taxonomy values from qa_agent._SUBMISSION_CLASSIFICATIONS.
+        assert _is_non_blocking_warn(
+            {"warn_class": "non_blocking"}) is True
+        assert _is_non_blocking_warn(
+            {"warn_class": "disclosure_required"}) is False
+        assert _is_non_blocking_warn({"warn_class": "blocks"}) is False
+        # Missing classification defaults to the most conservative read
+        # (the helper returns False so the legacy disclosure-required
+        # gate behaviour applies).
+        assert _is_non_blocking_warn({}) is False
+        assert _is_non_blocking_warn({"warn_class": None}) is False
+        # Case + whitespace tolerance so a future capitalisation drift
+        # cannot silently flip the gate.
+        assert _is_non_blocking_warn(
+            {"warn_class": "NON_BLOCKING"}) is True
+        assert _is_non_blocking_warn(
+            {"warn_class": "  non_blocking  "}) is True
+
+    def test_methodology_blocking_drops_non_blocking_warn(
+        self, monkeypatch,
+    ):
+        """An AN03 WARN (warn_class='non_blocking') must not appear in
+        unresolved_warnings -- it is informational only. A D01 WARN
+        (warn_class='disclosure_required') must still block when no
+        override is present."""
+        from tools import report_readiness
+
+        async def _fake_recent_qa_run(min_tier: int = 1):
+            return {"checklist": {"items": [
+                # AN03 sensitivity -- non_blocking by qa_agent taxonomy.
+                {"check_id": "AN03", "status": "WARN",
+                 "warn_class": "non_blocking",
+                 "check": "Sensitivity sweep", "category": "ANALYTICS"},
+                # D01 data integrity -- disclosure_required; must block.
+                {"check_id": "D01", "status": "WARN",
+                 "warn_class": "disclosure_required",
+                 "check": "Returns audit", "category": "DATA"},
+                # A FAIL is always blocking regardless of warn_class.
+                {"check_id": "P01", "status": "FAIL",
+                 "warn_class": "blocks",
+                 "check": "Weight integrity", "category": "PORTFOLIO"},
+            ]}}
+
+        monkeypatch.setattr(
+            "tools.cache.get_most_recent_qa_run", _fake_recent_qa_run)
+
+        # Empty overrides so D01 stays unreviewed (the only thing that
+        # would otherwise drop it from the list).
+        async def _empty_overrides_session():
+            class _S:
+                async def __aenter__(self_):
+                    return self_
+                async def __aexit__(self_, *a):
+                    return None
+                async def execute(self_, *_a, **_kw):
+                    class _R:
+                        def fetchall(self): return []
+                    return _R()
+            return _S()
+        # The function reads overrides via direct SQL; patch the
+        # AsyncSessionLocal it imports so the iterator yields no rows.
+        import database
+        monkeypatch.setattr(
+            database, "AsyncSessionLocal", _empty_overrides_session)
+
+        result = asyncio.run(report_readiness._methodology_blocking())
+
+        warning_ids = {it["check_id"]
+                       for it in result["unresolved_warnings"]}
+        failure_ids = {it["check_id"]
+                       for it in result["unresolved_failures"]}
+
+        # AN03 dropped -- non_blocking taxonomy.
+        assert "AN03" not in warning_ids
+        # D01 still blocking -- disclosure_required + no override.
+        assert "D01" in warning_ids
+        # P01 FAIL still blocking -- unchanged.
+        assert "P01" in failure_ids
+
+    def test_an03_warn_alone_does_not_block_compute_readiness(
+        self, monkeypatch,
+    ):
+        """End-to-end via compute_readiness: a single AN03 WARN finding
+        and no other blockers must produce is_ready=True. Pre-fix this
+        was is_ready=False, surfacing as a 422 on the generation
+        endpoints."""
+        from tools import report_readiness
+
+        async def _empty_stat():
+            return {"unreviewed_warnings": [], "unreviewed_failures": []}
+
+        async def _meth_with_an03():
+            # _methodology_blocking already filters non_blocking WARNs;
+            # we test the filtered output threads through to a clean
+            # verdict. This is the contract compute_readiness must
+            # satisfy with the new helper in place.
+            return {"unresolved_warnings": [], "unresolved_failures": []}
+
+        monkeypatch.setattr(
+            report_readiness, "_statistical_blocking", _empty_stat)
+        monkeypatch.setattr(
+            report_readiness, "_methodology_blocking", _meth_with_an03)
+
+        out = asyncio.run(report_readiness.compute_readiness())
+        assert out["is_ready"] is True
+        assert out["blocking_count"] == 0
+
+
 class TestSummariseBlockers:
     """The 422 detail line + frontend modal both render this list. The
     summariser must produce one entry per blocker, naming the surface

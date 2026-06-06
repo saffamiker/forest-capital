@@ -132,6 +132,34 @@ def _meth_blocker(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _is_non_blocking_warn(item: dict[str, Any]) -> bool:
+    """A WARN whose per-check classification (warn_class) is
+    'non_blocking' is informational only and must NOT gate report
+    generation.
+
+    The check classifications are defined in
+    agents/qa_agent.py:_SUBMISSION_CLASSIFICATIONS and attached to
+    every checklist item at module import time -- so the item dict
+    we receive here carries `warn_class` as a leaf field. The three
+    values defined there:
+
+      "disclosure_required" -- blocks until acknowledged (an
+                                qa_intentional_overrides row exists)
+      "non_blocking"        -- never blocks (informational)
+      "blocks"              -- treated as failure (always blocks)
+
+    A leaf missing the field defaults to the most conservative
+    reading ("disclosure_required") so a new check added without a
+    classification cannot silently sneak through. AN03 sensitivity
+    is the canonical non_blocking case -- the project scope marks it
+    as a Section 4 extension, not a structural gate.
+
+    Bridge #74 fix.
+    """
+    warn_class = str(item.get("warn_class") or "").strip().lower()
+    return warn_class == "non_blocking"
+
+
 async def _methodology_blocking() -> dict[str, list[dict[str, Any]]]:
     """
     Reads unresolved blocking checks from the most recent QA audit.
@@ -176,6 +204,16 @@ async def _methodology_blocking() -> dict[str, list[dict[str, Any]]]:
             cid = it.get("check_id")
             if status == "WARN":
                 if cid and cid in override_ids:
+                    continue
+                # Bridge #74 fix: respect the per-check warn_class
+                # taxonomy from qa_agent._SUBMISSION_CLASSIFICATIONS.
+                # A non_blocking WARN (AN03 sensitivity, E01 economic
+                # significance) is informational only and must never
+                # gate generation. Without this check the gate
+                # mis-treated every WARN as blocking-pending-override,
+                # which is wrong for the explicitly non_blocking
+                # checks the audit panel surfaces as advisory.
+                if _is_non_blocking_warn(it):
                     continue
                 warnings.append(_meth_blocker(it))
             elif status == "FAIL":
