@@ -128,6 +128,98 @@ html:not(.dark) .hover\:bg-navy-700:hover { background-color: var(--bg-hover); }
 html:not(.dark) .hover\:bg-navy-800:hover { background-color: #f1f5f9; }
 html:not(.dark) .hover\:text-white:hover  { color: var(--text-primary); }
 
+/* ── Semantic accent overrides (June 6 2026 bridge #72) ───────────────
+ *
+ * The tailwind config maps text-warning to #f59e0b (amber-500),
+ * text-success to #22c55e (green-500), text-danger to #ef4444
+ * (red-500), and adds direct text-amber-200/300, text-orange-300,
+ * text-emerald-400 usage throughout the warning/notice/badge
+ * surfaces. On the dark navy page these read fine; on the white
+ * light page they fade to near-invisible:
+ *
+ *   text-warning (#f59e0b) on bg-warning/5 (rgba(245,158,11,0.05))
+ *   = amber-on-pale-cream, both near-white, zero contrast.
+ *
+ * The audit (bridge #70) flagged 13 components with this anti-pattern
+ * across the CIO card divergence + deterministic-fallback notices,
+ * ReportReadinessIndicator, AuditWarningsBanner, the Dashboard 2022
+ * correlation-break card, the ChatInterface agent-color chips,
+ * AcademicReviewButton "Developing" badge, BobBlockBadge,
+ * EditorTasksCallout, and the QAAuditPanel orange/amber rows.
+ *
+ * The fix lives here -- once per token -- so every consumer of these
+ * Tailwind classes flips with the theme without touching the
+ * components themselves. Same pattern as the bg-navy / text-slate
+ * overrides above.
+ *
+ * Token philosophy in light mode: lean into SATURATED dark accent
+ * colors (amber-700, green-800, red-800, orange-700) so the alert
+ * still reads as alert. Backgrounds use the saturated/100 family
+ * with no opacity so the tile is visible as a tile, not just text.
+ */
+
+/* Foreground accent tokens. */
+html:not(.dark) .text-warning  { color: #b45309; }   /* amber-700 */
+html:not(.dark) .text-success  { color: #166534; }   /* green-800 */
+html:not(.dark) .text-danger   { color: #991b1b; }   /* red-800 */
+html:not(.dark) .text-positive { color: #166534; }   /* green-800 alias */
+html:not(.dark) .text-negative { color: #991b1b; }   /* red-800 alias */
+
+/* Direct Tailwind tints used in the audit surfaces. */
+html:not(.dark) .text-amber-100,
+html:not(.dark) .text-amber-200,
+html:not(.dark) .text-amber-300   { color: #b45309; }
+html:not(.dark) .text-amber-400   { color: #92400e; } /* amber-800 */
+html:not(.dark) .text-orange-200,
+html:not(.dark) .text-orange-300  { color: #c2410c; } /* orange-700 */
+html:not(.dark) .text-emerald-400 { color: #166534; }
+html:not(.dark) .text-blue-300    { color: #1d4ed8; } /* blue-700 */
+html:not(.dark) .text-violet-300,
+html:not(.dark) .text-violet-400  { color: #6d28d9; } /* violet-700 */
+
+/* Warning background opacity variants -- the audit's primary
+ * "invisible amber tile" anti-pattern. */
+html:not(.dark) .bg-warning\/5  { background-color: #fffbeb; } /* amber-50 */
+html:not(.dark) .bg-warning\/10 { background-color: #fef3c7; } /* amber-100 */
+html:not(.dark) .bg-warning\/15 { background-color: #fde68a; } /* amber-200 */
+html:not(.dark) .bg-warning\/20 { background-color: #fcd34d; } /* amber-300 */
+
+/* Success backgrounds (e.g. ReportReadinessIndicator ready state). */
+html:not(.dark) .bg-success\/5  { background-color: #f0fdf4; } /* green-50 */
+html:not(.dark) .bg-success\/10 { background-color: #dcfce7; } /* green-100 */
+html:not(.dark) .bg-success\/15 { background-color: #bbf7d0; } /* green-200 */
+
+/* Danger backgrounds. */
+html:not(.dark) .bg-danger\/5  { background-color: #fef2f2; } /* red-50 */
+html:not(.dark) .bg-danger\/10 { background-color: #fee2e2; } /* red-100 */
+
+/* Direct color-shade backgrounds (ChatInterface agent chips +
+ * AuditPanel + EditorTasksCallout). */
+html:not(.dark) .bg-amber-400\/5,
+html:not(.dark) .bg-amber-500\/5  { background-color: #fffbeb; }
+html:not(.dark) .bg-amber-400\/10,
+html:not(.dark) .bg-amber-500\/10 { background-color: #fef3c7; }
+html:not(.dark) .bg-amber-500\/15 { background-color: #fde68a; }
+html:not(.dark) .bg-amber-500\/20 { background-color: #fcd34d; }
+html:not(.dark) .bg-orange-500\/10 { background-color: #fed7aa; } /* orange-200 */
+html:not(.dark) .bg-blue-400\/5   { background-color: #eff6ff; } /* blue-50 */
+html:not(.dark) .bg-emerald-400\/5 { background-color: #f0fdf4; }
+html:not(.dark) .bg-violet-400\/5 { background-color: #faf5ff; } /* violet-50 */
+
+/* Border accents -- keep the alert "tile" outlined so it reads
+ * as a banner, not just colored text. */
+html:not(.dark) .border-warning\/30 { border-color: rgba(245, 158, 11, 0.55); }
+html:not(.dark) .border-warning\/40 { border-color: rgba(245, 158, 11, 0.7); }
+html:not(.dark) .border-success\/30 { border-color: rgba(34, 197, 94, 0.55); }
+html:not(.dark) .border-success\/40 { border-color: rgba(34, 197, 94, 0.7); }
+html:not(.dark) .border-amber-400\/40,
+html:not(.dark) .border-amber-500\/40 { border-color: rgba(245, 158, 11, 0.6); }
+html:not(.dark) .border-amber-500\/30 { border-color: rgba(245, 158, 11, 0.5); }
+html:not(.dark) .border-orange-500\/30 { border-color: rgba(249, 115, 22, 0.5); }
+html:not(.dark) .border-blue-400\/40   { border-color: rgba(59, 130, 246, 0.6); }
+html:not(.dark) .border-emerald-400\/40 { border-color: rgba(16, 185, 129, 0.6); }
+html:not(.dark) .border-violet-400\/40 { border-color: rgba(139, 92, 246, 0.6); }
+
 @layer base {
   * {
     box-sizing: border-box;
