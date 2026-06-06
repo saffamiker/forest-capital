@@ -1440,21 +1440,22 @@ async def build_digest_email() -> tuple[str, str, str]:
     fallback is plain ASCII."""
     today = date.today()
     sections: list[DigestSection] = []
+    # June 6 2026 — analytics-decision content leads the digest. The
+    # reader's first scroll is what to do (CIO recommendation), how to
+    # express it (implied asset allocation), and when to revisit
+    # (rebalance watch points). Platform health and ops content sit
+    # below so the morning skim surfaces the allocation call first;
+    # the operator goes deeper for health / releases / activity only
+    # when something there matters.
+    sections.append(await _section_latest_cio_recommendation())
+    sections.append(await _section_implied_asset_allocation())
+    sections.append(await _section_rebalance_triggers())
     sections.append(await _section_platform_health())
     sections.append(await _section_releases())
     sections.append(await _section_analytics_snapshot())
     sections.append(await _section_platform_usage())
     sections.append(await _section_team_activity())
     sections.append(await _section_warm_history())
-    # June 5 2026 — three new sections sit between warm history and
-    # open work: the implied asset allocation table (live blend ×
-    # per-strategy asset weights), the latest cached CIO recommendation
-    # capped at 300 words, and the rebalance trigger watch list (current
-    # signal values vs the project's threshold constants, plus the per-
-    # regime blend targets from refresh_regime_blends).
-    sections.append(await _section_implied_asset_allocation())
-    sections.append(await _section_latest_cio_recommendation())
-    sections.append(await _section_rebalance_triggers())
     sections.append(await _section_open_work())
     sections.append(_section_deadlines(today))
 
