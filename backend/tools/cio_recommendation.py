@@ -478,15 +478,20 @@ async def get_endpoint_recommendation() -> dict | None:
     regime = (live or {}).get("hmm_regime")
     probs = (live or {}).get("hmm_probabilities") or {}
     confidence = probs.get(regime) if regime else None
+    monthly_regime = (live or {}).get("monthly_hmm_regime")
+    hmm_models_agree = (live or {}).get("hmm_models_agree", True)
     data_hash = await _current_data_hash()
     if not data_hash:
-        return await get_latest_recommendation()
+        return _attach_divergence(
+            await get_latest_recommendation(),
+            regime, confidence, monthly_regime, hmm_models_agree)
     target_key = regime_cache_key(data_hash, regime, confidence)
     # Try the composite-key cache (falls through to None on bare-hash keys
     # too, since the bare data_hash IS the composite when regime is None).
     rec = await get_cached_for_hash(target_key)
     if rec is not None:
-        return rec
+        return _attach_divergence(
+            rec, regime, confidence, monthly_regime, hmm_models_agree)
     latest = await get_latest_recommendation()
     # Schedule background regenerate (only when we have enough to compose
     # a real composite key — otherwise the legacy bare-hash row is correct
@@ -497,7 +502,33 @@ async def get_endpoint_recommendation() -> dict | None:
             data_hash, regime, confidence)
         schedule_regime_aware_refresh(
             data_hash, regime, confidence, reason=reason)
-    return latest
+    return _attach_divergence(
+        latest, regime, confidence, monthly_regime, hmm_models_agree)
+
+
+def _attach_divergence(
+    rec: dict | None,
+    daily_regime: str | None,
+    confidence: float | None,
+    monthly_regime: str | None,
+    hmm_models_agree: bool,
+) -> dict | None:
+    """Overlay divergence_disclosure on the recommendation dict when the
+    daily HMM (live label) and the monthly HMM (blend weights) disagree.
+    Live-state field, NOT baked into the cached prose — the disclosure
+    reflects the moment of the read, not the moment the prose was written.
+    Fail-open: if any input is missing, leave rec untouched."""
+    if rec is None:
+        return None
+    if hmm_models_agree or not daily_regime or not monthly_regime:
+        return rec
+    pct = f"{float(confidence) * 100:.1f}%" if confidence is not None else "—"
+    rec["divergence_disclosure"] = (
+        f"Note: live regime signal ({daily_regime} at {pct}) diverges from "
+        f"the blend regime ({monthly_regime}). Blend weights reflect the "
+        f"monthly model; the live label reflects the daily model."
+    )
+    return rec
 
 
 async def _persist(data_hash: str, rec: dict, regime: str | None) -> None:

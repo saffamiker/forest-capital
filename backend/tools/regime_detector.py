@@ -217,6 +217,7 @@ def detect_current_regime() -> dict:
     # Attempt HMM classification using historical context
     hmm_regime = None
     hmm_probs = None
+    monthly_hmm_regime = None
     try:
         if _HMM_AVAILABLE:
             spy = fetch_equity_data([BENCHMARK], TRAIN_START, end)
@@ -228,9 +229,30 @@ def detect_current_regime() -> dict:
     except Exception as e:
         log.warning("regime_hmm_unavailable", error=str(e))
 
+    # Monthly HMM regime — the one the blend weights are derived from
+    # (cio_recommendation._build_live_context fits the monthly HMM separately).
+    # Surfacing both lets the recommendation tile flag a daily-vs-monthly
+    # split: when the daily label says BEAR but the monthly fit still says
+    # BULL the live label and the blend regime are talking past each other.
+    try:
+        if _HMM_AVAILABLE:
+            from tools.data_fetcher import build_monthly_returns
+            monthly_df = build_monthly_returns()
+            if monthly_df is not None and "equity_return" in monthly_df.columns:
+                monthly_rets = monthly_df["equity_return"].dropna()
+                if len(monthly_rets) >= 60:
+                    monthly_result = classify_hmm_regime(monthly_rets)
+                    monthly_hmm_regime = monthly_result.get("current_regime_label")
+    except Exception as e:
+        log.warning("regime_monthly_hmm_unavailable", error=str(e))
+
     # Regimes agree when both return BULL or both return BEAR
     # TRANSITION is counted as a partial agreement with either
     regimes_agree = _check_agreement(threshold_regime, hmm_regime)
+    # hmm_models_agree compares the two HMM fits (daily vs monthly). A
+    # mismatch is the cleanest signal that the live label and the blend
+    # weights are derived from different views of the same series.
+    hmm_models_agree = _check_agreement(hmm_regime, monthly_hmm_regime)
 
     log.info(
         "regime_detected",
@@ -268,6 +290,8 @@ def detect_current_regime() -> dict:
         "hmm_regime": hmm_regime,
         "hmm_probabilities": hmm_probs,
         "regimes_agree": regimes_agree,
+        "monthly_hmm_regime": monthly_hmm_regime,
+        "hmm_models_agree": hmm_models_agree,
         "vix_level": vix_level,
         "yield_curve_slope": yield_curve_slope,
         "equity_trend": equity_trend,
