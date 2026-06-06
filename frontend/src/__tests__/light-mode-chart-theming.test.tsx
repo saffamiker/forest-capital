@@ -52,6 +52,10 @@ const MEDIUM_IMPACT = [
   // pattern: import useChartTheme, swap inline SVG strokes + the
   // bg-navy-800/60 card class for chartTheme-driven values.
   'src/components/charts/CVStabilityRadar.tsx',
+  // bridge #69 -- Performance Attribution Waterfall used the same
+  // bg-navy-800/60 grid-card pattern + hardcoded SVG strokes and
+  // text fills. Same migration as #67.
+  'src/components/charts/PerformanceAttributionWaterfall.tsx',
 ]
 
 describe('light-mode chart theming -- bridge #64 audit', () => {
@@ -138,6 +142,29 @@ describe('light-mode chart theming -- bridge #64 audit', () => {
       // -- so we cannot just grep the file for absence of the hex.
       // The pin specifically targets the SVG axis-label fill line.
       expect(src).not.toMatch(/fill="#64748b"\s+fontSize/)
+    })
+  })
+
+  describe('Performance Attribution Waterfall -- bridge #69', () => {
+    const path = 'src/components/charts/PerformanceAttributionWaterfall.tsx'
+
+    it('no longer carries bg-navy-800/60 on the waterfall card', () => {
+      const src = source(path)
+      expect(src).not.toMatch(/bg-navy-800\/60/)
+    })
+
+    it('SVG zero-line uses chartTheme.gridStroke', () => {
+      const src = source(path)
+      expect(src).toContain('stroke={chartTheme.gridStroke}')
+      expect(src).not.toMatch(/stroke="#1e3a5c"/)
+    })
+
+    it('SVG axis labels + value labels use chartTheme.textSecondary / textPrimary', () => {
+      const src = source(path)
+      expect(src).toContain('fill={chartTheme.textSecondary}')
+      expect(src).toContain('fill={chartTheme.textPrimary}')
+      expect(src).not.toMatch(/fill="#64748b"\s+fontSize="9"/)
+      expect(src).not.toMatch(/fill="#cbd5e1"\s+fontSize="8"/)
     })
   })
 
