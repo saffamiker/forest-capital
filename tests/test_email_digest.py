@@ -26,10 +26,14 @@ from tools.email_digest import (  # noqa: E402
     _git_authors_for,
     _hours_ago_utc,
     _section_deadlines,
+    _section_implied_asset_allocation,
+    _section_latest_cio_recommendation,
     _section_platform_health,
     _section_platform_usage,
+    _section_rebalance_triggers,
     _section_team_activity,
     _section_warm_history,
+    _truncate_to_word_cap,
     _week_start_utc,
     build_digest_email,
     send_daily_digest,
@@ -282,3 +286,98 @@ async def test_warm_history_renders_empty_state_without_rows():
     assert "WARM HISTORY (last 7 days)" in s.text
     assert ("No warm runs" in s.html
             or "No warm runs" in s.text)
+
+
+# ── June 5 2026 — three new sections (digest #17 + #18) ──────────────────
+
+
+@pytest.mark.asyncio
+async def test_implied_asset_allocation_renders_placeholder_on_cold_cache():
+    """In the test env strategy_results_cache + forward_projection are
+    both cold. The section must still render — the title appears, the
+    placeholder body explains why it's empty, and neither half of the
+    DigestSection is blank."""
+    s = await _section_implied_asset_allocation()
+    assert s.title == "Implied asset allocation"
+    assert "Implied asset allocation" in s.html
+    # Placeholder copy on the cold path.
+    assert "No live blend" in s.html or "No live blend" in s.text
+    # The text fallback always renders — the section never returns
+    # html-only.
+    assert s.text.strip()
+
+
+@pytest.mark.asyncio
+async def test_latest_cio_recommendation_renders_placeholder_on_cold_cache():
+    """Without a populated cio_recommendations table the section still
+    fires — header present, placeholder explaining the empty cache,
+    text fallback non-empty."""
+    s = await _section_latest_cio_recommendation()
+    assert s.title == "CIO recommendation"
+    assert "CIO recommendation" in s.html
+    assert ("No CIO recommendation cached" in s.html
+            or "No CIO recommendation cached" in s.text
+            or "carries no narrative text" in s.html)
+    assert s.text.strip()
+
+
+@pytest.mark.asyncio
+async def test_rebalance_triggers_renders_placeholder_on_cold_cache():
+    """No regime_signals_cache rows + no regime_blends metric → the
+    section falls open to a placeholder. Header present, text
+    non-empty."""
+    s = await _section_rebalance_triggers()
+    assert s.title == "What would trigger a rebalance"
+    assert "What would trigger a rebalance" in s.html
+    assert ("No regime signals or blend targets" in s.html
+            or "No regime signals or blend targets" in s.text)
+
+
+def test_truncate_to_word_cap_below_cap_returns_unchanged():
+    text = "one two three"
+    assert _truncate_to_word_cap(text, 5) == text
+
+
+def test_truncate_to_word_cap_above_cap_truncates_with_ellipsis():
+    text = "one two three four five six"
+    out = _truncate_to_word_cap(text, 3)
+    # First three words, ellipsis at the end.
+    assert out.startswith("one two three")
+    assert out.endswith("…")
+    # Original five-word remainder is gone.
+    assert "four" not in out
+
+
+def test_truncate_to_word_cap_exact_cap_returns_unchanged():
+    text = "one two three"
+    # When count == cap, no truncation — same string back.
+    assert _truncate_to_word_cap(text, 3) == text
+
+
+def test_truncate_to_word_cap_empty_input():
+    assert _truncate_to_word_cap("", 3) == ""
+
+
+@pytest.mark.asyncio
+async def test_build_digest_includes_three_new_section_titles():
+    """The top-level build still works after wiring three new sections.
+    All three titles appear in the assembled HTML between Warm history
+    and Open work. A blank cache renders placeholders, not skipped
+    sections."""
+    subject, html, text = await build_digest_email()
+    assert "Implied asset allocation" in html
+    assert "CIO recommendation" in html
+    assert "What would trigger a rebalance" in html
+    # Text fallback carries the same three.
+    assert "IMPLIED ASSET ALLOCATION" in text
+    assert "CIO RECOMMENDATION" in text
+    assert "WHAT WOULD TRIGGER A REBALANCE" in text
+    # Primary ordering contract — the three new sections appear
+    # AFTER the warm-history section (case-insensitive search since
+    # the heading is "Warm history" not "WARM HISTORY") and BEFORE
+    # the open-work section.
+    html_lc = html.lower()
+    assert (html_lc.index("warm history")
+            < html_lc.index("implied asset allocation"))
+    assert (html_lc.index("what would trigger a rebalance")
+            < html_lc.index("open work"))
