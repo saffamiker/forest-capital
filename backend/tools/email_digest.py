@@ -28,6 +28,7 @@ network layer.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from dataclasses import dataclass, field
@@ -1028,6 +1029,22 @@ async def _section_rebalance_triggers() -> DigestSection:
     # cached signal" so the reader isn't misled.
     signals = await _read_latest_regime_signals_for_digest()
 
+    # Overlay live daily-vs-monthly HMM divergence. The cached row only
+    # carries the daily HMM label; the monthly HMM label (which drives
+    # the blend weights) lives only in the live detect_current_regime()
+    # return. Pulling it here lets the digest surface the divergence
+    # disclosure when the two models disagree. Fail-open: if the live
+    # read errors, the digest reverts to silent behaviour.
+    monthly_hmm_regime: str | None = None
+    hmm_models_agree: bool = True
+    try:
+        from tools.regime_detector import detect_current_regime
+        live = await asyncio.to_thread(detect_current_regime)
+        monthly_hmm_regime = (live or {}).get("monthly_hmm_regime")
+        hmm_models_agree = (live or {}).get("hmm_models_agree", True)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_live_regime_unavailable", error=str(exc))
+
     try:
         regime_blends = await get_latest_metric("regime_blends") or {}
     except Exception as exc:  # noqa: BLE001
@@ -1076,6 +1093,23 @@ async def _section_rebalance_triggers() -> DigestSection:
             f"    HMM regime: {hmm} — shift to BULL or BEAR triggers "
             f"a rebalance."))
 
+    # Daily-vs-monthly HMM divergence — surfaced ONLY when the two
+    # models actually disagree. The live label (daily HMM) and the
+    # blend regime (monthly HMM) can drift apart on different windows;
+    # the digest must show that drift rather than letting the reader
+    # infer agreement.
+    divergence_lines: list[tuple[str, str]] = []
+    if not hmm_models_agree and hmm and monthly_hmm_regime:
+        divergence_lines.append((
+            f"<li><b>Divergence:</b> live regime signal ({hmm}) diverges "
+            f"from the blend regime ({monthly_hmm_regime}). Blend weights "
+            f"reflect the monthly model; the live label reflects the "
+            f"daily model.</li>",
+            f"    Divergence: live regime signal ({hmm}) diverges from "
+            f"the blend regime ({monthly_hmm_regime}). Blend weights "
+            f"reflect the monthly model; the live label reflects the "
+            f"daily model."))
+
     # Per-regime blend targets. The payload's `blends` dict is keyed
     # by regime name with strategy → weight values.
     blends = regime_blends.get("blends") or {}
@@ -1096,7 +1130,7 @@ async def _section_rebalance_triggers() -> DigestSection:
             f"<li><b>{regime}:</b> {weight_str}</li>",
             f"    {regime}: {weight_str}"))
 
-    if not trigger_lines and not blend_lines:
+    if not trigger_lines and not blend_lines and not divergence_lines:
         return _empty_section(
             "What would trigger a rebalance",
             "  No regime signals or blend targets cached. Run the "
@@ -1115,6 +1149,16 @@ async def _section_rebalance_triggers() -> DigestSection:
             + "</ul>")
         text_parts.append("  Watch points:")
         text_parts.extend(text for _, text in trigger_lines)
+    if divergence_lines:
+        html_parts.append(
+            f"<div style='font-size:12px;color:#fca5a5;margin-bottom:4px'>"
+            f"<b>Model divergence</b></div>"
+            f"<ul style='padding-left:18px;margin:0 0 8px 0;"
+            f"font-size:12px;color:#fca5a5'>"
+            + "".join(html for html, _ in divergence_lines)
+            + "</ul>")
+        text_parts.append("  Model divergence:")
+        text_parts.extend(text for _, text in divergence_lines)
     if blend_lines:
         html_parts.append(
             f"<div style='font-size:12px;color:#cbd5e1;margin-bottom:4px'>"

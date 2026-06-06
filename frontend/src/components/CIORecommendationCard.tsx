@@ -28,6 +28,11 @@ interface Recommendation {
   dissenting_view?: string | null
   key_risk?: string | null
   limitations?: string[] | null
+  // Live overlay from /api/v1/recommendation: present only when the
+  // daily HMM (live label) and monthly HMM (blend weights) disagree.
+  // Reflects the moment of the read, not the moment the prose was
+  // written — never baked into the cached recommendation.
+  divergence_disclosure?: string | null
   // Live regime-conditional blend weights, overlaid from the cached
   // forward projection so the tile can show the blend + flag a binding
   // concentration constraint. Absent before the first warm.
@@ -195,6 +200,15 @@ export default function CIORecommendationCard() {
               <InfoIcon tooltipKey="key_risk" metricLabel="Key risk" />
               {rec.key_risk}
             </span>
+          </p>
+        )}
+        {rec.divergence_disclosure && (
+          <p
+            className="mt-2 flex gap-1.5 rounded border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
+            data-testid="cio-divergence-disclosure"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+            <span className="text-warning">{rec.divergence_disclosure}</span>
           </p>
         )}
       </div>
