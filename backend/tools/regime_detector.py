@@ -285,6 +285,17 @@ def detect_current_regime() -> dict:
     except Exception as e:
         log.warning("regime_correlation_unavailable", error=str(e))
 
+    # signals_partial -- True when any of the four FRED-derived signals
+    # failed to fetch. Each signal already has its own try/except, and
+    # the dict's existing fail-open guarantees the call returns; the new
+    # flag lets downstream consumers (the CIO card, the digest, audit
+    # banners) DISCLOSE the partial state instead of treating None
+    # fields as if they were 0. Additive only -- existing fallback
+    # behaviour is unchanged.
+    signals_partial = any(
+        v is None for v in
+        (vix_level, yield_curve_slope, equity_trend, credit_spread))
+
     result = {
         "threshold_regime": threshold_regime,
         "hmm_regime": hmm_regime,
@@ -296,6 +307,7 @@ def detect_current_regime() -> dict:
         "yield_curve_slope": yield_curve_slope,
         "equity_trend": equity_trend,
         "credit_spread": credit_spread,
+        "signals_partial": signals_partial,
         "pre_2022_avg_correlation": pre_2022_corr,
         "post_2022_avg_correlation": post_2022_corr,
         "as_of": end,
