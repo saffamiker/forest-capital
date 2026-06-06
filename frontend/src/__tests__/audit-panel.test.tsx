@@ -30,6 +30,9 @@ interface RowFinding {
   resolved_by?: string | null
   resolved_at?: string | null
   auto_acknowledged?: boolean
+  // Bridge #75 -- migration 055 adds the locked disclosure column.
+  // Mirrors the AuditFinding interface in components/AuditPanel.tsx.
+  locked_disclosure_text?: string | null
 }
 
 function warnFinding(over: Partial<RowFinding> = {}): RowFinding {
