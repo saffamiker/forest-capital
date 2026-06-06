@@ -353,6 +353,8 @@ class AcademicAdvisor:
         query: str,
         deliverable_type: str,
         strategy_results: dict[str, Any] | None = None,
+        regime_data: dict[str, Any] | None = None,
+        macro_context: str | None = None,
     ) -> dict[str, Any]:
         """
         Main feedback endpoint. Reviews strategy results vs the research
@@ -361,6 +363,14 @@ class AcademicAdvisor:
         deliverable_type ∈ {"midpoint", "appendix", "brief", "presentation"}.
         Unknown types still receive a response — guidance just won't be
         grade-weight-aware. Sonnet handles the fallback gracefully.
+
+        regime_data and macro_context are optional. When supplied (the
+        endpoint at main.py:8081 fetches both at call time), the advisor
+        grounds its grade-aware feedback in the live regime / blend
+        state and the latest macro digest — so suggestions like "flag the
+        weakly-determined TRANSITION allocation in your appendix" become
+        possible. Both default to None for backward compatibility with
+        any call site that has not migrated yet.
         """
         rubric = _DELIVERABLE_RUBRIC.get(
             deliverable_type,
@@ -383,7 +393,40 @@ class AcademicAdvisor:
                     "oos_sharpe":     r.get("oos_sharpe"),
                 }
 
+        # Regime + macro blocks render via the shared formatter so the
+        # advisor sees the same regime / blend snapshot the CIO and
+        # dissenters see, plus the latest macro digest. Both blocks are
+        # empty strings when the inputs are absent -- the user_message
+        # below threads them in only when populated.
+        from tools.agent_context_block import (
+            format_live_context_block, format_macro_context_line,
+        )
+        # The advisor receives the raw detect_current_regime() dict
+        # rather than compute_context output; map the field names so
+        # the shared formatter renders cleanly.
+        live_context_for_block: dict[str, Any] | None = None
+        if regime_data:
+            live_context_for_block = {
+                "regime":           regime_data.get("hmm_regime"),
+                "monthly_regime":   regime_data.get("monthly_hmm_regime"),
+                "hmm_models_agree": regime_data.get(
+                    "hmm_models_agree", True),
+                "probability": (regime_data.get("hmm_probabilities") or {}
+                                ).get(regime_data.get("hmm_regime")),
+            }
+        regime_block = format_live_context_block(live_context_for_block)
+        macro_line = format_macro_context_line(macro_context)
+
+        prelude_parts: list[str] = []
+        if regime_block:
+            prelude_parts.append(regime_block)
+        if macro_line:
+            prelude_parts.append(macro_line)
+        prelude = (("\n\n".join(prelude_parts) + "\n\n")
+                   if prelude_parts else "")
+
         user_message = (
+            f"{prelude}"
             f"DELIVERABLE: {deliverable_type} "
             f"(grade weight {rubric['weight']}, due {rubric['due']}, focus: {rubric['focus']})\n\n"
             f"TEAM QUERY: {query}\n\n"
