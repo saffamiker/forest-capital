@@ -148,32 +148,32 @@ class TestEditorContentBuilders:
             assert body["content"].strip()
 
     def test_executive_brief_to_editor_builds_tiptap_and_text(self):
-        """May 30 2026 — the brief was restructured to the six-section
-        rubric-trap-aware shape: Static Recommendation leads, then
-        Central Finding, Analytical Judgment, Platform as Evidence
-        Base, Evidence Summary, Part II Preview. The editor adapter
-        must render every section in order with the new keys."""
+        """June 6 2026 — the brief was rewritten to the six-section
+        panel-feedback shape: The Answer leads, then The Evidence,
+        The Methodology, Five Human Decisions, The Recommendation,
+        Limitations and Part II. The editor adapter must render every
+        section in order with the new keys."""
         from tools.editor_content import executive_brief_to_editor
         cj, ct = executive_brief_to_editor({
-            "static_rec":      "Static recommendation para.",
-            "central_finding": "Central finding para.",
-            "human_judgment":  "Human judgment para.",
-            "platform_role":   "Platform role para.",
-            "evidence":        "Evidence para.",
-            "part_ii_preview": "Part II preview para.",
+            "the_answer":              "The answer para.",
+            "the_evidence":            "The evidence para.",
+            "methodology":             "Methodology para.",
+            "five_human_decisions":    "Five decisions para.",
+            "the_recommendation":      "The recommendation para.",
+            "limitations_and_part_ii": "Limitations para.",
         })
         assert cj["type"] == "doc"
         # Six H1 section headings — matches the six-section spec.
         headings = [n for n in cj["content"] if n.get("type") == "heading"]
         assert len(headings) == 6
-        # Section 1 leads — the Part I answer plainly stated.
-        assert "1. The Static Recommendation" in ct
+        # Section 1 leads — the verdict plainly stated.
+        assert "1. The Answer" in ct
         # The five subsequent sections are named in order.
-        assert "2. The Central Finding" in ct
-        assert "3. Analytical Judgment and Methodology Decisions" in ct
-        assert "4. Platform as Evidence Base" in ct
-        assert "5. Evidence Summary" in ct
-        assert "6. Part II Preview" in ct
+        assert "2. The Evidence" in ct
+        assert "3. The Methodology" in ct
+        assert "4. Five Human Decisions" in ct
+        assert "5. The Recommendation" in ct
+        assert "6. Limitations and Part II" in ct
         # No legacy [[BOB]] callouts.
         assert ct.count("[[BOB:") == 0
         assert "BOB —" not in ct
