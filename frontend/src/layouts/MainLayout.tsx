@@ -343,6 +343,24 @@ function MobileNavDrawer({ open, onClose }: {
           <ModeSelector vertical onSelect={onClose} />
         </div>
 
+        {/* Theme toggle — June 6 2026. The desktop nav cluster
+            (hidden lg:flex) holds the toggle for desktop; the mobile
+            drawer needs its own copy so a tester or a presenter on a
+            phone / tablet can flip the theme without first opening
+            the platform on a laptop. The ThemeToggle component is
+            self-themed (no provider gating) so the same component
+            renders correctly here as in the desktop cluster. */}
+        <div className="shrink-0 border-t border-border px-4 py-3">
+          <div className="text-2xs font-semibold uppercase tracking-widest
+                          text-muted mb-1.5">
+            Theme
+          </div>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs text-muted">Light / dark</span>
+            <ThemeToggle />
+          </div>
+        </div>
+
         {/* Account — email + sign out. */}
         <div className="shrink-0 border-t border-border px-4 py-3
                         flex items-center justify-between gap-2">
