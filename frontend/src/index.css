@@ -31,7 +31,11 @@
   --bg-hover:     #e2e8f0;
   --text-primary: #0f172a;
   --text-secondary: #1e293b;
-  --text-muted:   #475569;
+  /* Bridge #76 UAT fix: slate-600 (#475569) is sufficient for AA on
+     pure white but reads "soft" on the platform's light surfaces
+     where many muted-text rows render against bg-elevated (#f8fafc).
+     Darken to slate-700 (#334155) for a stronger read. */
+  --text-muted:   #334155;
   --border:       #e2e8f0;
   --border-strong: #cbd5e1;
   --scroll-track: #e2e8f0;
@@ -103,6 +107,15 @@ html:not(.dark) .bg-navy-800\/90 { background-color: rgba(241, 245, 249, 0.95); 
 html:not(.dark) .bg-navy-700\/30 { background-color: rgba(226, 232, 240, 0.5); }
 html:not(.dark) .bg-navy-700\/40 { background-color: rgba(226, 232, 240, 0.6); }
 html:not(.dark) .bg-navy-700\/50 { background-color: rgba(226, 232, 240, 0.7); }
+/* Bridge #76 UAT fix: the Performance Record stat tiles use
+   bg-navy-900/{40,60,80} for slightly-elevated cards on the dark
+   theme. The /60 variant in particular was uncovered, so the tiles
+   stayed dark navy in light mode while every other surface flipped.
+   Light flips them to a tinted slate so the tile reads as elevated
+   against the white page (not flat to it). */
+html:not(.dark) .bg-navy-900\/40 { background-color: rgba(241, 245, 249, 0.6); }
+html:not(.dark) .bg-navy-900\/60 { background-color: rgba(241, 245, 249, 0.8); }
+html:not(.dark) .bg-navy-900\/80 { background-color: rgba(241, 245, 249, 0.92); }
 
 /* Text — near-white to near-black. The text-muted token in
  * tailwind.config also maps to a Tailwind colour — override it. */
