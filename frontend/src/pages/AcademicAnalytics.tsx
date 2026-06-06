@@ -26,7 +26,7 @@ import DataExplainButton from '../components/DataExplainButton'
 import DataCurrencyBar from '../components/DataCurrencyBar'
 import { useDataStatus, tableOf } from '../hooks/useDataStatus'
 import type { ChartTheme } from '../lib/exportTheme'
-import { DARK_CHART_THEME } from '../lib/exportTheme'
+import { useChartTheme } from '../lib/useChartTheme'
 // Diversification suite (item 8) — managed by its own hooks against
 // /api/v1/analytics/correlation etc. (the analytics_metrics_cache hot
 // path is sub-millisecond, so a per-mount fetch is fine here).
@@ -244,7 +244,7 @@ function SignedPct({ x }: { x: number | null | undefined }) {
 // ── Shared table chrome ───────────────────────────────────────────────────────
 
 function SectionCard({
-  title, subtitle, exportButton, infoKey, tourId, theme = DARK_CHART_THEME,
+  title, subtitle, exportButton, infoKey, tourId, theme: themeProp,
   dataExplain, sectionId, children,
 }: {
   title: string
@@ -270,8 +270,13 @@ function SectionCard({
   sectionId?: string
   children: React.ReactNode
 }) {
-  // In light mode the dark `card` class is bypassed entirely — the export
-  // package needs a white background, so card chrome is set inline instead.
+  // June 6 2026 — theme falls back to useChartTheme() so the live UI
+  // flips with the toggle. The export renderer still passes an explicit
+  // theme prop which wins. In light mode the dark `card` class is
+  // bypassed entirely — the export package needs a white background, so
+  // card chrome is set inline instead.
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   const light = theme.mode === 'light'
   return (
     <div
@@ -576,9 +581,11 @@ function BootstrapCITable({ rows }: { rows: BootstrapCIRow[] }) {
 
 
 function BootstrapCIDensityChart(
-  { rows, theme = DARK_CHART_THEME }:
+  { rows, theme: themeProp }:
   { rows: BootstrapCIRow[]; theme?: ChartTheme },
 ) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   // Recharts-friendly shape: one row per x-value, one column per
   // strategy. Densities are computed per strategy from `samples` and
   // re-indexed against a common x-grid so the overlap renders as
@@ -689,9 +696,11 @@ function BootstrapCIDensityChart(
 // ── Rolling excess return chart ───────────────────────────────────────────────
 
 export function RollingExcessReturnChart(
-  { data, theme = DARK_CHART_THEME }:
+  { data, theme: themeProp }:
   { data: RollingExcess; theme?: ChartTheme },
 ) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   const breakX = data.points.find((p) => p.date >= '2022-01-01')?.date
   // Numeric bounds for the above/below-zero shading.
   const vals = data.points.flatMap((p) =>
@@ -767,9 +776,11 @@ export function RollingExcessReturnChart(
 // ── 2. Rolling correlation chart ──────────────────────────────────────────────
 
 export function RollingCorrelationChart(
-  { data, theme = DARK_CHART_THEME }:
+  { data, theme: themeProp }:
   { data: RollingCorrelation; theme?: ChartTheme },
 ) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   // The vertical regime marker must land on an actual x value — snap it to
   // the first plotted month at or after the 2022 break.
   const breakX = data.points.find((p) => p.date >= data.regime_break)?.date
@@ -1055,9 +1066,11 @@ const LOOKBACK_WINDOWS: Record<string, number> = {
 }
 
 export function CumulativeReturnChart(
-  { data, theme = DARK_CHART_THEME }:
+  { data, theme: themeProp }:
   { data: CumulativeReturns; theme?: ChartTheme },
 ) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   const [logScale, setLogScale] = useState(false)
 
   // Snap the 2022 regime marker to the first plotted month at/after the break.
@@ -1198,9 +1211,11 @@ export function CumulativeReturnChart(
 // ── Sensitivity analysis ──────────────────────────────────────────────────────
 
 function SensitivityChart(
-  { s, theme = DARK_CHART_THEME }:
+  { s, theme: themeProp }:
   { s: SensitivityStrategy; theme?: ChartTheme },
 ) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   const light = theme.mode === 'light'
   return (
     <div
@@ -1247,8 +1262,10 @@ function SensitivityChart(
 }
 
 export function SensitivityAnalysis(
-  { theme = DARK_CHART_THEME }: { theme?: ChartTheme },
+  { theme: themeProp }: { theme?: ChartTheme },
 ) {
+  const fallback = useChartTheme()
+  const theme = themeProp ?? fallback
   const [data, setData] = useState<SensitivityPayload | null>(null)
   const [loading, setLoading] = useState(true)
 

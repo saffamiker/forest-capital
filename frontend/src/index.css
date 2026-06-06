@@ -18,13 +18,22 @@
  * card faces stay dark; the toggle still improves projectability on
  * the body / nav / scrollbars / login surfaces. */
 :root {
-  /* Light (the default — :root with no class) */
+  /* Light (the default — :root with no class). MVP palette expanded
+     June 6 2026: card / sidebar / navbar surfaces named explicitly
+     so the page is readable in light mode without touching every
+     component. */
   --bg-primary:   #ffffff;
+  --bg-card:      #f8fafc;
+  --bg-sidebar:   #f1f5f9;
+  --bg-navbar:    #ffffff;
   --bg-elevated:  #f8fafc;
   --bg-overlay:   rgba(248, 250, 252, 0.95);
+  --bg-hover:     #e2e8f0;
   --text-primary: #0f172a;
+  --text-secondary: #1e293b;
   --text-muted:   #475569;
   --border:       #e2e8f0;
+  --border-strong: #cbd5e1;
   --scroll-track: #e2e8f0;
   --scroll-thumb: #94a3b8;
   --scroll-hover: #2563eb;
@@ -34,16 +43,90 @@
 .dark {
   /* Dark (the platform's default — matches the existing palette) */
   --bg-primary:   #0a0e1a;
+  --bg-card:      #0d1424;
+  --bg-sidebar:   #0d1424;
+  --bg-navbar:    #0a0e1a;
   --bg-elevated:  #0d1424;
   --bg-overlay:   rgba(13, 20, 36, 0.95);
+  --bg-hover:     #111a2e;
   --text-primary: #e2e8f0;
+  --text-secondary: #cbd5e1;
   --text-muted:   #94a3b8;
   --border:       #1e3a5c;
+  --border-strong: #2d4a6b;
   --scroll-track: #0d1424;
   --scroll-thumb: #1e2d47;
   --scroll-hover: #3b82f6;
   --accent:       #3b82f6;
 }
+
+/* ── Light mode MVP override layer (June 6 2026) ────────────────────────
+ * The platform was built dark-first with hardcoded `bg-navy-*` and
+ * `text-slate-*` classes across ~50 files. Migrating each one to
+ * `dark:` companions is a 500-LOC refactor that has to come — but
+ * the toggle had to ship readable for the July 1 demo, so this layer
+ * overrides the most-used Tailwind navy / slate classes when
+ * `html.dark` is absent. The CSS selector `html:not(.dark) .bg-X`
+ * has specificity (0,2,1) vs Tailwind's (0,1,0), so it wins on the
+ * cascade without `!important`.
+ *
+ * The override list is the MOST COMMON classes across the codebase
+ * (counted via grep). Opacity variants (`bg-navy-700/30` etc.) get
+ * their own rules because Tailwind compiles them to distinct classes.
+ * Full component sweep tracked as a follow-up.
+ *
+ * IMPORTANT: this layer does NOT pretend to be the final state. It
+ * is the fastest path from "unreadable on toggle" to "readable on
+ * toggle" without 500 LOC of file-by-file refactor. Each component
+ * that adds a `dark:` companion can drop its entry from this list
+ * (or the list can simply outlive them — the specificity contract
+ * holds either way). */
+
+/* Backgrounds — navy → light surface. */
+html:not(.dark) .bg-navy-950  { background-color: #e2e8f0; }
+html:not(.dark) .bg-navy-900  { background-color: var(--bg-primary); }
+html:not(.dark) .bg-navy-800  { background-color: var(--bg-card); }
+html:not(.dark) .bg-navy-700  { background-color: #e2e8f0; }
+html:not(.dark) .bg-navy-600  { background-color: #cbd5e1; }
+html:not(.dark) .bg-navy-500  { background-color: #94a3b8; }
+html:not(.dark) .bg-navy-400  { background-color: #94a3b8; }
+html:not(.dark) .bg-slate-900 { background-color: var(--bg-primary); }
+html:not(.dark) .bg-slate-800 { background-color: var(--bg-card); }
+html:not(.dark) .bg-slate-700 { background-color: #cbd5e1; }
+
+/* Background opacity variants — Tailwind escapes the slash in the
+ * class name, so the selector needs the backslash escape too. */
+html:not(.dark) .bg-navy-800\/40 { background-color: rgba(241, 245, 249, 0.7); }
+html:not(.dark) .bg-navy-800\/50 { background-color: rgba(241, 245, 249, 0.75); }
+html:not(.dark) .bg-navy-800\/70 { background-color: rgba(241, 245, 249, 0.85); }
+html:not(.dark) .bg-navy-800\/90 { background-color: rgba(241, 245, 249, 0.95); }
+html:not(.dark) .bg-navy-700\/30 { background-color: rgba(226, 232, 240, 0.5); }
+html:not(.dark) .bg-navy-700\/40 { background-color: rgba(226, 232, 240, 0.6); }
+html:not(.dark) .bg-navy-700\/50 { background-color: rgba(226, 232, 240, 0.7); }
+
+/* Text — near-white to near-black. The text-muted token in
+ * tailwind.config also maps to a Tailwind colour — override it. */
+html:not(.dark) .text-white      { color: var(--text-primary); }
+html:not(.dark) .text-slate-50,
+html:not(.dark) .text-slate-100  { color: var(--text-primary); }
+html:not(.dark) .text-slate-200,
+html:not(.dark) .text-slate-300  { color: var(--text-secondary); }
+html:not(.dark) .text-slate-400  { color: var(--text-muted); }
+html:not(.dark) .text-slate-500  { color: var(--text-muted); }
+html:not(.dark) .text-muted      { color: var(--text-muted); }
+
+/* Borders — flip dark navy borders to light grays. */
+html:not(.dark) .border-border       { border-color: var(--border); }
+html:not(.dark) .border-navy-600,
+html:not(.dark) .border-navy-700,
+html:not(.dark) .border-navy-800     { border-color: var(--border); }
+html:not(.dark) .divide-border > *,
+html:not(.dark) .divide-navy-700 > * { border-color: var(--border); }
+
+/* Hover states — keep them subtle on light surfaces. */
+html:not(.dark) .hover\:bg-navy-700:hover { background-color: var(--bg-hover); }
+html:not(.dark) .hover\:bg-navy-800:hover { background-color: #f1f5f9; }
+html:not(.dark) .hover\:text-white:hover  { color: var(--text-primary); }
 
 @layer base {
   * {
@@ -178,7 +261,13 @@
 
 @layer components {
   .card {
-    @apply bg-navy-800 border border-border rounded-lg;
+    /* Reads --bg-card so the card surface flips with the theme
+       toggle. The :root layer above sets light-mode values; the
+       .dark class overrides them. Same border-border (covered by
+       the override block above) so the entire card adapts cleanly. */
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
   }
 
   .badge-pass {
