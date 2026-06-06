@@ -12,6 +12,7 @@ import { useRef } from 'react'
 import type { TransitionMatrix, Regime } from '../../types/charts'
 import ChartExportButton from '../ChartExportButton'
 import InfoIcon from '../InfoIcon'
+import { useChartTheme } from '../../lib/useChartTheme'
 
 interface Props {
   matrix: TransitionMatrix
@@ -30,8 +31,20 @@ function cellColor(p: number): string {
   return `rgba(59, 130, 246, ${alpha})`
 }
 
+// Cell-luminance-aware text colour for the transition matrix. Cells
+// with high alpha (high P) show a saturated blue background; pure
+// white text reads well. Cells with low alpha (low P) wash out in
+// light mode if we keep white text — switch to the theme's primary
+// text colour instead. Threshold matches the alpha midpoint of the
+// background gradient (0.05..0.9 -> midpoint ~0.47).
+function cellTextColour(p: number, themeTextPrimary: string): string {
+  const alpha = Math.max(0.05, Math.min(0.9, p * 0.9 + 0.05))
+  return alpha >= 0.47 ? '#f9fafb' : themeTextPrimary
+}
+
 export default function RegimeTransitionMatrix({ matrix }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const chartTheme = useChartTheme()
   const isEmpty = !matrix.BULL || Object.values(matrix.BULL).every((v) => v === 0)
 
   if (isEmpty) {
@@ -108,7 +121,7 @@ export default function RegimeTransitionMatrix({ matrix }: Props) {
                       className="rounded py-3 font-mono"
                       style={{
                         background: cellColor(p),
-                        color: '#f9fafb',
+                        color: cellTextColour(p, chartTheme.textPrimary),
                         border: from === to ? '1px solid rgba(255,255,255,0.2)' : '1px solid transparent',
                       }}
                       title={`${from} → ${to} · P(next month): ${(p * 100).toFixed(1)}%`}

@@ -9,6 +9,7 @@ import type { StrategyResult } from '../../types/strategies'
 import { colorFor, prettyName, tooltipLine, typeFor } from '../../lib/strategyColors'
 import ChartExportButton from '../ChartExportButton'
 import InfoIcon from '../InfoIcon'
+import { useChartTheme } from '../../lib/useChartTheme'
 
 interface Props {
   strategies: StrategyResult[]
@@ -16,6 +17,7 @@ interface Props {
 
 export default function ProbabilisticSharpeChart({ strategies }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const chartTheme = useChartTheme()
   const usable = strategies
     .filter((s) => s.sharpe_ci_95 && s.sharpe_ci_95.length === 2)
     .sort((a, b) => (a.sharpe_ratio ?? 0) - (b.sharpe_ratio ?? 0))
@@ -124,13 +126,13 @@ export default function ProbabilisticSharpeChart({ strategies }: Props) {
               <line x1={xPos(ciLow)} x2={xPos(ciLow)} y1={y - 5} y2={y + 5} stroke={color} strokeWidth={1.5} />
               <line x1={xPos(ciHigh)} x2={xPos(ciHigh)} y1={y - 5} y2={y + 5} stroke={color} strokeWidth={1.5} />
               {/* Point estimate */}
-              <circle cx={xPos(sr)} cy={y} r={4} fill={color} stroke="#f9fafb" strokeWidth={1.5}>
+              <circle cx={xPos(sr)} cy={y} r={4} fill={color} stroke={chartTheme.textPrimary} strokeWidth={1.5}>
                 <title>{tooltip}</title>
               </circle>
               {/* Value label to the right */}
               <text
                 x={xPos(ciHigh) + 8} y={y + 4}
-                fill="#cbd5e1" fontSize="10" fontFamily="monospace"
+                fill={chartTheme.textSecondary} fontSize="10" fontFamily="monospace"
               >
                 {sr.toFixed(2)}
               </text>

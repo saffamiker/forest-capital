@@ -21,6 +21,7 @@ import {
 } from 'recharts'
 import { Loader2, MessageSquare } from 'lucide-react'
 import InfoIcon from './InfoIcon'
+import { useChartTheme } from '../lib/useChartTheme'
 
 interface Band { median: number; p05: number; p95: number }
 type SeriesBands = Record<string, Band>   // horizon -> band
@@ -64,6 +65,7 @@ function asOf(ts?: string | null): string {
 
 export default function ForwardConfidenceChart() {
   const navigate = useNavigate()
+  const chartTheme = useChartTheme()
   const [data, setData] = useState<Payload | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -152,15 +154,16 @@ export default function ForwardConfidenceChart() {
       <div className="mt-4">
         <ResponsiveContainer width="100%" height={300}>
           <LineChart data={rows} margin={{ top: 8, right: 16, bottom: 4, left: 8 }}>
-            <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
-            <XAxis dataKey="month" tick={{ fill: '#64748b', fontSize: 11 }} />
+            <CartesianGrid stroke={chartTheme.gridStroke} strokeDasharray="3 3" />
+            <XAxis dataKey="month" tick={{ fill: chartTheme.textSecondary, fontSize: 11 }} />
             <YAxis tickFormatter={(v) => `${(v * 100).toFixed(0)}%`}
-                   tick={{ fill: '#64748b', fontSize: 11 }} />
+                   tick={{ fill: chartTheme.textSecondary, fontSize: 11 }} />
             <Tooltip
-              contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c' }}
+              contentStyle={chartTheme.tooltipContentStyle}
+              labelStyle={chartTheme.tooltipLabelStyle}
               formatter={(v: number) => `${(v * 100).toFixed(1)}%`} />
             <Legend />
-            <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1} />
+            <ReferenceLine y={0} stroke={chartTheme.textSecondary} strokeWidth={1} />
             {present.map((s) => [
               <Line key={`${s.key}_m`} type="monotone" dataKey={`${s.key}_median`}
                     name={s.label} stroke={s.color} strokeWidth={2} dot={false} />,
