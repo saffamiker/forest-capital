@@ -1,4 +1,5 @@
 import StrategyTypeBadge from './StrategyTypeBadge'
+import { useChartTheme } from '../lib/useChartTheme'
 
 interface AgentConfig {
   key: string
@@ -56,11 +57,21 @@ function Cell({ value }: { value: Sentiment }) {
 }
 
 function DivergenceScore({ sentiments }: { sentiments: SentimentData }) {
+  const chartTheme = useChartTheme()
+  const isLight = chartTheme.mode === 'light'
   const vals = Object.values(sentiments)
   const cio = sentiments['cio'] ?? 0
   const disagreements = vals.filter((v) => v !== cio).length
   const total = vals.length - 1
   const score = total > 0 ? disagreements / total : 0
+  // Dark mode keeps the saturated alert colors that pop on navy; light
+  // mode falls back to the darker family member (-700 / -800) so the
+  // bar still reads against the light slate-200 row background after
+  // the bg-navy-700 -> #e2e8f0 override flips the track underneath.
+  // Bridge #72 / #70 audit finding #10.
+  const highColor = isLight ? '#b91c1c' : '#ef4444'      // red-700  / red-500
+  const midColor  = isLight ? '#b45309' : '#f59e0b'      // amber-700 / amber-500
+  const lowColor  = isLight ? '#166534' : '#22c55e'      // green-800 / green-500
   return (
     <div className="flex items-center gap-1">
       <div className="w-12 h-1 bg-navy-700 rounded-full overflow-hidden">
@@ -68,7 +79,7 @@ function DivergenceScore({ sentiments }: { sentiments: SentimentData }) {
           className="h-full rounded-full"
           style={{
             width: `${score * 100}%`,
-            backgroundColor: score > 0.4 ? '#ef4444' : score > 0.2 ? '#f59e0b' : '#22c55e',
+            backgroundColor: score > 0.4 ? highColor : score > 0.2 ? midColor : lowColor,
           }}
         />
       </div>
