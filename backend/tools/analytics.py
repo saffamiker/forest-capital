@@ -235,14 +235,20 @@ def bootstrap_ci_table(
     payload. The density-overlap endpoint asks for include_samples=True
     explicitly.
     """
+    # First pass: compute every strategy's bootstrap CI. We need the
+    # BENCHMARK row's point Sharpe in hand BEFORE we can flag whether
+    # each row's CI brackets it, so we keep the raw CI on the row
+    # temporarily and resolve the benchmark in a second pass.
     rows: list[dict] = []
+    benchmark_sharpe: float | None = None
     for name, res in (strategy_results or {}).items():
         s = _pairs_to_series(res.get("monthly_returns") or [])
         ci = bootstrap_sharpe_ci(s, rf=rf)
         if ci is None:
             continue
+        strategy_name = res.get("strategy_name") or name
         row = {
-            "strategy":        res.get("strategy_name") or name,
+            "strategy":        strategy_name,
             "sharpe":          round(ci["point"], 4),
             "ci_low":          round(ci["ci_low"], 4),
             "ci_high":         round(ci["ci_high"], 4),
@@ -250,6 +256,8 @@ def bootstrap_ci_table(
             "block_size":      ci["block_size"],
             "n_observations":  ci["n_observations"],
         }
+        if "BENCHMARK" in str(strategy_name).upper():
+            benchmark_sharpe = float(ci["point"])
         if include_samples:
             # Down-sample to 1000 evenly-spaced quantiles for the chart
             # — preserves the distribution shape while keeping the
@@ -261,6 +269,21 @@ def bootstrap_ci_table(
                 samples = samples[::step][:1000]
             row["samples"] = [round(float(x), 4) for x in samples]
         rows.append(row)
+    # Second pass: flag whether each CI brackets the BENCHMARK Sharpe.
+    # Substantial overlap is the analytical justification for treating
+    # static-strategy rankings as inconclusive — Section D of the
+    # Analytical Appendix reads this column directly. The benchmark row
+    # itself trivially overlaps; we still emit True so the column reads
+    # consistently down the table.
+    if benchmark_sharpe is not None:
+        for row in rows:
+            row["overlaps_benchmark"] = bool(
+                row["ci_low"] <= benchmark_sharpe <= row["ci_high"])
+    else:
+        # No benchmark row in the payload — leave the flag absent so
+        # the consumer renders "—" rather than a misleading yes/no.
+        for row in rows:
+            row["overlaps_benchmark"] = None
     rows.sort(key=lambda r: r["sharpe"], reverse=True)
     return rows
 

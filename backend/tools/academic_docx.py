@@ -636,17 +636,31 @@ def _tiptap_text(node: Any) -> str:
     return "".join(_tiptap_text(c) for c in (node.get("content") or []))
 
 
-def build_editor_docx(draft: dict[str, Any]) -> bytes:
+def build_editor_docx(
+    draft: dict[str, Any],
+    appendix_data: dict[str, Any] | None = None,
+) -> bytes:
     """
-    Renders an editor draft (a midpoint_paper or executive_brief) to a
-    .docx straight from its TipTap content_json — the document exactly as
-    the author has edited it in the in-platform editor.
+    Renders an editor draft (a midpoint_paper, executive_brief, or
+    analytical_appendix) to a .docx straight from its TipTap
+    content_json — the document exactly as the author has edited it in
+    the in-platform editor.
 
     Unlike build_midpoint_paper / build_executive_brief, this does not
-    regenerate narrative or embed data tables: it is a faithful export of
-    the current editor content. The AI DRAFT banner and submission
-    checklist are still applied; any [[VERIFY]] markers left in the text
-    are rendered highlighted by _add_body.
+    regenerate narrative: it is a faithful export of the current editor
+    content. The AI DRAFT banner and submission checklist are still
+    applied; any [[VERIFY]] markers left in the text are rendered
+    highlighted by _add_body.
+
+    Analytical-appendix special case (the appendix is table-heavy by
+    design): when document_type == "analytical_appendix" and
+    appendix_data is supplied, the eight evidence tables (A1-H1) are
+    re-injected after the prose nodes so the in-editor export carries
+    the full evidentiary record. The data is the same dict produced by
+    tools.academic_export.gather_analytical_appendix_data() and the
+    table builders are the same ones used by build_analytical_appendix
+    — no recomputation, no LLM calls. The caller is responsible for
+    fetching appendix_data on the async edge; this builder stays sync.
     """
     doc = _new_document()
     _add_title_lines(doc, [
@@ -685,10 +699,60 @@ def build_editor_docx(draft: dict[str, Any]) -> bytes:
         _add_body(doc, (draft.get("content_text")
                         or "[DATA PENDING] — the draft is empty.").strip())
 
+    # Analytical Appendix: re-inject the eight evidence tables after the
+    # author's prose so the in-editor export carries the full record.
+    if (draft.get("document_type") == "analytical_appendix"
+            and appendix_data is not None):
+        _add_appendix_tables(doc, appendix_data)
+
     _add_submission_checklist(doc)
     buf = BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+def _add_appendix_tables(
+    doc: Document, data: dict[str, Any],
+) -> None:
+    """Append the eight evidence tables (A1-H1) to the document. Shared
+    between build_analytical_appendix (full regenerated path) and the
+    in-editor export of an analytical_appendix draft, so the tables
+    appear identically in both surfaces. Pure assembly — no DB reads,
+    no LLM calls."""
+    _add_heading(doc, "Evidence Tables")
+
+    h, r = table_summary_statistics(data.get("summary_statistics", []))
+    _add_table(doc, "Table A1. Summary Statistics by Asset Class", h, r)
+
+    h, r = table_strategy_performance_full(
+        data.get("strategy_results") or {})
+    _add_table(doc, "Table B1. Full-Period Performance by Strategy "
+                    "(sorted by Sharpe)", h, r)
+
+    h, r = table_statistical_tests(data.get("strategy_results") or {})
+    _add_table(doc, "Table C1. Statistical Tests by Strategy "
+                    "(paired-t, FDR-corrected, DSR, PSR, SPA)", h, r)
+
+    h, r = table_bootstrap_ci(data.get("bootstrap_ci_sharpe") or [])
+    _add_table(doc, "Table D1. Sharpe Ratio with 95% Bootstrap CI "
+                    "(block bootstrap, length 12, 10,000 resamples)", h, r)
+
+    h, r = table_factor_loadings(data.get("factor_loadings", []))
+    _add_table(doc, "Table E1. Carhart Four-Factor Loadings by Strategy "
+                    "(* significant at p < .05)", h, r)
+
+    h, r = table_crisis_performance(data.get("crisis_performance"))
+    _add_table(doc, "Table F1. Cumulative Return by Strategy and "
+                    "Crisis Window", h, r)
+
+    h, r = table_cost_sensitivity(data.get("cost_sensitivity"))
+    _add_table(doc, "Table G1. Net-of-Cost Sharpe at 10/15/20 bps "
+                    "per Material Rebalance (OOS Window)", h, r)
+
+    h, r = table_invariant_summary(data.get("invariant_summary"))
+    _add_table(doc, "Table H1. Latest Warm Invariant Verdict "
+                    "(deterministic detection only — see "
+                    "docs/INVARIANTS.md)", h, r)
 
 
 # ── Analytical Appendix (June 2 2026) ─────────────────────────────────────────

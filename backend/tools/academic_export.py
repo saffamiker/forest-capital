@@ -794,8 +794,8 @@ def table_bootstrap_ci(
 
     rows_in is the `bootstrap_ci_sharpe` payload from the
     academic_analytics metric: each entry carries a `strategy`,
-    `point_estimate`, `ci_low`, `ci_high`, and an `overlap_benchmark`
-    flag (true when the CI brackets the benchmark Sharpe).
+    `sharpe`, `ci_low`, `ci_high`, and an `overlaps_benchmark` flag
+    (true when the CI brackets the benchmark Sharpe).
     """
     headers = ["Strategy", "Sharpe", "95% CI low", "95% CI high",
                "Overlaps benchmark"]
@@ -803,7 +803,7 @@ def table_bootstrap_ci(
     for r in rows_in or []:
         rows.append([
             str(r.get("strategy", "—")),
-            format_metric(r.get("point_estimate"), "sharpe_ratio"),
+            format_metric(r.get("sharpe"), "sharpe_ratio"),
             format_metric(r.get("ci_low"), "sharpe_ratio"),
             format_metric(r.get("ci_high"), "sharpe_ratio"),
             ("yes" if r.get("overlaps_benchmark") is True else
