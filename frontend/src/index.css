@@ -2,6 +2,49 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ── Theme variables (June 5 2026) ───────────────────────────────────────
+ * Two palettes — dark (default, matches the existing navy palette) and
+ * light (a presentation-friendly palette for the July 1 demo on a
+ * projector). The ThemeContext toggle adds/removes the `dark` class on
+ * document.documentElement. We define light at :root (the default if no
+ * class is present) and dark when .dark is set; either way the toggle
+ * is a single class change.
+ *
+ * Body + scrollbars + key surfaces read from these variables so the
+ * toggle is always effective at the chrome level. Component-level
+ * surfaces (StrategyCard, tables, charts) currently keep their
+ * hardcoded `bg-navy-*` Tailwind classes — a follow-up sweep is
+ * tracked to add `dark:` companions so they flip too. Until then the
+ * card faces stay dark; the toggle still improves projectability on
+ * the body / nav / scrollbars / login surfaces. */
+:root {
+  /* Light (the default — :root with no class) */
+  --bg-primary:   #ffffff;
+  --bg-elevated:  #f8fafc;
+  --bg-overlay:   rgba(248, 250, 252, 0.95);
+  --text-primary: #0f172a;
+  --text-muted:   #475569;
+  --border:       #e2e8f0;
+  --scroll-track: #e2e8f0;
+  --scroll-thumb: #94a3b8;
+  --scroll-hover: #2563eb;
+  --accent:       #2563eb;
+}
+
+.dark {
+  /* Dark (the platform's default — matches the existing palette) */
+  --bg-primary:   #0a0e1a;
+  --bg-elevated:  #0d1424;
+  --bg-overlay:   rgba(13, 20, 36, 0.95);
+  --text-primary: #e2e8f0;
+  --text-muted:   #94a3b8;
+  --border:       #1e3a5c;
+  --scroll-track: #0d1424;
+  --scroll-thumb: #1e2d47;
+  --scroll-hover: #3b82f6;
+  --accent:       #3b82f6;
+}
+
 @layer base {
   * {
     box-sizing: border-box;
@@ -16,8 +59,10 @@
   }
 
   body {
-    background-color: #0a0e1a;
-    color: #e2e8f0;
+    /* Read from CSS variables so the toggle flips body chrome without
+       a component sweep. */
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
     font-family: 'Inter', system-ui, sans-serif;
     -webkit-font-smoothing: antialiased;
     /* Prevent a stray wide element from horizontally scrolling the whole
@@ -41,20 +86,21 @@
     -webkit-overflow-scrolling: touch;
   }
 
-  /* Thin scrollbar */
+  /* Thin scrollbar — also driven by CSS variables so the toggle flips
+     scrollbar colour alongside the body. */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
   ::-webkit-scrollbar-track {
-    background: #0d1424;
+    background: var(--scroll-track);
   }
   ::-webkit-scrollbar-thumb {
-    background: #1e2d47;
+    background: var(--scroll-thumb);
     border-radius: 3px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #3b82f6;
+    background: var(--scroll-hover);
   }
 }
 

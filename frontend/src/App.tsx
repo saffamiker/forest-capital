@@ -47,6 +47,7 @@ function _PageLoadingFallback() {
   )
 }
 import { BrandProvider } from './context/BrandContext'
+import { ThemeProvider } from './context/ThemeContext'
 import { UIProvider } from './context/UIContext'
 import { SessionProvider } from './context/SessionContext'
 import { trackLogout } from './lib/activityLogger'
@@ -269,7 +270,8 @@ export default function App() {
     <AuthProvider>
       <SessionProvider>
         <BrandProvider>
-          <UIProvider>
+          <ThemeProvider>
+            <UIProvider>
             <Routes>
               <Route path="/login" element={<LoginPage />} />
               <Route path="/auth/verify" element={<AuthVerify />} />
@@ -347,7 +349,8 @@ export default function App() {
                   } />
               </Route>
             </Routes>
-          </UIProvider>
+            </UIProvider>
+          </ThemeProvider>
         </BrandProvider>
       </SessionProvider>
     </AuthProvider>
