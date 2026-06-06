@@ -7,7 +7,7 @@
  *   - localStorage `fc_theme` persists the choice across mounts
  *   - applying the theme adds/removes the `dark` class on documentElement
  */
-import { describe, expect, test, beforeEach, vi } from 'vitest'
+import { describe, expect, test, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 
 import { ThemeProvider, useTheme } from '../context/ThemeContext'
