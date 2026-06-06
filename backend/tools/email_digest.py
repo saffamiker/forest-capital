@@ -768,6 +768,443 @@ async def _section_warm_history() -> DigestSection:
     return DigestSection(title="Warm history", html=html, text=text)
 
 
+# ── Section 6b — Implied asset allocation (June 5 2026) ──────────────────
+#
+# Per-strategy weights live in strategy_results_cache.results_json[s]:
+#   avg_equity_weight   float in [0, 1]
+#   avg_bond_weight     float in [0, 1]   ← COMBINED (IG + HY), no split today
+#
+# Per CLAUDE.md the bond figure is one number; the per-strategy IG/HY tilt
+# isn't persisted to the cache. The digest spec asks for three asset columns
+# (Equity / IG / HY) but rather than guess a tilt at the digest layer we
+# show Equity / Bonds with a footnote so the reader knows the bond split
+# is downstream of strategy choice, not a separate axis. A follow-up can
+# add per-strategy IG/HY decomposition if the backtester starts emitting it.
+#
+# Portfolio total row is the weighted average of each asset share across
+# the strategy weights, summing to 100% with a small rounding tolerance.
+
+
+async def _section_implied_asset_allocation() -> DigestSection:
+    """Reads the live blend (per-strategy weights from analytics_metrics_cache
+    `forward_projection`, fail-open to strategy_results_cache.avg_*_weight
+    directly when forward_projection is cold) and the per-strategy asset
+    weights from strategy_results_cache. Renders a table: strategy + weight
+    + equity% + bonds% per non-zero strategy + a portfolio total row.
+
+    The implied portfolio-level shares answer the question 'after the live
+    blend, what fraction of capital sits in equity vs bonds?' — not what
+    each strategy's average exposure was in isolation. Both reads are
+    fail-open: a cold cache renders a 'no live blend' placeholder rather
+    than skipping the section, so the reader knows the cron fired."""
+    try:
+        from tools.cache import get_latest_strategy_cache
+        from tools.precomputed_analytics import get_latest_metric
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_asset_allocation_imports_failed", error=str(exc))
+        return _empty_section("Implied asset allocation",
+                              "  Section unavailable.")
+
+    try:
+        # Live blend weights: prefer the cached forward_projection
+        # (the probability-weighted blend the platform serves) over
+        # raw strategy_results_cache, which carries only average per-
+        # strategy exposures and doesn't reflect the live regime read.
+        forward = await get_latest_metric("forward_projection") or {}
+        blend_weights = forward.get("blend_weights") or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_asset_allocation_forward_read_failed",
+                    error=str(exc))
+        blend_weights = {}
+
+    try:
+        strategies = await get_latest_strategy_cache() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_asset_allocation_strategies_read_failed",
+                    error=str(exc))
+        strategies = {}
+
+    if not blend_weights or not strategies:
+        return _empty_section(
+            "Implied asset allocation",
+            "  No live blend available — the forward_projection cache "
+            "is cold or the strategy cache is empty.")
+
+    # Filter to non-zero strategies, sort by weight descending.
+    rows: list[tuple[str, float, float, float]] = []
+    for strategy, weight in sorted(
+            blend_weights.items(), key=lambda kv: -float(kv[1] or 0)):
+        w = float(weight or 0)
+        if w <= 0:
+            continue
+        s = strategies.get(strategy) or {}
+        eq = float(s.get("avg_equity_weight") or 0)
+        bd = float(s.get("avg_bond_weight") or 0)
+        rows.append((strategy, w, eq, bd))
+
+    if not rows:
+        return _empty_section(
+            "Implied asset allocation",
+            "  All strategy weights are zero — nothing to allocate.")
+
+    # Portfolio total — weighted sum of each asset share by strategy
+    # weight. With a fully-invested blend (sum w_i ≈ 1) and fully-
+    # invested strategies (eq_i + bd_i ≈ 1) the totals also sum to ~1.
+    total_eq = sum(w * eq for _, w, eq, _ in rows)
+    total_bd = sum(w * bd for _, w, _, bd in rows)
+
+    # HTML table — same inline style register as the other digest sections.
+    html_rows = "".join(
+        f"<tr><td style='padding:2px 6px;color:#cbd5e1'>{name}</td>"
+        f"<td style='padding:2px 6px;text-align:right;color:#cbd5e1'>"
+        f"{w * 100:.1f}%</td>"
+        f"<td style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+        f"{eq * 100:.1f}%</td>"
+        f"<td style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+        f"{bd * 100:.1f}%</td></tr>"
+        for name, w, eq, bd in rows)
+    html = (
+        f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
+        f"Implied asset allocation</h3>"
+        f"<table style='border-collapse:collapse;font-size:12px;"
+        f"margin-bottom:6px'>"
+        f"<thead><tr>"
+        f"<th style='padding:2px 6px;text-align:left;color:#94a3b8'>Strategy</th>"
+        f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>Weight</th>"
+        f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>Equity</th>"
+        f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>Bonds</th>"
+        f"</tr></thead>"
+        f"<tbody>{html_rows}"
+        f"<tr style='border-top:1px solid #334155'>"
+        f"<td style='padding:4px 6px;color:#fbbf24'><b>Portfolio total</b></td>"
+        f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
+        f"<b>100.0%</b></td>"
+        f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
+        f"<b>{total_eq * 100:.1f}%</b></td>"
+        f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
+        f"<b>{total_bd * 100:.1f}%</b></td></tr>"
+        f"</tbody></table>"
+        f"<div style='font-size:10px;color:#64748b'>"
+        f"Bonds column is combined investment-grade + high-yield; the "
+        f"per-strategy IG/HY tilt is not persisted to the strategy cache."
+        f"</div>")
+
+    text_lines = [
+        "IMPLIED ASSET ALLOCATION",
+        "  Strategy            Weight    Equity     Bonds",
+    ]
+    for name, w, eq, bd in rows:
+        text_lines.append(
+            f"  {name:<18}  {w * 100:>5.1f}%   {eq * 100:>5.1f}%   "
+            f"{bd * 100:>5.1f}%")
+    text_lines.append(
+        f"  {'PORTFOLIO TOTAL':<18}  100.0%   {total_eq * 100:>5.1f}%   "
+        f"{total_bd * 100:>5.1f}%")
+    text_lines.append(
+        "  (Bonds = IG + HY combined; per-strategy split not persisted.)")
+    text = "\n".join(text_lines) + "\n"
+
+    return DigestSection(
+        title="Implied asset allocation",
+        html=html, text=text)
+
+
+# ── Section 6c — Latest CIO recommendation (June 5 2026) ─────────────────
+
+
+async def _section_latest_cio_recommendation() -> DigestSection:
+    """Pulls the most recent row from cio_recommendations and surfaces
+    the `recommendation` field (capped at 300 words). When PR #273's
+    A/B/C transparency structure is present in the cached prose the
+    digest shows it verbatim (the cap leaves room for all three
+    sections in typical cases). When the cache is cold or the table
+    is empty, a placeholder section renders rather than the digest
+    skipping it."""
+    try:
+        from tools.cio_recommendation import get_latest_recommendation
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_cio_recommendation_imports_failed",
+                    error=str(exc))
+        return _empty_section("CIO recommendation",
+                              "  Section unavailable.")
+
+    try:
+        rec = await get_latest_recommendation()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_cio_recommendation_read_failed", error=str(exc))
+        rec = None
+
+    if not rec:
+        return _empty_section(
+            "CIO recommendation",
+            "  No CIO recommendation cached — the cio_recommendations "
+            "table is empty.")
+
+    # Prefer the recommendation field; fall back to signal for the
+    # case where only the deterministic-fallback path has written.
+    body = (rec.get("recommendation") or rec.get("signal") or "").strip()
+    if not body:
+        return _empty_section(
+            "CIO recommendation",
+            "  CIO recommendation row exists but carries no narrative "
+            "text — likely an older schema. Re-run the recommendation "
+            "pipeline.")
+
+    truncated = _truncate_to_word_cap(body, 300)
+    regime = rec.get("regime") or (rec.get("confidence") or {}).get("regime")
+    computed_at = rec.get("computed_at") or ""
+
+    meta_line = ""
+    if regime:
+        meta_line += f"Current regime: {regime}. "
+    if computed_at:
+        meta_line += f"Computed at: {computed_at}."
+
+    # HTML — render the truncated body as a paragraph block (the prose
+    # may contain markdown ### headings from PR #273; we surface them
+    # verbatim, the email client will render the # characters as text).
+    html = (
+        f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
+        f"CIO recommendation</h3>"
+        f"<div style='font-size:11px;color:#94a3b8;margin-bottom:6px'>"
+        f"{meta_line}</div>"
+        f"<pre style='white-space:pre-wrap;font-family:inherit;"
+        f"font-size:12px;color:#cbd5e1;margin:0;padding:6px 8px;"
+        f"background:#0f172a;border-left:2px solid #334155'>"
+        f"{truncated}</pre>"
+        + (
+            "<div style='font-size:10px;color:#64748b;margin-top:4px'>"
+            "Truncated to 300 words — full recommendation on the "
+            "platform.</div>"
+            if len(body.split()) > 300 else ""))
+    text = "CIO RECOMMENDATION\n"
+    if meta_line:
+        text += f"  {meta_line}\n"
+    text += "\n" + "\n".join(f"  {line}" for line in truncated.splitlines())
+    if len(body.split()) > 300:
+        text += (
+            "\n  (Truncated to 300 words — full recommendation on the "
+            "platform.)")
+    text += "\n"
+
+    return DigestSection(
+        title="CIO recommendation", html=html, text=text)
+
+
+# ── Section 6d — What would trigger a rebalance (June 5 2026) ────────────
+
+
+async def _section_rebalance_triggers() -> DigestSection:
+    """Two halves:
+
+      1. Current regime signal values + the project's threshold
+         constants — names the watch points and what direction they
+         would have to move to flip the regime.
+      2. The per-regime target blends — what the live blend would
+         shift to on a BULL / BEAR / TRANSITION flip.
+
+    Source 1 reads regime_signals_cache (15-min TTL, refreshed on every
+    /api/regime/current call). Source 2 reads analytics_metrics_cache
+    metric_kind='regime_blends' (refreshed by refresh_regime_blends in
+    refresh_all_analytics, June 5 2026). Both fail-open."""
+    try:
+        from config import (
+            BEAR_MARKET_THRESHOLD, CREDIT_SPREAD_WIDE,
+            VIX_HIGH_THRESHOLD, YIELD_CURVE_INVERSION,
+        )
+        from tools.precomputed_analytics import get_latest_metric
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_rebalance_triggers_imports_failed",
+                    error=str(exc))
+        return _empty_section(
+            "What would trigger a rebalance",
+            "  Section unavailable.")
+
+    # Read the latest regime_signals_cache row directly — ignoring the
+    # 15-minute TTL that get_regime_cache() enforces. The digest runs
+    # once per day; the cache is almost always stale by then. For the
+    # watchpoints we want the LAST KNOWN signal values, not a refused
+    # read on expiry. The values are informational and labelled "current
+    # cached signal" so the reader isn't misled.
+    signals = await _read_latest_regime_signals_for_digest()
+
+    try:
+        regime_blends = await get_latest_metric("regime_blends") or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_rebalance_blends_read_failed", error=str(exc))
+        regime_blends = {}
+
+    # Trigger lines — each is (label, current value, comparator,
+    # threshold, sentence template). Only render rows where the signal
+    # is actually in the cache; a missing field is dropped silently
+    # rather than rendered as "None".
+    trigger_lines: list[tuple[str, str]] = []  # (html_li, text_line)
+    vix = signals.get("vix_level")
+    if vix is not None:
+        trigger_lines.append((
+            f"<li><b>VIX {float(vix):.2f}</b> — sustained rise above "
+            f"<b>{VIX_HIGH_THRESHOLD}</b> would signal BEAR.</li>",
+            f"    VIX {float(vix):.2f} — rise above {VIX_HIGH_THRESHOLD} "
+            f"signals BEAR."))
+    cs = signals.get("credit_spread")
+    if cs is not None:
+        trigger_lines.append((
+            f"<li><b>Credit spread {float(cs):.2f}</b> — widening "
+            f"above <b>{CREDIT_SPREAD_WIDE}</b> would signal stress.</li>",
+            f"    Credit spread {float(cs):.2f} — widening above "
+            f"{CREDIT_SPREAD_WIDE} signals stress."))
+    yc = signals.get("yield_curve_slope")
+    if yc is not None:
+        trigger_lines.append((
+            f"<li><b>Yield curve {float(yc):.2f}</b> — inversion "
+            f"(below <b>{YIELD_CURVE_INVERSION}</b>) would signal BEAR.</li>",
+            f"    Yield curve {float(yc):.2f} — inversion below "
+            f"{YIELD_CURVE_INVERSION} signals BEAR."))
+    eq_trend = signals.get("equity_trend")
+    if eq_trend is not None:
+        trigger_lines.append((
+            f"<li><b>Equity trend {float(eq_trend):.2%}</b> — trailing "
+            f"return below <b>{BEAR_MARKET_THRESHOLD:.0%}</b> would "
+            f"signal BEAR.</li>",
+            f"    Equity trend {float(eq_trend):.2%} — below "
+            f"{BEAR_MARKET_THRESHOLD:.0%} signals BEAR."))
+    hmm = signals.get("hmm_regime")
+    if hmm is not None:
+        trigger_lines.append((
+            f"<li><b>HMM regime: {hmm}</b> — a shift to BULL or BEAR "
+            f"triggers a rebalance.</li>",
+            f"    HMM regime: {hmm} — shift to BULL or BEAR triggers "
+            f"a rebalance."))
+
+    # Per-regime blend targets. The payload's `blends` dict is keyed
+    # by regime name with strategy → weight values.
+    blends = regime_blends.get("blends") or {}
+    blend_lines: list[tuple[str, str]] = []  # (html_li, text_line)
+    for regime in ("BULL", "BEAR", "TRANSITION"):
+        weights = blends.get(regime) or {}
+        if not weights:
+            continue
+        # Format as "STRAT_1 35%, STRAT_2 25%, ..." — top 3 only to
+        # keep the email readable.
+        top = sorted(weights.items(), key=lambda kv: -float(kv[1] or 0))[:3]
+        weight_str = ", ".join(
+            f"{name} {float(w) * 100:.0f}%" for name, w in top
+            if float(w or 0) > 0)
+        if not weight_str:
+            continue
+        blend_lines.append((
+            f"<li><b>{regime}:</b> {weight_str}</li>",
+            f"    {regime}: {weight_str}"))
+
+    if not trigger_lines and not blend_lines:
+        return _empty_section(
+            "What would trigger a rebalance",
+            "  No regime signals or blend targets cached. Run the "
+            "warm-cache refresh.")
+
+    html_parts: list[str] = []
+    text_parts: list[str] = []
+
+    if trigger_lines:
+        html_parts.append(
+            f"<div style='font-size:12px;color:#cbd5e1;margin-bottom:4px'>"
+            f"<b>Watch points</b></div>"
+            f"<ul style='padding-left:18px;margin:0 0 8px 0;"
+            f"font-size:12px;color:#94a3b8'>"
+            + "".join(html for html, _ in trigger_lines)
+            + "</ul>")
+        text_parts.append("  Watch points:")
+        text_parts.extend(text for _, text in trigger_lines)
+    if blend_lines:
+        html_parts.append(
+            f"<div style='font-size:12px;color:#cbd5e1;margin-bottom:4px'>"
+            f"<b>Blend shift on regime flip</b></div>"
+            f"<ul style='padding-left:18px;margin:0;"
+            f"font-size:12px;color:#94a3b8'>"
+            + "".join(html for html, _ in blend_lines)
+            + "</ul>")
+        text_parts.append("  Blend shift on regime flip:")
+        text_parts.extend(text for _, text in blend_lines)
+
+    html = (
+        f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
+        f"What would trigger a rebalance</h3>"
+        + "".join(html_parts))
+    text = ("WHAT WOULD TRIGGER A REBALANCE\n"
+            + "\n".join(text_parts) + "\n")
+    return DigestSection(
+        title="What would trigger a rebalance",
+        html=html, text=text)
+
+
+# ── Shared helpers for the new sections (June 5 2026) ────────────────────
+
+
+def _empty_section(title: str, body_text: str) -> DigestSection:
+    """A uniform placeholder so each new section renders SOMETHING even
+    on a cold cache. The reader sees the section header (so they know
+    the cron fired and didn't skip it) plus a one-line reason."""
+    html = (
+        f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
+        f"{title}</h3>"
+        f"<div style='font-size:12px;color:#64748b'>"
+        f"{body_text.strip()}</div>")
+    text = f"{title.upper()}\n{body_text}\n"
+    return DigestSection(title=title, html=html, text=text)
+
+
+async def _read_latest_regime_signals_for_digest() -> dict:
+    """Returns the latest regime_signals_cache row WITHOUT the 15-minute
+    TTL check that tools.cache.get_regime_cache enforces. The digest
+    runs once per day, so the cache is almost always stale by then —
+    refusing on expiry would render the rebalance-triggers section
+    blank every morning. Stale values are fine for an informational
+    watch list. Fail-open to an empty dict on any DB error / missing
+    table."""
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal  # type: ignore
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "digest_regime_signals_imports_failed", error=str(exc))
+        return {}
+    if AsyncSessionLocal is None:  # type: ignore[comparison-overlap]
+        return {}
+    try:
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(text(
+                "SELECT vix_level, yield_curve_slope, credit_spread, "
+                "       equity_trend, hmm_regime, fetched_at "
+                "FROM regime_signals_cache "
+                "ORDER BY fetched_at DESC LIMIT 1"))
+            r = row.fetchone()
+            if not r:
+                return {}
+            return {
+                "vix_level":         r[0],
+                "yield_curve_slope": r[1],
+                "credit_spread":     r[2],
+                "equity_trend":      r[3],
+                "hmm_regime":        r[4],
+                "fetched_at":        str(r[5]) if r[5] else None,
+            }
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "digest_regime_signals_read_failed", error=str(exc))
+        return {}
+
+
+def _truncate_to_word_cap(text: str, cap: int) -> str:
+    """Word-bound truncation with an ellipsis when shortened. Preserves
+    internal whitespace by splitting on whitespace and rejoining with
+    single spaces — the recommendation prose has markdown ### headings
+    which read fine with normalised whitespace inside an email."""
+    words = text.split()
+    if len(words) <= cap:
+        return text
+    return " ".join(words[:cap]) + "…"
+
+
 # ── Section 7 — Open work ─────────────────────────────────────────────────
 
 
@@ -965,6 +1402,15 @@ async def build_digest_email() -> tuple[str, str, str]:
     sections.append(await _section_platform_usage())
     sections.append(await _section_team_activity())
     sections.append(await _section_warm_history())
+    # June 5 2026 — three new sections sit between warm history and
+    # open work: the implied asset allocation table (live blend ×
+    # per-strategy asset weights), the latest cached CIO recommendation
+    # capped at 300 words, and the rebalance trigger watch list (current
+    # signal values vs the project's threshold constants, plus the per-
+    # regime blend targets from refresh_regime_blends).
+    sections.append(await _section_implied_asset_allocation())
+    sections.append(await _section_latest_cio_recommendation())
+    sections.append(await _section_rebalance_triggers())
     sections.append(await _section_open_work())
     sections.append(_section_deadlines(today))
 

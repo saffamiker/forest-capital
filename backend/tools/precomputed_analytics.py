@@ -940,6 +940,67 @@ async def refresh_risk_free_rate_config(data_hash: str) -> None:
                     error=str(exc))
 
 
+async def refresh_regime_blends(data_hash: str) -> None:
+    """The regime-conditional blend weights — the per-regime BULL / BEAR /
+    TRANSITION target allocations that the live `forward_projection` then
+    probability-weights into a current blend.
+
+    `compute_regime_blends()` (tools/regime_meta_optimizer.py:320) takes a
+    strategy_results cache row + an HMM historical fit and returns the
+    three per-regime weight maps. Today the function is called inline on
+    every CIO recommendation read (cio_recommendation.py:64) and on every
+    sensitivity sweep (regime_meta_forward.py:226) — never cached. The
+    daily digest's "what would trigger a rebalance" section needs to read
+    the per-regime targets to state "BEAR regime: blend would shift to
+    {...}" without paying the live-compute cost, so this refresh persists
+    the result to analytics_metrics_cache under metric_kind='regime_blends'.
+
+    Fail-open per the existing pattern: empty strategy cache returns
+    early, an HMM fit failure logs and returns, a compute_regime_blends
+    error logs and returns. No partial rows. Same shape as
+    refresh_diversification_metrics. June 5 2026."""
+    try:
+        import pandas as pd
+        from tools.cache import get_latest_strategy_cache, get_monthly_returns
+        from tools.regime_detector import fit_hmm_historical
+        from tools.regime_meta_optimizer import compute_regime_blends
+    except Exception as exc:  # noqa: BLE001
+        log.warning("regime_blends_refresh_imports_failed", error=str(exc))
+        return
+
+    try:
+        strategies = await get_latest_strategy_cache()
+        if not strategies:
+            log.info("regime_blends_refresh_skipped",
+                     reason="strategy_cache_empty")
+            return
+        monthly = await get_monthly_returns()
+        if (not monthly or not monthly.get("equity")
+                or not monthly.get("dates")):
+            log.info("regime_blends_refresh_skipped",
+                     reason="monthly_equity_unavailable")
+            return
+        idx = pd.to_datetime(monthly["dates"])
+        equity = pd.Series(monthly["equity"], index=idx).sort_index()
+        hmm_result = fit_hmm_historical(equity)
+        if not hmm_result or hmm_result.get("error"):
+            log.warning("regime_blends_hmm_fit_failed",
+                        error=(hmm_result or {}).get("error"))
+            return
+        payload = compute_regime_blends(strategies, hmm_result)
+        if payload.get("error"):
+            log.warning("regime_blends_compute_failed",
+                        error=payload["error"])
+            return
+        await set_metric(
+            data_hash, "regime_blends", payload,
+            source="refresh_regime_blends")
+        log.info("precomputed_regime_blends_complete",
+                 n_regimes=len(payload.get("blends") or {}))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("regime_blends_refresh_failed", error=str(exc))
+
+
 async def refresh_all_analytics(data_hash: str) -> None:
     """Top-level dispatch — calls every refresh function. Fires from
     tools/cache.set_strategy_cache after a successful strategy write.
@@ -977,6 +1038,12 @@ async def refresh_all_analytics(data_hash: str) -> None:
     # serve from analytics_metrics_cache on the hot path.
     await refresh_sensitivity(data_hash)
     await refresh_risk_free_rate_config(data_hash)
+    # June 5 2026 — per-regime blend targets are needed by the daily
+    # digest's "what would trigger a rebalance" section so it can state
+    # the target shift on a regime flip without inlining the full
+    # compute_regime_blends + HMM fit on a single email render. Stored
+    # as metric_kind='regime_blends'; reader is get_latest_metric.
+    await refresh_regime_blends(data_hash)
     # Item 9 (May 22 2026) — strategy_characterisations is its own
     # table (one row per strategy) rather than another row in
     # analytics_metrics_cache, but it refreshes on the same data-
