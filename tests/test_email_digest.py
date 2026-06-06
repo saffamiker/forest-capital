@@ -361,9 +361,15 @@ def test_truncate_to_word_cap_empty_input():
 @pytest.mark.asyncio
 async def test_build_digest_includes_three_new_section_titles():
     """The top-level build still works after wiring three new sections.
-    All three titles appear in the assembled HTML between Warm history
-    and Open work. A blank cache renders placeholders, not skipped
-    sections."""
+    All three titles appear in the assembled HTML; the morning skim
+    sees them at the TOP, not buried below the ops content. A blank
+    cache renders placeholders, not skipped sections.
+
+    Ordering contract (June 6 2026 reorder per operator request):
+    CIO recommendation -> Implied asset allocation -> Rebalance
+    triggers all precede Platform health / Releases / Warm history /
+    Open work so the morning skim sees the allocation decision first.
+    """
     subject, html, text = await build_digest_email()
     assert "Implied asset allocation" in html
     assert "CIO recommendation" in html
@@ -372,12 +378,19 @@ async def test_build_digest_includes_three_new_section_titles():
     assert "IMPLIED ASSET ALLOCATION" in text
     assert "CIO RECOMMENDATION" in text
     assert "WHAT WOULD TRIGGER A REBALANCE" in text
-    # Primary ordering contract — the three new sections appear
-    # AFTER the warm-history section (case-insensitive search since
-    # the heading is "Warm history" not "WARM HISTORY") and BEFORE
-    # the open-work section.
+    # Primary ordering contract: the three decision sections lead the
+    # digest, with the analytics-triplet appearing BEFORE platform
+    # health, warm history, and open work.
     html_lc = html.lower()
-    assert (html_lc.index("warm history")
-            < html_lc.index("implied asset allocation"))
-    assert (html_lc.index("what would trigger a rebalance")
-            < html_lc.index("open work"))
+    cio_idx = html_lc.index("cio recommendation")
+    blend_idx = html_lc.index("implied asset allocation")
+    trigger_idx = html_lc.index("what would trigger a rebalance")
+    health_idx = html_lc.index("platform health")
+    warm_idx = html_lc.index("warm history")
+    open_idx = html_lc.index("open work")
+    # Decision triplet appears in the named order at the top.
+    assert cio_idx < blend_idx < trigger_idx
+    # Decision triplet precedes the ops sections.
+    assert trigger_idx < health_idx
+    assert trigger_idx < warm_idx
+    assert trigger_idx < open_idx
