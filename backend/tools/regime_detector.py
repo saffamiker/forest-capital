@@ -71,7 +71,7 @@ _regime_cache: dict = {}
 # GaussianHMM (200-iteration Baum-Welch over ~6,500 daily observations)
 # on every call. The detect_current_regime cache above shields it within
 # any 15-minute window, but the HMM is still re-fit from scratch every
-# time that window expires — ~96 full fits per day.
+# time that window expires.
 #
 # The fitted model is a function of the input return series. Within a
 # trading day the daily-return series passed to classify_hmm_regime has
@@ -79,19 +79,48 @@ _regime_cache: dict = {}
 # closed → no new bar). So the fit is deterministic per (series length,
 # last date, n_states, seed). This cache keys the RESULT dict on exactly
 # that fingerprint: a cache hit skips the fit entirely and returns the
-# prior result. Effect: one fit per trading day instead of one per
-# 15-minute regime-cache miss.
+# prior result.
 #
-# This is NOT a leak: the cache holds exactly one entry, overwritten
-# (not appended) when the fingerprint changes. The cached result dict
-# carries a ~6,500-entry historical_labels map — bounded, one copy.
-_hmm_model_cache: dict = {}  # {"key": tuple, "result": dict}
+# Multi-entry (June 6 2026 perf fix per bridge #71): PR #282 added a
+# second classify_hmm_regime call inside detect_current_regime, once
+# for daily and once for monthly. The previous single-entry cache
+# evicted itself on every call so BOTH fits missed every time. The
+# cache is now a bounded dict keyed by the fingerprint tuple; daily
+# and monthly fits coexist. Bound is generous (16 entries) so any
+# realistic warm pipeline sequence (daily + monthly + a couple of
+# subperiod fits) lives in the cache without churn.
+_HMM_CACHE_MAX_ENTRIES = 16
+_hmm_model_cache: "dict[tuple, dict]" = {}
 
 
 def _hmm_cache_clear() -> None:
     """Drops the in-process HMM cache. Exposed for tests and for any
     future admin force-refresh path."""
     _hmm_model_cache.clear()
+
+
+def _hmm_cache_get(key: tuple) -> dict | None:
+    """Read accessor -- moves the entry to the END of the dict so the
+    eviction policy is LRU-ish (most-recently-used last)."""
+    if key in _hmm_model_cache:
+        # Touch -- delete + re-insert to push the entry to the end of
+        # insertion order. Python's dict is insertion-ordered on 3.7+
+        # so this gives us cheap LRU.
+        result = _hmm_model_cache.pop(key)
+        _hmm_model_cache[key] = result
+        return result
+    return None
+
+
+def _hmm_cache_put(key: tuple, result: dict) -> None:
+    """Write accessor -- trims the cache to the configured maximum
+    after insert so it never grows unbounded."""
+    _hmm_model_cache[key] = result
+    while len(_hmm_model_cache) > _HMM_CACHE_MAX_ENTRIES:
+        # Evict the OLDEST entry (the first inserted that has not
+        # been touched). One iteration of iter(dict) gives the
+        # least-recently-used key.
+        _hmm_model_cache.pop(next(iter(_hmm_model_cache)))
 
 
 # ── Threshold-based classification ───────────────────────────────────────────
@@ -370,17 +399,22 @@ def classify_hmm_regime(
         return {"error": "insufficient_data", "current_regime_label": None}
 
     # ── Fast path: warm HMM cache ───────────────────────────────────────────
-    # Fingerprint = (series length, last observation date, n_states, seed).
-    # Within a trading day all four are stable, so a cache hit skips the
-    # 200-iteration Baum-Welch fit and returns the prior result directly.
+    # Fingerprint = (series length, last observation date, n_states, seed,
+    # function tag). Within a trading day all four are stable, so a cache
+    # hit skips the 200-iteration Baum-Welch fit and returns the prior
+    # result directly. The "classify" tag namespaces the entry so
+    # classify_hmm_regime (covariance=diag, 2 features) cannot collide
+    # with fit_hmm_historical (covariance=full, 2-3 features) under the
+    # same series fingerprint.
     cache_key = (
+        "classify",
         len(clean),
         str(clean.index[-1]),
         n_states,
         seed,
     )
-    cached = _hmm_model_cache.get("result")
-    if cached is not None and _hmm_model_cache.get("key") == cache_key:
+    cached = _hmm_cache_get(cache_key)
+    if cached is not None:
         log.info("hmm_inprocess_cache_hit", n_obs=len(clean), n_states=n_states)
         return cached
 
@@ -471,8 +505,7 @@ def classify_hmm_regime(
 
     # Store under the input fingerprint. The next call with the same
     # series (same trading day) returns this without re-fitting.
-    _hmm_model_cache["key"] = cache_key
-    _hmm_model_cache["result"] = result
+    _hmm_cache_put(cache_key, result)
     return result
 
 
@@ -497,6 +530,26 @@ def fit_hmm_historical(
         return {"error": "hmmlearn_not_available"}
 
     clean_ret = returns.dropna()
+
+    # In-process cache (same multi-entry shape as classify_hmm_regime).
+    # Fingerprint includes whether VIX was supplied because the feature
+    # matrix shape changes and produces a different fit. Within a single
+    # warm pipeline pass, refresh_regime_blends and any other consumers
+    # called on the same monthly-equity series now hit the cache instead
+    # of re-fitting the 500-iteration Baum-Welch.
+    cache_key = (
+        "historical",
+        len(clean_ret),
+        str(clean_ret.index[-1]) if len(clean_ret) else "empty",
+        n_states,
+        seed,
+        vix is not None,
+    )
+    cached = _hmm_cache_get(cache_key)
+    if cached is not None:
+        log.info("hmm_historical_cache_hit",
+                 n_obs=len(clean_ret), n_states=n_states)
+        return cached
 
     if vix is not None:
         vix_aligned = vix.reindex(clean_ret.index).ffill().fillna(20.0)
@@ -556,7 +609,7 @@ def fit_hmm_historical(
     dates = [d.isoformat() if hasattr(d, "isoformat") else str(d)
              for d in clean_ret.index]
 
-    return {
+    result = {
         "n_states": n_states,
         "labelled_series": labelled.to_dict(),
         "historical_probs": historical_probs,
@@ -565,3 +618,5 @@ def fit_hmm_historical(
         "converged": bool(model.monitor_.converged),
         "label_map": label_map,
     }
+    _hmm_cache_put(cache_key, result)
+    return result

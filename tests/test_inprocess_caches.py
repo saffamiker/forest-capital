@@ -239,8 +239,19 @@ class TestHMMModelCache:
             "A longer series must re-fit, not reuse the cached result"
         )
 
-    def test_cache_holds_exactly_one_entry(self, monkeypatch):
-        """Bounded — overwritten on a fingerprint change, never appended."""
+    def test_cache_keys_are_fingerprint_tuples(self, monkeypatch):
+        """Each cache entry is keyed by a fingerprint tuple that begins
+        with the function-tag namespace ("classify" here -- "historical"
+        for fit_hmm_historical).
+
+        PR #293 (bridge #71) reshaped the HMM cache from a singleton
+        ({"key": ..., "result": ...} overwritten on every call) into a
+        multi-entry dict bounded at _HMM_CACHE_MAX_ENTRIES with LRU
+        eviction. Distinct series fingerprints now COEXIST instead of
+        evicting each other -- daily and monthly HMM fits run inside
+        the same warm pipeline and need to share the cache without
+        clobbering each other.
+        """
         from tools.regime_detector import (
             classify_hmm_regime, _hmm_cache_clear, _hmm_model_cache,
         )
@@ -248,15 +259,32 @@ class TestHMMModelCache:
 
         for n in (600, 601, 602):
             classify_hmm_regime(self._make_returns(n=n))
-        assert set(_hmm_model_cache.keys()) == {"key", "result"}
+
+        # Three distinct series fingerprints -> three coexisting entries
+        # (well under the 16-entry LRU bound).
+        assert len(_hmm_model_cache) == 3, (
+            "Multi-entry cache: distinct fingerprints must coexist, "
+            "not evict each other -- the old singleton shape regressed.")
+        for key in _hmm_model_cache:
+            assert isinstance(key, tuple), (
+                f"cache key must be a fingerprint tuple, got {type(key)}")
+            assert key[0] == "classify", (
+                f"cache key must be namespaced under the 'classify' "
+                f"function tag, got {key[0]!r}")
 
     def test_clear_empties_cache(self):
+        """_hmm_cache_clear() drops every entry. After a single fit
+        the cache has exactly one tuple-keyed entry; after clear it is
+        empty."""
         from tools.regime_detector import (
             classify_hmm_regime, _hmm_cache_clear, _hmm_model_cache,
         )
         _hmm_cache_clear()
         classify_hmm_regime(self._make_returns())
-        assert "result" in _hmm_model_cache
+        assert len(_hmm_model_cache) == 1
+        only_key = next(iter(_hmm_model_cache))
+        assert isinstance(only_key, tuple)
+        assert only_key[0] == "classify"
         _hmm_cache_clear()
         assert _hmm_model_cache == {}
 
