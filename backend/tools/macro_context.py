@@ -56,6 +56,7 @@ their role-specific instructions.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import structlog
@@ -65,8 +66,26 @@ log = structlog.get_logger(__name__)
 
 # Module-level cache, mirroring academic_context._CONTEXT_CACHE. A
 # dict so a future refresh can swap the string atomically without a
-# Python-level lock.
-_CACHE: dict[str, str] = {"text": ""}
+# Python-level lock. We also stash generated_at so the staleness gate
+# can compute the digest's age without re-querying the engine on every
+# inject call.
+_CACHE: dict[str, Any] = {"text": "", "generated_at": None}
+
+# Stale-after threshold for the macro digest. Past this point the
+# inject layer appends a disclosure line so agents know the macro
+# block is informational background that has not been refreshed in
+# the last day.
+_STALENESS_HOURS = 24.0
+
+# Disclosure injected when the cache is empty -- a cold deploy or a
+# persistently failing refresh. Tells the agent the macro layer was
+# not available rather than letting them silently reason without it.
+_EMPTY_CACHE_NOTICE = (
+    "\n\n=== MACRO CONTEXT UNAVAILABLE ===\n"
+    "Macro context unavailable at query time -- proceed without macro "
+    "grounding. Reason from the strategy results and historical "
+    "patterns only; do NOT invent current macro conditions.\n"
+)
 
 
 def _format_digest_block(digest: dict[str, Any] | None) -> str:
@@ -142,18 +161,65 @@ def _format_digest_block(digest: dict[str, Any] | None) -> str:
 def get_macro_context() -> str:
     """Sync accessor — returns the cached formatted context block.
     Empty string until refresh_macro_context has populated the cache
-    (cold deploy state). Every injection site calls this; an empty
-    string makes inject_macro_context a no-op."""
+    (cold deploy state). Every injection site calls this; the empty
+    string is the signal inject_macro_context uses to render the
+    "macro unavailable" disclosure rather than silently inject
+    nothing."""
     return _CACHE["text"]
 
 
+def _digest_age_hours() -> float | None:
+    """Hours since the cached digest was generated, or None when the
+    cache lacks a generated_at timestamp (cold deploy or older digest
+    rows without the field). Used by inject_macro_context to decide
+    whether to append the staleness disclosure."""
+    generated_at = _CACHE.get("generated_at")
+    if not generated_at:
+        return None
+    try:
+        if isinstance(generated_at, str):
+            ts = datetime.fromisoformat(
+                generated_at.replace("Z", "+00:00"))
+        elif isinstance(generated_at, datetime):
+            ts = generated_at
+        else:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        delta = datetime.now(timezone.utc) - ts
+        return delta.total_seconds() / 3600.0
+    except (ValueError, TypeError):
+        return None
+
+
 def inject_macro_context(system_prompt: str) -> str:
-    """Append the macro context to a system prompt. A no-op when the
-    cache is empty, so every agent can call it unconditionally — a
-    cold deploy with no digest yet runs text-only, identical to the
-    pre-macro behaviour."""
+    """Append the macro context to a system prompt.
+
+    Behaviour:
+      - Populated cache, digest <= 24h old:
+            system_prompt + cached macro block (the prior behaviour).
+      - Populated cache, digest > 24h old:
+            system_prompt + cached macro block + staleness disclosure.
+      - Empty cache (cold deploy or persistently failed refresh):
+            system_prompt + "MACRO CONTEXT UNAVAILABLE" disclosure.
+
+    Every agent now sees one of: fresh macro, stale macro with a
+    disclosure, or an explicit "unavailable" notice -- so the agent
+    can never be confused about whether macro grounding was offered
+    and which case applies."""
     ctx = get_macro_context()
-    return system_prompt + ctx if ctx else system_prompt
+    if not ctx:
+        return system_prompt + _EMPTY_CACHE_NOTICE
+    age_hours = _digest_age_hours()
+    if age_hours is not None and age_hours > _STALENESS_HOURS:
+        notice = (
+            f"\n\nNote: macro context is {int(age_hours)} hours old -- "
+            f"live refresh unavailable at query time. The figures above "
+            f"reflect the last successful digest; treat as background, "
+            f"not real-time data.\n"
+        )
+        return system_prompt + ctx + notice
+    return system_prompt + ctx
 
 
 async def refresh_macro_context() -> None:
@@ -173,6 +239,11 @@ async def refresh_macro_context() -> None:
         new_block = _format_digest_block(digest)
         previous_len = len(_CACHE["text"])
         _CACHE["text"] = new_block
+        # Stash generated_at so inject_macro_context can compute the
+        # digest's age without re-querying the engine. None when the
+        # digest is absent or lacks the field.
+        _CACHE["generated_at"] = (
+            (digest or {}).get("generated_at") if digest else None)
         log.info("macro_context_refreshed",
                  has_digest=bool(new_block),
                  chars=len(new_block),
@@ -183,8 +254,15 @@ async def refresh_macro_context() -> None:
         log.warning("macro_context_refresh_failed", error=str(exc))
 
 
-def _set_cache_for_test(text: str) -> None:
+def _set_cache_for_test(
+    text: str,
+    generated_at: Any = None,
+) -> None:
     """Testing hook — lets a test write a known context block into the
     cache without monkeypatching the read accessor. NOT for production
-    callers. Used by tests/test_macro_context.py (Commit 5)."""
+    callers. Used by tests/test_macro_context.py (Commit 5).
+
+    The generated_at parameter lets a test pin the digest age so the
+    staleness gate fires deterministically."""
     _CACHE["text"] = text
+    _CACHE["generated_at"] = generated_at

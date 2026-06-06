@@ -39,6 +39,13 @@ interface Recommendation {
   blend_weights?: Record<string, number> | null
   computed_at?: string | null
   model?: string | null
+  // The Python pipeline emits `_model` (underscore prefix) carrying
+  // either the LLM model id (e.g. claude-sonnet-4-6) or the literal
+  // "deterministic_fallback" sentinel when the LLM call failed and the
+  // user is seeing the structured fail-open recommendation. The card
+  // surfaces an inline notice when the sentinel is present so the
+  // user can never mistake the fallback for a live LLM run.
+  _model?: string | null
 }
 interface Payload {
   available: boolean
@@ -209,6 +216,17 @@ export default function CIORecommendationCard() {
           >
             <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
             <span className="text-warning">{rec.divergence_disclosure}</span>
+          </p>
+        )}
+        {rec._model === 'deterministic_fallback' && (
+          <p
+            className="mt-2 flex gap-1.5 rounded border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
+            data-testid="cio-deterministic-fallback-notice"
+          >
+            <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+            <span className="text-warning">
+              Live regime unavailable — showing last deterministic recommendation.
+            </span>
           </p>
         )}
       </div>
