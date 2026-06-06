@@ -36,6 +36,13 @@ interface AuditFinding {
   resolved_by?: string | null
   resolved_at?: string | null
   auto_acknowledged?: boolean
+  // Migration 055 (bridge #75) -- the verbatim disclosure the team
+  // agreed to put into the report at acknowledge time. Locked when
+  // the acknowledge form's "Disclosure (optional)" textarea was
+  // populated. NULL on findings acknowledged without a disclosure
+  // (internal review only) -- the finding card omits the
+  // copy-paste box in that case.
+  locked_disclosure_text?: string | null
 }
 
 // A demo run (the QA tab's "Run Live Demo" button) is marked 🎯 in the
@@ -194,6 +201,14 @@ export function FindingRow({ f }: { f: AuditFinding }) {
   const [note, setNote] = useState(f.resolution_note ?? '')
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
+  // Bridge #75 -- the optional disclosure text. Lockded into the
+  // finding row at acknowledge time so Bob can copy-paste straight
+  // into the brief. Separate state from the resolution note: the
+  // note is the team's internal review comment; the disclosure is
+  // what will appear in the report.
+  const [disclosureDraft, setDisclosureDraft] = useState('')
+  const [lockedDisclosure, setLockedDisclosure] = useState<string | null>(
+    f.locked_disclosure_text ?? null)
   const [saving, setSaving] = useState(false)
   const [ackError, setAckError] = useState<string | null>(null)
   // Migration 044 — the reviewer's email and the ack timestamp.
@@ -243,11 +258,18 @@ export function FindingRow({ f }: { f: AuditFinding }) {
       // renders immediately, without waiting for a panel reload.
       const res = await axios.post<AuditFinding>(
         `/api/v1/audit/findings/${f.id}/resolve`,
-        { resolution_note: draft.trim() })
+        {
+          resolution_note: draft.trim(),
+          disclosure_text: disclosureDraft.trim() || null,
+        })
       setResolved(true)
       setNote(draft.trim())
       setResolvedBy(res.data.resolved_by ?? null)
       setResolvedAt(res.data.resolved_at ?? null)
+      // The server normalises empty disclosure to NULL; read the
+      // locked value off the response so the copy-paste box renders
+      // immediately without a panel reload.
+      setLockedDisclosure(res.data.locked_disclosure_text ?? null)
       // A manual Save endorses the ack — the server clears the
       // auto_acknowledged flag and the local label flips from
       // "Auto-acknowledged" to "Acknowledged".
@@ -275,6 +297,8 @@ export function FindingRow({ f }: { f: AuditFinding }) {
       setResolved(false)
       setNote('')
       setDraft('')
+      setDisclosureDraft('')
+      setLockedDisclosure(null)
       setEditing(false)
       setRevokeOpen(false)
       setAutoAck(false)
@@ -372,6 +396,42 @@ export function FindingRow({ f }: { f: AuditFinding }) {
                   {note && (
                     <div className="text-slate-300 leading-relaxed">{note}</div>
                   )}
+                  {/* Bridge #75 -- the locked disclosure box.
+                      Acknowledgements with a non-empty
+                      disclosure_text show the verbatim agreed text
+                      in a copyable container so Bob can paste it
+                      straight into the executive brief. Findings
+                      acknowledged without a disclosure simply do not
+                      render this box (the next sibling is the
+                      Edit / Revoke row, untouched). */}
+                  {lockedDisclosure && (
+                    <div
+                      data-testid={`audit-locked-disclosure-${f.id}`}
+                      className="rounded border border-success/40 bg-success/10
+                                 px-2 py-1.5 space-y-1"
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-2xs text-success uppercase
+                                         tracking-wide font-semibold">
+                          Transfer to report
+                        </span>
+                        <button type="button"
+                          onClick={() => {
+                            if (lockedDisclosure) {
+                              void navigator.clipboard.writeText(lockedDisclosure)
+                            }
+                          }}
+                          data-testid={`audit-copy-disclosure-${f.id}`}
+                          className="text-2xs text-success underline">
+                          Copy
+                        </button>
+                      </div>
+                      <pre className="text-2xs text-slate-200 whitespace-pre-wrap
+                                       font-sans leading-relaxed">
+                        {lockedDisclosure}
+                      </pre>
+                    </div>
+                  )}
                   {/* Edit / Revoke — Edit reopens the inline editor
                       pre-populated with the existing note; Revoke
                       removes the acknowledgement entirely via the
@@ -409,16 +469,42 @@ export function FindingRow({ f }: { f: AuditFinding }) {
                 </button>
               )}
               {editing && (
-                <div className="space-y-1">
-                  <textarea
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    rows={3}
-                    placeholder="Describe how you have addressed or accepted
-                                 this limitation…"
-                    className="w-full bg-navy-800 border border-border rounded
-                               text-2xs text-white px-2 py-1.5 resize-y"
-                  />
+                <div className="space-y-2">
+                  <div>
+                    <label className="text-2xs text-muted block mb-0.5">
+                      Internal review note
+                    </label>
+                    <textarea
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      rows={3}
+                      placeholder="Describe how you have addressed or accepted
+                                   this limitation…"
+                      className="w-full bg-navy-800 border border-border rounded
+                                 text-2xs text-white px-2 py-1.5 resize-y"
+                    />
+                  </div>
+                  {/* Bridge #75 -- the disclosure text the team agrees
+                      will appear in the report. Locked at acknowledge
+                      time so Bob can copy the agreed wording straight
+                      into the brief. Optional: a finding can be
+                      acknowledged without a public disclosure. */}
+                  <div>
+                    <label className="text-2xs text-muted block mb-0.5">
+                      Disclosure for the report (optional, locked on acknowledge)
+                    </label>
+                    <textarea
+                      value={disclosureDraft}
+                      onChange={(e) => setDisclosureDraft(e.target.value)}
+                      rows={3}
+                      placeholder="The verbatim text that will appear in the
+                                   executive brief disclosure section. Leave
+                                   blank if no public disclosure is needed."
+                      data-testid={`audit-disclosure-input-${f.id}`}
+                      className="w-full bg-navy-800 border border-border rounded
+                                 text-2xs text-white px-2 py-1.5 resize-y"
+                    />
+                  </div>
                   <div className="flex items-center gap-2">
                     <button type="button" onClick={() => void saveAck()}
                       disabled={saving || !draft.trim()}
