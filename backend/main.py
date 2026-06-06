@@ -9565,7 +9565,7 @@ async def export_package(
 #
 # POST /api/v1/export/midpoint-paper     → 3-page midpoint submission (.docx)
 # POST /api/v1/export/executive-brief    → 5-page executive brief (.docx)
-# POST /api/v1/export/presentation-deck  → 10-slide final deck (.pptx)
+# POST /api/v1/export/presentation-deck  → 6-slide final deck (.pptx)
 #
 # Each assembles a graded deliverable as a FIRST DRAFT for Bob to refine:
 # every figure is real platform data (tools/academic_export.gather_document_
@@ -10979,11 +10979,19 @@ def _render_deck_slide_charts(
     """Render the per-slide deck charts (sync; called in a thread). Returns
     {slide_number: png|None}. Every renderer is fail-open and individually
     guarded — a None becomes a [DATA PENDING] note in the deck, never a
-    failure. Charts on slides 2, 3, 4, 6, 8 per academic_deck.SLIDE_CHARTS."""
-    from tools.academic_deck import _STATIC_STRATEGIES
+    failure.
+
+    June 6 2026 — six-slide rewrite. Charts on slides 2, 3, and 6 per
+    academic_deck.SLIDE_CHARTS:
+      slide 2: rolling correlation (the 2022 break)
+      slide 3: OOS Sharpe comparison (benchmark / best static / blend)
+      slide 6: efficient frontier with the live blend position marked
+    Slides 1, 4, 5 don't carry matplotlib charts — slide 1's drawdown bars
+    are a slide-body table rendered by the builder, slide 4's nine-event
+    scorecard is a body table, and slide 5 is bullets-only."""
     from tools.chart_render import (
-        render_cumulative_returns, render_efficient_frontier,
-        render_rolling_correlation, render_strategy_comparison,
+        render_efficient_frontier, render_rolling_correlation,
+        render_strategy_comparison,
     )
 
     def _safe(fn):
@@ -10995,20 +11003,17 @@ def _render_deck_slide_charts(
 
     return {
         2: _safe(lambda: render_rolling_correlation(data)),
-        3: _safe(lambda: render_cumulative_returns(
-            data, only=_STATIC_STRATEGIES,
-            title="Static Strategies - Growth of $1")),
-        4: _safe(lambda: render_strategy_comparison(
-            data, strategy_type="dynamic")),
+        # Slide 3 — three-bar OOS Sharpe comparison. render_strategy_
+        # comparison's default arguments render every strategy as bars;
+        # the slide spec instructs the model to surface only the three
+        # relevant rows in its table, but the chart renderer produces
+        # the full comparison so the visual carries the cohort context.
+        3: _safe(lambda: render_strategy_comparison(data)),
+        # Slide 6 — efficient frontier with the live blend point.
+        # blend_weights drives the marker; the rest of the frontier
+        # is the cached sweep from analytics_metrics_cache.
         6: _safe(lambda: render_efficient_frontier(
             data, blend_weights=blend_weights)),
-        # Slide 8 — post-2022, three series: the regime-conditional blend
-        # (injected from the cached performance chart), benchmark, equal weight.
-        8: _safe(lambda: render_cumulative_returns(
-            data, only={"BENCHMARK", "EQUAL_WEIGHT"}, period="post2022",
-            extra_series=({"Regime-Conditional Blend": blend_series}
-                          if blend_series else None),
-            title="Out-of-Sample Cumulative Return (post-2022)")),
     }
 
 
@@ -11016,9 +11021,10 @@ async def _generate_deck_document(
     email: str,
 ) -> tuple[bytes, str, str, int | None]:
     """
-    Generates the 10-slide final presentation deck. Returns (file bytes,
-    filename, media type, editor draft id). Raises on failure — the job
-    wrapper records it.
+    Generates the 6-slide final presentation deck (June 6 2026 rewrite;
+    previously 10 slides — see academic_deck.SLIDE_TITLES for the new
+    narrative arc). Returns (file bytes, filename, media type, editor
+    draft id). Raises on failure — the job wrapper records it.
 
     JSON-driven (May 28 2026 rebuild): a single Academic Writer call
     (academic_deck.deck_generation_prompt() through the harness) returns
