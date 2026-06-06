@@ -5292,9 +5292,29 @@ async def council_query(
             start_harness_capture()
             start_usage_capture()
 
+            # June 5 2026 — fetch the prior CIO recommendation so the
+            # synthesis step can write Section C (shift narrative). The
+            # helper fails open to None — first run, cache cleared, or
+            # DB outage all produce None and Section C is omitted from
+            # the response per the system prompt's CONDITIONAL clause.
+            prior_recommendation = None
+            try:
+                from tools.cio_recommendation import (
+                    _current_data_hash, get_prior_recommendation,
+                )
+                current_hash = await _current_data_hash()
+                if current_hash:
+                    prior_recommendation = await get_prior_recommendation(
+                        current_hash)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("council_prior_recommendation_fetch_error",
+                            error=str(exc))
+
             cio = CIO()
             gen = cio.deliberate_streaming(
-                query, strategy_results, history, live_context=live_context)
+                query, strategy_results, history,
+                live_context=live_context,
+                prior_recommendation=prior_recommendation)
             sentinel = object()
             while True:
                 # Each next(gen) runs a phase — specialists fan-out,
@@ -13010,8 +13030,27 @@ async def ws_council(websocket: WebSocket):
                         })
 
                     # Gemini challenge + CIO synthesis — sent as final frame
+                    # June 5 2026 — prior_recommendation fetch parallels
+                    # the SSE path's logic so this legacy WebSocket route
+                    # also writes Section C of the transparency structure
+                    # when a prior CIO output exists.
+                    prior_recommendation_ws = None
+                    try:
+                        from tools.cio_recommendation import (
+                            _current_data_hash, get_prior_recommendation,
+                        )
+                        ws_current_hash = await _current_data_hash()
+                        if ws_current_hash:
+                            prior_recommendation_ws = await (
+                                get_prior_recommendation(ws_current_hash))
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning(
+                            "council_ws_prior_recommendation_fetch_error",
+                            error=str(exc))
                     cio = CIO()
-                    final = cio.deliberate(query, strategy_results, history)
+                    final = cio.deliberate(
+                        query, strategy_results, history,
+                        prior_recommendation=prior_recommendation_ws)
                     await websocket.send_json({
                         "type": "agent_result",
                         "agent": "cio",

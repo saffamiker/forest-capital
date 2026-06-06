@@ -263,6 +263,56 @@ async def get_latest_recommendation() -> dict | None:
         return None
 
 
+async def get_prior_recommendation(current_data_hash: str) -> dict | None:
+    """The most recent recommendation written under a DIFFERENT data_hash
+    than the current one — i.e. the previous distinct council output the
+    pipeline produced before today's data state.
+
+    Used by the CIO's _synthesise step to enable Section C (the "shift
+    narrative") of the mandatory transparency structure. When a prior
+    exists, the synthesis prompt receives it as `prior_recommendation`
+    in the DATA block and the CIO compares prior vs current — what
+    regime signal shifted, how the blend moved, what the weight change
+    means. When NONE exists (first run after a cache clear, or genuinely
+    first ever) the helper returns None and Section C is correctly
+    omitted from the response per the system prompt's `CONDITIONAL`
+    instruction.
+
+    The data_hash column carries either a bare base hash (older rows)
+    or a composite `{base}_{regime}_{bucket}` (newer rows — see the
+    comment block above near _composite_key). For the "prior" lookup
+    we want any row whose key differs from the current key — that
+    captures both a base-hash change (the underlying data moved) AND a
+    regime/confidence-bucket change without a base shift. Both count
+    as a prior distinct recommendation for narrative purposes.
+
+    Fail-open to None on a DB error, a missing table, or a missing
+    current_data_hash. June 5 2026."""
+    if not _DB_AVAILABLE or not current_data_hash:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(
+                text("SELECT raw_json, data_hash, regime, model, "
+                     "computed_at FROM cio_recommendations "
+                     "WHERE data_hash != :h "
+                     "ORDER BY computed_at DESC LIMIT 1"),
+                {"h": current_data_hash})
+            r = row.fetchone()
+            if not r:
+                return None
+            payload = dict(r[0]) if r[0] else {}
+            payload["data_hash"] = r[1]
+            payload["regime"] = r[2]
+            payload["model"] = r[3]
+            payload["computed_at"] = str(r[4])
+            return payload
+    except Exception as exc:  # noqa: BLE001
+        log.warning("cio_recommendation_prior_read_error", error=str(exc))
+        return None
+
+
 # ── regime-aware cache key (recommendation prose) ──────────────────────────
 #
 # The narrative prose (signal / recommendation / dissenting view) is keyed on
