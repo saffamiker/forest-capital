@@ -47,6 +47,11 @@ const MEDIUM_IMPACT = [
   'src/components/charts/CPCVSharpePlot.tsx',
   'src/components/charts/ProbabilisticSharpeChart.tsx',
   'src/components/charts/RegimeTransitionMatrix.tsx',
+  // bridge #67 -- the CV stability radar was the dark-grey-card
+  // outlier still showing in light mode after PR #289. Same fix
+  // pattern: import useChartTheme, swap inline SVG strokes + the
+  // bg-navy-800/60 card class for chartTheme-driven values.
+  'src/components/charts/CVStabilityRadar.tsx',
 ]
 
 describe('light-mode chart theming -- bridge #64 audit', () => {
@@ -107,6 +112,32 @@ describe('light-mode chart theming -- bridge #64 audit', () => {
       expect(src).not.toMatch(
         /background:\s*cellColor\([^)]+\),\s*\n\s*color:\s*'#f9fafb'/,
       )
+    })
+  })
+
+  describe('CV stability radar -- bridge #67', () => {
+    const path = 'src/components/charts/CVStabilityRadar.tsx'
+
+    it('no longer carries bg-navy-800/60 on the radar card', () => {
+      const src = source(path)
+      expect(src).not.toMatch(/bg-navy-800\/60/)
+    })
+
+    it('SVG strokes use chartTheme.gridStroke not the #1e3a5c literal', () => {
+      const src = source(path)
+      expect(src).toContain('stroke={chartTheme.gridStroke}')
+      expect(src).not.toMatch(/stroke="#1e3a5c"/)
+    })
+
+    it('SVG axis labels use chartTheme.textSecondary not the #64748b literal', () => {
+      const src = source(path)
+      expect(src).toContain('fill={chartTheme.textSecondary}')
+      // The badge-color logic at the top of RadarSmall still
+      // references '#64748b' as the STATIC strategy badge tint --
+      // that is intentional (functional UI color, not theme-driven)
+      // -- so we cannot just grep the file for absence of the hex.
+      // The pin specifically targets the SVG axis-label fill line.
+      expect(src).not.toMatch(/fill="#64748b"\s+fontSize/)
     })
   })
 
