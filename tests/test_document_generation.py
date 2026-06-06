@@ -7,7 +7,7 @@ AI-generated narrative:
 
   POST /api/v1/export/midpoint-paper      → 3-page midpoint paper (.docx)
   POST /api/v1/export/executive-brief     → 5-page executive brief (.docx)
-  POST /api/v1/export/presentation-deck   → 10-slide final deck (.pptx)
+  POST /api/v1/export/presentation-deck   → 6-slide final deck (.pptx)
 
 Two tiers, the same pattern as test_export_package.py:
   - Endpoint-contract tests run everywhere including CI. In the test
@@ -183,14 +183,17 @@ class TestDocumentGenerationContract:
         assert "[[BOB]]" not in text
         assert "[DATA PENDING]" in text
 
-    def test_presentation_deck_document_is_a_valid_10_slide_pptx(self):
+    def test_presentation_deck_document_is_a_valid_6_slide_pptx(self):
+        # June 6 2026 — deck rewrite reduced the slide count from 10 to 6
+        # to lead with the answer and follow with evidence. The builder
+        # now always emits exactly six slides, matching SLIDE_TITLES.
         import main
         pptx_bytes, filename, media, _draft = _run(
             main._generate_deck_document(TEAM_EMAIL))
         assert _PPTX_CT in media
         assert filename.endswith(".pptx")
         prs = Presentation(io.BytesIO(pptx_bytes))
-        assert len(prs.slides) == 10
+        assert len(prs.slides) == 6
         # Cold caches / no matplotlib in the test env must not fail the deck.
         assert "[DATA PENDING]" in _pptx_text(pptx_bytes)
 
@@ -200,7 +203,7 @@ class TestDocumentGenerationContract:
         pptx_bytes, *_ = _run(main._generate_deck_document(TEAM_EMAIL))
         prs = Presentation(io.BytesIO(pptx_bytes))
         text = _pptx_text(pptx_bytes)
-        # The ten canonical slide titles are always present (the builder
+        # The six canonical slide titles are always present (the builder
         # falls back to them when the AI JSON is absent — the test env case).
         for title in SLIDE_TITLES:
             assert title in text, f"missing slide title: {title}"
@@ -212,30 +215,38 @@ class TestDocumentGenerationContract:
         assert "SUBMISSION CHECKLIST" in \
             prs.slides[0].notes_slide.notes_text_frame.text
 
-    def test_build_presentation_deck_embeds_charts_on_2_3_4_6_8(self):
-        # The chart-embedding contract, tested directly on the builder with a
-        # Pillow placeholder PNG (no matplotlib needed) so it is deterministic
-        # in every environment — the _generate_deck_document path renders None
-        # charts in the test env (cold data), so it cannot assert pictures.
+    def test_build_presentation_deck_embeds_charts_on_2_3_6(self):
+        # June 6 2026 — chart-bearing slides are 2, 3, 6 per the six-slide
+        # rewrite (rolling correlation / OOS Sharpe comparison / efficient
+        # frontier with live blend). Slides 1, 4, 5 don't carry matplotlib
+        # charts — slide 1's drawdown bars and slide 4's nine-event
+        # scorecard are slide-body tables, slide 5 is bullets-only.
         from pptx.enum.shapes import MSO_SHAPE_TYPE
-        from tools.academic_deck import SLIDE_CHARTS, build_presentation_deck
+        from tools.academic_deck import (
+            DECK_SLIDE_COUNT, SLIDE_CHARTS, build_presentation_deck)
         from tools.chart_render import _placeholder
         png = _placeholder(240, 150)
         slides = [{"slide_number": n, "title": f"T{n}", "bullets": ["b1", "b2"],
                    "table_data": None, "speaker_notes": f"notes {n}"}
-                  for n in range(1, 11)]
-        charts = {n: png for n in SLIDE_CHARTS}  # 2, 3, 4, 6, 8
+                  for n in range(1, DECK_SLIDE_COUNT + 1)]
+        charts = {n: png for n in SLIDE_CHARTS}  # 2, 3, 6
         out = build_presentation_deck(slides, charts)
         prs = Presentation(io.BytesIO(out))
-        assert len(prs.slides) == 10
+        assert len(prs.slides) == DECK_SLIDE_COUNT
 
         def _has_pic(s):
             return any(sh.shape_type == MSO_SHAPE_TYPE.PICTURE
                        for sh in s.shapes)
-        for n in (2, 3, 4, 6, 8):
+        # Chart slides per SLIDE_CHARTS keys.
+        for n in SLIDE_CHARTS:
             assert _has_pic(prs.slides[n - 1]), f"slide {n} missing chart"
-        for n in (1, 5, 7, 9, 10):
-            assert not _has_pic(prs.slides[n - 1]), f"slide {n} unexpected chart"
+        # No-chart slides — all slides 1..N not in SLIDE_CHARTS.
+        chart_keys = set(SLIDE_CHARTS.keys())
+        for n in range(1, DECK_SLIDE_COUNT + 1):
+            if n in chart_keys:
+                continue
+            assert not _has_pic(prs.slides[n - 1]), (
+                f"slide {n} unexpected chart")
         for s in prs.slides:
             assert s.notes_slide.notes_text_frame.text.strip()
 
