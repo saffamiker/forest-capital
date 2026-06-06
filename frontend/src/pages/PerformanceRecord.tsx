@@ -22,6 +22,7 @@ import {
 } from 'recharts'
 import { AlertTriangle, TrendingUp, TrendingDown, Loader2 } from 'lucide-react'
 import InfoIcon from '../components/InfoIcon'
+import { useChartTheme } from '../lib/useChartTheme'
 
 interface Horizons { d30: number | null; d60: number | null; d90: number | null }
 interface PerfBlock {
@@ -194,6 +195,7 @@ const NET_COST_LINES: { bps: number; color: string; dash: string }[] = [
 ]
 
 export default function PerformanceRecord() {
+  const chartTheme = useChartTheme()
   const [data, setData] = useState<Payload | null>(null)
   const [cost, setCost] = useState<CostSensitivity | null>(null)
   const [loading, setLoading] = useState(true)
@@ -618,16 +620,17 @@ export default function PerformanceRecord() {
           <ResponsiveContainer width="100%" height={360}>
             <LineChart data={cum.series}
                        margin={{ top: 48, right: 16, bottom: 8, left: 8 }}>
-              <CartesianGrid stroke="#1f2937" strokeDasharray="3 3" />
-              <XAxis dataKey="date" tick={{ fill: '#64748b', fontSize: 11 }}
+              <CartesianGrid stroke={chartTheme.gridStroke} strokeDasharray="3 3" />
+              <XAxis dataKey="date" tick={{ fill: chartTheme.textSecondary, fontSize: 11 }}
                      minTickGap={40} />
               <YAxis tickFormatter={(v) => `${(v * 100).toFixed(0)}%`}
-                     tick={{ fill: '#64748b', fontSize: 11 }} />
+                     tick={{ fill: chartTheme.textSecondary, fontSize: 11 }} />
               <Tooltip
-                contentStyle={{ background: '#1a2438', border: '1px solid #1e3a5c' }}
+                contentStyle={chartTheme.tooltipContentStyle}
+                labelStyle={chartTheme.tooltipLabelStyle}
                 formatter={(v: number) => `${(v * 100).toFixed(1)}%`} />
               <Legend />
-              <ReferenceLine y={0} stroke="#94a3b8" strokeWidth={1} />
+              <ReferenceLine y={0} stroke={chartTheme.textSecondary} strokeWidth={1} />
               {(cum.event_markers || []).map((d, i) => {
                 const ev = eventByDate.get(d)
                 const va = ev?.value_added_sharpe ?? null

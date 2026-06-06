@@ -15,6 +15,7 @@ import { prettyName, tooltipLine } from '../../lib/strategyColors'
 import StrategyTypeBadge from '../StrategyTypeBadge'
 import ChartExportButton from '../ChartExportButton'
 import InfoIcon from '../InfoIcon'
+import { useChartTheme } from '../../lib/useChartTheme'
 
 interface Props {
   factorLoadings: Record<string, FactorLoadings>
@@ -38,8 +39,27 @@ function cellColor(value: number, max: number): string {
   return `rgba(239, 68, 68, ${a})`        // red for negative
 }
 
+// Cell-luminance-aware text colour. Cells with a low alpha (norm
+// near zero) show almost-white background in light mode and
+// almost-navy in dark mode -- pure white text washes out in light
+// mode while pure black washes out in dark. Pick a luminant text
+// colour by reading the saturation of the cell colour: high-norm
+// cells (saturated blue / red) always read well with light text;
+// low-norm cells need the reverse. The threshold is conservative
+// (0.45) -- below it we use the chart-theme's textPrimary so the
+// number is always readable on white.
+function cellTextColour(
+  value: number, max: number, themeTextPrimary: string,
+): string {
+  if (max === 0) return themeTextPrimary
+  const norm = Math.abs(Math.max(-1, Math.min(1, value / max)))
+  const alpha = norm * 0.7 + 0.1
+  return alpha >= 0.45 ? '#f9fafb' : themeTextPrimary
+}
+
 export default function FactorExposureHeatmap({ factorLoadings }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const chartTheme = useChartTheme()
   const entries = Object.entries(factorLoadings)
   if (entries.length === 0) {
     return (
@@ -107,7 +127,11 @@ export default function FactorExposureHeatmap({ factorLoadings }: Props) {
                   <td key={k} className="px-2 py-1.5 text-center">
                     <span
                       className="inline-block px-2 py-1 rounded font-mono text-2xs"
-                      style={{ background: cellColor(loadings[k], maxLoading), color: '#f9fafb' }}
+                      style={{
+                        background: cellColor(loadings[k], maxLoading),
+                        color: cellTextColour(
+                          loadings[k], maxLoading, chartTheme.textPrimary),
+                      }}
                       title={tooltipLine(name, FACTOR_LABELS[k] + ' loading', loadings[k].toFixed(2))}
                     >
                       {loadings[k].toFixed(2)}

@@ -19,6 +19,7 @@ import {
 } from '../stores/strategyCharacterisationsStore'
 import { PortfolioProfileModal } from './PortfolioProfileModal'
 import ExplainableText from './ExplainableText'
+import { useChartTheme } from '../lib/useChartTheme'
 import InfoIcon from './InfoIcon'
 import ChartCommentStrip from './ChartCommentStrip'
 import LearnModeBanner from './LearnModeBanner'
@@ -258,6 +259,7 @@ function StrategyTableRow({
 }
 
 export default function Dashboard() {
+  const chartTheme = useChartTheme()
   // Read from stores — no direct axios calls in this component.
   // Stores are session-scoped singletons; load() is a no-op if already loaded.
   const { strategies, dataRange, loading, load: loadStrategies } = useStrategiesStore()
@@ -565,17 +567,17 @@ export default function Dashboard() {
                 dataKey="date"
                 tickFormatter={(d: unknown) => typeof d === 'string' ? d.slice(0, 4) : ''}
                 minTickGap={50}
-                tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'JetBrains Mono' }}
+                tick={{ fill: chartTheme.textSecondary, fontSize: 10, fontFamily: 'JetBrains Mono' }}
               />
               <YAxis
                 tickFormatter={(v: unknown) => typeof v === 'number' ? `${v.toFixed(1)}x` : ''}
-                tick={{ fill: '#64748b', fontSize: 10, fontFamily: 'JetBrains Mono' }}
+                tick={{ fill: chartTheme.textSecondary, fontSize: 10, fontFamily: 'JetBrains Mono' }}
                 domain={['auto', 'auto']}
               />
               <Tooltip
-                contentStyle={{ backgroundColor: '#0d1424', border: '1px solid #1e2d47', borderRadius: 6 }}
-                labelStyle={{ color: '#94a3b8', fontSize: 11 }}
-                itemStyle={{ fontFamily: 'JetBrains Mono', fontSize: 11 }}
+                contentStyle={chartTheme.tooltipContentStyle}
+                labelStyle={chartTheme.tooltipLabelStyle}
+                itemStyle={{ fontFamily: 'JetBrains Mono', fontSize: 11, color: chartTheme.textPrimary }}
                 formatter={(v: unknown) => typeof v === 'number' ? `${v.toFixed(2)}x` : '—'}
               />
               {strategies.filter((s) => visibleStrategies.has(s.strategy_name)).map((s) => (

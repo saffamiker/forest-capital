@@ -31,6 +31,7 @@ import {
 import { useAdvisorStore } from '../stores/advisorStore'
 import { useUI } from '../context/UIContext'
 import type { DeliverableType, AdvisorAnalysis, VerifiedCitation } from '../types/advisor'
+import { useChartTheme } from '../lib/useChartTheme'
 
 
 // May 24 2026 — context-aware floating button visibility per user spec.
@@ -392,6 +393,7 @@ function Section({ title, items, accent }: { title: string; items: string[]; acc
 const FALLBACK_EXCERPT = 'Excerpt unavailable — click to verify directly'
 
 function CitationItem({ citation }: { citation: VerifiedCitation }) {
+  const chartTheme = useChartTheme()
   const [hovered, setHovered] = useState(false)
   const hasExcerpt = typeof citation.excerpt === 'string' && citation.excerpt.length > 0
   const tooltipText = hasExcerpt ? (citation.excerpt as string) : FALLBACK_EXCERPT
@@ -444,7 +446,8 @@ function CitationItem({ citation }: { citation: VerifiedCitation }) {
           data-testid="advisor-citation-tooltip"
           className="absolute left-2 right-2 bottom-full mb-1 z-50 rounded shadow-lg p-2.5"
           style={{
-            backgroundColor: '#1a2438',
+            backgroundColor: chartTheme.tooltipContentStyle.backgroundColor as string,
+            color: chartTheme.textPrimary,
             border: '1px solid rgba(245,158,11,0.4)',
             // Subtle gold left accent ties the tooltip back to the
             // advisor's brand colour and signals "advisor surfaced this".
