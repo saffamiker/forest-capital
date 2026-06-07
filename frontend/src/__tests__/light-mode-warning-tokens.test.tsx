@@ -156,3 +156,85 @@ describe('light-mode warning token overrides -- bridge #72', () => {
     })
   })
 })
+
+
+// ── Bridge #83: warning banner subtext + Report Writer card body ─────
+
+describe('light-mode banner subtext + text-text-* alias overrides -- bridge #83', () => {
+  const css = source('src/index.css')
+
+  describe('amber opacity variants flip to amber-700 (banner subtext)', () => {
+    it('text-amber-200/80 reads dark on light banner backgrounds', () => {
+      expect(css).toContain(String.raw`.text-amber-200\/80`)
+      expect(css).toMatch(
+        /text-amber-200\\\/80[^}]*color:\s*#b45309/i,
+      )
+    })
+
+    it('the other amber-200 opacity variants share the override', () => {
+      expect(css).toContain(String.raw`.text-amber-200\/70`)
+      expect(css).toContain(String.raw`.text-amber-200\/60`)
+    })
+  })
+
+  describe('text-text-* aliases route through the CSS variable system', () => {
+    it('text-text-secondary uses --text-secondary on light', () => {
+      expect(css).toContain('.text-text-secondary')
+      expect(css).toMatch(
+        /text-text-secondary\s*\{\s*color:\s*var\(--text-secondary\)/i,
+      )
+    })
+
+    it('text-text-primary uses --text-primary on light', () => {
+      expect(css).toMatch(
+        /text-text-primary\s*\{\s*color:\s*var\(--text-primary\)/i,
+      )
+    })
+
+    it('text-text-muted uses --text-muted on light', () => {
+      expect(css).toMatch(
+        /text-text-muted\s*\{\s*color:\s*var\(--text-muted\)/i,
+      )
+    })
+  })
+
+  describe('Reports.tsx Report Writer card body has no BOB callout copy', () => {
+    const reports = source('src/pages/Reports.tsx')
+
+    it('removes the [BOB] callout phrase from the description', () => {
+      expect(reports).not.toMatch(/resolve every \[BOB\] callout/i)
+    })
+
+    it('still describes the eleven-step verified-data flow', () => {
+      // The copy moves to "outstanding placeholder" -- generic phrasing
+      // that survives the BOB callout removal without losing the user's
+      // sense of what the eleven-step flow does.
+      expect(reports).toMatch(/eleven-step verified-data flow/i)
+      expect(reports).toMatch(/outstanding placeholder/i)
+    })
+
+    it('keeps the description on the text-text-secondary token', () => {
+      // After bridge #83's index.css override, the token reads dark on
+      // light AND light on dark -- single source of truth, no per-page
+      // class swap needed.
+      expect(reports).toMatch(
+        /text-text-secondary[^>]*>\s*\n?\s*The eleven-step/,
+      )
+    })
+  })
+
+  describe('ReportReadinessIndicator banner subtext is on text-amber-200/80', () => {
+    const indicator = source('src/components/ReportReadinessIndicator.tsx')
+
+    it('still uses the text-amber-200/80 class (override-based fix)', () => {
+      // The fix lives in CSS, not in this component -- the class itself
+      // is the right semantic choice (amber subtext on amber banner).
+      // The override forces the colour to amber-700 on light.
+      expect(indicator).toContain('text-amber-200/80')
+    })
+
+    it('keeps the "Acknowledge, mark intentional, or revoke" wording', () => {
+      expect(indicator).toMatch(/Acknowledge, mark intentional, or revoke/)
+    })
+  })
+})

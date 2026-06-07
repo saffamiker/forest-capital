@@ -480,10 +480,10 @@ export default function Reports() {
         <DocumentGenerationPanel />
       </div>
 
-      {/* Report Writer — verified-data midpoint paper flow with [BOB]
-          callout resolution, AI iteration toolbar, academic review
-          against the FNA670 rubric, and two-tier download gating.
-          The /reports/writer page hosts the full eleven-step workflow. */}
+      {/* Report Writer — verified-data midpoint paper flow with the
+          AI iteration toolbar, academic review against the FNA670
+          rubric, and two-tier download gating. The /reports/writer
+          page hosts the full eleven-step workflow. */}
       <TeamGate permission="team_member"
         tooltip="The report writer is available to the project team">
         <section
@@ -500,9 +500,9 @@ export default function Reports() {
               <p className="text-text-secondary text-xs mb-3">
                 The eleven-step verified-data flow: stage findings,
                 source citations, validate thesis, generate draft,
-                resolve every [BOB] callout, run final check, run the
-                academic review against the FNA670 rubric, and
-                download the submission-ready .docx.
+                resolve every outstanding placeholder, run final
+                check, run the academic review against the FNA670
+                rubric, and download the submission-ready .docx.
               </p>
               <Link
                 to="/reports/writer"
