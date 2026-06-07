@@ -394,3 +394,54 @@ async def test_build_digest_includes_three_new_section_titles():
     assert trigger_idx < health_idx
     assert trigger_idx < warm_idx
     assert trigger_idx < open_idx
+
+
+@pytest.mark.asyncio
+async def test_digest_section_order_bridge_84():
+    """Bridge #84: the Analytics snapshot (current regime, live blend
+    weights, OOS Sharpe) is operationally critical and must appear
+    immediately after the rebalance-triggers block -- BEFORE platform
+    health, NOT below release history. Release history / commit
+    summaries are useful as a "what shipped" footer and must sit at
+    the bottom of the digest.
+
+    The previous order tucked Analytics snapshot below the Releases
+    block, so the morning operator's most decision-relevant numbers
+    appeared after the cosmetic "what shipped" list."""
+    _, html, text = await build_digest_email()
+    html_lc = html.lower()
+
+    trigger_idx = html_lc.index("what would trigger a rebalance")
+    analytics_idx = html_lc.index("analytics snapshot")
+    health_idx = html_lc.index("platform health")
+    releases_idx = html_lc.index("platform releases")
+    open_idx = html_lc.index("open work")
+
+    # Bridge #84 contract: Analytics snapshot moves UP -- it sits
+    # immediately after the rebalance trigger and BEFORE the platform
+    # health block.
+    assert trigger_idx < analytics_idx, (
+        "Analytics snapshot must follow the rebalance trigger.")
+    assert analytics_idx < health_idx, (
+        "Analytics snapshot must precede platform health.")
+
+    # Bridge #84 contract: Releases moves DOWN to the bottom -- below
+    # platform health, below the analytics snapshot, below open work.
+    assert releases_idx > analytics_idx, (
+        "Releases must NOT appear above the analytics snapshot.")
+    assert releases_idx > health_idx, (
+        "Releases must NOT appear above the platform health block.")
+    assert releases_idx > open_idx, (
+        "Releases must sit at the bottom -- below open work.")
+
+    # Text fallback carries the same ordering -- the contract is
+    # presentation-agnostic so an operator using a plain-text client
+    # sees the same priority.
+    text_lc = text.lower()
+    text_trigger = text_lc.index("what would trigger a rebalance")
+    text_analytics = text_lc.index("analytics snapshot")
+    text_health = text_lc.index("platform health")
+    text_releases = text_lc.index("platform releases")
+    assert text_trigger < text_analytics < text_health
+    assert text_releases > text_analytics
+    assert text_releases > text_health
