@@ -266,11 +266,15 @@ _SUBMISSION_CLASSIFICATIONS: dict[str, dict[str, str]] = {
     "AN04": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
     "AN05": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
     "AN06": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
-    # PLATFORM INTEGRATION — IN01/02/03 verify the platform's own
-    # subsystems; their failure means the audit chain itself is
-    # broken. Blocks.
+    # PLATFORM INTEGRATION — IN01/IN03 verify the audit chain itself;
+    # their failure is structural. IN02 attests an Academic Review row
+    # exists; an academic-review WARN is advisory by design (the
+    # midpoint banner and the editor header already display the
+    # advisory score), so IN02 is non_blocking — the report generation
+    # gate must not refuse a draft just because the latest review was
+    # truncated or had fewer than five rated sections.
     "IN01": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
-    "IN02": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
+    "IN02": {"warn_class": "non_blocking",        "incomplete_class": "blocks_submission"},
     "IN03": {"warn_class": "disclosure_required", "incomplete_class": "blocks_submission"},
 }
 

@@ -651,64 +651,70 @@ class TestComputeReadinessExcludesMethodologyCheckIds:
         assert out["blocking_count"] == 1  # statistical FAIL stands
 
 
-class TestMidpointIN02CarveOutEndpoint:
-    """End-to-end gate contract: a pure-IN02 methodology blocker no
-    longer 422s the midpoint endpoint, but still 422s the executive
-    brief. Same monkeypatch pattern as TestGenerationGate so the
-    contract is read against the real gate, not a mock of it."""
+class TestUniversalIN02NonBlocking:
+    """Bridge #82: IN02 is reclassified non_blocking in qa_agent.py,
+    so the readiness gate drops it via the generic _is_non_blocking_warn
+    filter on every document type — midpoint, executive brief, AND the
+    presentation deck. The previous per-document carve-out
+    (`exclude_methodology_check_ids={"IN02"}` on the midpoint path
+    only) has been removed because the taxonomy itself now says
+    "IN02 never blocks generation". The gate behaves identically for
+    all three endpoints — no special-casing by finding code.
 
-    def _seed_in02_only(self, monkeypatch) -> None:
-        # The midpoint path will pass exclude_methodology_check_ids=
-        # {"IN02"} to compute_readiness; the patched function must
-        # honour that. We patch compute_readiness directly to a
-        # version that respects the exclusion and reports the same
-        # shape compute_readiness emits.
+    A real IN02 WARN now carries warn_class='non_blocking' (set in
+    _SUBMISSION_CLASSIFICATIONS) so the _methodology_blocking filter
+    drops it before compute_readiness even sees it. Tests below mock
+    the methodology layer so the IN02 WARN never appears in
+    unresolved_warnings — that is the canonical post-bridge-#82
+    behaviour: the methodology blocker filter handles it, not a
+    per-endpoint exclusion param."""
+
+    def _seed_in02_dropped_at_methodology(self, monkeypatch) -> None:
+        """After the reclassification, _methodology_blocking filters
+        IN02 out generically (warn_class='non_blocking'). Mock the
+        layer below to return empty -- matching the post-fix shape."""
         from tools import report_readiness
 
         async def _verdict(exclude_methodology_check_ids=None):
-            warns = [{
-                "check_id": "IN02", "check": "Academic Review complete",
-                "description": "...", "category": "INTEGRATION",
-                "status": "WARN"}]
-            excl = exclude_methodology_check_ids or set()
-            kept = [it for it in warns if it["check_id"] not in excl]
-            blocking_count = len(kept)
+            # IN02 is already dropped by the methodology filter; this
+            # mock represents post-filter state (no IN02 here).
             return {
-                "is_ready": blocking_count == 0,
-                "blocking_count": blocking_count,
+                "is_ready": True,
+                "blocking_count": 0,
                 "statistical": {"unreviewed_warnings": [],
                                 "unreviewed_failures": []},
-                "methodology": {"unresolved_warnings": kept,
+                "methodology": {"unresolved_warnings": [],
                                 "unresolved_failures": []},
-                "checked_at": "2026-05-25T00:00:00+00:00",
+                "checked_at": "2026-06-07T00:00:00+00:00",
             }
 
         monkeypatch.setattr(report_readiness, "compute_readiness", _verdict)
 
-    def test_midpoint_skips_in02_block(
+    def test_midpoint_accepts_when_only_in02_would_block(
         self, monkeypatch, client: TestClient,
     ):
-        self._seed_in02_only(monkeypatch)
+        self._seed_in02_dropped_at_methodology(monkeypatch)
         r = client.post("/api/v1/export/midpoint-paper",
                         headers=_auth_headers(), json={})
-        # 202 — the gate accepts because IN02 is advisory for midpoint.
         assert r.status_code == 202
 
-    def test_executive_brief_still_blocked_by_in02(
+    def test_executive_brief_accepts_when_only_in02_would_block(
         self, monkeypatch, client: TestClient,
     ):
-        self._seed_in02_only(monkeypatch)
+        """NEW post-bridge-#82: the executive brief no longer 422s
+        when IN02 is the only methodology WARN — IN02 is universally
+        non-blocking."""
+        self._seed_in02_dropped_at_methodology(monkeypatch)
         r = client.post("/api/v1/export/executive-brief",
                         headers=_auth_headers(), json={})
-        # 422 — IN02 is still a hard gate for the executive brief.
-        assert r.status_code == 422
-        assert r.json()["detail"]["error"] == "report_not_ready"
+        assert r.status_code == 202
 
-    def test_presentation_deck_still_blocked_by_in02(
+    def test_presentation_deck_accepts_when_only_in02_would_block(
         self, monkeypatch, client: TestClient,
     ):
-        """Deck behaviour matches the exec brief — IN02 still gates."""
-        self._seed_in02_only(monkeypatch)
+        """NEW post-bridge-#82: deck matches the exec brief — IN02
+        never gates any document type."""
+        self._seed_in02_dropped_at_methodology(monkeypatch)
         r = client.post("/api/v1/export/presentation-deck",
                         headers=_auth_headers(), json={})
-        assert r.status_code == 422
+        assert r.status_code == 202

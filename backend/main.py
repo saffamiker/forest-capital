@@ -10060,6 +10060,7 @@ async def _run_auto_academic_review(
             "overall_rating": scored["rating"],
             "section_ratings": scored["section_ratings"],
             "sections_rated": scored["sections_rated"],
+            "parse_error": scored.get("parse_error", False),
         }
         harness_meta = collect_harness_metrics()
         if harness_meta:
@@ -10188,12 +10189,12 @@ async def export_midpoint_paper(
         # Editor exports are a faithful render of what the author has
         # already saved; the gate runs only on fresh AI generation.
         return await _editor_export(int(editor_draft_id))
-    # IN02 (Academic Review complete) is advisory for the midpoint
-    # paper — the auto-fired review post-generation produces a score
-    # surfaced in the editor header, with an amber banner below 6.0.
-    # Other blockers (statistical FAIL, methodology FAIL on anything
-    # else) still gate generation.
-    await _require_report_ready(exclude_methodology_check_ids={"IN02"})
+    # IN02 (Academic Review complete) is advisory by design — the
+    # check is classified warn_class="non_blocking" in qa_agent.py so
+    # the readiness gate skips it on every document type, not just
+    # midpoint. Other blockers (statistical FAIL, methodology FAIL on
+    # anything else) still gate generation.
+    await _require_report_ready()
     return _start_generation_job("midpoint_paper", session, request)
 
 
