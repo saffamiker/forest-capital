@@ -2855,6 +2855,46 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
                     rec["blend_weights"] = proj["blend_weights"]
             except Exception as exc:  # noqa: BLE001
                 log.warning("recommendation_blend_overlay_failed", error=str(exc))
+            # Bridge #81 -- implied asset allocation + blend change
+            # trigger overlays. Both reuse already-cached primitives:
+            #
+            # implied_asset_allocation -- equity / bond / cash portfolio
+            #   split derived from the live blend_weights times the
+            #   per-strategy avg_equity_weight / avg_bond_weight
+            #   persisted in strategy_results_cache. Pure read.
+            #
+            # blend_change_trigger -- one readable sentence describing
+            #   what would shift the blend (regime flip, VIX threshold,
+            #   etc.). Synthesised from detect_current_regime() output
+            #   already used by _overlay_live_regime above. The 15-min
+            #   in-process regime cache shields the second read.
+            #
+            # Both fail-open: a cold strategy cache leaves
+            # implied_asset_allocation absent; an unavailable regime
+            # leaves blend_change_trigger as the generic sentence. The
+            # frontend gracefully omits or shows the existing line in
+            # either case.
+            try:
+                import asyncio
+                from tools.cio_recommendation import (
+                    compute_implied_asset_allocation,
+                    compute_blend_change_trigger,
+                )
+                from tools.regime_detector import detect_current_regime
+                allocation = await compute_implied_asset_allocation(
+                    rec.get("blend_weights"))
+                if allocation:
+                    rec["implied_asset_allocation"] = allocation
+                live = await asyncio.to_thread(detect_current_regime)
+                rec["blend_change_trigger"] = compute_blend_change_trigger(
+                    (live or {}).get("hmm_regime"),
+                    (live or {}).get("monthly_hmm_regime"),
+                    bool((live or {}).get("hmm_models_agree", True)),
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "recommendation_allocation_overlay_failed",
+                    error=str(exc))
         return {"available": bool(rec), "recommendation": rec}
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]

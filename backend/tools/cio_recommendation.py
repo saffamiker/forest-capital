@@ -515,6 +515,137 @@ async def get_endpoint_recommendation() -> dict | None:
         latest, regime, confidence, monthly_regime, hmm_models_agree)
 
 
+async def compute_implied_asset_allocation(
+    blend_weights: dict[str, float] | None,
+) -> dict[str, float] | None:
+    """Translate the live regime-conditional blend (per-strategy weights)
+    into asset-class percentages. The per-strategy avg_equity_weight /
+    avg_bond_weight live in strategy_results_cache; we multiply each
+    strategy's weight in the blend by its asset-class composition and
+    sum to portfolio totals.
+
+    Returns {equity_pct, bond_pct, cash_pct} as fractions of 1.0, OR
+    None when the strategy cache is empty / the blend is missing /
+    every blend weight is zero. Fail-open across the board: a cold
+    cache returns None and the caller renders the existing CIO card
+    without the new line.
+
+    PURE READ: this helper does NOT recompute or refit anything. It
+    pulls already-cached primitives only -- strategy_results_cache
+    and the blend_weights dict the caller supplies (usually from the
+    CIO recommendation's own blend_weights field, persisted at the
+    last warm). Bridge #81.
+    """
+    if not blend_weights:
+        return None
+    try:
+        from tools.cache import get_latest_strategy_cache
+    except Exception as exc:  # noqa: BLE001
+        log.warning("implied_asset_allocation_imports_failed",
+                    error=str(exc))
+        return None
+    try:
+        strategies = await get_latest_strategy_cache() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("implied_asset_allocation_cache_read_failed",
+                    error=str(exc))
+        return None
+    if not strategies:
+        return None
+
+    total_eq = 0.0
+    total_bd = 0.0
+    total_w = 0.0
+    for strategy, weight in blend_weights.items():
+        try:
+            w = float(weight or 0)
+        except (TypeError, ValueError):
+            continue
+        if w <= 0:
+            continue
+        s = strategies.get(strategy) or {}
+        try:
+            eq = float(s.get("avg_equity_weight") or 0)
+            bd = float(s.get("avg_bond_weight") or 0)
+        except (TypeError, ValueError):
+            continue
+        total_eq += w * eq
+        total_bd += w * bd
+        total_w += w
+
+    if total_w <= 0:
+        return None
+
+    # Cash residual = whatever the strategies' weighted-average exposures
+    # do not cover. A fully-invested blend (eq + bd ≈ 1) leaves cash ≈ 0;
+    # a partial blend (cash drag from one of the strategies) surfaces
+    # explicitly so the audience can SEE the un-invested fraction
+    # instead of mentally subtracting.
+    cash = max(0.0, 1.0 - total_eq - total_bd)
+    return {
+        "equity_pct": round(total_eq, 4),
+        "bond_pct": round(total_bd, 4),
+        "cash_pct": round(cash, 4),
+    }
+
+
+def compute_blend_change_trigger(
+    regime: str | None,
+    monthly_regime: str | None,
+    hmm_models_agree: bool,
+) -> str:
+    """Synthesise the one-sentence "what would shift the blend" guidance
+    that goes under the CIO card's allocation line.
+
+    The CIO card asks: "what would cause us to rebalance?" The answer is
+    "the regime read shifts" -- but expanding that into something the
+    audience can act on means naming the watch points (the threshold
+    constants from config.py) and any current divergence between the
+    daily and monthly HMM fits.
+
+    Single readable sentence, NOT a data dump. Fail-open: when the
+    current regime is unknown the helper still returns a generic
+    sentence so the card is never blank. Bridge #81.
+    """
+    from config import VIX_HIGH_THRESHOLD, BEAR_MARKET_THRESHOLD
+
+    vix = int(VIX_HIGH_THRESHOLD)
+    trend_pct = int(abs(BEAR_MARKET_THRESHOLD) * 100)
+
+    if regime and not hmm_models_agree and monthly_regime:
+        # The two HMMs already disagree -- the next blend shift is
+        # whichever model concedes first. Lead with that.
+        return (
+            f"Daily HMM reads {regime} while the monthly HMM still reads "
+            f"{monthly_regime}; the blend tilts further when the two "
+            f"converge, or sooner if VIX sustains above {vix} or the "
+            f"trailing equity trend falls below {-trend_pct}%."
+        )
+    if regime == "BEAR":
+        return (
+            f"Blend de-risks further on a deeper bear signal (VIX sustained "
+            f"above {vix} or HY credit spreads widening), and re-risks "
+            f"when the HMM flips back to BULL or TRANSITION."
+        )
+    if regime == "BULL":
+        return (
+            f"Blend stays risk-on while the HMM reads BULL; a regime flip "
+            f"to BEAR or sustained VIX above {vix} would tilt the blend "
+            f"toward MIN_VARIANCE and VOL_TARGETING."
+        )
+    if regime == "TRANSITION":
+        return (
+            f"Blend stays neutral while the HMM reads TRANSITION; a flip "
+            f"to BULL re-risks toward growth strategies, and a flip to "
+            f"BEAR tilts toward MIN_VARIANCE and VOL_TARGETING."
+        )
+    return (
+        f"Blend shifts on the next HMM regime flip; the watch signals are "
+        f"VIX above {vix}, a trailing equity trend below {-trend_pct}%, "
+        f"or a sustained yield-curve inversion."
+    )
+
+
 def _attach_divergence(
     rec: dict | None,
     daily_regime: str | None,
