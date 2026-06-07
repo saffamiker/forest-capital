@@ -140,22 +140,44 @@ def _is_non_blocking_warn(item: dict[str, Any]) -> bool:
     The check classifications are defined in
     agents/qa_agent.py:_SUBMISSION_CLASSIFICATIONS and attached to
     every checklist item at module import time -- so the item dict
-    we receive here carries `warn_class` as a leaf field. The three
-    values defined there:
+    we receive here typically carries `warn_class` as a leaf field.
+    The three values defined there:
 
       "disclosure_required" -- blocks until acknowledged (an
                                 qa_intentional_overrides row exists)
       "non_blocking"        -- never blocks (informational)
       "blocks"              -- treated as failure (always blocks)
 
-    A leaf missing the field defaults to the most conservative
-    reading ("disclosure_required") so a new check added without a
-    classification cannot silently sneak through. AN03 sensitivity
-    is the canonical non_blocking case -- the project scope marks it
-    as a Section 4 extension, not a structural gate.
-
-    Bridge #74 fix.
+    Source-of-truth ordering (bridge #85):
+      1. The static _SUBMISSION_CLASSIFICATIONS map keyed by check_id.
+         The classification lives in code, not in the row; a cached
+         qa_results_cache item written before a reclassification ships
+         carries STALE warn_class data, which would otherwise keep
+         the gate blocking on a finding the taxonomy now says is
+         advisory. Consulting the static map first means the gate
+         survives a taxonomy change without requiring cache
+         invalidation. IN02 was the canonical instance: PR #300
+         flipped it to non_blocking, but the cached row on Render
+         still carried "disclosure_required", so generation kept
+         blocking until the next audit run.
+      2. The per-item warn_class field on the row (legacy / cached
+         fallback). Still consulted so the gate works in test
+         fixtures and for any check_id missing from the static map.
+      3. Default to False (not non-blocking) so a new check added
+         without a classification cannot silently sneak through.
     """
+    cid = item.get("check_id")
+    if cid:
+        try:
+            from agents.qa_agent import _SUBMISSION_CLASSIFICATIONS
+            cls = _SUBMISSION_CLASSIFICATIONS.get(cid)
+            if cls and cls.get("warn_class"):
+                static = str(cls["warn_class"]).strip().lower()
+                return static == "non_blocking"
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "readiness_static_classify_failed",
+                check_id=cid, error=str(exc))
     warn_class = str(item.get("warn_class") or "").strip().lower()
     return warn_class == "non_blocking"
 

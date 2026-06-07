@@ -209,6 +209,7 @@ class TestNonBlockingWarnFilter:
         from tools.report_readiness import _is_non_blocking_warn
 
         # The three taxonomy values from qa_agent._SUBMISSION_CLASSIFICATIONS.
+        # No check_id present -> the per-item warn_class fallback applies.
         assert _is_non_blocking_warn(
             {"warn_class": "non_blocking"}) is True
         assert _is_non_blocking_warn(
@@ -225,6 +226,52 @@ class TestNonBlockingWarnFilter:
             {"warn_class": "NON_BLOCKING"}) is True
         assert _is_non_blocking_warn(
             {"warn_class": "  non_blocking  "}) is True
+
+    def test_static_classification_overrides_stale_cached_warn_class(self):
+        """Bridge #85 -- the gate reads the source-of-truth static map
+        from qa_agent.py first. A cached qa_results_cache row whose
+        warn_class is stale ('disclosure_required' for IN02, written
+        before PR #300 reclassified IN02 to non_blocking) MUST be
+        treated as non-blocking by the gate because the STATIC
+        classification is the authoritative one.
+
+        Without this, IN02 would keep blocking generation on Render
+        until the next QA audit run rewrote the cached row -- which
+        is exactly the bug the user reported in bridge #85."""
+        from tools.report_readiness import _is_non_blocking_warn
+
+        # IN02 in qa_agent._SUBMISSION_CLASSIFICATIONS is non_blocking
+        # after PR #300. Even if the cached row still carries the
+        # stale disclosure_required value, the gate must say "non
+        # blocking".
+        assert _is_non_blocking_warn({
+            "check_id": "IN02",
+            "warn_class": "disclosure_required",  # stale cache value
+        }) is True
+
+        # Conversely, a check classified disclosure_required in the
+        # static map remains blocking even if the row mis-states it
+        # as non_blocking (defensive both ways).
+        assert _is_non_blocking_warn({
+            "check_id": "D01",
+            "warn_class": "non_blocking",  # bogus row value
+        }) is False
+
+    def test_unknown_check_id_falls_back_to_row_warn_class(self):
+        """A check_id not present in _SUBMISSION_CLASSIFICATIONS
+        falls back to the per-row warn_class field. This keeps the
+        helper extension-friendly: tests can pin behaviour for a
+        synthetic check_id without registering it in the static map."""
+        from tools.report_readiness import _is_non_blocking_warn
+
+        assert _is_non_blocking_warn({
+            "check_id": "XX99",   # not in the static map
+            "warn_class": "non_blocking",
+        }) is True
+        assert _is_non_blocking_warn({
+            "check_id": "XX99",
+            "warn_class": "disclosure_required",
+        }) is False
 
     def test_methodology_blocking_drops_non_blocking_warn(
         self, monkeypatch,
