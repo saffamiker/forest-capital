@@ -9974,6 +9974,32 @@ async def _require_report_ready(
         exclude_methodology_check_ids=exclude_methodology_check_ids)
     if readiness.get("is_ready"):
         return
+    # Bridge #91 — when caches are cold, the gate's "report not ready"
+    # error type narrows to "caches_not_warm" so the frontend can
+    # render a Warm Caches action button instead of the audit-blocker
+    # list. When BOTH caches are cold AND audit blockers exist, we
+    # surface caches_not_warm because warming is the prerequisite the
+    # user has to clear first.
+    caches_warm = readiness.get("caches_warm")
+    if caches_warm is False:
+        cold_caches = readiness.get("cold_caches") or []
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "caches_not_warm",
+                "message": (
+                    "Caches are not warm — generation would produce "
+                    "[DATA PENDING] placeholders. Click Warm Caches "
+                    "before generating."),
+                "blocking_count": readiness.get("blocking_count", 0),
+                "blockers": summarise_blockers(readiness),
+                "caches_warm": False,
+                "cold_caches": cold_caches,
+                "warm_status": readiness.get("warm_status"),
+                "statistical": readiness.get("statistical"),
+                "methodology": readiness.get("methodology"),
+            },
+        )
     raise HTTPException(
         status_code=422,
         detail={
@@ -9985,6 +10011,8 @@ async def _require_report_ready(
                 "generated."),
             "blocking_count": readiness.get("blocking_count", 0),
             "blockers": summarise_blockers(readiness),
+            "caches_warm": readiness.get("caches_warm"),
+            "cold_caches": readiness.get("cold_caches") or [],
             "statistical": readiness.get("statistical"),
             "methodology": readiness.get("methodology"),
         },

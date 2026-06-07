@@ -52,6 +52,12 @@ export interface ReportReadiness {
     unresolved_warnings: MethodologyBlocker[]
     unresolved_failures: MethodologyBlocker[]
   }
+  // Bridge #91 — analytics-cache warmth verdict. caches_warm=false
+  // gates generation pre-flight so the user doesn't burn an LLM run
+  // on cold caches that would emit [DATA PENDING].
+  caches_warm?: boolean
+  cold_caches?: string[]
+  warm_status?: 'idle' | 'warming' | 'warm' | 'failed' | 'unknown'
   checked_at: string
 }
 
