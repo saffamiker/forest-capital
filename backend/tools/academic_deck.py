@@ -361,6 +361,97 @@ def deck_generation_prompt() -> str:
     return f"{DECK_GENERATION_PROMPT}\n\n{SLIDE_SPECIFICATIONS}"
 
 
+def _slice_slide_spec(slide_number: int) -> str:
+    """Returns the slide-N section out of SLIDE_SPECIFICATIONS.
+
+    SLIDE_SPECIFICATIONS is a single block of text with "Slide N --"
+    headers. We split on those headers and return the requested slide's
+    body. Bridge #95 -- per-slide generation needs ONE slide's spec at
+    a time so the LLM doesn't have to hold all six in working memory
+    AND so each call's output fits comfortably under max_tokens.
+    """
+    if not (1 <= slide_number <= DECK_SLIDE_COUNT):
+        raise ValueError(
+            f"slide_number must be 1..{DECK_SLIDE_COUNT}; got {slide_number}")
+    text = SLIDE_SPECIFICATIONS
+    marker = f"Slide {slide_number} --"
+    start = text.find(marker)
+    if start == -1:
+        raise ValueError(
+            f"Slide {slide_number} spec missing from SLIDE_SPECIFICATIONS")
+    # The next slide's marker terminates this slide's body. The last
+    # slide runs to end-of-string.
+    if slide_number < DECK_SLIDE_COUNT:
+        end = text.find(f"Slide {slide_number + 1} --", start)
+        if end == -1:
+            end = len(text)
+    else:
+        end = len(text)
+    return text[start:end].rstrip()
+
+
+def slide_generation_prompt(slide_number: int) -> str:
+    """Bridge #95 -- per-slide generation prompt. Returns a prompt that
+    asks the model to emit a SINGLE slide's JSON object (not the
+    {"slides":[...]} wrapper) for the given slide number. Token budget
+    per slide is much smaller than the all-six-at-once call, so a
+    1000-1500 max_tokens cap fits comfortably with headroom for
+    speaker notes -- no more truncation.
+
+    The DECK_GENERATION_PROMPT preamble carries the wrapped-list
+    schema example because it's also handed to the legacy all-six
+    call. For the per-slide path we trim the preamble at the
+    "Respond only in JSON" line so the per-slide schema below isn't
+    competing with the wrapped example for the model's attention.
+    """
+    cutoff = DECK_GENERATION_PROMPT.find("Respond only in JSON")
+    preamble = (
+        DECK_GENERATION_PROMPT[:cutoff].rstrip()
+        if cutoff != -1 else DECK_GENERATION_PROMPT.rstrip()
+    )
+    spec = _slice_slide_spec(slide_number)
+    title = SLIDE_TITLES[slide_number - 1]
+    return (
+        f"{preamble}\n\n"
+        f"You are generating ONLY slide {slide_number} of the 6-slide "
+        f"deck: \"{title}\". Spec:\n\n{spec}\n\n"
+        f"Respond ONLY with a single JSON object matching this shape "
+        f"(no preamble, no markdown fences, no wrapping list):\n"
+        f'{{\n'
+        f'  "slide_number": {slide_number},\n'
+        f'  "title": "...",\n'
+        f'  "bullets": ["...", "..."],\n'
+        f'  "table_data": null or {{"headers": [...], "rows": [[...], ...]}},\n'
+        f'  "speaker_notes": "..."\n'
+        f'}}'
+    )
+
+
+def parse_single_slide_json(raw: str) -> dict | None:
+    """Bridge #95 -- parse a per-slide LLM response into a single slide
+    dict, or None on any failure (the caller writes a [DATA PENDING]
+    placeholder for that slide). Mirrors _parse_deck_slides's tolerance
+    of markdown fences and leading/trailing prose, but pulls the
+    SINGLE object instead of the wrapped list.
+    """
+    import json
+    text = (raw or "").strip()
+    if "{" not in text:
+        return None
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text[:4].lower() == "json":
+            text = text[4:]
+    try:
+        start, end = text.find("{"), text.rfind("}")
+        if start == -1 or end == -1 or end < start:
+            return None
+        obj = json.loads(text[start:end + 1])
+        return obj if isinstance(obj, dict) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
 # ── Professional navy/white theme — deliberately NOT the platform dark UI ─────
 _NAVY = RGBColor(0x1A, 0x2A, 0x4A)
 _NAVY_SOFT = RGBColor(0x2D, 0x4A, 0x6B)
