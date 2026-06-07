@@ -46,19 +46,35 @@ def upgrade() -> None:
     # regime together (the primary cache-lookup pattern post-#282)
     # and is a no-op for the legacy bare-hash read pattern -- those
     # still hit the unique constraint's implicit index.
-    op.create_index(
-        "ix_cio_recommendations_hash_regime",
-        "cio_recommendations",
-        ["data_hash", "regime"],
-    )
+    #
+    # IF NOT EXISTS (bridge #79 idempotency fix): the first attempt
+    # to run this migration on Render created the index but then
+    # crashed on the changelog INSERT below, so alembic_version
+    # never advanced. A naive re-run would trip CREATE INDEX
+    # because the index already exists. Using raw SQL with
+    # IF NOT EXISTS makes the index step idempotent so re-runs
+    # are safe regardless of whether the index landed before the
+    # crash. Postgres-specific syntax (we are Postgres-only).
+    op.execute(sa.text(
+        "CREATE INDEX IF NOT EXISTS "
+        "ix_cio_recommendations_hash_regime "
+        "ON cio_recommendations (data_hash, regime)"
+    ))
 
+    # ON CONFLICT (version) DO NOTHING (bridge #79 idempotency fix):
+    # the changelog has UNIQUE(version). This migration originally
+    # tried v=73 but migration 053 already claimed v=73 (for
+    # TEST_SCRIPT_VERSION 8 -> 9). Bumped to v=74. The DO NOTHING
+    # clause additionally protects against any future collision so
+    # a re-run never crashes here.
     op.execute(sa.text(
         "INSERT INTO changelog "
         "(version, released_at, title, description, "
         " academic_rationale, tour_step_id) "
-        "VALUES (:v, :rel, :t, :d, :a, NULL)"
+        "VALUES (:v, :rel, :t, :d, :a, NULL) "
+        "ON CONFLICT (version) DO NOTHING"
     ).bindparams(
-        v=73,
+        v=74,
         rel=datetime.now(timezone.utc),
         t="Cache-warm perf: composite index on cio_recommendations",
         d=(
@@ -90,10 +106,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_cio_recommendations_hash_regime",
-        table_name="cio_recommendations",
-    )
+    # DROP INDEX IF EXISTS mirrors the upgrade's idempotency so a
+    # downgrade survives a partial upgrade where the index was never
+    # created.
+    op.execute(sa.text(
+        "DROP INDEX IF EXISTS ix_cio_recommendations_hash_regime"
+    ))
     op.execute(sa.text(
         "DELETE FROM changelog WHERE version = :v"
-    ).bindparams(v=73))
+    ).bindparams(v=74))

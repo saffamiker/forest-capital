@@ -300,8 +300,16 @@ def test_migration_054_creates_composite_index():
     The migration's module name starts with a digit so unittest.mock's
     string-based patch decorator cannot reach into it. We exercise the
     contract via grep-on-disk -- same pattern as the chart-theming
-    regression pins in PR #289. The upgrade docstring + create_index
-    call are required text in the migration file.
+    regression pins in PR #289.
+
+    Bridge #79 update: the migration was rewritten to use raw SQL with
+    IF NOT EXISTS on the index step + ON CONFLICT DO NOTHING on the
+    changelog INSERT, because the original op.create_index call was
+    not idempotent and crashed mid-upgrade on a changelog-version
+    collision in production. The assertions below now match the
+    rewritten raw-SQL shape -- they pin the index name + both target
+    columns + the idempotency guards so a future contributor cannot
+    silently revert either safeguard.
     """
     from pathlib import Path
 
@@ -313,15 +321,28 @@ def test_migration_054_creates_composite_index():
         "updating this test.")
     src = migration.read_text(encoding="utf8")
 
-    # upgrade() must call create_index with the named composite target.
+    # The migration must reference the named composite index and
+    # BOTH target columns. The exact statement shape can be either
+    # op.create_index(...) OR raw SQL via op.execute(...); we
+    # assert on the strings that must appear regardless.
     assert 'ix_cio_recommendations_hash_regime' in src
-    assert '"cio_recommendations"' in src
-    assert '["data_hash", "regime"]' in src
+    assert 'cio_recommendations' in src
+    assert 'data_hash' in src
+    assert 'regime' in src
     # The new revision must chain off 053.
     assert 'down_revision: str | None = "053"' in src
     assert 'revision: str = "054"' in src
-    # downgrade() must drop the same index.
-    assert 'drop_index(' in src
+    # Idempotency safeguards added in bridge #79 -- both must stay.
+    assert 'IF NOT EXISTS' in src, (
+        "Migration 054 must use CREATE INDEX IF NOT EXISTS so a "
+        "re-run after a partial upgrade does not crash on an "
+        "already-existing index. See bridge #79.")
+    assert 'ON CONFLICT' in src, (
+        "Migration 054 must use ON CONFLICT (version) DO NOTHING on "
+        "the changelog INSERT so a re-run after a partial upgrade "
+        "does not crash on a duplicate version key. See bridge #79.")
+    # downgrade() must drop the same index (also idempotent now).
+    assert 'DROP INDEX IF EXISTS' in src
 
 
 def test_migration_054_revision_chain_is_continuous():
