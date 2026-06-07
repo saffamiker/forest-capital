@@ -11137,6 +11137,137 @@ async def export_presentation_deck(
     return _start_generation_job("presentation_deck", session, request)
 
 
+@app.post("/api/v1/export/presentation-deck/stream")
+@limiter.limit("4/minute")
+async def export_presentation_deck_stream(
+    request: Request,
+    session: dict = Depends(require_permission("generate_documents")),
+):
+    """Bridge #95 -- streams deck generation via Server-Sent Events.
+
+    The endpoint returns text/event-stream immediately and emits
+    progress events as each slide's content lands:
+
+      data: {"type": "started", "job_id": "...", "total_slides": 6}
+      data: {"type": "slide_complete", "slide_number": 1, "title": "..."}
+      data: {"type": "slide_error", "slide_number": N, "error": "..."}
+      data: {"type": "rendering"}                # charts + pptx assembly
+      data: {"type": "complete", "job_id": "...", "draft_id": N,
+              "download_url": "/api/v1/jobs/.../download"}
+      data: [DONE]
+
+    A fatal error before any slide-complete event emits:
+      data: {"type": "error", "message": "..."}
+
+    Keeps Cloudflare's gateway connection alive by emitting a frame
+    every few seconds (one per slide on the happy path). The pptx
+    bytes are stored in the standard generation_jobs slot so the
+    existing /api/v1/jobs/{id}/download endpoint serves them with
+    no special handling.
+
+    The async-job endpoint above (POST /api/v1/export/presentation-deck)
+    remains the back-compat surface for frontends that haven't
+    migrated to the stream consumer."""
+    if ENVIRONMENT == "test":
+        return JSONResponse(
+            content={"sse_stub": True, "note": "test env"},
+            media_type="application/json")
+
+    await _require_report_ready()
+
+    email = session["email"]
+    from tools.generation_jobs import create_job, update_job
+    from agents.usage import start_usage_capture
+    start_usage_capture()
+    job = create_job("presentation_deck", email)
+    job_id = job["job_id"]
+
+    async def event_stream():
+        import asyncio
+        import traceback
+        from datetime import datetime, timezone
+
+        from tools.academic_deck import DECK_SLIDE_COUNT, SLIDE_TITLES
+
+        update_job(job_id, status="running")
+        yield _sse("started", job_id=job_id, total_slides=DECK_SLIDE_COUNT)
+
+        try:
+            data, blend_weights, blend_series, n_strategies = \
+                await _build_deck_context(email)
+            per_slide_ctx = _deck_per_slide_context(data)
+
+            slides: list[dict] = []
+            for n in range(1, DECK_SLIDE_COUNT + 1):
+                slide = await asyncio.to_thread(
+                    _generate_one_deck_slide, n, per_slide_ctx, n_strategies)
+                if slide is None:
+                    yield _sse(
+                        "slide_error",
+                        slide_number=n,
+                        title=SLIDE_TITLES[n - 1],
+                        error=(
+                            "Per-slide generation failed; the slide "
+                            "renders with a [DATA PENDING] placeholder."))
+                    continue
+                slides.append(slide)
+                yield _sse(
+                    "slide_complete",
+                    slide_number=n,
+                    title=str(slide.get("title")
+                              or SLIDE_TITLES[n - 1]))
+
+            yield _sse("rendering")
+
+            file_bytes, filename, media, draft_id = await _finalize_deck(
+                slides, data, blend_weights, blend_series, email)
+
+            update_job(
+                job_id, status="complete", draft_id=draft_id,
+                download_url=f"/api/v1/jobs/{job_id}/download",
+                completed_at=datetime.now(timezone.utc),
+                _file_bytes=file_bytes, _filename=filename,
+                _media_type=media)
+            _log_interaction_bg(
+                request, session, "export",
+                agents_involved=["academic_writer"],
+                response_summary="presentation_deck generated (sse)",
+                metadata={"deliverable": "presentation_deck",
+                          "draft_id": draft_id})
+            _schedule_auto_academic_review(
+                draft_id, "presentation_deck", email)
+
+            yield _sse(
+                "complete",
+                job_id=job_id,
+                draft_id=draft_id,
+                download_url=f"/api/v1/jobs/{job_id}/download")
+        except Exception as exc:  # noqa: BLE001
+            ref = uuid.uuid4().hex[:8]
+            log.error(
+                "deck_stream_failed",
+                job_id=job_id, ref=ref,
+                exc_type=type(exc).__name__,
+                exc_module=type(exc).__module__,
+                error=str(exc),
+                traceback_excerpt="".join(
+                    traceback.format_exception_only(
+                        type(exc), exc)).strip()[:300])
+            update_job(
+                job_id, status="failed",
+                error=f"Deck stream failed (ref: {ref})",
+                completed_at=datetime.now(timezone.utc))
+            yield _sse(
+                "error",
+                job_id=job_id,
+                message=f"Deck generation failed (ref: {ref}).")
+
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(),
+                             media_type="text/event-stream")
+
+
 def _parse_deck_slides(raw: str) -> list:
     """Parse the slide JSON from the deck-generation harness output.
     Fence-tolerant. Returns the slides list, or [] on any failure (the
@@ -11206,6 +11337,187 @@ def _render_deck_slide_charts(
     }
 
 
+async def _build_deck_context(
+    email: str,
+) -> tuple[dict, dict, list, int]:
+    """Bridge #95 — extracted helper so both the async-job and SSE
+    streaming endpoints can build the deck-generation context block
+    from a single source. Returns (data, blend_weights, blend_series,
+    n_strategies). All four fail-open: a cold cache produces an empty
+    bundle rather than raising."""
+    from tools.academic_export import gather_document_data
+
+    data = await gather_document_data()
+
+    # ── Live regime context (Slide 6) — current_regime / regime_confidence
+    #    / blend_weights from detect_current_regime() + the regime blend,
+    #    the SAME source the Forward Projection tile and CIO card use, so
+    #    the slide never carries a stale constant. Fail-open to None. ─────
+    blend_weights: dict = {}
+    try:
+        from tools.cio_recommendation import _build_live_context
+        built = await _build_live_context()
+        if not built.get("error"):
+            ctx = built["context"]
+            data["current_regime"] = ctx.get("regime")
+            data["regime_confidence"] = ctx.get("probability")
+            blend_weights = ctx.get("blend_weights") or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_regime_context_unavailable", error=str(exc))
+
+    # ── Play-by-play frozen events (Slide 4) + the post-2022 blend series.
+    play_by_play_events: list = []
+    blend_series: list = []
+    try:
+        from tools.play_by_play import (
+            get_cached_performance_chart, load_stored_events,
+        )
+        play_by_play_events = await load_stored_events()
+        pc = await get_cached_performance_chart()
+        if pc and pc.get("series"):
+            blend_series = [
+                (p.get("date"), p.get("regime_conditional"))
+                for p in pc["series"]
+                if p.get("regime_conditional") is not None]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_play_by_play_unavailable", error=str(exc))
+    data["play_by_play_events"] = play_by_play_events
+    data["blend_weights"] = blend_weights
+    n_strategies = len(data.get("strategy_results") or {})
+    return data, blend_weights, blend_series, n_strategies
+
+
+def _deck_per_slide_context(data: dict) -> dict:
+    """Bridge #95 — the context block handed to the per-slide LLM call.
+    Same shape as the all-six-at-once prompt's context so existing
+    SLIDE_SPECIFICATIONS references resolve. Per-slide prompts ask the
+    model to draw from THIS block; the slice helper inside the prompt
+    isolates which slide's spec to emit."""
+    from tools.academic_deck import (
+        CORRELATION_POST_2022, CORRELATION_PRE_2022,
+        OOS_SHARPE_BENCHMARK, OOS_SHARPE_EQUAL_WEIGHT,
+        OOS_SHARPE_REGIME_CONDITIONAL, PLAY_BY_PLAY_EVENTS,
+    )
+    rc = data.get("rolling_correlation") or {}
+    return {
+        "study_period": data.get("study_period"),
+        "summary_statistics": data.get("summary_statistics"),
+        "strategy_performance": data.get("regime_conditional"),
+        "drawdown_comparison": data.get("drawdown_comparison"),
+        "factor_loadings": data.get("factor_loadings"),
+        "rolling_correlation": {"pre_2022": rc.get("pre_2022"),
+                                "post_2022": rc.get("post_2022")},
+        "current_regime": data.get("current_regime"),
+        "regime_confidence": data.get("regime_confidence"),
+        "blend_weights": data.get("blend_weights") or {},
+        "play_by_play_events": [
+            {"event_id": e.get("event_id"),
+             "event_date": e.get("event_date"),
+             "trigger": e.get("trigger"), "regime": e.get("regime"),
+             "verdict": e.get("verdict"),
+             "value_added_sharpe": e.get("value_added_sharpe")}
+            for e in (data.get("play_by_play_events") or [])],
+        "validated_constants": {
+            "oos_sharpe_regime_conditional": OOS_SHARPE_REGIME_CONDITIONAL,
+            "oos_sharpe_benchmark": OOS_SHARPE_BENCHMARK,
+            "oos_sharpe_equal_weight": OOS_SHARPE_EQUAL_WEIGHT,
+            "correlation_pre_2022": CORRELATION_PRE_2022,
+            "correlation_post_2022": CORRELATION_POST_2022,
+            "play_by_play_events": PLAY_BY_PLAY_EVENTS,
+        },
+    }
+
+
+def _generate_one_deck_slide(
+    slide_number: int, context: dict, n_strategies: int,
+) -> dict | None:
+    """Bridge #95 — generate ONE deck slide. Sync (the harness is sync;
+    callers wrap in asyncio.to_thread). Returns the parsed slide dict
+    or None on any failure; the caller writes the [DATA PENDING]
+    placeholder for that slide via _normalize_slides.
+
+    Per-slide max_tokens is 1500 -- comfortably above a single slide's
+    bullets + table + speaker notes (typical ~500-900 tokens), so the
+    JSON never truncates the way the all-six-at-once 4000-token call
+    did.
+    """
+    from tools.academic_deck import (
+        slide_generation_prompt, parse_single_slide_json,
+    )
+    from tools.academic_export import harness_narrative
+    try:
+        raw = harness_narrative(
+            f"presentation_deck_slide_{slide_number}",
+            slide_generation_prompt(slide_number),
+            context,
+            max_tokens=1500,
+            n_strategies=n_strategies,
+        )
+        parsed = parse_single_slide_json(raw)
+        if parsed is None:
+            log.warning("deck_slide_parse_failed",
+                        slide_number=slide_number,
+                        response_chars=len(raw or ""),
+                        response_prefix=(raw or "")[:200])
+            return None
+        # Force the slide_number to the requested value so the
+        # builder's by_num indexing finds it even if the LLM dropped
+        # or off-by-oned the field.
+        parsed["slide_number"] = slide_number
+        return parsed
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_slide_generation_failed",
+                    slide_number=slide_number, error=str(exc))
+        return None
+
+
+async def _finalize_deck(
+    slides: list[dict],
+    data: dict,
+    blend_weights: dict,
+    blend_series: list,
+    email: str,
+) -> tuple[bytes, str, str, int | None]:
+    """Bridge #95 — shared between the async-job and SSE paths. Given
+    the assembled per-slide dicts, renders charts + builds pptx +
+    creates the editor draft + writes audit metrics. Returns
+    (file bytes, filename, media type, editor draft id). Every
+    degradation (cold chart, draft-create failure) is non-fatal."""
+    import asyncio
+    from datetime import date
+
+    from tools.academic_deck import build_presentation_deck
+
+    charts = await asyncio.to_thread(
+        _render_deck_slide_charts, data, blend_weights, blend_series)
+    pptx_bytes = await asyncio.to_thread(
+        build_presentation_deck, slides, charts)
+
+    draft_id: int | None = None
+    try:
+        from tools.editor_content import deck_slides_to_editor
+        from tools.editor_drafts import create_draft
+
+        content_json, content_text = deck_slides_to_editor(slides)
+        audit_warnings = await _run_document_audit(
+            content_text, "presentation_deck", email)
+        draft = await create_draft(
+            "presentation_deck", email,
+            f"Presentation Deck — {date.today().isoformat()}",
+            content_json, content_text,
+            created_from="generated",
+            audit_warnings=audit_warnings)
+        if draft is not None:
+            draft_id = draft["id"]
+        await _write_audit_metrics(
+            "presentation_deck", email, draft_id, audit_warnings)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_draft_create_failed", error=str(exc))
+
+    filename = f"forest-capital-presentation-deck-{date.today().isoformat()}.pptx"
+    return pptx_bytes, filename, _PPTX_MEDIA, draft_id
+
+
 async def _generate_deck_document(
     email: str,
 ) -> tuple[bytes, str, str, int | None]:
@@ -11215,139 +11527,42 @@ async def _generate_deck_document(
     narrative arc). Returns (file bytes, filename, media type, editor
     draft id). Raises on failure — the job wrapper records it.
 
-    JSON-driven (May 28 2026 rebuild): a single Academic Writer call
-    (academic_deck.deck_generation_prompt() through the harness) returns
-    content for all ten slides; build_presentation_deck lays them out in a
-    professional navy/white theme with per-slide charts rendered server-side
-    as light-mode PNGs. Regime state on Slide 6 is LIVE-SOURCED from
-    detect_current_regime() (via the CIO live context), never a constant, so
-    the slide reflects the current HMM posterior. Every degradation — a cold
-    cache, an unparseable JSON, a missing chart — falls back to a
-    [DATA PENDING] note rather than failing the deck.
+    Bridge #95 (June 7 2026) -- rewritten to call harness_narrative ONCE
+    PER SLIDE instead of once for all six slides combined. The old
+    all-six call at max_tokens=4000 was truncating the JSON mid-slide-6
+    (estimated 2300-3900 token output), producing an unparseable
+    response and the canonical six-slides-all-[DATA PENDING] symptom.
+    Per-slide calls cap each slide at max_tokens=1500 with comfortable
+    headroom -- no more truncation, and a single slide's failure no
+    longer downs the entire deck.
+
+    Bridge #82 (May 26 2026) -- regime state on Slide 6 is LIVE-SOURCED
+    from detect_current_regime() (via the CIO live context). Every
+    degradation -- a cold cache, an unparseable JSON, a missing chart
+    -- falls back to a [DATA PENDING] note rather than failing.
     """
     import asyncio
-    from datetime import date
-
-    from tools.academic_deck import (
-        CORRELATION_POST_2022, CORRELATION_PRE_2022,
-        OOS_SHARPE_BENCHMARK, OOS_SHARPE_EQUAL_WEIGHT,
-        OOS_SHARPE_REGIME_CONDITIONAL, PLAY_BY_PLAY_EVENTS,
-        build_presentation_deck, deck_generation_prompt,
-    )
-    from tools.academic_export import gather_document_data, harness_narrative
 
     try:
-        data = await gather_document_data()
+        data, blend_weights, blend_series, n_strategies = \
+            await _build_deck_context(email)
+        per_slide_ctx = _deck_per_slide_context(data)
 
-        # ── Live regime context (Slide 6) — current_regime / regime_confidence
-        #    / blend_weights from detect_current_regime() + the regime blend,
-        #    the SAME source the Forward Projection tile and CIO card use, so
-        #    the slide never carries a stale constant. Fail-open to None. ─────
-        current_regime = None
-        regime_confidence = None
-        blend_weights: dict = {}
-        try:
-            from tools.cio_recommendation import _build_live_context
-            built = await _build_live_context()
-            if not built.get("error"):
-                ctx = built["context"]
-                current_regime = ctx.get("regime")
-                regime_confidence = ctx.get("probability")
-                blend_weights = ctx.get("blend_weights") or {}
-        except Exception as exc:  # noqa: BLE001
-            log.warning("deck_regime_context_unavailable", error=str(exc))
+        from tools.academic_deck import DECK_SLIDE_COUNT
+        slides: list[dict] = []
+        for n in range(1, DECK_SLIDE_COUNT + 1):
+            slide = await asyncio.to_thread(
+                _generate_one_deck_slide,
+                n, per_slide_ctx, n_strategies)
+            if slide is not None:
+                slides.append(slide)
+            # A None slide is left out -- _normalize_slides inside
+            # build_presentation_deck (called by _finalize_deck) fills
+            # the missing slot with the canonical title + [DATA PENDING]
+            # bullet. A SINGLE slide failure no longer downs the deck.
 
-        # ── Play-by-play frozen events (Slide 7) + the post-2022 blend series
-        #    for the Slide 8 chart, both from the play_by_play layer. ─────────
-        play_by_play_events: list = []
-        blend_series: list = []
-        try:
-            from tools.play_by_play import (
-                get_cached_performance_chart, load_stored_events,
-            )
-            play_by_play_events = await load_stored_events()
-            pc = await get_cached_performance_chart()
-            if pc and pc.get("series"):
-                blend_series = [
-                    (p.get("date"), p.get("regime_conditional"))
-                    for p in pc["series"]
-                    if p.get("regime_conditional") is not None]
-        except Exception as exc:  # noqa: BLE001
-            log.warning("deck_play_by_play_unavailable", error=str(exc))
-
-        # ── Generation context block. The slide specs instruct the model to
-        #    read these; the validated constants are injected so it never
-        #    invents them, and the live regime values come from above. ────────
-        rc = data.get("rolling_correlation") or {}
-        context = {
-            "study_period": data.get("study_period"),
-            "summary_statistics": data.get("summary_statistics"),
-            "strategy_performance": data.get("regime_conditional"),
-            "drawdown_comparison": data.get("drawdown_comparison"),
-            "factor_loadings": data.get("factor_loadings"),
-            "rolling_correlation": {"pre_2022": rc.get("pre_2022"),
-                                    "post_2022": rc.get("post_2022")},
-            "current_regime": current_regime,
-            "regime_confidence": regime_confidence,
-            "blend_weights": blend_weights,
-            "play_by_play_events": [
-                {"event_id": e.get("event_id"),
-                 "event_date": e.get("event_date"),
-                 "trigger": e.get("trigger"), "regime": e.get("regime"),
-                 "verdict": e.get("verdict"),
-                 "value_added_sharpe": e.get("value_added_sharpe")}
-                for e in play_by_play_events],
-            "validated_constants": {
-                "oos_sharpe_regime_conditional": OOS_SHARPE_REGIME_CONDITIONAL,
-                "oos_sharpe_benchmark": OOS_SHARPE_BENCHMARK,
-                "oos_sharpe_equal_weight": OOS_SHARPE_EQUAL_WEIGHT,
-                "correlation_pre_2022": CORRELATION_PRE_2022,
-                "correlation_post_2022": CORRELATION_POST_2022,
-                "play_by_play_events": PLAY_BY_PLAY_EVENTS,
-            },
-        }
-
-        # Single Academic Writer generation through the harness → slide JSON.
-        raw = await asyncio.to_thread(
-            harness_narrative, "presentation_deck", deck_generation_prompt(),
-            context, max_tokens=4000,
-            n_strategies=len(data.get("strategy_results") or {}))
-        slides = _parse_deck_slides(raw)
-
-        charts = await asyncio.to_thread(
-            _render_deck_slide_charts, data, blend_weights, blend_series)
-        pptx_bytes = await asyncio.to_thread(
-            build_presentation_deck, slides, charts)
-
-        # Load the generated deck into a presentation_deck editor draft so
-        # Molly can open it in the canvas editor; draft_id rides back in the
-        # X-Draft-Id header. Never fails the download.
-        draft_id: int | None = None
-        try:
-            from tools.editor_content import deck_slides_to_editor
-            from tools.editor_drafts import create_draft
-            content_json, content_text = deck_slides_to_editor(slides)
-
-            # Post-generation audit — same four checks as the brief,
-            # see _run_document_audit. NEVER blocks the deck write.
-            audit_warnings = await _run_document_audit(
-                content_text, "presentation_deck", email)
-
-            draft = await create_draft(
-                "presentation_deck", email,
-                f"Presentation Deck — {date.today().isoformat()}",
-                content_json, content_text,
-                created_from="generated",
-                audit_warnings=audit_warnings)
-            if draft is not None:
-                draft_id = draft["id"]
-            await _write_audit_metrics(
-                "presentation_deck", email, draft_id, audit_warnings)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("deck_draft_create_failed", error=str(exc))
-
-        filename = f"forest-capital-presentation-deck-{date.today().isoformat()}.pptx"
-        return pptx_bytes, filename, _PPTX_MEDIA, draft_id
+        return await _finalize_deck(
+            slides, data, blend_weights, blend_series, email)
     except Exception as exc:  # noqa: BLE001
         log.error("presentation_deck_generation_error", error=str(exc))
         raise
