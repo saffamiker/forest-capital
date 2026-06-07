@@ -37,6 +37,20 @@ interface Recommendation {
   // forward projection so the tile can show the blend + flag a binding
   // concentration constraint. Absent before the first warm.
   blend_weights?: Record<string, number> | null
+  // Bridge #81 -- portfolio-level equity / bond / cash split derived
+  // from blend_weights x per-strategy asset weights. Absent when the
+  // strategy cache is cold or the blend is missing -- the card omits
+  // the line entirely in that case.
+  implied_asset_allocation?: {
+    equity_pct: number
+    bond_pct: number
+    cash_pct: number
+  } | null
+  // Bridge #81 -- one-sentence guidance on what would shift the
+  // blend (HMM regime flip + threshold watch points). Always present
+  // on a successful read; a generic sentence backs the case where
+  // the regime is unknown.
+  blend_change_trigger?: string | null
   computed_at?: string | null
   model?: string | null
   // The Python pipeline emits `_model` (underscore prefix) carrying
@@ -187,6 +201,33 @@ export default function CIORecommendationCard() {
         </div>
       </div>
 
+      {/* Bridge #81 -- divergence disclosure + deterministic-fallback
+          notice surface ABOVE the prose stack so they sit between the
+          confidence line at the top of the card and the allocation
+          block below. Pre-fix these rendered at the BOTTOM of the
+          prose stack (right above Blend), so the user often missed the
+          regime-divergence flag entirely. */}
+      {rec.divergence_disclosure && (
+        <p
+          className="mt-3 flex gap-1.5 rounded border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
+          data-testid="cio-divergence-disclosure"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+          <span className="text-warning">{rec.divergence_disclosure}</span>
+        </p>
+      )}
+      {rec._model === 'deterministic_fallback' && (
+        <p
+          className="mt-3 flex gap-1.5 rounded border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
+          data-testid="cio-deterministic-fallback-notice"
+        >
+          <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
+          <span className="text-warning">
+            Live regime unavailable — showing last deterministic recommendation.
+          </span>
+        </p>
+      )}
+
       <div className="mt-4 space-y-2 text-sm">
         {rec.signal && (
           <p><span className="text-muted">Signal: </span>{rec.signal}</p>
@@ -209,37 +250,41 @@ export default function CIORecommendationCard() {
             </span>
           </p>
         )}
-        {rec.divergence_disclosure && (
-          <p
-            className="mt-2 flex gap-1.5 rounded border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
-            data-testid="cio-divergence-disclosure"
-          >
-            <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
-            <span className="text-warning">{rec.divergence_disclosure}</span>
-          </p>
-        )}
-        {rec._model === 'deterministic_fallback' && (
-          <p
-            className="mt-2 flex gap-1.5 rounded border border-warning/30 bg-warning/5 px-2 py-1.5 text-xs"
-            data-testid="cio-deterministic-fallback-notice"
-          >
-            <AlertTriangle className="w-3.5 h-3.5 text-warning shrink-0 mt-0.5" />
-            <span className="text-warning">
-              Live regime unavailable — showing last deterministic recommendation.
-            </span>
-          </p>
-        )}
       </div>
 
-      {/* Live regime-conditional blend (top weights) */}
+      {/* Bridge #81 -- allocation block.
+          Line 1: Current Strategy Blend (renamed from "Blend") with the
+                  top-4 strategy weights, unchanged in content.
+          Line 2: Implied Asset Allocation, the equity / IG-HY-bonds /
+                  cash split derived from the live blend. Omitted when
+                  the backend overlay was absent (cold strategy cache).
+          Line 3: Blend Change Trigger, one readable sentence describing
+                  what would shift the blend. Always rendered when
+                  blend_change_trigger is present. */}
       {blendTop.length > 0 && (
-        <p className="mt-3 text-sm">
-          <span className="text-muted">Blend: </span>
+        <p className="mt-3 text-sm" data-testid="cio-current-strategy-blend">
+          <span className="text-muted">Current Strategy Blend: </span>
           <span className="font-mono text-xs text-slate-300">
             {blendTop.slice(0, 4)
               .map(([n, v]) => `${n} ${(v * 100).toFixed(0)}%`)
               .join('  ·  ')}
           </span>
+        </p>
+      )}
+      {rec.implied_asset_allocation && (
+        <p className="mt-1 text-sm" data-testid="cio-implied-asset-allocation">
+          <span className="text-muted">Implied Asset Allocation: </span>
+          <span className="font-mono text-xs text-slate-300">
+            {`Equity ${(rec.implied_asset_allocation.equity_pct * 100).toFixed(0)}%`
+              + `  ·  Bonds ${(rec.implied_asset_allocation.bond_pct * 100).toFixed(0)}%`
+              + `  ·  Cash ${(rec.implied_asset_allocation.cash_pct * 100).toFixed(0)}%`}
+          </span>
+        </p>
+      )}
+      {rec.blend_change_trigger && (
+        <p className="mt-1 text-sm" data-testid="cio-blend-change-trigger">
+          <span className="text-muted">Blend Change Trigger: </span>
+          <span className="text-text">{rec.blend_change_trigger}</span>
         </p>
       )}
 
