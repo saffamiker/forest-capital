@@ -116,6 +116,16 @@ html:not(.dark) .bg-navy-700\/50 { background-color: rgba(226, 232, 240, 0.7); }
 html:not(.dark) .bg-navy-900\/40 { background-color: rgba(241, 245, 249, 0.6); }
 html:not(.dark) .bg-navy-900\/60 { background-color: rgba(241, 245, 249, 0.8); }
 html:not(.dark) .bg-navy-900\/80 { background-color: rgba(241, 245, 249, 0.92); }
+/* Bridge #89: FloatingSectionNav's collapsed pill uses bg-navy-900/90
+ * and its expanded panel uses bg-navy-900/95 (incl. the hover state).
+ * Without overrides for those two specific opacity stops the right-
+ * edge "Sections" nav stayed dark navy in light mode while every
+ * other surface flipped. Same tinted-slate treatment as the /80
+ * variant so the pill reads as a clickable elevated control against
+ * the white page. */
+html:not(.dark) .bg-navy-900\/90 { background-color: rgba(241, 245, 249, 0.95); }
+html:not(.dark) .bg-navy-900\/95 { background-color: rgba(241, 245, 249, 0.97); }
+html:not(.dark) .hover\:bg-navy-900\/95:hover { background-color: rgba(226, 232, 240, 0.97); }
 
 /* Text — near-white to near-black. The text-muted token in
  * tailwind.config also maps to a Tailwind colour — override it. */
