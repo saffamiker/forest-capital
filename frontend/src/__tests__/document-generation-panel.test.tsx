@@ -170,6 +170,69 @@ describe('DocumentGenerationPanel — async generation', () => {
     expect(deckCard.textContent).not.toMatch(/16-slide/i)
   })
 
+  it('shows a Regenerate button on a complete-state card (bridge #90)', async () => {
+    // Bridge #90: a completed generation should still let the team
+    // trigger a fresh run without manual draft deletion. The button
+    // sits alongside Open in Editor + Download on the complete-state
+    // card.
+    renderPanel(<DocumentGenerationPanel />)
+    trackJob({
+      job_id: 'j-deck', document_type: 'presentation_deck',
+      status: 'complete', draft_id: 33,
+      download_url: '/api/v1/jobs/j-deck/download', error: null,
+    })
+    const deckCard = (
+      await screen.findByText('Final Presentation Deck')).closest(
+        '.card') as HTMLElement
+    const button = await within(deckCard).findByTestId(
+      'regenerate-deck')
+    expect(button).toBeInTheDocument()
+    expect(button.textContent).toMatch(/Regenerate/i)
+  })
+
+  it('Regenerate POSTs the generation endpoint after the user confirms (bridge #90)', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm')
+      .mockImplementation(() => true)
+    mockedAxios.post.mockResolvedValue({
+      data: { job_id: 'j-deck-2', status: 'pending' } })
+    renderPanel(<DocumentGenerationPanel />)
+    trackJob({
+      job_id: 'j-deck', document_type: 'presentation_deck',
+      status: 'complete', draft_id: 33,
+      download_url: '/api/v1/jobs/j-deck/download', error: null,
+    })
+    const deckCard = (
+      await screen.findByText('Final Presentation Deck')).closest(
+        '.card') as HTMLElement
+    const button = await within(deckCard).findByTestId(
+      'regenerate-deck')
+    fireEvent.click(button)
+    expect(confirmSpy).toHaveBeenCalled()
+    await waitFor(() => expect(mockedAxios.post)
+      .toHaveBeenCalledWith('/api/v1/export/presentation-deck'))
+    confirmSpy.mockRestore()
+  })
+
+  it('Regenerate is a no-op when the user dismisses the confirm prompt (bridge #90)', async () => {
+    // Defensive: clicking Regenerate and then cancelling the confirm
+    // must NOT fire the POST. Pinning this guards against the
+    // confirm prompt being silently removed in a future refactor.
+    const confirmSpy = vi.spyOn(window, 'confirm')
+      .mockImplementation(() => false)
+    renderPanel(<DocumentGenerationPanel />)
+    trackJob({
+      job_id: 'j-brief-c', document_type: 'executive_brief',
+      status: 'complete', draft_id: 41,
+      download_url: '/api/v1/jobs/j-brief-c/download', error: null,
+    })
+    const card = briefCard()
+    const button = await within(card).findByTestId('regenerate-brief')
+    fireEvent.click(button)
+    expect(confirmSpy).toHaveBeenCalled()
+    expect(mockedAxios.post).not.toHaveBeenCalled()
+    confirmSpy.mockRestore()
+  })
+
   it('shows the error state with Try Again on a failed job', async () => {
     renderPanel(<DocumentGenerationPanel />)
     trackJob({
