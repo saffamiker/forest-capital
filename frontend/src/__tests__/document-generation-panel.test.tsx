@@ -158,6 +158,18 @@ describe('DocumentGenerationPanel — async generation', () => {
       within(appxCard).getByText(/Generating your/)).toBeInTheDocument())
   })
 
+  it('renders the deck card with the post-rewrite six-slide description (bridge #86)', async () => {
+    // The previous copy said "16-slide deck" -- stale since the
+    // June 6 2026 rewrite. The card must now describe the six-slide
+    // narrative and must NOT carry the old "16-slide" wording.
+    renderPanel(<DocumentGenerationPanel />)
+    const deckCard = (
+      screen.getByText('Final Presentation Deck').closest('.card') as HTMLElement)
+    expect(deckCard).toBeInTheDocument()
+    expect(deckCard.textContent).toMatch(/Six-slide/i)
+    expect(deckCard.textContent).not.toMatch(/16-slide/i)
+  })
+
   it('shows the error state with Try Again on a failed job', async () => {
     renderPanel(<DocumentGenerationPanel />)
     trackJob({
