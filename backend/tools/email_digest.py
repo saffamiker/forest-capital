@@ -1440,24 +1440,28 @@ async def build_digest_email() -> tuple[str, str, str]:
     fallback is plain ASCII."""
     today = date.today()
     sections: list[DigestSection] = []
-    # June 6 2026 — analytics-decision content leads the digest. The
-    # reader's first scroll is what to do (CIO recommendation), how to
-    # express it (implied asset allocation), and when to revisit
-    # (rebalance watch points). Platform health and ops content sit
+    # June 7 2026 (bridge #84) — analytics-decision content leads the
+    # digest. The reader's first scroll is what to do (CIO
+    # recommendation), how to express it (implied asset allocation),
+    # when to revisit (rebalance watch points), and what the live
+    # state is (analytics snapshot — current regime, live blend
+    # weights, OOS Sharpe). Platform health and ops content sit
     # below so the morning skim surfaces the allocation call first;
-    # the operator goes deeper for health / releases / activity only
-    # when something there matters.
+    # the operator goes deeper for health / activity only when
+    # something there matters. Release history / commit summaries
+    # sit at the very bottom — they are useful as a "what shipped
+    # since I last looked" footer, not as front-page material.
     sections.append(await _section_latest_cio_recommendation())
     sections.append(await _section_implied_asset_allocation())
     sections.append(await _section_rebalance_triggers())
-    sections.append(await _section_platform_health())
-    sections.append(await _section_releases())
     sections.append(await _section_analytics_snapshot())
+    sections.append(await _section_platform_health())
     sections.append(await _section_platform_usage())
     sections.append(await _section_team_activity())
     sections.append(await _section_warm_history())
     sections.append(await _section_open_work())
     sections.append(_section_deadlines(today))
+    sections.append(await _section_releases())
 
     subject = (
         f"AnalyticsDesk daily digest — {today.isoformat()}")
