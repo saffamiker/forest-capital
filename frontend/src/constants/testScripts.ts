@@ -1634,10 +1634,11 @@ const molly: TestScript = {
       title: 'Generate the presentation deck',
       instruction: 'In Generate Documents, click Generate Presentation '
         + 'Deck, wait (30–60s), download the .pptx and open it.',
-      expectedResult: 'The deck has 16 slides, a navy/white professional '
-        + 'theme, a correct title slide, embedded charts (slide 5 rolling '
-        + 'correlation, slide 8 cumulative returns), real activity counts '
-        + 'on slide 15, readable text throughout, and no placeholder text.',
+      expectedResult: 'The deck has 6 slides, a navy/white professional '
+        + 'theme, a correct title slide, embedded charts (slide 2 rolling '
+        + 'correlation, slide 3 OOS Sharpe, slide 6 efficient frontier), '
+        + 'a live blend / regime read on slide 6, readable text '
+        + 'throughout, and no placeholder text.',
       allowSkip: true,
     },
     // ── Audit Warnings Banner — PR #264 (v9, June 3 2026) ──────────────

@@ -61,8 +61,10 @@ const DOCS: DocSpec[] = [
     documentType: 'presentation_deck',
     title: 'Final Presentation Deck',
     description:
-      '16-slide deck with real data charts in light mode, ready to '
-      + 'refine in the editor.',
+      'Six-slide narrative deck (regime thesis, 2022 correlation '
+      + 'break, OOS evidence, play-by-play, live blend, recommendation) '
+      + 'with real data charts in light mode, ready to refine in the '
+      + 'editor.',
     endpoint: '/api/v1/export/presentation-deck',
     icon: Presentation,
   },

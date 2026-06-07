@@ -9876,22 +9876,44 @@ async def _editor_export(editor_draft_id: int) -> Response:
         # Render each chart element's PNG server-side (an async path) and
         # hand the {element_id: png} map to the sync .pptx builder. A
         # failed render is left out — the builder degrades it gracefully.
+        #
+        # Bridge #86 — render concurrently with asyncio.gather. The
+        # previous implementation awaited each render serially in the
+        # for-loop, so a deck with N chart elements at distinct sizes
+        # paid N × (gather_document_data + matplotlib) wall-clock.
+        # gather() runs the renders in parallel; the per-(chart_key,
+        # theme, w, h) render cache means concurrent calls for the same
+        # signature still only execute once. Critical on Render where
+        # the editor export sits inside the user-facing request and a
+        # serial tail can clip Cloudflare's 100 s gateway timeout.
         content_json = draft.get("content_json") or {}
         deck_slides = (content_json.get("slides", [])
                        if isinstance(content_json, dict) else [])
-        chart_pngs: dict[str, bytes] = {}
+
+        async def _render_one(el: dict) -> tuple[str, bytes] | None:
+            try:
+                w = min(2000, max(80, int(el.get("width") or 360) * 2))
+                h = min(2000, max(80, int(el.get("height") or 220) * 2))
+                png = await render_chart_png(
+                    str(el["chartKey"]), "light", w, h)
+                return (str(el.get("id")), png)
+            except Exception:  # noqa: BLE001 — skip, builder degrades
+                return None
+
+        chart_elements: list[dict] = []
         for sl in deck_slides:
             for el in (sl.get("elements") or [] if isinstance(sl, dict) else []):
                 if (isinstance(el, dict) and el.get("type") == "chart"
                         and is_known_chart(str(el.get("chartKey", "")))):
-                    try:
-                        # Render at 2x the element box for print quality.
-                        w = min(2000, max(80, int(el.get("width") or 360) * 2))
-                        h = min(2000, max(80, int(el.get("height") or 220) * 2))
-                        chart_pngs[str(el.get("id"))] = await render_chart_png(
-                            str(el["chartKey"]), "light", w, h)
-                    except Exception:  # noqa: BLE001 — skip, builder degrades
-                        pass
+                    chart_elements.append(el)
+
+        rendered = await asyncio.gather(
+            *(_render_one(el) for el in chart_elements),
+            return_exceptions=False)
+        chart_pngs: dict[str, bytes] = {
+            eid: png for r in rendered if r is not None
+            for eid, png in (r,)}
+
         content = await asyncio.to_thread(build_editor_pptx, draft, chart_pngs)
         media, ext = _PPTX_MEDIA, "pptx"
     else:
@@ -10146,8 +10168,21 @@ async def _generate_async(
         raise
     except Exception as exc:  # noqa: BLE001
         ref = uuid.uuid4().hex[:8]
-        log.error("generation_job_failed", job_id=job_id,
-                  document_type=document_type, ref=ref, error=str(exc))
+        # Bridge #86 — include the exception class and a short traceback
+        # excerpt so the Render log reveals the failure surface without
+        # forcing a Render-shell session. The ref ties the user-facing
+        # generic "Generation failed" to the structured server log.
+        import traceback as _tb
+        tb_lines = _tb.format_exception_only(type(exc), exc)
+        tb_summary = "".join(tb_lines).strip()[:300]
+        log.error("generation_job_failed",
+                  job_id=job_id,
+                  document_type=document_type,
+                  ref=ref,
+                  exc_type=type(exc).__name__,
+                  exc_module=type(exc).__module__,
+                  error=str(exc),
+                  traceback_excerpt=tb_summary)
         update_job(job_id, status="failed",
                    error=f"Generation failed (ref: {ref})",
                    completed_at=datetime.now(timezone.utc))
