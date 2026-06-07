@@ -128,6 +128,18 @@ html:not(.dark) .text-slate-400  { color: var(--text-muted); }
 html:not(.dark) .text-slate-500  { color: var(--text-muted); }
 html:not(.dark) .text-muted      { color: var(--text-muted); }
 
+/* Bridge #83 -- the tailwind config's `text-text-*` aliases (used in
+ * 90+ places) hard-code the DARK-mode greys (text-text-secondary =
+ * slate-300 #cbd5e1, text-text-muted = slate-500 #64748b). On light
+ * surfaces those render as illegible "light gray on white" body
+ * copy -- the Report Writer card description is the canonical
+ * symptom. Re-route the three aliases through the CSS variable
+ * system so they flip with the toggle. */
+html:not(.dark) .text-text-primary   { color: var(--text-primary); }
+html:not(.dark) .text-text-secondary { color: var(--text-secondary); }
+html:not(.dark) .text-text-muted     { color: var(--text-muted); }
+html:not(.dark) .text-text-disabled  { color: var(--text-muted); }
+
 /* Borders — flip dark navy borders to light grays. */
 html:not(.dark) .border-border       { border-color: var(--border); }
 html:not(.dark) .border-navy-600,
@@ -183,6 +195,18 @@ html:not(.dark) .text-amber-100,
 html:not(.dark) .text-amber-200,
 html:not(.dark) .text-amber-300   { color: #b45309; }
 html:not(.dark) .text-amber-400   { color: #92400e; } /* amber-800 */
+/* Bridge #83 -- opacity variants of text-amber-200 used as banner
+ * subtext (ReportReadinessBanner, AuditPanel callouts). Without an
+ * explicit override Tailwind compiles them to rgb(... / 0.x) of the
+ * base amber-200 fill (#fde68a) which is invisible against light
+ * amber backgrounds. Force amber-700 fully opaque -- the slash
+ * variant must read as well as the base class. */
+html:not(.dark) .text-amber-200\/90,
+html:not(.dark) .text-amber-200\/80,
+html:not(.dark) .text-amber-200\/70,
+html:not(.dark) .text-amber-200\/60 { color: #b45309; }
+html:not(.dark) .text-amber-100\/80,
+html:not(.dark) .text-amber-300\/80 { color: #b45309; }
 html:not(.dark) .text-orange-200,
 html:not(.dark) .text-orange-300  { color: #c2410c; } /* orange-700 */
 html:not(.dark) .text-emerald-400 { color: #166534; }
