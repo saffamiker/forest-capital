@@ -7335,14 +7335,24 @@ async def audit_resolve_finding(
     Records the team's response (resolution_note) and sets resolved. This
     is a response, not a correction: the audit's overall verdict does not
     change. Project team only.
+
+    Optional body field `disclosure_text` (June 6 2026, bridge #75) is
+    persisted to locked_disclosure_text -- the verbatim disclosure the
+    team agreed to put in the report at acknowledge time. Bob copies
+    the locked text from the finding card straight into the executive
+    brief without re-deriving. Empty / whitespace-only strings are
+    normalised to NULL (no disclosure locked).
     """
     from tools.audit_engine import resolve_finding
     note = str((body or {}).get("resolution_note") or "").strip()
     if not note:
         raise HTTPException(
             status_code=422, detail="A resolution note is required.")
+    disclosure_text = (body or {}).get("disclosure_text")
     finding = await resolve_finding(
-        finding_id, True, note, resolved_by=session["email"])
+        finding_id, True, note,
+        resolved_by=session["email"],
+        disclosure_text=str(disclosure_text) if disclosure_text else None)
     if finding is None:
         raise HTTPException(status_code=404, detail="Audit finding not found.")
     return finding

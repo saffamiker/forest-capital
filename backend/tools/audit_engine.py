@@ -471,7 +471,8 @@ async def get_audit_run(run_id: int) -> dict[str, Any] | None:
                 "status, platform_value, auditor_value, discrepancy, "
                 "formula_used, raw_inputs_hash, auditor_reasoning, "
                 "resolved, resolution_note, resolved_by, resolved_at, "
-                "auto_acknowledged FROM audit_findings "
+                "auto_acknowledged, locked_disclosure_text "
+                "FROM audit_findings "
                 "WHERE audit_run_id = :id ORDER BY layer, id"), {"id": run_id})
             findings = [_finding_row(r) for r in rows.fetchall()]
         out = _run_row(found)
@@ -488,8 +489,10 @@ async def get_audit_run(run_id: int) -> dict[str, Any] | None:
 
 def _finding_row(r: Any) -> dict[str, Any]:
     # resolved_by, resolved_at, auto_acknowledged were added by
-    # migration 044. Older rows have NULL / false for these; the
-    # PDF disclosures section renders missing values as a dash.
+    # migration 044. locked_disclosure_text was added by migration 055.
+    # Older rows have NULL / false for these; the PDF disclosures
+    # section renders missing values as a dash and the frontend
+    # omits the disclosure box for a NULL value.
     return {
         "id": r[0], "layer": r[1], "check_name": r[2], "metric": r[3],
         "strategy": r[4], "severity": r[5], "status": r[6],
@@ -500,6 +503,7 @@ def _finding_row(r: Any) -> dict[str, Any]:
         "resolved_at": r[16] if len(r) > 16 else None,
         "auto_acknowledged": bool(r[17]) if len(r) > 17 and r[17] is not None
                               else False,
+        "locked_disclosure_text": r[18] if len(r) > 18 else None,
     }
 
 
@@ -509,6 +513,7 @@ async def resolve_finding(
     note: str | None,
     *,
     resolved_by: str | None = None,
+    disclosure_text: str | None = None,
 ) -> dict[str, Any] | None:
     """
     Sets or clears the acknowledgement on an audit finding — the WARN
@@ -524,6 +529,13 @@ async def resolve_finding(
     resolution_note and resolved_at — the row reverts to its
     pre-review state.
 
+    disclosure_text — optional. The verbatim disclosure the team agreed
+    to put into the report at acknowledge time. Stored in the
+    locked_disclosure_text column added by migration 055 so Bob can
+    copy-paste it into the brief without re-deriving. Cleared (set to
+    NULL) on unresolve so a revoked acknowledgement does not leave
+    a stale disclosure attached.
+
     Workstream A — a successful ack also writes an audit_acknowledgements
     row so the next re-run's carry pass (tools/audit_carry.apply_carry)
     can re-apply this review against an equivalent future finding. A
@@ -536,21 +548,30 @@ async def resolve_finding(
         from database import AsyncSessionLocal
         if AsyncSessionLocal is None:
             return None
+        # Normalise disclosure_text -- treat empty/whitespace as None
+        # so a blank textarea produces a clean NULL.
+        locked_disclosure = (
+            (disclosure_text or "").strip() if resolved else None)
+        if locked_disclosure == "":
+            locked_disclosure = None
         async with AsyncSessionLocal() as session:
             result = await session.execute(text(
                 "UPDATE audit_findings SET resolved = :r, "
                 "resolution_note = :n, resolved_by = :by, "
                 "resolved_at = CASE WHEN :r THEN now() ELSE NULL END, "
                 "auto_acknowledged = CASE WHEN :r THEN false "
-                "                         ELSE auto_acknowledged END "
+                "                         ELSE auto_acknowledged END, "
+                "locked_disclosure_text = :ld "
                 "WHERE id = :id "
                 "RETURNING id, layer, check_name, metric, strategy, "
                 "severity, status, platform_value, auditor_value, "
                 "discrepancy, formula_used, raw_inputs_hash, "
                 "auditor_reasoning, resolved, resolution_note, "
-                "resolved_by, resolved_at, auto_acknowledged"),
+                "resolved_by, resolved_at, auto_acknowledged, "
+                "locked_disclosure_text"),
                 {"r": resolved, "n": note if resolved else None,
                  "by": resolved_by if resolved else None,
+                 "ld": locked_disclosure,
                  "id": finding_id})
             row = result.fetchone()
             await session.commit()
