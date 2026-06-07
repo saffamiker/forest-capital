@@ -15,7 +15,7 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, FileSpreadsheet, Presentation, Download, Loader2, AlertCircle,
-  CheckCircle, PenLine, X,
+  CheckCircle, PenLine, RefreshCw, X,
 } from 'lucide-react'
 import TeamGate from './TeamGate'
 import {
@@ -150,7 +150,22 @@ export default function DocumentGenerationPanel() {
     }
   }, [jobs])
 
-  const handleGenerate = async (doc: DocSpec) => {
+  const handleGenerate = async (doc: DocSpec, opts?: { regenerate?: boolean }) => {
+    // Bridge #90: when the user clicks Regenerate on a card that
+    // already has a complete generation, warn them the existing
+    // editor draft will be superseded -- the backend creates a NEW
+    // editor_drafts row and flips the previous one's is_current to
+    // false, so any unsaved edits in the editor are no longer the
+    // canonical "current" draft. The frontend has no explicit
+    // dirty-flag for the editor, so always-confirm on Regenerate
+    // is the safe default.
+    if (opts?.regenerate) {
+      const ok = window.confirm(
+        `Regenerating will create a new draft and overwrite the `
+        + `current "${doc.title}" version. Any unsaved edits in the `
+        + `editor will no longer be the canonical draft. Continue?`)
+      if (!ok) return
+    }
     // Client-side gate — open the blocking modal without firing the
     // POST when readiness is known-blocked. is_ready === null means
     // "unknown" (endpoint failed or not loaded yet); fall through to
@@ -308,6 +323,28 @@ export default function DocumentGenerationPanel() {
                                hover:bg-electric/10">
                     <Download className="w-3 h-3" /> Download
                   </button>
+                  {/* Bridge #90: a Regenerate button alongside the
+                      existing Open / Download buttons so the user
+                      can refresh the deck against fresh analytics
+                      without leaving the Reports page or
+                      hand-deleting the existing draft. The button
+                      is gated to team members (same TeamGate the
+                      first-time Generate uses); the confirmation
+                      prompt lives in handleGenerate so a future
+                      caller can opt into it via opts.regenerate. */}
+                  <TeamGate block permission="generate_documents"
+                    tooltip="Document generation is available to the project team">
+                    <button type="button"
+                      data-testid={`regenerate-${doc.id}`}
+                      onClick={() => void handleGenerate(
+                        doc, { regenerate: true })}
+                      className="w-full flex items-center justify-center gap-1.5
+                                 px-3 py-1.5 rounded text-xs border
+                                 border-border text-muted
+                                 hover:text-white hover:bg-navy-700">
+                      <RefreshCw className="w-3 h-3" /> Regenerate
+                    </button>
+                  </TeamGate>
                 </div>
               ) : job?.status === 'failed' ? (
                 <div className="flex flex-col gap-1.5">
