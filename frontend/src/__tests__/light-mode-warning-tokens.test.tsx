@@ -238,3 +238,38 @@ describe('light-mode banner subtext + text-text-* alias overrides -- bridge #83'
     })
   })
 })
+
+
+// ── Bridge #89: FloatingSectionNav opacity variants in light mode ────
+
+describe('FloatingSectionNav bg-navy-900 opacity variants flip in light mode -- bridge #89', () => {
+  const css = source('src/index.css')
+
+  it('bg-navy-900/90 (collapsed pill) flips to tinted slate', () => {
+    expect(css).toContain(String.raw`.bg-navy-900\/90`)
+    expect(css).toMatch(
+      /bg-navy-900\\\/90[^}]*background-color:\s*rgba\(241,\s*245,\s*249/i,
+    )
+  })
+
+  it('bg-navy-900/95 (expanded panel) flips to tinted slate', () => {
+    expect(css).toContain(String.raw`.bg-navy-900\/95`)
+    expect(css).toMatch(
+      /bg-navy-900\\\/95[^}]*background-color:\s*rgba\(241,\s*245,\s*249/i,
+    )
+  })
+
+  it('hover:bg-navy-900/95 (panel hover state) is overridden too', () => {
+    expect(css).toContain(String.raw`.hover\:bg-navy-900\/95:hover`)
+  })
+
+  it('FloatingSectionNav still uses bg-navy-900/90 + /95', () => {
+    // The fix is taxonomy-level (overrides in index.css). The
+    // component keeps the same classes; if a future contributor
+    // sweeps the component to use CSS variables directly, this
+    // pin reminds them to also drop the index.css override.
+    const nav = source('src/components/FloatingSectionNav.tsx')
+    expect(nav).toContain('bg-navy-900/90')
+    expect(nav).toContain('bg-navy-900/95')
+  })
+})
