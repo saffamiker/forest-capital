@@ -227,3 +227,66 @@ class TestRatingExtraction:
         # But the score still averages over the two sections present.
         assert result["score"] == 8.5
         assert result["sections_rated"] == 2
+
+
+# ── Bridge #82: parse_error vs partial-truncation distinction ─────────
+
+class TestParseErrorFlag:
+    """Bridge #82: a non-empty arbiter response that yields zero
+    sections must surface as `parse_error=True` so the IN02 finding
+    can describe an unparseable response rather than calling it a
+    valid zero-section result. A partial response (1-4 sections
+    parsed) is NOT a parse error — the parser kept what was there."""
+
+    def test_empty_verdict_is_not_a_parse_error(self):
+        result = compute_review_score("")
+        assert result["sections_rated"] == 0
+        assert result["parse_error"] is False
+
+    def test_none_verdict_is_not_a_parse_error(self):
+        result = compute_review_score(None)
+        assert result["sections_rated"] == 0
+        assert result["parse_error"] is False
+
+    def test_whitespace_only_verdict_is_not_a_parse_error(self):
+        # Whitespace only is treated as empty — nothing to fail on.
+        result = compute_review_score("   \n\n  \t\n")
+        assert result["sections_rated"] == 0
+        assert result["parse_error"] is False
+
+    def test_non_empty_response_with_zero_sections_is_a_parse_error(self):
+        """The arbiter refused, drifted from the rubric headings, or
+        returned an error payload — non-trivial text with no parseable
+        sections is exactly the case the IN02 finding must distinguish
+        from a clean zero-section result."""
+        result = compute_review_score(
+            "I cannot fulfill this academic review request at this time. "
+            "Please try again later or escalate to a human reviewer.")
+        assert result["sections_rated"] == 0
+        assert result["parse_error"] is True
+
+    def test_partial_response_is_not_a_parse_error(self):
+        """Three sections parsed out of five is a partial result, not
+        a parse error. The parser kept what it found — the IN02
+        finding describes truncation, not parse failure."""
+        verdict = (
+            "### 1. A\n\n**Rating:** Strong\n\n"
+            "### 2. B\n\n**Rating:** Developing\n\n"
+            "### 3. C\n\n**Rating:** Strong\n"
+        )
+        result = compute_review_score(verdict)
+        assert result["sections_rated"] == 3
+        assert result["parse_error"] is False
+
+    def test_single_section_parsed_is_not_a_parse_error(self):
+        # Even one parseable section is enough that it's not a parse
+        # failure — the response was structured correctly, just short.
+        verdict = "### 1. A\n\n**Rating:** Strong\n"
+        result = compute_review_score(verdict)
+        assert result["sections_rated"] == 1
+        assert result["parse_error"] is False
+
+    def test_full_five_section_response_is_not_a_parse_error(self):
+        result = compute_review_score(_VERDICT_MIXED)
+        assert result["sections_rated"] == 5
+        assert result["parse_error"] is False

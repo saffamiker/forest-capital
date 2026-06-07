@@ -134,11 +134,21 @@ def compute_review_score(verdict: str | None) -> dict[str, Any]:
         advisory:        True    # score is below 6.0 — the midpoint
                                  # advisory banner threshold
         sections_rated:  4       # how many of 5 the parser found
+        parse_error:     False   # True only when the verdict carried
+                                 # non-trivial text but zero sections
+                                 # parsed — distinguishes "arbiter
+                                 # response broken" from "partial
+                                 # truncation" downstream (bridge #82).
       }
 
     Always returns the shape — the caller treats `score is None` as
     "could not derive a score" (the arbiter returned malformed
     markdown) rather than as a failing paper.
+
+    Partial responses are kept verbatim. If the parser recognises 3 of
+    5 sections, sections_rated is 3 and section_ratings carries those
+    three; the caller decides whether to treat a partial result as
+    advisory or to re-run the review.
     """
     section_ratings = _parse_section_ratings(verdict)
     points = [
@@ -153,10 +163,20 @@ def compute_review_score(verdict: str | None) -> dict[str, Any]:
         score = None
     overall = section_ratings.get("readiness")
     advisory = score is not None and score < ADVISORY_THRESHOLD
+    # Bridge #82 — when the verdict is non-empty but zero sections
+    # parsed, surface it as a parse error rather than reporting it as
+    # a clean zero-section result. The arbiter may have refused, the
+    # heading syntax may have drifted, or the response may have been
+    # truncated mid-prefix; in every case the IN02 finding should
+    # describe the broken response, not pretend the review delivered
+    # zero ratings.
+    stripped = (verdict or "").strip()
+    parse_error = bool(stripped) and not section_ratings
     return {
         "score": score,
         "rating": overall,
         "section_ratings": section_ratings,
         "advisory": advisory,
         "sections_rated": len(section_ratings),
+        "parse_error": parse_error,
     }

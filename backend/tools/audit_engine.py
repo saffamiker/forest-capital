@@ -883,21 +883,38 @@ async def compute_in02_attestation() -> dict[str, Any]:
         # was "parsed only 1 of 5" while compute_review_score saw
         # all five.
         n_sections: int | None = None
+        parse_error: bool | None = None
         if isinstance(meta, dict):
             md_count = meta.get("sections_rated")
             if isinstance(md_count, int) and md_count >= 0:
                 n_sections = md_count
+            pe = meta.get("parse_error")
+            if isinstance(pe, bool):
+                parse_error = pe
         if n_sections is None:
             try:
                 from tools.academic_review_score import compute_review_score
                 scored = compute_review_score(summary or "")
                 n_sections = int(scored.get("sections_rated") or 0)
+                if parse_error is None:
+                    parse_error = bool(scored.get("parse_error"))
                 if not overall:
                     overall = scored.get("rating")
             except Exception as _exc:  # noqa: BLE001
                 log.warning(
                     "in02_canonical_score_failed", error=str(_exc))
                 n_sections = 0
+        # Re-derive parse_error from the summary when the metadata row
+        # is old (pre-bridge-#82 metadata had no parse_error field) and
+        # n_sections came back zero. The canonical scorer is the
+        # source of truth.
+        if parse_error is None and n_sections == 0:
+            try:
+                from tools.academic_review_score import compute_review_score
+                parse_error = bool(
+                    compute_review_score(summary or "").get("parse_error"))
+            except Exception:  # noqa: BLE001
+                parse_error = False
 
         if n_sections >= 5:
             return {
@@ -914,17 +931,36 @@ async def compute_in02_attestation() -> dict[str, Any]:
                 "n_sections": n_sections,
                 "overall_rating": overall,
             }
-        return {
-            "status": "WARN",
-            "evidence": (
+        # Bridge #82 — distinguish "arbiter response could not be
+        # parsed" from "fewer than five sections survived parsing".
+        # parse_error=True means the response carried text but the
+        # parser recognised zero sections; the user needs to investigate
+        # the arbiter run (refused / unparseable / heading drift) rather
+        # than retry the document.
+        if parse_error and n_sections == 0:
+            evidence = (
+                f"An Academic Review row exists ({email} on {when}), "
+                f"but the arbiter response could not be parsed — zero "
+                f"of five rated sections were recognised in a non-empty "
+                f"response. The arbiter may have refused, drifted from "
+                f"the rubric heading format, or returned an error "
+                f"payload; inspect the agent_interactions row and re-run "
+                f"the Academic Review."
+            )
+        else:
+            evidence = (
                 f"An Academic Review row exists ({email} on {when}), "
                 f"but the verdict parsed only {n_sections} of 5 rated "
                 f"sections — the arbiter response may have truncated. "
                 f"Re-run the Academic Review so the full five-section "
                 f"verdict lands."
-            ),
+            )
+        return {
+            "status": "WARN",
+            "evidence": evidence,
             "last_review_at": when,
             "n_sections": n_sections,
+            "parse_error": bool(parse_error),
         }
     except Exception as exc:  # noqa: BLE001
         log.warning("in02_attestation_query_failed", error=str(exc))
