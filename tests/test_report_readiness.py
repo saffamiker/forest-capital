@@ -363,6 +363,98 @@ class TestNonBlockingWarnFilter:
         assert out["blocking_count"] == 0
 
 
+class TestCacheWarmthGate:
+    """Bridge #91: cold analytics caches must block generation before
+    the LLM run fires, not after. compute_readiness consults
+    _caches_warm and contributes ONE blocker per cold-cache verdict.
+    The 422 detail surfaces error='caches_not_warm' so the modal can
+    render a Warm Caches button instead of the audit-blocker list."""
+
+    def test_caches_warm_true_in_test_env_is_default(self, monkeypatch):
+        """ENVIRONMENT=test short-circuits the cache check (auto-warm
+        is disabled in tests so the WarmState stays idle). Without
+        this short-circuit every existing readiness fixture would
+        gain a synthetic blocker."""
+        from tools.report_readiness import _caches_warm
+        # The conftest already sets ENVIRONMENT=test; the helper
+        # must return caches_warm=True without consulting the live
+        # WarmState.
+        verdict = _caches_warm()
+        assert verdict["caches_warm"] is True
+        assert verdict["cold_caches"] == []
+        assert verdict["warm_status"] == "warm"
+
+    def test_caches_cold_adds_a_synthetic_blocker(self, monkeypatch):
+        """A non-test env with a cold WarmState contributes one
+        blocker to the count. compute_readiness exposes the cold list
+        AND keeps is_ready=False even when no audit blocker exists."""
+        from tools import report_readiness
+
+        # Force the helper to report cold (bypass the test-env
+        # short-circuit). Stub the helper directly so the test is
+        # decoupled from env-var handling.
+        def _fake_cold_caches():
+            return {
+                "caches_warm": False,
+                "cold_caches": ["academic_analytics", "cio_recommendation"],
+                "warm_status": "idle",
+            }
+        monkeypatch.setattr(
+            report_readiness, "_caches_warm", _fake_cold_caches)
+
+        async def _empty_stat():
+            return {"unreviewed_warnings": [], "unreviewed_failures": []}
+
+        async def _empty_meth():
+            return {"unresolved_warnings": [], "unresolved_failures": []}
+
+        monkeypatch.setattr(
+            report_readiness, "_statistical_blocking", _empty_stat)
+        monkeypatch.setattr(
+            report_readiness, "_methodology_blocking", _empty_meth)
+
+        out = asyncio.run(report_readiness.compute_readiness())
+        assert out["is_ready"] is False
+        assert out["blocking_count"] == 1
+        assert out["caches_warm"] is False
+        assert out["cold_caches"] == [
+            "academic_analytics", "cio_recommendation"]
+
+    def test_summarise_blockers_lists_cold_caches_first(self):
+        """When caches are cold AND an audit blocker exists, the
+        cold-caches entry appears FIRST -- warming is the
+        prerequisite the user has to clear first."""
+        from tools.report_readiness import summarise_blockers
+
+        readiness = {
+            "caches_warm": False,
+            "cold_caches": ["academic_analytics"],
+            "statistical": {"unreviewed_warnings": [], "unreviewed_failures": []},
+            "methodology": {"unresolved_warnings": [
+                {"check_id": "D01", "check": "Returns audit"}
+            ], "unresolved_failures": []},
+        }
+        labels = summarise_blockers(readiness)
+        assert labels[0].startswith("Caches are not warm")
+        assert "academic_analytics" in labels[0]
+        assert any("D01" in lbl for lbl in labels[1:])
+
+    def test_summarise_blockers_warm_caches_omits_the_entry(self):
+        from tools.report_readiness import summarise_blockers
+
+        readiness = {
+            "caches_warm": True,
+            "cold_caches": [],
+            "statistical": {"unreviewed_warnings": [], "unreviewed_failures": []},
+            "methodology": {"unresolved_warnings": [
+                {"check_id": "D01", "check": "Returns audit"}
+            ], "unresolved_failures": []},
+        }
+        labels = summarise_blockers(readiness)
+        assert not any("Caches are not warm" in lbl for lbl in labels)
+        assert any("D01" in lbl for lbl in labels)
+
+
 class TestSummariseBlockers:
     """The 422 detail line + frontend modal both render this list. The
     summariser must produce one entry per blocker, naming the surface

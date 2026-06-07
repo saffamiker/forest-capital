@@ -123,7 +123,8 @@ export default function DocumentGenerationPanel() {
   // depth against a stale `is_ready` value).
   const readinessGate = useReportReadinessGate()
   const [blockingModal, setBlockingModal] = useState<{
-    open: boolean; blockers: string[]; message?: string
+    open: boolean; blockers: string[]; message?: string;
+    coldCaches?: string[]
   }>({ open: false, blockers: [] })
 
   // On mount, resume polling any in-progress jobs and surface recently
@@ -199,13 +200,19 @@ export default function DocumentGenerationPanel() {
         const data = err.response.data as {
           detail?: {
             error?: string; message?: string; blockers?: string[]
+            cold_caches?: string[]
           }
         }
-        if (data?.detail?.error === 'report_not_ready') {
+        // Bridge #91 — the gate now returns a distinct error type
+        // for cold caches so the modal can render Warm Caches.
+        if (data?.detail?.error === 'report_not_ready'
+            || data?.detail?.error === 'caches_not_warm') {
           setBlockingModal({
             open: true,
             blockers: data.detail.blockers ?? [],
             ...(data.detail.message ? { message: data.detail.message } : {}),
+            ...(data.detail.cold_caches
+              ? { coldCaches: data.detail.cold_caches } : {}),
           })
           // Refresh the readiness store so the banner matches the
           // server's authoritative state from this 422.
@@ -416,6 +423,8 @@ export default function DocumentGenerationPanel() {
         onClose={() => setBlockingModal({ open: false, blockers: [] })}
         blockers={blockingModal.blockers}
         {...(blockingModal.message ? { message: blockingModal.message } : {})}
+        {...(blockingModal.coldCaches
+          ? { coldCaches: blockingModal.coldCaches } : {})}
       />
     </section>
   )
