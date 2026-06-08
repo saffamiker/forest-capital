@@ -228,6 +228,98 @@ def deck_to_editor(
     return content_json, content_text
 
 
+# Bridge (June 8 2026) -- auto-embed per-slide charts so the editor opens
+# with the contextually-appropriate platform chart already on every slide
+# that has one. Keys are slide_number; values are chart_key strings the
+# /api/v1/charts/available endpoint recognises. Slides absent from the
+# map carry NO chart element -- the slide is bullets / table only.
+DECK_SLIDE_CHART_KEYS: dict[int, str] = {
+    # 1: stat card only -- the answer up front, no chart.
+    # 2: three-column comparison card -- table-style, no chart.
+    3: "rolling_sharpe",            # risk-adjusted comparison
+    4: "rolling_correlation",       # the 2022 break
+    5: "cumulative_returns",        # capital preservation history
+    6: "oos_performance",           # walk-forward / OOS evidence
+    7: "regime_signals",            # live regime read context
+    # 8: play-by-play scorecard -- table, no chart.
+    # 9: transition slide -- no chart.
+    # 10: AI methodology two-column bullets -- no chart.
+    11: "risk_return",              # efficient-frontier proxy + live blend
+}
+
+
+def _markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+    """Bridge (June 8 2026) -- render a slide's table_data as a proper
+    markdown table (with the `|---|` separator row) so PresentationPreview
+    can detect + render it as a styled HTML table instead of raw pipe
+    text. The .pptx export still consumes the structured table_data
+    directly via build_presentation_deck -- this helper exists for the
+    editor's text element only."""
+    if not headers:
+        return ""
+    header_row = "| " + " | ".join(headers) + " |"
+    separator = "|" + "|".join("---" for _ in headers) + "|"
+    body_rows = []
+    for r in rows[:12]:
+        cells = [str(c) for c in r]
+        # Pad / truncate to the header column count so the table stays
+        # rectangular even when an LLM emits a row with the wrong arity.
+        if len(cells) < len(headers):
+            cells = cells + [""] * (len(headers) - len(cells))
+        elif len(cells) > len(headers):
+            cells = cells[: len(headers)]
+        body_rows.append("| " + " | ".join(cells) + " |")
+    return "\n".join([header_row, separator, *body_rows])
+
+
+def _deck_slide_with_chart(
+    slide_id: int, title: str, body: str, chart_key: str | None,
+) -> dict[str, Any]:
+    """Bridge (June 8 2026) -- emit a deck slide with a chart element
+    pre-embedded on the right half when a chart is configured for this
+    slide number. When chart_key is None, the slide is bullets / table
+    only and the body element spans the full content area (no narrowing).
+
+    Layout:
+      - Title: 60,40 -> 900,120 (full width).
+      - With chart: bullets 60,150 -> 460,470 (left 400px),
+                    chart   500,150 -> 900,470 (right 400x320).
+      - Without chart: bullets 60,150 -> 900,470 (full 840px).
+    """
+    elements: list[dict[str, Any]] = [
+        {"id": "el_001", "type": "text",
+         "x": 60, "y": 40, "width": 840, "height": 80,
+         "content": title, "fontSize": 36, "fontWeight": "bold",
+         "fontStyle": "normal", "color": "#1B2A4A", "locked": False},
+    ]
+    if chart_key:
+        elements.append({
+            "id": "el_002", "type": "text",
+            "x": 60, "y": 150, "width": 400, "height": 320,
+            "content": body, "fontSize": 16, "fontWeight": "normal",
+            "fontStyle": "normal", "color": "#333333", "locked": False,
+        })
+        elements.append({
+            "id": "el_003", "type": "chart",
+            "x": 500, "y": 150, "width": 400, "height": 320,
+            "chartKey": chart_key, "verified": False, "locked": False,
+        })
+    else:
+        elements.append({
+            "id": "el_002", "type": "text",
+            "x": 60, "y": 150, "width": 840, "height": 320,
+            "content": body, "fontSize": 18, "fontWeight": "normal",
+            "fontStyle": "normal", "color": "#333333", "locked": False,
+        })
+    return {
+        "id": slide_id,
+        "title": title,
+        "background": "#FFFFFF",
+        "speaker_notes": "",
+        "elements": elements,
+    }
+
+
 def deck_slides_to_editor(
     slides: Any,
 ) -> tuple[dict[str, Any], str]:
@@ -246,6 +338,15 @@ def deck_slides_to_editor(
     still produces a complete, openable deck. The AI speaker_notes
     carry into each slide; content_text concatenates every slide for
     Academic Review.
+
+    Bridge (June 8 2026) updates:
+      * table_data is now rendered as a proper markdown table (with a
+        `|---|` separator row) -- PresentationPreview detects + renders
+        the markdown as a styled HTML table instead of raw pipe text.
+      * Slides with an entry in DECK_SLIDE_CHART_KEYS get a chart
+        element pre-embedded on the right half. The deck opens in the
+        editor with charts already in place; the user no longer has
+        to add them via ChartPicker.
     """
     from tools.academic_deck import SLIDE_TITLES, _normalize_slides
 
@@ -259,11 +360,17 @@ def deck_slides_to_editor(
         td = sl.get("table_data")
         if isinstance(td, dict) and td.get("rows"):
             headers = [str(h) for h in (td.get("headers") or [])]
+            rows = [
+                [str(c) for c in r]
+                for r in (td.get("rows") or [])
+                if isinstance(r, (list, tuple))
+            ]
             if headers:
-                body += "\n\n" + " | ".join(headers)
-            for row in (td.get("rows") or [])[:12]:
-                body += "\n" + " | ".join(str(c) for c in row)
-        cs = _canvas_slide(i, title, body)
+                md = _markdown_table(headers, rows)
+                if md:
+                    body = (body + "\n\n" + md) if body else md
+        chart_key = DECK_SLIDE_CHART_KEYS.get(i)
+        cs = _deck_slide_with_chart(i, title, body, chart_key)
         notes = str(sl.get("speaker_notes") or "").strip()
         if notes:
             cs["speaker_notes"] = notes
