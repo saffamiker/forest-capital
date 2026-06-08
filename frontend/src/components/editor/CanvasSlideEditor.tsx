@@ -358,12 +358,31 @@ export default function CanvasSlideEditor({
           <Type className="w-3.5 h-3.5" /> Text
         </button>
         {!isTouchDevice && (
-          <button type="button" onClick={onRequestChartPicker}
-            className="flex items-center gap-1 text-2xs px-2 py-1 rounded
-                       border border-electric/40 text-electric
-                       hover:bg-electric/10">
-            <BarChart3 className="w-3.5 h-3.5" /> Chart
-          </button>
+          // The deck generator now auto-embeds the contextually-
+          // appropriate chart on every slide that has one (see
+          // editor_content.DECK_SLIDE_CHART_KEYS). The manual picker
+          // is kept as a demoted secondary option for slides that
+          // don't carry a default chart, or to add a second chart
+          // alongside the embedded one. Muted styling +
+          // separator + tooltip make the demotion visible.
+          <>
+            <span aria-hidden="true"
+              className="h-4 w-px bg-border mx-0.5" />
+            <button type="button"
+              onClick={onRequestChartPicker}
+              data-testid="canvas-toolbar-chart-picker"
+              title={
+                'Add an additional chart manually. '
+                + 'Slides 3-7 and 11 already carry their default chart '
+                + 'from the deck spec — use this for extras.'
+              }
+              className="flex items-center gap-1 text-2xs px-2 py-1 rounded
+                         border border-border text-muted
+                         hover:text-white hover:bg-navy-700
+                         transition-colors">
+              <BarChart3 className="w-3.5 h-3.5" /> Add chart…
+            </button>
+          </>
         )}
 
         {selectedEl?.type === 'text' && (

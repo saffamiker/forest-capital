@@ -15,7 +15,10 @@
  * own background (default white, settable per slide) — the deck builder
  * does the same on export.
  */
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import {
+  useCallback, useEffect, useLayoutEffect, useRef, useState,
+  type ReactElement,
+} from 'react'
 import axios from 'axios'
 import { ChevronLeft, ChevronRight, X } from 'lucide-react'
 
@@ -147,7 +150,114 @@ export default function PresentationPreview({ slides, onClose }: Props) {
   )
 }
 
+// Bridge (June 8 2026) -- markdown helpers so slide text elements that
+// carry table_data render as proper visual tables instead of raw pipe
+// strings. We split the element's content into "blocks" -- a sequence
+// of either plain-text lines or a markdown table -- and render each
+// block in order.
+//
+// Recognised markdown table shape (the one editor_content._markdown_table
+// emits):
+//   | Header A | Header B |
+//   |---|---|
+//   | Cell    | Cell    |
+//
+// Detection rule: a line of `|...|` followed by a line that's pure
+// `|---|---|` separators (dashes / colons / pipes / whitespace only).
+// Bold (**text**) is also unwrapped per-text-run.
+
+interface TableBlock {
+  kind: 'table'
+  headers: string[]
+  rows: string[][]
+}
+interface TextBlock {
+  kind: 'text'
+  lines: string[]
+}
+type ContentBlock = TableBlock | TextBlock
+
+function _isSeparatorRow(line: string): boolean {
+  const trimmed = line.trim()
+  if (!/^\|/.test(trimmed) || !/\|$/.test(trimmed)) return false
+  // Cells between pipes must be dashes / colons / whitespace only.
+  const cells = trimmed.slice(1, -1).split('|')
+  if (cells.length === 0) return false
+  return cells.every((c) => /^[\s:-]+$/.test(c) && /-/.test(c))
+}
+
+function _splitPipeRow(line: string): string[] {
+  let s = line.trim()
+  if (s.startsWith('|')) s = s.slice(1)
+  if (s.endsWith('|')) s = s.slice(0, -1)
+  return s.split('|').map((c) => c.trim())
+}
+
+export function _splitIntoBlocks(content: string): ContentBlock[] {
+  const lines = content.split('\n')
+  const blocks: ContentBlock[] = []
+  let buffer: string[] = []
+  const flush = () => {
+    if (buffer.length > 0) {
+      blocks.push({ kind: 'text', lines: buffer })
+      buffer = []
+    }
+  }
+  let i = 0
+  while (i < lines.length) {
+    const headerLike = lines[i]
+    const separatorLike = i + 1 < lines.length ? lines[i + 1] : ''
+    if (
+      headerLike != null
+      && /\|/.test(headerLike) && /\|/.test(headerLike.trim().slice(1, -1) || ' ')
+      && _isSeparatorRow(separatorLike)
+    ) {
+      flush()
+      const headers = _splitPipeRow(headerLike)
+      const rows: string[][] = []
+      let j = i + 2
+      while (j < lines.length && /\|/.test(lines[j])) {
+        rows.push(_splitPipeRow(lines[j]))
+        j += 1
+      }
+      blocks.push({ kind: 'table', headers, rows })
+      i = j
+      continue
+    }
+    buffer.push(headerLike ?? '')
+    i += 1
+  }
+  flush()
+  return blocks
+}
+
+function _renderInline(text: string): ReactElement[] {
+  // Minimal markdown -- bold (**text**) only. Italic (*text*) is
+  // currently rare in slide bullets; keep this minimal so the preview
+  // is predictable.
+  const parts: ReactElement[] = []
+  let cursor = 0
+  const re = /\*\*(.+?)\*\*/g
+  let m: RegExpExecArray | null
+  let key = 0
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > cursor) {
+      parts.push(
+        <span key={`t${key++}`}>{text.slice(cursor, m.index)}</span>,
+      )
+    }
+    parts.push(<strong key={`b${key++}`}>{m[1]}</strong>)
+    cursor = m.index + m[0].length
+  }
+  if (cursor < text.length) {
+    parts.push(<span key={`t${key++}`}>{text.slice(cursor)}</span>)
+  }
+  return parts
+}
+
 function PreviewText({ el, scale }: { el: CanvasTextElement; scale: number }) {
+  const blocks = _splitIntoBlocks(el.content || '')
+  const hasTable = blocks.some((b) => b.kind === 'table')
   return (
     <div style={{
       position: 'absolute',
@@ -158,9 +268,55 @@ function PreviewText({ el, scale }: { el: CanvasTextElement; scale: number }) {
       fontWeight: el.fontWeight,
       fontStyle: el.fontStyle === 'italic' ? 'italic' : 'normal',
       color: el.color, lineHeight: 1.2, overflow: 'hidden',
-      whiteSpace: 'pre-wrap',
+      whiteSpace: hasTable ? 'normal' : 'pre-wrap',
     }}>
-      {el.content}
+      {blocks.map((block, idx) => block.kind === 'table' ? (
+        <table
+          key={`tbl-${idx}`}
+          data-testid="preview-text-table"
+          style={{
+            width: '100%', borderCollapse: 'collapse',
+            margin: '0.4em 0',
+            fontSize: 'inherit', fontFamily: 'inherit',
+            color: '#1B2A4A',
+          }}>
+          <thead>
+            <tr>
+              {block.headers.map((h, hi) => (
+                <th key={hi} style={{
+                  background: '#1B2A4A', color: '#FFFFFF',
+                  padding: '0.35em 0.55em',
+                  textAlign: 'left',
+                  fontWeight: 'bold',
+                  border: 'none',
+                }}>{_renderInline(h)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {block.rows.map((row, ri) => (
+              <tr key={ri} style={{
+                background: ri % 2 === 0
+                  ? 'rgba(27,42,74,0.04)'
+                  : 'rgba(27,42,74,0.10)',
+              }}>
+                {row.map((cell, ci) => (
+                  <td key={ci} style={{
+                    padding: '0.35em 0.55em',
+                    border: 'none',
+                  }}>{_renderInline(cell)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : (
+        <div key={`txt-${idx}`} style={{ whiteSpace: 'pre-wrap' }}>
+          {block.lines.map((line, li) => (
+            <div key={li}>{_renderInline(line)}</div>
+          ))}
+        </div>
+      ))}
     </div>
   )
 }
