@@ -112,9 +112,29 @@ describe('CanvasSlideEditor', () => {
     render(<CanvasSlideEditor draftId={1} deck={makeDeck()} activeSlideId={1}
       onChange={noop} onRequestChartPicker={noop} />)
     expect(screen.getByRole('button', { name: 'Text' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Chart' })).toBeInTheDocument()
+    // The chart-picker button is now labelled "Add chart…" (June 8
+    // 2026 demotion -- the deck generator auto-embeds charts, so
+    // the manual picker is a secondary action with muted styling).
+    expect(screen.getByRole('button', { name: /Add chart/ }))
+      .toBeInTheDocument()
     // The slide's text element renders inside the (mocked) stage.
     expect(screen.getByText('Opening title')).toBeInTheDocument()
+  })
+
+  it('chart-picker button is styled as a demoted secondary action', () => {
+    // June 8 2026 demotion: switch from electric primary styling
+    // (border-electric/40 text-electric) to muted secondary
+    // (border-border text-muted). The deck generator now auto-
+    // embeds charts; this button is for manual additions only.
+    render(<CanvasSlideEditor draftId={1} deck={makeDeck()} activeSlideId={1}
+      onChange={noop} onRequestChartPicker={noop} />)
+    const btn = screen.getByTestId('canvas-toolbar-chart-picker')
+    expect(btn.className).toContain('border-border')
+    expect(btn.className).toContain('text-muted')
+    expect(btn.className).not.toContain('text-electric')
+    expect(btn.className).not.toContain('border-electric')
+    // Tooltip explains the demotion.
+    expect(btn.getAttribute('title') ?? '').toMatch(/manually/i)
   })
 
   it('shows an empty-state message when the deck has no slides', () => {
@@ -133,11 +153,11 @@ describe('CanvasSlideEditor', () => {
     expect(next.slides[0].elements).toHaveLength(2)
   })
 
-  it('opens the chart picker when [Chart] is clicked', () => {
+  it('opens the chart picker when [Add chart] is clicked', () => {
     const onRequestChartPicker = vi.fn()
     render(<CanvasSlideEditor draftId={1} deck={makeDeck()} activeSlideId={1}
       onChange={noop} onRequestChartPicker={onRequestChartPicker} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Chart' }))
+    fireEvent.click(screen.getByRole('button', { name: /Add chart/ }))
     expect(onRequestChartPicker).toHaveBeenCalledTimes(1)
   })
 
