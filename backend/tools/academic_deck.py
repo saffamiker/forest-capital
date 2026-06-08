@@ -115,84 +115,99 @@ _DYNAMIC_STRATEGIES = ["MOMENTUM_ROTATION", "REGIME_SWITCHING", "VOL_TARGETING",
 # body. SLIDE_CHARTS maps a slide number to the deck-chart role the
 # builder embeds on it.
 SLIDE_TITLES = [
-    "Does holding only equities cost you?",                # 1
-    "Why this question got harder in 2022",                # 2
-    "Three strategies, one comparison",                    # 3
-    "We tried to break our own answer",                    # 4
-    "Five decisions only the team made",                   # 5
-    "The answer — updated on presentation morning",        # 6
+    "Does Diversification Beat 100% Equity?",                 # 1
+    "Static, Dynamic, or Benchmark?",                         # 2
+    "Risk-Adjusted Outperformance: The Numbers",              # 3
+    "The 2022 Break: Why Static Allocation Failed",           # 4
+    "Capital Preservation in Bear Regimes",                   # 5
+    "Does It Hold Up Out-of-Sample?",                         # 6
+    "Macro Context: Why Now Is a BEAR Regime",                # 7
+    "What the Model Gets Wrong",                              # 8
+    "AnalyticsDesk: The Platform Behind the Analysis",        # 9
+    "How We Used AI: What Worked and What Didn't",            # 10
+    "The Answer: Yes, With Conditions",                       # 11
 ]
 DECK_SLIDE_COUNT = len(SLIDE_TITLES)
 
 # slide_number → chart role. The role string is resolved to a chart_render
 # renderer + arguments in main._render_deck_slide_charts. Slides not listed
-# carry no chart. The six-slide rewrite (June 6 2026) reuses the existing
-# chart renderers where the shape matches — rolling correlation for slide
-# 2, strategy_comparison bars for slide 3 (OOS Sharpe comparison across
-# three series), and efficient_frontier with the live blend position
-# marked for slide 6. Slide 1's two-bar drawdown chart, slide 4's
-# nine-event scorecard, and slide 5 (no chart) all render directly from
-# the slide body tables — no custom matplotlib renderer needed.
+# carry no chart -- the slide body renders bullets + optional table only.
+#
+# Bridge #98/#100 (June 7 2026) -- eleven-slide rebuild. Chart slots map to
+# the existing platform renderers where the shape matches:
+#   slide 4 -- rolling correlation (the 2022 break)
+#   slide 5 -- strategy comparison bars (cumulative returns proxy)
+#   slide 11 -- efficient frontier with the live blend marker
+# Other slides carry stat cards, tables, or pure prose -- the builder
+# renders those from the slide body without a matplotlib pass.
 SLIDE_CHARTS: dict[int, str] = {
-    2: "rolling_correlation",
-    3: "strategy_comparison_oos_sharpe",
-    6: "efficient_frontier",
+    4: "rolling_correlation",
+    5: "strategy_comparison_oos_sharpe",
+    11: "efficient_frontier",
 }
 
 
-# ── Generation prompt (passed verbatim to harness_narrative) ──────────────────
-# DECK_GENERATION_PROMPT is the preamble; SLIDE_SPECIFICATIONS lists the ten
-# slides' required content. deck_generation_prompt() concatenates them — the
-# full text handed to harness_narrative() as the generation task.
+# ── Generation prompt (the per-slide framing) ─────────────────────────────────
+# DECK_GENERATION_PROMPT is the preamble carrying the project framing + the
+# audience + the story-arc seed. slide_generation_prompt() slices ONE slide's
+# spec out of SLIDE_SPECIFICATIONS, prepends the preamble (with the story-arc
+# seed parameterised for that slide), and asks for a single-object JSON
+# response. Bridge #98 / #100 (June 7 2026) rebuilt the deck from 6 slides
+# to 11 and switched generation from the academic-writer harness to a single
+# direct Sonnet call per slide (no peer-discussant evaluator, no Gemini, no
+# Opus arbiter -- those were leaking peer-review text into the slide output).
 DECK_GENERATION_PROMPT = """\
-You are generating content for a 6-slide investment research presentation \
-for FNA 670 (Financial Strategies and Analytics). The audience is Dr. \
-Katerina Panttser and peer reviewers. Runtime is approximately 8-10 \
-minutes — slides 1-4 land in 4-5 minutes total, slide 5 in 1.5 minutes, \
-slide 6 in 3 minutes including the live regime read.
+You are generating slide content for an 18-20 minute final investment \
+presentation to an academic panel for FNA 670 (Financial Strategies and \
+Analytics) at the McColl School of Business, Queens University of Charlotte. \
+The audience is Dr. Katerina Panttser and a graduate-level industry panel.
 
 The central question of the project is: \
-"Does diversification outperform 100% equity?" Every slide must \
-contribute to answering that question. The title slide states the \
-question; every speaker note references it explicitly. The answer \
-appears on slide 1 (the drawdown answer) and again on slide 6 (the \
-live blend recommendation). The slides in between are evidence.
+"Does diversification outperform 100% equity?" Every slide must contribute \
+to answering that question with the investable conclusion front and center.
+
+Midpoint feedback was explicit: (a) lead with the answer, not the methodology; \
+(b) simplify the strategy set to three (Static / Dynamic / Benchmark) for the \
+panel; (c) emphasise the economic story around regime-switching, not the HMM \
+math; (d) keep the framing at the executive level; (e) discuss AI use \
+explicitly. Forest Capital purchases individual stocks and bonds; ETF \
+proxies in this analysis represent asset-class signals only.
 
 The team is:
-Bob Thao -- quantitative analysis, regime hypothesis, economic \
-significance threshold
-Michael Ruurds -- platform engineering, architecture, OOS window \
-design, asset scope decisions
-Molly Murdock -- presentation, validation framework, 9-event \
-play-by-play, peer review
+Bob Thao -- quantitative analysis, regime hypothesis, economic significance \
+threshold.
+Michael Ruurds -- platform engineering, architecture, OOS window design, \
+asset scope decisions.
+Molly Murdock -- presentation, validation framework, 9-event play-by-play \
+scorecard, peer review.
 
-Using ONLY the data provided in the context block, generate structured slide \
-content for all 6 slides. Do not invent numbers. If a value is missing from \
-context, write [DATA PENDING].
+Using ONLY the data provided in the context block, generate the slide \
+content. Do not invent numbers. If a value is missing from context, write \
+[DATA PENDING]."""
 
-For each slide return:
-- title (use the exact canonical title from the spec below)
-- 3-5 bullet points (factual, specific, no filler phrases)
-- table_data (if applicable): column headers + row data as JSON
-- speaker_notes (the full spoken script from the spec below — paraphrase \
-in your own voice but cover every required point)
 
-Respond only in JSON. No preamble, no markdown fences. Structure:
-{
-  "slides": [
-    {
-      "slide_number": 1,
-      "title": "...",
-      "bullets": ["...", "..."],
-      "table_data": null or {
-        "headers": [...],
-        "rows": [[...], ...]
-      },
-      "speaker_notes": "..."
-    }
-  ]
-}
-"""
+# Story-arc seed: every per-slide prompt prepends this with the slide-N
+# value substituted in. The seed tells the model where it is in the overall
+# narrative -- critical for keeping slide-by-slide tone consistent without
+# re-reading every other slide's content.
+STORY_ARC_SEED = """\
+This is slide {slide_number} of {total_slides} in the final FNA 670 \
+investment presentation. The story arc is:
+  1. The investment question and direct answer.
+  2. Three strategies, one comparison (Static / Dynamic / Benchmark).
+  3. Risk-adjusted outperformance -- the numbers.
+  4. Why regime-switching works (the 2022 correlation break).
+  5. Capital preservation in bear regimes.
+  6. Out-of-sample validation (resolves the overfitting concern).
+  7. Macro context -- why the live signal is BEAR right now.
+  8. Limitations and honest assessment (the 3/9 play-by-play).
+  9. Live platform demo setup.
+  10. AI methodology -- what worked, what didn't.
+  11. Final recommendation.
+
+You are generating slide {slide_number}: "{slide_title}". Stay in arc \
+position -- do not anticipate slides ahead or re-state slides already \
+covered. The panel reads the deck in order."""
 
 # The slide specifications. Constants are interpolated; performance numbers for
 # the strategy tables are deliberately left for gather_document_data() to
@@ -201,157 +216,286 @@ Respond only in JSON. No preamble, no markdown fences. Structure:
 SLIDE_SPECIFICATIONS = f"""\
 SLIDE SPECIFICATIONS
 
-Title slide convention: every deck opens on slide 1 with the central
-question stated explicitly: "Does diversification outperform 100%
-equity?" Every speaker note references the central question — it is
-the thread the panel follows from slide 1 to slide 6.
+Bridge #98/#100 (June 7 2026) -- eleven-slide rebuild. The deck opens
+with the answer, lays evidence in slides 2-8, sets up the live demo on
+slide 9, addresses AI use explicitly on slide 10, and closes with the
+investable recommendation on slide 11.
 
-Slide 1 -- Does holding only equities cost you?
-Key number: {MAX_DRAWDOWN_BENCHMARK:.1%} vs {MAX_DRAWDOWN_REGIME_CONDITIONAL:.1%} \
-(max drawdown, benchmark vs the regime-conditional blend)
-Required bullets:
-- The answer is yes. A 100%-equity allocation cost 27 points of additional \
-drawdown over the study period.
-- Benchmark max drawdown: {MAX_DRAWDOWN_BENCHMARK:.1%} (peak-to-trough).
-- Regime-conditional blend max drawdown: \
-{MAX_DRAWDOWN_REGIME_CONDITIONAL:.1%} — less than half.
-- The rest of the deck is the evidence behind this number.
-Required table: none
-Chart: two-bar drawdown comparison (benchmark red, blend green) — no other
-strategies on this slide. (Renders via strategy_comparison filtered to
-benchmark + blend.)
-Speaker notes: "Before we show you anything else — here is the answer. \
-A diversified, regime-aware blend would have cut your worst drawdown in \
-half. Everything we show you for the next 8-10 minutes is the evidence \
-behind that number." Time: ~1 minute.
+Slide 1 -- Does Diversification Beat 100% Equity?
+Message: The regime-conditional blend outperforms the 100% equity \
+benchmark on a risk-adjusted basis in the out-of-sample period.
+Required bullets (no more than 3, answer-first):
+- Yes. The dynamic regime-conditional blend beats the 100% equity \
+benchmark on out-of-sample Sharpe.
+- OOS Sharpe of the blend: {{strategy_performance.regime_conditional.oos_sharpe}}. \
+OOS Sharpe of the benchmark: {{strategy_performance.benchmark.oos_sharpe}}. \
+Pull both numbers from context -- do NOT invent.
+- Current regime context: state the live regime label from \
+current_regime as a single word (BEAR / BULL / TRANSITION).
+Required table: none. Single large stat card -- the OOS Sharpe of the \
+blend, the benchmark Sharpe, and the percentage advantage.
+Chart: none -- the answer is the data point.
+Speaker notes: "Before we get to methodology, here is the answer. \
+The regime-conditional blend outperforms 100% equity on risk-adjusted \
+returns in the out-of-sample period. The rest of the deck is the evidence \
+behind that answer." Time: ~1 minute.
+Guardrails: No more than 3 data points. Do not mention HMM, strategy \
+codes, or factor loadings on this slide. Visible answer in 5 seconds.
 
-Slide 2 -- Why this question got harder in 2022
-Key number: equity-bond correlation moved from {CORRELATION_PRE_2022:+.2f} \
-pre-2022 to {CORRELATION_POST_2022:+.2f} post-2022
+Slide 2 -- Static, Dynamic, or Benchmark?
+Message: Simplify the strategy set to three categories for the panel. \
+Static = Classic 60/40. Dynamic = Regime-conditional blend. Benchmark = \
+100% S&P 500. Everything else is supporting evidence.
 Required bullets:
-- The traditional 60/40 diversification answer broke in 2022.
-- Equity-bond correlation moved from {CORRELATION_PRE_2022:+.2f} pre-2022 to \
-{CORRELATION_POST_2022:+.2f} post-2022 — a structural inversion, not a \
-short-term anomaly.
-- Bonds stopped cushioning equity falls; both fell together.
-- The diversification question now depends on KNOWING WHAT REGIME YOU ARE IN, \
-not on a fixed mix.
-Required table: none
-Chart: rolling 12-month equity-bond correlation 2002-2026, single line, zero
-axis highlighted. (Renders via rolling_correlation.)
-Speaker notes: "The traditional diversification answer broke in 2022. Bonds \
-stopped cushioning equity falls — they fell together. The old playbook \
-failed. You need to know what regime you are in." Time: ~1 minute.
-
-Slide 3 -- Three strategies, one comparison
-Key number: {OOS_SHARPE_REGIME_CONDITIONAL} vs {OOS_SHARPE_BENCHMARK} (OOS \
-Sharpe, regime-conditional blend vs the 100%-equity benchmark)
-Required bullets:
-- We tested 10 strategies; three are what matter for the recommendation.
-- 100% equity benchmark — the baseline the question asks about.
-- Best static diversifier — the strongest fixed-mix alternative.
-- Dynamic regime-aware blend — the recommendation.
-- The blend wins on risk-adjusted return AND on drawdown.
-- Test window: the 40 months AFTER the 2022 correlation break, not before. \
-The OOS evidence reflects the environment the hypothesis addresses.
+- Static (Classic 60/40): a fixed 60% equity / 40% bond mix, rebalanced \
+monthly. The traditional diversification answer.
+- Dynamic (Regime-Conditional Blend): allocation shifts with the live \
+regime read -- the platform's recommendation.
+- Benchmark (100% S&P 500): the question's baseline -- does \
+diversification beat this?
 Required table:
-Headers: Strategy | OOS Sharpe | OOS Return | OOS Volatility | Max DD
-Rows: BENCHMARK, the best static strategy (pull from context), and the \
-regime-conditional blend. Pull every performance figure from the \
-strategy_performance section of the context — do not invent any.
-Chart: three-bar OOS Sharpe comparison (benchmark / best static / dynamic
-blend). Other 7 strategies dropped from the body — they live in the
-Analytical Appendix. (Renders via strategy_comparison_oos_sharpe.)
-Speaker notes: "We tested 10 strategies. Three are what matter: 100% \
-equity as the baseline, the best static diversifier, and the dynamic \
-regime-aware blend. The blend wins on risk-adjusted return AND drawdown — \
-in the 40-month window after the correlation break, not before it." \
-Time: ~1.5 minutes.
+Headers: Strategy | Description | IS Sharpe | OOS Sharpe
+Rows: Three rows in this exact order: Dynamic Blend, Classic 60/40, \
+100% Equity Benchmark. Pull Sharpe figures from context.summary_statistics \
+and context.strategy_performance. Use plain English strategy names on \
+this slide.
+Chart: none -- the three-column comparison is the visual.
+Speaker notes: "We tested ten strategies. For this panel we simplify to \
+three categories: the static answer, the dynamic answer, and the \
+benchmark. Everything else is supporting evidence and lives in the \
+analytical appendix." Time: ~1.5 minutes.
+Guardrails: Do NOT list all 10 strategies. Do NOT use codes \
+(MIN_VARIANCE, VOL_TARGETING). Use plain English on this slide only.
 
-Slide 4 -- We tried to break our own answer
-Key number: {PLAY_BY_PLAY_ADD_VALUE} of {PLAY_BY_PLAY_EVENTS} (events where \
-the council added value, on shock days)
+Slide 3 -- Risk-Adjusted Outperformance: The Numbers
+Message: The dynamic strategy beats the benchmark on every risk-adjusted \
+metric in the out-of-sample period. Static diversification also \
+outperforms but by less.
+Required bullets:
+- Out-of-sample period: 40+ months post-2022 correlation break. The \
+window the hypothesis addresses.
+- Dynamic Blend wins on every risk-adjusted metric vs the benchmark.
+- Classic 60/40 also outperforms the benchmark, but the dynamic edge is \
+larger.
+Required table:
+Headers: Strategy | OOS Sharpe | Max Drawdown | Volatility | Total Return
+Rows: Dynamic Blend, Classic 60/40, 100% Equity Benchmark. Pull every \
+figure from context.strategy_performance. Color-code in the bullets: \
+green = dynamic beats benchmark, amber = 60/40 beats benchmark.
+Footnote: "Figures based on December 2025 data lock. Academic submission \
+figures."
+Chart: none -- the performance table IS the slide.
+Speaker notes: "Out-of-sample numbers across our three categories. The \
+dynamic blend leads on Sharpe and drawdown. Classic 60/40 helps but the \
+edge is smaller. Benchmark is third on every risk-adjusted metric." \
+Time: ~2 minutes.
+Guardrails: OOS period only. Do NOT mix IS and OOS in the same table.
+
+Slide 4 -- The 2022 Break: Why Static Allocation Failed
+Message: Pre-2022 equities and bonds were negatively correlated -- \
+diversification was a free hedge. Post-2022 the correlation flipped to \
++0.68. Regime-conditional allocation adapts; static does not.
+Required bullets:
+- Equity-bond correlation pre-2022: {CORRELATION_PRE_2022:+.2f} \
+(negative -- bonds hedged equity falls).
+- Post-2022: {CORRELATION_POST_2022:+.2f} (structural inversion). Bonds \
+and equities now fall together.
+- Static 60/40 was designed for the pre-2022 regime. It cannot adapt to \
+the new correlation environment.
+- Dynamic regime-conditional allocation shifts when the regime shifts.
+Required table: none -- the chart carries the slide.
+Chart: rolling_correlation -- twelve-month equity-bond correlation \
+2002-2026, vertical line at Jan 2022, annotation showing the +0.68 \
+post-2022 figure. Right-panel bar chart NOT required in the JSON; the \
+builder renders the canonical rolling-correlation matplotlib output.
+Speaker notes: "Pre-2022 the equity-bond correlation was {CORRELATION_PRE_2022:+.2f}. \
+That negative correlation was the diversification answer. In 2022 it \
+flipped to {CORRELATION_POST_2022:+.2f}. The static 60/40 answer was \
+designed for the old regime. The dynamic blend adapts." Time: ~2 minutes.
+Guardrails: Causal story, not just numbers. No HMM technical detail. \
+Just the economic intuition: correlation broke, static suffered, regime \
+detection adapted.
+
+Slide 5 -- Capital Preservation in Bear Regimes
+Message: The platform's edge is capital preservation when it matters most, \
+not bull-market outperformance.
+Required bullets:
+- The blend's drawdown profile is meaningfully better in bear regimes; \
+the benchmark and 60/40 are both punished in 2008-2009 and 2022.
+- Max drawdown: blend vs benchmark vs 60/40 -- pull from context.drawdown_comparison.
+- Honest caveat: the council MISSED the April 2025 Liberation Day \
+V-shaped recovery. Capital preservation is the edge, not crisis \
+prediction.
+Required table:
+Headers: Strategy | Max Drawdown | 2008-09 DD | 2022 DD
+Rows: Dynamic Blend, Classic 60/40, 100% Equity Benchmark. Pull figures \
+from context.drawdown_comparison. If a value is missing, write \
+[DATA PENDING] in that cell.
+Chart: strategy_comparison_oos_sharpe -- cumulative-returns proxy, \
+three lines, 2008-09 and 2022 bear regions shaded.
+Speaker notes: "Where does the dynamic blend earn its Sharpe? In bear \
+regimes. The blend cuts the worst drawdown roughly in half versus the \
+benchmark. Liberation Day in April 2025 was a miss for us -- we did not \
+call the V-shaped recovery. Our edge is sustained directional regimes, \
+not sharp reversals." Time: ~2 minutes.
+Guardrails: Be honest about the April 2025 miss. Cumulative returns \
+chart starts at $1.00 in 2002.
+
+Slide 6 -- Does It Hold Up Out-of-Sample?
+Message: Strategy was designed on pre-2022 data and tested on 40+ months \
+of post-2022 data it never saw. It beats the benchmark OOS -- this \
+addresses the overfitting concern directly.
+Required bullets:
+- Design window (in-sample): 2002 through 2021-end. The strategy was \
+calibrated on this period.
+- Test window (out-of-sample): January 2022 through the December 2025 \
+data lock -- ~40 months the strategy never saw.
+- Dynamic Blend OOS Sharpe: {{strategy_performance.regime_conditional.oos_sharpe}}.
+- Benchmark OOS Sharpe: {{strategy_performance.benchmark.oos_sharpe}}.
+- OOS performance is genuine -- the strategy parameters were NOT tuned \
+on post-2022 data.
+Required table:
+Headers: Strategy | IS Sharpe (pre-2022) | OOS Sharpe (post-2022)
+Rows: Dynamic Blend, Classic 60/40, 100% Equity Benchmark. Pull both \
+columns from context.strategy_performance.
+Chart: none -- the comparison table IS the slide.
+Speaker notes: "The overfitting concern: did we tune on the same data we \
+report on? No. Pre-2022 is the design window. Post-2022 is 40+ months of \
+genuine out-of-sample. The dynamic blend beats the benchmark on both. \
+The static 60/40 wins IS, ties OOS." Time: ~2 minutes.
+Guardrails: Address overfitting head-on. Panel WILL ask.
+
+Slide 7 -- Macro Context: Why Now Is a BEAR Regime
+Message: Connect the live platform regime signal to real macroeconomic \
+conditions. The current BEAR signal reflects specific observable factors. \
+Not a black box.
+Required bullets:
+- Live regime: {{current_regime}} ({{regime_confidence}}). The signal \
+updates as macro conditions shift.
+- VIX, 10Y-2Y spread, HY credit spread, equity trend -- five watch-tiles \
+showing what the live signal is reading right now.
+- This is the only slide with live data; everything else is the locked \
+academic figures from December 2025.
+Required table:
+Headers: Watchpoint | Current | Direction | Threshold
+Rows: five watch-tiles -- pull from context.live_regime_signals. If the \
+context lacks a watch-tile, write [DATA PENDING] in that row.
+Chart: none -- the watchpoint tile grid carries the slide.
+Speaker notes: "The live regime read updates as macro conditions move. \
+Here is what the platform is reading right now. {{current_regime}} -- \
+{{regime_confidence}}. This is the only slide in the deck with live data; \
+the rest are the December 2025 academic-submission figures." \
+Time: ~2 minutes.
+Guardrails: This slide is FOR DISCUSSION ONLY. Add the label: \
+"Live signal as of [generation date] -- for discussion, not academic \
+submission figures."
+
+Slide 8 -- What the Model Gets Wrong
+Message: Intellectual honesty is a strength. Edge is capital preservation \
+in sustained bear regimes. NOT designed to call sharp V-shaped reversals. \
+Acknowledge explicitly.
 Required bullets:
 - We tested the council against {PLAY_BY_PLAY_EVENTS} named market events \
-we did not choose — the events were committed to the database BEFORE the \
-council was asked about them.
-- Honest result: {PLAY_BY_PLAY_ADD_VALUE} of {PLAY_BY_PLAY_EVENTS} events \
-where the council added value.
-- We are NOT selling a crisis-prediction engine.
-- We ARE selling allocation discipline that compounds over a full cycle.
-- The cumulative outperformance comes from systematic regime weighting \
-across every month, not from calling individual crises.
+committed to the database BEFORE the council was asked about them.
+- Honest result: value added in {PLAY_BY_PLAY_ADD_VALUE} of \
+{PLAY_BY_PLAY_EVENTS} events.
+- Misses include April 2025 Liberation Day (V-shaped recovery -- \
+council was risk-off, missed the bounce).
+- The regime filter is optimised for SUSTAINED directional regimes, not \
+short-duration reversals.
 Required table:
 Headers: Event | Date | Council Signal | Outcome
-Rows: all {PLAY_BY_PLAY_EVENTS} events from the play_by_play_events context \
-section. Event names only, no quantitative outcome scores — the slide is a \
-scorecard, not a P&L attribution.
-Chart: none — the table is the scorecard.
-Speaker notes: "We tested against {PLAY_BY_PLAY_EVENTS} named market events \
-we did not choose. Honest result: value added in {PLAY_BY_PLAY_ADD_VALUE} \
-of {PLAY_BY_PLAY_EVENTS}. We are not selling a crisis-prediction engine. \
-We are selling allocation discipline that compounds over a full cycle. The \
-Sharpe advantage comes from being correctly positioned across all months, \
-not from calling individual shocks." Time: ~1 minute.
+Rows: every event in context.play_by_play_events. One row per event. \
+Event names only, no quantitative outcome scores -- the slide is a \
+scorecard not a P&L attribution.
+Chart: none -- the table IS the scorecard.
+Speaker notes: "{PLAY_BY_PLAY_ADD_VALUE} of {PLAY_BY_PLAY_EVENTS}. We \
+are not selling crisis prediction. We are selling allocation discipline \
+that compounds. The model's edge is sustained bear regimes -- not sharp \
+reversals like April 2025 Liberation Day." Time: ~1.5 minutes.
+Guardrails: Do NOT spin the misses. {PLAY_BY_PLAY_ADD_VALUE}/{PLAY_BY_PLAY_EVENTS} \
+honest framing is academically stronger than cherry-picking wins.
 
-Slide 5 -- Five decisions only the team made
-Required bullets (five numbered, each one short paragraph):
-1. Regime hypothesis -- Bob Thao. Chose to test whether the 2022 correlation \
-inversion creates distinct regimes requiring different allocation rules. \
-The platform cannot hypothesise; it tests.
-2. Economic significance threshold -- Bob Thao. Set the bar at drawdown \
-reduction and capital preservation rather than statistical Sharpe edge. \
-No strategy clears p < 0.005; framing the case on economic magnitude was \
-a deliberate analytical choice.
-3. Out-of-sample window design -- Michael Ruurds. Chose to begin the OOS \
-period AFTER the 2022 break, not before. The evidence reflects the \
-environment the hypothesis addresses.
-4. Asset scope -- Michael Ruurds. Three asset classes was the graduate \
-project boundary. Designed the architecture to be extensible — HMM and \
-transition matrix work with any return series; the scope is a constraint, \
-not an architectural limit.
-5. Validation framework -- Molly Murdock. Designed the \
-{PLAY_BY_PLAY_EVENTS}-event play-by-play scorecard and the 4-layer data \
-integrity framework, including the honest \
-{PLAY_BY_PLAY_ADD_VALUE}-of-{PLAY_BY_PLAY_EVENTS} result. Chose to surface \
-the limitation rather than omit it.
-Required table: none — the bullets carry the section.
-Chart: none.
-Speaker notes: "The platform runs the computation. Five decisions required \
-human judgment. Each was a deliberate choice — not a platform output. \
-Without these five decisions, the platform produces tables of numbers \
-without a thesis." Time: ~1.5 minutes.
-
-Slide 6 -- The answer — updated on presentation morning
-Key number: LIVE — pulled from detect_current_regime() on the day of \
-generation. The regime label, the confidence percentage, and the blend \
-weights all come from the context block; do NOT hardcode any of them.
+Slide 9 -- AnalyticsDesk: The Platform Behind the Analysis
+Message: Transition slide before the live demo. Set up what the panel is \
+about to see. Three things: live regime + CIO recommendation, council \
+output with dissenting view, document generation.
 Required bullets:
-- Yes. Diversification outperforms 100% equity over the study period.
-- In the CURRENT regime: state the regime (current_regime), the confidence \
-(regime_confidence as a percentage), and the per-strategy live blend \
-weights from the context.
-- These are ASSET-CLASS WEIGHTS for a portfolio of individual stocks and \
-bonds — Forest Capital fills each envelope with its own security selection.
-- The project scope was three asset classes. The architecture has no such \
-limit.
-- The blend updates as the regime read changes — refresh this slide on \
-presentation morning.
+- Live regime detection + CIO recommendation (Investment Outlook page).
+- Council output -- five agents, generator-evaluator harness, dissenting \
+view from the Risk Manager.
+- Document generation -- this deck, the executive brief, the analytical \
+appendix all from the same data layer.
+- URL for the panel: analyticsdesk.app.
+Required table: none.
+Chart: none -- this is a transition slide. The live browser demo follows.
+Speaker notes: "The platform is the analytical engine behind everything \
+you have seen so far. Three things to show in the live demo: regime \
+detection, the council with its dissenting view, and document \
+generation. URL is analyticsdesk.app." Time: 30 seconds (setup only -- \
+the demo itself happens on the live site).
+Guardrails: Setup slide. NO data tables. Brief. The demo is the live \
+browser pivot.
+
+Slide 10 -- How We Used AI: What Worked and What Didn't
+Message: Rubric explicitly requires discussion of AI use. Be direct. \
+The generator-evaluator council with dissenting agents is the platform \
+differentiator. Honest about what failed.
+Required bullets (two columns -- what worked + what we learned):
+- What worked: multi-model validation (Sonnet + Opus + Gemini + Grok), \
+regime-keyed caching, harness evaluation with the dissenting Risk Manager.
+- What worked: deterministic Python recomputation of every reported \
+number -- the LLMs draft prose, Python computes the numbers.
+- What worked: documentation generation -- this deck, the brief, the \
+appendix all from the same data layer.
+- What we learned: LLM arithmetic is unreliable -- replaced every \
+numerical computation with deterministic Python.
+- What we learned: early prompts produced sycophantic outputs -- the \
+dissenting Risk Manager agent specifically counters this.
+- What we learned: the council is the analytical engine, not just a \
+writing tool.
+Required table: none -- two-column bullets carry the slide.
+Chart: none.
+Speaker notes: "The rubric asks about AI use. We used AI critically, \
+not blindly. What worked: multi-model validation, deterministic \
+recomputation, dissenting agents that argue back. What we learned: LLM \
+arithmetic is unreliable, early prompts were sycophantic, and the \
+council is the analytical engine -- not just a writing helper." \
+Time: ~2 minutes.
+Guardrails: Honest and reflective, not promotional. Do NOT list every \
+AI model used. The callout: "Every number in this presentation was \
+verified by deterministic Python recomputation, not LLM arithmetic."
+
+Slide 11 -- The Answer: Yes, With Conditions
+Message: Return to the central question with a direct investable answer. \
+Yes diversification outperforms 100% equity -- but only when allocation \
+is regime-conditional. Static helps but is insufficient post-2022. \
+Recommendation for Forest Capital is the current BEAR regime blend.
+Required bullets (no more than 4 -- the conclusion is the slide):
+- Question restated: "Does diversification outperform 100% equity?"
+- Answer: Yes -- regime-conditional diversification outperforms; static \
+helps but is insufficient post-2022.
+- Current recommended blend (live, refreshes on regeneration): pull \
+{{blend_weights}} from context. Express as implied asset allocation \
+(equities X%, bonds Y%) using compute_implied_asset_allocation on the \
+weights.
+- These are asset-class signals -- Forest Capital purchases individual \
+stocks and bonds; ETF proxies represent asset-class direction only.
 Required table:
-Headers: Regime | Equity | IG Bonds | HY Bonds | Notes
-Rows: BULL (from regime_blends.BULL aggregated to asset class), BEAR (from \
-regime_blends.BEAR), TRANSITION (from regime_blends.TRANSITION). Three rows \
-showing what the blend SHIFTS TO on a regime flip — the table is a watch \
-list, not a recommendation. The CURRENT row (whichever matches the live \
-regime) is highlighted in the speaker notes; the table itself shows all \
-three for context.
-Chart: efficient_frontier with the current live blend position marked.
-(Renders via efficient_frontier with blend_weights from context.)
-Speaker notes: "Yes. Diversification outperforms 100% equity. In the \
-current [LIVE REGIME] regime: [LIVE BLEND]. Asset class weights for a \
-portfolio of individual stocks and bonds. The project scope was three \
-asset classes. The architecture has no such limit." Time: ~3 minutes \
-including the live regime read.
+Headers: Asset Class | Allocation
+Rows: Equities (compute from blend_weights), Bonds (compute), Cash \
+residual if any. Two-decimal percentage values.
+Chart: efficient_frontier with the live blend point marked.
+Speaker notes: "The answer to the panel's question: yes, diversification \
+outperforms 100% equity -- when the allocation is regime-conditional. \
+Static 60/40 helps but is not sufficient post-2022. The current BEAR \
+regime recommendation is {{blend_weights}}, which works out to roughly \
+[implied asset allocation]. Forest Capital purchases individual stocks \
+and bonds -- these are asset-class signals." Time: 1 minute (close).
+Guardrails: End on the investable conclusion, NOT on limitations or \
+caveats. Final image the panel sees should be the answer to the \
+question. Academic disclaimer present but visually subordinate.
+
 """
 
 
@@ -391,35 +535,40 @@ def _slice_slide_spec(slide_number: int) -> str:
 
 
 def slide_generation_prompt(slide_number: int) -> str:
-    """Bridge #95 -- per-slide generation prompt. Returns a prompt that
-    asks the model to emit a SINGLE slide's JSON object (not the
-    {"slides":[...]} wrapper) for the given slide number. Token budget
-    per slide is much smaller than the all-six-at-once call, so a
-    1000-1500 max_tokens cap fits comfortably with headroom for
-    speaker notes -- no more truncation.
+    """Bridge #98 / #100 -- per-slide generation prompt. Returns a prompt
+    that asks the model to emit a SINGLE slide's JSON object for slide
+    {slide_number}. The prompt is sent directly to Sonnet (no harness,
+    no evaluator, no Gemini, no Opus arbiter -- those were leaking
+    peer-review text into the slide output via the academic-review
+    evaluator's feedback retry loop).
 
-    The DECK_GENERATION_PROMPT preamble carries the wrapped-list
-    schema example because it's also handed to the legacy all-six
-    call. For the per-slide path we trim the preamble at the
-    "Respond only in JSON" line so the per-slide schema below isn't
-    competing with the wrapped example for the model's attention.
+    Structure:
+      1. DECK_GENERATION_PROMPT preamble (project framing, audience,
+         midpoint feedback, team roles).
+      2. STORY_ARC_SEED with slide_number / total_slides / slide_title
+         substituted. Tells the model where it sits in the 11-slide arc.
+      3. The slide's spec block from SLIDE_SPECIFICATIONS.
+      4. Explicit single-object JSON contract -- no wrapped list, no
+         markdown fences, no preamble.
+
+    Token budget: with one slide's content the response stays at
+    ~500-1200 tokens, comfortably under a 2000 max_tokens cap.
     """
-    cutoff = DECK_GENERATION_PROMPT.find("Respond only in JSON")
-    preamble = (
-        DECK_GENERATION_PROMPT[:cutoff].rstrip()
-        if cutoff != -1 else DECK_GENERATION_PROMPT.rstrip()
-    )
     spec = _slice_slide_spec(slide_number)
     title = SLIDE_TITLES[slide_number - 1]
+    arc_seed = STORY_ARC_SEED.format(
+        slide_number=slide_number,
+        total_slides=DECK_SLIDE_COUNT,
+        slide_title=title)
     return (
-        f"{preamble}\n\n"
-        f"You are generating ONLY slide {slide_number} of the 6-slide "
-        f"deck: \"{title}\". Spec:\n\n{spec}\n\n"
-        f"Respond ONLY with a single JSON object matching this shape "
-        f"(no preamble, no markdown fences, no wrapping list):\n"
+        f"{DECK_GENERATION_PROMPT}\n\n"
+        f"{arc_seed}\n\n"
+        f"SLIDE SPEC:\n{spec}\n\n"
+        f"Output ONLY a JSON object with these keys (no preamble, no "
+        f"markdown fences, no wrapping list, no commentary):\n"
         f'{{\n'
         f'  "slide_number": {slide_number},\n'
-        f'  "title": "...",\n'
+        f'  "title": "{title}",\n'
         f'  "bullets": ["...", "..."],\n'
         f'  "table_data": null or {{"headers": [...], "rows": [[...], ...]}},\n'
         f'  "speaker_notes": "..."\n'

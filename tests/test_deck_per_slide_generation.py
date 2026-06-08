@@ -160,14 +160,14 @@ class TestParseSingleSlideJson:
 
 
 class TestDeckSlideCount:
-    """The deck has exactly 6 slides post-rewrite. _slice_slide_spec
-    + slide_generation_prompt + parse_single_slide_json all rely on
-    this constant; pin it so a future change touches every helper at
-    once."""
+    """The deck has exactly 11 slides post-rebuild (bridge #98).
+    _slice_slide_spec + slide_generation_prompt + parse_single_slide_json
+    all rely on this constant; pin it so a future change touches every
+    helper at once."""
 
-    def test_six_slides_post_rewrite(self):
+    def test_eleven_slides_post_rebuild(self):
         from tools.academic_deck import DECK_SLIDE_COUNT
-        assert DECK_SLIDE_COUNT == 6
+        assert DECK_SLIDE_COUNT == 11
 
     def test_every_slide_number_has_a_spec(self):
         """The per-slide loop iterates 1..DECK_SLIDE_COUNT. Each must
@@ -177,3 +177,67 @@ class TestDeckSlideCount:
             slice_n = _slice_slide_spec(n)
             assert slice_n
             assert f"Slide {n} --" in slice_n
+
+
+class TestStoryArcSeed:
+    """Bridge #98: each per-slide prompt carries the story-arc seed
+    so the LLM knows where it sits in the 11-slide narrative without
+    re-reading every other slide's content."""
+
+    def test_seed_substitutes_slide_number_and_title(self):
+        from tools.academic_deck import (
+            slide_generation_prompt, SLIDE_TITLES,
+        )
+        prompt = slide_generation_prompt(7)
+        assert "slide 7 of 11" in prompt
+        assert SLIDE_TITLES[6] in prompt   # slide 7's title
+
+    def test_seed_lists_the_eleven_arc_stops(self):
+        from tools.academic_deck import slide_generation_prompt
+        prompt = slide_generation_prompt(1)
+        # The arc seed lists all 11 narrative beats so the slide-1
+        # generator knows where the deck is heading.
+        for n in range(1, 12):
+            assert f"{n}." in prompt
+
+
+class TestNoHarnessReferenced:
+    """Bridge #100: the deck slide generation must NOT route through
+    the academic-writer harness (which uses the peer-discussant
+    evaluator that caused the slide-2 leak). The prompt is sent
+    directly to Sonnet via call_claude."""
+
+    def test_main_imports_call_claude_not_harness_for_slide_generation(self):
+        """Grep the _generate_one_deck_slide body for the import.
+        A future refactor that reintroduces harness_narrative for
+        slide generation breaks this pin. The docstring may mention
+        the deprecated harness path for context; the test checks the
+        non-comment body for the actual invocation."""
+        import inspect
+        import main
+        src = inspect.getsource(main._generate_one_deck_slide)
+        assert "call_claude" in src
+        # Strip the docstring out before scanning -- the docstring
+        # explains WHY harness_narrative was removed, so it's allowed
+        # to mention the name. The actual function body must not.
+        lines = src.split("\n")
+        in_docstring = False
+        body_only_lines: list[str] = []
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith('"""'):
+                # Either opens or closes a docstring; could open AND
+                # close on the same line for one-liners.
+                if in_docstring:
+                    in_docstring = False
+                else:
+                    in_docstring = True
+                    if stripped.count('"""') >= 2:
+                        in_docstring = False
+                continue
+            if in_docstring:
+                continue
+            body_only_lines.append(line)
+        body = "\n".join(body_only_lines)
+        # The body must not import or call harness_narrative.
+        assert "harness_narrative" not in body

@@ -231,16 +231,21 @@ def deck_to_editor(
 def deck_slides_to_editor(
     slides: Any,
 ) -> tuple[dict[str, Any], str]:
-    """Editor content for the 6-slide deck (June 6 2026 rewrite; the
-    rewrite reduced the deck from 10 slides to 6 to lead with the answer
-    and follow with evidence — see academic_deck.SLIDE_TITLES).
+    """Editor content for the eleven-slide deck (bridges #98 / #100,
+    June 7 2026 -- rebuilt from the six-slide narrative to an eleven-
+    slide academic-presentation structure covering investment
+    question, evidence, regime story, OOS validation, live demo
+    setup, AI methodology, and the final recommendation -- see
+    academic_deck.SLIDE_TITLES).
 
-    Maps the AI slide JSON (slide_number / title / bullets / table_data /
-    speaker_notes) onto the canvas element schema (migration 022) so a freshly
-    generated deck opens in the Konva editor. Always emits the canonical six
-    slides (via academic_deck._normalize_slides) so a missing/unparseable JSON
-    still produces a complete, openable deck. The AI speaker_notes carry into
-    each slide; content_text concatenates every slide for Academic Review.
+    Maps the AI slide JSON (slide_number / title / bullets /
+    table_data / speaker_notes) onto the canvas element schema
+    (migration 022) so a freshly generated deck opens in the Konva
+    editor. Always emits the canonical DECK_SLIDE_COUNT slides (via
+    academic_deck._normalize_slides) so a missing/unparseable JSON
+    still produces a complete, openable deck. The AI speaker_notes
+    carry into each slide; content_text concatenates every slide for
+    Academic Review.
     """
     from tools.academic_deck import SLIDE_TITLES, _normalize_slides
 

@@ -11428,47 +11428,86 @@ def _deck_per_slide_context(data: dict) -> dict:
     }
 
 
+_DECK_SLIDE_SYSTEM_PROMPT = (
+    "You write JSON for slides in an investment-research presentation. "
+    "Your output is parsed by code -- emit ONLY a single JSON object, "
+    "no markdown fences, no preamble, no commentary. Do NOT review or "
+    "evaluate slides; do NOT produce 'Peer Discussant Review' headers "
+    "or any rubric-scored format. The downstream pipeline parses your "
+    "JSON directly into a .pptx slide."
+)
+
+
 def _generate_one_deck_slide(
     slide_number: int, context: dict, n_strategies: int,
 ) -> dict | None:
-    """Bridge #95 — generate ONE deck slide. Sync (the harness is sync;
-    callers wrap in asyncio.to_thread). Returns the parsed slide dict
+    """Bridge #98 / #100 -- generate ONE deck slide via a DIRECT Sonnet
+    call (no harness, no evaluator, no Gemini, no Opus arbiter). Sync;
+    callers wrap in asyncio.to_thread. Returns the parsed slide dict
     or None on any failure; the caller writes the [DATA PENDING]
     placeholder for that slide via _normalize_slides.
 
-    Per-slide max_tokens is 1500 -- comfortably above a single slide's
-    bullets + table + speaker notes (typical ~500-900 tokens), so the
-    JSON never truncates the way the all-six-at-once 4000-token call
-    did.
+    Why direct call_claude instead of harness_narrative:
+      The harness uses the academic_review_peer_evaluator rubric, which
+      expects "### N. Rated Section / **Rating:**" blocks. Slide JSON
+      scored low, retries prepended the evaluator's "Peer Discussant
+      Review" feedback to the generator prompt, and Sonnet complied on
+      retry attempts -- emitting peer-review text instead of slide JSON.
+      The user reported the symptom for slide 2 (bridge #97). Bridge
+      #100's no-harness architecture is the fix.
+
+    Failure handling:
+      - JSON parse fails the first attempt -> retry ONCE with an added
+        instruction reminding the model to output ONLY JSON.
+      - If the second attempt also fails to parse -> return None and
+        the caller writes a [DATA PENDING] placeholder for THAT slide.
+      - A single slide's failure no longer downs the entire deck.
     """
+    import json as _json
+
+    from agents.base import SONNET_MODEL, call_claude
     from tools.academic_deck import (
         slide_generation_prompt, parse_single_slide_json,
     )
-    from tools.academic_export import harness_narrative
-    try:
-        raw = harness_narrative(
-            f"presentation_deck_slide_{slide_number}",
-            slide_generation_prompt(slide_number),
-            context,
-            max_tokens=1500,
-            n_strategies=n_strategies,
-        )
-        parsed = parse_single_slide_json(raw)
-        if parsed is None:
-            log.warning("deck_slide_parse_failed",
+
+    prompt = slide_generation_prompt(slide_number)
+    ctx_str = (
+        context if isinstance(context, str)
+        else _json.dumps(context, indent=2, default=str)
+    )
+    user_message = f"{prompt}\n\nCONTEXT (numbers to cite, do not invent):\n{ctx_str}"
+
+    for attempt in (1, 2):
+        try:
+            raw = call_claude(
+                SONNET_MODEL, _DECK_SLIDE_SYSTEM_PROMPT, user_message,
+                max_tokens=2000,
+                trigger=f"deck_slide_{slide_number}_attempt_{attempt}")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("deck_slide_call_failed",
                         slide_number=slide_number,
-                        response_chars=len(raw or ""),
-                        response_prefix=(raw or "")[:200])
+                        attempt=attempt, error=str(exc))
             return None
-        # Force the slide_number to the requested value so the
-        # builder's by_num indexing finds it even if the LLM dropped
-        # or off-by-oned the field.
-        parsed["slide_number"] = slide_number
-        return parsed
-    except Exception as exc:  # noqa: BLE001
-        log.warning("deck_slide_generation_failed",
-                    slide_number=slide_number, error=str(exc))
-        return None
+
+        parsed = parse_single_slide_json(raw)
+        if parsed is not None:
+            parsed["slide_number"] = slide_number
+            return parsed
+
+        log.warning("deck_slide_parse_failed",
+                    slide_number=slide_number,
+                    attempt=attempt,
+                    response_chars=len(raw or ""),
+                    response_prefix=(raw or "")[:200])
+
+        if attempt == 1:
+            user_message = (
+                f"{prompt}\n\nCONTEXT (numbers to cite, do not invent):\n{ctx_str}\n\n"
+                "Your previous response was not valid JSON. Output ONLY "
+                "the JSON object for this slide, nothing else. No preamble, "
+                "no markdown fences, no peer-review formatting -- just the "
+                "single JSON object matching the contract above.")
+    return None
 
 
 async def _finalize_deck(
