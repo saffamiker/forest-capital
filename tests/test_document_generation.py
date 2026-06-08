@@ -184,17 +184,20 @@ class TestDocumentGenerationContract:
         assert "[[BOB]]" not in text
         assert "[DATA PENDING]" in text
 
-    def test_presentation_deck_document_is_a_valid_6_slide_pptx(self):
-        # June 6 2026 — deck rewrite reduced the slide count from 10 to 6
-        # to lead with the answer and follow with evidence. The builder
-        # now always emits exactly six slides, matching SLIDE_TITLES.
+    def test_presentation_deck_document_is_a_valid_11_slide_pptx(self):
+        # June 7 2026 (bridges #98 / #100) -- deck rebuilt from 6 to
+        # 11 slides covering the investment question, evidence,
+        # regime story, OOS validation, live demo setup, AI
+        # methodology, and the final recommendation.
         import main
+        from tools.academic_deck import DECK_SLIDE_COUNT
         pptx_bytes, filename, media, _draft = _run(
             main._generate_deck_document(TEAM_EMAIL))
         assert _PPTX_CT in media
         assert filename.endswith(".pptx")
         prs = Presentation(io.BytesIO(pptx_bytes))
-        assert len(prs.slides) == 6
+        assert len(prs.slides) == DECK_SLIDE_COUNT
+        assert DECK_SLIDE_COUNT == 11
         # Cold caches / no matplotlib in the test env must not fail the deck.
         assert "[DATA PENDING]" in _pptx_text(pptx_bytes)
 
@@ -216,12 +219,13 @@ class TestDocumentGenerationContract:
         assert "SUBMISSION CHECKLIST" in \
             prs.slides[0].notes_slide.notes_text_frame.text
 
-    def test_build_presentation_deck_embeds_charts_on_2_3_6(self):
-        # June 6 2026 — chart-bearing slides are 2, 3, 6 per the six-slide
-        # rewrite (rolling correlation / OOS Sharpe comparison / efficient
-        # frontier with live blend). Slides 1, 4, 5 don't carry matplotlib
-        # charts — slide 1's drawdown bars and slide 4's nine-event
-        # scorecard are slide-body tables, slide 5 is bullets-only.
+    def test_build_presentation_deck_embeds_charts_on_4_5_11(self):
+        # June 7 2026 (bridges #98 / #100) -- chart-bearing slides
+        # are 4, 5, 11 per the eleven-slide rebuild (rolling
+        # correlation on slide 4, OOS Sharpe / cumulative comparison
+        # proxy on slide 5, efficient frontier with the live blend
+        # marker on slide 11). The other eight slides carry stat
+        # cards, comparison tables, or pure prose -- no matplotlib.
         from pptx.enum.shapes import MSO_SHAPE_TYPE
         from tools.academic_deck import (
             DECK_SLIDE_COUNT, SLIDE_CHARTS, build_presentation_deck)
@@ -230,7 +234,7 @@ class TestDocumentGenerationContract:
         slides = [{"slide_number": n, "title": f"T{n}", "bullets": ["b1", "b2"],
                    "table_data": None, "speaker_notes": f"notes {n}"}
                   for n in range(1, DECK_SLIDE_COUNT + 1)]
-        charts = {n: png for n in SLIDE_CHARTS}  # 2, 3, 6
+        charts = {n: png for n in SLIDE_CHARTS}  # 4, 5, 11
         out = build_presentation_deck(slides, charts)
         prs = Presentation(io.BytesIO(out))
         assert len(prs.slides) == DECK_SLIDE_COUNT

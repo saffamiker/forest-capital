@@ -61,10 +61,10 @@ const DOCS: DocSpec[] = [
     documentType: 'presentation_deck',
     title: 'Final Presentation Deck',
     description:
-      'Six-slide narrative deck (regime thesis, 2022 correlation '
-      + 'break, OOS evidence, play-by-play, live blend, recommendation) '
-      + 'with real data charts in light mode, ready to refine in the '
-      + 'editor.',
+      'Eleven-slide presentation deck covering the investment '
+      + 'question, evidence, regime analysis, live demo setup, AI '
+      + 'methodology, and the final recommendation -- with real data '
+      + 'charts in light mode, ready to refine in the editor.',
     endpoint: '/api/v1/export/presentation-deck',
     icon: Presentation,
   },
