@@ -2912,6 +2912,36 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
                     log.warning(
                         "recommendation_regime_blends_overlay_failed",
                         error=str(exc))
+                # OOS validation overlay (June 15 2026). The
+                # precomputed oos_summary metric carries the
+                # December 2025 academic-lock Sharpe values for the
+                # blend vs the 100%-equity benchmark plus the
+                # value-add event count from the play-by-play
+                # scorecard. Same pure-overlay pattern as the
+                # blend_change_trigger -- the cached scalar is read
+                # and threaded onto the recommendation payload so
+                # the CIO card can render the OOS validation row
+                # without a second round-trip. Fail-open: a cold
+                # oos_summary cache leaves the field as None and
+                # the frontend omits the row.
+                try:
+                    from tools.play_by_play import get_cached_oos_summary
+                    oos = await get_cached_oos_summary()
+                    if oos:
+                        rec["oos_sharpe"] = {
+                            "blend": oos.get("blend"),
+                            "benchmark": oos.get("benchmark"),
+                            "value_add_events": oos.get(
+                                "value_add_events"),
+                            "total_events": oos.get("total_events"),
+                        }
+                    else:
+                        rec["oos_sharpe"] = None
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "recommendation_oos_summary_overlay_failed",
+                        error=str(exc))
+                    rec["oos_sharpe"] = None
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "recommendation_allocation_overlay_failed",

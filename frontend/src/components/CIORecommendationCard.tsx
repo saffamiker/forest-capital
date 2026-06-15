@@ -86,6 +86,15 @@ interface Recommendation {
   // row is cold or the live current implied is unavailable -- the
   // card omits the regime-shift section in that case.
   regime_blends_implied?: Record<string, RegimeBlendImplied> | null
+  // June 15 2026 -- OOS validation overlay. Pulled from the cached
+  // oos_summary metric (December 2025 academic lock). null when the
+  // cache is cold or the read failed; the card omits the row.
+  oos_sharpe?: {
+    blend: number | null
+    benchmark: number | null
+    value_add_events: number | null
+    total_events: number | null
+  } | null
   computed_at?: string | null
   model?: string | null
   // The Python pipeline emits `_model` (underscore prefix) carrying
@@ -337,6 +346,51 @@ export default function CIORecommendationCard() {
           <span className="text-text">{rec.blend_change_trigger}</span>
         </p>
       )}
+
+      {/* ── OOS validation (June 15 2026) ─────────────────────────────
+          Pulled from oos_summary cached at warm time (December 2025
+          academic-lock numbers). Renders the blend / benchmark
+          Sharpe + the explicit delta, plus a secondary "Blend
+          outperformed at N of M rebalance events" line. Hidden
+          silently when the overlay is null (cold cache). */}
+      {rec.oos_sharpe
+        && typeof rec.oos_sharpe.blend === 'number'
+        && typeof rec.oos_sharpe.benchmark === 'number'
+        && (() => {
+          const oos = rec.oos_sharpe!
+          const delta = (oos.blend as number) - (oos.benchmark as number)
+          const fmt = (n: number) => n.toFixed(2)
+          const sign = delta >= 0 ? '+' : ''
+          return (
+            <div className="mt-4" data-testid="cio-oos-sharpe">
+              <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
+                OOS Sharpe (Dec 2025 lock)
+              </div>
+              <p className="text-sm leading-snug">
+                <span className="text-muted">Blend </span>
+                <span className="font-mono text-slate-300">
+                  {fmt(oos.blend as number)}
+                </span>
+                <span className="text-muted ml-3">Benchmark </span>
+                <span className="font-mono text-slate-300">
+                  {fmt(oos.benchmark as number)}
+                </span>
+                <span className="text-2xs text-muted ml-2">
+                  ({sign}{fmt(delta)} vs benchmark)
+                </span>
+              </p>
+              {typeof oos.value_add_events === 'number'
+                && typeof oos.total_events === 'number'
+                && oos.total_events > 0 && (
+                <p className="text-2xs text-muted mt-0.5"
+                  data-testid="cio-oos-events">
+                  Blend outperformed at {oos.value_add_events} of{' '}
+                  {oos.total_events} rebalance events
+                </p>
+              )}
+            </div>
+          )
+        })()}
 
       {/* ── Per-regime blend shift (June 8 2026) ──────────────────────
           Three rows -- BULL / BEAR / TRANSITION -- showing the
