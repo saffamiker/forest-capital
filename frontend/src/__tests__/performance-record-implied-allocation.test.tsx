@@ -32,8 +32,17 @@ vi.mock('recharts', async () => {
 })
 
 vi.mock('axios')
+// Loose-typed `get` mock so the URL-keyed factory below doesn't trip
+// the Mock<[url], ...> vs Mock<any[], unknown> tuple/variadic mismatch
+// that strict tsc (Vercel's build step) flags. Vitest runs the test
+// fine either way; this keeps the build green.
 const mockedAxios = axios as unknown as {
-  get: ReturnType<typeof vi.fn>
+  get: ((...args: unknown[]) => Promise<unknown>) & {
+    mockImplementation: (
+      fn: (url: unknown) => Promise<unknown>,
+    ) => void
+    mockReset?: () => void
+  }
 }
 
 const PLAY_BY_PLAY = {
@@ -96,14 +105,14 @@ function renderPage() {
 }
 
 beforeEach(() => {
-  mockedAxios.get = vi.fn((url: string) => {
-    if (url.includes('/api/v1/play-by-play')) {
+  mockedAxios.get.mockImplementation((url) => {
+    if (String(url).includes('/api/v1/play-by-play')) {
       return Promise.resolve({ data: PLAY_BY_PLAY })
     }
-    if (url.includes('/api/v1/oos-cost-sensitivity')) {
+    if (String(url).includes('/api/v1/oos-cost-sensitivity')) {
       return Promise.resolve({ data: COST_SENSITIVITY })
     }
-    if (url.includes('/api/v1/charts/data')) {
+    if (String(url).includes('/api/v1/charts/data')) {
       return Promise.resolve({ data: CHARTS_DATA })
     }
     return Promise.resolve({ data: {} })
@@ -152,14 +161,14 @@ describe('PerformanceRecord -- Implied Asset Allocation Over Time', () => {
 
   it('hides the regime band silently when /api/v1/charts/data fails',
     async () => {
-      mockedAxios.get = vi.fn((url: string) => {
-        if (url.includes('/api/v1/play-by-play')) {
+      mockedAxios.get.mockImplementation((url) => {
+        if (String(url).includes('/api/v1/play-by-play')) {
           return Promise.resolve({ data: PLAY_BY_PLAY })
         }
-        if (url.includes('/api/v1/oos-cost-sensitivity')) {
+        if (String(url).includes('/api/v1/oos-cost-sensitivity')) {
           return Promise.resolve({ data: COST_SENSITIVITY })
         }
-        if (url.includes('/api/v1/charts/data')) {
+        if (String(url).includes('/api/v1/charts/data')) {
           return Promise.reject(new Error('cold cache'))
         }
         return Promise.resolve({ data: {} })
@@ -173,11 +182,11 @@ describe('PerformanceRecord -- Implied Asset Allocation Over Time', () => {
 
   it('shows the empty-state copy when no rebalance_events are cached',
     async () => {
-      mockedAxios.get = vi.fn((url: string) => {
-        if (url.includes('/api/v1/play-by-play')) {
+      mockedAxios.get.mockImplementation((url) => {
+        if (String(url).includes('/api/v1/play-by-play')) {
           return Promise.resolve({ data: PLAY_BY_PLAY })
         }
-        if (url.includes('/api/v1/oos-cost-sensitivity')) {
+        if (String(url).includes('/api/v1/oos-cost-sensitivity')) {
           return Promise.resolve({
             data: {
               available: true,
