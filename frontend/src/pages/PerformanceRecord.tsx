@@ -17,7 +17,12 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
+  // Cumulative chart was Line/LineChart; the implied-allocation rebuild
+  // swaps in AreaChart (stacked Equity/IG/HY) and a BarChart regime
+  // band below. The cumulative DATA is still fetched (data.cumulative
+  // remains in scope); only the render changed.
+  AreaChart, Area, BarChart, Bar, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import { AlertTriangle, TrendingUp, TrendingDown, Loader2 } from 'lucide-react'
@@ -186,18 +191,31 @@ interface CostPayload {
   cost_sensitivity: CostSensitivity | null
 }
 
-// The net cumulative blend lines drawn on the chart (ADDITION 1). Blue
-// family: lighter/dashed (10), dashed (15), dotted (20).
-const NET_COST_LINES: { bps: number; color: string; dash: string }[] = [
-  { bps: 10, color: '#93c5fd', dash: '5 3' },
-  { bps: 15, color: '#3b82f6', dash: '5 3' },
-  { bps: 20, color: '#3b82f6', dash: '1 4' },
-]
+// /api/v1/charts/data carries the full monthly HMM regime timeline
+// for every market_data_monthly row. Used to draw the regime band
+// below the Implied Asset Allocation Over Time chart. Filtered to
+// post-2022 at the render layer.
+interface RegimeTimelinePoint {
+  date: string   // ISO yyyy-mm-dd
+  regime: string // BULL | BEAR | TRANSITION
+}
+interface ChartsDataPayload {
+  regime_timeline?: RegimeTimelinePoint[]
+}
+
+const REGIME_COLOR: Record<string, string> = {
+  BULL: '#22c55e',        // green
+  BEAR: '#ef4444',        // red
+  TRANSITION: '#f59e0b',  // amber
+}
+
 
 export default function PerformanceRecord() {
   const chartTheme = useChartTheme()
   const [data, setData] = useState<Payload | null>(null)
   const [cost, setCost] = useState<CostSensitivity | null>(null)
+  const [regimeTimeline, setRegimeTimeline] = useState<
+    RegimeTimelinePoint[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
@@ -211,6 +229,18 @@ export default function PerformanceRecord() {
     axios.get<CostPayload>('/api/v1/oos-cost-sensitivity')
       .then((r) => { if (alive && r.data.available) setCost(r.data.cost_sensitivity) })
       .catch(() => { /* table hidden when unavailable */ })
+    // Monthly HMM regime sequence for the regime band beneath the
+    // Implied Asset Allocation Over Time chart. /api/v1/charts/data
+    // returns the FULL series (2002 onward); we filter to post-2022
+    // at the render layer. Failures hide the band silently -- the
+    // main chart still renders without it.
+    axios.get<ChartsDataPayload>('/api/v1/charts/data')
+      .then((r) => {
+        if (alive && Array.isArray(r.data.regime_timeline)) {
+          setRegimeTimeline(r.data.regime_timeline)
+        }
+      })
+      .catch(() => { /* regime band hidden when unavailable */ })
     return () => { alive = false }
   }, [])
 
@@ -624,71 +654,189 @@ export default function PerformanceRecord() {
         )
       })()}
 
-      {/* ── Cumulative chart (post-2022) ──────────────────────────── */}
-      <section className="bg-navy-800 border border-navy-700 rounded-lg p-5">
-        <h2 className="text-sm font-semibold text-slate-200 mb-3 uppercase tracking-wide">
-          Cumulative return, post-2022
+      {/* ── Implied Asset Allocation Over Time + regime band ───────
+          Replaces the post-2022 cumulative line chart. The
+          underlying cumulative data is still fetched (data.cumulative
+          stays in scope for future surfaces); only the render
+          changed. Three stacked Area series sum to 100% at every
+          rebalance; type="stepAfter" holds the allocation flat
+          between events the way the live portfolio actually behaves
+          between rebalances. Event markers from the play-by-play
+          cache survive verbatim. */}
+      <section data-testid="implied-allocation-over-time"
+        className="bg-navy-800 border border-navy-700 rounded-lg p-5">
+        <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">
+          Implied Asset Allocation Over Time
         </h2>
-        {cum && cum.series.length > 0 ? (
-          <ResponsiveContainer width="100%" height={360}>
-            <LineChart data={cum.series}
-                       margin={{ top: 48, right: 16, bottom: 8, left: 8 }}>
-              <CartesianGrid stroke={chartTheme.gridStroke} strokeDasharray="3 3" />
-              <XAxis dataKey="date" tick={{ fill: chartTheme.textSecondary, fontSize: 11 }}
-                     minTickGap={40} />
-              <YAxis tickFormatter={(v) => `${(v * 100).toFixed(0)}%`}
-                     tick={{ fill: chartTheme.textSecondary, fontSize: 11 }} />
-              <Tooltip
-                contentStyle={chartTheme.tooltipContentStyle}
-                labelStyle={chartTheme.tooltipLabelStyle}
-                formatter={(v: number) => `${(v * 100).toFixed(1)}%`} />
-              <Legend />
-              <ReferenceLine y={0} stroke={chartTheme.textSecondary} strokeWidth={1} />
-              {(cum.event_markers || []).map((d, i) => {
-                const ev = eventByDate.get(d)
-                const va = ev?.value_added_sharpe ?? null
-                const added = va !== null && va > 0
-                // Green when the council added value at this event; muted
-                // red when it did not (value-added Sharpe <= 0).
-                const labelColor = added ? '#34d399' : '#f87171'
-                const vaStr = va === null ? '—' : `${va >= 0 ? '+' : ''}${va.toFixed(2)}`
-                const tip = ev
-                  ? `${ev.event_id}\n${fmtDate(ev.event_date)}`
-                    + `${ev.verdict ? `\n${ev.verdict}` : ''}`
-                    + `\nValue added Sharpe: ${vaStr}`
-                  : d
-                return (
-                  <ReferenceLine key={d} x={d} stroke="#f59e0b"
-                                 strokeDasharray="2 2"
-                                 label={<EventMarkerLabel
-                                   text={ev ? shortLabel(ev.event_id) : d}
-                                   color={labelColor} tooltip={tip} idx={i} />} />
-                )
-              })}
-              <Line type="monotone" dataKey="regime_conditional"
-                    name="Gross (0 bps)" stroke="#3b82f6"
-                    dot={false} strokeWidth={2} connectNulls />
-              {/* Net-of-transaction-cost blend paths (ADDITION 1). Rendered
-                  only when the backend supplied the blend_net_* series. */}
-              {NET_COST_LINES.map((l) => (
-                <Line key={l.bps} type="monotone" dataKey={`blend_net_${l.bps}`}
-                      name={`Blend net ${l.bps} bps`} stroke={l.color}
-                      strokeDasharray={l.dash} dot={false} strokeWidth={1.5}
-                      connectNulls />
-              ))}
-              <Line type="monotone" dataKey="benchmark" name="Benchmark (S&P 500)"
-                    stroke="#ef4444" dot={false} strokeWidth={1.5} connectNulls />
-              <Line type="monotone" dataKey="classic_6040" name="Classic 60/40"
-                    stroke="#94a3b8" dot={false} strokeWidth={1.5} connectNulls />
-            </LineChart>
-          </ResponsiveContainer>
-        ) : (
-          <p className="text-sm text-slate-500">
-            Cumulative series not yet available. The event records below are
-            the point-in-time track record; the continuous post-2022 curve
-            is computed separately.
-          </p>
-        )}
+        <p className="text-2xs text-slate-500 mt-1 mb-3 leading-relaxed">
+          Portfolio composition at each rebalance. Regime shown below.
+          Months with no material weight change (&gt;2pp) omitted.
+        </p>
+        {(() => {
+          const series = (cost?.rebalance_events ?? [])
+            .filter((e) => !!e.date && !!e.asset_allocation)
+            .map((e) => ({
+              date: e.date as string,
+              equity: ((e.asset_allocation?.equity ?? 0) * 100),
+              ig:     ((e.asset_allocation?.ig ?? 0) * 100),
+              hy:     ((e.asset_allocation?.hy ?? 0) * 100),
+            }))
+            .sort((a, b) => a.date.localeCompare(b.date))
+          // Domain anchor for the regime band -- both charts share
+          // their x range. When the allocation series is empty we
+          // fall through to the empty-state copy below.
+          const xMin = series[0]?.date
+          const xMax = series[series.length - 1]?.date
+          // Post-2022 regime band points, filtered to the visible
+          // window so the band starts where the main chart starts.
+          const bandPoints = regimeTimeline
+            .filter((p) => p.date >= '2022-01-01')
+            .map((p) => ({ date: p.date, regime: p.regime, fill: 1 }))
+          return series.length > 0 ? (
+            <>
+              <ResponsiveContainer width="100%" height={300}>
+                <AreaChart
+                  data={series}
+                  margin={{ top: 32, right: 16, bottom: 0, left: 8 }}>
+                  <CartesianGrid stroke={chartTheme.gridStroke}
+                                 strokeDasharray="3 3" />
+                  <XAxis dataKey="date"
+                         tick={{ fill: chartTheme.textSecondary, fontSize: 11 }}
+                         minTickGap={40} />
+                  <YAxis domain={[0, 100]}
+                         ticks={[0, 25, 50, 75, 100]}
+                         tickFormatter={(v) => `${v}%`}
+                         tick={{ fill: chartTheme.textSecondary, fontSize: 11 }} />
+                  <Tooltip
+                    contentStyle={chartTheme.tooltipContentStyle}
+                    labelStyle={chartTheme.tooltipLabelStyle}
+                    formatter={(v: number) => `${v.toFixed(1)}%`} />
+                  {/* Event markers (play-by-play) retained verbatim --
+                      same narrative anchors the presentation already
+                      references on the cumulative view. */}
+                  {(cum?.event_markers || []).map((d, i) => {
+                    const ev = eventByDate.get(d)
+                    const va = ev?.value_added_sharpe ?? null
+                    const added = va !== null && va > 0
+                    const labelColor = added ? '#34d399' : '#f87171'
+                    const vaStr = va === null
+                      ? '—'
+                      : `${va >= 0 ? '+' : ''}${va.toFixed(2)}`
+                    const tip = ev
+                      ? `${ev.event_id}\n${fmtDate(ev.event_date)}`
+                        + `${ev.verdict ? `\n${ev.verdict}` : ''}`
+                        + `\nValue added Sharpe: ${vaStr}`
+                      : d
+                    return (
+                      <ReferenceLine key={d} x={d} stroke="#f59e0b"
+                        strokeDasharray="2 2"
+                        label={<EventMarkerLabel
+                          text={ev ? shortLabel(ev.event_id) : d}
+                          color={labelColor} tooltip={tip} idx={i} />} />
+                    )
+                  })}
+                  {/* Three stacked Areas, step-after so each segment
+                      holds flat between rebalance dates. Stack order:
+                      equity (bottom) -> ig -> hy (top). */}
+                  <Area type="stepAfter" dataKey="equity" stackId="aa"
+                        name="Equity" stroke="#3b82f6" fill="#3b82f6"
+                        fillOpacity={0.85} />
+                  <Area type="stepAfter" dataKey="ig" stackId="aa"
+                        name="IG Bonds" stroke="#14b8a6" fill="#14b8a6"
+                        fillOpacity={0.85} />
+                  <Area type="stepAfter" dataKey="hy" stackId="aa"
+                        name="HY Bonds" stroke="#f59e0b" fill="#f59e0b"
+                        fillOpacity={0.85} />
+                </AreaChart>
+              </ResponsiveContainer>
+              {/* Inline legend -- matches the area fills. */}
+              <div data-testid="implied-allocation-legend"
+                className="flex items-center justify-center gap-4 mt-2 text-2xs text-slate-300">
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-3 rounded-sm"
+                    style={{ background: '#3b82f6' }} aria-hidden="true" />
+                  Equity
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-3 rounded-sm"
+                    style={{ background: '#14b8a6' }} aria-hidden="true" />
+                  IG Bonds
+                </span>
+                <span className="flex items-center gap-1.5">
+                  <span className="inline-block w-3 h-3 rounded-sm"
+                    style={{ background: '#f59e0b' }} aria-hidden="true" />
+                  HY Bonds
+                </span>
+              </div>
+              {/* Regime band -- one colored rectangle per month from
+                  the post-2022 HMM regime_timeline. Shares the x
+                  domain with the chart above. Hidden silently when
+                  the timeline fetch failed. */}
+              {bandPoints.length > 0 && (
+                <div data-testid="regime-band" className="mt-2"
+                  aria-label="Monthly HMM regime indicator">
+                  <ResponsiveContainer width="100%" height={28}>
+                    <BarChart data={bandPoints}
+                      margin={{ top: 0, right: 16, bottom: 0, left: 8 }}>
+                      <XAxis dataKey="date" hide />
+                      <YAxis hide domain={[0, 1]} />
+                      <Tooltip
+                        contentStyle={chartTheme.tooltipContentStyle}
+                        labelStyle={chartTheme.tooltipLabelStyle}
+                        cursor={{ fill: 'transparent' }}
+                        formatter={(_v: number, _n: string,
+                                    p: { payload?: { regime?: string } }) => [
+                          p?.payload?.regime ?? '—', 'Regime',
+                        ]} />
+                      <Bar dataKey="fill" isAnimationActive={false}>
+                        {bandPoints.map((p, i) => (
+                          <Cell key={`band-${i}`}
+                            fill={REGIME_COLOR[p.regime]
+                                  ?? chartTheme.textSecondary} />
+                        ))}
+                      </Bar>
+                    </BarChart>
+                  </ResponsiveContainer>
+                  <div className="flex items-center justify-center gap-3 mt-1 text-2xs text-slate-400">
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block w-2.5 h-2.5 rounded-sm"
+                        style={{ background: REGIME_COLOR.BULL }}
+                        aria-hidden="true" />
+                      BULL
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block w-2.5 h-2.5 rounded-sm"
+                        style={{ background: REGIME_COLOR.TRANSITION }}
+                        aria-hidden="true" />
+                      TRANSITION
+                    </span>
+                    <span className="flex items-center gap-1">
+                      <span className="inline-block w-2.5 h-2.5 rounded-sm"
+                        style={{ background: REGIME_COLOR.BEAR }}
+                        aria-hidden="true" />
+                      BEAR
+                    </span>
+                  </div>
+                </div>
+              )}
+              {/* xMin / xMax kept available for a future shared-domain
+                  refactor (e.g. when a per-month allocation series
+                  replaces the rebalance-event-only series). For now
+                  the AreaChart and BarChart share an x domain
+                  implicitly because they share the same date range
+                  from rebalance_events + regime_timeline. */}
+              <p className="sr-only">{xMin} {xMax}</p>
+            </>
+          ) : (
+            <p className="text-sm text-slate-500">
+              Implied asset allocation series not yet available. The
+              rebalancing-event table above is the point-in-time
+              composition record; this continuous view is computed
+              from the same events once the OOS cost-sensitivity warm
+              has run.
+            </p>
+          )
+        })()}
       </section>
 
       {/* ── Event cards ───────────────────────────────────────────── */}
