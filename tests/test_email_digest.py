@@ -333,6 +333,77 @@ async def test_rebalance_triggers_renders_placeholder_on_cold_cache():
             or "No regime signals or blend targets" in s.text)
 
 
+# ── Bridge (June 8 2026): implied + delta lines in blend-shift rows ──
+
+@pytest.mark.asyncio
+async def test_rebalance_triggers_renders_implied_and_delta_sub_lines(
+    monkeypatch,
+):
+    """When the regime_blends metric AND the strategy cache are both
+    warm, each blend-shift row carries two sub-lines:
+      Line 1: "Equity X% | Bonds Y%" -- the regime's implied split.
+      Line 2: "vs today: Equity +/-Z.Zpp | Bonds +/-Z.Zpp" -- the
+              delta from the current portfolio in percentage points.
+
+    Test stubs the cache reads so the test stays decoupled from a
+    live cache row."""
+    from tools import email_digest
+
+    # Stub the regime_signals + regime_blends caches so the section
+    # has both signals (the live regime label) and per-regime blends.
+    async def _fake_signals():
+        return {
+            "vix_level": 18.0,
+            "credit_spread": 2.5,
+            "yield_curve_slope": 0.3,
+            "equity_trend": 0.05,
+            "hmm_regime": "BULL",     # live regime label
+        }
+
+    async def _fake_metric(kind):
+        if kind == "regime_blends":
+            return {
+                "blends": {
+                    # BULL is the live regime -> drives current_implied.
+                    # BULL = 50/50 DYN/STAT
+                    "BULL": {"DYN": 0.5, "STAT": 0.5},
+                    # BEAR shifts much more defensive
+                    "BEAR": {"DYN": 0.0, "STAT": 1.0},
+                }
+            }
+        return None
+
+    async def _fake_strategy_cache():
+        return {
+            "DYN":  {"avg_equity_weight": 1.00,
+                     "avg_bond_weight":   0.00},   # 100% equity
+            "STAT": {"avg_equity_weight": 0.00,
+                     "avg_bond_weight":   1.00},   # 100% bond
+        }
+
+    monkeypatch.setattr(
+        email_digest, "_read_latest_regime_signals_for_digest",
+        _fake_signals)
+    # get_latest_metric is imported lazily INSIDE the function from
+    # tools.precomputed_analytics; patch it at its source.
+    monkeypatch.setattr(
+        "tools.precomputed_analytics.get_latest_metric", _fake_metric)
+    monkeypatch.setattr(
+        "tools.cache.get_latest_strategy_cache", _fake_strategy_cache)
+
+    s = await _section_rebalance_triggers()
+    # The implied line for BULL (50/50 DYN/STAT) -> 50% equity,
+    # 50% bond. The implied line for BEAR (100% STAT) -> 0% equity,
+    # 100% bond.
+    assert "Equity 50.0% | Bonds 50.0%" in s.text
+    assert "Equity 0.0% | Bonds 100.0%" in s.text
+    # Delta: live regime is BULL with current 50/50; BEAR shift to
+    # 0% equity / 100% bond is -50pp / +50pp.
+    assert "Equity -50.0pp | Bonds +50.0pp" in s.text
+    # The BULL row's delta is 0 since it IS the current regime.
+    assert "Equity +0.0pp | Bonds +0.0pp" in s.text
+
+
 def test_truncate_to_word_cap_below_cap_returns_unchanged():
     text = "one two three"
     assert _truncate_to_word_cap(text, 5) == text

@@ -589,6 +589,94 @@ async def compute_implied_asset_allocation(
     }
 
 
+async def compute_regime_blends_implied(
+    regime_blends: dict[str, dict[str, float]] | None,
+    current_implied: dict[str, float] | None,
+) -> dict[str, dict[str, Any]] | None:
+    """For each regime in `regime_blends`, multiply its per-strategy
+    weights by per-strategy avg_equity_weight / avg_bond_weight from
+    strategy_results_cache and return the asset-class split + the
+    delta (in percentage points) against `current_implied`.
+
+    Returns:
+        {
+          "BULL": {
+            "weights":  {strategy: weight},    # the input pass-through
+            "equity_pct": 0.68, "bond_pct": 0.32, "cash_pct": 0.00,
+            "equity_delta_pp": 35.6,           # percentage points
+            "bond_delta_pp": -35.6,
+          },
+          "BEAR": {...},
+          "TRANSITION": {...},
+        }
+
+    Fail-open: returns None on cold cache, empty regime_blends, or any
+    internal error. Same pure-read contract as
+    compute_implied_asset_allocation. Bridge (June 8 2026).
+    """
+    if not regime_blends:
+        return None
+    try:
+        from tools.cache import get_latest_strategy_cache
+    except Exception as exc:  # noqa: BLE001
+        log.warning("regime_blends_implied_imports_failed", error=str(exc))
+        return None
+    try:
+        strategies = await get_latest_strategy_cache() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("regime_blends_implied_cache_read_failed",
+                    error=str(exc))
+        return None
+    if not strategies:
+        return None
+
+    cur_eq = (current_implied or {}).get("equity_pct")
+    cur_bd = (current_implied or {}).get("bond_pct")
+    out: dict[str, dict[str, Any]] = {}
+    for regime, weights in regime_blends.items():
+        if not isinstance(weights, dict) or not weights:
+            continue
+        total_eq = 0.0
+        total_bd = 0.0
+        total_w = 0.0
+        for strategy, w_raw in weights.items():
+            try:
+                w = float(w_raw or 0)
+            except (TypeError, ValueError):
+                continue
+            if w <= 0:
+                continue
+            s = strategies.get(strategy) or {}
+            try:
+                eq = float(s.get("avg_equity_weight") or 0)
+                bd = float(s.get("avg_bond_weight") or 0)
+            except (TypeError, ValueError):
+                continue
+            total_eq += w * eq
+            total_bd += w * bd
+            total_w += w
+        if total_w <= 0:
+            continue
+        cash = max(0.0, 1.0 - total_eq - total_bd)
+        entry: dict[str, Any] = {
+            "weights": dict(weights),
+            "equity_pct": round(total_eq, 4),
+            "bond_pct": round(total_bd, 4),
+            "cash_pct": round(cash, 4),
+        }
+        # Delta is in PERCENTAGE POINTS (not fractions) so the UI can
+        # render "+35.6pp" without re-multiplying by 100. None when the
+        # current implied is unavailable -- the frontend then omits
+        # the delta line gracefully.
+        if isinstance(cur_eq, (int, float)) and isinstance(cur_bd, (int, float)):
+            entry["equity_delta_pp"] = round(
+                (total_eq - float(cur_eq)) * 100, 1)
+            entry["bond_delta_pp"] = round(
+                (total_bd - float(cur_bd)) * 100, 1)
+        out[regime] = entry
+    return out or None
+
+
 def compute_blend_change_trigger(
     regime: str | None,
     monthly_regime: str | None,

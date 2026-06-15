@@ -1113,6 +1113,43 @@ async def _section_rebalance_triggers() -> DigestSection:
     # Per-regime blend targets. The payload's `blends` dict is keyed
     # by regime name with strategy → weight values.
     blends = regime_blends.get("blends") or {}
+    # Bridge (June 8 2026) -- compute the per-regime implied
+    # equity/bond split + delta from the current portfolio so each
+    # blend row carries the asset-class translation alongside the
+    # strategy weights. compute_regime_blends_implied lives in
+    # tools.cio_recommendation and reuses the same per-strategy
+    # avg_equity_weight / avg_bond_weight the live implied-allocation
+    # row uses. Fail-open: if either the regime_implied or the
+    # live current_implied is unavailable, the digest renders the
+    # strategy-weights row alone (pre-bridge behaviour).
+    current_implied: dict[str, float] | None = None
+    regime_implied: dict[str, dict[str, Any]] | None = None
+    try:
+        from tools.cio_recommendation import (
+            compute_implied_asset_allocation,
+            compute_regime_blends_implied,
+        )
+        # The live blend is implicitly the blend FOR the current regime;
+        # the digest's signals dict carries hmm_regime / threshold_regime
+        # but the actual blend weights live in regime_blends keyed by
+        # the live regime label. detect_current_regime() is already in
+        # the digest's context via signals; fall through to None on any
+        # missing key.
+        live_regime = signals.get("hmm_regime")
+        live_blend = blends.get(live_regime) if live_regime else None
+        if live_blend:
+            current_implied = await compute_implied_asset_allocation(
+                live_blend)
+        regime_implied = await compute_regime_blends_implied(
+            blends, current_implied)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_blend_implied_failed", error=str(exc))
+
+    def _fmt_pp(value: float) -> str:
+        # Explicit-sign percentage-points formatter -- "+35.6pp" /
+        # "-35.6pp" so the reader sees direction at a glance.
+        return f"{'+' if value >= 0 else ''}{value:.1f}pp"
+
     blend_lines: list[tuple[str, str]] = []  # (html_li, text_line)
     for regime in ("BULL", "BEAR", "TRANSITION"):
         weights = blends.get(regime) or {}
@@ -1126,9 +1163,38 @@ async def _section_rebalance_triggers() -> DigestSection:
             if float(w or 0) > 0)
         if not weight_str:
             continue
+
+        # Sub-lines: implied equity/bonds and delta vs current.
+        sub_html: list[str] = []
+        sub_text: list[str] = []
+        entry = (regime_implied or {}).get(regime) or {}
+        eq_pct = entry.get("equity_pct")
+        bd_pct = entry.get("bond_pct")
+        if isinstance(eq_pct, (int, float)) and isinstance(bd_pct, (int, float)):
+            implied_str = (
+                f"Equity {float(eq_pct) * 100:.1f}% | "
+                f"Bonds {float(bd_pct) * 100:.1f}%")
+            sub_html.append(
+                f"<div style='margin-left:14px;color:#cbd5e1;"
+                f"font-size:11px'>{implied_str}</div>")
+            sub_text.append(f"      {implied_str}")
+        dq = entry.get("equity_delta_pp")
+        db = entry.get("bond_delta_pp")
+        if isinstance(dq, (int, float)) and isinstance(db, (int, float)):
+            delta_str = (
+                f"vs today: Equity {_fmt_pp(float(dq))} | "
+                f"Bonds {_fmt_pp(float(db))}")
+            sub_html.append(
+                f"<div style='margin-left:14px;color:#94a3b8;"
+                f"font-size:11px'>{delta_str}</div>")
+            sub_text.append(f"      {delta_str}")
+
         blend_lines.append((
-            f"<li><b>{regime}:</b> {weight_str}</li>",
-            f"    {regime}: {weight_str}"))
+            f"<li><b>{regime}:</b> {weight_str}"
+            + "".join(sub_html)
+            + "</li>",
+            f"    {regime}: {weight_str}"
+            + ("\n" + "\n".join(sub_text) if sub_text else "")))
 
     if not trigger_lines and not blend_lines and not divergence_lines:
         return _empty_section(
