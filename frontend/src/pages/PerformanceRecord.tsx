@@ -494,10 +494,23 @@ export default function PerformanceRecord() {
         const subtitle = (
           'Events where blend weights shifted more than 2% in any strategy. '
           + 'Transaction costs applied at each.')
+        // Data-through date pulled from the cumulative-series tail when
+        // available -- it is the most recent OOS month evaluated, which
+        // is at or after the most recent rebalance event. Surfaces the
+        // gap between "data through" and "last rebalance" so a reader
+        // doesn't worry the latest data is missing when no strategy
+        // weight crossed the 2pp threshold in the latest month.
+        const dataThroughIso = (cum?.series?.length ?? 0) > 0
+          ? cum!.series[cum!.series.length - 1]!.date
+          : null
         const footer = (
           `${n} rebalancing events over ${cost.n_test_months} months.`
           + (avgGap !== null
-            ? ` Average ${avgGap.toFixed(1)} months between rebalances.` : ''))
+            ? ` Average ${avgGap.toFixed(1)} months between rebalances.` : '')
+          + (dataThroughIso
+            ? ` Data through ${fmtDate(dataThroughIso)}; months with no `
+              + 'strategy weight change exceeding 2pp are omitted.'
+            : ''))
         // Strategy columns: preferred order first, then any extras alphabetically.
         const stratCols = Array.from(
           new Set(events.flatMap((e) => Object.keys(e.weights))))
