@@ -1164,26 +1164,48 @@ async def _section_rebalance_triggers() -> DigestSection:
         if not weight_str:
             continue
 
-        # Sub-lines: implied equity/bonds and delta vs current.
+        # Sub-lines: implied equity/bonds (or equity/IG/HY when the
+        # IG/HY split fields are present on the entry) and delta vs
+        # current.
         sub_html: list[str] = []
         sub_text: list[str] = []
         entry = (regime_implied or {}).get(regime) or {}
         eq_pct = entry.get("equity_pct")
         bd_pct = entry.get("bond_pct")
+        ig_pct = entry.get("ig_bond_pct")
+        hy_pct = entry.get("hy_bond_pct")
+        has_ig_hy = (isinstance(ig_pct, (int, float))
+                     and isinstance(hy_pct, (int, float)))
         if isinstance(eq_pct, (int, float)) and isinstance(bd_pct, (int, float)):
-            implied_str = (
-                f"Equity {float(eq_pct) * 100:.1f}% | "
-                f"Bonds {float(bd_pct) * 100:.1f}%")
+            if has_ig_hy:
+                implied_str = (
+                    f"Equity {float(eq_pct) * 100:.1f}% | "
+                    f"IG {float(ig_pct) * 100:.1f}% | "
+                    f"HY {float(hy_pct) * 100:.1f}%")
+            else:
+                implied_str = (
+                    f"Equity {float(eq_pct) * 100:.1f}% | "
+                    f"Bonds {float(bd_pct) * 100:.1f}%")
             sub_html.append(
                 f"<div style='margin-left:14px;color:#cbd5e1;"
                 f"font-size:11px'>{implied_str}</div>")
             sub_text.append(f"      {implied_str}")
         dq = entry.get("equity_delta_pp")
         db = entry.get("bond_delta_pp")
+        dig = entry.get("ig_bond_delta_pp")
+        dhy = entry.get("hy_bond_delta_pp")
+        has_ig_hy_delta = (isinstance(dig, (int, float))
+                           and isinstance(dhy, (int, float)))
         if isinstance(dq, (int, float)) and isinstance(db, (int, float)):
-            delta_str = (
-                f"vs today: Equity {_fmt_pp(float(dq))} | "
-                f"Bonds {_fmt_pp(float(db))}")
+            if has_ig_hy_delta:
+                delta_str = (
+                    f"vs today: Equity {_fmt_pp(float(dq))} | "
+                    f"IG {_fmt_pp(float(dig))} | "
+                    f"HY {_fmt_pp(float(dhy))}")
+            else:
+                delta_str = (
+                    f"vs today: Equity {_fmt_pp(float(dq))} | "
+                    f"Bonds {_fmt_pp(float(db))}")
             sub_html.append(
                 f"<div style='margin-left:14px;color:#94a3b8;"
                 f"font-size:11px'>{delta_str}</div>")

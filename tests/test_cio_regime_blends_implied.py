@@ -17,6 +17,8 @@ import asyncio
 import os
 import sys
 
+import pytest
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 os.environ.setdefault("SECRET_KEY", "test-secret-key-at-least-32-characters-long")
 os.environ.setdefault("ENVIRONMENT", "test")
@@ -150,6 +152,79 @@ class TestComputeRegimeBlendsImplied:
             regime_blends, None))
         assert out is not None
         assert set(out.keys()) == {"BULL"}
+
+    def test_ig_hy_split_and_deltas_when_strategies_carry_the_fields(
+        self, monkeypatch,
+    ):
+        """June 2026 -- when strategies in the regime blend carry
+        explicit avg_ig_weight / avg_hy_weight, the regime entry
+        gains ig_bond_pct + hy_bond_pct, and (when current_implied
+        also carries the split) ig_bond_delta_pp + hy_bond_delta_pp.
+
+        Invariants:
+            ig_bond_pct + hy_bond_pct == bond_pct (within rounding)
+            ig_bond_delta_pp + hy_bond_delta_pp == bond_delta_pp
+        """
+        from tools.cio_recommendation import compute_regime_blends_implied
+
+        async def _cache():
+            return {
+                # Defensive: 100% IG bond leg.
+                "VOL":  {"avg_equity_weight": 0.3,
+                         "avg_bond_weight":   0.7,
+                         "avg_ig_weight":     0.7,
+                         "avg_hy_weight":     0.0},
+                # Yield-grabbing: 100% HY bond leg.
+                "RISK": {"avg_equity_weight": 0.3,
+                         "avg_bond_weight":   0.7,
+                         "avg_ig_weight":     0.0,
+                         "avg_hy_weight":     0.7},
+            }
+        monkeypatch.setattr(
+            "tools.cache.get_latest_strategy_cache", _cache)
+
+        # BULL = 100% VOL (defensive) -- bond leg entirely IG.
+        # BEAR = 100% RISK (yield-grabbing) -- bond leg entirely HY.
+        regime_blends = {
+            "BULL": {"VOL": 1.0},
+            "BEAR": {"RISK": 1.0},
+        }
+        # Current portfolio: 50/50 mix of the two -> 35% IG / 35% HY.
+        current = {
+            "equity_pct": 0.30, "bond_pct": 0.70,
+            "ig_bond_pct": 0.35, "hy_bond_pct": 0.35,
+        }
+        out = asyncio.run(compute_regime_blends_implied(
+            regime_blends, current))
+        assert out is not None
+        assert out["BULL"]["ig_bond_pct"] == pytest.approx(0.70)
+        assert out["BULL"]["hy_bond_pct"] == pytest.approx(0.0)
+        assert out["BEAR"]["ig_bond_pct"] == pytest.approx(0.0)
+        assert out["BEAR"]["hy_bond_pct"] == pytest.approx(0.70)
+        # Delta invariants: ig_delta + hy_delta == bond_delta.
+        for regime in ("BULL", "BEAR"):
+            entry = out[regime]
+            total = entry["ig_bond_delta_pp"] + entry["hy_bond_delta_pp"]
+            assert total == pytest.approx(
+                entry["bond_delta_pp"], abs=0.1)
+
+    def test_omits_ig_hy_when_no_strategy_in_blend_carries_split(
+        self, monkeypatch,
+    ):
+        from tools.cio_recommendation import compute_regime_blends_implied
+
+        async def _cache():
+            return {
+                "OLD": {"avg_equity_weight": 0.5,
+                        "avg_bond_weight":   0.5},  # pre-backfill row
+            }
+        monkeypatch.setattr(
+            "tools.cache.get_latest_strategy_cache", _cache)
+        out = asyncio.run(compute_regime_blends_implied(
+            {"BULL": {"OLD": 1.0}}, None))
+        assert out is not None
+        assert "ig_bond_pct" not in out["BULL"]
+        assert "hy_bond_pct" not in out["BULL"]
 
     def test_returns_none_when_no_regime_produces_a_valid_blend(
         self, monkeypatch,

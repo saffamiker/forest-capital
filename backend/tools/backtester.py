@@ -372,7 +372,16 @@ def _build_result(
     alpha, beta = _m_alpha_beta(portfolio_returns, bm_returns, rf)
     ir = _m_ir(portfolio_returns, bm_returns)
 
-    avg_bond_wt = avg_weights.get("ig", 0.0) + avg_weights.get("hy", 0.0)
+    # IG and HY are tracked separately throughout the upstream pipeline
+    # (every per-strategy runner constructs an avg_weights dict keyed by
+    # "equity" / "ig" / "hy"). The previous emitter summed them into a
+    # single avg_bond_weight before persistence, hiding the split from
+    # every downstream consumer. June 2026 split: emit ig + hy as
+    # distinct fields AND keep avg_bond_weight as a back-compat alias
+    # equal to ig + hy.
+    avg_ig_wt = avg_weights.get("ig", 0.0)
+    avg_hy_wt = avg_weights.get("hy", 0.0)
+    avg_bond_wt = avg_ig_wt + avg_hy_wt
     avg_eq_wt = avg_weights.get("equity", 0.0)
     cagr = _m_cagr(portfolio_returns)
     bm_cagr = _m_cagr(bm_returns) if len(bm_returns) > 0 else 0.0
@@ -483,6 +492,10 @@ def _build_result(
         "omega_ratio": omega,
         "avg_equity_weight": round(avg_eq_wt, 4),
         "avg_bond_weight": round(avg_bond_wt, 4),
+        # IG / HY split. avg_bond_weight stays as the sum so old
+        # consumers continue to work; new consumers read the split.
+        "avg_ig_weight": round(avg_ig_wt, 4),
+        "avg_hy_weight": round(avg_hy_wt, 4),
         # Statistical tests
         "p_value_ttest": round(p_ttest, 6),
         "p_value_sharpe_jk": round(p_ttest, 6),  # proxy until JK implemented per-strategy
@@ -602,6 +615,8 @@ def run_benchmark(history: dict) -> dict:
         "information_ratio": 0.0,
         "avg_equity_weight": 1.0,
         "avg_bond_weight": 0.0,
+        "avg_ig_weight": 0.0,
+        "avg_hy_weight": 0.0,
         "is_significant": False,
         "avg_monthly_turnover": 0.0,
         "true_turnover": 0.0,

@@ -150,6 +150,37 @@ def test_run_benchmark_full_equity_weight():
     result = run_benchmark(make_history())
     assert result["avg_equity_weight"] == 1.0
     assert result["avg_bond_weight"] == 0.0
+    # IG/HY split (June 2026). 100% equity benchmark must declare
+    # both bond fields as exactly zero so downstream consumers can
+    # rely on the back-compat invariant ig + hy == avg_bond_weight.
+    assert result["avg_ig_weight"] == 0.0
+    assert result["avg_hy_weight"] == 0.0
+
+
+def test_avg_bond_weight_equals_ig_plus_hy_across_all_strategies():
+    """June 2026 -- the IG/HY split MUST sum to the back-compat
+    avg_bond_weight alias. Old consumers continue to work; new
+    consumers can rely on ig + hy == bond. The full strategy sweep
+    is the cleanest place to pin this invariant, so we run the
+    canonical 10-strategy backtest and check every result."""
+    from tools.backtester import run_all_strategies
+    results = run_all_strategies(make_history(n_months=120))
+    for name, r in results.items():
+        if not isinstance(r, dict) or r.get("error"):
+            continue
+        ig = r.get("avg_ig_weight")
+        hy = r.get("avg_hy_weight")
+        bd = r.get("avg_bond_weight")
+        # Every strategy result must carry the new fields.
+        assert ig is not None, f"{name} missing avg_ig_weight"
+        assert hy is not None, f"{name} missing avg_hy_weight"
+        # The combined alias must equal the split, within rounding.
+        assert abs((ig + hy) - bd) < 0.01, (
+            f"{name}: ig({ig}) + hy({hy}) != bond({bd})")
+        # And the full asset-class invariant must hold.
+        eq = r.get("avg_equity_weight") or 0.0
+        assert abs(eq + ig + hy - 1.0) < 0.01, (
+            f"{name}: equity + ig + hy != 1.0")
 
 
 def test_run_benchmark_n_observations_positive():

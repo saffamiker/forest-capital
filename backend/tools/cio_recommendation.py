@@ -555,6 +555,18 @@ async def compute_implied_asset_allocation(
 
     total_eq = 0.0
     total_bd = 0.0
+    total_ig = 0.0
+    total_hy = 0.0
+    # ig_hy_evidence_count -- number of contributing strategies that
+    # carry the explicit IG/HY split fields (avg_ig_weight /
+    # avg_hy_weight). When zero, no strategy in the live blend has
+    # the new fields and we fall back to omitting ig_bond_pct /
+    # hy_bond_pct from the result so the consumer falls through to
+    # the combined-bonds rendering. When non-zero we surface the
+    # split even if one or two strategies in the blend lack it
+    # (treating absent as 0 IG / 0 HY for those rows -- they only
+    # contribute via the combined bond_pct).
+    ig_hy_evidence_count = 0
     total_w = 0.0
     for strategy, weight in blend_weights.items():
         try:
@@ -569,6 +581,17 @@ async def compute_implied_asset_allocation(
             bd = float(s.get("avg_bond_weight") or 0)
         except (TypeError, ValueError):
             continue
+        ig_raw = s.get("avg_ig_weight")
+        hy_raw = s.get("avg_hy_weight")
+        if ig_raw is not None and hy_raw is not None:
+            try:
+                ig = float(ig_raw)
+                hy = float(hy_raw)
+                total_ig += w * ig
+                total_hy += w * hy
+                ig_hy_evidence_count += 1
+            except (TypeError, ValueError):
+                pass
         total_eq += w * eq
         total_bd += w * bd
         total_w += w
@@ -582,11 +605,21 @@ async def compute_implied_asset_allocation(
     # explicitly so the audience can SEE the un-invested fraction
     # instead of mentally subtracting.
     cash = max(0.0, 1.0 - total_eq - total_bd)
-    return {
+    result: dict[str, float] = {
         "equity_pct": round(total_eq, 4),
         "bond_pct": round(total_bd, 4),
         "cash_pct": round(cash, 4),
     }
+    # IG/HY split (June 2026). Surfaced only when at least one strategy
+    # in the live blend carries the new fields; otherwise the consumer
+    # renders the combined-bonds row alone. Once the backfill script
+    # has run AND the strategy cache holds the new keys on every row,
+    # ig_hy_evidence_count == len(non-zero blend members) and the
+    # detail rendering kicks in everywhere.
+    if ig_hy_evidence_count > 0:
+        result["ig_bond_pct"] = round(total_ig, 4)
+        result["hy_bond_pct"] = round(total_hy, 4)
+    return result
 
 
 async def compute_regime_blends_implied(
@@ -632,12 +665,17 @@ async def compute_regime_blends_implied(
 
     cur_eq = (current_implied or {}).get("equity_pct")
     cur_bd = (current_implied or {}).get("bond_pct")
+    cur_ig = (current_implied or {}).get("ig_bond_pct")
+    cur_hy = (current_implied or {}).get("hy_bond_pct")
     out: dict[str, dict[str, Any]] = {}
     for regime, weights in regime_blends.items():
         if not isinstance(weights, dict) or not weights:
             continue
         total_eq = 0.0
         total_bd = 0.0
+        total_ig = 0.0
+        total_hy = 0.0
+        ig_hy_evidence_count = 0
         total_w = 0.0
         for strategy, w_raw in weights.items():
             try:
@@ -652,6 +690,15 @@ async def compute_regime_blends_implied(
                 bd = float(s.get("avg_bond_weight") or 0)
             except (TypeError, ValueError):
                 continue
+            ig_raw = s.get("avg_ig_weight")
+            hy_raw = s.get("avg_hy_weight")
+            if ig_raw is not None and hy_raw is not None:
+                try:
+                    total_ig += w * float(ig_raw)
+                    total_hy += w * float(hy_raw)
+                    ig_hy_evidence_count += 1
+                except (TypeError, ValueError):
+                    pass
             total_eq += w * eq
             total_bd += w * bd
             total_w += w
@@ -664,15 +711,25 @@ async def compute_regime_blends_implied(
             "bond_pct": round(total_bd, 4),
             "cash_pct": round(cash, 4),
         }
-        # Delta is in PERCENTAGE POINTS (not fractions) so the UI can
-        # render "+35.6pp" without re-multiplying by 100. None when the
-        # current implied is unavailable -- the frontend then omits
-        # the delta line gracefully.
+        # Delta in PERCENTAGE POINTS (not fractions). Surfaced for
+        # every dimension whose current_implied has a value.
         if isinstance(cur_eq, (int, float)) and isinstance(cur_bd, (int, float)):
             entry["equity_delta_pp"] = round(
                 (total_eq - float(cur_eq)) * 100, 1)
             entry["bond_delta_pp"] = round(
                 (total_bd - float(cur_bd)) * 100, 1)
+        # IG/HY split + delta (June 2026). Same evidence-count rule as
+        # compute_implied_asset_allocation: only surface when at least
+        # one contributing strategy carries the new fields.
+        if ig_hy_evidence_count > 0:
+            entry["ig_bond_pct"] = round(total_ig, 4)
+            entry["hy_bond_pct"] = round(total_hy, 4)
+            if isinstance(cur_ig, (int, float)) and isinstance(
+                    cur_hy, (int, float)):
+                entry["ig_bond_delta_pp"] = round(
+                    (total_ig - float(cur_ig)) * 100, 1)
+                entry["hy_bond_delta_pp"] = round(
+                    (total_hy - float(cur_hy)) * 100, 1)
         out[regime] = entry
     return out or None
 
