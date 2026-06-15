@@ -131,6 +131,85 @@ class TestImpliedAllocation:
         assert out["bond_pct"] == pytest.approx(0.5)
 
 
+# ── IG/HY split surfaced when the new fields are present ───────────────
+
+class TestImpliedAllocationIgHySplit:
+    """June 2026 -- when strategy cache entries carry the explicit
+    avg_ig_weight / avg_hy_weight split, the returned dict gains
+    ig_bond_pct and hy_bond_pct. ig + hy == bond_pct (within rounding).
+    When no contributing strategy carries the new fields, the dict
+    falls back to the combined-bonds shape (no ig/hy keys)."""
+
+    def test_returns_ig_hy_when_strategies_carry_the_split(
+        self, monkeypatch,
+    ):
+        from tools.cio_recommendation import (
+            compute_implied_asset_allocation,
+        )
+
+        async def _cache():
+            return {
+                # An IG-only strategy: avg_bond is 100% IG.
+                "VOL_TARGETING": {
+                    "avg_equity_weight": 0.5,
+                    "avg_bond_weight":   0.5,
+                    "avg_ig_weight":     0.5,
+                    "avg_hy_weight":     0.0,
+                },
+                # A mixed-bond strategy: 50/50 IG/HY of the bond leg.
+                "EQUAL_WEIGHT": {
+                    "avg_equity_weight": 0.333,
+                    "avg_bond_weight":   0.667,
+                    "avg_ig_weight":     0.333,
+                    "avg_hy_weight":     0.333,
+                },
+            }
+        monkeypatch.setattr(
+            "tools.cache.get_latest_strategy_cache", _cache)
+
+        # 50/50 blend.
+        out = asyncio.run(compute_implied_asset_allocation(
+            {"VOL_TARGETING": 0.5, "EQUAL_WEIGHT": 0.5}))
+        assert out is not None
+        # Equity = 0.5*0.5 + 0.5*0.333 = 0.4165
+        assert out["equity_pct"] == pytest.approx(0.4165, abs=1e-3)
+        # IG = 0.5*0.5 + 0.5*0.333 = 0.4165
+        assert out["ig_bond_pct"] == pytest.approx(0.4165, abs=1e-3)
+        # HY = 0.5*0.0 + 0.5*0.333 = 0.1665
+        assert out["hy_bond_pct"] == pytest.approx(0.1665, abs=1e-3)
+        # ig + hy == bond_pct (within rounding tolerance).
+        assert (out["ig_bond_pct"] + out["hy_bond_pct"]) == pytest.approx(
+            out["bond_pct"], abs=1e-2)
+
+    def test_omits_ig_hy_when_no_strategy_carries_the_split(
+        self, monkeypatch,
+    ):
+        from tools.cio_recommendation import (
+            compute_implied_asset_allocation,
+        )
+
+        async def _cache():
+            return {
+                # Pre-backfill: only the combined avg_bond_weight.
+                "VOL_TARGETING": {
+                    "avg_equity_weight": 0.5,
+                    "avg_bond_weight":   0.5,
+                },
+            }
+        monkeypatch.setattr(
+            "tools.cache.get_latest_strategy_cache", _cache)
+
+        out = asyncio.run(compute_implied_asset_allocation(
+            {"VOL_TARGETING": 1.0}))
+        assert out is not None
+        assert out["equity_pct"] == pytest.approx(0.5)
+        assert out["bond_pct"] == pytest.approx(0.5)
+        # The frontend uses presence of ig_bond_pct as the
+        # back-compat switch -- it MUST be absent on the old shape.
+        assert "ig_bond_pct" not in out
+        assert "hy_bond_pct" not in out
+
+
 # ── compute_blend_change_trigger ────────────────────────────────────────
 
 class TestBlendChangeTrigger:

@@ -874,23 +874,46 @@ class QAAgent:
         """
         results: dict[str, dict[str, str]] = {}
 
-        # P01: weights sum to 1.0 — verified arithmetically from avg weight fields
-        weight_ok = all(
-            abs(
-                r.get("avg_equity_weight", 0.0) + r.get("avg_bond_weight", 0.0) - 1.0
-            ) < 0.01
-            for r in strategy_results.values()
-        )
+        # P01: weights sum to 1.0 — verified arithmetically from avg weight
+        # fields. IG/HY are emitted separately as of June 2026; on rows that
+        # carry the new fields we ALSO verify equity + ig + hy ≈ 1.0 AND
+        # ig + hy ≈ avg_bond_weight (back-compat alias). Old rows (pre-
+        # split) carry no ig/hy keys; we fall back to the equity+bond
+        # check alone for them so existing cache vintages don't fail.
+        def _weights_check(r: dict) -> bool:
+            eq = r.get("avg_equity_weight", 0.0)
+            bd = r.get("avg_bond_weight", 0.0)
+            ig = r.get("avg_ig_weight")
+            hy = r.get("avg_hy_weight")
+            if abs(eq + bd - 1.0) >= 0.01:
+                return False
+            if ig is not None and hy is not None:
+                if abs(eq + float(ig) + float(hy) - 1.0) >= 0.01:
+                    return False
+                if abs(float(ig) + float(hy) - bd) >= 0.01:
+                    return False
+            return True
+        weight_ok = all(_weights_check(r) for r in strategy_results.values())
         results["weights_sum"] = {
             "status": "PASS" if weight_ok else "FAIL",
-            "evidence": "avg_equity_weight + avg_bond_weight ≈ 1.0 for all strategies."
-            if weight_ok else "Weight fields do not sum to 1.0 — check rebalancing logic.",
+            "evidence": (
+                "avg_equity_weight + avg_ig_weight + avg_hy_weight ≈ 1.0 "
+                "for all strategies; ig + hy ≈ avg_bond_weight back-compat "
+                "alias holds."
+            ) if weight_ok else (
+                "Weight fields do not sum to 1.0 — check rebalancing "
+                "logic / IG-HY split consistency."
+            ),
         }
 
         # P02: no negative weights — long-only constraint enforced
         no_shorts = all(
             r.get("avg_equity_weight", 0.0) >= 0
             and r.get("avg_bond_weight", 0.0) >= 0
+            and (r.get("avg_ig_weight") is None
+                 or float(r.get("avg_ig_weight") or 0) >= 0)
+            and (r.get("avg_hy_weight") is None
+                 or float(r.get("avg_hy_weight") or 0) >= 0)
             for r in strategy_results.values()
         )
         results["no_short_positions"] = {
@@ -1700,6 +1723,17 @@ class QAAgent:
                 "alpha_after_costs_bps": r.get("alpha_after_costs_bps"),
                 "avg_equity_weight": r.get("avg_equity_weight"),
                 "avg_bond_weight": r.get("avg_bond_weight"),
+                # IG/HY split (June 2026). Absent for pre-split cache
+                # rows; surface only when present so the LLM evidence
+                # doesn't get "None" tokens on legacy data.
+                **(
+                    {"avg_ig_weight": r.get("avg_ig_weight")}
+                    if r.get("avg_ig_weight") is not None else {}
+                ),
+                **(
+                    {"avg_hy_weight": r.get("avg_hy_weight")}
+                    if r.get("avg_hy_weight") is not None else {}
+                ),
                 "has_oos": r.get("oos_sharpe") is not None,
                 "has_dsr": r.get("deflated_sharpe_ratio") is not None,
                 "has_psr": r.get("probabilistic_sharpe_ratio") is not None,

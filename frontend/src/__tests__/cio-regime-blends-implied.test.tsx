@@ -198,6 +198,69 @@ describe('CIO card -- Blend Shift on Regime Flip (June 8 2026)', () => {
     ).not.toBeInTheDocument()
   })
 
+  it('renders IG / HY split when the overlay carries it (June 2026)', async () => {
+    // When the strategy cache rows carry avg_ig_weight / avg_hy_weight
+    // (post-backfill), the regime entry gains ig_bond_pct, hy_bond_pct,
+    // ig_bond_delta_pp, hy_bond_delta_pp. The implied + delta lines
+    // render IG and HY columns; the combined "Bonds X%" wording is
+    // replaced with "IG X% | HY Y%".
+    mockedAxios.get.mockResolvedValue({
+      data: {
+        available: true,
+        recommendation: {
+          ...baseRec,
+          regime_blends_implied: {
+            BULL: {
+              weights: { DYN: 1.0 },
+              equity_pct: 0.7, bond_pct: 0.3, cash_pct: 0,
+              ig_bond_pct: 0.225, hy_bond_pct: 0.075,
+              equity_delta_pp: 37.6,
+              bond_delta_pp: -37.6,
+              ig_bond_delta_pp: -12.5,
+              hy_bond_delta_pp: -25.1,
+            },
+          },
+        },
+      },
+    })
+    renderCard()
+    const bull = await screen.findByTestId('cio-regime-blend-BULL')
+    expect(bull.textContent).toContain('IG 22.5%')
+    expect(bull.textContent).toContain('HY 7.5%')
+    // Combined "Bonds X%" wording must be GONE on the IG/HY path.
+    expect(bull.textContent).not.toContain('Bonds 30.0%')
+    const delta = await screen.findByTestId('cio-regime-blend-BULL-delta')
+    expect(delta.textContent).toContain('IG -12.5pp')
+    expect(delta.textContent).toContain('HY -25.1pp')
+    // Combined bond delta also gone.
+    expect(delta.textContent).not.toContain('Bonds -37.6pp')
+  })
+
+  it('falls back to combined Bonds when the overlay omits IG/HY', async () => {
+    // Pre-backfill rows have only the combined fields. The card
+    // must render gracefully (no crash, no missing rows).
+    mockedAxios.get.mockResolvedValue({
+      data: {
+        available: true,
+        recommendation: {
+          ...baseRec,
+          regime_blends_implied: {
+            BULL: {
+              weights: { OLD: 1.0 },
+              equity_pct: 0.7, bond_pct: 0.3, cash_pct: 0,
+              equity_delta_pp: 37.6, bond_delta_pp: -37.6,
+              // No ig_bond_pct / hy_bond_pct.
+            },
+          },
+        },
+      },
+    })
+    renderCard()
+    const bull = await screen.findByTestId('cio-regime-blend-BULL')
+    expect(bull.textContent).toContain('Bonds 30.0%')
+    expect(bull.textContent).not.toContain('IG ')
+  })
+
   it('renders BULL, BEAR, TRANSITION in that fixed order', async () => {
     mockedAxios.get.mockResolvedValue({
       data: {

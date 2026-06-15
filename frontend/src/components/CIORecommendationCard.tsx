@@ -34,6 +34,13 @@ interface RegimeBlendImplied {
   cash_pct: number
   equity_delta_pp?: number
   bond_delta_pp?: number
+  // IG/HY split (June 2026). Same back-compat rule as
+  // implied_asset_allocation -- absent when no contributing strategy
+  // in the regime blend carries the new fields.
+  ig_bond_pct?: number
+  hy_bond_pct?: number
+  ig_bond_delta_pp?: number
+  hy_bond_delta_pp?: number
 }
 interface Recommendation {
   signal?: string | null
@@ -59,6 +66,12 @@ interface Recommendation {
     equity_pct: number
     bond_pct: number
     cash_pct: number
+    // IG/HY split (June 2026). Surfaced only when the strategy cache
+    // rows carry the per-strategy avg_ig_weight / avg_hy_weight; until
+    // the backfill script lands, this is absent and the card renders
+    // the combined-bonds row alone.
+    ig_bond_pct?: number
+    hy_bond_pct?: number
   } | null
   // Bridge #81 -- one-sentence guidance on what would shift the
   // blend (HMM regime flip + threshold watch points). Always present
@@ -293,16 +306,31 @@ export default function CIORecommendationCard() {
           </span>
         </p>
       )}
-      {rec.implied_asset_allocation && (
-        <p className="mt-1 text-sm" data-testid="cio-implied-asset-allocation">
-          <span className="text-muted">Implied Asset Allocation: </span>
-          <span className="font-mono text-xs text-slate-300">
-            {`Equity ${(rec.implied_asset_allocation.equity_pct * 100).toFixed(0)}%`
-              + `  ·  Bonds ${(rec.implied_asset_allocation.bond_pct * 100).toFixed(0)}%`
-              + `  ·  Cash ${(rec.implied_asset_allocation.cash_pct * 100).toFixed(0)}%`}
-          </span>
-        </p>
-      )}
+      {rec.implied_asset_allocation && (() => {
+        const ia = rec.implied_asset_allocation
+        // IG/HY detail is surfaced only when the backend overlay
+        // carried both fields. Once the backfill script has run and
+        // strategy_results_cache has the new keys on every row, this
+        // is always populated; pre-backfill rows fall through to the
+        // combined-bonds row.
+        const hasIgHy = typeof ia.ig_bond_pct === 'number'
+          && typeof ia.hy_bond_pct === 'number'
+        return (
+          <p className="mt-1 text-sm" data-testid="cio-implied-asset-allocation">
+            <span className="text-muted">Implied Asset Allocation: </span>
+            <span className="font-mono text-xs text-slate-300">
+              {`Equity ${(ia.equity_pct * 100).toFixed(0)}%`}
+              {hasIgHy ? (
+                `  ·  IG Bonds ${(ia.ig_bond_pct! * 100).toFixed(0)}%`
+                + `  ·  HY Bonds ${(ia.hy_bond_pct! * 100).toFixed(0)}%`
+              ) : (
+                `  ·  Bonds ${(ia.bond_pct * 100).toFixed(0)}%`
+              )}
+              {`  ·  Cash ${(ia.cash_pct * 100).toFixed(0)}%`}
+            </span>
+          </p>
+        )
+      })()}
       {rec.blend_change_trigger && (
         <p className="mt-1 text-sm" data-testid="cio-blend-change-trigger">
           <span className="text-muted">Blend Change Trigger: </span>
@@ -340,6 +368,12 @@ export default function CIORecommendationCard() {
               const tone = REGIME_TONE[regime] || 'text-text'
               const dq = entry.equity_delta_pp
               const db = entry.bond_delta_pp
+              const dig = entry.ig_bond_delta_pp
+              const dhy = entry.hy_bond_delta_pp
+              const hasIgHy = typeof entry.ig_bond_pct === 'number'
+                && typeof entry.hy_bond_pct === 'number'
+              const hasIgHyDelta = typeof dig === 'number'
+                && typeof dhy === 'number'
               const fmtPp = (v: number) =>
                 `${v >= 0 ? '+' : ''}${v.toFixed(1)}pp`
               return (
@@ -353,13 +387,23 @@ export default function CIORecommendationCard() {
                     <span className="text-slate-300">{weightStr}</span>
                   </div>
                   <div className="ml-4 text-slate-300 font-mono text-2xs">
-                    {`Equity ${(entry.equity_pct * 100).toFixed(1)}%`
-                      + ` | Bonds ${(entry.bond_pct * 100).toFixed(1)}%`}
+                    {`Equity ${(entry.equity_pct * 100).toFixed(1)}%`}
+                    {hasIgHy ? (
+                      ` | IG ${(entry.ig_bond_pct! * 100).toFixed(1)}%`
+                      + ` | HY ${(entry.hy_bond_pct! * 100).toFixed(1)}%`
+                    ) : (
+                      ` | Bonds ${(entry.bond_pct * 100).toFixed(1)}%`
+                    )}
                   </div>
                   {typeof dq === 'number' && typeof db === 'number' && (
                     <div className="ml-4 text-muted font-mono text-2xs"
                       data-testid={`cio-regime-blend-${regime}-delta`}>
-                      {`vs today: Equity ${fmtPp(dq)} | Bonds ${fmtPp(db)}`}
+                      {`vs today: Equity ${fmtPp(dq)}`}
+                      {hasIgHyDelta ? (
+                        ` | IG ${fmtPp(dig!)} | HY ${fmtPp(dhy!)}`
+                      ) : (
+                        ` | Bonds ${fmtPp(db)}`
+                      )}
                     </div>
                   )}
                 </div>
