@@ -914,13 +914,38 @@ async def _section_implied_asset_allocation() -> DigestSection:
 
 
 async def _section_latest_cio_recommendation() -> DigestSection:
-    """Pulls the most recent row from cio_recommendations and surfaces
-    the `recommendation` field (capped at 300 words). When PR #273's
-    A/B/C transparency structure is present in the cached prose the
-    digest shows it verbatim (the cap leaves room for all three
-    sections in typical cases). When the cache is cold or the table
-    is empty, a placeholder section renders rather than the digest
-    skipping it."""
+    """The CIO recommendation block. June 15 2026 restructure
+    consolidates the supporting context inline so the reader has
+    enough to understand WHY the recommendation was made, in one
+    section, without cross-referencing the rebalance triggers
+    section below.
+
+    Render order (each block silently skipped when the underlying
+    data isn't available):
+
+      A. Regime header -- "{regime} · {prob:.1%} confidence" with an
+         ESS warning sub-line when ess_warning is true, plus the
+         full HMM posterior breakdown (all three states) on the
+         next line so the reader sees whether the dominant
+         probability is overwhelming or marginal.
+      B. Key signals -- VIX / credit spread / yield curve slope /
+         equity trend from regime_signals_cache. Values only; the
+         trigger thresholds stay in _section_rebalance_triggers so
+         the digest doesn't duplicate the threshold language.
+      C. Recommendation prose -- signal sentence + recommendation
+         sentence. The four-component A/B/C/D framing already lives
+         in the prose itself.
+      D. Dissenting view + key risk -- two short lines.
+      E. Current implied allocation -- "Equity X% | Bonds Y%" or
+         "Equity X% | IG Y% | HY Z%" when the IG/HY split is
+         available (PR #315). Live blend overlay.
+      F. Deterministic fallback notice -- one line ABOVE the
+         recommendation prose, surfaced only when _model is the
+         fallback sentinel.
+
+    The four mandatory limitations are NOT included -- they're
+    too verbose for email and remain on the site card.
+    """
     try:
         from tools.cio_recommendation import get_latest_recommendation
     except Exception as exc:  # noqa: BLE001
@@ -941,52 +966,210 @@ async def _section_latest_cio_recommendation() -> DigestSection:
             "  No CIO recommendation cached — the cio_recommendations "
             "table is empty.")
 
-    # Prefer the recommendation field; fall back to signal for the
-    # case where only the deterministic-fallback path has written.
-    body = (rec.get("recommendation") or rec.get("signal") or "").strip()
-    if not body:
-        return _empty_section(
-            "CIO recommendation",
-            "  CIO recommendation row exists but carries no narrative "
-            "text — likely an older schema. Re-run the recommendation "
-            "pipeline.")
+    confidence = rec.get("confidence") or {}
+    regime = rec.get("regime") or confidence.get("regime")
+    prob = confidence.get("probability")
+    ess = confidence.get("ess")
+    ess_warning = bool(confidence.get("ess_warning"))
+    posterior = confidence.get("posterior") or {}
+    model = rec.get("model") or rec.get("_model")
+    is_fallback = model == "deterministic_fallback"
 
-    truncated = _truncate_to_word_cap(body, 300)
-    regime = rec.get("regime") or (rec.get("confidence") or {}).get("regime")
+    signal_text = (rec.get("signal") or "").strip()
+    recommendation_text = (rec.get("recommendation") or "").strip()
+    dissenting_view = (rec.get("dissenting_view") or "").strip()
+    key_risk = (rec.get("key_risk") or "").strip()
     computed_at = rec.get("computed_at") or ""
 
-    meta_line = ""
+    # ── Block A: regime header (and the posterior breakdown) ────────
+    header_lines_html: list[str] = []
+    header_lines_text: list[str] = []
     if regime:
-        meta_line += f"Current regime: {regime}. "
-    if computed_at:
-        meta_line += f"Computed at: {computed_at}."
+        prob_str = (f" · {float(prob) * 100:.1f}% confidence"
+                    if isinstance(prob, (int, float)) else "")
+        header_lines_html.append(
+            f"<div style='font-size:14px;color:#cbd5e1;"
+            f"margin-bottom:2px'><b>{regime}</b>{prob_str}</div>")
+        header_lines_text.append(f"  {regime}{prob_str}")
+    if ess_warning and isinstance(ess, (int, float)):
+        ess_note = (
+            f"(low ESS: {float(ess):.0f} — regime signal less reliable)")
+        header_lines_html.append(
+            f"<div style='font-size:11px;color:#fca5a5;"
+            f"margin-bottom:2px'>{ess_note}</div>")
+        header_lines_text.append(f"  {ess_note}")
+    if isinstance(posterior, dict) and posterior:
+        # Posterior keys may be "BULL"/"BEAR"/"TRANSITION" (canonical)
+        # or alphabetically sorted; we render in the canonical order
+        # so the reader's eye lands on the same column each day.
+        ordered = []
+        for label in ("BULL", "TRANSITION", "BEAR"):
+            if label in posterior:
+                try:
+                    p = float(posterior[label])
+                    ordered.append(f"{label} {p * 100:.1f}%")
+                except (TypeError, ValueError):
+                    continue
+        if ordered:
+            posterior_str = "  ".join(ordered)
+            header_lines_html.append(
+                f"<div style='font-size:11px;color:#94a3b8;"
+                f"font-family:monospace;margin-bottom:6px'>"
+                f"{posterior_str}</div>")
+            header_lines_text.append(f"  {posterior_str}")
 
-    # HTML — render the truncated body as a paragraph block (the prose
-    # may contain markdown ### headings from PR #273; we surface them
-    # verbatim, the email client will render the # characters as text).
+    # ── Block B: key signals (VIX / credit / yc / equity trend) ─────
+    signal_lines_html: list[str] = []
+    signal_lines_text: list[str] = []
+    try:
+        signals = await _read_latest_regime_signals_for_digest()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_cio_signals_read_failed", error=str(exc))
+        signals = {}
+    parts: list[str] = []
+    if signals:
+        vix = signals.get("vix_level")
+        cs = signals.get("credit_spread")
+        yc = signals.get("yield_curve_slope")
+        et = signals.get("equity_trend")
+        if isinstance(vix, (int, float)):
+            parts.append(f"VIX {float(vix):.2f}")
+        if isinstance(cs, (int, float)):
+            parts.append(f"Credit spread {float(cs):.2f}")
+        if isinstance(yc, (int, float)):
+            parts.append(f"Yield curve {float(yc):.2f}")
+        if isinstance(et, (int, float)):
+            parts.append(f"Equity trend {float(et) * 100:.2f}%")
+    if parts:
+        joined = " | ".join(parts)
+        signal_lines_html.append(
+            f"<div style='font-size:11px;color:#94a3b8;"
+            f"margin-bottom:2px'><b>Signals supporting this call:</b>"
+            f"</div>"
+            f"<div style='font-size:11px;color:#cbd5e1;"
+            f"font-family:monospace;margin-bottom:6px'>{joined}</div>")
+        signal_lines_text.append("  Signals supporting this call:")
+        signal_lines_text.append(f"    {joined}")
+
+    # ── Block F (rendered BEFORE the prose so the fallback notice is
+    #    above the recommendation it qualifies, not below) ──────────
+    fallback_html: list[str] = []
+    fallback_text: list[str] = []
+    if is_fallback:
+        fallback_html.append(
+            "<div style='font-size:11px;color:#fbbf24;"
+            "margin-bottom:6px'><b>Note:</b> Live regime unavailable "
+            "— showing last deterministic recommendation.</div>")
+        fallback_text.append(
+            "  Note: Live regime unavailable — showing last "
+            "deterministic recommendation.")
+
+    # ── Block C: recommendation prose ───────────────────────────────
+    prose_html: list[str] = []
+    prose_text: list[str] = []
+    if signal_text:
+        prose_html.append(
+            f"<div style='font-size:12px;color:#cbd5e1;"
+            f"margin-bottom:4px'><b>Signal:</b> {signal_text}</div>")
+        prose_text.append(f"  Signal: {signal_text}")
+    if recommendation_text:
+        # Cap the recommendation prose alone at 200 words so the
+        # digest stays readable; the full text is on the site.
+        truncated_rec = _truncate_to_word_cap(recommendation_text, 200)
+        prose_html.append(
+            f"<div style='font-size:12px;color:#cbd5e1;"
+            f"margin-bottom:6px'><b>Recommendation:</b> "
+            f"{truncated_rec}</div>")
+        prose_text.append(f"  Recommendation: {truncated_rec}")
+
+    # ── Block D: dissenting view + key risk ─────────────────────────
+    rationale_html: list[str] = []
+    rationale_text: list[str] = []
+    if dissenting_view:
+        rationale_html.append(
+            f"<div style='font-size:11px;color:#94a3b8;"
+            f"margin-bottom:2px'><b>Dissenting view:</b> "
+            f"{dissenting_view}</div>")
+        rationale_text.append(f"  Dissenting view: {dissenting_view}")
+    if key_risk:
+        rationale_html.append(
+            f"<div style='font-size:11px;color:#94a3b8;"
+            f"margin-bottom:6px'><b>Key risk:</b> {key_risk}</div>")
+        rationale_text.append(f"  Key risk: {key_risk}")
+
+    # ── Block E: current implied allocation ────────────────────────
+    # Pulls the same regime_blends payload _section_rebalance_triggers
+    # uses, picks the LIVE regime's blend, and computes the implied
+    # split. Surfaces IG/HY when the strategy cache rows carry the
+    # avg_ig_weight / avg_hy_weight fields (post-PR #315 backfill).
+    allocation_html: list[str] = []
+    allocation_text: list[str] = []
+    try:
+        from tools.cio_recommendation import compute_implied_asset_allocation
+        from tools.precomputed_analytics import get_latest_metric
+        rb_row = await get_latest_metric("regime_blends") or {}
+        rb_blends = (rb_row or {}).get("blends") or {}
+        live_blend = rb_blends.get(regime) if regime else None
+        implied = (
+            await compute_implied_asset_allocation(live_blend)
+            if live_blend else None)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_cio_allocation_read_failed", error=str(exc))
+        implied = None
+    if implied:
+        eq = implied.get("equity_pct")
+        bd = implied.get("bond_pct")
+        ig = implied.get("ig_bond_pct")
+        hy = implied.get("hy_bond_pct")
+        has_ig_hy = (isinstance(ig, (int, float))
+                     and isinstance(hy, (int, float)))
+        if (isinstance(eq, (int, float))
+                and isinstance(bd, (int, float))):
+            if has_ig_hy:
+                alloc_str = (
+                    f"Equity {float(eq) * 100:.1f}% | "
+                    f"IG Bonds {float(ig) * 100:.1f}% | "
+                    f"HY Bonds {float(hy) * 100:.1f}%")
+            else:
+                alloc_str = (
+                    f"Equity {float(eq) * 100:.1f}% | "
+                    f"Bonds {float(bd) * 100:.1f}%")
+            allocation_html.append(
+                f"<div style='font-size:11px;color:#94a3b8;"
+                f"margin-bottom:2px'><b>Current implied allocation:"
+                f"</b></div>"
+                f"<div style='font-size:11px;color:#cbd5e1;"
+                f"font-family:monospace;margin-bottom:6px'>"
+                f"{alloc_str}</div>")
+            allocation_text.append("  Current implied allocation:")
+            allocation_text.append(f"    {alloc_str}")
+
+    # ── Assemble ────────────────────────────────────────────────────
+    meta_line = ""
+    if computed_at:
+        meta_line = (
+            f"<div style='font-size:10px;color:#64748b;"
+            f"margin-top:6px'>Computed at: {computed_at}</div>")
     html = (
         f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
         f"CIO recommendation</h3>"
-        f"<div style='font-size:11px;color:#94a3b8;margin-bottom:6px'>"
-        f"{meta_line}</div>"
-        f"<pre style='white-space:pre-wrap;font-family:inherit;"
-        f"font-size:12px;color:#cbd5e1;margin:0;padding:6px 8px;"
-        f"background:#0f172a;border-left:2px solid #334155'>"
-        f"{truncated}</pre>"
-        + (
-            "<div style='font-size:10px;color:#64748b;margin-top:4px'>"
-            "Truncated to 300 words — full recommendation on the "
-            "platform.</div>"
-            if len(body.split()) > 300 else ""))
-    text = "CIO RECOMMENDATION\n"
-    if meta_line:
-        text += f"  {meta_line}\n"
-    text += "\n" + "\n".join(f"  {line}" for line in truncated.splitlines())
-    if len(body.split()) > 300:
-        text += (
-            "\n  (Truncated to 300 words — full recommendation on the "
-            "platform.)")
-    text += "\n"
+        + "".join(header_lines_html)
+        + "".join(signal_lines_html)
+        + "".join(fallback_html)
+        + "".join(prose_html)
+        + "".join(rationale_html)
+        + "".join(allocation_html)
+        + meta_line)
+    text_blocks: list[str] = ["CIO RECOMMENDATION"]
+    text_blocks.extend(header_lines_text)
+    text_blocks.extend(signal_lines_text)
+    text_blocks.extend(fallback_text)
+    text_blocks.extend(prose_text)
+    text_blocks.extend(rationale_text)
+    text_blocks.extend(allocation_text)
+    if computed_at:
+        text_blocks.append(f"  Computed at: {computed_at}")
+    text = "\n".join(text_blocks) + "\n"
 
     return DigestSection(
         title="CIO recommendation", html=html, text=text)
@@ -1051,47 +1234,57 @@ async def _section_rebalance_triggers() -> DigestSection:
         log.warning("digest_rebalance_blends_read_failed", error=str(exc))
         regime_blends = {}
 
-    # Trigger lines — each is (label, current value, comparator,
-    # threshold, sentence template). Only render rows where the signal
-    # is actually in the cache; a missing field is dropped silently
-    # rather than rendered as "None".
+    # Trigger lines — June 15 2026 restructure: render the THRESHOLD
+    # LANGUAGE only, not the current value. The values themselves now
+    # appear in the CIO recommendation section's Block B ("Signals
+    # supporting this call") so the digest doesn't carry the same
+    # number twice. The trigger rows here describe what WOULD flip
+    # the regime; the CIO section describes where the signal IS
+    # right now.
+    #
+    # A row still requires the underlying field to be PRESENT in the
+    # cache (a missing field is dropped silently) -- this guards
+    # against rendering "Yield curve inversion below ..." when the
+    # cache never carried a yield_curve_slope at all (pre-FRED
+    # bootstrap), which would mislead the reader into thinking the
+    # signal is being watched when it isn't.
     trigger_lines: list[tuple[str, str]] = []  # (html_li, text_line)
     vix = signals.get("vix_level")
     if vix is not None:
         trigger_lines.append((
-            f"<li><b>VIX {float(vix):.2f}</b> — sustained rise above "
+            f"<li><b>VIX</b> — sustained rise above "
             f"<b>{VIX_HIGH_THRESHOLD}</b> would signal BEAR.</li>",
-            f"    VIX {float(vix):.2f} — rise above {VIX_HIGH_THRESHOLD} "
-            f"signals BEAR."))
+            f"    VIX — rise above {VIX_HIGH_THRESHOLD} signals BEAR."))
     cs = signals.get("credit_spread")
     if cs is not None:
         trigger_lines.append((
-            f"<li><b>Credit spread {float(cs):.2f}</b> — widening "
-            f"above <b>{CREDIT_SPREAD_WIDE}</b> would signal stress.</li>",
-            f"    Credit spread {float(cs):.2f} — widening above "
+            f"<li><b>Credit spread</b> — widening above "
+            f"<b>{CREDIT_SPREAD_WIDE}</b> would signal stress.</li>",
+            f"    Credit spread — widening above "
             f"{CREDIT_SPREAD_WIDE} signals stress."))
     yc = signals.get("yield_curve_slope")
     if yc is not None:
         trigger_lines.append((
-            f"<li><b>Yield curve {float(yc):.2f}</b> — inversion "
+            f"<li><b>Yield curve</b> — inversion "
             f"(below <b>{YIELD_CURVE_INVERSION}</b>) would signal BEAR.</li>",
-            f"    Yield curve {float(yc):.2f} — inversion below "
+            f"    Yield curve — inversion below "
             f"{YIELD_CURVE_INVERSION} signals BEAR."))
     eq_trend = signals.get("equity_trend")
     if eq_trend is not None:
         trigger_lines.append((
-            f"<li><b>Equity trend {float(eq_trend):.2%}</b> — trailing "
-            f"return below <b>{BEAR_MARKET_THRESHOLD:.0%}</b> would "
-            f"signal BEAR.</li>",
-            f"    Equity trend {float(eq_trend):.2%} — below "
+            f"<li><b>Equity trend</b> — trailing return below "
+            f"<b>{BEAR_MARKET_THRESHOLD:.0%}</b> would signal BEAR.</li>",
+            f"    Equity trend — below "
             f"{BEAR_MARKET_THRESHOLD:.0%} signals BEAR."))
     hmm = signals.get("hmm_regime")
     if hmm is not None:
+        # The current regime label is in the CIO section's header
+        # (Block A); the rebalance section describes what causes a
+        # change, not what the current label is.
         trigger_lines.append((
-            f"<li><b>HMM regime: {hmm}</b> — a shift to BULL or BEAR "
-            f"triggers a rebalance.</li>",
-            f"    HMM regime: {hmm} — shift to BULL or BEAR triggers "
-            f"a rebalance."))
+            "<li><b>HMM regime</b> — a shift to a different state "
+            "(BULL / BEAR / TRANSITION) triggers a rebalance.</li>",
+            "    HMM regime — a state shift triggers a rebalance."))
 
     # Daily-vs-monthly HMM divergence — surfaced ONLY when the two
     # models actually disagree. The live label (daily HMM) and the
