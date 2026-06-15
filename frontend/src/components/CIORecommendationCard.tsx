@@ -21,6 +21,20 @@ interface Confidence {
   ess?: number | null
   ess_warning?: boolean | null
 }
+// June 8 2026 -- per-regime blend shift entry. weights mirrors the
+// regime_blends cache (strategy name -> fractional weight); equity_pct
+// / bond_pct / cash_pct are the asset-class split derived from the
+// strategy cache; equity_delta_pp / bond_delta_pp are the delta vs
+// the live portfolio in PERCENTAGE POINTS (not fractions) so the UI
+// renders "+35.6pp" without re-multiplying.
+interface RegimeBlendImplied {
+  weights: Record<string, number>
+  equity_pct: number
+  bond_pct: number
+  cash_pct: number
+  equity_delta_pp?: number
+  bond_delta_pp?: number
+}
 interface Recommendation {
   signal?: string | null
   recommendation?: string | null
@@ -51,6 +65,14 @@ interface Recommendation {
   // on a successful read; a generic sentence backs the case where
   // the regime is unknown.
   blend_change_trigger?: string | null
+  // June 8 2026 -- per-regime blend-shift implied splits + deltas
+  // from the live portfolio. The /api/v1/recommendation endpoint
+  // overlays this from the cached regime_blends metric crossed with
+  // the same per-strategy avg_equity_weight / avg_bond_weight that
+  // drive implied_asset_allocation. Absent when the regime_blends
+  // row is cold or the live current implied is unavailable -- the
+  // card omits the regime-shift section in that case.
+  regime_blends_implied?: Record<string, RegimeBlendImplied> | null
   computed_at?: string | null
   model?: string | null
   // The Python pipeline emits `_model` (underscore prefix) carrying
@@ -286,6 +308,65 @@ export default function CIORecommendationCard() {
           <span className="text-muted">Blend Change Trigger: </span>
           <span className="text-text">{rec.blend_change_trigger}</span>
         </p>
+      )}
+
+      {/* ── Per-regime blend shift (June 8 2026) ──────────────────────
+          Three rows -- BULL / BEAR / TRANSITION -- showing the
+          strategy weights, the asset-class implied split, and the
+          delta from the live portfolio. The endpoint overlays this
+          from analytics_metrics_cache 'regime_blends' crossed with
+          per-strategy avg_equity_weight / avg_bond_weight. Absent
+          when the cache is cold or the live current implied is
+          unavailable -- the card omits the whole section. */}
+      {rec.regime_blends_implied
+        && Object.keys(rec.regime_blends_implied).length > 0 && (
+        <div className="mt-4" data-testid="cio-regime-blends-implied">
+          <div className="text-2xs text-muted uppercase tracking-wide mb-1.5">
+            Blend Shift on Regime Flip
+          </div>
+          <div className="space-y-2">
+            {(['BULL', 'BEAR', 'TRANSITION'] as const).map((regime) => {
+              const entry = rec.regime_blends_implied?.[regime]
+              if (!entry) return null
+              // Top three strategies by weight -- matches the digest
+              // truncation so the surface stays readable.
+              const top = Object.entries(entry.weights)
+                .filter(([, w]) => Number(w) > 0)
+                .sort((a, b) => Number(b[1]) - Number(a[1]))
+                .slice(0, 3)
+              const weightStr = top
+                .map(([name, w]) => `${name} ${Math.round(Number(w) * 100)}%`)
+                .join(', ')
+              const tone = REGIME_TONE[regime] || 'text-text'
+              const dq = entry.equity_delta_pp
+              const db = entry.bond_delta_pp
+              const fmtPp = (v: number) =>
+                `${v >= 0 ? '+' : ''}${v.toFixed(1)}pp`
+              return (
+                <div key={regime}
+                  data-testid={`cio-regime-blend-${regime}`}
+                  className="text-xs leading-snug">
+                  <div>
+                    <span className={`font-semibold ${tone}`}>
+                      {regime}:
+                    </span>{' '}
+                    <span className="text-slate-300">{weightStr}</span>
+                  </div>
+                  <div className="ml-4 text-slate-300 font-mono text-2xs">
+                    {`Equity ${(entry.equity_pct * 100).toFixed(1)}%`
+                      + ` | Bonds ${(entry.bond_pct * 100).toFixed(1)}%`}
+                  </div>
+                  {typeof dq === 'number' && typeof db === 'number' && (
+                    <div className="ml-4 text-muted font-mono text-2xs"
+                      data-testid={`cio-regime-blend-${regime}-delta`}>
+                      {`vs today: Equity ${fmtPp(dq)} | Bonds ${fmtPp(db)}`}
+                    </div>
+                  )}
+                </div>
+              )
+            })}
+          </div>
+        </div>
       )}
 
       {/* ── Portfolio Constraints (standing disclosure) ───────────── */}

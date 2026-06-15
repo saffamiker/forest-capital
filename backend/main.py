@@ -2879,6 +2879,7 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
                 from tools.cio_recommendation import (
                     compute_implied_asset_allocation,
                     compute_blend_change_trigger,
+                    compute_regime_blends_implied,
                 )
                 from tools.regime_detector import detect_current_regime
                 allocation = await compute_implied_asset_allocation(
@@ -2891,6 +2892,26 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
                     (live or {}).get("monthly_hmm_regime"),
                     bool((live or {}).get("hmm_models_agree", True)),
                 )
+                # Bridge (June 8 2026) -- per-regime blend shifts overlay.
+                # Pulls the cached regime_blends payload and computes the
+                # equity/bond implied split + delta-from-current for each
+                # of BULL / BEAR / TRANSITION so the CIO card and digest
+                # can render the per-regime shift without re-computing.
+                # Fail-open: a cold regime_blends row leaves the field
+                # absent and the frontend / digest omit the section.
+                try:
+                    from tools.cache import get_latest_metric
+                    rb_row = await get_latest_metric("regime_blends") or {}
+                    rb_blends = rb_row.get("blends") or {}
+                    if rb_blends and allocation:
+                        regime_implied = await compute_regime_blends_implied(
+                            rb_blends, allocation)
+                        if regime_implied:
+                            rec["regime_blends_implied"] = regime_implied
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "recommendation_regime_blends_overlay_failed",
+                        error=str(exc))
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "recommendation_allocation_overlay_failed",
