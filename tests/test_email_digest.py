@@ -321,6 +321,231 @@ async def test_latest_cio_recommendation_renders_placeholder_on_cold_cache():
     assert s.text.strip()
 
 
+# ── Bridge (June 15 2026): restructured CIO recommendation section ───
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_renders_full_posterior_breakdown(
+    monkeypatch,
+):
+    """Block A includes the three-state posterior on the line below
+    the regime header so the reader can see whether the dominant
+    probability is overwhelming or marginal."""
+    from tools import email_digest
+
+    async def _fake_rec():
+        return {
+            "confidence": {
+                "regime": "TRANSITION",
+                "probability": 0.84,
+                "ess": 35.0,
+                "ess_warning": False,
+                "posterior": {
+                    "BULL": 0.05, "TRANSITION": 0.84, "BEAR": 0.11,
+                },
+            },
+            "regime": "TRANSITION",
+            "signal": "Test signal.",
+            "recommendation": "Hold the regime blend.",
+            "dissenting_view": "Test dissent.",
+            "key_risk": "Test risk.",
+            "computed_at": "2026-06-15T12:00:00+00:00",
+            "model": "claude-sonnet-4-6",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    # Header line carries regime + probability + "confidence" word.
+    assert "TRANSITION" in s.text
+    assert "84.0%" in s.text
+    # Posterior breakdown shows all three states in canonical order.
+    assert "BULL 5.0%" in s.text
+    assert "TRANSITION 84.0%" in s.text
+    assert "BEAR 11.0%" in s.text
+
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_renders_ess_warning_sub_line(monkeypatch):
+    """When ess_warning is true, an ESS note renders on its own line
+    so the reader sees the regime signal is less reliable."""
+    from tools import email_digest
+
+    async def _fake_rec():
+        return {
+            "confidence": {
+                "regime": "BEAR",
+                "probability": 0.70,
+                "ess": 12.5,
+                "ess_warning": True,  # the flag we're pinning
+            },
+            "regime": "BEAR",
+            "signal": "Test signal.",
+            "recommendation": "Hold defensive blend.",
+            "computed_at": "2026-06-15T12:00:00+00:00",
+            "model": "claude-sonnet-4-6",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    assert "low ESS" in s.text
+    assert "12" in s.text   # the ESS value (rounded)
+
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_renders_deterministic_fallback_notice(
+    monkeypatch,
+):
+    """When the LLM call failed and the deterministic fallback wrote
+    the row, a notice line appears in the digest so the reader knows
+    they're seeing a structured fallback, not a live LLM run."""
+    from tools import email_digest
+
+    async def _fake_rec():
+        return {
+            "confidence": {"regime": "BULL", "probability": 0.80},
+            "regime": "BULL",
+            "signal": "Fallback signal.",
+            "recommendation": "Fallback recommendation.",
+            "model": "deterministic_fallback",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    assert "deterministic" in s.text.lower()
+    assert "live regime unavailable" in s.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_no_posterior_does_not_crash(monkeypatch):
+    """Older cache rows may carry a confidence dict with no posterior
+    sub-dict. The digest must skip the posterior line silently rather
+    than crashing or rendering 'None'."""
+    from tools import email_digest
+
+    async def _fake_rec():
+        return {
+            "confidence": {
+                "regime": "BULL",
+                "probability": 0.80,
+                # No posterior key on this row.
+            },
+            "regime": "BULL",
+            "signal": "Test signal.",
+            "recommendation": "Test recommendation.",
+            "model": "claude-sonnet-4-6",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    assert s.text.strip()
+    # No 'None' or empty-posterior tokens leak into the rendered text.
+    assert "None" not in s.text
+    # The CIO recommendation header still rendered.
+    assert "BULL" in s.text
+
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_carries_dissenting_view_and_key_risk(
+    monkeypatch,
+):
+    """Block D surfaces the dissenting view and key risk so a reader
+    who only sees the email knows the model's strongest counter-
+    argument and the most material outcome to monitor."""
+    from tools import email_digest
+
+    async def _fake_rec():
+        return {
+            "confidence": {"regime": "BEAR", "probability": 0.78},
+            "regime": "BEAR",
+            "signal": "Bear signal.",
+            "recommendation": "Hold defensive blend.",
+            "dissenting_view": "The bond sleeve assumes post-2022 "
+                               "correlation does not invert further.",
+            "key_risk": "Sharp regime reversal between monthly reads.",
+            "model": "claude-sonnet-4-6",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    assert "Dissenting view:" in s.text
+    assert "bond sleeve assumes" in s.text
+    assert "Key risk:" in s.text
+    assert "Sharp regime reversal" in s.text
+
+
+@pytest.mark.asyncio
+async def test_cio_recommendation_omits_limitations(monkeypatch):
+    """Per spec, the four mandatory limitations are NOT rendered in
+    the digest -- they're too verbose for email and live on the site
+    card. Pin this so a future contributor doesn't re-add them."""
+    from tools import email_digest
+
+    LIM_TEXT = (
+        "Three-asset universe constraint (equities, investment-grade "
+        "bonds, high-yield bonds only).")
+
+    async def _fake_rec():
+        return {
+            "confidence": {"regime": "BULL", "probability": 0.85},
+            "regime": "BULL",
+            "signal": "s.",
+            "recommendation": "r.",
+            "limitations": [
+                LIM_TEXT,
+                "Post-2022 sample size: 40 months.",
+            ],
+            "model": "claude-sonnet-4-6",
+        }
+    monkeypatch.setattr(
+        "tools.cio_recommendation.get_latest_recommendation", _fake_rec)
+
+    s = await email_digest._section_latest_cio_recommendation()
+    assert LIM_TEXT not in s.text
+    assert "Three-asset universe" not in s.text
+
+
+@pytest.mark.asyncio
+async def test_rebalance_triggers_omits_watch_point_values(monkeypatch):
+    """The watch point VALUES moved to the CIO section (Block B). The
+    rebalance triggers section keeps the threshold LANGUAGE only -- no
+    duplication of the live numbers."""
+    from tools import email_digest
+
+    async def _fake_signals():
+        return {
+            "vix_level": 18.20,
+            "credit_spread": 2.50,
+            "yield_curve_slope": 0.30,
+            "equity_trend": 0.05,
+            "hmm_regime": "BULL",
+        }
+    monkeypatch.setattr(
+        email_digest, "_read_latest_regime_signals_for_digest",
+        _fake_signals)
+
+    s = await email_digest._section_rebalance_triggers()
+    # The pre-restructure section rendered "VIX 18.20 — sustained rise
+    # above {VIX_HIGH_THRESHOLD}..." which embedded the live value.
+    # Post-restructure it renders "VIX — sustained rise above
+    # {VIX_HIGH_THRESHOLD}..." with no live value.
+    assert "VIX 18.20" not in s.text
+    assert "Credit spread 2.50" not in s.text
+    # The threshold language still renders so the reader knows what
+    # would flip the regime. The exact threshold values come from
+    # config (VIX_HIGH_THRESHOLD etc.) -- we don't pin the numbers
+    # here so a future config change doesn't break this test.
+    assert "rise above" in s.text and "signals BEAR" in s.text
+    assert "widening above" in s.text
+    # And the live regime label "HMM regime: BULL" should NOT appear
+    # (it's in the CIO header now); only the generic state-shift
+    # phrasing remains.
+    assert "HMM regime: BULL" not in s.text
+
+
 @pytest.mark.asyncio
 async def test_rebalance_triggers_renders_placeholder_on_cold_cache():
     """No regime_signals_cache rows + no regime_blends metric → the
