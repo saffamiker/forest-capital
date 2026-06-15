@@ -17,11 +17,14 @@
 import { useEffect, useState } from 'react'
 import axios from 'axios'
 import {
-  // Cumulative chart was Line/LineChart; the implied-allocation rebuild
-  // swaps in AreaChart (stacked Equity/IG/HY) and a BarChart regime
-  // band below. The cumulative DATA is still fetched (data.cumulative
-  // remains in scope); only the render changed.
-  AreaChart, Area, BarChart, Bar, Cell,
+  // Cumulative LineChart sits above the Implied Asset Allocation
+  // AreaChart; both stay in scope. The regime band below the
+  // allocation chart is now a uniform-width SVG (one cell per
+  // calendar month) so the time axis stays honest -- the BarChart
+  // path was mis-spacing the cells against the rebalance-event
+  // domain. Recharts BarChart/Bar/Cell are no longer needed for
+  // the band; the SVG is hand-rolled below.
+  AreaChart, Area, LineChart, Line, Legend,
   XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, ReferenceLine,
 } from 'recharts'
@@ -209,6 +212,14 @@ const REGIME_COLOR: Record<string, string> = {
   TRANSITION: '#f59e0b',  // amber
 }
 
+// The net cumulative blend lines drawn on the cumulative chart.
+// Blue family: lighter (10), dashed (15), dotted (20).
+const NET_COST_LINES: { bps: number; color: string; dash: string }[] = [
+  { bps: 10, color: '#93c5fd', dash: '5 3' },
+  { bps: 15, color: '#3b82f6', dash: '5 3' },
+  { bps: 20, color: '#3b82f6', dash: '1 4' },
+]
+
 
 export default function PerformanceRecord() {
   const chartTheme = useChartTheme()
@@ -218,6 +229,14 @@ export default function PerformanceRecord() {
     RegimeTimelinePoint[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  // Custom tooltip state for the SVG regime band -- browser-native
+  // <title> renders with OS default colours (black text on the
+  // platform's default background, which clashes with our dark UI
+  // and showed up as black-on-dark in PR review). The dark-themed
+  // overlay below mirrors the recharts Tooltip styling used by the
+  // other charts on this page.
+  const [bandHover, setBandHover] = useState<
+    { date: string; regime: string; x: number; y: number } | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -654,15 +673,75 @@ export default function PerformanceRecord() {
         )
       })()}
 
+      {/* ── Cumulative chart (post-2022) ──────────────────────────── */}
+      <section className="bg-navy-800 border border-navy-700 rounded-lg p-5">
+        <h2 className="text-sm font-semibold text-slate-200 mb-3 uppercase tracking-wide">
+          Cumulative return, post-2022
+        </h2>
+        {cum && cum.series.length > 0 ? (
+          <ResponsiveContainer width="100%" height={360}>
+            <LineChart data={cum.series}
+                       margin={{ top: 48, right: 16, bottom: 8, left: 8 }}>
+              <CartesianGrid stroke={chartTheme.gridStroke} strokeDasharray="3 3" />
+              <XAxis dataKey="date" tick={{ fill: chartTheme.textSecondary, fontSize: 11 }}
+                     minTickGap={40} />
+              <YAxis tickFormatter={(v) => `${(v * 100).toFixed(0)}%`}
+                     tick={{ fill: chartTheme.textSecondary, fontSize: 11 }} />
+              <Tooltip
+                contentStyle={chartTheme.tooltipContentStyle}
+                labelStyle={chartTheme.tooltipLabelStyle}
+                formatter={(v: number) => `${(v * 100).toFixed(1)}%`} />
+              <Legend />
+              <ReferenceLine y={0} stroke={chartTheme.textSecondary} strokeWidth={1} />
+              {(cum.event_markers || []).map((d, i) => {
+                const ev = eventByDate.get(d)
+                const va = ev?.value_added_sharpe ?? null
+                const added = va !== null && va > 0
+                const labelColor = added ? '#34d399' : '#f87171'
+                const vaStr = va === null ? '—' : `${va >= 0 ? '+' : ''}${va.toFixed(2)}`
+                const tip = ev
+                  ? `${ev.event_id}\n${fmtDate(ev.event_date)}`
+                    + `${ev.verdict ? `\n${ev.verdict}` : ''}`
+                    + `\nValue added Sharpe: ${vaStr}`
+                  : d
+                return (
+                  <ReferenceLine key={d} x={d} stroke="#f59e0b"
+                                 strokeDasharray="2 2"
+                                 label={<EventMarkerLabel
+                                   text={ev ? shortLabel(ev.event_id) : d}
+                                   color={labelColor} tooltip={tip} idx={i} />} />
+                )
+              })}
+              <Line type="monotone" dataKey="regime_conditional"
+                    name="Gross (0 bps)" stroke="#3b82f6"
+                    dot={false} strokeWidth={2} connectNulls />
+              {NET_COST_LINES.map((l) => (
+                <Line key={l.bps} type="monotone" dataKey={`blend_net_${l.bps}`}
+                      name={`Blend net ${l.bps} bps`} stroke={l.color}
+                      strokeDasharray={l.dash} dot={false} strokeWidth={1.5}
+                      connectNulls />
+              ))}
+              <Line type="monotone" dataKey="benchmark" name="Benchmark (S&P 500)"
+                    stroke="#ef4444" dot={false} strokeWidth={1.5} connectNulls />
+              <Line type="monotone" dataKey="classic_6040" name="Classic 60/40"
+                    stroke="#94a3b8" dot={false} strokeWidth={1.5} connectNulls />
+            </LineChart>
+          </ResponsiveContainer>
+        ) : (
+          <p className="text-sm text-slate-500">
+            Cumulative series not yet available. The event records below are
+            the point-in-time track record; the continuous post-2022 curve
+            is computed separately.
+          </p>
+        )}
+      </section>
+
       {/* ── Implied Asset Allocation Over Time + regime band ───────
-          Replaces the post-2022 cumulative line chart. The
-          underlying cumulative data is still fetched (data.cumulative
-          stays in scope for future surfaces); only the render
-          changed. Three stacked Area series sum to 100% at every
-          rebalance; type="stepAfter" holds the allocation flat
-          between events the way the live portfolio actually behaves
-          between rebalances. Event markers from the play-by-play
-          cache survive verbatim. */}
+          Cumulative chart above; three stacked Area series sum to
+          100% at every rebalance; type="stepAfter" holds the
+          allocation flat between events the way the live portfolio
+          actually behaves between rebalances. Event markers from
+          the play-by-play cache survive verbatim. */}
       <section data-testid="implied-allocation-over-time"
         className="bg-navy-800 border border-navy-700 rounded-lg p-5">
         <h2 className="text-sm font-semibold text-slate-200 uppercase tracking-wide">
@@ -768,35 +847,63 @@ export default function PerformanceRecord() {
                   HY Bonds
                 </span>
               </div>
-              {/* Regime band -- one colored rectangle per month from
-                  the post-2022 HMM regime_timeline. Shares the x
-                  domain with the chart above. Hidden silently when
-                  the timeline fetch failed. */}
+              {/* Regime band -- one uniform-width SVG cell per
+                  calendar month from the post-2022 HMM regime_timeline
+                  (~53 cells, Jan 2022 onward). Each cell is exactly
+                  one unit wide in viewBox space, scaled to
+                  chartWidth/N px by preserveAspectRatio="none";
+                  positioned by integer index rather than by date
+                  value so visually neighbouring months take equal
+                  horizontal space. The earlier Recharts BarChart
+                  variant inherited the rebalance-event domain (30
+                  irregular points) and mis-spaced the cells. Hidden
+                  silently when the /api/v1/charts/data fetch failed. */}
               {bandPoints.length > 0 && (
-                <div data-testid="regime-band" className="mt-2"
-                  aria-label="Monthly HMM regime indicator">
-                  <ResponsiveContainer width="100%" height={28}>
-                    <BarChart data={bandPoints}
-                      margin={{ top: 0, right: 16, bottom: 0, left: 8 }}>
-                      <XAxis dataKey="date" hide />
-                      <YAxis hide domain={[0, 1]} />
-                      <Tooltip
-                        contentStyle={chartTheme.tooltipContentStyle}
-                        labelStyle={chartTheme.tooltipLabelStyle}
-                        cursor={{ fill: 'transparent' }}
-                        formatter={(_v: number, _n: string,
-                                    p: { payload?: { regime?: string } }) => [
-                          p?.payload?.regime ?? '—', 'Regime',
-                        ]} />
-                      <Bar dataKey="fill" isAnimationActive={false}>
-                        {bandPoints.map((p, i) => (
-                          <Cell key={`band-${i}`}
+                <div data-testid="regime-band" className="mt-2 relative"
+                  aria-label="Monthly HMM regime indicator"
+                  onMouseLeave={() => setBandHover(null)}>
+                  <svg width="100%" height={28}
+                       viewBox={`0 0 ${bandPoints.length} 1`}
+                       preserveAspectRatio="none"
+                       style={{ display: 'block' }}>
+                    {bandPoints.map((p, i) => (
+                      <rect key={`band-${i}`}
+                            x={i} y={0} width={1} height={1}
                             fill={REGIME_COLOR[p.regime]
-                                  ?? chartTheme.textSecondary} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
+                                  ?? chartTheme.textSecondary}
+                            onMouseEnter={(e) => setBandHover({
+                              date: p.date, regime: p.regime,
+                              x: e.clientX, y: e.clientY,
+                            })}
+                            onMouseMove={(e) => setBandHover({
+                              date: p.date, regime: p.regime,
+                              x: e.clientX, y: e.clientY,
+                            })} />
+                    ))}
+                  </svg>
+                  {bandHover && (
+                    <div
+                      role="tooltip"
+                      style={{
+                        position: 'fixed',
+                        left: bandHover.x + 12,
+                        top: bandHover.y + 12,
+                        backgroundColor: '#1e293b',
+                        border: 'none',
+                        color: '#f1f5f9',
+                        padding: '6px 10px',
+                        borderRadius: 4,
+                        fontSize: 11,
+                        pointerEvents: 'none',
+                        zIndex: 50,
+                        boxShadow: '0 2px 6px rgba(0,0,0,0.4)',
+                      }}>
+                      <div style={{ color: '#f1f5f9' }}>{bandHover.date}</div>
+                      <div style={{ color: '#f1f5f9' }}>
+                        Regime: {bandHover.regime}
+                      </div>
+                    </div>
+                  )}
                   <div className="flex items-center justify-center gap-3 mt-1 text-2xs text-slate-400">
                     <span className="flex items-center gap-1">
                       <span className="inline-block w-2.5 h-2.5 rounded-sm"
