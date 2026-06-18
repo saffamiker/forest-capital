@@ -272,6 +272,42 @@ async def get_latest_recommendation() -> dict | None:
         return None
 
 
+async def get_latest_non_fallback_recommendation() -> dict | None:
+    """The most recent recommendation written by a REAL LLM model -- skips
+    rows where `model = 'deterministic_fallback'`. The executive brief's
+    Final Recommendations section uses this as a graceful fallback when
+    the live regime build is degraded (a transient HMM fit failure, a
+    cold strategy cache, or a CIO call that returned the deterministic
+    fallback). The brief then writes the recommendation off the last
+    known real regime + blend, and discloses the staleness in the
+    prose. Fail-open to None. June 18 2026."""
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(
+                text("SELECT raw_json, data_hash, regime, model, "
+                     "computed_at FROM cio_recommendations "
+                     "WHERE model IS NOT NULL "
+                     "  AND model <> 'deterministic_fallback' "
+                     "ORDER BY computed_at DESC LIMIT 1"))
+            r = row.fetchone()
+            if not r:
+                return None
+            payload = dict(r[0]) if r[0] else {}
+            payload["data_hash"] = r[1]
+            payload["regime"] = r[2]
+            payload["model"] = r[3]
+            payload["computed_at"] = str(r[4])
+            return payload
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "cio_recommendation_latest_non_fallback_read_error",
+            error=str(exc))
+        return None
+
+
 async def get_prior_recommendation(current_data_hash: str) -> dict | None:
     """The most recent recommendation written under a DIFFERENT data_hash
     than the current one — i.e. the previous distinct council output the

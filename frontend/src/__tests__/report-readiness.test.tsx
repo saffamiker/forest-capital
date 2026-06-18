@@ -242,6 +242,48 @@ describe('ReportBlockingModal', () => {
     fireEvent.click(screen.getByTestId('report-blocking-modal-dismiss'))
     expect(onClose).toHaveBeenCalled()
   })
+
+  it('renders each cold cache by name when coldCaches is supplied',
+    () => {
+      // The 422 detail for caches_not_warm carries a cold_caches list.
+      // The modal must surface each entry by name so the user knows
+      // exactly which warm to trigger (a generic "warm the caches"
+      // instruction was previously the only signal).
+      render(<ReportBlockingModal open={true} onClose={() => undefined}
+        blockers={[]}
+        coldCaches={[
+          'performance_chart',
+          'oos_cost_sensitivity',
+          'oos_summary',
+        ]} />)
+      const wrapper = screen.getByTestId('report-blocking-cold-caches')
+      expect(wrapper).toBeInTheDocument()
+      expect(wrapper.textContent).toMatch(
+        /Brief generation requires the following caches/i)
+      // Each cache rendered as a list item with a stable testid.
+      expect(screen.getByTestId('report-cold-cache-0').textContent)
+        .toContain('performance_chart')
+      expect(screen.getByTestId('report-cold-cache-1').textContent)
+        .toContain('oos_cost_sensitivity')
+      expect(screen.getByTestId('report-cold-cache-2').textContent)
+        .toContain('oos_summary')
+      // The actionable instruction is present.
+      expect(wrapper.textContent).toMatch(/Trigger a warm and retry/i)
+    })
+
+  it('hides the cold-caches block when coldCaches is empty or absent',
+    () => {
+      const { rerender } = render(
+        <ReportBlockingModal open={true} onClose={() => undefined}
+          blockers={['some blocker']} />)
+      expect(screen.queryByTestId('report-blocking-cold-caches'))
+        .not.toBeInTheDocument()
+      // Empty array also hides.
+      rerender(<ReportBlockingModal open={true} onClose={() => undefined}
+        blockers={['some blocker']} coldCaches={[]} />)
+      expect(screen.queryByTestId('report-blocking-cold-caches'))
+        .not.toBeInTheDocument()
+    })
 })
 
 

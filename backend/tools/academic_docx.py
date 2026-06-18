@@ -530,15 +530,25 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
     """
     The executive brief for a senior investment audience.
 
-    Rewritten June 6 2026 — six sections in order, addressing the
-    midpoint panel feedback (too academic, no investable conclusion,
-    division-of-labor 3/5, simplify strategy set):
-      1. The Answer (one paragraph, leads with the verdict)
-      2. The Evidence (three strategies only, honest 2-of-9 + FDR)
-      3. The Methodology (background, two paragraphs max)
-      4. Five Human Decisions (Bob / Michael / Molly named explicitly)
-      5. The Recommendation (LIVE regime + asset-class allocations)
-      6. Limitations and Part II
+    Rewritten June 18 2026 to the FNA 670 rubric's six required sections,
+    in rubric order. Earlier (June 6) the brief led with "The Answer"
+    and embedded a "Five Human Decisions" section + a "Part II preview";
+    review against the rubric flagged the latter two as non-rubric
+    content and the section ordering as out-of-spec. Visuals are
+    referenced by name in the prose (per rubric §6) and supported by
+    the embedded table set; the platform's matplotlib chart surfaces
+    (cumulative return, implied asset allocation, efficient frontier)
+    are pointed to as live companion artifacts.
+
+      1. Executive Summary    -- verdict + headline figures
+      2. Methodology Overview -- HMM + OOS window + validation layers
+      3. Key Findings         -- three-strategy comparison + honest 2-of-9
+      4. Limitations & Risks  -- four mandatory limitations, no future-work
+      5. Final Recommendations -- investment conclusions from the OOS
+         Sharpe + diversification evidence; cached-regime fallback so the
+         section is data-independent and never renders empty
+      6. Visuals              -- captioned interpretations of the platform's
+         chart surfaces so reviewers can navigate to each one
     """
     doc = _new_document()
 
@@ -551,7 +561,7 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
     doc.add_paragraph()
     _add_title_lines(doc, [
         "Executive Brief",
-        "FNA 670 — Summer 2026",
+        "FNA 670 -- Summer 2026",
         "Forest Capital / McColl School of Business",
         date.today().strftime("%B %d, %Y"),
     ])
@@ -560,60 +570,72 @@ def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> b
     _add_review_warning_box(doc)
     doc.add_page_break()
 
-    # Section 1 — THE ANSWER. Leads with the verdict; one paragraph;
-    # no methodology. Drawdown comparison table sits here so the
-    # reader sees the 27-point number in the body and in the table.
-    _add_heading(doc, "1. The Answer")
-    _add_body(doc, narratives.get("the_answer", "[DATA PENDING]"))
+    # Section 1 -- EXECUTIVE SUMMARY. Opens with the verdict + the
+    # headline numbers a senior investment reader expects on page 1.
+    # Drawdown comparison table embedded here so the 27-point number
+    # is visible alongside the prose claim.
+    _add_heading(doc, "1. Executive Summary")
+    _add_body(doc, narratives.get("executive_summary", "[DATA PENDING]"))
     h, r = table_drawdown(data.get("drawdown_comparison", []))
     _add_table(doc, "Table 1. Drawdown and Recovery by Strategy", h, r)
 
-    # Section 2 — THE EVIDENCE. Three-strategy comparison + honest
-    # FDR and play-by-play disclosure. Summary statistics table for
-    # the headline Sharpe / drawdown figures the section cites.
-    _add_heading(doc, "2. The Evidence")
-    _add_body(doc, narratives.get("the_evidence", "[DATA PENDING]"))
-    # Audit-readiness one-liner — surfaces the platform's audit
-    # verdict here (the validation context for the evidence claims).
+    # Section 2 -- METHODOLOGY OVERVIEW. Moved from §3 to §2 to match
+    # the rubric ordering (methodology sets the stage before findings).
+    # Factor-loading table accompanies the validation prose.
+    _add_heading(doc, "2. Methodology Overview")
+    _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
+    h, r = table_factor_loadings(data.get("factor_loadings", []))
+    _add_table(doc, "Table 2. Carhart Four-Factor Loadings "
+                    "(* significant at p < .05)", h, r)
+
+    # Section 3 -- KEY FINDINGS AND INSIGHTS. The three-strategy
+    # comparison + honest 2-of-9 + FDR disclosure. Two tables anchor
+    # the findings (summary statistics + regime-conditional performance).
+    _add_heading(doc, "3. Key Findings and Insights")
+    _add_body(doc, narratives.get("key_findings", "[DATA PENDING]"))
+    # Audit-readiness one-liner -- surfaces the platform's audit
+    # verdict here (the validation context for the findings claims).
     from tools.audit_summary import audit_summary_sentence
     audit_line = audit_summary_sentence(data.get("audit_disclosures") or {})
     if audit_line:
         _add_body(doc, audit_line)
     h, r = table_summary_statistics(data.get("summary_statistics", []))
-    _add_table(doc, "Table 2. Summary Statistics by Asset Class", h, r)
+    _add_table(doc, "Table 3. Summary Statistics by Asset Class", h, r)
     h, r = table_regime_conditional(data.get("regime_conditional", []))
-    _add_table(doc, "Table 3. Regime-Conditional Performance "
-                     "(Pre- vs Post-2022)", h, r)
+    _add_table(doc, "Table 4. Regime-Conditional Performance "
+                    "(Pre- vs Post-2022)", h, r)
 
-    # Section 3 — THE METHODOLOGY. Brief, two paragraphs.
-    _add_heading(doc, "3. The Methodology")
-    _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
-    h, r = table_factor_loadings(data.get("factor_loadings", []))
-    _add_table(doc, "Table 4. Carhart Four-Factor Loadings "
-                     "(* significant at p < .05)", h, r)
-
-    # Section 4 — FIVE HUMAN DECISIONS. Bob / Michael / Molly named.
-    # No table — the bullets carry the section.
-    _add_heading(doc, "4. Five Human Decisions")
-    _add_body(doc, narratives.get("five_human_decisions", "[DATA PENDING]"))
-
-    # Section 5 — THE RECOMMENDATION. LIVE regime + asset-class
-    # allocations. The narrative quotes the live numbers; the table
-    # carries the per-regime watch list (BULL / BEAR / TRANSITION
-    # target shares) so the reader sees the full menu.
-    _add_heading(doc, "5. The Recommendation")
-    _add_body(doc, narratives.get("the_recommendation", "[DATA PENDING]"))
-
-    # Section 6 — LIMITATIONS AND PART II. Audit body paragraph
-    # belongs here — the platform's validation surface is the
-    # closing limitation context.
-    _add_heading(doc, "6. Limitations and Part II")
-    _add_body(doc, narratives.get(
-        "limitations_and_part_ii", "[DATA PENDING]"))
+    # Section 4 -- LIMITATIONS AND RISKS. The four mandatory limitations
+    # only -- the previous "Part II preview" content was dropped (it
+    # was non-rubric "next steps" content the panel feedback explicitly
+    # called out as "putting out next steps rather than final
+    # recommendations"). Audit body paragraph anchors the validation
+    # surface as the closing limitation context.
+    _add_heading(doc, "4. Limitations and Risks")
+    _add_body(doc, narratives.get("limitations", "[DATA PENDING]"))
     from tools.audit_summary import audit_body_paragraph
     audit_para = audit_body_paragraph(data.get("audit_disclosures") or {})
     if audit_para:
         _add_body(doc, audit_para)
+
+    # Section 5 -- FINAL RECOMMENDATIONS. Reframed as INVESTMENT
+    # CONCLUSIONS drawn from the OOS evidence, not a point-in-time
+    # portfolio position. The cached-regime fallback (assembled in
+    # gather_document_data -> _gather_live_recommendation) means the
+    # section can ALWAYS state the recommendation: live data when
+    # available, cached regime when the live build is degraded, with
+    # the staleness explicitly disclosed in the prose.
+    _add_heading(doc, "5. Final Recommendations")
+    _add_body(doc, narratives.get(
+        "final_recommendations", "[DATA PENDING]"))
+
+    # Section 6 -- VISUALS. A captioned roster of the platform's chart
+    # surfaces with a one-paragraph interpretation each. Reviewers can
+    # navigate to each artifact on the live platform; the tables above
+    # carry the static visual content the rubric expects to find in
+    # the document body.
+    _add_heading(doc, "6. Visuals to Demonstrate the Insights")
+    _add_body(doc, narratives.get("visuals", "[DATA PENDING]"))
 
     # Audit Disclosure Appendix carries the platform's audit trail.
     _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))

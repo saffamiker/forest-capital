@@ -78,19 +78,21 @@ _MIDPOINT_SECTIONS = [
 # explicitly name the five human-judgment decisions, introduce the
 # platform AFTER human judgment as the evidence base, summarise the
 # evidence, then preview Part II as the logical consequence of Part I.
-# June 6 2026 — rewritten to mirror build_executive_brief's new six-
-# section order. The keys match the narrative dict the brief generator
-# produces (see main._generate_brief_document). The previous keys
-# (static_rec, central_finding, human_judgment, platform_role, evidence,
-# part_ii_preview) are deprecated alongside this commit; the new names
-# are self-documenting.
+# June 18 2026 -- rewritten to the FNA 670 rubric's six required
+# sections in rubric order. The previous structure (The Answer / Five
+# Human Decisions / Part II preview) carried non-rubric content the
+# panel flagged ("next steps rather than final recommendations"). The
+# section keys now match build_executive_brief's headings and the
+# _generate_brief_document spec list 1:1 so a draft opened in the
+# editor mirrors the generated .docx exactly.
 _EXEC_BRIEF_SECTIONS = [
-    ("1. The Answer",                  "the_answer",               None),
-    ("2. The Evidence",                "the_evidence",             None),
-    ("3. The Methodology",             "methodology",              None),
-    ("4. Five Human Decisions",        "five_human_decisions",     None),
-    ("5. The Recommendation",          "the_recommendation",       None),
-    ("6. Limitations and Part II",     "limitations_and_part_ii",  None),
+    ("1. Executive Summary",                "executive_summary",       None),
+    ("2. Methodology Overview",             "methodology",             None),
+    ("3. Key Findings and Insights",        "key_findings",            None),
+    ("4. Limitations and Risks",            "limitations",             None),
+    ("5. Final Recommendations",            "final_recommendations",   None),
+    ("6. Visuals to Demonstrate the Insights",
+                                            "visuals",                 None),
 ]
 
 
