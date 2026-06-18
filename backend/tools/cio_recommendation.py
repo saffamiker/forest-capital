@@ -824,6 +824,22 @@ async def _persist(data_hash: str, rec: dict, regime: str | None) -> None:
     from sqlalchemy import text
     try:
         async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            # Recovery upsert (June 18 2026). The earlier
+            # ON CONFLICT (data_hash) DO NOTHING shape was idempotent --
+            # but if a transient LLM failure wrote a deterministic_fallback
+            # row first, every subsequent successful warm for the same
+            # data_hash was silently discarded, and the digest kept
+            # reading the fallback row until the underlying data_hash
+            # changed (next monthly market data tick).
+            #
+            # DO UPDATE with a guarded WHERE flips this: a real LLM row
+            # (any model that is NOT 'deterministic_fallback') overwrites
+            # a previously stored fallback for the same hash. The reverse
+            # case -- a real row already exists and a later warm falls
+            # back -- is blocked by the WHERE: we never replace a real
+            # recommendation with a fallback. computed_at bumps to now()
+            # on recovery so any read ordered by computed_at sees the
+            # corrected row immediately.
             await session.execute(
                 text(
                     "INSERT INTO cio_recommendations "
@@ -832,7 +848,19 @@ async def _persist(data_hash: str, rec: dict, regime: str | None) -> None:
                     "VALUES (:h, :sig, CAST(:conf AS JSONB), :dis, "
                     " CAST(:lim AS JSONB), :reg, :model, "
                     " CAST(:raw AS JSONB)) "
-                    "ON CONFLICT (data_hash) DO NOTHING"),
+                    "ON CONFLICT (data_hash) DO UPDATE SET "
+                    "  signal = EXCLUDED.signal, "
+                    "  confidence = EXCLUDED.confidence, "
+                    "  dissenting_view = EXCLUDED.dissenting_view, "
+                    "  limitations = EXCLUDED.limitations, "
+                    "  regime = EXCLUDED.regime, "
+                    "  model = EXCLUDED.model, "
+                    "  raw_json = EXCLUDED.raw_json, "
+                    "  computed_at = now() "
+                    "WHERE cio_recommendations.model "
+                    "      = 'deterministic_fallback' "
+                    "  AND EXCLUDED.model "
+                    "      IS DISTINCT FROM 'deterministic_fallback'"),
                 {
                     "h": data_hash,
                     "sig": rec.get("signal"),
