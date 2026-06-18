@@ -210,3 +210,129 @@ class TestSystemPromptStructureMandate:
         assert rec["confidence"]["regime"] == "BULL"
         assert rec["confidence"]["ess_warning"] is False
         assert rec["recommendation"] and rec["key_risk"]
+
+
+# ── Persistence recovery (June 18 2026) ──────────────────────────────────
+#
+# When the LLM call fails on a warm and the deterministic fallback is
+# persisted under a data_hash, the previous ON CONFLICT DO NOTHING
+# pinned that fallback row -- a later successful warm at the same hash
+# was silently dropped, leaving the digest stuck on "Live regime
+# unavailable" until the next monthly data tick changed the hash.
+#
+# The fix flips the conflict resolution to a guarded UPSERT: a real
+# LLM row (any model that is NOT 'deterministic_fallback') overwrites
+# a previously stored fallback; the reverse case (real then fallback)
+# never overwrites. These tests pin the SQL string shape -- the live
+# behaviour is verified on Render where the actual Postgres engine
+# evaluates the WHERE clause; the CI test DB is fail-open SQLite so
+# this catches regressions at the statement-shape layer.
+
+
+class TestPersistRecoveryUpsert:
+
+    @pytest.mark.asyncio
+    async def test_persist_uses_guarded_do_update(self, monkeypatch):
+        """The ON CONFLICT clause is DO UPDATE with the
+        deterministic_fallback guard, not DO NOTHING. Captures the
+        SQL text passed to session.execute and pins both halves of
+        the WHERE clause (existing row must be a fallback, new row
+        must NOT be a fallback)."""
+        from tools import cio_recommendation as cio_mod
+
+        captured: dict = {"sql": None, "params": None, "committed": False}
+
+        class _FakeSession:
+            async def execute(self, sql, params):
+                captured["sql"] = str(sql)
+                captured["params"] = params
+
+            async def commit(self):
+                captured["committed"] = True
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+        # Force the DB-available branch + redirect AsyncSessionLocal to
+        # the fake. The fake captures the SQL string for inspection.
+        monkeypatch.setattr(cio_mod, "_DB_AVAILABLE", True)
+        monkeypatch.setattr(
+            cio_mod, "AsyncSessionLocal", lambda: _FakeSession())
+
+        await cio_mod._persist(
+            "abc123",
+            {"signal": "s", "confidence": {"regime": "BULL"},
+             "dissenting_view": "d", "limitations": ["a"],
+             "_model": "claude-sonnet-4-6"},
+            "BULL")
+
+        sql = captured["sql"] or ""
+        assert "ON CONFLICT (data_hash) DO UPDATE" in sql
+        # The recovery guard: only overwrite if the existing row is a
+        # fallback. This is the half that lets a successful warm clear
+        # a previously poisoned cache row.
+        assert (
+            "cio_recommendations.model "
+            "      = 'deterministic_fallback'" in sql)
+        # The reverse guard: never overwrite a real row with a fallback.
+        assert (
+            "EXCLUDED.model "
+            "      IS DISTINCT FROM 'deterministic_fallback'" in sql)
+        # computed_at bumps so reads ordered by recency see the
+        # corrected row immediately.
+        assert "computed_at = now()" in sql
+        # The DO NOTHING shape MUST be gone -- a regression that
+        # accidentally restores it would re-introduce the digest
+        # poisoning.
+        assert "DO NOTHING" not in sql
+        assert captured["committed"] is True
+
+    @pytest.mark.asyncio
+    async def test_persist_short_circuits_when_db_unavailable(
+            self, monkeypatch):
+        """The Render-side path runs on Postgres; CI runs without a DB.
+        With _DB_AVAILABLE False the helper must return immediately
+        without raising, so the test matrix mirrors the production
+        fail-open contract."""
+        from tools import cio_recommendation as cio_mod
+
+        monkeypatch.setattr(cio_mod, "_DB_AVAILABLE", False)
+        # No fake session needed -- the short-circuit fires first.
+        await cio_mod._persist(
+            "abc123",
+            {"signal": "s", "_model": "deterministic_fallback"},
+            "BULL")
+        # If we reach here without raising, the contract held.
+
+    @pytest.mark.asyncio
+    async def test_persist_swallows_db_errors(self, monkeypatch):
+        """A DB failure during persistence must log + return, never
+        raise -- otherwise a warm failure would poison the entire
+        warm pipeline rather than just the CIO recommendation surface."""
+        from tools import cio_recommendation as cio_mod
+
+        class _ExplodingSession:
+            async def execute(self, *_args, **_kw):
+                raise RuntimeError("boom")
+
+            async def commit(self):  # pragma: no cover -- never reached
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+        monkeypatch.setattr(cio_mod, "_DB_AVAILABLE", True)
+        monkeypatch.setattr(
+            cio_mod, "AsyncSessionLocal", lambda: _ExplodingSession())
+
+        # Must not raise.
+        await cio_mod._persist(
+            "abc123",
+            {"signal": "s", "_model": "claude-sonnet-4-6"},
+            "BULL")
