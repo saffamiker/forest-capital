@@ -576,12 +576,71 @@ def slide_generation_prompt(slide_number: int) -> str:
     )
 
 
+# LLM preamble patterns that should never appear in a slide bullet.
+# When the model emits a short conversational opener before the JSON
+# (which the JSON-extraction step strips) the same conversational tone
+# sometimes bleeds into a bullet -- "I cannot generate the requested
+# slide", "Note: ...", "Sorry, ...". A short prefix scan after parsing
+# replaces those with a clearly-flagged regen marker so the deck never
+# carries raw apology text to the audience.
+_BULLET_PREAMBLE_PATTERNS = (
+    "i ", "i'm ", "i am ", "note:", "sorry", "as an ai",
+    "i apologize", "i cannot", "i can't", "unfortunately",
+)
+_BULLET_PREAMBLE_REPLACEMENT = (
+    "[Content generation error -- regenerate deck]")
+
+
+def _bullet_looks_like_preamble(bullet: str) -> bool:
+    """A bullet that opens with a known LLM preamble pattern is the
+    model talking ABOUT the slide rather than producing slide content.
+    Case-insensitive prefix check; the leading bullet glyph (if any)
+    is stripped before the comparison."""
+    text = (bullet or "").lstrip("-•▪ \t").lower()
+    return any(text.startswith(p) for p in _BULLET_PREAMBLE_PATTERNS)
+
+
+def _scrub_bullet_preambles(obj: dict) -> dict:
+    """Replace any bullet that opens with a known LLM preamble pattern
+    with the regen marker. Logs each substitution so a deck with a
+    polluted prose surface is visible in Render logs without having to
+    open the .pptx.
+    """
+    bullets = obj.get("bullets")
+    if not isinstance(bullets, list):
+        return obj
+    cleaned: list[str] = []
+    for b in bullets:
+        if isinstance(b, str) and _bullet_looks_like_preamble(b):
+            log.warning(
+                "deck_bullet_preamble_replaced",
+                bullet_preview=str(b)[:120])
+            cleaned.append(_BULLET_PREAMBLE_REPLACEMENT)
+        else:
+            cleaned.append(b if isinstance(b, str) else str(b))
+    obj["bullets"] = cleaned
+    return obj
+
+
 def parse_single_slide_json(raw: str) -> dict | None:
     """Bridge #95 -- parse a per-slide LLM response into a single slide
     dict, or None on any failure (the caller writes a [DATA PENDING]
     placeholder for that slide). Mirrors _parse_deck_slides's tolerance
     of markdown fences and leading/trailing prose, but pulls the
     SINGLE object instead of the wrapped list.
+
+    Hardened June 18 2026:
+      * any preamble text before the first '{' is discarded entirely
+        before parsing (the JSON-object extraction was lenient enough
+        that a stray "Here is the slide:" prefix could survive when
+        paired with an unusually-shaped body),
+      * on parse failure we log the raw response truncated to 500
+        chars at WARNING level so a regression is diagnosable without
+        having to reproduce locally,
+      * post-parse we scrub any bullet that opens with an LLM
+        apology / preamble pattern -- those are the model talking
+        ABOUT the slide rather than producing slide content and they
+        otherwise leak verbatim into the final .pptx.
     """
     import json
     text = (raw or "").strip()
@@ -591,13 +650,32 @@ def parse_single_slide_json(raw: str) -> dict | None:
         text = text.strip("`")
         if text[:4].lower() == "json":
             text = text[4:]
+    # Discard any preamble BEFORE the first opening brace. This is
+    # belt-and-braces -- the slice-by-find below already trims it
+    # implicitly -- but doing it explicitly here makes the intent
+    # visible at the entry point.
+    first_brace = text.find("{")
+    if first_brace > 0:
+        text = text[first_brace:]
     try:
         start, end = text.find("{"), text.rfind("}")
         if start == -1 or end == -1 or end < start:
+            log.warning(
+                "deck_slide_parse_no_object_braces",
+                raw_preview=(raw or "")[:500])
             return None
         obj = json.loads(text[start:end + 1])
-        return obj if isinstance(obj, dict) else None
-    except Exception:  # noqa: BLE001
+        if not isinstance(obj, dict):
+            log.warning(
+                "deck_slide_parse_non_object",
+                raw_preview=(raw or "")[:500])
+            return None
+        return _scrub_bullet_preambles(obj)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "deck_slide_parse_failed",
+            error=str(exc),
+            raw_preview=(raw or "")[:500])
         return None
 
 
@@ -900,14 +978,27 @@ def _bullets(slide, items: list[str], *, left=Inches(0.7), top=Inches(1.4),
 
 
 def _image(slide, png: bytes | None, *, left, top, width, fallback="chart"):
-    """Places a PNG, or a [DATA PENDING] note when the render was unavailable."""
+    """Places a PNG, or a clearly-marked unavailable note when the
+    chart renderer returned None.
+
+    Hardened June 18 2026: every silent None now emits a WARNING log
+    naming the chart slot, so a deck that came back with a missing
+    chart is diagnosable from Render logs alone (previously the
+    [DATA PENDING] text was the ONLY signal, requiring the operator
+    to open the .pptx to know a chart had been skipped). The
+    placeholder text was also reworded to name the chart slot
+    explicitly -- "[Chart unavailable: rolling_correlation -- ..."
+    is more actionable than the old "[DATA PENDING] -- chart
+    unavailable" line which gave no slot context.
+    """
     if png:
         slide.shapes.add_picture(io.BytesIO(png), left, top, width=width)
-    else:
-        _textbox(slide, left, top, width, Inches(1.0),
-                 f"[DATA PENDING] — {fallback} chart unavailable. "
-                 "Warm the analytics caches, then regenerate the deck.",
-                 size=14, color=_AMBER, anchor=MSO_ANCHOR.MIDDLE)
+        return
+    log.warning("deck_chart_slot_unavailable", chart=str(fallback))
+    _textbox(slide, left, top, width, Inches(1.0),
+             f"[Chart unavailable: {fallback} -- ensure caches are warm "
+             "before generating the deck]",
+             size=14, color=_AMBER, anchor=MSO_ANCHOR.MIDDLE)
 
 
 def _callout(slide, left, top, width, height, heading, value, *,

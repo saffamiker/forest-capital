@@ -158,6 +158,234 @@ class TestParseSingleSlideJson:
         raw = "[1, 2, 3]"
         assert parse_single_slide_json(raw) is None
 
+    def test_strips_preamble_text_before_first_brace(self):
+        """The model occasionally emits a short conversational opener
+        before the JSON body ("Here is the slide content:\n{...}").
+        The hardening discards any text before the first '{' so the
+        opening preamble can never leak into the parsed output."""
+        from tools.academic_deck import parse_single_slide_json
+
+        raw = (
+            "Here is the slide content for you:\n\n"
+            '{"slide_number": 4, "title": "Methodology", '
+            '"bullets": ["one", "two"], "speaker_notes": ""}')
+        out = parse_single_slide_json(raw)
+        assert out is not None
+        assert out["slide_number"] == 4
+        assert out["bullets"] == ["one", "two"]
+
+    def test_logs_raw_preview_on_parse_failure(self, monkeypatch):
+        """A fully-mangled response should log the raw preview at
+        WARNING so a regression hunter can see what the model emitted
+        without having to reproduce locally. We assert via a monkey-
+        patched structlog warning capture because the module uses a
+        structlog BoundLogger that bypasses stdlib caplog."""
+        from tools import academic_deck
+
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(academic_deck.log, "warning", _capture)
+        # Unparseable: looks like JSON but the braces don't close.
+        bad = "Here is the slide: {" + ("oops " * 60)
+        assert academic_deck.parse_single_slide_json(bad) is None
+        # One of the parse-failure log keys must have fired with a
+        # raw_preview field carrying the start of the broken response.
+        events = [e for e, _ in captured]
+        assert any(e.startswith("deck_slide_parse") for e in events), events
+        last_event, last_kw = captured[-1]
+        assert "raw_preview" in last_kw
+        assert "Here is the slide" in last_kw["raw_preview"]
+
+
+class TestBulletPreambleScrub:
+    """A bullet that opens with a known LLM apology / preamble pattern
+    is the model talking ABOUT the slide rather than producing slide
+    content. The post-parse scrub replaces those bullets with a
+    clearly-flagged regen marker so the deck never carries raw
+    apology text in front of an audience."""
+
+    def test_replaces_apology_bullet_with_regen_marker(self):
+        from tools.academic_deck import parse_single_slide_json
+
+        raw = (
+            '{"slide_number": 5, "title": "T", '
+            '"bullets": ["I cannot produce this section.", '
+            '"Real bullet content."], '
+            '"speaker_notes": ""}')
+        out = parse_single_slide_json(raw)
+        assert out is not None
+        assert out["bullets"][0].startswith(
+            "[Content generation error")
+        assert out["bullets"][1] == "Real bullet content."
+
+    def test_replaces_note_prefix_bullet(self):
+        from tools.academic_deck import parse_single_slide_json
+
+        raw = (
+            '{"slide_number": 6, "title": "T", '
+            '"bullets": ["Note: this is filler text from the model.", '
+            '"Genuine analytical point."], '
+            '"speaker_notes": ""}')
+        out = parse_single_slide_json(raw)
+        assert out is not None
+        assert out["bullets"][0].startswith(
+            "[Content generation error")
+        assert out["bullets"][1] == "Genuine analytical point."
+
+    def test_leaves_normal_bullets_untouched(self):
+        from tools.academic_deck import parse_single_slide_json
+
+        raw = (
+            '{"slide_number": 7, "title": "T", '
+            '"bullets": ["Equity 60% / Bonds 40%.", '
+            '"Drawdown reduced 27 percentage points."], '
+            '"speaker_notes": ""}')
+        out = parse_single_slide_json(raw)
+        assert out is not None
+        # Both bullets are real analysis content and must NOT be
+        # replaced. The scrub is opt-in via the preamble prefix.
+        assert "[Content generation error" not in (out["bullets"][0]
+                                                   + out["bullets"][1])
+
+    def test_handles_bullet_glyphs_before_preamble(self):
+        """A model that opens with a bullet glyph followed by the
+        preamble pattern still triggers the scrub -- the prefix scan
+        strips list-marker glyphs before matching."""
+        from tools.academic_deck import _bullet_looks_like_preamble
+
+        assert _bullet_looks_like_preamble("- I cannot do that")
+        assert _bullet_looks_like_preamble("• Sorry, the data is missing")
+        assert _bullet_looks_like_preamble("▪  Note: filler")
+        assert _bullet_looks_like_preamble("As an AI language model")
+        assert not _bullet_looks_like_preamble(
+            "Inflation-adjusted blend Sharpe is 1.24.")
+
+
+class TestImagePlaceholder:
+    """The chart slot is filled by the matplotlib render when the
+    cache is warm. A None return from the renderer used to silently
+    insert a generic [DATA PENDING] placeholder; the hardening logs
+    the slot name + emits a more diagnostic placeholder."""
+
+    def test_image_logs_warning_with_chart_slot(self, monkeypatch):
+        from tools import academic_deck
+
+        log_calls: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            log_calls.append((event, kwargs))
+
+        monkeypatch.setattr(academic_deck.log, "warning", _capture)
+
+        # Fake slide that records add_picture / add_textbox calls so
+        # the placeholder string + the log emission can be inspected
+        # without standing up a real python-pptx Presentation. _image
+        # only ever calls slide.shapes.add_picture (skipped when png
+        # is None) and the module-level _textbox helper -- the latter
+        # uses slide.shapes.add_textbox. A minimal stub is sufficient.
+        captured: dict = {"add_picture": 0, "textboxes": []}
+
+        class _FakeText:
+            def __init__(self):
+                self.word_wrap = False
+                self.vertical_anchor = None
+                self.paragraphs = [_FakePara()]
+
+            def add_paragraph(self):
+                self.paragraphs.append(_FakePara())
+                return self.paragraphs[-1]
+
+        class _FakePara:
+            def __init__(self):
+                self.alignment = None
+                self.space_after = None
+                self.runs: list = []
+
+            def add_run(self):
+                run = _FakeRun()
+                self.runs.append(run)
+                return run
+
+        class _FakeRun:
+            def __init__(self):
+                self.text = ""
+                self.font = _FakeFont()
+
+        class _FakeFont:
+            def __init__(self):
+                self.size = None
+                self.color = _FakeColor()
+                self.name = None
+                self.bold = False
+
+        class _FakeColor:
+            def __init__(self):
+                self.rgb = None
+
+        class _FakeBox:
+            def __init__(self):
+                self.text_frame = _FakeText()
+
+        class _FakeShapes:
+            def add_picture(self, *_a, **_kw):
+                captured["add_picture"] += 1
+
+            def add_textbox(self, *_a, **_kw):
+                box = _FakeBox()
+                captured["textboxes"].append(box)
+                return box
+
+        class _FakeSlide:
+            def __init__(self):
+                self.shapes = _FakeShapes()
+
+        from pptx.util import Inches
+
+        slide = _FakeSlide()
+        academic_deck._image(
+            slide, None,
+            left=Inches(1.0), top=Inches(1.0), width=Inches(5.0),
+            fallback="rolling_correlation")
+
+        # No image was added; one placeholder textbox was added; a
+        # WARNING was emitted naming the chart slot.
+        assert captured["add_picture"] == 0
+        assert len(captured["textboxes"]) == 1
+        events = [e for e, _ in log_calls
+                  if e == "deck_chart_slot_unavailable"]
+        assert events, "expected deck_chart_slot_unavailable warning"
+        # The chart slot name is carried in the structured log kwarg.
+        assert any(kw.get("chart") == "rolling_correlation"
+                   for _e, kw in log_calls)
+
+    def test_image_renders_picture_when_png_present(self):
+        """Belt-and-braces: confirm the happy path still calls
+        add_picture without going down the placeholder path."""
+        from tools.academic_deck import _image
+
+        counts: dict = {"add_picture": 0, "textboxes": 0}
+
+        class _Shapes:
+            def add_picture(self, *_a, **_kw):
+                counts["add_picture"] += 1
+
+            def add_textbox(self, *_a, **_kw):  # pragma: no cover
+                counts["textboxes"] += 1
+                raise AssertionError("textbox path should not fire")
+
+        class _Slide:
+            shapes = _Shapes()
+
+        from pptx.util import Inches
+
+        _image(_Slide(), b"\x89PNG\r\n\x1a\n",
+               left=Inches(0), top=Inches(0), width=Inches(5))
+        assert counts["add_picture"] == 1
+        assert counts["textboxes"] == 0
+
 
 class TestDeckSlideCount:
     """The deck has exactly 11 slides post-rebuild (bridge #98).
