@@ -220,9 +220,37 @@ export function ReportBlockingModal({
             </ul>
           </div>
         )}
+        {/* Cold-cache list -- when the gate fires with caches_not_warm
+            the 422 detail carries a cold_caches array. Surfacing each
+            cache by name tells the user exactly which warm to trigger
+            (a generic "warm the caches" instruction was previously
+            the only signal). The Warm Caches action below addresses
+            them all at once; the list is purely informational. */}
+        {coldCaches && coldCaches.length > 0 && (
+          <div className="rounded border border-amber-500/40 bg-amber-500/5
+                          px-3 py-2"
+               data-testid="report-blocking-cold-caches">
+            <p className="text-2xs text-amber-200 leading-relaxed mb-1
+                          font-semibold">
+              Brief generation requires the following caches to be warm:
+            </p>
+            <ul className="text-2xs text-amber-100 leading-relaxed
+                           space-y-0.5 list-disc list-inside">
+              {coldCaches.map((c, idx) => (
+                <li key={idx}
+                    data-testid={`report-cold-cache-${idx}`}>
+                  {c}
+                </li>
+              ))}
+            </ul>
+            <p className="text-2xs text-amber-300 leading-relaxed mt-1.5">
+              Trigger a warm and retry.
+            </p>
+          </div>
+        )}
         <p className="text-2xs text-muted leading-relaxed">
           {cacheGate
-            ? ('Warm the analytics caches before generating — a cold '
+            ? ('Warm the analytics caches before generating -- a cold '
                + 'cache produces a [DATA PENDING] placeholder in the '
                + 'generated document.')
             : ('Each item must be acknowledged, marked intentional, '

@@ -227,6 +227,12 @@ async def _gather_live_recommendation(
         "equity_pct":    None,
         "bond_pct":      None,
         "ess":           None,
+        # June 18 2026 -- staleness flag + as-of timestamp. The brief
+        # Final Recommendations section reads these so the prose can
+        # disclose when the recommendation is built from a cached
+        # regime read rather than the live HMM fit.
+        "is_stale":      False,
+        "stale_as_of":   None,
     }
     try:
         # Reuse the platform's canonical live-context builder so the
@@ -237,11 +243,11 @@ async def _gather_live_recommendation(
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_export_live_recommendation_failed",
                     error=str(exc))
-        return empty
-    if not live or live.get("error"):
-        return empty
+        live = None
 
-    ctx = live.get("context") or {}
+    ctx = (live or {}).get("context") if isinstance(live, dict) else None
+    if ctx is None or (live and live.get("error")):
+        ctx = {}
     regime = ctx.get("regime")
     confidence = ctx.get("probability")
     blend_weights = ctx.get("blend_weights") or {}
@@ -250,6 +256,57 @@ async def _gather_live_recommendation(
     equity_pct, bond_pct = aggregate_blend_to_asset_classes(
         blend_weights, strategy_results)
 
+    # June 18 2026 -- cached-regime fallback. The brief's Final
+    # Recommendations section previously rendered "[DATA PENDING]" when
+    # the live build was degraded (cold cache, transient HMM fit error,
+    # CIO call that fell to deterministic_fallback). The fallback below
+    # reads the most recent NON-FALLBACK CIO recommendation from the
+    # persistence layer and lifts its regime + confidence + blend so
+    # the section can ALWAYS state a recommendation; the prose
+    # discloses the staleness explicitly via is_stale + stale_as_of.
+    if not regime or equity_pct is None:
+        try:
+            from tools.cio_recommendation import (
+                get_latest_non_fallback_recommendation,
+            )
+            cached = await get_latest_non_fallback_recommendation()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "academic_export_cached_regime_lookup_failed",
+                error=str(exc))
+            cached = None
+        if cached and cached.get("regime"):
+            log.info("academic_export_cached_regime_fallback_used",
+                     stale_as_of=cached.get("computed_at"),
+                     model=cached.get("model"))
+            # Lift the regime + a reasonable confidence proxy from the
+            # cached row's stored confidence dict. The blend weights
+            # live in raw_json["confidence"] only loosely (the raw_json
+            # is the four-component object, not a strategies->weight
+            # map), so we use any blend_weights surfaced in the row's
+            # raw_json directly if present.
+            cached_regime = cached.get("regime")
+            cached_conf_block = cached.get("confidence") or {}
+            cached_confidence = cached_conf_block.get("probability")
+            cached_ess = cached_conf_block.get("ess")
+            cached_blend = cached.get("blend_weights") or {}
+            cached_equity, cached_bond = (
+                aggregate_blend_to_asset_classes(
+                    cached_blend, strategy_results))
+            return {
+                "regime":        cached_regime,
+                "confidence":    cached_confidence,
+                "blend_weights": cached_blend,
+                "equity_pct":    cached_equity,
+                "bond_pct":      cached_bond,
+                "ess":           cached_ess,
+                "is_stale":      True,
+                "stale_as_of":   cached.get("computed_at"),
+            }
+        # No cached non-fallback row either -- return the empty
+        # contract so the section still renders [DATA PENDING].
+        return empty
+
     return {
         "regime":        regime,
         "confidence":    confidence,
@@ -257,6 +314,8 @@ async def _gather_live_recommendation(
         "equity_pct":    equity_pct,
         "bond_pct":      bond_pct,
         "ess":           ess,
+        "is_stale":      False,
+        "stale_as_of":   None,
     }
 
 

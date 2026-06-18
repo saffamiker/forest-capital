@@ -148,35 +148,35 @@ class TestEditorContentBuilders:
             assert body["content"].strip()
 
     def test_executive_brief_to_editor_builds_tiptap_and_text(self):
-        """June 6 2026 — the brief was rewritten to the six-section
-        panel-feedback shape: The Answer leads, then The Evidence,
-        The Methodology, Five Human Decisions, The Recommendation,
-        Limitations and Part II. The editor adapter must render every
-        section in order with the new keys."""
+        """June 18 2026 -- the brief was rewritten to the FNA 670
+        rubric's six required sections in rubric order. The previous
+        structure (June 6) carried non-rubric "Five Human Decisions"
+        and "Part II preview" sections; the rubric-aligned structure
+        below replaces those entirely. The editor adapter must render
+        every section in order with the new keys."""
         from tools.editor_content import executive_brief_to_editor
         cj, ct = executive_brief_to_editor({
-            "the_answer":              "The answer para.",
-            "the_evidence":            "The evidence para.",
-            "methodology":             "Methodology para.",
-            "five_human_decisions":    "Five decisions para.",
-            "the_recommendation":      "The recommendation para.",
-            "limitations_and_part_ii": "Limitations para.",
+            "executive_summary":     "Executive summary para.",
+            "methodology":           "Methodology para.",
+            "key_findings":          "Key findings para.",
+            "limitations":           "Limitations para.",
+            "final_recommendations": "Final recommendations para.",
+            "visuals":               "Visuals para.",
         })
         assert cj["type"] == "doc"
-        # Six H1 section headings — matches the six-section spec.
+        # Six H1 section headings -- matches the rubric six-section spec.
         headings = [n for n in cj["content"] if n.get("type") == "heading"]
         assert len(headings) == 6
-        # Section 1 leads — the verdict plainly stated.
-        assert "1. The Answer" in ct
-        # The five subsequent sections are named in order.
-        assert "2. The Evidence" in ct
-        assert "3. The Methodology" in ct
-        assert "4. Five Human Decisions" in ct
-        assert "5. The Recommendation" in ct
-        assert "6. Limitations and Part II" in ct
+        # The six section headings in rubric order.
+        assert "1. Executive Summary" in ct
+        assert "2. Methodology Overview" in ct
+        assert "3. Key Findings and Insights" in ct
+        assert "4. Limitations and Risks" in ct
+        assert "5. Final Recommendations" in ct
+        assert "6. Visuals to Demonstrate the Insights" in ct
         # No legacy [[BOB]] callouts.
         assert ct.count("[[BOB:") == 0
-        assert "BOB —" not in ct
+        assert "BOB --" not in ct
 
 
 # ── CRUD round-trips — skip without a live database ───────────────────────────

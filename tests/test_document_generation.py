@@ -144,13 +144,12 @@ class TestDocumentGenerationContract:
         assert "[DATA PENDING]" in text
 
     def test_executive_brief_document_is_a_valid_docx_with_headings(self):
-        """June 6 2026 — the brief was rewritten for the panel-feedback
-        structure (verdict first, three-strategy comparison, brief
-        methodology, NAMED human decisions, live recommendation,
-        limitations + Part II). The May 30 headings (Static
-        Recommendation, Central Finding, Analytical Judgment, Platform
-        as Evidence Base, Evidence Summary, Part II Preview) are
-        retired."""
+        """June 18 2026 -- the brief was rewritten to the FNA 670
+        rubric's six required sections in rubric order. The earlier
+        (June 6) structure carried non-rubric "Five Human Decisions"
+        and "Part II preview" sections; rubric review against the
+        FNA 670 spec retired both. The six section headings below
+        match the rubric exactly."""
         import main
         docx_bytes, filename, media, _draft = _run(
             main._generate_brief_document(TEAM_EMAIL))
@@ -158,20 +157,20 @@ class TestDocumentGenerationContract:
         assert filename.endswith(".docx")
         text = _docx_text(docx_bytes)
         # All six new section headings present in order.
-        assert "1. The Answer" in text
-        assert "2. The Evidence" in text
-        assert "3. The Methodology" in text
-        assert "4. Five Human Decisions" in text
-        assert "5. The Recommendation" in text
-        assert "6. Limitations and Part II" in text
+        assert "1. Executive Summary" in text
+        assert "2. Methodology Overview" in text
+        assert "3. Key Findings and Insights" in text
+        assert "4. Limitations and Risks" in text
+        assert "5. Final Recommendations" in text
+        assert "6. Visuals to Demonstrate the Insights" in text
         # And the section order is preserved.
         idx = [text.index(h) for h in (
-            "1. The Answer",
-            "2. The Evidence",
-            "3. The Methodology",
-            "4. Five Human Decisions",
-            "5. The Recommendation",
-            "6. Limitations and Part II",
+            "1. Executive Summary",
+            "2. Methodology Overview",
+            "3. Key Findings and Insights",
+            "4. Limitations and Risks",
+            "5. Final Recommendations",
+            "6. Visuals to Demonstrate the Insights",
         )]
         assert idx == sorted(idx)
         # The retired pre-rebuild [[BOB]] callouts must not creep back.

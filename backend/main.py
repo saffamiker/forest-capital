@@ -10707,25 +10707,31 @@ async def _generate_brief_document(
 ) -> tuple[bytes, str, str, int | None]:
     """
     Generates the executive brief. Returns (file bytes, filename, media
-    type, editor draft id). Raises on failure — the job wrapper records it.
+    type, editor draft id). Raises on failure -- the job wrapper records it.
 
-    Rewritten June 6 2026 — six sections in order, addressing the
-    midpoint panel feedback (too academic, no investable conclusion,
-    division-of-labor score 3/5, simplify strategy set):
-      1. THE ANSWER (one paragraph, leads with the verdict)
-      2. THE EVIDENCE (three strategies only — benchmark, best static,
-         dynamic blend; honest 2-of-9 + FDR result)
-      3. THE METHODOLOGY (background, two paragraphs max)
-      4. FIVE HUMAN DECISIONS (Bob / Michael / Molly named explicitly,
-         addresses the 3/5 division-of-labor score)
-      5. THE RECOMMENDATION (LIVE regime + blend weights expressed as
-         asset-class allocations on generation morning)
-      6. LIMITATIONS AND PART II (boundaries, sample size, the
-         architecture's extensibility)
+    Rewritten June 18 2026 to the FNA 670 rubric's six required sections,
+    in rubric order. The earlier (June 6) structure led with "The Answer"
+    + a "Five Human Decisions" section + a "Part II preview"; rubric
+    review flagged the latter two as non-rubric content ("next steps
+    rather than final recommendations") and the section ordering as
+    out-of-spec. The six sections below match the rubric exactly:
+
+      1. EXECUTIVE SUMMARY      -- verdict + headline figures
+      2. METHODOLOGY OVERVIEW   -- HMM + OOS window + validation layers
+      3. KEY FINDINGS           -- three-strategy comparison + honest 2-of-9
+      4. LIMITATIONS AND RISKS  -- four mandatory limitations (no Part II)
+      5. FINAL RECOMMENDATIONS  -- investment conclusions drawn from the
+         OOS Sharpe + diversification evidence (NOT a point-in-time
+         portfolio position). Uses the cached-regime fallback assembled
+         in academic_export so the section is data-independent and never
+         renders [DATA PENDING] under a degraded live build.
+      6. VISUALS                -- captioned roster of the platform's
+         chart surfaces (cumulative return, implied asset allocation,
+         efficient frontier) with a one-paragraph interpretation each.
 
     Target length: 1,800-2,200 words. Every section is generated with
     _BRIEF_TONE_RULES threaded into the agent prompt so the prose never
-    says "the platform found X" — it says "our analysis shows X". The
+    says "the platform found X" -- it says "our analysis shows X". The
     platform is cited as the source of DATA, conclusions are framed
     as ours.
     """
@@ -10738,32 +10744,37 @@ async def _generate_brief_document(
     try:
         data = await gather_document_data()
         avail = data["available"]
-        pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
+        pending = (f"{DATA_PENDING} -- analytics caches not warm. Load the "
                    "dashboard once, then regenerate this brief.")
         live = data.get("live_recommendation") or {}
 
-        # Brief rewritten June 6 2026 — six sections in order. Section 1
-        # leads with the answer; Section 2 lays out the three-strategy
-        # comparison with honest validation result; Section 3 is the
-        # brief methodology background; Section 4 names Bob / Michael
-        # / Molly with their five specific decisions; Section 5 states
-        # the LIVE recommendation as asset-class weights; Section 6
-        # closes with limitations + Part II.
+        # FNA 670 rubric, six sections in rubric order. Each spec
+        # threads _BRIEF_TONE_RULES so the prose stays in the
+        # appropriate first-person-plural analytical voice.
         specs = [
-            {"key": "the_answer", "available": avail, "pending": pending,
-             "agent_id": "brief_the_answer",
+            {"key": "executive_summary", "available": avail,
+             "pending": pending,
+             "agent_id": "brief_executive_summary",
              "task": (
-                 "Write Section 1: THE ANSWER. Approximately 200 words. "
-                 "Lead with the answer, not the methodology.\n\n"
-                 "Open with this exact opening sentence: 'Yes. A regime-"
-                 "aware diversified blend outperforms a 100% equity "
-                 "allocation by 27 percentage points of maximum drawdown "
-                 "over the study period.'\n\n"
-                 "Then ONE PARAGRAPH framing the 2022 correlation break as "
-                 "the practical problem that makes this finding actionable "
-                 "now. Reference the locked pre/post-2022 correlation values "
-                 "from context (approximately -0.05 → +0.57). Do NOT discuss "
-                 "the methodology yet — that is Section 3."
+                 "Write Section 1: EXECUTIVE SUMMARY. Approximately 250 "
+                 "words. The senior investment audience reads this page "
+                 "first and may stop here, so it MUST stand alone.\n\n"
+                 "Lead with the verdict in the first sentence. Use this "
+                 "exact opener: 'A regime-conditional diversified blend "
+                 "outperforms a 100% equity allocation on a risk-"
+                 "adjusted basis over the post-2022 out-of-sample "
+                 "window.'\n\n"
+                 "Immediately follow with the headline figures in plain "
+                 "language (no preamble): OOS Sharpe 0.86 (blend) vs 0.43 "
+                 "(benchmark); maximum drawdown -25.3% (blend) vs -52.6% "
+                 "(benchmark); the regime-conditional construction held "
+                 "the bond sleeve through the 2022 equity drawdown.\n\n"
+                 "Close with one short paragraph naming the practical "
+                 "context: the pre/post-2022 correlation break "
+                 "(approximately -0.05 -> +0.57) is the environment the "
+                 "hypothesis addresses, and the analysis below is built "
+                 "on that scope. Do not introduce methodology details or "
+                 "the recommendation here -- those are Sections 2 and 5."
                  + _BRIEF_TONE_RULES),
              "context": {"summary_statistics": data["summary_statistics"],
                          "drawdown_comparison": data["drawdown_comparison"],
@@ -10773,158 +10784,186 @@ async def _generate_brief_document(
                                  "pre_2022"),
                              "post_2022": data["rolling_correlation"].get(
                                  "post_2022")}}},
-            {"key": "the_evidence", "available": avail, "pending": pending,
-             "agent_id": "brief_the_evidence",
+            {"key": "methodology", "available": True,
+             "agent_id": "brief_methodology",
              "task": (
-                 "Write Section 2: THE EVIDENCE. Approximately 500 words. "
-                 "Compare exactly THREE strategies: the 100% equity "
-                 "benchmark, the best static diversifier (pull the name "
-                 "from summary_statistics), and the dynamic regime-aware "
-                 "blend.\n\n"
+                 "Write Section 2: METHODOLOGY OVERVIEW. Approximately "
+                 "300 words across TWO PARAGRAPHS MAXIMUM. Brevity is "
+                 "the contract -- full methodology lives in the "
+                 "Analytical Appendix.\n\n"
+                 "First paragraph: name the three-asset universe "
+                 "(equities, investment-grade bonds, high-yield bonds) "
+                 "and note explicitly that this is a PROJECT SCOPE "
+                 "BOUNDARY, not an architectural limit -- the platform "
+                 "handles any return series. State the HMM regime "
+                 "detection mechanism in one sentence. State the OOS "
+                 "window design: the test period begins AFTER the 2022 "
+                 "correlation break so the evidence reflects the "
+                 "environment the hypothesis addresses.\n\n"
+                 "Second paragraph: name the validation layers in one "
+                 "sentence each -- three-layer statistical audit, the "
+                 "Carhart four-factor model, the Benjamini-Hochberg FDR "
+                 "correction at q < 0.005, the play-by-play scorecard. "
+                 "Close by directing the reader to the Carhart factor-"
+                 "loading table (embedded below Section 2) and the "
+                 "Analytical Appendix for the per-strategy detail."
+                 + _BRIEF_TONE_RULES),
+             "context": {"study_period": data["study_period"]}},
+            {"key": "key_findings", "available": avail, "pending": pending,
+             "agent_id": "brief_key_findings",
+             "task": (
+                 "Write Section 3: KEY FINDINGS AND INSIGHTS. Approximately "
+                 "550 words. Compare exactly THREE strategies: the 100% "
+                 "equity benchmark, the best static diversifier (pull the "
+                 "name from summary_statistics), and the dynamic regime-"
+                 "aware blend.\n\n"
                  "Key figures to cite (locked academic figures, do NOT "
                  "update from any newer dataset):\n"
                  "  - Drawdown -52.6% (benchmark) vs -25.3% (blend)\n"
                  "  - OOS Sharpe 0.86 (blend) vs 0.43 (benchmark)\n"
                  "  - 40-month post-2022 out-of-sample window\n\n"
+                 "Reference the platform's cumulative return chart by "
+                 "name when you state the OOS Sharpe -- the chart is the "
+                 "visual evidence behind the headline number. Reference "
+                 "the implied asset allocation over time chart when you "
+                 "discuss how the blend held the bond sleeve through the "
+                 "2022 equity drawdown.\n\n"
                  "Honest acknowledgement (one paragraph): the council "
-                 "added value in 2 of 9 named market events (the play-by-"
-                 "play scorecard). No strategy clears statistical "
+                 "added value in 2 of 9 named market events (the play-"
+                 "by-play scorecard). No strategy clears statistical "
                  "significance at p < 0.005 under Benjamini-Hochberg FDR "
                  "correction across the ten-strategy set. The case rests "
                  "on economic magnitude, NOT statistical certainty.\n\n"
-                 "DROP the other seven strategies from the body — reference "
-                 "the Analytical Appendix for the full 10-strategy table.\n\n"
-                 "Numbers from the platform; conclusions framed as 'our "
-                 "analysis shows' / 'we conclude' / 'we interpret'."
+                 "DROP the other seven strategies from the body -- "
+                 "reference the Analytical Appendix for the full 10-"
+                 "strategy table. Numbers from the platform; conclusions "
+                 "framed as 'our analysis shows' / 'we conclude' / 'we "
+                 "interpret'."
                  + _BRIEF_TONE_RULES),
              "context": {"summary_statistics": data["summary_statistics"],
                          "regime_conditional": data["regime_conditional"],
                          "drawdown_comparison": data["drawdown_comparison"]}},
-            {"key": "methodology", "available": True,
-             "agent_id": "brief_methodology",
+            {"key": "limitations", "available": True,
+             "agent_id": "brief_limitations",
              "task": (
-                 "Write Section 3: THE METHODOLOGY. Approximately 250 words "
-                 "across TWO PARAGRAPHS MAXIMUM. This is background, not "
-                 "the centrepiece.\n\n"
-                 "First paragraph: name the three-asset universe (equities, "
-                 "investment-grade bonds, high-yield bonds) and note "
-                 "explicitly that this is a PROJECT SCOPE BOUNDARY, not an "
-                 "architectural limit — the platform handles any return "
-                 "series. State the HMM regime detection mechanism in one "
-                 "sentence. State the OOS window design: the test period "
-                 "begins AFTER the 2022 correlation break so the evidence "
-                 "reflects the environment the hypothesis addresses.\n\n"
-                 "Second paragraph: name the validation layers in one "
-                 "sentence each — three-layer statistical audit, the "
-                 "Carhart four-factor model, the Benjamini-Hochberg FDR "
-                 "correction at q < 0.005, the play-by-play scorecard.\n\n"
-                 "Brevity is the contract here — full methodology lives in "
-                 "the Analytical Appendix."
-                 + _BRIEF_TONE_RULES),
-             "context": {"study_period": data["study_period"]}},
-            {"key": "five_human_decisions", "available": True,
-             "agent_id": "brief_five_human_decisions",
-             "task": (
-                 "Write Section 4: FIVE HUMAN DECISIONS. Approximately 500 "
-                 "words. This section MUST be explicit, named, and "
-                 "analytical. NOT roles — DECISIONS.\n\n"
-                 "Critical: this section addresses the 3/5 division-of-"
-                 "labor score from the midpoint check-in. Each decision "
-                 "MUST name the team member explicitly and explain why "
-                 "the platform could not make it alone.\n\n"
-                 "Format each decision as a short numbered paragraph with "
-                 "this exact structure: 'Decision / Who made it / Why the "
-                 "platform could not make it alone.'\n\n"
-                 "1. Regime hypothesis — Bob Thao. Chose to test whether "
-                 "the 2022 correlation inversion creates distinct regimes "
-                 "requiring different allocation rules. The platform "
-                 "cannot hypothesise — it tests.\n\n"
-                 "2. Economic significance threshold — Bob Thao. Set the "
-                 "bar at drawdown reduction and capital preservation "
-                 "rather than statistical Sharpe edge. No strategy clears "
-                 "p < 0.005; framing the case on economic magnitude was "
-                 "a deliberate analytical choice.\n\n"
-                 "3. Out-of-sample window design — Michael Ruurds. Chose "
-                 "to begin the OOS period AFTER the 2022 break, not before. "
-                 "This ensures the evidence reflects the environment the "
-                 "hypothesis addresses.\n\n"
-                 "4. Asset scope — Michael Ruurds. Three asset classes was "
-                 "the graduate project boundary. Designed the architecture "
-                 "to be extensible — HMM and transition matrix work with "
+                 "Write Section 4: LIMITATIONS AND RISKS. Approximately "
+                 "300 words. Be honest. Four mandatory limitations, one "
+                 "short paragraph each.\n\n"
+                 "  - THREE-ASSET SCOPE: the universe is equities, IG "
+                 "bonds, HY bonds. State explicitly that this is a "
+                 "PROJECT scope boundary, not an architectural limit -- "
+                 "the platform's HMM and transition matrix work with "
                  "any return series.\n\n"
-                 "5. Validation framework — Molly Murdock. Designed the "
-                 "9-event play-by-play scorecard and the 4-layer data "
-                 "integrity framework including the honest 2/9 result. "
-                 "Chose to surface the limitation rather than omit it.\n\n"
-                 "Each decision is the team member's specific analytical "
-                 "or design judgment — name them every time, do not "
-                 "anonymise."
-                 + _BRIEF_TONE_RULES),
-             "context": {"study_period": data["study_period"]}},
-            {"key": "the_recommendation", "available": True,
-             "agent_id": "brief_the_recommendation",
-             "task": (
-                 "Write Section 5: THE RECOMMENDATION. Approximately 250 "
-                 "words. Express the recommendation as ASSET CLASS "
-                 "ALLOCATIONS, not strategy names.\n\n"
-                 "LIVE DATA — pull the regime + confidence + asset-class "
-                 "weights from the live_recommendation block in context. "
-                 "These values change every regeneration; the brief is "
-                 "the snapshot of the live state on the day of "
-                 "generation.\n\n"
-                 "If live_recommendation.regime is set: state the current "
-                 "regime by name, then the live confidence as a percentage. "
-                 "Then state the recommended portfolio shares: 'Equity "
-                 "{equity_pct}%, Bonds {bond_pct}%' using the equity_pct + "
-                 "bond_pct fields directly. Include this exact framing: "
-                 "'These are asset class weights for a portfolio of "
-                 "individual stocks and bonds. Forest Capital fills each "
-                 "envelope with its own security selection.'\n\n"
-                 "If live_recommendation.regime is null or "
-                 "live_recommendation.equity_pct is null, write a "
-                 "[DATA PENDING] block stating: 'The live regime read is "
-                 "not currently available; regenerate this brief once the "
-                 "regime cache has warmed.'\n\n"
-                 "Close the section with the rebalance trigger sentence: "
-                 "'A regime flip — to BULL or to BEAR from the current "
-                 "state — would shift the recommendation. The Forward "
-                 "Confidence Projection on the platform shows the "
-                 "probability of that shift over the next 1, 3, 6, and "
-                 "12 months.' Do NOT discuss strategy-by-strategy weights "
-                 "— that is the platform's job; the brief surfaces the "
-                 "ASSET-CLASS answer the audience cares about."
-                 + _BRIEF_TONE_RULES),
-             "context": {"live_recommendation": live,
-                         "study_period": data["study_period"]}},
-            {"key": "limitations_and_part_ii", "available": True,
-             "agent_id": "brief_limitations_and_part_ii",
-             "task": (
-                 "Write Section 6: LIMITATIONS AND PART II. Approximately "
-                 "300 words.\n\n"
-                 "First paragraph — LIMITATIONS (be honest):\n"
-                 "  - Three-asset scope is the PROJECT boundary, not an "
-                 "architectural limit. State this explicitly.\n"
-                 "  - Bootstrap confidence intervals on Sharpe ratios "
-                 "overlap substantially — at 287 monthly observations the "
-                 "static historical ranking is not reliable, which "
-                 "MOTIVATES the regime-conditional construction (the "
-                 "selection mechanism comes from regime signals, not "
-                 "Sharpe rankings).\n"
-                 "  - HMM calendar-break: the current pre/post-2022 split "
-                 "is illustrative. Real-time regime probability requires "
-                 "the live HMM, which is already implemented on the "
-                 "platform.\n\n"
-                 "Second paragraph — PART II preview:\n"
-                 "  - Extend to Forest Capital's actual security "
-                 "universe.\n"
-                 "  - Add cash as a fourth asset class.\n"
-                 "  - Walk-forward backtest on the dynamic strategies, not "
-                 "just the post-2022 OOS window.\n\n"
-                 "Frame Part II as the LOGICAL CONSEQUENCE of Part I — "
-                 "the static analysis revealed the question the dynamic "
-                 "extension answers."
+                 "  - SAMPLE SIZE: 40 months of post-2022 out-of-sample "
+                 "data is approximately 14% of the full study window. "
+                 "Bootstrap confidence intervals on Sharpe ratios "
+                 "overlap substantially across the static set, which is "
+                 "WHY the regime-conditional construction is the right "
+                 "framing -- the selection mechanism comes from regime "
+                 "signals, not Sharpe rankings.\n\n"
+                 "  - TRANSACTION COSTS: the headline Sharpe figures are "
+                 "gross. The platform's Net of Switching Costs panel "
+                 "shows the blend stays above the benchmark across 10/15/"
+                 "20 bps cost assumptions; the post-cost margin compresses "
+                 "but does not invert.\n\n"
+                 "  - STATISTICAL SIGNIFICANCE: no strategy clears p < "
+                 "0.005 under Benjamini-Hochberg FDR correction. The case "
+                 "is built on economic magnitude (drawdown reduction, "
+                 "Sharpe improvement) rather than statistical certainty.\n\n"
+                 "Close with a single sentence acknowledging the platform's "
+                 "audit subsystem (Performance Record + Net of Switching "
+                 "Costs + Implied Asset Allocation) as the standing "
+                 "validation surface a reader can navigate to verify any "
+                 "claim above. Do NOT add a 'next steps', 'future work', "
+                 "or 'Part II' paragraph -- the rubric explicitly excludes "
+                 "future-work content from the brief."
                  + _BRIEF_TONE_RULES),
              "context": {"summary_statistics": data["summary_statistics"]}},
+            {"key": "final_recommendations", "available": True,
+             "agent_id": "brief_final_recommendations",
+             "task": (
+                 "Write Section 5: FINAL RECOMMENDATIONS. Approximately "
+                 "350 words. These are INVESTMENT CONCLUSIONS drawn from "
+                 "the analysis -- NOT next steps, NOT operational "
+                 "suggestions, NOT future research. The rubric is "
+                 "explicit on this distinction.\n\n"
+                 "Lead with the headline conclusion sentence in this "
+                 "shape (adapt the figures to the locked academic "
+                 "values): 'Given an out-of-sample Sharpe of 0.86 for "
+                 "the regime-conditional blend versus 0.43 for the "
+                 "benchmark and a maximum drawdown of -25.3% versus "
+                 "-52.6%, we recommend that a regime-conditional "
+                 "allocation framework be considered as a core "
+                 "approach to asset allocation in the post-2022 "
+                 "environment.'\n\n"
+                 "Three supporting recommendations, each grounded in a "
+                 "specific finding from Section 3:\n"
+                 "  1. Adopt the regime-conditional construction as the "
+                 "selection mechanism for the multi-asset blend, because "
+                 "the static historical Sharpe ranking is unreliable at "
+                 "the available sample size.\n"
+                 "  2. Retain a diversifying bond sleeve through equity "
+                 "drawdowns, because the 2022 evidence shows the blend's "
+                 "capital-preservation advantage came from holding the "
+                 "bond allocation rather than from market timing.\n"
+                 "  3. Monitor the regime posterior monthly and re-balance "
+                 "on regime transitions, because the value-added events "
+                 "(2 of 9 in the play-by-play) cluster at regime flips.\n\n"
+                 "Then reference the live recommendation surface for the "
+                 "current portfolio snapshot: 'The current regime + "
+                 "asset-class weights are surfaced on the CIO "
+                 "Recommendation card and the Implied Asset Allocation "
+                 "Over Time chart. This brief is the analytical case; "
+                 "those surfaces are the live snapshot.' If "
+                 "live_recommendation.is_stale is true, include this "
+                 "exact disclosure sentence: 'The live regime read at "
+                 "generation time was unavailable; the recommendation "
+                 "above references the most recent cached regime read "
+                 "(stale_as_of in context).'\n\n"
+                 "Reference the efficient frontier chart by name when "
+                 "you justify the blend over a single static strategy.\n\n"
+                 "Do NOT discuss future work, Part II, walk-forward "
+                 "backtests, or any 'next research direction' content -- "
+                 "those belong outside this section. The rubric grades "
+                 "this section on investment conclusions drawn from the "
+                 "quantitative result set above."
+                 + _BRIEF_TONE_RULES),
+             "context": {"live_recommendation": live,
+                         "summary_statistics": data["summary_statistics"],
+                         "study_period": data["study_period"]}},
+            {"key": "visuals", "available": True,
+             "agent_id": "brief_visuals",
+             "task": (
+                 "Write Section 6: VISUALS TO DEMONSTRATE THE INSIGHTS. "
+                 "Approximately 250 words. A captioned roster of the "
+                 "platform's chart surfaces that demonstrate the "
+                 "findings above. Each entry is one short paragraph: "
+                 "the chart name, the location on the platform, and "
+                 "the specific insight it carries.\n\n"
+                 "Cover at least these four visuals in this order:\n"
+                 "  1. CUMULATIVE RETURN, POST-2022 (Performance Record "
+                 "page). Shows the regime-conditional blend's cumulative "
+                 "outperformance vs the S&P 500 benchmark and Classic "
+                 "60/40 over the OOS window. The 2022 correlation break "
+                 "is the inflection where the blend opens its lead.\n\n"
+                 "  2. IMPLIED ASSET ALLOCATION OVER TIME (Performance "
+                 "Record page). Stacked equity / IG / HY shares at each "
+                 "rebalance, with a monthly regime band beneath. Shows "
+                 "how the blend held the bond sleeve through the 2022 "
+                 "equity drawdown.\n\n"
+                 "  3. EFFICIENT FRONTIER (Performance / Strategy "
+                 "Comparison surface). Strategy risk-return scatter "
+                 "with the live blend point marked. Shows the blend "
+                 "sits above the static frontier at comparable vol.\n\n"
+                 "  4. ROLLING CORRELATION (Macro / Performance Record). "
+                 "Equity-bond rolling correlation with the 2022 break "
+                 "axvline. Shows the inversion that motivates the "
+                 "regime-conditional construction.\n\n"
+                 "Close with one sentence pointing reviewers to the "
+                 "Analytical Appendix for the per-chart data table "
+                 "behind each visual."
+                 + _BRIEF_TONE_RULES),
+             "context": {"study_period": data["study_period"]}},
         ]
         narratives = await _generate_narratives(
             _apply_draft_caveats(specs),
