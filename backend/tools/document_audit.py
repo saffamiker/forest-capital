@@ -195,6 +195,9 @@ class AuditResult:
             # numeric_anchors AND not in the precomputed cache. Empty
             # when no plan is supplied (skipped).
             "story_plan": [],
+            # PR #336 -- brief-only checks.
+            "required_citations": [],
+            "section_word_count": [],
         })
     skipped: dict[str, str] = field(default_factory=dict)  # check_name → reason
 
@@ -206,6 +209,10 @@ class AuditResult:
             "consistency": len(self.flags_by_check["consistency"]),
             "citation":    len(self.flags_by_check["citation"]),
             "story_plan":  len(self.flags_by_check.get("story_plan", [])),
+            "required_citations": len(
+                self.flags_by_check.get("required_citations", [])),
+            "section_word_count": len(
+                self.flags_by_check.get("section_word_count", [])),
             "total": sum(len(v) for v in self.flags_by_check.values()),
         }
 
@@ -670,6 +677,284 @@ def _iter_slide_numbers(slide: dict[str, Any]):
                     yield tok, v
 
 
+def check_brief_story_plan_violations(
+    content_text: str,
+    brief_section_plan: dict[str, Any] | None,
+    *,
+    strategy_cache: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """PR #336 -- brief counterpart of check_story_plan_violations.
+
+    Flags numeric values in the brief body that appear in NEITHER
+    (a) any section's locked numeric_anchors from the story plan,
+    within _STORY_PLAN_TOLERANCE, NOR (b) the precomputed strategy
+    cache. A flag means the per-section LLM substituted a number the
+    locked plan did not authorise.
+
+    Skipped silently (returns []) when brief_section_plan is falsy --
+    when the brief generation ran without a plan (cold cache, fallback,
+    or pre-PR-333 environment) this check has no opinion.
+
+    brief_section_plan -- the {section_key -> {key_message,
+    numeric_anchors, target_length_words}} dict produced by
+    generate_brief_section_plan() and persisted via story_plans
+    (document_type='brief'). Unlike the deck variant, the brief plan
+    is a flat dict of named sections rather than a list of slides;
+    every section's anchors contribute to the UNION of allowed
+    values (the body prose can quote ANY section's anchor without
+    flagging since the brief is one continuous document, not slide
+    silos).
+    """
+    if not content_text or not brief_section_plan:
+        return []
+    if not isinstance(brief_section_plan, dict):
+        return []
+    # Build the union of every section's numeric_anchors -- the brief
+    # is one continuous document, so an anchor from §3 quoted in §1
+    # is legitimate. Flagging only happens when the value is in NO
+    # section's anchors.
+    anchor_values: list[float] = []
+    for section_entry in brief_section_plan.values():
+        if not isinstance(section_entry, dict):
+            continue
+        anchors_raw = section_entry.get("numeric_anchors") or {}
+        for v in anchors_raw.values():
+            try:
+                anchor_values.append(float(v))
+            except (TypeError, ValueError):
+                continue
+    if not anchor_values:
+        return []
+    cache_norm: dict[str, dict[str, Any]] = {}
+    if strategy_cache:
+        cache_norm = {
+            _normalise_strategy_name(k): v
+            for k, v in strategy_cache.items()
+        }
+    flags: list[dict[str, Any]] = []
+    seen: set[float] = set()
+    for m in re.finditer(_NUMBER_RE, content_text):
+        tok = m.group(1)
+        val = _parse_number(tok)
+        if val is None:
+            continue
+        # Skip citation-year numbers in parentheses ("(1989)" etc.) --
+        # the same year-suppression heuristic the attributed-number
+        # extractor uses. Without this filter every Hamilton (1989)
+        # citation in the body would flag as a story-plan violation
+        # for the value 1989.
+        prev_char = (content_text[m.start() - 1]
+                     if m.start() > 0 else "")
+        is_year_like = (
+            "." not in tok and "%" not in tok
+            and 1900 <= val <= 2100)
+        if prev_char == "(" and is_year_like:
+            continue
+        # De-dupe: a value cited multiple times only flags once.
+        if val in seen:
+            continue
+        if any(abs(val - a) <= _STORY_PLAN_TOLERANCE
+               for a in anchor_values):
+            continue
+        if _value_in_cache(val, cache_norm):
+            continue
+        seen.add(val)
+        flags.append({
+            "type": "story_plan_violation",
+            "value": val,
+            "token": tok,
+            "message": (
+                "Numeric value not in story plan anchors or cache"),
+        })
+    return flags
+
+
+# ── CHECK 6 — Required citations (PR #336, brief only) ──────────────────
+
+
+# Map each VERIFIED_CITATIONS key to the (author_tokens, year) the
+# in-text check looks for. Author tokens are matched case-insensitively
+# anywhere in the body; year is matched as a literal substring. Hardcoded
+# so this module does NOT depend on parsing the long bibliographic
+# strings out of VERIFIED_CITATIONS at runtime (a single tokenisation
+# bug would silently relax every citation check). The reverse map below
+# is asserted in tests so a key drift in VERIFIED_CITATIONS is caught.
+_REQUIRED_CITATION_PATTERNS: dict[str, tuple[tuple[str, ...], str]] = {
+    "hamilton_1989":    (("Hamilton",), "1989"),
+    "ang_bekaert_2002": (("Ang", "Bekaert"), "2002"),
+    "markowitz_1952":   (("Markowitz",), "1952"),
+    "carhart_1997":     (("Carhart",), "1997"),
+    "sharpe_1994":      (("Sharpe",), "1994"),
+    "fama_french_1993": (("Fama", "French"), "1993"),
+    "lo_2002":          (("Lo",), "2002"),
+}
+
+
+def check_required_citations(
+    content_text: str, document_type: str,
+) -> list[dict[str, Any]]:
+    """PR #336 -- positive-coverage citation check.
+
+    Verifies that the brief body cites all seven required papers from
+    VERIFIED_CITATIONS (Hamilton 1989, Ang & Bekaert 2002, Markowitz
+    1952, Carhart 1997, Sharpe 1994, Fama & French 1993, Lo 2002).
+    The existing check_citation_completeness catches in-text citations
+    MISSING from References (orphans); this check catches the inverse:
+    required citations missing entirely.
+
+    Also verifies that a References section exists -- a brief with
+    seven in-text citations but no References section to point them
+    at fails the rubric just as hard as one with no citations.
+
+    Skipped silently for non-brief document types (the deck does not
+    require a formal References section, see #335)."""
+    if document_type != "executive_brief":
+        return []
+    if not content_text:
+        return []
+    flags: list[dict[str, Any]] = []
+    text_lower = content_text.lower()
+    for key, (author_tokens, year) in _REQUIRED_CITATION_PATTERNS.items():
+        authors_present = all(
+            a.lower() in text_lower for a in author_tokens)
+        year_present = year in content_text
+        if authors_present and year_present:
+            continue
+        canonical = "(" + " and ".join(author_tokens) + f", {year})"
+        flags.append({
+            "type":             "missing_required_citation",
+            "citation_key":     key,
+            "expected_pattern": canonical,
+            "message": (
+                f"Required citation {canonical} not found in brief "
+                "body. Add in-text citation in the section it grounds "
+                "(Methodology for Hamilton / Markowitz / Sharpe, "
+                "limitations or methodology for Lo, factor attribution "
+                "for Fama-French / Carhart, dynamic blend for "
+                "Ang and Bekaert)."),
+        })
+    # References-section check. A brief with no References heading
+    # fails the rubric regardless of in-text coverage.
+    refs_present = bool(
+        re.search(r"(?:^|\n)#*\s*References\b", content_text,
+                  re.IGNORECASE)
+        or re.search(r"\bReferences\b\s*\n", content_text))
+    if not refs_present:
+        flags.append({
+            "type":             "missing_references_section",
+            "expected_pattern": "References",
+            "message": (
+                "No References section found at the end of the brief. "
+                "Add a References heading followed by the seven "
+                "verified citations in APA 7th hanging-indent format."),
+        })
+    return flags
+
+
+# ── CHECK 7 — Per-section word counts (PR #336, brief only) ─────────────
+
+
+# Target word bands per section (the brief spec from main.py's spec
+# list at PR #326 + PR #335 widening of §2 for the rebalancing
+# disclosure). Mins are generous to avoid false positives on short
+# but rubric-complete sections; maxes pin the upper end so the brief
+# does not bloat past the 5-page double-spaced ceiling.
+_BRIEF_SECTION_WORD_TARGETS: dict[str, tuple[int, int]] = {
+    "Executive Summary":     (200, 300),
+    "Methodology":           (300, 400),
+    "Key Findings":          (480, 620),
+    "Limitations":           (250, 350),
+    "Final Recommendations": (300, 400),
+    "Visuals":               (200, 300),
+}
+
+
+def check_section_word_counts(
+    content_text: str, document_type: str,
+) -> list[dict[str, Any]]:
+    """PR #336 -- per-section word band check.
+
+    Splits the brief body by section heading (recognising the six
+    rubric section titles from PR #326), counts words in each
+    section's prose, and flags any section outside its target word
+    band. A section heading that does not match any recognised title
+    is skipped silently -- some drafts use slight variants ("Final
+    Recommendation" singular vs "Final Recommendations") and an
+    over-strict heading match would false-positive on every
+    presentation.
+
+    Skipped silently for non-brief document types."""
+    if document_type != "executive_brief":
+        return []
+    if not content_text:
+        return []
+    sections = _split_brief_by_section(content_text)
+    flags: list[dict[str, Any]] = []
+    for canonical, target in _BRIEF_SECTION_WORD_TARGETS.items():
+        body = sections.get(canonical)
+        if body is None:
+            # Section heading not found (or doesn't match the
+            # canonical variant) -- skip silently.
+            continue
+        word_count = len(re.findall(r"\b\w+\b", body))
+        target_min, target_max = target
+        if target_min <= word_count <= target_max:
+            continue
+        side = ("below" if word_count < target_min else "above")
+        flags.append({
+            "type":       "section_word_count",
+            "section":    canonical,
+            "word_count": word_count,
+            "target_min": target_min,
+            "target_max": target_max,
+            "message": (
+                f"{canonical} section is {word_count} words -- "
+                f"{side} the {target_min}-{target_max} word target. "
+                "Expand or trim to meet rubric depth requirement."),
+        })
+    return flags
+
+
+def _split_brief_by_section(text: str) -> dict[str, str]:
+    """Match each canonical section heading case-insensitively and
+    extract the body text up to the next recognised heading.
+    Tolerates three heading shapes the brief / appendix / midpoint
+    paths emit:
+      - markdown:        '## Methodology'
+      - numbered:        '1. Methodology' / '2. Methodology Overview'
+      - plain heading:   'Methodology' on a line of its own
+    """
+    canonical_names = list(_BRIEF_SECTION_WORD_TARGETS.keys())
+    # Heading prefix tolerated: zero-or-more markdown #, zero-or-more
+    # whitespace, optional "N." numeric prefix, optional whitespace.
+    # The canonical name is captured as group 1. The (?: ...|...)
+    # alternation is ordered by length-descending so "Final
+    # Recommendations" cannot match as just "Recommendations" if a
+    # caller adds the shorter heading later.
+    name_alt = "|".join(sorted(
+        (re.escape(n) for n in canonical_names),
+        key=len, reverse=True))
+    pattern = (
+        r"(?:^|\n)\s*"
+        r"(?:#+\s*)?"
+        r"(?:\d+\.?\s*)?"
+        r"(" + name_alt + r")\b[^\n]*\n")
+    out: dict[str, str] = {}
+    matches = list(re.finditer(pattern, text, re.IGNORECASE))
+    for i, m in enumerate(matches):
+        matched_heading = m.group(1)
+        canonical = next(
+            (n for n in canonical_names
+             if n.lower() == matched_heading.lower()),
+            None)
+        if canonical is None:
+            continue
+        start = m.end()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        out[canonical] = text[start:end]
+    return out
+
+
 def _value_in_cache(
     val: float, cache_norm: dict[str, dict[str, Any]],
 ) -> bool:
@@ -709,6 +994,7 @@ def audit_document(
     strategy_cache: dict[str, dict[str, Any]] | None = None,
     slides: list[dict[str, Any]] | None = None,
     story_plan_slides: list[dict[str, Any]] | None = None,
+    brief_section_plan: dict[str, Any] | None = None,
 ) -> AuditResult:
     """Run the five checks and return a single result object.
 
@@ -771,10 +1057,9 @@ def audit_document(
         log.warning("document_audit_check4_failed", error=str(exc))
         result.skipped["citation"] = str(exc)
 
-    # Check 5 -- story plan violations (PR #333, deck only). Skips
-    # silently when no story plan was supplied (the deck generation
-    # ran without the locked structural layer, or this is a brief
-    # audit where the check does not apply).
+    # Check 5 -- story plan violations. Deck variant uses slides +
+    # story_plan_slides; brief variant uses content_text +
+    # brief_section_plan. Skips silently when no plan was supplied.
     if slides and story_plan_slides:
         try:
             result.flags_by_check["story_plan"] = (
@@ -784,12 +1069,46 @@ def audit_document(
         except Exception as exc:  # noqa: BLE001
             log.warning("document_audit_check5_failed", error=str(exc))
             result.skipped["story_plan"] = str(exc)
+    elif brief_section_plan and document_type == "executive_brief":
+        try:
+            result.flags_by_check["story_plan"] = (
+                check_brief_story_plan_violations(
+                    text or "", brief_section_plan,
+                    strategy_cache=strategy_cache))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "document_audit_check5_brief_failed", error=str(exc))
+            result.skipped["story_plan"] = str(exc)
     else:
         # Surface the skip reason so the dispatcher's structured log
         # accurately reports why the check did not fire -- avoids the
         # frontend interpreting an empty list as "no violations" when
         # it actually means "the check did not run".
         result.skipped["story_plan"] = "no_plan_or_no_slides"
+
+    # Check 6 -- required citations (brief only, PR #336).
+    if document_type == "executive_brief":
+        try:
+            result.flags_by_check["required_citations"] = (
+                check_required_citations(text or "", document_type))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "document_audit_check6_failed", error=str(exc))
+            result.skipped["required_citations"] = str(exc)
+    else:
+        result.skipped["required_citations"] = "not_a_brief"
+
+    # Check 7 -- per-section word counts (brief only, PR #336).
+    if document_type == "executive_brief":
+        try:
+            result.flags_by_check["section_word_count"] = (
+                check_section_word_counts(text or "", document_type))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "document_audit_check7_failed", error=str(exc))
+            result.skipped["section_word_count"] = str(exc)
+    else:
+        result.skipped["section_word_count"] = "not_a_brief"
 
     log.info(
         "document_audit_complete",
