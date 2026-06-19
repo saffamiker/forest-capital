@@ -77,6 +77,49 @@ except Exception:  # noqa: BLE001
 _DETERMINISTIC = "deterministic_fallback"
 
 
+# ── Shared framing -- midpoint-feedback constraints (June 19 2026) ──────
+#
+# Three constants threaded into every Pass-1 system prompt below so the
+# brief, deck, and script all open from the same authoritative frame.
+# Pinned by tests so a future refactor cannot drop any one of them.
+# The midpoint panel's directive (Dr. Panttser): too academic, lacking
+# an investable conclusion, the central question is buried, the
+# strategy set is too complex for a senior-audience presentation. The
+# constants below address each criticism structurally.
+
+THREE_STRATEGY_FRAME = """\
+PRESENTATION FRAME: All outputs use a three-strategy lens regardless \
+of how many strategies exist in the analytical cache:
+  - Benchmark: S&P 500 (100% equity, no diversification)
+  - Static blend: Classic 60/40 (fixed allocation)
+  - Dynamic blend: regime-conditional (HMM-driven)
+The 10-strategy analytical engine is appendix material. Presentation, \
+brief, and script communicate through these three strategies only."""
+
+
+CENTRAL_QUESTION_AND_ANSWER = """\
+CENTRAL QUESTION (front-load in every deliverable):
+The central question: does diversification improve risk-adjusted \
+performance vs 100% equity?
+The answer, supported by out-of-sample evidence:
+YES. The dynamic blend achieves an OOS Sharpe of 1.24 versus 0.73 for \
+the benchmark -- a 70% improvement -- with max drawdown reduced by 51%."""
+
+
+INVESTABLE_CONCLUSION_GUARD = """\
+INVESTABLE CONCLUSION (non-negotiable):
+The audience includes Forest Capital representatives who need an \
+investable conclusion, not a literature review. Lead with the \
+recommendation in the language of a CIO memo, not an academic paper. \
+Do not use language like "future research suggests" or "further study \
+would benefit from" -- these are academic hedges that undermine an \
+investable conclusion. The final recommendations section must be \
+written as an investment committee conclusion. Close with one \
+sentence on the conditions under which the recommendation would be \
+revisited (e.g. sustained ESS below the reliable threshold, or data \
+hash change indicating structural market shift)."""
+
+
 # ── Evaluator prompts (Pass 1, both document types) ──────────────────────
 
 STORY_PLAN_EVALUATOR_PROMPT = """\
@@ -117,11 +160,25 @@ Liberation Day underperformance directly, with a prepared response? A \
 plan that omits known weaknesses scores 0 -- academic panels penalize \
 evasion more than honest limitations.
 
+6. INVESTABLE CONCLUSION (0-2)
+   Does every section move toward a clear, actionable investment \
+recommendation? Could a non-technical decision-maker (a Forest Capital \
+representative who has not seen the analytical work) read this plan \
+and understand what to do with the information? A technically correct \
+output that fails to communicate an investable conclusion scores 0 on \
+this criterion regardless of analytical quality. The midpoint panel \
+flagged this explicitly: "too academic, lacking an investable \
+conclusion".
+
+The rubric now has six criteria for a maximum of 12 points. The \
+acceptance threshold is 8.4 (70% equivalent, same proportional \
+contract as the original 7.0/10 threshold).
+
 Return ONLY valid JSON with no preamble or markdown fences:
-{"overall": <float 0-10>, "feedback": "<one paragraph of specific, \
+{"overall": <float 0-12>, "feedback": "<one paragraph of specific, \
 actionable improvement notes>"}
 
-If overall >= 7.0 the plan is accepted. If < 7.0 your feedback will be \
+If overall >= 8.4 the plan is accepted. If < 8.4 your feedback will be \
 injected into the next generation attempt. Be specific: identify which \
 slides fail which criteria and what must change."""
 
@@ -163,14 +220,43 @@ scores 1 maximum.
 events and Liberation Day underperformance directly? Does it frame \
 them as known, bounded risks rather than hiding them?
 
+6. INVESTABLE CONCLUSION (0-2)
+   Does every section move toward a clear, actionable investment \
+recommendation? Could a non-technical decision-maker (a Forest Capital \
+representative) read this brief and understand what to do with the \
+information? A technically correct output that fails to communicate an \
+investable conclusion scores 0 on this criterion regardless of \
+analytical quality. The midpoint panel flagged this explicitly: "too \
+academic, lacking an investable conclusion".
+
+The rubric now has six criteria for a maximum of 12 points. The \
+acceptance threshold is 8.4 (70% equivalent).
+
 Return ONLY valid JSON:
-{"overall": <float 0-10>, "feedback": "<specific actionable notes on \
+{"overall": <float 0-12>, "feedback": "<specific actionable notes on \
 which sections fail which criteria>"}"""
 
 
 # ── Pass 1 generator system prompts ──────────────────────────────────────
 
-_DECK_STORY_PLAN_SYSTEM_PROMPT = """\
+_DECK_ECONOMIC_STORYTELLING = """\
+ECONOMIC STORYTELLING REQUIREMENT: The presentation must explain not \
+just WHAT the HMM finds but WHY regime detection improves outcomes and \
+WHEN it works. The speaker notes for the methodology slide must \
+include:
+  - WHY: HMM identifies structural market state changes that persist \
+for months (average regime duration from the transition matrix). This \
+persistence means the portfolio can reposition before drawdowns \
+materialize, unlike momentum signals which are reactive.
+  - WHEN: Concrete examples from the play-by-play -- the 2022 BEAR \
+call that reduced equity exposure before the drawdown, the TRANSITION \
+call before Liberation Day (even if the timing wasn't perfect -- be \
+honest about this).
+Grok's anticipated questions will likely probe this layer -- the \
+script must have prepared answers."""
+
+
+_DECK_STORY_PLAN_BODY = """\
 You design the structural plan for an 18-20 minute investment \
 presentation. Your output is consumed by a downstream code path that \
 renders each slide and a separate full-script pass: produce ONLY \
@@ -217,7 +303,21 @@ Output schema (return ONLY this JSON object):
   ]
 }"""
 
-_DECK_FULL_SCRIPT_SYSTEM_PROMPT = """\
+
+# Composite deck Pass-1 system prompt -- midpoint-feedback constraints
+# threaded ahead of the original schema body. The base body still
+# defines the JSON output contract; the framing constants establish
+# the rubric that the Opus arbiter and the downstream evaluator both
+# enforce.
+_DECK_STORY_PLAN_SYSTEM_PROMPT = (
+    THREE_STRATEGY_FRAME + "\n\n"
+    + CENTRAL_QUESTION_AND_ANSWER + "\n\n"
+    + INVESTABLE_CONCLUSION_GUARD + "\n\n"
+    + _DECK_ECONOMIC_STORYTELLING + "\n\n"
+    + _DECK_STORY_PLAN_BODY)
+
+
+_DECK_FULL_SCRIPT_BODY = """\
 You write the word-for-word presenter script for an 18-20 minute \
 investment presentation, conditioned on a pre-locked slide plan. \
 Output ONLY strict JSON, no markdown fences, no preamble.
@@ -240,7 +340,43 @@ delimiters>",
 }"""
 
 
-_BRIEF_SECTION_PLAN_SYSTEM_PROMPT = """\
+_SCRIPT_AUDIENCE_CALIBRATION = """\
+AUDIENCE CALIBRATION: This script will be delivered to a mixed \
+audience including Dr. Panttser (academic) and Forest Capital \
+representatives (investment professionals). The academic audience \
+wants to see methodological rigor and statistical validity. The \
+investment audience wants to know: should I use this approach to \
+manage money?
+
+For every technical result mentioned in the script, the next \
+sentence must translate it to an investment implication. Example \
+patterns:
+  - OOS Sharpe 1.24 vs 0.73 -> "In practical terms, this means the \
+blend generated more return per unit of risk than simply holding the \
+S&P 500 -- a result that holds in the post-training period where the \
+model had no look-ahead advantage."
+  - Max drawdown reduced 51% -> "A portfolio that lost half as much \
+in the 2022 drawdown allowed investors to stay invested rather than \
+panic-selling at the bottom."
+
+Each translation should take no more than one sentence. The goal is \
+that a Forest Capital representative who knows nothing about HMM can \
+leave the room understanding why this approach is worth considering."""
+
+
+# Composite script Pass-2 system prompt -- audience calibration ahead
+# of the original body. The base body still defines the JSON output
+# contract; the audience calibration layer translates every technical
+# claim into an investment implication so a Forest Capital decision-
+# maker leaves with an actionable takeaway.
+_DECK_FULL_SCRIPT_SYSTEM_PROMPT = (
+    THREE_STRATEGY_FRAME + "\n\n"
+    + CENTRAL_QUESTION_AND_ANSWER + "\n\n"
+    + _SCRIPT_AUDIENCE_CALIBRATION + "\n\n"
+    + _DECK_FULL_SCRIPT_BODY)
+
+
+_BRIEF_SECTION_PLAN_BODY = """\
 You design the section plan for a 5-page executive brief for a finance \
 practicum submission. Your output is consumed by a downstream code path \
 that renders each section's prose: produce ONLY strict JSON, no markdown \
@@ -285,6 +421,18 @@ Output schema:
     "visuals": { ... }
   }
 }"""
+
+
+# Composite brief Pass-1 system prompt -- midpoint-feedback constraints
+# threaded ahead of the original schema body. Same composition shape
+# as the deck Pass-1 prompt above; the framing constants establish the
+# rubric the Opus arbiter and the downstream BRIEF_PLAN_EVALUATOR_PROMPT
+# both enforce.
+_BRIEF_SECTION_PLAN_SYSTEM_PROMPT = (
+    THREE_STRATEGY_FRAME + "\n\n"
+    + CENTRAL_QUESTION_AND_ANSWER + "\n\n"
+    + INVESTABLE_CONCLUSION_GUARD + "\n\n"
+    + _BRIEF_SECTION_PLAN_BODY)
 
 
 # ── Pass 3 / Pass 4 system prompts ───────────────────────────────────────

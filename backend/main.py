@@ -11085,11 +11085,45 @@ async def export_analytical_appendix(
     return _start_generation_job("analytical_appendix", session, request)
 
 
+# The analytical appendix carries the FULL 10-strategy evidence base
+# behind every claim the brief and the deck make. Unlike the brief/
+# deck/script -- which simplify to a three-strategy lens per the
+# midpoint feedback -- the appendix is the place where every strategy
+# is shown alongside the others. The framing prelude below threads the
+# audience contract and the economic-intuition layer into every
+# section task so the writer treats the appendix as the analytical
+# evidence base for a mixed academic + investment audience, not a
+# table-dump.
+_APPENDIX_FRAMING_PRELUDE = (
+    "APPENDIX FRAMING (applies to every section):\n"
+    "  - This is the analytical evidence base supporting the "
+    "executive brief and presentation deck. The audience reads the "
+    "appendix to verify the claims made elsewhere.\n"
+    "  - Unlike the brief / deck / script (which use a three-strategy "
+    "lens of Benchmark / Static blend / Dynamic blend per midpoint "
+    "feedback), the appendix shows ALL strategies from the cache. "
+    "The full 10-strategy table is appropriate here.\n"
+    "  - Each section's prose must include one sentence of economic "
+    "intuition explaining what the result MEANS for a reader, not "
+    "just what the table contains. Example: a section reporting a "
+    "Sharpe ratio table does not stop at 'the table reports Sharpe' "
+    "-- it adds 'the regime-conditional construction's lead widens "
+    "post-2022 because the HMM identifies structural state changes "
+    "that persist for months'.\n"
+    "  - Sensitivity analysis results must be presented with "
+    "interpretation, not just tables. Tell the reader what to take "
+    "away.\n\n"
+)
+
+
 # Appendix section narrative tasks — one Academic Writer call per
 # section, each producing ~80-150 words. Deliberately short: the
 # appendix is table-heavy, the prose is scaffolding. Each task pins
 # the section's role and provides the context the writer needs to
-# describe what the table will show.
+# describe what the table will show. The framing prelude is
+# prepended to each task at dispatch time so a future section
+# addition automatically inherits the audience + economic-intuition
+# contract.
 _APPENDIX_NARRATIVE_TASKS = {
     "appendix_a": (
         "Write a 100-130 word introduction to Section A: Data and "
@@ -11204,7 +11238,14 @@ async def _generate_appendix_document(
             {
                 "key": key,
                 "agent_id": f"appendix_{key.split('_', 1)[1]}",
-                "task": task,
+                # PR #334 -- prepend the framing prelude so every
+                # section task inherits the audience contract +
+                # economic-intuition guard. The three-strategy
+                # simplification does NOT apply to the appendix --
+                # full 10-strategy coverage is appropriate here --
+                # but the audience and economic-intuition layers
+                # do (see _APPENDIX_FRAMING_PRELUDE above).
+                "task": _APPENDIX_FRAMING_PRELUDE + task,
                 "context": {"study_period": data.get("study_period")},
                 "available": avail,
                 "pending": pending,
