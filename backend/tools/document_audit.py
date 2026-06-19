@@ -190,6 +190,11 @@ class AuditResult:
         default_factory=lambda: {
             "numeric": [], "direction": [],
             "consistency": [], "citation": [],
+            # PR #333 -- story_plan_violation flags fire when a slide
+            # carries a numeric value not in its locked story plan's
+            # numeric_anchors AND not in the precomputed cache. Empty
+            # when no plan is supplied (skipped).
+            "story_plan": [],
         })
     skipped: dict[str, str] = field(default_factory=dict)  # check_name → reason
 
@@ -200,6 +205,7 @@ class AuditResult:
             "direction":   len(self.flags_by_check["direction"]),
             "consistency": len(self.flags_by_check["consistency"]),
             "citation":    len(self.flags_by_check["citation"]),
+            "story_plan":  len(self.flags_by_check.get("story_plan", [])),
             "total": sum(len(v) for v in self.flags_by_check.values()),
         }
 
@@ -558,6 +564,141 @@ def check_citation_completeness(
     return flags, None
 
 
+# ── CHECK 5 — Story plan violation (PR #333, deck only) ──────────────────
+
+
+_STORY_PLAN_TOLERANCE = 0.01
+
+
+def check_story_plan_violations(
+    slides: list[dict[str, Any]],
+    story_plan_slides: list[dict[str, Any]] | None,
+    *,
+    strategy_cache: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Flag numeric values that appear on a slide but are NOT in either
+    (a) the slide's locked numeric_anchors from the story plan, within
+    _STORY_PLAN_TOLERANCE, OR (b) the precomputed strategy cache. A
+    flag means the per-slide LLM has substituted a number the locked
+    plan did not authorise.
+
+    Skipped silently (returns []) when story_plan_slides is falsy --
+    when the deck generation ran without a plan (cold cache, fallback,
+    or pre-PR-333 environment) this check has no opinion.
+
+    slides -- the parsed AI JSON list as it arrives at the deck builder
+    (one dict per slide, with bullets / table_data / speaker_notes /
+    slide_number). Each value found in bullets or table cells is
+    cross-checked against the matching plan entry's numeric_anchors.
+    """
+    if not slides or not story_plan_slides:
+        return []
+    by_slide_number = {
+        e.get("slide_number"): e
+        for e in story_plan_slides
+        if isinstance(e, dict)
+    }
+    cache_norm: dict[str, dict[str, Any]] = {}
+    if strategy_cache:
+        cache_norm = {
+            _normalise_strategy_name(k): v
+            for k, v in strategy_cache.items()
+        }
+    flags: list[dict[str, Any]] = []
+    for sl in slides:
+        if not isinstance(sl, dict):
+            continue
+        slide_number = sl.get("slide_number")
+        plan_entry = by_slide_number.get(slide_number)
+        if not plan_entry:
+            continue
+        anchors_raw = plan_entry.get("numeric_anchors") or {}
+        # Normalise the anchor values to floats for comparison.
+        anchor_values: list[float] = []
+        for v in anchors_raw.values():
+            try:
+                anchor_values.append(float(v))
+            except (TypeError, ValueError):
+                continue
+        for token, val in _iter_slide_numbers(sl):
+            # Anchored: matches any anchor within tolerance.
+            if any(abs(val - a) <= _STORY_PLAN_TOLERANCE
+                   for a in anchor_values):
+                continue
+            # Cache-backed: any strategy row in cache carries this
+            # value within the strict numeric tolerance.
+            if _value_in_cache(val, cache_norm):
+                continue
+            flags.append({
+                "type": "story_plan_violation",
+                "slide": slide_number,
+                "value": val,
+                "token": token,
+                "message": (
+                    "Numeric value not in story plan anchors or cache"),
+            })
+    return flags
+
+
+def _iter_slide_numbers(slide: dict[str, Any]):
+    """Yield (raw_token, parsed_value) for every numeric token found
+    in a slide's bullets and table cells. Bullets are scanned for
+    standalone numbers; the slide title and speaker_notes are NOT
+    scanned (the audit narrows to the visible-on-slide surface)."""
+    bullets = slide.get("bullets") or []
+    for b in bullets:
+        if not isinstance(b, str):
+            continue
+        for m in re.finditer(_NUMBER_RE, b):
+            tok = m.group(1)
+            v = _parse_number(tok)
+            if v is not None:
+                yield tok, v
+    table = slide.get("table_data") or {}
+    rows = table.get("rows") if isinstance(table, dict) else None
+    for row in (rows or []):
+        if not isinstance(row, list):
+            continue
+        for cell in row:
+            if cell is None:
+                continue
+            cell_s = str(cell)
+            for m in re.finditer(_NUMBER_RE, cell_s):
+                tok = m.group(1)
+                v = _parse_number(tok)
+                if v is not None:
+                    yield tok, v
+
+
+def _value_in_cache(
+    val: float, cache_norm: dict[str, dict[str, Any]],
+) -> bool:
+    """True if any strategy row in the cache carries `val` (under
+    either the strict fraction tolerance OR the percent-point
+    tolerance after normalisation by metric kind). Mirrors the
+    numeric check's tolerance shape without requiring tuple
+    extraction -- this check is broader by design since story-plan
+    violations are about "this number wasn't authorised anywhere",
+    not "this number is wrong for this strategy"."""
+    if not cache_norm:
+        return False
+    for row in cache_norm.values():
+        if not isinstance(row, dict):
+            continue
+        for metric, cv in row.items():
+            try:
+                cv_f = float(cv)
+            except (TypeError, ValueError):
+                continue
+            g_norm, c_norm, scale = _normalise_audit_comparison(
+                val, cv_f, metric)
+            tol = (_NUMERIC_TOLERANCE_PP if scale == "pp"
+                   else _NUMERIC_TOLERANCE)
+            if abs(g_norm - c_norm) <= tol:
+                return True
+    return False
+
+
 # ── Dispatcher ────────────────────────────────────────────────────────────
 
 
@@ -566,8 +707,10 @@ def audit_document(
     document_type: str,
     *,
     strategy_cache: dict[str, dict[str, Any]] | None = None,
+    slides: list[dict[str, Any]] | None = None,
+    story_plan_slides: list[dict[str, Any]] | None = None,
 ) -> AuditResult:
-    """Run the four checks and return a single result object.
+    """Run the five checks and return a single result object.
 
     text             — the full plain-text projection of the document
                        (content_text from the editor draft adapter).
@@ -575,6 +718,11 @@ def audit_document(
     strategy_cache   — the strategy_results_cache row (latest), passed
                        in so the caller controls cache freshness and
                        the audit stays pure-Python with no DB reads.
+    slides           — PR #333: the parsed AI JSON slide list. Only
+                       used by the deck path's CHECK 5.
+    story_plan_slides — PR #333: the locked slide plan entries from
+                       story_plans. CHECK 5 skips silently when this
+                       is None.
 
     No exception leaves the function — each check is wrapped so a
     failed check is recorded in `skipped` and the rest still run.
@@ -622,6 +770,26 @@ def audit_document(
     except Exception as exc:  # noqa: BLE001
         log.warning("document_audit_check4_failed", error=str(exc))
         result.skipped["citation"] = str(exc)
+
+    # Check 5 -- story plan violations (PR #333, deck only). Skips
+    # silently when no story plan was supplied (the deck generation
+    # ran without the locked structural layer, or this is a brief
+    # audit where the check does not apply).
+    if slides and story_plan_slides:
+        try:
+            result.flags_by_check["story_plan"] = (
+                check_story_plan_violations(
+                    slides, story_plan_slides,
+                    strategy_cache=strategy_cache))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("document_audit_check5_failed", error=str(exc))
+            result.skipped["story_plan"] = str(exc)
+    else:
+        # Surface the skip reason so the dispatcher's structured log
+        # accurately reports why the check did not fire -- avoids the
+        # frontend interpreting an empty list as "no violations" when
+        # it actually means "the check did not run".
+        result.skipped["story_plan"] = "no_plan_or_no_slides"
 
     log.info(
         "document_audit_complete",
