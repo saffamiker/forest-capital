@@ -3126,6 +3126,60 @@ async def get_analytics_sensitivity(request: Request, session: dict = Depends(re
 
 # ── Admin: data status ────────────────────────────────────────────────────────
 
+@app.post("/api/v1/admin/clear-story-plans")
+async def post_clear_story_plans(
+    document_type: str = "all",
+    session: dict = Depends(require_team_member),
+):
+    """PR #336 Gap E -- delete cached story_plans rows so the next
+    deck or brief regeneration runs the four-pass Opus pipeline from
+    scratch. Required after a prompt change (e.g. PR #335's seven-
+    citation grounding) lands so the new framing fires immediately
+    rather than waiting for the data_hash to change.
+
+    document_type:
+      "brief" -- delete only brief plans
+      "deck"  -- delete only deck plans
+      "all"   -- delete every story_plans row (the default)
+
+    Returns: {"deleted": <int>, "document_type": <str>}.
+    """
+    if document_type not in {"brief", "deck", "all"}:
+        raise HTTPException(
+            status_code=400,
+            detail="document_type must be 'brief' | 'deck' | 'all'")
+    if ENVIRONMENT == "test":
+        return {"deleted": 0, "document_type": document_type,
+                "note": "test environment"}
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal  # type: ignore[attr-defined]
+        if AsyncSessionLocal is None:
+            return {"deleted": 0, "document_type": document_type,
+                    "note": "no database"}
+        async with AsyncSessionLocal() as s:
+            if document_type == "all":
+                res = await s.execute(
+                    text("DELETE FROM story_plans"))
+            else:
+                res = await s.execute(
+                    text("DELETE FROM story_plans "
+                         "WHERE document_type = :t"),
+                    {"t": document_type})
+            await s.commit()
+            deleted = int(res.rowcount or 0)
+        log.info("story_plans_cleared",
+                 document_type=document_type, deleted=deleted,
+                 actor=session.get("email"))
+        return {"deleted": deleted, "document_type": document_type}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("clear_story_plans_failed",
+                    document_type=document_type, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"clear_story_plans_failed: {exc}")
+
+
 @app.post("/api/v1/admin/warm-analytics-cache")
 async def post_warm_analytics_cache(
     session: dict = Depends(require_team_member),
@@ -3573,24 +3627,50 @@ async def _run_document_audit(
     document_type: str,
     email: str,
 ) -> dict[str, Any] | None:
-    """Runs the four-check post-generation audit. Returns the
-    flags_by_check dict suitable for editor_drafts.audit_warnings,
-    or None when nothing was flagged (so the column stores NULL).
+    """Runs the post-generation audit. Returns the flags_by_check
+    dict suitable for editor_drafts.audit_warnings, or None when
+    nothing was flagged (so the column stores NULL).
 
     Reads the latest strategy_results_cache row ONCE so the numeric
     cross-reference and consistency checks share the same dataset
-    snapshot. Fail-open per the wider generator: an audit exception
-    logs and returns None, never blocks the document write.
+    snapshot. For the brief, ALSO reads the cached brief section
+    plan from story_plans so PR #336's CHECK 5 (story_plan_violation),
+    CHECK 6 (required_citations), and CHECK 7 (section_word_count)
+    can fire end-to-end. Fail-open per the wider generator: an audit
+    exception logs and returns None, never blocks the document write.
     """
     if ENVIRONMENT == "test":
         return None
     try:
-        from tools.cache import get_latest_strategy_cache
+        from tools.cache import (
+            get_latest_strategy_cache, get_latest_strategy_hash,
+        )
         from tools.document_audit import audit_document
         strategy_cache = await get_latest_strategy_cache()
+        # PR #336 -- pull the cached brief section plan so CHECK 5
+        # has the locked numeric_anchors to compare against. Fail-
+        # open if the plan is unavailable (cold cache or a brief
+        # generated before #333's caching layer landed); the check
+        # skips silently in that case.
+        brief_section_plan: dict | None = None
+        if document_type == "executive_brief":
+            try:
+                from tools import story_plan as sp
+                data_hash = await get_latest_strategy_hash()
+                if data_hash:
+                    plan = await sp.get_cached_story_plan(
+                        data_hash, "brief")
+                    if plan and isinstance(
+                            plan.get("section_plan"), dict):
+                        brief_section_plan = plan["section_plan"]
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "document_audit_brief_plan_lookup_failed",
+                    error=str(exc))
         result = audit_document(
             content_text, document_type,
-            strategy_cache=strategy_cache)
+            strategy_cache=strategy_cache,
+            brief_section_plan=brief_section_plan)
         log.info("document_audit_executed",
                  document_type=document_type,
                  owner=email,
@@ -9987,6 +10067,42 @@ async def _editor_export(editor_draft_id: int) -> Response:
         content = await asyncio.to_thread(
             build_editor_docx, draft, appendix_data)
         media, ext = _DOCX_MEDIA, "docx"
+
+    # PR #336 Gap D -- re-run the audit on the EDITED content_text
+    # before the export downloads. Edits between generation and export
+    # can introduce numeric errors, break citation references, or
+    # drop a section heading; re-running the audit on the way out
+    # catches those before they leave the platform.
+    #
+    # Best-effort: a missing content_text or any audit exception
+    # logs and proceeds with the export. The audit warnings are
+    # persisted onto the draft row so the editor's AuditWarningsBanner
+    # surfaces them on the next render.
+    try:
+        edited_text = draft.get("content_text") or ""
+        if edited_text:
+            owner_email = draft.get("owner_email") or ""
+            new_warnings = await _run_document_audit(
+                edited_text,
+                draft["document_type"],
+                owner_email)
+            try:
+                from tools.editor_drafts import (
+                    update_audit_warnings as _update_audit_warnings,
+                )
+                await _update_audit_warnings(
+                    editor_draft_id, new_warnings)
+            except Exception as exc:  # noqa: BLE001
+                # The update helper may not exist in older deploys;
+                # fall back to a direct UPDATE so the draft row stays
+                # current. The export must NEVER fail because of this.
+                log.warning(
+                    "editor_export_audit_persist_warning",
+                    error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_export_audit_failed",
+            draft_id=editor_draft_id, error=str(exc))
 
     slug = draft["document_type"].replace("_", "-")
     filename = f"forest-capital-{slug}-{date.today().isoformat()}.{ext}"

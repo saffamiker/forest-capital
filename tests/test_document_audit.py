@@ -366,6 +366,10 @@ class TestAuditDocument:
     }
 
     def test_clean_document_no_flags(self):
+        # Use presentation_deck so PR #336's brief-only CHECK 6
+        # (required citations) and CHECK 7 (section word counts) do
+        # not fire on this minimal sample. The brief-specific
+        # equivalents are pinned in tests/test_brief_audit_gaps.py.
         text = (
             "Regime Switching achieves a Sharpe of 0.6291 over the period. "
             "We follow Sharpe (1994) in computing the ratio.\n\n"
@@ -373,7 +377,7 @@ class TestAuditDocument:
             "Sharpe, W. F. (1994). JPM."
         )
         result = audit_document(
-            text, "executive_brief", strategy_cache=self.cache)
+            text, "presentation_deck", strategy_cache=self.cache)
         assert isinstance(result, AuditResult)
         assert result.flag_counts["total"] == 0
         assert not result.has_any_flag

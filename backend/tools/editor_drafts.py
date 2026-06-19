@@ -207,6 +207,35 @@ async def update_draft(
         return False
 
 
+async def update_audit_warnings(
+    draft_id: int, audit_warnings: dict[str, Any] | None,
+) -> bool:
+    """PR #336 -- update the audit_warnings JSONB column on a draft
+    row in place. Used by the editor-export path to persist a
+    post-edit audit result so the next editor render surfaces the
+    flags from the actual edited text. NULL clears the column when
+    the audit found nothing."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return False
+        aw = json.dumps(audit_warnings) if audit_warnings else None
+        async with sf() as s:
+            res = await s.execute(text(
+                "UPDATE editor_drafts "
+                "SET audit_warnings = CAST(:aw AS JSONB), "
+                "    updated_at = now() "
+                "WHERE id = :i AND is_deleted = false"),
+                {"aw": aw, "i": draft_id})
+            await s.commit()
+            return res.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_update_audit_warnings_failed", error=str(exc))
+        return False
+
+
 async def save_version(
     draft_id: int, version_label: str | None, saved_by: str | None,
 ) -> dict[str, Any] | None:
