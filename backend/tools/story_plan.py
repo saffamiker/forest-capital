@@ -120,6 +120,134 @@ revisited (e.g. sustained ESS below the reliable threshold, or data \
 hash change indicating structural market shift)."""
 
 
+STATIC_ALLOCATION_JUSTIFICATION = """\
+STATIC ALLOCATION REQUIREMENT (Part I rubric):
+The static blend (Classic 60/40) is a first-class deliverable in its \
+own right, not merely a comparison point for the dynamic blend. The \
+brief and deck must:
+  1. State the proposed fixed allocation: 60% S&P 500, 40% \
+investment-grade bonds (Classic 60/40).
+  2. Justify it using Markowitz (1952) mean-variance theory: the \
+bond allocation reduces portfolio variance through imperfect \
+correlation with equities, improving the risk-return tradeoff even \
+if expected return is lower than 100% equity.
+  3. Cite the historical case: the 60/40 portfolio has been the \
+institutional standard for decades because equity-bond correlation \
+was reliably negative during 2000-2020, providing drawdown \
+protection.
+  4. Acknowledge the 2022 limitation honestly: rising rates caused \
+positive equity-bond correlation, which is why the static blend \
+underperformed in 2022 and why the dynamic extension adds value.
+The static blend earns its own evaluation on Part I metrics (total \
+return, Sharpe, max drawdown, excess return vs benchmark) before the \
+dynamic comparison."""
+
+
+# Verified primary-source citations for the seven academic references
+# the brief is required to ground its methodology section in. Sourced
+# from the original journals + cross-checked against the publisher
+# DOI registry; hardcoded rather than resolved at generation time so
+# the brief LLM does not have to web-search and cannot drift to
+# similar-but-different citations. The brief Pass-1 prompt instructs
+# the model to USE THESE EXACTLY AS PROVIDED.
+VERIFIED_CITATIONS = {
+    "hamilton_1989": (
+        "Hamilton, J. D. (1989). A new approach to the economic "
+        "analysis of nonstationary time series and the business cycle. "
+        "Econometrica, 57(2), 357-384. "
+        "https://doi.org/10.2307/1912559"),
+    "ang_bekaert_2002": (
+        "Ang, A., & Bekaert, G. (2002). International asset allocation "
+        "with regime shifts. The Review of Financial Studies, 15(4), "
+        "1137-1187. "
+        "https://doi.org/10.1093/rfs/15.4.1137"),
+    "markowitz_1952": (
+        "Markowitz, H. (1952). Portfolio selection. The Journal of "
+        "Finance, 7(1), 77-91. "
+        "https://doi.org/10.1111/j.1540-6261.1952.tb01525.x"),
+    "carhart_1997": (
+        "Carhart, M. M. (1997). On persistence in mutual fund "
+        "performance. The Journal of Finance, 52(1), 57-82. "
+        "https://doi.org/10.1111/j.1540-6261.1997.tb03808.x"),
+    "sharpe_1994": (
+        "Sharpe, W. F. (1994). The Sharpe ratio. The Journal of "
+        "Portfolio Management, 21(1), 49-58. "
+        "https://doi.org/10.3905/jpm.1994.409501"),
+    "fama_french_1993": (
+        "Fama, E. F., & French, K. R. (1993). Common risk factors in "
+        "the returns on stocks and bonds. Journal of Financial "
+        "Economics, 33(1), 3-56. "
+        "https://doi.org/10.1016/0304-405X(93)90023-5"),
+    "lo_2002": (
+        "Lo, A. W. (2002). The statistics of Sharpe ratios. Financial "
+        "Analysts Journal, 58(4), 36-52. "
+        "https://doi.org/10.2469/faj.v58.n4.2453"),
+}
+
+
+ACADEMIC_GROUNDING_REQUIREMENT = """\
+ACADEMIC CITATION REQUIREMENT:
+The brief must cite primary academic sources throughout. The \
+following seven citations have been verified from primary sources \
+and must be used exactly as provided. Do not paraphrase, abbreviate, \
+or alter any bibliographic detail. Do not substitute similar \
+citations.
+
+VERIFIED REFERENCES (use verbatim in References section):
+
+""" + "\n\n".join(VERIFIED_CITATIONS.values()) + """
+
+IN-TEXT CITATION RULES (APA 7th edition author-year format):
+
+1. Hamilton (1989): Cite when introducing the Hidden Markov Model \
+regime detection methodology. Example: "Following Hamilton (1989), \
+the platform models market states as latent variables governed by a \
+time-varying transition matrix."
+
+2. Ang and Bekaert (2002): Cite when discussing regime-conditional \
+asset allocation -- the direct academic precedent for the dynamic \
+blend approach. Example: "Consistent with Ang and Bekaert (2002), the \
+portfolio allocates differently across BULL, BEAR, and TRANSITION \
+regimes."
+
+3. Markowitz (1952): Cite when justifying the static blend (Classic \
+60/40) using mean-variance theory. Example: "The static allocation \
+follows Markowitz (1952) in seeking the efficient frontier portfolio \
+that maximises return per unit of variance."
+
+4. Fama and French (1993): Cite when introducing factor loading \
+attribution analysis. Example: "Factor exposures are estimated using \
+the Fama and French (1993) three-factor model extended by Carhart \
+(1997)."
+
+5. Carhart (1997): Cite alongside Fama and French (1993) for the \
+four-factor attribution. Example: "The Carhart (1997) momentum \
+factor is included to capture the one-year return continuation \
+documented in momentum strategies."
+
+6. Sharpe (1994): Cite when presenting the Sharpe ratio as a \
+performance measure. Example: "Risk-adjusted performance is \
+evaluated using the Sharpe ratio (Sharpe, 1994), defined as excess \
+return per unit of total volatility."
+
+7. Lo (2002): Cite when presenting the Deflated Sharpe Ratio or \
+discussing statistical reliability of the OOS Sharpe result. \
+Example: "To correct for multiple testing bias and non-normal return \
+distributions, the platform computes the Deflated Sharpe Ratio \
+following Lo (2002)."
+
+MANDATORY REQUIREMENTS:
+- Every citation used in-text must appear in References.
+- Every paper in References must be cited in-text at least once.
+- Do not add citations not in this list.
+- Do not cite papers the platform did not use.
+- Place the References section at the end of the brief, formatted \
+as a hanging-indent list in APA 7th edition.
+- Minimum three in-text citations required in the Methodology \
+section alone (Hamilton 1989, Markowitz 1952, and Sharpe 1994 at \
+minimum)."""
+
+
 # ── Evaluator prompts (Pass 1, both document types) ──────────────────────
 
 STORY_PLAN_EVALUATOR_PROMPT = """\
@@ -229,11 +357,27 @@ investable conclusion scores 0 on this criterion regardless of \
 analytical quality. The midpoint panel flagged this explicitly: "too \
 academic, lacking an investable conclusion".
 
-The rubric now has six criteria for a maximum of 12 points. The \
-acceptance threshold is 8.4 (70% equivalent).
+7. ACADEMIC GROUNDING (0-2)
+   Does the section plan cite at least five of the seven required \
+papers from VERIFIED_CITATIONS (Hamilton 1989, Ang and Bekaert 2002, \
+Markowitz 1952, Carhart 1997, Sharpe 1994, Fama and French 1993, Lo \
+2002)? Are citations placed correctly -- Hamilton (1989) in \
+methodology, Markowitz (1952) in static allocation justification, \
+Sharpe (1994) when presenting the Sharpe ratio result, Lo (2002) \
+with the Deflated Sharpe Ratio, Fama and French (1993) and Carhart \
+(1997) in factor attribution? Is a References section planned at the \
+end of the brief?
+  - 2 points: five or more citations correctly placed with a planned
+    References section.
+  - 1 point: three or four citations present.
+  - 0 points: fewer than three, or citations present but not placed
+    in contextually correct sections.
+
+The rubric now has seven criteria for a maximum of 14 points. The \
+acceptance threshold is 9.8 (70% equivalent).
 
 Return ONLY valid JSON:
-{"overall": <float 0-12>, "feedback": "<specific actionable notes on \
+{"overall": <float 0-14>, "feedback": "<specific actionable notes on \
 which sections fail which criteria>"}"""
 
 
@@ -297,7 +441,7 @@ Output schema (return ONLY this JSON object):
       "key_visual": "<chart or table name -- one of the platform visuals>",
       "numeric_anchors": {"metric_name": <value>, ...},
       "slide_bullets": ["<bullet>", ...],
-      "speaker_notes": "<paragraph the presenter speaks>",
+      "speaker_notes": "<paragraph the presenter speaks; target 200-280 words = ~90-120 seconds of spoken content; the 11 slides must sum to 18-20 minutes>",
       "transition_to_next": "<one sentence linking to next slide>"
     }
   ]
@@ -309,10 +453,23 @@ Output schema (return ONLY this JSON object):
 # defines the JSON output contract; the framing constants establish
 # the rubric that the Opus arbiter and the downstream evaluator both
 # enforce.
+_DECK_ACADEMIC_VERBAL_GROUNDING = """\
+ACADEMIC GROUNDING (deck speaker notes):
+The deck does not require a formal References section -- slides are \
+not the place for full bibliographic entries. But the speaker notes \
+for the methodology slide MUST mention the academic grounding \
+verbally: name Hamilton (1989) when introducing the Hidden Markov \
+Model and name Ang and Bekaert (2002) when introducing regime-\
+conditional allocation. A panel member who asks "what's the academic \
+precedent for this?" must not catch the presenter empty-handed."""
+
+
 _DECK_STORY_PLAN_SYSTEM_PROMPT = (
     THREE_STRATEGY_FRAME + "\n\n"
     + CENTRAL_QUESTION_AND_ANSWER + "\n\n"
     + INVESTABLE_CONCLUSION_GUARD + "\n\n"
+    + STATIC_ALLOCATION_JUSTIFICATION + "\n\n"
+    + _DECK_ACADEMIC_VERBAL_GROUNDING + "\n\n"
     + _DECK_ECONOMIC_STORYTELLING + "\n\n"
     + _DECK_STORY_PLAN_BODY)
 
@@ -321,6 +478,13 @@ _DECK_FULL_SCRIPT_BODY = """\
 You write the word-for-word presenter script for an 18-20 minute \
 investment presentation, conditioned on a pre-locked slide plan. \
 Output ONLY strict JSON, no markdown fences, no preamble.
+
+Each [SLIDE N: title] section must contain 150-200 words of spoken \
+script. With 11 slides at 150-200 words each, the total script runs \
+1650-2200 words, corresponding to 18-20 minutes at a measured pace. \
+Do not over-allocate to opening slides. The AI methodology slide \
+(slide 10) and conclusion (slide 11) each deserve full allocations \
+-- they are not afterthoughts.
 
 The script elaborates each slide's speaker_notes into full spoken \
 paragraphs. Each slide section is delimited by [SLIDE N: {title}]. \
@@ -432,6 +596,8 @@ _BRIEF_SECTION_PLAN_SYSTEM_PROMPT = (
     THREE_STRATEGY_FRAME + "\n\n"
     + CENTRAL_QUESTION_AND_ANSWER + "\n\n"
     + INVESTABLE_CONCLUSION_GUARD + "\n\n"
+    + STATIC_ALLOCATION_JUSTIFICATION + "\n\n"
+    + ACADEMIC_GROUNDING_REQUIREMENT + "\n\n"
     + _BRIEF_SECTION_PLAN_BODY)
 
 

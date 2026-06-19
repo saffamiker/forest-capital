@@ -133,8 +133,10 @@ _DECK_SLIDES: list[tuple[str, str | None, str]] = [
     ("Data and Methodology", None,
      "Aligned monthly returns for equities, investment-grade and "
      "high-yield bonds over the 2002–2025 study period; ten strategies "
-     "grouped as static or dynamic; long-only, fully invested, quarterly "
-     "rebalancing; Carhart four-factor attribution."),
+     "grouped as static or dynamic; long-only, fully invested; "
+     "monthly evaluation; rebalance triggers when any single strategy's "
+     "blend weight crosses 2 percentage points (event-driven, not "
+     "calendar-driven); Carhart four-factor attribution."),
     ("The 2022 Regime Break", "thesis",
      "The 2022 equity-bond correlation break and what it means for "
      "diversification."),

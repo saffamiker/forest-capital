@@ -165,12 +165,277 @@ class TestEvaluatorCriterion6:
 
     def test_brief_evaluator_has_criterion_6_investable_conclusion(self):
         from tools.story_plan import BRIEF_PLAN_EVALUATOR_PROMPT
+        # PR #335 expanded the brief rubric to 7 criteria (14-point
+        # ceiling, 9.8 threshold). The deck rubric is still at 6
+        # criteria (12-point, 8.4 threshold) -- the deck does not
+        # require a References section so the academic-grounding
+        # criterion is brief-only.
         assert "6. INVESTABLE CONCLUSION (0-2)" \
             in BRIEF_PLAN_EVALUATOR_PROMPT
         assert "non-technical decision-maker" \
             in BRIEF_PLAN_EVALUATOR_PROMPT
-        assert "12 points" in BRIEF_PLAN_EVALUATOR_PROMPT
-        assert "8.4" in BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "14 points" in BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "9.8" in BRIEF_PLAN_EVALUATOR_PROMPT
+
+
+class TestRubricCoverageFixes:
+    """PR #335 -- the rubric-coverage audit (Q2-Q5) identified four
+    structural gaps: per-slide duration anchoring (Q2), static
+    allocation theoretical justification missing as a Part I
+    deliverable (Q3), rebalancing frequency disclosure (Q4) with an
+    inherited accuracy bug in editor_content.py, and academic
+    citation grounding (Q5). All four fixes thread through the
+    shared framing constant pattern PR #334 introduced so the brief,
+    deck, and script all inherit the same contract."""
+
+    def test_static_allocation_justification_constant_present(self):
+        from tools.story_plan import STATIC_ALLOCATION_JUSTIFICATION
+        # Part I rubric language pinned.
+        assert "Part I rubric" in STATIC_ALLOCATION_JUSTIFICATION
+        # The four required elements: fixed allocation, Markowitz
+        # justification, historical case, 2022 limitation.
+        assert "60% S&P 500" in STATIC_ALLOCATION_JUSTIFICATION
+        assert "Markowitz (1952)" in STATIC_ALLOCATION_JUSTIFICATION
+        assert "mean-variance theory" \
+            in STATIC_ALLOCATION_JUSTIFICATION
+        assert "reliably negative during 2000-2020" \
+            in STATIC_ALLOCATION_JUSTIFICATION
+        assert "2022 limitation" in STATIC_ALLOCATION_JUSTIFICATION
+
+    def test_academic_grounding_requirement_constant_present(self):
+        from tools.story_plan import ACADEMIC_GROUNDING_REQUIREMENT
+        # All seven required citations named in the in-text usage
+        # rules (each rule appears as a numbered list item with the
+        # canonical author-year form).
+        for citation in (
+            "Hamilton (1989)", "Ang and Bekaert (2002)",
+            "Markowitz (1952)", "Fama and French (1993)",
+            "Carhart (1997)", "Sharpe (1994)", "Lo (2002)",
+        ):
+            assert citation in ACADEMIC_GROUNDING_REQUIREMENT, (
+                f"missing in-text reference: {citation}")
+        # The "use them exactly as provided" + mandatory-requirements
+        # block pinned so a future trim cannot quietly relax the
+        # contract.
+        assert "must be used exactly as provided" \
+            in ACADEMIC_GROUNDING_REQUIREMENT
+        assert "Every citation used in-text must appear in References" \
+            in ACADEMIC_GROUNDING_REQUIREMENT
+        assert "Do not add citations not in this list" \
+            in ACADEMIC_GROUNDING_REQUIREMENT
+
+    def test_verified_citations_constant_carries_all_seven_dois(self):
+        """The seven primary-source citations are pre-verified from
+        their original journals; hardcoded into the constant so the
+        brief LLM does not have to web-search and cannot drift to
+        similar-but-different citations."""
+        from tools.story_plan import VERIFIED_CITATIONS
+        # All seven keys present (expanded from the initial four in
+        # the same PR to cover Sharpe ratio + Fama-French + Lo
+        # Deflated Sharpe Ratio).
+        assert set(VERIFIED_CITATIONS.keys()) == {
+            "hamilton_1989", "ang_bekaert_2002",
+            "markowitz_1952", "carhart_1997",
+            "sharpe_1994", "fama_french_1993", "lo_2002",
+        }
+        # The verified DOIs pinned individually so any value drift
+        # surfaces immediately.
+        assert "10.2307/1912559" in VERIFIED_CITATIONS["hamilton_1989"]
+        assert "10.1093/rfs/15.4.1137" \
+            in VERIFIED_CITATIONS["ang_bekaert_2002"]
+        assert "10.1111/j.1540-6261.1952.tb01525.x" \
+            in VERIFIED_CITATIONS["markowitz_1952"]
+        assert "10.1111/j.1540-6261.1997.tb03808.x" \
+            in VERIFIED_CITATIONS["carhart_1997"]
+        assert "10.3905/jpm.1994.409501" \
+            in VERIFIED_CITATIONS["sharpe_1994"]
+        assert "10.1016/0304-405X(93)90023-5" \
+            in VERIFIED_CITATIONS["fama_french_1993"]
+        assert "10.2469/faj.v58.n4.2453" \
+            in VERIFIED_CITATIONS["lo_2002"]
+        # Each citation includes a DOI (defensive against a
+        # truncation that drops the second half).
+        for key, citation in VERIFIED_CITATIONS.items():
+            assert "https://doi.org/" in citation, (
+                f"missing DOI in {key}")
+
+    def test_grounding_requirement_injects_all_seven_dois_verbatim(self):
+        """Each of the seven verified DOIs lands in the brief Pass-1
+        prompt verbatim -- the brief LLM sees the bibliographic
+        details exactly as verified and cannot drift to a similar-
+        but-different citation. Hamilton + Lo are spot-checked
+        explicitly per the user's directive; the loop below pins the
+        remaining five."""
+        from tools.story_plan import (
+            ACADEMIC_GROUNDING_REQUIREMENT, VERIFIED_CITATIONS,
+        )
+        # Spot-check the two ends of the bibliography.
+        assert "10.2307/1912559" in ACADEMIC_GROUNDING_REQUIREMENT
+        assert "10.2469/faj.v58.n4.2453" \
+            in ACADEMIC_GROUNDING_REQUIREMENT
+        # The remaining five verified DOIs land too.
+        for key, citation in VERIFIED_CITATIONS.items():
+            doi_fragment = citation.split("https://doi.org/")[-1]
+            assert doi_fragment in ACADEMIC_GROUNDING_REQUIREMENT, (
+                f"DOI fragment for {key} did not land in the "
+                "grounding requirement")
+
+    def test_no_web_search_citation_step_in_brief_path(self):
+        """The user's directive: citations are compile-time constants,
+        not runtime web-search lookups. Pin the absence of any
+        web-search-driven citation resolution helper in story_plan.py
+        so a future refactor cannot reintroduce the runtime lookup
+        that the verified-citation constant supersedes."""
+        from pathlib import Path
+        src = (Path(__file__).resolve().parents[1] / "backend"
+               / "tools" / "story_plan.py").read_text(encoding="utf-8")
+        # No web-search-driven citation resolver function or constant.
+        assert "_resolve_academic_citations" not in src
+        assert "STEP 0" not in src
+        # WEB_SEARCH_TOOL is not imported into story_plan -- the
+        # citation grounding is purely compile-time.
+        assert "WEB_SEARCH_TOOL" not in src
+
+    def test_static_justification_threaded_into_deck_pass1(self):
+        from tools.story_plan import (
+            STATIC_ALLOCATION_JUSTIFICATION,
+            _DECK_STORY_PLAN_SYSTEM_PROMPT,
+        )
+        assert STATIC_ALLOCATION_JUSTIFICATION \
+            in _DECK_STORY_PLAN_SYSTEM_PROMPT
+
+    def test_static_justification_threaded_into_brief_pass1(self):
+        from tools.story_plan import (
+            STATIC_ALLOCATION_JUSTIFICATION,
+            _BRIEF_SECTION_PLAN_SYSTEM_PROMPT,
+        )
+        assert STATIC_ALLOCATION_JUSTIFICATION \
+            in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+
+    def test_academic_grounding_threaded_into_brief_pass1_only(self):
+        """The brief gets full citations + a References section; the
+        deck does not require a formal Reference section in slides so
+        only a verbal-mention note rides along on the deck path."""
+        from tools.story_plan import (
+            ACADEMIC_GROUNDING_REQUIREMENT,
+            _BRIEF_SECTION_PLAN_SYSTEM_PROMPT,
+            _DECK_STORY_PLAN_SYSTEM_PROMPT,
+        )
+        assert ACADEMIC_GROUNDING_REQUIREMENT \
+            in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+        # The deck path does NOT carry the full grounding requirement
+        # (no References section in slides) -- it carries the verbal-
+        # mention note instead.
+        assert ACADEMIC_GROUNDING_REQUIREMENT \
+            not in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        # The verbal-mention note IS on the deck path.
+        assert "ACADEMIC GROUNDING (deck speaker notes)" \
+            in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert "Hamilton (1989)" in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert "Ang and Bekaert (2002)" \
+            in _DECK_STORY_PLAN_SYSTEM_PROMPT
+
+    def test_brief_evaluator_has_criterion_7_academic_grounding(self):
+        from tools.story_plan import BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "7. ACADEMIC GROUNDING (0-2)" \
+            in BRIEF_PLAN_EVALUATOR_PROMPT
+        # Criterion 7 references the expanded "five of the seven"
+        # threshold (updated when VERIFIED_CITATIONS expanded from
+        # 4 to 7 entries).
+        assert "five of the seven" in BRIEF_PLAN_EVALUATOR_PROMPT
+        # All seven required citations called out by name in the
+        # rubric.
+        for citation in (
+            "Hamilton 1989", "Ang and Bekaert 2002", "Markowitz 1952",
+            "Carhart 1997", "Sharpe 1994", "Fama and French 1993",
+            "Lo 2002",
+        ):
+            assert citation in BRIEF_PLAN_EVALUATOR_PROMPT, (
+                f"criterion 7 missing reference: {citation}")
+        # The contextual placement rules (Hamilton in methodology, etc.)
+        # are pinned -- scoring criterion 2 requires correct PLACEMENT
+        # too, not just presence.
+        assert ("Hamilton (1989) in methodology"
+                in BRIEF_PLAN_EVALUATOR_PROMPT)
+        # The 14-point ceiling + 9.8 threshold pinned.
+        assert "seven criteria" in BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "14 points" in BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "9.8" in BRIEF_PLAN_EVALUATOR_PROMPT
+
+    def test_pass1_speaker_notes_carry_duration_band(self):
+        """Q2 -- the Pass-1 schema annotation pins the per-slide
+        speaker_notes word band so the Opus arbiter targets the right
+        cadence (~90-120 seconds per slide)."""
+        from tools.story_plan import _DECK_STORY_PLAN_BODY
+        assert "200-280 words" in _DECK_STORY_PLAN_BODY
+        assert "90-120 seconds" in _DECK_STORY_PLAN_BODY
+
+    def test_pass2_script_carries_per_slide_word_band(self):
+        """Q2 -- the Pass-2 script body pins the per-slide word band
+        + the 11-slide total so the script does not over-allocate to
+        opening slides at the expense of the AI methodology +
+        conclusion slides."""
+        from tools.story_plan import _DECK_FULL_SCRIPT_BODY
+        assert "150-200 words" in _DECK_FULL_SCRIPT_BODY
+        assert "1650-2200 words" in _DECK_FULL_SCRIPT_BODY
+        # The "do not over-allocate" guard.
+        assert "Do not over-allocate to opening slides" \
+            in _DECK_FULL_SCRIPT_BODY
+        # The AI methodology + conclusion get full allocations.
+        assert "AI methodology slide (slide 10)" \
+            in _DECK_FULL_SCRIPT_BODY
+
+    def test_editor_content_quarterly_rebalancing_string_removed(self):
+        """Q4 (accuracy bug) -- the midpoint paper section description
+        previously claimed 'quarterly rebalancing' which contradicts
+        the production behaviour (monthly evaluation, 2pp threshold).
+        Pinning the absence of the wrong string + the presence of the
+        correct one."""
+        from pathlib import Path
+        import re
+        raw = (Path(__file__).resolve().parents[1] / "backend"
+               / "tools" / "editor_content.py").read_text(
+                   encoding="utf-8")
+        # Collapse Python string-literal continuations so multi-line
+        # adjacent-string-concat (which Python concatenates at parse
+        # time) is matched as a single string by these assertions.
+        src = re.sub(r'"\s*\n\s+"', '', raw)
+        assert "quarterly rebalancing" not in src.lower()
+        assert "monthly evaluation" in src
+        assert "2 percentage points" in src
+        assert "event-driven, not calendar-driven" in src
+
+    def test_brief_methodology_task_carries_rebalancing_disclosure(
+            self):
+        """Q4 -- the brief Section 2 Methodology task instructs an
+        explicit rebalancing-frequency disclosure paragraph + the
+        justification for monthly rather than quarterly cadence."""
+        from pathlib import Path
+        import re
+        raw = (Path(__file__).resolve().parents[1] / "backend"
+               / "main.py").read_text(encoding="utf-8")
+        # Collapse Python string-literal continuations the same way
+        # the existing structure test does.
+        source = re.sub(r'"\s*\n\s+"', '', raw)
+        assert "Disclose the rebalancing frequency explicitly" \
+            in source
+        assert "2 percentage points" in source
+        assert "monthly evaluation matches the cadence at which the " \
+               "HMM produces regime updates" in source
+
+    def test_brief_methodology_task_carries_required_citations(self):
+        """Q5 -- the brief Section 2 Methodology task names all four
+        required academic citations inline so the per-section LLM
+        pass cannot drift back to citation-free prose."""
+        from pathlib import Path
+        import re
+        raw = (Path(__file__).resolve().parents[1] / "backend"
+               / "main.py").read_text(encoding="utf-8")
+        source = re.sub(r'"\s*\n\s+"', '', raw)
+        assert "Hamilton (1989)" in source
+        assert "Ang and Bekaert (2002)" in source
+        assert "Markowitz (1952)" in source
+        assert "Carhart, 1997" in source or "Carhart (1997)" in source
 
 
 class TestAppendixFramingPrelude:
