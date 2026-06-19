@@ -10996,6 +10996,17 @@ async def _generate_brief_document(
                  + _BRIEF_TONE_RULES),
              "context": {"study_period": data["study_period"]}},
         ]
+        # PR #333 -- brief section plan injection. Mirrors the deck
+        # path: cache-aware retrieval of the Opus story plan keyed by
+        # (data_hash, 'brief'); on hit, each spec's task is prepended
+        # with a LOCKED CONTRACT block listing the section's
+        # key_message + numeric_anchors + target_length_words. The
+        # per-section Sonnet pass then writes prose around the lock.
+        # Fail-open: a missing plan or any retrieval error returns an
+        # empty section_plan dict and the specs run exactly as before.
+        section_plan = await _resolve_story_plan_brief_sections(data)
+        if section_plan:
+            specs = _inject_brief_section_plan(specs, section_plan)
         narratives = await _generate_narratives(
             _apply_draft_caveats(specs),
             n_strategies=len(data.get("strategy_results") or {}))
@@ -11589,12 +11600,24 @@ _DECK_SLIDE_SYSTEM_PROMPT = (
 
 def _generate_one_deck_slide(
     slide_number: int, context: dict, n_strategies: int,
+    *, slide_plan_entry: dict | None = None,
 ) -> dict | None:
     """Bridge #98 / #100 -- generate ONE deck slide via a DIRECT Sonnet
     call (no harness, no evaluator, no Gemini, no Opus arbiter). Sync;
     callers wrap in asyncio.to_thread. Returns the parsed slide dict
     or None on any failure; the caller writes the [DATA PENDING]
     placeholder for that slide via _normalize_slides.
+
+    slide_plan_entry (PR #333) -- when supplied, the entry from the
+    Opus story plan for THIS slide is injected ahead of the existing
+    spec block. The headline, numeric_anchors, bullets, and key visual
+    are LOCKED -- the per-slide Sonnet call's job becomes prose layout,
+    not deciding what the numbers are. Speaker notes from the plan are
+    also overwritten onto the parsed slide dict after the call returns
+    (the plan is the source of truth; the LLM never gets to "improve"
+    them). When the plan is None the call behaves exactly as before --
+    the fail-open contract is: a missing or fallback plan never blocks
+    slide generation.
 
     Why direct call_claude instead of harness_narrative:
       The harness uses the academic_review_peer_evaluator rubric, which
@@ -11624,7 +11647,32 @@ def _generate_one_deck_slide(
         context if isinstance(context, str)
         else _json.dumps(context, indent=2, default=str)
     )
-    user_message = f"{prompt}\n\nCONTEXT (numbers to cite, do not invent):\n{ctx_str}"
+    # PR #333 -- when a story plan entry exists for this slide, inject
+    # the LOCKED contract above the spec block. The slide LLM is told
+    # explicitly that its job is layout + prose only; the numbers, the
+    # headline, and the bullet content are NOT to be regenerated.
+    plan_block = ""
+    if slide_plan_entry and isinstance(slide_plan_entry, dict):
+        anchors = slide_plan_entry.get("numeric_anchors") or {}
+        bullets = slide_plan_entry.get("slide_bullets") or []
+        bullets_block = (
+            "\n".join(f"  - {b}" for b in bullets)
+            if bullets else "  (no bullets -- the headline is the slide)")
+        plan_block = (
+            "\n\nSTORY PLAN FOR THIS SLIDE (do not deviate):\n"
+            f"  Headline: {slide_plan_entry.get('headline', '')}\n"
+            f"  Key visual: {slide_plan_entry.get('key_visual', '')}\n"
+            "  Numeric anchors (use ONLY these values):\n"
+            f"{_json.dumps(anchors, indent=4, default=str)}\n"
+            "  Bullets (render these, max 2):\n"
+            f"{bullets_block}\n\n"
+            "  Your job is layout and prose formatting only. Do not "
+            "invent numbers. Do not change the headline. Do not add "
+            "bullets beyond those listed. Write [DATA PENDING] for any "
+            "value not in numeric_anchors.")
+    user_message = (
+        f"{prompt}{plan_block}\n\nCONTEXT (numbers to cite, do not "
+        f"invent):\n{ctx_str}")
 
     for attempt in (1, 2):
         try:
@@ -11641,6 +11689,16 @@ def _generate_one_deck_slide(
         parsed = parse_single_slide_json(raw)
         if parsed is not None:
             parsed["slide_number"] = slide_number
+            # PR #333 -- the story plan is the source of truth for
+            # speaker notes. The Opus arbiter wrote them once with the
+            # rubric-evaluated quality bar; we never let the per-slide
+            # Sonnet pass "improve" them. Inject verbatim onto the
+            # parsed dict so build_presentation_deck reads them.
+            if slide_plan_entry and isinstance(
+                    slide_plan_entry.get("speaker_notes"), str
+            ) and slide_plan_entry["speaker_notes"].strip():
+                parsed["speaker_notes"] = (
+                    slide_plan_entry["speaker_notes"])
             return parsed
 
         log.warning("deck_slide_parse_failed",
@@ -11736,12 +11794,33 @@ async def _generate_deck_document(
             await _build_deck_context(email)
         per_slide_ctx = _deck_per_slide_context(data)
 
-        from tools.academic_deck import DECK_SLIDE_COUNT
+        from tools.academic_deck import DECK_SLIDE_COUNT, SLIDE_TITLES
+        # PR #333 -- the story plan is the LOCKED structural layer
+        # above the per-slide LLM passes. Each slide's headline,
+        # numeric anchors, bullets, and speaker notes come from the
+        # plan; the per-slide Sonnet call writes prose around them.
+        # Fail-open contract: a missing plan (transient Opus failure,
+        # cold cache, or document_type mismatch) leaves slide_plan as
+        # an empty list and slide generation proceeds exactly as
+        # before -- the existing fallback already produces a complete
+        # deck without the locked structural layer.
+        slide_plan = await _resolve_story_plan_slide_entries(
+            data, n_strategies, list(SLIDE_TITLES))
+
         slides: list[dict] = []
         for n in range(1, DECK_SLIDE_COUNT + 1):
+            # Index by slide_number explicitly so a partial plan (e.g.
+            # the Opus pass returned 9 slide entries when the deck has
+            # 11 slots) does not shift downstream slides.
+            entry = next(
+                (e for e in slide_plan
+                 if isinstance(e, dict)
+                 and e.get("slide_number") == n),
+                None)
             slide = await asyncio.to_thread(
                 _generate_one_deck_slide,
-                n, per_slide_ctx, n_strategies)
+                n, per_slide_ctx, n_strategies,
+                slide_plan_entry=entry)
             if slide is not None:
                 slides.append(slide)
             # A None slide is left out -- _normalize_slides inside
@@ -11754,6 +11833,126 @@ async def _generate_deck_document(
     except Exception as exc:  # noqa: BLE001
         log.error("presentation_deck_generation_error", error=str(exc))
         raise
+
+
+async def _resolve_story_plan_slide_entries(
+    data: dict, n_strategies: int, slide_titles: list[str],
+) -> list[dict]:
+    """Cache-aware story plan retrieval for deck generation.
+
+    Reads story_plans for (current_data_hash, 'deck'). On a non-fallback
+    cache hit returns the slide_plan list verbatim. On a cache miss
+    fires generate_deck_story_plan() and persists. Fail-open at every
+    layer: an unreachable Opus or a cold strategy cache returns an
+    empty list and the deck renders without the locked structural
+    layer (i.e. exactly as it did pre-PR-333). Logs the cache decision
+    so an operator can see hit / miss / fallback in Render logs.
+    """
+    try:
+        from tools.cache import get_latest_strategy_hash
+        data_hash = await get_latest_strategy_hash()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_story_plan_hash_unavailable", error=str(exc))
+        return []
+    if not data_hash:
+        return []
+    try:
+        from tools import story_plan as sp
+        plan = await sp.refresh_story_plan(
+            data_hash, "deck",
+            deck_context=_deck_per_slide_context(data),
+            slide_titles=slide_titles)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_story_plan_refresh_failed", error=str(exc))
+        return []
+    if not plan or plan.get("error"):
+        log.warning("deck_story_plan_unavailable",
+                    error=(plan or {}).get("error"))
+        return []
+    log.info("deck_story_plan_resolved",
+             cache=plan.get("cache"),
+             model=plan.get("_model"))
+    entries = plan.get("slide_plan") or []
+    return entries if isinstance(entries, list) else []
+
+
+async def _resolve_story_plan_brief_sections(
+    data: dict,
+) -> dict:
+    """Cache-aware brief section plan retrieval. Mirrors the deck
+    helper above: reads story_plans for (current_data_hash, 'brief')
+    + fires generate_brief_section_plan on miss. Fail-open at every
+    layer -- a missing plan returns an empty dict and the brief
+    section specs run exactly as before the injection layer landed."""
+    try:
+        from tools.cache import get_latest_strategy_hash
+        data_hash = await get_latest_strategy_hash()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("brief_story_plan_hash_unavailable", error=str(exc))
+        return {}
+    if not data_hash:
+        return {}
+    try:
+        from tools import story_plan as sp
+        from tools.editor_content import _EXEC_BRIEF_SECTIONS
+        rubric_sections = [k for _h, k, _c in _EXEC_BRIEF_SECTIONS]
+        plan = await sp.refresh_story_plan(
+            data_hash, "brief",
+            brief_context={
+                "validated_constants": data.get(
+                    "validated_constants") or {},
+                "summary_statistics": data.get("summary_statistics"),
+                "drawdown_comparison": data.get("drawdown_comparison"),
+                "regime_conditional": data.get("regime_conditional"),
+                "study_period": data.get("study_period"),
+            },
+            rubric_sections=rubric_sections)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("brief_story_plan_refresh_failed", error=str(exc))
+        return {}
+    if not plan or plan.get("error"):
+        log.warning("brief_story_plan_unavailable",
+                    error=(plan or {}).get("error"))
+        return {}
+    log.info("brief_story_plan_resolved",
+             cache=plan.get("cache"),
+             model=plan.get("_model"))
+    section_plan = plan.get("section_plan") or {}
+    return section_plan if isinstance(section_plan, dict) else {}
+
+
+def _inject_brief_section_plan(
+    specs: list[dict], section_plan: dict,
+) -> list[dict]:
+    """Prepend each spec's task with the locked section plan entry
+    for that spec's key. The injection is a no-op for any spec whose
+    key has no entry in the plan (defensive against a partial plan)."""
+    import json as _json
+
+    out: list[dict] = []
+    for spec in specs:
+        key = spec.get("key")
+        entry = section_plan.get(key) if isinstance(
+            section_plan, dict) else None
+        if not isinstance(entry, dict):
+            out.append(spec)
+            continue
+        anchors = entry.get("numeric_anchors") or {}
+        block = (
+            "SECTION PLAN (do not deviate):\n"
+            f"  Key message: {entry.get('key_message', '')}\n"
+            "  Numeric anchors (use ONLY these values):\n"
+            f"{_json.dumps(anchors, indent=4, default=str)}\n"
+            f"  Target length: {entry.get('target_length_words', '')}"
+            " words\n\n"
+            "  Write in the voice of a senior investment memo. Ground "
+            "every claim in the numeric anchors. Do not add sections "
+            "not in the rubric. Do not frame recommendations as next "
+            "steps -- frame them as investment conclusions.\n\n")
+        new_spec = dict(spec)
+        new_spec["task"] = block + str(spec.get("task", ""))
+        out.append(new_spec)
+    return out
 
 
 # ── Async document generation — job status / download / cancel ────────────────
