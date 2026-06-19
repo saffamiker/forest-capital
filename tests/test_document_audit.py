@@ -93,6 +93,134 @@ class TestNumericCrossReference:
         assert flags == []
 
 
+class TestScaleAndSignNormalisation:
+    """June 19 2026 -- the cache stores percent metrics as fractions
+    (-0.3527) while the brief / deck prose surfaces them as
+    percentages (35.27%, often without the % sign and often with the
+    drawdown sign stripped). The audit normaliser brings both sides
+    onto a common pp scale + abs() for loss metrics so a legitimate
+    magnitude match does not flag, while non-percent metrics still
+    compare at the strict 0.005 fraction-space tolerance so a real
+    Sharpe mismatch surfaces."""
+
+    cache = {
+        "Benchmark": {
+            "sharpe_ratio":  0.4936,
+            "max_drawdown":  -0.3527,
+            "cagr":          0.0779,
+        },
+        "Regime Switching": {
+            "sharpe_ratio":  0.5370,
+            "max_drawdown":  -0.2843,
+            "cagr":          0.0640,
+        },
+    }
+
+    def test_drawdown_fraction_matches_percent_no_sign(self):
+        # Cache stores -0.3527 (negative fraction). Prose says
+        # "35.27%". After normalisation: 35.27 pp vs 35.27 pp, abs()
+        # for the drawdown sign -- no flag.
+        from tools.document_audit import (
+            _extract_attributed_numbers, check_numeric_cross_reference,
+        )
+        text = "Benchmark max drawdown of 35.27% over the window."
+        tuples = _extract_attributed_numbers(text, list(self.cache.keys()))
+        # Force the parsed value into the percent-form by simulating
+        # the case where the LLM emits a bare number rather than the
+        # %-suffixed form (the user's reported failure mode).
+        for t in tuples:
+            if t["metric"] == "max_drawdown":
+                t["value"] = 35.27  # percent without % sign
+        flags = check_numeric_cross_reference(tuples, self.cache)
+        # Magnitude matches -> no flag.
+        assert flags == []
+
+    def test_drawdown_negative_percent_matches_positive(self):
+        # The cache stores the drawdown as -0.3527; the prose quotes
+        # it as -35.27% (with the sign preserved). After
+        # normalisation: abs(35.27) vs abs(35.27) pp -- no flag.
+        from tools.document_audit import (
+            _extract_attributed_numbers, check_numeric_cross_reference,
+        )
+        text = "Benchmark max drawdown of -35.27% over the window."
+        tuples = _extract_attributed_numbers(text, list(self.cache.keys()))
+        # Convert the parsed -0.3527 fraction to the percent-form
+        # the LLM occasionally emits as a bare number.
+        for t in tuples:
+            if t["metric"] == "max_drawdown":
+                t["value"] = -35.27
+        flags = check_numeric_cross_reference(tuples, self.cache)
+        assert flags == []
+
+    def test_real_sharpe_mismatch_still_flags(self):
+        # The Sharpe ratio is NOT a percent metric -- the scale
+        # normalisation must not apply, and a 0.86 (the locked OOS
+        # blend constant) attributed to BENCHMARK whose cache Sharpe
+        # is 0.4936 must STILL flag at the strict tolerance. This
+        # pins the regression: a too-permissive normalisation that
+        # also touches non-percent metrics would silently swallow
+        # the very mismatch the user reported.
+        from tools.document_audit import (
+            _extract_attributed_numbers, check_numeric_cross_reference,
+        )
+        text = "Benchmark Sharpe ratio of 0.86 stands out."
+        tuples = _extract_attributed_numbers(text, list(self.cache.keys()))
+        flags = check_numeric_cross_reference(tuples, self.cache)
+        # 0.86 vs 0.4936 -- diff 0.3664, well over 0.005 tolerance.
+        assert len(flags) == 1
+        assert flags[0]["strategy"] == "Benchmark"
+        assert flags[0]["metric"] == "sharpe_ratio"
+        assert flags[0]["scale"] == "raw"
+
+    def test_drawdown_scale_label_on_flag_is_pp(self):
+        # When a percent-metric flag does fire (genuine mismatch),
+        # the scale label is "pp" so the frontend can render the
+        # diff in percentage points. Drawdown -35.27% cache vs prose
+        # 50% -> diff 14.73 pp, well over 0.5 pp tolerance.
+        from tools.document_audit import (
+            _extract_attributed_numbers, check_numeric_cross_reference,
+        )
+        text = "Benchmark max drawdown of 50% over the window."
+        tuples = _extract_attributed_numbers(text, list(self.cache.keys()))
+        for t in tuples:
+            if t["metric"] == "max_drawdown":
+                t["value"] = 50.0
+        flags = check_numeric_cross_reference(tuples, self.cache)
+        assert len(flags) == 1
+        assert flags[0]["metric"] == "max_drawdown"
+        assert flags[0]["scale"] == "pp"
+
+
+class TestNumericGroundingPropagation:
+    """The brief tone-rules constant now carries the numeric
+    grounding directive so every section spec automatically inherits
+    it. The deck prompt carries the same CRITICAL grounding
+    instruction at the prompt preamble. These tests pin both so a
+    future tone-rules refactor doesn't quietly drop the grounding."""
+
+    def test_brief_tone_rules_include_numeric_grounding(self):
+        from main import _BRIEF_TONE_RULES
+        assert "NUMERIC GROUNDING" in _BRIEF_TONE_RULES
+        assert "must come exactly from the data context" \
+            in _BRIEF_TONE_RULES
+        assert "[DATA PENDING]" in _BRIEF_TONE_RULES
+
+    def test_brief_tone_rules_keep_original_language_contract(self):
+        # The pre-existing language contract is still present
+        # alongside the new grounding directive.
+        from main import _BRIEF_TONE_RULES
+        assert "Never write 'the platform found'" in _BRIEF_TONE_RULES
+        assert "our analysis shows" in _BRIEF_TONE_RULES
+
+    def test_deck_preamble_carries_critical_grounding(self):
+        from tools.academic_deck import DECK_GENERATION_PROMPT
+        assert "CRITICAL" in DECK_GENERATION_PROMPT
+        assert "must come exactly from the data context" \
+            in DECK_GENERATION_PROMPT
+        assert "Numeric accuracy is non-negotiable" \
+            in DECK_GENERATION_PROMPT
+
+
 # ── CHECK 2 — Label direction ─────────────────────────────────────────────
 
 
