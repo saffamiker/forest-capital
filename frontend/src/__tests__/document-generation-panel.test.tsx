@@ -251,6 +251,61 @@ describe('DocumentGenerationPanel — async generation', () => {
   })
 })
 
+describe('DocumentGenerationPanel — Brief Workflow guide', () => {
+  it('renders the Info button on the Executive Brief card and not on '
+    + 'the others', () => {
+      renderPanel(<DocumentGenerationPanel />)
+      // The brief card carries the info button.
+      const briefInfo = within(briefCard()).getByTestId(
+        'brief-workflow-info-button')
+      expect(briefInfo).toBeInTheDocument()
+      // The midpoint + deck cards do NOT carry the info button.
+      const midpointCard = screen.getByText('Midpoint Submission Paper')
+        .closest('.card') as HTMLElement
+      expect(within(midpointCard).queryByTestId(
+        'brief-workflow-info-button')).not.toBeInTheDocument()
+      const deckCard = screen.getByText('Final Presentation Deck')
+        .closest('.card') as HTMLElement
+      expect(within(deckCard).queryByTestId(
+        'brief-workflow-info-button')).not.toBeInTheDocument()
+    })
+
+  it('renders the persistent helper text below the brief description',
+    () => {
+      renderPanel(<DocumentGenerationPanel />)
+      expect(
+        within(briefCard()).getByTestId('brief-workflow-helper-link'),
+      ).toBeInTheDocument()
+      expect(within(briefCard()).getByText(
+        /Review the step-by-step guide/i)).toBeInTheDocument()
+    })
+
+  it('clicking the Info button opens the workflow modal', () => {
+    renderPanel(<DocumentGenerationPanel />)
+    expect(screen.queryByTestId('brief-workflow-modal'))
+      .not.toBeInTheDocument()
+    fireEvent.click(within(briefCard()).getByTestId(
+      'brief-workflow-info-button'))
+    expect(screen.getByTestId('brief-workflow-modal'))
+      .toBeInTheDocument()
+    expect(screen.getByText(/How to Build the Executive Brief/i))
+      .toBeInTheDocument()
+  })
+
+  it('Generate button still works when the modal is closed', async () => {
+    mockedAxios.post.mockResolvedValue({
+      data: { job_id: 'j-brief-guide', status: 'pending' } })
+    renderPanel(<DocumentGenerationPanel />)
+    // Modal is closed; click Generate.
+    fireEvent.click(within(briefCard()).getByRole('button',
+      { name: /^Generate$/ }))
+    await waitFor(() =>
+      expect(mockedAxios.post).toHaveBeenCalledWith(
+        '/api/v1/export/executive-brief'))
+  })
+})
+
+
 describe('GenerationToast — background completion', () => {
   it('announces a completed job away from the Reports page', () => {
     trackJob({
