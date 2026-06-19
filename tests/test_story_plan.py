@@ -32,6 +32,171 @@ os.environ.setdefault("MASTER_API_KEY", "test_master_key")
 # ── Evaluator prompt content ─────────────────────────────────────────────
 
 
+class TestMidpointFeedbackFraming:
+    """PR #334 -- midpoint panel feedback (Dr. Panttser) directed three
+    structural constraints into every generator prompt: a three-strategy
+    lens, a front-loaded central question + answer, and an investable-
+    conclusion guard. These tests pin each constant + verify each is
+    composed into the appropriate system prompts so a future refactor
+    cannot quietly drop the framing the midpoint review required."""
+
+    def test_three_strategy_frame_constant(self):
+        from tools.story_plan import THREE_STRATEGY_FRAME
+        # The three strategies named and labelled.
+        assert "Benchmark: S&P 500" in THREE_STRATEGY_FRAME
+        assert "Static blend: Classic 60/40" in THREE_STRATEGY_FRAME
+        assert "Dynamic blend: regime-conditional" in THREE_STRATEGY_FRAME
+        # The 10-strategy engine relegated to the appendix.
+        assert "appendix material" in THREE_STRATEGY_FRAME
+
+    def test_central_question_and_answer_constant(self):
+        from tools.story_plan import CENTRAL_QUESTION_AND_ANSWER
+        # The verbatim question + the answer with quantified evidence.
+        assert "diversification improve risk-adjusted performance" \
+            in CENTRAL_QUESTION_AND_ANSWER
+        assert "OOS Sharpe of 1.24 versus 0.73" \
+            in CENTRAL_QUESTION_AND_ANSWER
+        assert "70% improvement" in CENTRAL_QUESTION_AND_ANSWER
+        assert "max drawdown reduced by 51%" \
+            in CENTRAL_QUESTION_AND_ANSWER
+
+    def test_investable_conclusion_guard_constant(self):
+        from tools.story_plan import INVESTABLE_CONCLUSION_GUARD
+        # The forbidden academic-hedging phrases pinned.
+        assert "future research suggests" in INVESTABLE_CONCLUSION_GUARD
+        assert "further study would benefit from" \
+            in INVESTABLE_CONCLUSION_GUARD
+        # The CIO-memo voice contract.
+        assert "CIO memo" in INVESTABLE_CONCLUSION_GUARD
+        # The "conditions to revisit" close.
+        assert "would be revisited" in INVESTABLE_CONCLUSION_GUARD
+
+    def test_deck_pass1_prompt_carries_all_three_framing_constants(self):
+        from tools.story_plan import (
+            CENTRAL_QUESTION_AND_ANSWER, INVESTABLE_CONCLUSION_GUARD,
+            THREE_STRATEGY_FRAME, _DECK_STORY_PLAN_SYSTEM_PROMPT,
+        )
+        # The system prompt sent to Opus on Pass 1 must carry every
+        # framing constant verbatim -- a substring check is enough
+        # because the constants are stable strings.
+        assert THREE_STRATEGY_FRAME in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert CENTRAL_QUESTION_AND_ANSWER \
+            in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert INVESTABLE_CONCLUSION_GUARD \
+            in _DECK_STORY_PLAN_SYSTEM_PROMPT
+
+    def test_deck_pass1_prompt_carries_economic_storytelling(self):
+        from tools.story_plan import _DECK_STORY_PLAN_SYSTEM_PROMPT
+        # The WHY / WHEN layer pinned -- midpoint feedback called this
+        # out as the missing economic-intuition layer.
+        assert "ECONOMIC STORYTELLING REQUIREMENT" \
+            in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert "WHY: HMM identifies structural market state changes" \
+            in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert "WHEN: Concrete examples from the play-by-play" \
+            in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        # The 2022 BEAR call + Liberation Day examples cited verbatim.
+        assert "2022 BEAR call" in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert "Liberation Day" in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        # Original schema body still present.
+        assert "central_argument" in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert "slide_plan" in _DECK_STORY_PLAN_SYSTEM_PROMPT
+
+    def test_script_pass2_prompt_carries_audience_calibration(self):
+        from tools.story_plan import (
+            CENTRAL_QUESTION_AND_ANSWER, THREE_STRATEGY_FRAME,
+            _DECK_FULL_SCRIPT_SYSTEM_PROMPT,
+        )
+        # The script gets the central question + three-strategy frame
+        # AND a script-specific audience-calibration block translating
+        # every technical claim into an investment implication.
+        assert THREE_STRATEGY_FRAME in _DECK_FULL_SCRIPT_SYSTEM_PROMPT
+        assert CENTRAL_QUESTION_AND_ANSWER \
+            in _DECK_FULL_SCRIPT_SYSTEM_PROMPT
+        assert "AUDIENCE CALIBRATION" in _DECK_FULL_SCRIPT_SYSTEM_PROMPT
+        # The "every technical result -> investment implication" rule
+        # + the exact example patterns the midpoint feedback flagged.
+        assert "the next sentence must translate it to an investment " \
+               "implication" in _DECK_FULL_SCRIPT_SYSTEM_PROMPT
+        assert "stay invested rather than panic-selling" \
+            in _DECK_FULL_SCRIPT_SYSTEM_PROMPT
+        # Original schema body still present.
+        assert "full_script" in _DECK_FULL_SCRIPT_SYSTEM_PROMPT
+        assert "estimated_duration_minutes" \
+            in _DECK_FULL_SCRIPT_SYSTEM_PROMPT
+
+    def test_brief_pass1_prompt_carries_all_three_framing_constants(self):
+        from tools.story_plan import (
+            CENTRAL_QUESTION_AND_ANSWER, INVESTABLE_CONCLUSION_GUARD,
+            THREE_STRATEGY_FRAME, _BRIEF_SECTION_PLAN_SYSTEM_PROMPT,
+        )
+        assert THREE_STRATEGY_FRAME \
+            in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+        assert CENTRAL_QUESTION_AND_ANSWER \
+            in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+        assert INVESTABLE_CONCLUSION_GUARD \
+            in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+        # Original schema body (the six rubric sections) survives.
+        assert "executive_summary" in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+        assert "section_plan" in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+
+
+class TestEvaluatorCriterion6:
+    """PR #334 -- both evaluator rubrics gain a sixth criterion
+    (INVESTABLE CONCLUSION) so the harness retries any plan that's
+    technically correct but communicates poorly to a non-technical
+    decision-maker. The threshold scales proportionally from 7.0/10 to
+    8.4/12."""
+
+    def test_deck_evaluator_has_criterion_6_investable_conclusion(self):
+        from tools.story_plan import STORY_PLAN_EVALUATOR_PROMPT
+        assert "6. INVESTABLE CONCLUSION (0-2)" \
+            in STORY_PLAN_EVALUATOR_PROMPT
+        # The "non-technical decision-maker" lens pinned.
+        assert "non-technical decision-maker" \
+            in STORY_PLAN_EVALUATOR_PROMPT
+        assert "Forest Capital representative" \
+            in STORY_PLAN_EVALUATOR_PROMPT
+        # The 12-point ceiling + 8.4 threshold pinned.
+        assert "12 points" in STORY_PLAN_EVALUATOR_PROMPT
+        assert "8.4" in STORY_PLAN_EVALUATOR_PROMPT
+        # The midpoint-feedback grounding quote.
+        assert "too academic" in STORY_PLAN_EVALUATOR_PROMPT.lower()
+
+    def test_brief_evaluator_has_criterion_6_investable_conclusion(self):
+        from tools.story_plan import BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "6. INVESTABLE CONCLUSION (0-2)" \
+            in BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "non-technical decision-maker" \
+            in BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "12 points" in BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "8.4" in BRIEF_PLAN_EVALUATOR_PROMPT
+
+
+class TestAppendixFramingPrelude:
+    """PR #334 -- the analytical appendix is not a thin scaffolding
+    layer; it carries the FULL 10-strategy evidence base. The framing
+    prelude threaded into every section task gives the writer the
+    audience contract + the economic-intuition obligation (the WHAT
+    -> WHY translation that midpoint feedback called out as missing)."""
+
+    def test_appendix_prelude_pins_audience_and_economic_intuition(self):
+        from main import _APPENDIX_FRAMING_PRELUDE
+        # The audience contract.
+        assert "analytical evidence base" \
+            in _APPENDIX_FRAMING_PRELUDE
+        # The three-strategy lens explicitly does NOT apply to the
+        # appendix -- the full 10-strategy table is appropriate here.
+        assert "ALL strategies from the cache" \
+            in _APPENDIX_FRAMING_PRELUDE
+        # The economic-intuition layer.
+        assert "economic intuition explaining what the result MEANS" \
+            in _APPENDIX_FRAMING_PRELUDE
+        # The sensitivity-analysis-with-interpretation requirement.
+        assert "Sensitivity analysis results must be presented with " \
+               "interpretation" in _APPENDIX_FRAMING_PRELUDE
+
+
 class TestEvaluatorPrompts:
     """Both Pass 1 evaluator prompts must pin the rubric so a future
     refactor doesn't quietly drop a criterion."""
