@@ -10668,7 +10668,23 @@ async def export_executive_brief(
 # threaded into the agent prompt so the prose never says "the
 # platform found X" — it says "our analysis shows X". The platform
 # is cited as source of DATA, never as source of CONCLUSIONS.
-_BRIEF_TONE_RULES = (
+_BRIEF_NUMERIC_GROUNDING = (
+    "\n\nNUMERIC GROUNDING (CRITICAL):\n"
+    "  - All numeric values in your response must come exactly from the "
+    "data context provided in this section. Do not estimate, interpolate, "
+    "round beyond two decimal places, or substitute figures from prior "
+    "knowledge.\n"
+    "  - Sharpe ratios, max drawdowns, CAGR figures, OOS Sharpe values, "
+    "and correlation coefficients MUST be quoted from the data block "
+    "verbatim or else replaced with [DATA PENDING].\n"
+    "  - If a value is not in the data context, write [DATA PENDING] "
+    "rather than inventing a number.\n"
+    "  - Numeric accuracy is verified against the source cache after "
+    "generation -- a Sharpe attributed to the wrong strategy or a "
+    "drawdown that disagrees with the cache flags in the audit panel."
+)
+
+_BRIEF_TONE_RULES_BASE = (
     "\n\nTONE AND LANGUAGE RULES (non-negotiable):\n"
     "  - Never write 'the platform found' or 'the AI council "
     "determined'. Always write 'our analysis shows', 'we interpret', "
@@ -10680,6 +10696,14 @@ _BRIEF_TONE_RULES = (
     "appendix.\n"
     "  - No em dashes (project-wide prose rule)."
 )
+
+# The composite tone-rules string actually threaded into every
+# section spec. Composes the base tone rules with the numeric-
+# grounding directive so each section automatically picks up both
+# contracts -- the grounding is not optional and propagating it via
+# the same constant means a future section addition can never forget
+# to apply it.
+_BRIEF_TONE_RULES = _BRIEF_TONE_RULES_BASE + _BRIEF_NUMERIC_GROUNDING
 
 
 # Four-component recommendation structure required on every recommendation

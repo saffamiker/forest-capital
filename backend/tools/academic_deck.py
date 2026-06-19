@@ -183,7 +183,17 @@ scorecard, peer review.
 
 Using ONLY the data provided in the context block, generate the slide \
 content. Do not invent numbers. If a value is missing from context, write \
-[DATA PENDING]."""
+[DATA PENDING].
+
+CRITICAL: All numeric values in your response must come exactly from the \
+data context provided. Do not estimate, interpolate, round beyond two \
+decimal places, or substitute figures from prior knowledge. Sharpe ratios, \
+max drawdowns, CAGR figures, and correlation coefficients MUST be quoted \
+from the data block verbatim or else replaced with [DATA PENDING]. Every \
+numeric attribution is verified against the source cache by a post-\
+generation audit; a Sharpe attributed to the wrong strategy or a drawdown \
+that is not the cache's figure will fail the numeric cross-reference \
+check and flag in the audit panel. Numeric accuracy is non-negotiable."""
 
 
 # Story-arc seed: every per-slide prompt prepends this with the slide-N

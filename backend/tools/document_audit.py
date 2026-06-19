@@ -114,8 +114,69 @@ _SUPERLATIVES_ANY: tuple[str, ...] = (
 
 
 # Tolerances per the user's spec.
-_NUMERIC_TOLERANCE = 0.005       # Check 1
+_NUMERIC_TOLERANCE = 0.005       # Check 1 (fraction-space comparison)
+_NUMERIC_TOLERANCE_PP = 0.5      # Check 1 (percentage-point comparison)
 _CONSISTENCY_TOLERANCE = 0.05    # Check 3
+
+# Percent-scaled canonical metric names. When the cache stores a value
+# in fraction form (-0.3527) and the prose surfaces it in percentage
+# form (35.27%, sometimes without the % sign and sometimes with the
+# sign stripped), the audit must compare on a normalised scale. The
+# set below names every canonical metric the codebase persists as a
+# decimal fraction; non-percent metrics (sharpe_ratio, etc.) bypass
+# the scale step and compare on their stored numeric value directly.
+_PERCENT_METRICS: set[str] = {
+    "max_drawdown", "cagr", "volatility", "cvar", "tail_risk",
+    "vol", "annual_return", "drawdown",
+}
+
+# Loss metrics where the cache stores a negative fraction (-0.3527)
+# but the prose typically reads a positive percentage ("max drawdown
+# of 35.27%"). Sign-stripping before comparison stops a legitimate
+# magnitude match from flagging.
+_SIGN_INVARIANT_METRICS: set[str] = {
+    "max_drawdown", "drawdown", "cvar", "tail_risk",
+}
+
+
+def _normalise_audit_comparison(
+    generated: float, cache_value: float, metric: str,
+) -> tuple[float, float, str]:
+    """Bring (generated, cache_value) onto a common scale + strip the
+    sign for loss metrics so the numeric tolerance compares like-for-
+    like. Returns (g, c, scale_label) where scale_label is "pp" when
+    the comparison is in percentage points and "raw" otherwise.
+
+    The shape:
+      * Percent metrics: if one side is fraction-scale (abs < 1) and
+        the other is percentage-scale (abs >= 1), multiply the
+        fraction side by 100. After this both sides are in pp.
+      * Loss metrics: abs() both sides so the cache's stored negative
+        does not flag against the prose's stripped positive.
+
+    Non-percent metrics (sharpe_ratio, etc.) skip the scale step
+    and return the values unchanged in "raw" mode. This isolates the
+    scale-normalisation to the metric kinds where it makes sense; a
+    Sharpe of 0.86 vs a cache Sharpe of 0.537 IS a real mismatch
+    and must still flag at the standard tolerance.
+    """
+    g, c = float(generated), float(cache_value)
+    is_percent = metric in _PERCENT_METRICS
+    is_loss = metric in _SIGN_INVARIANT_METRICS
+    if is_percent:
+        # Bring whichever side is the fraction up to percentage points
+        # so the comparison is in a single coordinate system. The
+        # threshold check below uses _NUMERIC_TOLERANCE_PP.
+        if abs(g) < 1.0 and abs(c) >= 1.0:
+            g = g * 100.0
+        elif abs(c) < 1.0 and abs(g) >= 1.0:
+            c = c * 100.0
+        if is_loss:
+            g, c = abs(g), abs(c)
+        return g, c, "pp"
+    if is_loss:
+        g, c = abs(g), abs(c)
+    return g, c, "raw"
 
 
 # ── Result shape ──────────────────────────────────────────────────────────
@@ -277,7 +338,17 @@ def check_numeric_cross_reference(
     strategy_cache: dict[str, dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
     """Compare each extracted tuple against strategy_results_cache.
-    Flag deviations > _NUMERIC_TOLERANCE absolute."""
+
+    Scale-aware: percent metrics (max_drawdown, cagr, etc.) compare in
+    percentage-point space at _NUMERIC_TOLERANCE_PP, with the fraction
+    side multiplied by 100 when the cache stores the value as a
+    fraction (-0.3527) and the prose surfaces it as a percentage
+    (35.27%). Loss metrics also strip sign so a positively-quoted
+    drawdown doesn't flag against the cache's stored negative. Non-
+    percent metrics (sharpe_ratio, etc.) keep the original
+    fraction-space comparison at _NUMERIC_TOLERANCE -- a Sharpe of
+    0.86 vs cache 0.537 IS a real mismatch and must still surface.
+    """
     flags: list[dict[str, Any]] = []
     if not strategy_cache:
         return flags
@@ -299,13 +370,20 @@ def check_numeric_cross_reference(
             cache_value = float(cache_value)
         except (TypeError, ValueError):
             continue
-        diff = abs(float(t["value"]) - cache_value)
-        if diff > _NUMERIC_TOLERANCE:
+        g_norm, c_norm, scale = _normalise_audit_comparison(
+            float(t["value"]), cache_value, t["metric"])
+        diff = abs(g_norm - c_norm)
+        tol = (_NUMERIC_TOLERANCE_PP if scale == "pp"
+               else _NUMERIC_TOLERANCE)
+        if diff > tol:
             flags.append({
                 "strategy":  t["strategy"],
                 "metric":    t["metric"],
                 "generated": t["value"],
                 "cache":     cache_value,
+                # Scale + tolerance the comparison ran under so the
+                # frontend can render the diff in the right units.
+                "scale":     scale,
                 "diff":      round(diff, 6),
                 "context":   t["window"][:200],
             })
