@@ -15,7 +15,7 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, FileSpreadsheet, Presentation, Download, Loader2, AlertCircle,
-  CheckCircle, PenLine, RefreshCw, X,
+  CheckCircle, PenLine, RefreshCw, X, Info,
 } from 'lucide-react'
 import TeamGate from './TeamGate'
 import {
@@ -25,6 +25,7 @@ import {
 import {
   ReportBlockingModal, useReportReadinessGate,
 } from './ReportReadinessIndicator'
+import { BriefWorkflowModal } from './BriefWorkflowModal'
 
 interface DocSpec {
   id: string
@@ -113,6 +114,10 @@ export default function DocumentGenerationPanel() {
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [generatedAt, setGeneratedAt] =
     useState<Record<string, string>>(readGeneratedAt)
+  // PR #337 -- the Executive Brief card has an Info icon that opens
+  // a step-by-step workflow guide. State is local to the panel; the
+  // modal re-mounts itself on open so the checklist resets each time.
+  const [briefGuideOpen, setBriefGuideOpen] = useState(false)
   // Job ids whose completion has already been written to "last generated".
   const recorded = useRef<Set<string>>(new Set())
   // Workstream C report gate. The hook loads /api/v1/report/readiness
@@ -269,12 +274,42 @@ export default function DocumentGenerationPanel() {
                   <Icon className="w-4 h-4" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <h3 className="text-white font-semibold text-sm">
-                    {doc.title}
-                  </h3>
+                  <div className="flex items-start justify-between
+                                  gap-2">
+                    <h3 className="text-white font-semibold text-sm">
+                      {doc.title}
+                    </h3>
+                    {doc.documentType === 'executive_brief' && (
+                      <button
+                        type="button"
+                        onClick={() => setBriefGuideOpen(true)}
+                        data-testid="brief-workflow-info-button"
+                        aria-label="How to build the executive brief"
+                        className="shrink-0 text-muted hover:text-electric
+                                   transition-colors"
+                        title="Step-by-step guide">
+                        <Info className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
                   <p className="text-muted text-xs mt-1 leading-relaxed">
                     {doc.description}
                   </p>
+                  {doc.documentType === 'executive_brief' && (
+                    <p className="text-2xs text-muted mt-1.5
+                                  leading-relaxed">
+                      Review the step-by-step guide{' '}
+                      <button
+                        type="button"
+                        onClick={() => setBriefGuideOpen(true)}
+                        data-testid="brief-workflow-helper-link"
+                        className="text-electric hover:underline
+                                   inline-flex items-center gap-0.5">
+                        <Info className="w-3 h-3" />
+                      </button>
+                      {' '}before generating for the first time.
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -426,6 +461,9 @@ export default function DocumentGenerationPanel() {
         {...(blockingModal.coldCaches
           ? { coldCaches: blockingModal.coldCaches } : {})}
       />
+      <BriefWorkflowModal
+        open={briefGuideOpen}
+        onClose={() => setBriefGuideOpen(false)} />
     </section>
   )
 }
