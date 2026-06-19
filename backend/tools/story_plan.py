@@ -1,0 +1,892 @@
+"""tools/story_plan.py -- the locked story arc that backs the deck and brief.
+
+Each slide of the presentation deck and each section of the executive
+brief is rendered today by an independent LLM call. The June 18 deck
+audit panel surfaced what that independence costs: 48 numeric flags
+and 7 cross-section consistency flags where the same metric appeared
+at different values across slides because each slide's LLM call made
+its own substitution from prior knowledge instead of the locked cache.
+
+The fix is structural. This module generates a STORY PLAN once per
+data_hash: a structured outline with locked numeric anchors per slide
+(deck) or per section (brief), a presenter script (deck), Grok's
+anticipated committee questions, and Gemini's honest dissent. The
+per-slide / per-section rendering pass then reads the locked anchors
+and writes prose around them; it never substitutes its own figures.
+
+Architecture mirrors tools/cio_recommendation.py (PR #324):
+
+  * The expensive multi-pass generation runs ONCE per data_hash,
+    persisted to story_plans (migration 056) and served from cache
+    on every subsequent read until the underlying market data ticks
+    over and a new hash is computed.
+  * The persistence is a GUARDED UPSERT: a real LLM plan overwrites
+    a previously stored deterministic_fallback row at the same
+    (data_hash, document_type); a fallback never overwrites a real
+    plan. The reverse-of-PR-324 contract.
+  * Every LLM call is fail-open: an exception logs and falls through
+    to a deterministic structured plan so the deck and brief always
+    have something to render.
+
+Four-pass pipeline (per document type):
+
+  PASS 1  Opus arbiter (claude-opus-4-7) wrapped in
+          GeneratorEvaluatorHarness with a story-plan-specific
+          evaluator rubric. The harness retries up to 2 times if the
+          plan scores below 7.0 against the rubric. Generates the
+          slide_plan / section_plan + central_argument.
+
+  PASS 2  Opus arbiter, direct call. Generates the full word-for-
+          word presenter script (deck only). Conditioned on Pass 1
+          output so the script and the plan never diverge.
+
+  PASS 3  Grok contrarian (xAI). Generates anticipated_questions --
+          the hardest committee questions the team will face,
+          grounded in known weak points (53-month sample, 2-of-9
+          play-by-play, Liberation Day miss).
+
+  PASS 4  Gemini independent (Google). Generates dissenting_view +
+          limitations_to_surface -- the blind-spot pass that names
+          what the plan is NOT saying that it should be.
+
+Passes 3 and 4 are INDEPENDENT of Pass 1 / Pass 2 -- a failure in
+either does not block the slide_plan or full_script from being
+persisted. The deck / brief consumer reads whatever is present.
+
+Caching:
+  get_cached_story_plan(data_hash, document_type) reads the most
+  recent row for (data_hash, document_type) and returns it as a
+  dict. None on cold cache or DB unavailability.
+"""
+from __future__ import annotations
+
+import json
+from typing import Any
+
+import structlog
+
+log = structlog.get_logger(__name__)
+
+_DB_AVAILABLE = False
+try:  # pragma: no cover -- environment dependent
+    from database import AsyncSessionLocal
+    _DB_AVAILABLE = AsyncSessionLocal is not None
+except Exception:  # noqa: BLE001
+    AsyncSessionLocal = None  # type: ignore[assignment]
+
+_DETERMINISTIC = "deterministic_fallback"
+
+
+# ── Evaluator prompts (Pass 1, both document types) ──────────────────────
+
+STORY_PLAN_EVALUATOR_PROMPT = """\
+You are evaluating a presentation story plan for a finance practicum \
+final presentation (18-20 minutes). Score the plan against these five \
+criteria, 0-2 points each:
+
+1. CENTRAL ARGUMENT (0-2)
+   Does the plan open with the diversification question and resolve it \
+with the OOS Sharpe result as the primary evidence? The conclusion must \
+be explicit and quantified, not implied. A plan that buries the OOS \
+Sharpe result below slide 6 scores 0.
+
+2. NARRATIVE ARC (0-2)
+   Does the flow move cleanly from: problem statement -> methodology -> \
+in-sample evidence -> OOS validation -> conclusion? Regime detection \
+and the multi-agent council must appear as core methodological \
+differentiators, not as appendix material. A plan that front-loads \
+results before methodology scores 1 maximum.
+
+3. NUMERIC DISCIPLINE (0-2)
+   Are all key figures explicitly present in numeric_anchors per slide? \
+Required figures: OOS Sharpe blend 1.24 vs benchmark 0.73, max drawdown \
+reduction vs benchmark, CAGR for each strategy, regime confidence level. \
+Any slide that discusses performance without numeric_anchors scores 0 \
+for this criterion.
+
+4. SLIDE ECONOMY (0-2)
+   Are slides lean -- one headline assertion, one visual reference, zero \
+to two bullets maximum? A plan where slide_bullets contains more than \
+two items per slide, or where speaker_notes content has leaked into \
+slide_bullets, scores 1 maximum. Slides carry the assertion; the script \
+carries the argument.
+
+5. HONEST LIMITATIONS (0-2)
+   Does the plan surface the 2-of-9 value-add events result and the \
+Liberation Day underperformance directly, with a prepared response? A \
+plan that omits known weaknesses scores 0 -- academic panels penalize \
+evasion more than honest limitations.
+
+Return ONLY valid JSON with no preamble or markdown fences:
+{"overall": <float 0-10>, "feedback": "<one paragraph of specific, \
+actionable improvement notes>"}
+
+If overall >= 7.0 the plan is accepted. If < 7.0 your feedback will be \
+injected into the next generation attempt. Be specific: identify which \
+slides fail which criteria and what must change."""
+
+
+BRIEF_PLAN_EVALUATOR_PROMPT = """\
+You are evaluating an executive brief section plan for a finance \
+practicum submission (5 pages, double-spaced, senior investment \
+audience, FNA 670 rubric).
+
+Score against these five criteria, 0-2 points each:
+
+1. RUBRIC COMPLIANCE (0-2)
+   Does the plan contain exactly these six sections and no others: \
+executive summary, methodology overview, key findings and insights, \
+limitations and risks, final recommendations, visuals? Any extra \
+section (next steps, future work, appendix) scores 0.
+
+2. RECOMMENDATIONS FRAMING (0-2)
+   Are final recommendations framed as investment conclusions drawn \
+from quantitative results -- not action items, next steps, or future \
+research? The recommendations section must reference OOS Sharpe 1.24 \
+vs 0.73 as the primary evidentiary basis. A section plan that frames \
+recommendations as "we suggest further study" scores 0.
+
+3. NUMERIC DISCIPLINE (0-2)
+   Are key figures present in numeric_anchors for each section? Key \
+findings section must anchor OOS Sharpe, Sharpe ratio full-sample, max \
+drawdown reduction, CAGR. Methodology section must anchor sample \
+period, number of strategies, rebalancing frequency.
+
+4. SENIOR AUDIENCE CALIBRATION (0-2)
+   Is the language calibrated for senior investment professionals -- \
+direct, evidence-based, not over-hedged? A plan whose key_message \
+fields read like a student report rather than an investment memo \
+scores 1 maximum.
+
+5. LIMITATIONS HONESTY (0-2)
+   Does the limitations section plan surface the 2-of-9 value-add \
+events and Liberation Day underperformance directly? Does it frame \
+them as known, bounded risks rather than hiding them?
+
+Return ONLY valid JSON:
+{"overall": <float 0-10>, "feedback": "<specific actionable notes on \
+which sections fail which criteria>"}"""
+
+
+# ── Pass 1 generator system prompts ──────────────────────────────────────
+
+_DECK_STORY_PLAN_SYSTEM_PROMPT = """\
+You design the structural plan for an 18-20 minute investment \
+presentation. Your output is consumed by a downstream code path that \
+renders each slide and a separate full-script pass: produce ONLY \
+strict JSON, no markdown fences, no commentary, no preamble.
+
+The plan is the LOCKED source of truth for every numeric value in the \
+deck. Each slide's numeric_anchors are quoted verbatim by the per-slide \
+LLM pass; any number not in numeric_anchors must NOT appear on that \
+slide. The slide rendering pass writes prose around the anchors but \
+never substitutes its own figures.
+
+Audience: senior investment professionals and the FNA 670 academic \
+panel (Dr. Katerina Panttser). Tone: confident, evidence-based, not \
+over-hedged. Slides are executive quality: one headline assertion, one \
+visual, minimal bullets (0-2 maximum per slide). Speaker notes carry \
+the full argument; slides carry only the assertion and the visual \
+anchor. This is an executive presentation, not a report.
+
+The central question: does diversification outperform 100% equity on a \
+risk-adjusted basis? The answer must be grounded in OOS Sharpe 1.24 vs \
+0.73 benchmark, not asserted without evidence.
+
+CRITICAL: All numeric values in numeric_anchors must come EXACTLY from \
+the validated_constants block in context. Do not estimate, interpolate, \
+round beyond two decimal places, or substitute figures from prior \
+knowledge. Numeric accuracy will be verified against the source cache \
+after generation.
+
+Output schema (return ONLY this JSON object):
+{
+  "central_argument": "<one-sentence thesis>",
+  "presentation_arc": "<two-to-three-sentence narrative thread>",
+  "slide_plan": [
+    {
+      "slide_number": <int>,
+      "title": "<slide title>",
+      "headline": "<one assertion that appears in large text on the slide>",
+      "key_visual": "<chart or table name -- one of the platform visuals>",
+      "numeric_anchors": {"metric_name": <value>, ...},
+      "slide_bullets": ["<bullet>", ...],
+      "speaker_notes": "<paragraph the presenter speaks>",
+      "transition_to_next": "<one sentence linking to next slide>"
+    }
+  ]
+}"""
+
+_DECK_FULL_SCRIPT_SYSTEM_PROMPT = """\
+You write the word-for-word presenter script for an 18-20 minute \
+investment presentation, conditioned on a pre-locked slide plan. \
+Output ONLY strict JSON, no markdown fences, no preamble.
+
+The script elaborates each slide's speaker_notes into full spoken \
+paragraphs. Each slide section is delimited by [SLIDE N: {title}]. \
+Transitions between slides are explicit. Tone: confident, evidence-\
+based, not over-hedged. Acknowledge the 2-of-9 value-add events \
+limitation honestly when relevant -- the committee will ask about it.
+
+CRITICAL: All numeric values in the script must come EXACTLY from the \
+locked numeric_anchors of the corresponding slide. Do not introduce \
+new figures, do not round, do not substitute from prior knowledge.
+
+Output schema:
+{
+  "full_script": "<word-for-word script with [SLIDE N: title] \
+delimiters>",
+  "estimated_duration_minutes": <float 18-20>
+}"""
+
+
+_BRIEF_SECTION_PLAN_SYSTEM_PROMPT = """\
+You design the section plan for a 5-page executive brief for a finance \
+practicum submission. Your output is consumed by a downstream code path \
+that renders each section's prose: produce ONLY strict JSON, no markdown \
+fences, no commentary, no preamble.
+
+The brief follows the FNA 670 rubric exactly. The six sections, in \
+order:
+  1. executive_summary
+  2. methodology
+  3. key_findings
+  4. limitations_and_risks
+  5. final_recommendations
+  6. visuals
+
+Do NOT add a "next_steps" or "future_work" or "part_ii_preview" section \
+-- those are explicitly excluded by the rubric. final_recommendations \
+must be framed as INVESTMENT CONCLUSIONS drawn from the quantitative \
+results, not action items, next steps, or future research.
+
+Audience: senior investment professionals. Tone: direct, evidence-\
+based. The plan is the LOCKED source of truth for every numeric value \
+in the brief; each section's numeric_anchors are quoted verbatim by \
+the per-section rendering pass.
+
+CRITICAL: All numeric values in numeric_anchors must come EXACTLY from \
+the validated_constants block in context. Numeric accuracy is verified \
+against the source cache after generation.
+
+Output schema:
+{
+  "central_argument": "<one-sentence thesis>",
+  "section_plan": {
+    "executive_summary": {
+      "key_message": "<one-paragraph anchor message>",
+      "numeric_anchors": {"metric": <value>, ...},
+      "target_length_words": <int>
+    },
+    "methodology": { ... },
+    "key_findings": { ... },
+    "limitations_and_risks": { ... },
+    "final_recommendations": { ... },
+    "visuals": { ... }
+  }
+}"""
+
+
+# ── Pass 3 / Pass 4 system prompts ───────────────────────────────────────
+
+_GROK_ANTICIPATED_QUESTIONS_PROMPT = """\
+You are a sceptical academic panellist. Given a presentation story \
+plan, generate the HARDEST questions the panel is likely to ask -- \
+not softballs. The team will rehearse against your questions, so \
+honesty about weaknesses matters more than politeness.
+
+Known weak points to probe:
+  * OOS window only 53 months -- limited sample for statistical claims
+  * 2 of 9 rebalance events added value (play-by-play scorecard)
+  * HMM convergence warnings in sensitivity analysis
+  * Liberation Day (April 2025) underperformance the council missed
+
+Output ONLY JSON. Min 5, max 10 questions. Mark "hard" for questions \
+the team should rehearse carefully; "medium" for foreseeable but more \
+routine questions.
+
+Schema:
+{
+  "anticipated_questions": [
+    {
+      "question": "<the question, exactly as a panellist would ask it>",
+      "difficulty": "hard" | "medium",
+      "suggested_answer": "<concise, evidence-based answer the team \
+should prepare>"
+    }
+  ]
+}"""
+
+
+_GEMINI_BLIND_SPOTS_PROMPT = """\
+You are an independent reviewer of a presentation story plan. Your job \
+is to identify what the plan is NOT saying that it SHOULD be -- gaps \
+in the argument, missing caveats, claims that need more support, \
+limitations the plan glosses over.
+
+You are not scoring quality; you are surfacing blind spots. Be \
+specific. Cite slide numbers or section names when possible.
+
+Output ONLY JSON:
+{
+  "dissenting_view": "<one paragraph stating the strongest honest \
+counter-argument to the plan's central thesis>",
+  "limitations_to_surface": [
+    "<a specific limitation the plan should disclose>",
+    ...
+  ],
+  "blind_spots": [
+    "<a specific gap in the argument that a sceptical reader would \
+spot>",
+    ...
+  ]
+}"""
+
+
+# ── Deterministic fallback (per document type) ───────────────────────────
+
+
+def _deterministic_deck_plan(deck_context: dict[str, Any]) -> dict[str, Any]:
+    """A structured fallback plan built without the LLM. Always renders
+    a valid (slide_plan, full_script, anticipated_questions,
+    dissenting_view) tuple so the downstream deck rendering never sees
+    a missing field. Uses the validated_constants from context so the
+    anchors are still the locked academic figures."""
+    constants = (deck_context or {}).get("validated_constants") or {}
+    blend = constants.get("oos_sharpe_regime_conditional")
+    bench = constants.get("oos_sharpe_benchmark")
+    return {
+        "central_argument": (
+            "A regime-conditional diversified blend outperforms a 100% "
+            "equity allocation on a risk-adjusted basis in the post-"
+            "2022 out-of-sample window."),
+        "presentation_arc": (
+            "Open with the question and the answer. Establish the "
+            "methodology. Show the OOS evidence. Address the limitations "
+            "honestly. Close with the recommendation."),
+        "slide_plan": [
+            {
+                "slide_number": 1,
+                "title": "Does Diversification Beat 100% Equity?",
+                "headline": (
+                    f"Yes -- OOS Sharpe {blend} vs benchmark {bench}."
+                    if blend is not None and bench is not None
+                    else "Yes -- the OOS Sharpe evidence is the answer."),
+                "key_visual": "cumulative_return_post_2022",
+                "numeric_anchors": {
+                    "oos_sharpe_blend": blend,
+                    "oos_sharpe_benchmark": bench,
+                },
+                "slide_bullets": [],
+                "speaker_notes": (
+                    "[DATA PENDING] -- LLM unavailable; deterministic "
+                    "fallback plan in use. Regenerate the story plan "
+                    "once the council models are reachable."),
+                "transition_to_next": (
+                    "Now the methodology that produced this result."),
+            },
+        ],
+        "_model": _DETERMINISTIC,
+    }
+
+
+def _deterministic_brief_plan(
+    brief_context: dict[str, Any],
+) -> dict[str, Any]:
+    """A structured brief section plan fallback."""
+    constants = (brief_context or {}).get("validated_constants") or {}
+    blend = constants.get("oos_sharpe_regime_conditional")
+    bench = constants.get("oos_sharpe_benchmark")
+    section_skeleton = {
+        "key_message": (
+            "[DATA PENDING] -- deterministic fallback plan in use."),
+        "numeric_anchors": {
+            "oos_sharpe_blend": blend,
+            "oos_sharpe_benchmark": bench,
+        },
+        "target_length_words": 300,
+    }
+    return {
+        "central_argument": (
+            "A regime-conditional diversified blend outperforms a 100% "
+            "equity allocation on a risk-adjusted basis."),
+        "section_plan": {
+            "executive_summary":      dict(section_skeleton),
+            "methodology":            dict(section_skeleton),
+            "key_findings":           dict(section_skeleton),
+            "limitations_and_risks":  dict(section_skeleton),
+            "final_recommendations":  dict(section_skeleton),
+            "visuals":                dict(section_skeleton),
+        },
+        "_model": _DETERMINISTIC,
+    }
+
+
+# ── Pass 1: harness-wrapped Opus arbiter ─────────────────────────────────
+
+
+def _build_pass1_generator(model: str, max_tokens: int):
+    """Returns a generator_fn closure compatible with the
+    GeneratorEvaluatorHarness shape: (prompt) -> response_text."""
+    def _gen(prompt: str) -> str:
+        from agents.base import call_claude
+        # The harness passes the FULL accumulated prompt as `prompt`
+        # (including any retry feedback prefix). The system prompt
+        # is the document-type-specific Pass 1 instruction.
+        return call_claude(
+            model, prompt, "",
+            max_tokens=max_tokens,
+            trigger="story_plan_pass1")
+    return _gen
+
+
+def _run_pass1_with_harness(
+    *,
+    system_prompt: str,
+    user_prompt: str,
+    evaluator_prompt: str,
+    agent_id: str,
+    max_tokens: int,
+) -> tuple[str, float, int]:
+    """Runs Pass 1 through GeneratorEvaluatorHarness. Returns
+    (best_response_text, final_score, attempts) so the caller can log
+    evaluator performance per data_hash."""
+    from agents.base import call_claude, OPUS_MODEL
+    from agents.harness import GeneratorEvaluatorHarness
+
+    # The harness retries the SAME generator_fn with the evaluator's
+    # feedback prepended to the prompt -- so the generator_fn must
+    # know the SYSTEM prompt to send to call_claude. Bind it via
+    # closure here rather than threading through the harness.
+    def _gen(prompt: str) -> str:
+        return call_claude(
+            OPUS_MODEL, system_prompt, prompt,
+            max_tokens=max_tokens,
+            trigger=f"story_plan:{agent_id}")
+
+    harness = GeneratorEvaluatorHarness()
+    result = harness.run(
+        generator_fn=_gen,
+        evaluator_prompt=evaluator_prompt,
+        generator_prompt=user_prompt,
+        context=user_prompt,
+        agent_id=agent_id)
+    return result.response, result.final_score, result.attempts
+
+
+# ── JSON parsing (mirrors cio_recommendation hardening) ─────────────────
+
+
+def _parse_plan_json(raw: str | None, *, log_key: str) -> dict | None:
+    """Robust JSON parsing for LLM responses. Returns None on any
+    failure (the caller falls open to the deterministic plan)."""
+    import re
+    if not raw:
+        return None
+    text = raw.strip()
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*```$', '', text)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        log.warning(f"{log_key}_no_object",
+                    raw_preview=(raw or "")[:500])
+        return None
+    try:
+        obj = json.loads(text[start:end + 1])
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"{log_key}_parse_failed",
+                    error=str(exc),
+                    raw_preview=(raw or "")[:500])
+        return None
+    if not isinstance(obj, dict):
+        log.warning(f"{log_key}_not_object")
+        return None
+    return obj
+
+
+# ── Pass 3: Grok contrarian -- anticipated questions ─────────────────────
+
+
+def _generate_anticipated_questions(plan_summary: str) -> list[dict]:
+    """Calls Grok directly (mirrors ContrarianAnalyst's HTTP pattern)
+    with a story-plan-specific prompt. Returns the parsed
+    anticipated_questions list, or an empty list on any failure."""
+    import os
+
+    import httpx
+
+    from agents.contrarian_analyst import (
+        XAI_TIMEOUT_SECONDS, build_headers, resolve_xai_config,
+    )
+
+    environment = os.getenv("ENVIRONMENT", "development")
+    xai = resolve_xai_config()
+    if environment == "test" or xai is None:
+        return []
+
+    user_prompt = (
+        "STORY PLAN SUMMARY:\n"
+        f"{plan_summary}\n\n"
+        "Generate the hardest questions the panel will ask. "
+        "Return only JSON.")
+    try:
+        with httpx.Client(timeout=XAI_TIMEOUT_SECONDS) as client:
+            resp = client.post(
+                xai.chat_url,
+                headers=build_headers(xai.api_key, xai.provider),
+                json={
+                    "model": xai.model,
+                    "messages": [
+                        {"role": "system",
+                         "content": _GROK_ANTICIPATED_QUESTIONS_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "max_tokens": 3000,
+                    "temperature": 0.7,
+                })
+            resp.raise_for_status()
+            data = resp.json()
+        raw = data["choices"][0]["message"]["content"]
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plan_grok_failed", error=str(exc))
+        return []
+    obj = _parse_plan_json(raw, log_key="story_plan_grok")
+    if not obj:
+        return []
+    questions = obj.get("anticipated_questions") or []
+    return questions if isinstance(questions, list) else []
+
+
+# ── Pass 4: Gemini independent -- blind spots ────────────────────────────
+
+
+def _generate_blind_spots(plan_summary: str) -> dict[str, Any]:
+    """Calls Gemini directly with a story-plan-specific prompt.
+    Returns {dissenting_view, limitations_to_surface, blind_spots}
+    or empty defaults on any failure."""
+    import os
+
+    empty = {
+        "dissenting_view": "",
+        "limitations_to_surface": [],
+        "blind_spots": [],
+    }
+    api_key = os.getenv("GOOGLE_API_KEY", "")
+    environment = os.getenv("ENVIRONMENT", "development")
+    if environment == "test" or not api_key:
+        return empty
+
+    try:
+        from agents.base import GEMINI_MODEL, call_gemini
+        user_prompt = (
+            "STORY PLAN SUMMARY:\n"
+            f"{plan_summary}\n\n"
+            "Identify what the plan is NOT saying that it should be. "
+            "Return only JSON.")
+        raw = call_gemini(
+            GEMINI_MODEL, _GEMINI_BLIND_SPOTS_PROMPT, user_prompt,
+            trigger="story_plan_gemini")
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plan_gemini_failed", error=str(exc))
+        return empty
+    obj = _parse_plan_json(raw, log_key="story_plan_gemini")
+    if not obj:
+        return empty
+    return {
+        "dissenting_view": obj.get("dissenting_view") or "",
+        "limitations_to_surface":
+            obj.get("limitations_to_surface") or [],
+        "blind_spots": obj.get("blind_spots") or [],
+    }
+
+
+# ── Top-level generators ────────────────────────────────────────────────
+
+
+def generate_deck_story_plan(
+    deck_context: dict[str, Any],
+    slide_titles: list[str],
+    *,
+    audience: str = (
+        "senior investment professionals and the FNA 670 academic panel"),
+    duration_minutes: int = 19,
+) -> dict[str, Any]:
+    """The four-pass deck story plan generator. Fail-open at every
+    pass: an unreachable LLM degrades to deterministic fallback but
+    the deck still has SOMETHING to render."""
+    user_prompt = (
+        "CONTEXT (validated constants + per-slide data):\n"
+        f"{json.dumps(deck_context, indent=2, default=str)}\n\n"
+        f"SLIDE TITLES (n={len(slide_titles)}):\n"
+        + "\n".join(
+            f"  {i + 1}. {t}" for i, t in enumerate(slide_titles))
+        + "\n\n"
+        f"AUDIENCE: {audience}\n"
+        f"DURATION: {duration_minutes} minutes\n\n"
+        "Produce the story plan as the strict JSON object specified.")
+
+    # Pass 1 -- Opus arbiter wrapped in harness.
+    try:
+        raw, score, attempts = _run_pass1_with_harness(
+            system_prompt=_DECK_STORY_PLAN_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            evaluator_prompt=STORY_PLAN_EVALUATOR_PROMPT,
+            agent_id="story_plan_deck",
+            max_tokens=6000)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plan_deck_pass1_failed", error=str(exc))
+        return _deterministic_deck_plan(deck_context)
+
+    pass1 = _parse_plan_json(raw, log_key="story_plan_deck_pass1")
+    if not pass1 or not pass1.get("slide_plan"):
+        log.warning("story_plan_deck_pass1_invalid",
+                    raw_preview=(raw or "")[:500])
+        return _deterministic_deck_plan(deck_context)
+    log.info("story_plan_evaluated",
+             document_type="deck",
+             attempts=attempts,
+             final_score=score)
+    pass1["_model"] = "claude-opus-4-7"
+
+    # Pass 2 -- Opus full script.
+    try:
+        from agents.base import OPUS_MODEL, call_claude
+        script_user_prompt = (
+            "LOCKED SLIDE PLAN:\n"
+            f"{json.dumps(pass1.get('slide_plan'), indent=2, default=str)}\n\n"
+            f"CENTRAL ARGUMENT: {pass1.get('central_argument')}\n"
+            f"DURATION: {duration_minutes} minutes\n\n"
+            "Produce the full presenter script as the strict JSON "
+            "object specified.")
+        script_raw = call_claude(
+            OPUS_MODEL, _DECK_FULL_SCRIPT_SYSTEM_PROMPT,
+            script_user_prompt,
+            max_tokens=5000,
+            trigger="story_plan_deck_pass2")
+        script_obj = _parse_plan_json(
+            script_raw, log_key="story_plan_deck_pass2")
+        if script_obj and script_obj.get("full_script"):
+            pass1["full_script"] = script_obj["full_script"]
+            pass1["estimated_duration_minutes"] = (
+                script_obj.get("estimated_duration_minutes"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plan_deck_pass2_failed", error=str(exc))
+        # Pass 2 failure does NOT fail the whole plan -- the slide
+        # plan is still useful even without the script.
+        pass1["full_script"] = None
+
+    # Pass 3 -- Grok contrarian (independent of Pass 1/2 success).
+    plan_summary = (
+        f"Central argument: {pass1.get('central_argument')}\n"
+        f"Slide count: {len(pass1.get('slide_plan') or [])}\n"
+        f"First slide headline: "
+        f"{(pass1.get('slide_plan') or [{}])[0].get('headline', '')}"
+    )
+    pass1["anticipated_questions"] = _generate_anticipated_questions(
+        plan_summary)
+
+    # Pass 4 -- Gemini blind spots (independent).
+    blind = _generate_blind_spots(plan_summary)
+    pass1["dissenting_view"] = blind.get("dissenting_view") or ""
+    pass1["limitations_surfaced"] = (
+        blind.get("limitations_to_surface", [])
+        + blind.get("blind_spots", []))
+    return pass1
+
+
+def generate_brief_section_plan(
+    brief_context: dict[str, Any],
+    rubric_sections: list[str],
+    *,
+    audience: str = "senior investment professionals",
+) -> dict[str, Any]:
+    """The four-pass brief section plan generator. Same fail-open
+    contract as the deck plan; structure mirrors it."""
+    user_prompt = (
+        "CONTEXT (validated constants + per-section data):\n"
+        f"{json.dumps(brief_context, indent=2, default=str)}\n\n"
+        f"RUBRIC SECTIONS (n={len(rubric_sections)}):\n"
+        + "\n".join(
+            f"  {i + 1}. {s}" for i, s in enumerate(rubric_sections))
+        + "\n\n"
+        f"AUDIENCE: {audience}\n\n"
+        "Produce the section plan as the strict JSON object "
+        "specified.")
+
+    try:
+        raw, score, attempts = _run_pass1_with_harness(
+            system_prompt=_BRIEF_SECTION_PLAN_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            evaluator_prompt=BRIEF_PLAN_EVALUATOR_PROMPT,
+            agent_id="story_plan_brief",
+            max_tokens=6000)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plan_brief_pass1_failed", error=str(exc))
+        return _deterministic_brief_plan(brief_context)
+
+    pass1 = _parse_plan_json(raw, log_key="story_plan_brief_pass1")
+    if not pass1 or not pass1.get("section_plan"):
+        log.warning("story_plan_brief_pass1_invalid",
+                    raw_preview=(raw or "")[:500])
+        return _deterministic_brief_plan(brief_context)
+    log.info("story_plan_evaluated",
+             document_type="brief",
+             attempts=attempts,
+             final_score=score)
+    pass1["_model"] = "claude-opus-4-7"
+
+    # Briefs do NOT get a Pass 2 full-script (a written document does
+    # not need a spoken script). Passes 3 and 4 still apply -- the
+    # brief benefits from anticipated audience questions and the
+    # blind-spot pass for its limitations section.
+    plan_summary = (
+        f"Central argument: {pass1.get('central_argument')}\n"
+        f"Section count: {len(pass1.get('section_plan') or {})}")
+    pass1["anticipated_questions"] = _generate_anticipated_questions(
+        plan_summary)
+    blind = _generate_blind_spots(plan_summary)
+    pass1["dissenting_view"] = blind.get("dissenting_view") or ""
+    pass1["limitations_surfaced"] = (
+        blind.get("limitations_to_surface", [])
+        + blind.get("blind_spots", []))
+    return pass1
+
+
+# ── Persistence + cache reader ──────────────────────────────────────────
+
+
+async def get_cached_story_plan(
+    data_hash: str, document_type: str,
+) -> dict[str, Any] | None:
+    """Read the cached story plan for (data_hash, document_type).
+    Returns the plan dict on cache hit, None on cold cache or DB
+    unavailable. Fail-open."""
+    if not _DB_AVAILABLE or not data_hash:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            row = await session.execute(
+                text("SELECT plan_json, full_script, "
+                     "anticipated_questions, dissenting_view, "
+                     "limitations_surfaced, model, computed_at "
+                     "FROM story_plans "
+                     "WHERE data_hash = :h "
+                     "  AND document_type = :t "
+                     "ORDER BY computed_at DESC LIMIT 1"),
+                {"h": data_hash, "t": document_type})
+            r = row.fetchone()
+            if not r:
+                return None
+            plan = dict(r[0]) if r[0] else {}
+            plan["full_script"] = r[1]
+            plan["anticipated_questions"] = (
+                list(r[2]) if r[2] else [])
+            plan["dissenting_view"] = r[3] or ""
+            plan["limitations_surfaced"] = (
+                list(r[4]) if r[4] else [])
+            plan["_model"] = r[5]
+            plan["computed_at"] = str(r[6])
+            return plan
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plan_read_error", error=str(exc))
+        return None
+
+
+async def persist_story_plan(
+    data_hash: str, document_type: str, plan: dict[str, Any],
+) -> None:
+    """Persist the plan under (data_hash, document_type). Guarded
+    UPSERT: a real LLM plan overwrites a previously stored
+    deterministic_fallback row; a fallback never overwrites a real
+    plan (mirrors PR #324's cio_recommendations recovery contract)."""
+    if not _DB_AVAILABLE or not data_hash:
+        return
+    try:
+        from sqlalchemy import text
+        # Split the plan dict into the flat columns + the residual
+        # JSON blob so the indexed surfaces (model, computed_at) are
+        # cheap to query.
+        plan_json = dict(plan)
+        full_script = plan_json.pop("full_script", None)
+        anticipated = plan_json.pop("anticipated_questions", None)
+        dissenting = plan_json.pop("dissenting_view", "") or None
+        limitations = plan_json.pop("limitations_surfaced", None)
+        model = plan_json.pop("_model", None)
+        central = plan.get("central_argument")
+
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            await session.execute(
+                text(
+                    "INSERT INTO story_plans "
+                    "(data_hash, document_type, central_argument, "
+                    " plan_json, full_script, anticipated_questions, "
+                    " dissenting_view, limitations_surfaced, model) "
+                    "VALUES (:h, :t, :c, "
+                    " CAST(:pj AS JSONB), :fs, "
+                    " CAST(:aq AS JSONB), "
+                    " :dv, CAST(:ls AS JSONB), :m) "
+                    "ON CONFLICT (data_hash, document_type) "
+                    "DO UPDATE SET "
+                    "  central_argument = EXCLUDED.central_argument, "
+                    "  plan_json = EXCLUDED.plan_json, "
+                    "  full_script = EXCLUDED.full_script, "
+                    "  anticipated_questions = "
+                    "      EXCLUDED.anticipated_questions, "
+                    "  dissenting_view = EXCLUDED.dissenting_view, "
+                    "  limitations_surfaced = "
+                    "      EXCLUDED.limitations_surfaced, "
+                    "  model = EXCLUDED.model, "
+                    "  computed_at = now() "
+                    "WHERE story_plans.model "
+                    "      = 'deterministic_fallback' "
+                    "  AND EXCLUDED.model "
+                    "      IS DISTINCT FROM 'deterministic_fallback'"),
+                {
+                    "h": data_hash,
+                    "t": document_type,
+                    "c": central,
+                    "pj": json.dumps(plan_json),
+                    "fs": full_script,
+                    "aq": (json.dumps(anticipated)
+                           if anticipated is not None else None),
+                    "dv": dissenting,
+                    "ls": (json.dumps(limitations)
+                           if limitations is not None else None),
+                    "m": model,
+                })
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plan_persist_error", error=str(exc))
+
+
+async def refresh_story_plan(
+    data_hash: str,
+    document_type: str,
+    *,
+    deck_context: dict[str, Any] | None = None,
+    brief_context: dict[str, Any] | None = None,
+    slide_titles: list[str] | None = None,
+    rubric_sections: list[str] | None = None,
+) -> dict[str, Any]:
+    """Hash-pipeline entry point. Serves from cache when a non-
+    fallback row exists at (data_hash, document_type); otherwise
+    runs the four-pass generator and persists. Fail-open per pass."""
+    if not data_hash:
+        return {"error": "no_data_hash"}
+    cached = await get_cached_story_plan(data_hash, document_type)
+    if cached and cached.get("_model") != _DETERMINISTIC:
+        cached["cache"] = "hit"
+        return cached
+    if document_type == "deck":
+        plan = generate_deck_story_plan(
+            deck_context or {}, slide_titles or [])
+    elif document_type == "brief":
+        plan = generate_brief_section_plan(
+            brief_context or {}, rubric_sections or [])
+    else:
+        return {"error": f"unknown_document_type:{document_type}"}
+    await persist_story_plan(data_hash, document_type, plan)
+    plan["cache"] = "miss"
+    return plan
