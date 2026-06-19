@@ -95,7 +95,16 @@ def upgrade() -> None:
         " academic_rationale, tour_step_id) "
         "VALUES (:v, :rel, :t, :d, :a, NULL)"
     ).bindparams(
-        v="056",
+        # The changelog.version column is INTEGER + UNIQUE (migration
+        # 011). The original "056" string bind caused the INSERT to
+        # fail on production with a type mismatch -- and because the
+        # whole upgrade() runs in a transaction, the failing INSERT
+        # rolled back the preceding CREATE TABLE, leaving the
+        # story_plans table absent. The integer fix below also has
+        # to PICK A FREE VERSION: v=56 is already taken by an earlier
+        # migration; the next free slot after migration 055 (v=75)
+        # is v=76.
+        v=76,
         rel=sa.text("now()"),
         t="Story-plan cache for deck and brief",
         d="A shared structured outline keyed by data_hash + document_type. "
