@@ -2900,7 +2900,14 @@ async def get_cio_recommendation(session: dict = Depends(require_auth)):
                 # Fail-open: a cold regime_blends row leaves the field
                 # absent and the frontend / digest omit the section.
                 try:
-                    from tools.cache import get_latest_metric
+                    # get_latest_metric lives in tools.precomputed_analytics,
+                    # not tools.cache (every other caller in the codebase
+                    # imports it from there). The wrong module here silently
+                    # broke the regime_blends overlay -- the try-block
+                    # swallowed the ImportError and logged
+                    # recommendation_regime_blends_overlay_failed, hiding
+                    # the typo behind the structured warning.
+                    from tools.precomputed_analytics import get_latest_metric
                     rb_row = await get_latest_metric("regime_blends") or {}
                     rb_blends = rb_row.get("blends") or {}
                     if rb_blends and allocation:

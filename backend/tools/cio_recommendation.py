@@ -178,10 +178,7 @@ def generate_recommendation(context: dict, macro_context: str = "") -> dict:
         raw = call_claude(SONNET_MODEL,
                           LANDING_PAGE_RECOMMENDATION_SYSTEM_PROMPT, user,
                           max_tokens=600, trigger="cio_recommendation")
-        text = (raw or "").strip()
-        if text.startswith("```"):
-            text = text.strip("`")
-        data = json.loads(text[text.find("{"): text.rfind("}") + 1])
+        data = _parse_recommendation_json(raw)
         # The four mandatory limitations are non-negotiable: enforce them
         # even if the model omitted or altered one.
         data["limitations"] = list(MANDATORY_LIMITATIONS)
@@ -205,6 +202,58 @@ def generate_recommendation(context: dict, macro_context: str = "") -> dict:
     except Exception as exc:  # noqa: BLE001
         log.warning("cio_recommendation_llm_failed", error=str(exc))
         return _deterministic_recommendation(context)
+
+
+def _parse_recommendation_json(raw: str | None) -> dict:
+    """Extract the JSON object from a CIO LLM response and parse it.
+
+    Hardens against three observed failure modes:
+      * markdown fences around the body (` ```json {...} ``` `),
+      * preamble text before the opening brace ("Here is the JSON: {..."),
+      * trailing prose after the closing brace ("...} Note: ...").
+
+    Explicit find('{') / rfind('}') trimming + a raw-preview WARNING
+    log on parse failure so the Render-side delimiter error ("Expecting
+    ',' delimiter: line 9 column 4 (char 1222)") is no longer cryptic --
+    the truncated raw response shows what the model emitted.
+
+    Raises ValueError when the response has no JSON object braces, and
+    the underlying json.JSONDecodeError when the trimmed body fails to
+    parse. The caller's outer except clause converts either into the
+    deterministic fail-open recommendation, so persistence still records
+    a row but with _model = 'deterministic_fallback' (which is what
+    blocks the warm's landed flag from claiming a real LLM write).
+    """
+    import json
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        # Some responses tag the fence as `json` (` ```json ... ``` `);
+        # after stripping backticks the leading "json" survives -- drop
+        # it so the brace-find scan starts at the body.
+        if text[:4].lower() == "json":
+            text = text[4:]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end < start:
+        log.warning(
+            "cio_recommendation_no_json_object",
+            raw_preview=(raw or "")[:500])
+        raise ValueError("No JSON object found in LLM response")
+    cleaned = text[start:end + 1]
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        log.warning(
+            "cio_recommendation_json_parse_failed",
+            raw_preview=(raw or "")[:500])
+        raise
+    if not isinstance(parsed, dict):
+        log.warning(
+            "cio_recommendation_json_not_object",
+            raw_preview=(raw or "")[:500])
+        raise ValueError("LLM response JSON is not an object")
+    return parsed
 
 
 # ── persistence: data_hash cache (serve-from-DB, recompute on change) ────────

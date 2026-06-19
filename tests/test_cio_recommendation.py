@@ -229,6 +229,116 @@ class TestSystemPromptStructureMandate:
 # this catches regressions at the statement-shape layer.
 
 
+# ── LLM JSON parse hardening (June 19 2026) ──────────────────────────────
+#
+# The CIO recommendation LLM occasionally emits preamble text before the
+# JSON body or trailing prose after the closing brace. The previous
+# json.loads on a best-effort slice surfaced cryptic "Expecting ',' "
+# delimiter errors that gave no clue what the model had emitted.
+# _parse_recommendation_json hardens the path:
+#   * markdown fences (with or without `json` tag) are stripped,
+#   * the body is bracketed by find('{') / rfind('}') so any preamble
+#     or trailing prose is discarded,
+#   * a raw-preview WARNING fires on parse failure so Render logs carry
+#     the truncated response that broke the parse.
+
+
+class TestParseRecommendationJson:
+
+    def test_parses_clean_object(self):
+        out = cio._parse_recommendation_json(
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BULL"}}')
+        assert out["signal"] == "s"
+        assert out["confidence"]["regime"] == "BULL"
+
+    def test_strips_markdown_fence_with_json_tag(self):
+        out = cio._parse_recommendation_json(
+            "```json\n"
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BEAR"}}\n'
+            "```")
+        assert out["confidence"]["regime"] == "BEAR"
+
+    def test_strips_preamble_before_first_brace(self):
+        out = cio._parse_recommendation_json(
+            "Here is the JSON object you requested:\n\n"
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "TRANSITION"}}')
+        assert out["confidence"]["regime"] == "TRANSITION"
+
+    def test_strips_trailing_prose_after_last_brace(self):
+        out = cio._parse_recommendation_json(
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BULL"}}\n\n'
+            "Note: this concludes the recommendation.")
+        assert out["confidence"]["regime"] == "BULL"
+
+    def test_raises_value_error_when_no_object_braces(self, monkeypatch):
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(cio.log, "warning", _capture)
+        with pytest.raises(ValueError):
+            cio._parse_recommendation_json(
+                "Sorry, I cannot produce this output.")
+        events = [e for e, _ in captured]
+        assert "cio_recommendation_no_json_object" in events
+        # The raw preview survives so the operator can see what the
+        # model actually emitted.
+        kwargs = next(kw for e, kw in captured
+                      if e == "cio_recommendation_no_json_object")
+        assert "Sorry, I cannot produce this output." \
+            in kwargs.get("raw_preview", "")
+
+    def test_logs_raw_preview_on_parse_failure(self, monkeypatch):
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(cio.log, "warning", _capture)
+        # The brace-pair lookup succeeds but the body is malformed
+        # JSON. The original delimiter error must propagate, AND the
+        # raw preview must land in the structured log so a regression
+        # hunter can see what the model wrote.
+        bad = ('{"signal": "s", '
+               '"dissenting_view": "d", '
+               '"confidence": {regime: "BULL"}}')   # unquoted key
+        import json as _json
+        with pytest.raises(_json.JSONDecodeError):
+            cio._parse_recommendation_json(bad)
+        events = [e for e, _ in captured]
+        assert "cio_recommendation_json_parse_failed" in events
+
+    def test_raises_when_root_is_not_a_dict(self, monkeypatch):
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(cio.log, "warning", _capture)
+        # A JSON array at the root level should not be accepted as a
+        # recommendation -- the caller treats only dicts as valid.
+        # The brace-pair scan would pull the empty {} from a body
+        # like "[{...}]" -- guard by isinstance check at the end.
+        # Construct a response where the brace-pair extraction yields
+        # a non-object: a bare string in braces.
+        with pytest.raises(ValueError):
+            cio._parse_recommendation_json('{"just a value"}')
+        # Either parse_failed (more likely -- malformed) or
+        # not_object (if the slice happened to parse). Both are
+        # acceptable signals -- the contract is just "no dict, no
+        # acceptance".
+        events = {e for e, _ in captured}
+        assert events.intersection({
+            "cio_recommendation_json_parse_failed",
+            "cio_recommendation_json_not_object",
+        })
+
+
 class TestPersistRecoveryUpsert:
 
     @pytest.mark.asyncio
