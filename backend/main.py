@@ -11419,17 +11419,27 @@ def _render_deck_slide_charts(
 ) -> dict:
     """Render the per-slide deck charts (sync; called in a thread). Returns
     {slide_number: png|None}. Every renderer is fail-open and individually
-    guarded — a None becomes a [DATA PENDING] note in the deck, never a
+    guarded -- a None becomes a [DATA PENDING] note in the deck, never a
     failure.
 
-    June 6 2026 — six-slide rewrite. Charts on slides 2, 3, and 6 per
-    academic_deck.SLIDE_CHARTS:
-      slide 2: rolling correlation (the 2022 break)
-      slide 3: OOS Sharpe comparison (benchmark / best static / blend)
-      slide 6: efficient frontier with the live blend position marked
-    Slides 1, 4, 5 don't carry matplotlib charts — slide 1's drawdown bars
-    are a slide-body table rendered by the builder, slide 4's nine-event
-    scorecard is a body table, and slide 5 is bullets-only."""
+    Slot mapping is DERIVED from academic_deck.SLIDE_CHARTS so the
+    renderer dict and the slot dict can never drift. The 11-slide rebuild
+    (June 7 2026) moved the chart slots to {4, 5, 11} but the renderer
+    mapping was left at the older 6-slide positions {2, 3, 6} -- every
+    deck generation since then fired three deck_chart_slot_unavailable
+    warnings because the builder asked for charts on slides 4/5/11 and
+    the returned dict carried 2/3/6. Reconciled by indexing through
+    SLIDE_CHARTS and dispatching by role string. Adding a new chart role
+    (or moving an existing chart to a different slide) now requires only
+    a SLIDE_CHARTS edit + a CHART_ROLE_RENDERERS entry; the slot keys
+    propagate automatically.
+
+    Roles not covered by CHART_ROLE_RENDERERS are silently dropped so a
+    future SLIDE_CHARTS entry for a chart that hasn't been wired yet
+    doesn't blow up the deck -- the slide still renders without a chart
+    and the operator sees the slot-unavailable WARNING via _image().
+    """
+    from tools.academic_deck import SLIDE_CHARTS
     from tools.chart_render import (
         render_efficient_frontier, render_rolling_correlation,
         render_strategy_comparison,
@@ -11442,20 +11452,38 @@ def _render_deck_slide_charts(
             log.warning("deck_chart_render_failed", error=str(exc))
             return None
 
-    return {
-        2: _safe(lambda: render_rolling_correlation(data)),
-        # Slide 3 — three-bar OOS Sharpe comparison. render_strategy_
-        # comparison's default arguments render every strategy as bars;
-        # the slide spec instructs the model to surface only the three
-        # relevant rows in its table, but the chart renderer produces
-        # the full comparison so the visual carries the cohort context.
-        3: _safe(lambda: render_strategy_comparison(data)),
-        # Slide 6 — efficient frontier with the live blend point.
-        # blend_weights drives the marker; the rest of the frontier
-        # is the cached sweep from analytics_metrics_cache.
-        6: _safe(lambda: render_efficient_frontier(
-            data, blend_weights=blend_weights)),
+    # Role string -> renderer callable. The blend_weights closure is
+    # captured once here so the lambdas only need the data dict at call
+    # time. blend_series is reserved for future role additions (e.g. an
+    # explicit cumulative-return overlay slot); kept on the signature
+    # so the existing call sites do not have to change.
+    chart_role_renderers = {
+        "rolling_correlation":
+            lambda d: render_rolling_correlation(d),
+        # render_strategy_comparison's default arguments render every
+        # strategy as bars; the slide spec instructs the model to
+        # surface only the three relevant rows in its table, but the
+        # chart renderer produces the full comparison so the visual
+        # carries the cohort context.
+        "strategy_comparison_oos_sharpe":
+            lambda d: render_strategy_comparison(d),
+        # blend_weights drives the live marker on the frontier; the
+        # rest of the sweep comes from analytics_metrics_cache.
+        "efficient_frontier":
+            lambda d: render_efficient_frontier(
+                d, blend_weights=blend_weights),
     }
+
+    out: dict = {}
+    for slide_number, role in SLIDE_CHARTS.items():
+        renderer = chart_role_renderers.get(role)
+        if renderer is None:
+            log.warning(
+                "deck_chart_role_unwired",
+                slide_number=slide_number, role=role)
+            continue
+        out[slide_number] = _safe(lambda r=renderer: r(data))
+    return out
 
 
 async def _build_deck_context(

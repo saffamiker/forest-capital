@@ -429,6 +429,94 @@ class TestStoryArcSeed:
             assert f"{n}." in prompt
 
 
+class TestChartSlotDerivedFromSlideCharts:
+    """The renderer's output slot dict is DERIVED from
+    academic_deck.SLIDE_CHARTS so the two cannot drift. Earlier
+    (pre-PR #332) the renderer hardcoded {2, 3, 6} while SLIDE_CHARTS
+    had moved to {4, 5, 11} during the 11-slide rebuild; every deck
+    generation since then fired three deck_chart_slot_unavailable
+    warnings. Pinning the derivation here so a future hardcode
+    regression fails loudly."""
+
+    def test_renderer_keys_follow_slide_charts(self, monkeypatch):
+        """Mock SLIDE_CHARTS to a single arbitrary slot {7:
+        rolling_correlation}. The renderer must return a dict whose
+        ONLY key is 7 -- proving the slot follows SLIDE_CHARTS and
+        is not a hardcoded constant elsewhere."""
+        from tools import academic_deck
+
+        # Replace SLIDE_CHARTS with a single-entry probe. The renderer
+        # reads it via `from tools.academic_deck import SLIDE_CHARTS`
+        # at call time, so monkeypatching the module attribute is
+        # sufficient.
+        monkeypatch.setattr(
+            academic_deck, "SLIDE_CHARTS", {7: "rolling_correlation"})
+
+        from main import _render_deck_slide_charts
+        out = _render_deck_slide_charts(
+            data={}, blend_weights={}, blend_series=[])
+        # Only key 7 -- the slot the mocked SLIDE_CHARTS named. The
+        # hardcoded-pre-fix would have returned {2, 3, 6} (or any
+        # other constants) regardless of SLIDE_CHARTS contents.
+        assert set(out.keys()) == {7}, (
+            f"renderer slot ({sorted(out.keys())}) did not follow "
+            f"SLIDE_CHARTS ({{7}}) -- the derivation regressed to a "
+            "hardcoded constant.")
+
+    def test_renderer_keys_align_with_real_slide_charts(self):
+        """End-to-end smoke: the production SLIDE_CHARTS keys and the
+        renderer output keys are equal. This is the test that would
+        have caught the pre-PR-332 drift the moment it landed."""
+        from tools.academic_deck import SLIDE_CHARTS
+
+        from main import _render_deck_slide_charts
+        out = _render_deck_slide_charts(
+            data={}, blend_weights={}, blend_series=[])
+        assert set(out.keys()) == set(SLIDE_CHARTS.keys()), (
+            "SLIDE_CHARTS and _render_deck_slide_charts must agree on "
+            "the slide numbers that carry charts. Mismatch causes "
+            "silent deck_chart_slot_unavailable WARNINGs on every "
+            "deck generation.")
+
+    def test_unknown_chart_role_logs_warning_not_crash(
+            self, monkeypatch):
+        """An unknown chart_name in SLIDE_CHARTS must NOT raise -- the
+        renderer logs a deck_chart_role_unwired WARNING and silently
+        skips that slot. Defends against a SLIDE_CHARTS edit that adds
+        a new role before the renderer dispatch is wired."""
+        from tools import academic_deck
+
+        monkeypatch.setattr(
+            academic_deck, "SLIDE_CHARTS",
+            {4: "rolling_correlation",   # known role -- rendered
+             9: "future_chart_role"})    # unknown role -- skipped
+
+        captured: list[tuple[str, dict]] = []
+
+        import main
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(main.log, "warning", _capture)
+
+        # Must NOT raise.
+        out = main._render_deck_slide_charts(
+            data={}, blend_weights={}, blend_series=[])
+        # Known role slot is present; unknown role slot is dropped.
+        assert 4 in out
+        assert 9 not in out
+        # The deck_chart_role_unwired event fired with both slide_number
+        # and role kwargs so an operator reading Render logs can see
+        # exactly which slot was unwired.
+        events = [(e, kw) for e, kw in captured
+                  if e == "deck_chart_role_unwired"]
+        assert events, "expected deck_chart_role_unwired warning"
+        _, kw = events[-1]
+        assert kw.get("slide_number") == 9
+        assert kw.get("role") == "future_chart_role"
+
+
 class TestNoHarnessReferenced:
     """Bridge #100: the deck slide generation must NOT route through
     the academic-writer harness (which uses the peer-discussant
