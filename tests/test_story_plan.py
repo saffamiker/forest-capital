@@ -204,64 +204,81 @@ class TestRubricCoverageFixes:
 
     def test_academic_grounding_requirement_constant_present(self):
         from tools.story_plan import ACADEMIC_GROUNDING_REQUIREMENT
-        # All four required citations named.
-        assert "Hamilton (1989)" in ACADEMIC_GROUNDING_REQUIREMENT
-        assert "Ang and Bekaert (2002)" \
+        # All seven required citations named in the in-text usage
+        # rules (each rule appears as a numbered list item with the
+        # canonical author-year form).
+        for citation in (
+            "Hamilton (1989)", "Ang and Bekaert (2002)",
+            "Markowitz (1952)", "Fama and French (1993)",
+            "Carhart (1997)", "Sharpe (1994)", "Lo (2002)",
+        ):
+            assert citation in ACADEMIC_GROUNDING_REQUIREMENT, (
+                f"missing in-text reference: {citation}")
+        # The "use them exactly as provided" + mandatory-requirements
+        # block pinned so a future trim cannot quietly relax the
+        # contract.
+        assert "must be used exactly as provided" \
             in ACADEMIC_GROUNDING_REQUIREMENT
-        assert "Markowitz (1952)" in ACADEMIC_GROUNDING_REQUIREMENT
-        assert "Carhart (1997)" in ACADEMIC_GROUNDING_REQUIREMENT
-        # The "do not assert without citing" guards pinned for all
-        # four required references.
-        assert "Do not assert the HMM approach without citing Hamilton " \
-               "(1989)" in ACADEMIC_GROUNDING_REQUIREMENT
-        assert "Do not assert the static blend without citing " \
-               "Markowitz (1952)" in ACADEMIC_GROUNDING_REQUIREMENT
-        assert "Do not assert regime-conditional allocation without " \
-               "citing Ang and Bekaert (2002)" \
+        assert "Every citation used in-text must appear in References" \
             in ACADEMIC_GROUNDING_REQUIREMENT
-        assert "Do not assert factor-loading attribution without " \
-               "citing Carhart (1997)" \
+        assert "Do not add citations not in this list" \
             in ACADEMIC_GROUNDING_REQUIREMENT
 
-    def test_verified_citations_constant_carries_all_four_dois(self):
-        """The four primary-source citations are pre-verified from
+    def test_verified_citations_constant_carries_all_seven_dois(self):
+        """The seven primary-source citations are pre-verified from
         their original journals; hardcoded into the constant so the
         brief LLM does not have to web-search and cannot drift to
         similar-but-different citations."""
         from tools.story_plan import VERIFIED_CITATIONS
-        # All four keys present.
+        # All seven keys present (expanded from the initial four in
+        # the same PR to cover Sharpe ratio + Fama-French + Lo
+        # Deflated Sharpe Ratio).
         assert set(VERIFIED_CITATIONS.keys()) == {
             "hamilton_1989", "ang_bekaert_2002",
             "markowitz_1952", "carhart_1997",
+            "sharpe_1994", "fama_french_1993", "lo_2002",
         }
         # The verified DOIs pinned individually so any value drift
-        # surfaces immediately. Hamilton 1989 Econometrica DOI:
+        # surfaces immediately.
         assert "10.2307/1912559" in VERIFIED_CITATIONS["hamilton_1989"]
-        # Ang & Bekaert 2002 RFS DOI:
         assert "10.1093/rfs/15.4.1137" \
             in VERIFIED_CITATIONS["ang_bekaert_2002"]
-        # Markowitz 1952 JF DOI:
         assert "10.1111/j.1540-6261.1952.tb01525.x" \
             in VERIFIED_CITATIONS["markowitz_1952"]
-        # Carhart 1997 JF DOI:
         assert "10.1111/j.1540-6261.1997.tb03808.x" \
             in VERIFIED_CITATIONS["carhart_1997"]
-        # Each citation includes the year + journal + page range
-        # (defensive against a truncation that drops the second half).
+        assert "10.3905/jpm.1994.409501" \
+            in VERIFIED_CITATIONS["sharpe_1994"]
+        assert "10.1016/0304-405X(93)90023-5" \
+            in VERIFIED_CITATIONS["fama_french_1993"]
+        assert "10.2469/faj.v58.n4.2453" \
+            in VERIFIED_CITATIONS["lo_2002"]
+        # Each citation includes a DOI (defensive against a
+        # truncation that drops the second half).
         for key, citation in VERIFIED_CITATIONS.items():
             assert "https://doi.org/" in citation, (
                 f"missing DOI in {key}")
 
-    def test_grounding_requirement_injects_hamilton_doi_verbatim(self):
-        """The Hamilton DOI is the proxy test for all four citations
-        being injected verbatim into the brief Pass-1 prompt. The
-        brief LLM sees the bibliographic details exactly as verified
-        and cannot drift to a similar-but-different citation."""
-        from tools.story_plan import ACADEMIC_GROUNDING_REQUIREMENT
+    def test_grounding_requirement_injects_all_seven_dois_verbatim(self):
+        """Each of the seven verified DOIs lands in the brief Pass-1
+        prompt verbatim -- the brief LLM sees the bibliographic
+        details exactly as verified and cannot drift to a similar-
+        but-different citation. Hamilton + Lo are spot-checked
+        explicitly per the user's directive; the loop below pins the
+        remaining five."""
+        from tools.story_plan import (
+            ACADEMIC_GROUNDING_REQUIREMENT, VERIFIED_CITATIONS,
+        )
+        # Spot-check the two ends of the bibliography.
         assert "10.2307/1912559" in ACADEMIC_GROUNDING_REQUIREMENT
-        # The "USE THEM EXACTLY AS PROVIDED" directive pinned.
-        assert "USE THEM EXACTLY AS PROVIDED" \
+        assert "10.2469/faj.v58.n4.2453" \
             in ACADEMIC_GROUNDING_REQUIREMENT
+        # The remaining five verified DOIs land too.
+        for key, citation in VERIFIED_CITATIONS.items():
+            doi_fragment = citation.split("https://doi.org/")[-1]
+            assert doi_fragment in ACADEMIC_GROUNDING_REQUIREMENT, (
+                f"DOI fragment for {key} did not land in the "
+                "grounding requirement")
 
     def test_no_web_search_citation_step_in_brief_path(self):
         """The user's directive: citations are compile-time constants,
@@ -322,11 +339,24 @@ class TestRubricCoverageFixes:
         from tools.story_plan import BRIEF_PLAN_EVALUATOR_PROMPT
         assert "7. ACADEMIC GROUNDING (0-2)" \
             in BRIEF_PLAN_EVALUATOR_PROMPT
-        # The three minimum-required citations called out by name in
-        # the rubric.
-        assert "Hamilton 1989" in BRIEF_PLAN_EVALUATOR_PROMPT
-        assert "Ang and Bekaert 2002" in BRIEF_PLAN_EVALUATOR_PROMPT
-        assert "Markowitz 1952" in BRIEF_PLAN_EVALUATOR_PROMPT
+        # Criterion 7 references the expanded "five of the seven"
+        # threshold (updated when VERIFIED_CITATIONS expanded from
+        # 4 to 7 entries).
+        assert "five of the seven" in BRIEF_PLAN_EVALUATOR_PROMPT
+        # All seven required citations called out by name in the
+        # rubric.
+        for citation in (
+            "Hamilton 1989", "Ang and Bekaert 2002", "Markowitz 1952",
+            "Carhart 1997", "Sharpe 1994", "Fama and French 1993",
+            "Lo 2002",
+        ):
+            assert citation in BRIEF_PLAN_EVALUATOR_PROMPT, (
+                f"criterion 7 missing reference: {citation}")
+        # The contextual placement rules (Hamilton in methodology, etc.)
+        # are pinned -- scoring criterion 2 requires correct PLACEMENT
+        # too, not just presence.
+        assert ("Hamilton (1989) in methodology"
+                in BRIEF_PLAN_EVALUATOR_PROMPT)
         # The 14-point ceiling + 9.8 threshold pinned.
         assert "seven criteria" in BRIEF_PLAN_EVALUATOR_PROMPT
         assert "14 points" in BRIEF_PLAN_EVALUATOR_PROMPT

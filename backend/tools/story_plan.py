@@ -143,7 +143,7 @@ return, Sharpe, max drawdown, excess return vs benchmark) before the \
 dynamic comparison."""
 
 
-# Verified primary-source citations for the four academic references
+# Verified primary-source citations for the seven academic references
 # the brief is required to ground its methodology section in. Sourced
 # from the original journals + cross-checked against the publisher
 # DOI registry; hardcoded rather than resolved at generation time so
@@ -169,51 +169,83 @@ VERIFIED_CITATIONS = {
         "Carhart, M. M. (1997). On persistence in mutual fund "
         "performance. The Journal of Finance, 52(1), 57-82. "
         "https://doi.org/10.1111/j.1540-6261.1997.tb03808.x"),
+    "sharpe_1994": (
+        "Sharpe, W. F. (1994). The Sharpe ratio. The Journal of "
+        "Portfolio Management, 21(1), 49-58. "
+        "https://doi.org/10.3905/jpm.1994.409501"),
+    "fama_french_1993": (
+        "Fama, E. F., & French, K. R. (1993). Common risk factors in "
+        "the returns on stocks and bonds. Journal of Financial "
+        "Economics, 33(1), 3-56. "
+        "https://doi.org/10.1016/0304-405X(93)90023-5"),
+    "lo_2002": (
+        "Lo, A. W. (2002). The statistics of Sharpe ratios. Financial "
+        "Analysts Journal, 58(4), 36-52. "
+        "https://doi.org/10.2469/faj.v58.n4.2453"),
 }
 
 
-ACADEMIC_GROUNDING_REQUIREMENT = (
-    """\
+ACADEMIC_GROUNDING_REQUIREMENT = """\
 ACADEMIC CITATION REQUIREMENT:
-The methodology section must cite primary academic sources. The four \
-required citations have been pre-verified from their original journals \
-and DOI registries; USE THEM EXACTLY AS PROVIDED below. Do NOT \
-paraphrase the bibliographic details, do NOT substitute similar \
-citations, do NOT modify the DOIs.
+The brief must cite primary academic sources throughout. The \
+following seven citations have been verified from primary sources \
+and must be used exactly as provided. Do not paraphrase, abbreviate, \
+or alter any bibliographic detail. Do not substitute similar \
+citations.
 
-Required citations (verbatim APA 7th edition):
+VERIFIED REFERENCES (use verbatim in References section):
 
-  - Hamilton (1989) -- foundation for the Hidden Markov Model regime
-    detection in financial time series. Cite this when introducing
-    the HMM approach.
-    """
-    + VERIFIED_CITATIONS["hamilton_1989"]
-    + "\n\n"
-    + """  - Ang and Bekaert (2002) -- direct academic precedent for """
-    """regime-conditional asset allocation. Cite this when """
-    """introducing the dynamic-blend construction.
-    """
-    + VERIFIED_CITATIONS["ang_bekaert_2002"]
-    + "\n\n"
-    + """  - Markowitz (1952) -- mean-variance optimization, the """
-    """theoretical basis for the static blend. Cite this when """
-    """justifying the 60/40 fixed allocation.
-    """
-    + VERIFIED_CITATIONS["markowitz_1952"]
-    + "\n\n"
-    + """  - Carhart (1997) -- four-factor model used in the """
-    """factor-loading attribution analysis. Cite this when discussing """
-    """the validation layer.
-    """
-    + VERIFIED_CITATIONS["carhart_1997"]
-    + "\n\n"
-    + """Place the four verbatim entries above in a References section """
-    """at the end of the brief. In-text citations use (Author, Year) """
-    """format. Do not assert the HMM approach without citing Hamilton """
-    """(1989). Do not assert the static blend without citing Markowitz """
-    """(1952). Do not assert regime-conditional allocation without """
-    """citing Ang and Bekaert (2002). Do not assert factor-loading """
-    """attribution without citing Carhart (1997).""")
+""" + "\n\n".join(VERIFIED_CITATIONS.values()) + """
+
+IN-TEXT CITATION RULES (APA 7th edition author-year format):
+
+1. Hamilton (1989): Cite when introducing the Hidden Markov Model \
+regime detection methodology. Example: "Following Hamilton (1989), \
+the platform models market states as latent variables governed by a \
+time-varying transition matrix."
+
+2. Ang and Bekaert (2002): Cite when discussing regime-conditional \
+asset allocation -- the direct academic precedent for the dynamic \
+blend approach. Example: "Consistent with Ang and Bekaert (2002), the \
+portfolio allocates differently across BULL, BEAR, and TRANSITION \
+regimes."
+
+3. Markowitz (1952): Cite when justifying the static blend (Classic \
+60/40) using mean-variance theory. Example: "The static allocation \
+follows Markowitz (1952) in seeking the efficient frontier portfolio \
+that maximises return per unit of variance."
+
+4. Fama and French (1993): Cite when introducing factor loading \
+attribution analysis. Example: "Factor exposures are estimated using \
+the Fama and French (1993) three-factor model extended by Carhart \
+(1997)."
+
+5. Carhart (1997): Cite alongside Fama and French (1993) for the \
+four-factor attribution. Example: "The Carhart (1997) momentum \
+factor is included to capture the one-year return continuation \
+documented in momentum strategies."
+
+6. Sharpe (1994): Cite when presenting the Sharpe ratio as a \
+performance measure. Example: "Risk-adjusted performance is \
+evaluated using the Sharpe ratio (Sharpe, 1994), defined as excess \
+return per unit of total volatility."
+
+7. Lo (2002): Cite when presenting the Deflated Sharpe Ratio or \
+discussing statistical reliability of the OOS Sharpe result. \
+Example: "To correct for multiple testing bias and non-normal return \
+distributions, the platform computes the Deflated Sharpe Ratio \
+following Lo (2002)."
+
+MANDATORY REQUIREMENTS:
+- Every citation used in-text must appear in References.
+- Every paper in References must be cited in-text at least once.
+- Do not add citations not in this list.
+- Do not cite papers the platform did not use.
+- Place the References section at the end of the brief, formatted \
+as a hanging-indent list in APA 7th edition.
+- Minimum three in-text citations required in the Methodology \
+section alone (Hamilton 1989, Markowitz 1952, and Sharpe 1994 at \
+minimum)."""
 
 
 # ── Evaluator prompts (Pass 1, both document types) ──────────────────────
@@ -326,15 +358,20 @@ analytical quality. The midpoint panel flagged this explicitly: "too \
 academic, lacking an investable conclusion".
 
 7. ACADEMIC GROUNDING (0-2)
-   Does the methodology section cite at least three primary academic \
-sources (Hamilton 1989, Ang and Bekaert 2002, Markowitz 1952 minimum)? \
-A brief that asserts regime detection or mean-variance theory without \
-academic grounding scores 0. The brief is graded on analytical rigor \
-as well as investable conclusion -- the academic grounding is what \
-moves the rigor score above pass.
-  - Two or more required citations present: 2 points.
-  - One required citation present: 1 point.
-  - Zero: 0 points.
+   Does the section plan cite at least five of the seven required \
+papers from VERIFIED_CITATIONS (Hamilton 1989, Ang and Bekaert 2002, \
+Markowitz 1952, Carhart 1997, Sharpe 1994, Fama and French 1993, Lo \
+2002)? Are citations placed correctly -- Hamilton (1989) in \
+methodology, Markowitz (1952) in static allocation justification, \
+Sharpe (1994) when presenting the Sharpe ratio result, Lo (2002) \
+with the Deflated Sharpe Ratio, Fama and French (1993) and Carhart \
+(1997) in factor attribution? Is a References section planned at the \
+end of the brief?
+  - 2 points: five or more citations correctly placed with a planned
+    References section.
+  - 1 point: three or four citations present.
+  - 0 points: fewer than three, or citations present but not placed
+    in contextually correct sections.
 
 The rubric now has seven criteria for a maximum of 14 points. The \
 acceptance threshold is 9.8 (70% equivalent).
