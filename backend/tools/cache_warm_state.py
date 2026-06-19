@@ -434,7 +434,20 @@ async def _default_warm_fn() -> dict[str, bool]:
     try:
         from tools.cio_recommendation import refresh_cio_recommendation
         cio = await refresh_cio_recommendation()
-        cio_landed = not bool((cio or {}).get("error"))
+        # The landed flag has to distinguish a REAL LLM write from the
+        # fail-open path that persists the deterministic_fallback row
+        # (which carries no live LLM judgment). Previously the flag
+        # flipped true on any non-error refresh, so the warm reported
+        # success while the digest immediately fell to the "Live regime
+        # unavailable" path -- a contradiction in the operator's view.
+        # The two-clause check below requires (a) no refresh-level
+        # error and (b) the persisted model is the real Sonnet output,
+        # not the fallback sentinel. See cio_recommendation._DETERMINISTIC
+        # for the canonical string.
+        cio_landed = (
+            not bool((cio or {}).get("error"))
+            and (cio or {}).get("_model") != "deterministic_fallback"
+        )
     except Exception as exc:  # noqa: BLE001
         log.warning("cio_recommendation_warm_failed", error=str(exc))
 
