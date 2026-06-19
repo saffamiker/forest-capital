@@ -313,6 +313,106 @@ class TestParseRecommendationJson:
         events = [e for e, _ in captured]
         assert "cio_recommendation_json_parse_failed" in events
 
+    def test_fence_wrapped_clean_json_parses(self):
+        """The model occasionally wraps the JSON body in a fenced code
+        block (` ```json {...} ``` `). The regex-anchored fence strip
+        peels both the leading and trailing fences before the brace-
+        pair extraction so the body parses cleanly."""
+        raw = (
+            "```json\n"
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BULL"}}\n'
+            "```")
+        out = cio._parse_recommendation_json(raw)
+        assert out["signal"] == "s"
+        assert out["confidence"]["regime"] == "BULL"
+
+    def test_fence_wrapped_without_json_tag_parses(self):
+        """Fence without the `json` tag is the older Anthropic shape;
+        the regex matches a bare ``` and the body still parses."""
+        raw = (
+            "```\n"
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BEAR"}}\n'
+            "```")
+        out = cio._parse_recommendation_json(raw)
+        assert out["confidence"]["regime"] == "BEAR"
+
+    def test_fence_with_uppercase_tag_parses(self):
+        """The regex is case-insensitive so ` ```JSON ` is treated
+        the same as ` ```json `."""
+        raw = (
+            "```JSON\n"
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "TRANSITION"}}\n'
+            "```")
+        out = cio._parse_recommendation_json(raw)
+        assert out["confidence"]["regime"] == "TRANSITION"
+
+    def test_fence_plus_truncation_raises_clear_error(self, monkeypatch):
+        """The compound failure mode the Render logs surfaced:
+        ` ```json\n{ ... signal cut mid-string ` with no closing brace
+        and no closing fence. The fence is stripped by the regex; the
+        rfind('}') returns -1; ValueError must surface with a clear
+        message naming truncation as the suspected cause (not a cryptic
+        delimiter error)."""
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(cio.log, "warning", _capture)
+        raw = (
+            "```json\n"
+            '{\n  "signal": "The regime classifier assigns a 97.4% '
+            'posterior probability to BULL... historically the cycle '
+            "has shown that")
+        with pytest.raises(ValueError, match="No JSON object found"):
+            cio._parse_recommendation_json(raw)
+        # The structured warn fires with the raw preview so an operator
+        # reading Render logs can see the truncation point.
+        events = [e for e, _ in captured]
+        assert "cio_recommendation_no_json_object" in events
+        kwargs = next(kw for e, kw in captured
+                      if e == "cio_recommendation_no_json_object")
+        assert "97.4% posterior probability" in kwargs.get(
+            "raw_preview", "")
+
+    def test_unfenced_truncation_surfaces_distinct_error(
+            self, monkeypatch):
+        """An unfenced body that truncates mid-string deserves a
+        DISTINCT error message ("Truncated LLM response: no closing
+        brace found") that names raising max_tokens as the next
+        diagnostic step -- separates "model refused" from "model ran
+        out of budget mid-response"."""
+        captured: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            captured.append((event, kwargs))
+
+        monkeypatch.setattr(cio.log, "warning", _capture)
+        raw = (
+            '{\n  "signal": "The regime classifier assigns... '
+            "historically the cycle")
+        with pytest.raises(ValueError,
+                           match="Truncated LLM response"):
+            cio._parse_recommendation_json(raw)
+        events = [e for e, _ in captured]
+        assert "cio_recommendation_no_json_object" in events
+
+    def test_clean_unfenced_json_unchanged(self):
+        """The regex fence-strip is a no-op when no fence is present;
+        unfenced clean JSON must parse exactly as it did before the
+        hardening, with no behavioural change."""
+        raw = (
+            '{"signal": "s", "dissenting_view": "d", '
+            '"confidence": {"regime": "BULL", "probability": 0.97}, '
+            '"recommendation": "r", "key_risk": "k"}')
+        out = cio._parse_recommendation_json(raw)
+        assert out["signal"] == "s"
+        assert out["confidence"]["probability"] == 0.97
+        assert out["recommendation"] == "r"
+
     def test_raises_when_root_is_not_a_dict(self, monkeypatch):
         captured: list[tuple[str, dict]] = []
 

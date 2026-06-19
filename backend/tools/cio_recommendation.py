@@ -175,9 +175,22 @@ def generate_recommendation(context: dict, macro_context: str = "") -> dict:
         "four mandatory limitations verbatim.")
     try:
         import json
+        # max_tokens=4000 (June 19 2026, raised from 600). The four-
+        # component response is signal + recommendation + dissenting_view
+        # + key_risk (each one short paragraph) + four mandatory
+        # limitations (verbatim ~100 tokens each) + confidence + blend
+        # weights. At 600 tokens the model occasionally truncated inside
+        # the signal field, leaving the JSON unclosed -- the raw_preview
+        # log from the Render side showed the cut happening mid-string
+        # in the first field. 4000 is the same ceiling the deck per-
+        # slide call uses (post-#100); well under Sonnet's per-call
+        # cap and the project credit budget for a once-per-data_hash
+        # call. The global default MAX_OUTPUT_TOKENS=1024 is for
+        # generic helpers; this call site overrides it because the
+        # mandatory four limitations alone are ~400 tokens.
         raw = call_claude(SONNET_MODEL,
                           LANDING_PAGE_RECOMMENDATION_SYSTEM_PROMPT, user,
-                          max_tokens=600, trigger="cio_recommendation")
+                          max_tokens=4000, trigger="cio_recommendation")
         data = _parse_recommendation_json(raw)
         # The four mandatory limitations are non-negotiable: enforce them
         # even if the model omitted or altered one.
@@ -207,15 +220,27 @@ def generate_recommendation(context: dict, macro_context: str = "") -> dict:
 def _parse_recommendation_json(raw: str | None) -> dict:
     """Extract the JSON object from a CIO LLM response and parse it.
 
-    Hardens against three observed failure modes:
+    Hardens against four observed failure modes:
       * markdown fences around the body (` ```json {...} ``` `),
       * preamble text before the opening brace ("Here is the JSON: {..."),
-      * trailing prose after the closing brace ("...} Note: ...").
+      * trailing prose after the closing brace ("...} Note: ..."),
+      * truncated responses where the closing brace + closing fence
+        never arrive (an unclosed string in `signal` runs the model
+        past max_tokens before the JSON can close).
 
-    Explicit find('{') / rfind('}') trimming + a raw-preview WARNING
-    log on parse failure so the Render-side delimiter error ("Expecting
-    ',' delimiter: line 9 column 4 (char 1222)") is no longer cryptic --
-    the truncated raw response shows what the model emitted.
+    The fence strip is now regex-based -- matches `` ```json ``,
+    `` ``` ``, optional whitespace and optional `json` tag, both as
+    LEADING and TRAILING anchors. Distinct from text.strip('`') which
+    over-strips backticks anywhere a leading/trailing run lives;
+    the regex anchors guarantee we ONLY peel the markdown fence
+    delimiters and never touch backticks inside the body. After the
+    fence strip the existing find('{') / rfind('}') extraction runs
+    as before.
+
+    A raw-preview WARNING fires on parse failure so the Render-side
+    delimiter error ("Expecting ',' delimiter: line 9 column 4
+    (char 1222)") is no longer cryptic -- the truncated raw response
+    shows up in Render logs alongside the exception.
 
     Raises ValueError when the response has no JSON object braces, and
     the underlying json.JSONDecodeError when the trimmed body fails to
@@ -225,20 +250,28 @@ def _parse_recommendation_json(raw: str | None) -> dict:
     blocks the warm's landed flag from claiming a real LLM write).
     """
     import json
+    import re
     text = (raw or "").strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        # Some responses tag the fence as `json` (` ```json ... ``` `);
-        # after stripping backticks the leading "json" survives -- drop
-        # it so the brace-find scan starts at the body.
-        if text[:4].lower() == "json":
-            text = text[4:]
+    # Regex-anchored fence strip. The optional `json` tag is matched
+    # case-insensitively. Anchoring at ^ and $ means a stray ``` inside
+    # the body (e.g. a model that mentions code in the signal prose)
+    # is never touched -- only the surrounding fence is peeled.
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*```$', '', text)
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end < start:
         log.warning(
             "cio_recommendation_no_json_object",
             raw_preview=(raw or "")[:500])
+        # Distinct error message for truncated responses (fence stripped
+        # but no closing brace ever arrived) so the operator can tell
+        # "model refused to answer" from "model ran out of tokens
+        # mid-response". The two are diagnostically different.
+        if "```" not in (raw or "") and text.startswith("{"):
+            raise ValueError(
+                "Truncated LLM response: no closing brace found "
+                "(consider raising max_tokens)")
         raise ValueError("No JSON object found in LLM response")
     cleaned = text[start:end + 1]
     try:
