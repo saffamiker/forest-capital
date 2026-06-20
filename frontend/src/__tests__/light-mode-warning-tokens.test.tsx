@@ -198,28 +198,16 @@ describe('light-mode banner subtext + text-text-* alias overrides -- bridge #83'
     })
   })
 
-  describe('Reports.tsx Report Writer card body has no BOB callout copy', () => {
+  describe('Reports.tsx after PR #338 retired the Report Writer card', () => {
+    // PR #338 removed the Report Writer entry section from Reports.tsx
+    // entirely. The legacy 11-step pipeline was a parallel brief
+    // generation surface that bypassed the two-pass story plan
+    // architecture; the canonical path is now DocumentGenerationPanel.
     const reports = source('src/pages/Reports.tsx')
 
-    it('removes the [BOB] callout phrase from the description', () => {
-      expect(reports).not.toMatch(/resolve every \[BOB\] callout/i)
-    })
-
-    it('still describes the eleven-step verified-data flow', () => {
-      // The copy moves to "outstanding placeholder" -- generic phrasing
-      // that survives the BOB callout removal without losing the user's
-      // sense of what the eleven-step flow does.
-      expect(reports).toMatch(/eleven-step verified-data flow/i)
-      expect(reports).toMatch(/outstanding placeholder/i)
-    })
-
-    it('keeps the description on the text-text-secondary token', () => {
-      // After bridge #83's index.css override, the token reads dark on
-      // light AND light on dark -- single source of truth, no per-page
-      // class swap needed.
-      expect(reports).toMatch(
-        /text-text-secondary[^>]*>\s*\n?\s*The eleven-step/,
-      )
+    it('no longer renders the Report Writer entry copy', () => {
+      expect(reports).not.toMatch(/eleven-step verified-data flow/i)
+      expect(reports).not.toMatch(/Open Report Writer/)
     })
   })
 

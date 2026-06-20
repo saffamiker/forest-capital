@@ -106,10 +106,10 @@ export const TOUR_STEPS: TourStep[] = [
       'Six analytical components built specifically to support the '
       + "project's academic deliverables. Every table exports to CSV for "
       + 'the Analytical Appendix.',
-      'This page is the quantitative backbone of your midpoint paper and '
-      + 'executive brief. Faculty will expect everything here — asset class '
-      + 'statistics, correlation analysis, factor loadings, and regime '
-      + 'performance — to be present and interpreted.',
+      'This page is the quantitative backbone of your executive brief. '
+      + 'Faculty will expect everything here — asset class statistics, '
+      + 'correlation analysis, factor loadings, and regime performance '
+      + '— to be present and interpreted.',
     ],
   },
   {
@@ -253,7 +253,7 @@ export const TOUR_STEPS: TourStep[] = [
       + 'AI wrote the first draft. The grader reads what you do next.',
     ],
     relevantFor:
-      'Bob and Molly — the midpoint paper and the presentation deck both '
+      'Bob and Molly — the executive brief and the presentation deck both '
       + 'open in the editor; refine them here, not in Word.',
   },
   {
@@ -262,18 +262,15 @@ export const TOUR_STEPS: TourStep[] = [
     route: '/settings',
     title: 'Academic Documents — Agent Context',
     body: [
-      'Upload your project requirements, rubric, midpoint draft, and '
-      + 'presentation materials here. These documents are injected into '
-      + 'every AI agent session automatically.',
-      'The council cannot evaluate your work against the grading criteria '
-      + 'until these are uploaded. The midpoint draft is especially '
-      + 'important — once uploaded, the Academic Review shifts from '
-      + 'evaluating methodology in the abstract to giving direct feedback '
-      + 'on your actual submission.',
+      'Upload your project requirements, rubric, and presentation '
+      + 'materials here. These documents are injected into every AI '
+      + 'agent session automatically.',
+      'The council cannot evaluate your work against the grading '
+      + 'criteria until these are uploaded.',
     ],
     relevantFor:
-      'Bob — upload your midpoint draft here once written. The council '
-      + 'cannot evaluate your submission until it is uploaded.',
+      'Bob — upload your project requirements and rubric here. The '
+      + 'council cannot evaluate your submission until they are uploaded.',
   },
   {
     target: '[data-tour="testing-mode"]',

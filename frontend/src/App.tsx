@@ -31,10 +31,6 @@ const SectionEditor = lazy(() =>
   import('./pages/SectionEditor'))
 const DocumentEditor = lazy(() =>
   import('./pages/DocumentEditor'))
-const ReportWriter = lazy(() =>
-  import('./pages/ReportWriter'))
-const PeerReview = lazy(() =>
-  import('./pages/PeerReview'))
 
 
 /** Minimal page-load fallback. Keeps the route mount measurable in
@@ -300,35 +296,9 @@ export default function App() {
                 <Route path="performance-record" element={<PerformanceRecord />} />
                 <Route path="council" element={<CouncilDebate />} />
                 <Route path="qa" element={<QAHub />} />
-                <Route path="peer-review"
-                  element={
-                    /* PeerReview is lazy-imported (line 34) but was
-                       previously mounted bare — without a Suspense
-                       boundary, React's reconciler hit the lazy
-                       promise and the next render mounted the
-                       resolved component for the first time. The
-                       hooks-count delta between the two renders
-                       fired React's #426 "rendered more hooks than
-                       previous render" guard, surfacing as a blank
-                       page that recovered only on a hard reload
-                       (the eager import path). Every other lazy
-                       route in this Routes block is Suspense-
-                       wrapped; this one was the lone exception.
-                       Fix: same Suspense pattern as the rest.
-                       May 24 2026 UAT. */
-                    <Suspense fallback={<_PageLoadingFallback />}>
-                      <PeerReview />
-                    </Suspense>
-                  } />
                 <Route path="reports" element={<Reports />} />
                 <Route path="settings" element={<Settings />} />
                 <Route path="admin/health" element={<AdminHealth />} />
-                <Route path="reports/writer"
-                  element={
-                    <Suspense fallback={<_PageLoadingFallback />}>
-                      <ReportWriter />
-                    </Suspense>
-                  } />
                 <Route path="reports/storyboard"
                   element={
                     <Suspense fallback={<_PageLoadingFallback />}>

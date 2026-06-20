@@ -254,13 +254,17 @@ describe('AdvisorPanel — interaction', () => {
     expect(screen.getByTestId('advisor-panel')).toBeInTheDocument()
   })
 
-  it('shows the deliverable dropdown with all four options', async () => {
-    const user = userEvent.setup()
-    renderInMode('analyst', <AdvisorPanel />)
-    await user.click(screen.getByTestId('advisor-floating-button'))
-    const select = screen.getByTestId('advisor-deliverable-select') as HTMLSelectElement
-    expect(select.querySelectorAll('option').length).toBe(4)
-  })
+  it('shows the deliverable dropdown with the three remaining options',
+    async () => {
+      // PR #338 retired the midpoint deliverable; the dropdown now
+      // carries only appendix / brief / presentation.
+      const user = userEvent.setup()
+      renderInMode('analyst', <AdvisorPanel />)
+      await user.click(screen.getByTestId('advisor-floating-button'))
+      const select = screen.getByTestId(
+        'advisor-deliverable-select') as HTMLSelectElement
+      expect(select.querySelectorAll('option').length).toBe(3)
+    })
 
   it('submits a request and renders verified citations on success', async () => {
     mockedAxios.post = vi.fn().mockResolvedValue({ data: ANALYSIS_FIXTURE })

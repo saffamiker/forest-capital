@@ -53,9 +53,10 @@ describe('deadlineCountdown', () => {
   })
 })
 
-describe('compactCountdown — dual-deadline guide chips', () => {
-  // Bob's guide carries two chips (midpoint paper + executive brief), so
-  // each chip needs to identify which deliverable it is counting down to.
+describe('compactCountdown — labelled chip rendering', () => {
+  // Each chip identifies which deliverable it is counting down to.
+  // PR #338 retired the midpoint sub-deliverable; only the executive
+  // brief countdown variants need pinning here.
   it('prefixes the deliverable label and renders a compact day count', () => {
     const cd = compactCountdown('2026-07-01', 'Executive Brief',
                                 at('2026-06-21'))
@@ -64,39 +65,36 @@ describe('compactCountdown — dual-deadline guide chips', () => {
   })
 
   it('uses singular "day" inside the urgency window', () => {
-    const cd = compactCountdown('2026-05-27', 'Midpoint paper',
-                                at('2026-05-26'))
+    const cd = compactCountdown('2026-07-01', 'Executive Brief',
+                                at('2026-06-30'))
     expect(cd.tone).toBe('red')
-    expect(cd.label).toBe('Midpoint paper: 1 day')
+    expect(cd.label).toBe('Executive Brief: 1 day')
   })
 
   it('reads "<Label>: today" on the deadline day', () => {
-    const cd = compactCountdown('2026-05-27', 'Midpoint paper',
-                                at('2026-05-27'))
+    const cd = compactCountdown('2026-07-01', 'Executive Brief',
+                                at('2026-07-01'))
     expect(cd.tone).toBe('red')
-    expect(cd.label).toBe('Midpoint paper: today')
+    expect(cd.label).toBe('Executive Brief: today')
   })
 
   it('reads "<Label>: passed" after the deadline', () => {
-    const cd = compactCountdown('2026-05-27', 'Midpoint paper',
-                                at('2026-05-30'))
+    const cd = compactCountdown('2026-07-01', 'Executive Brief',
+                                at('2026-07-05'))
     expect(cd.tone).toBe('passed')
-    expect(cd.label).toBe('Midpoint paper: passed')
+    expect(cd.label).toBe('Executive Brief: passed')
   })
 })
 
 describe('SUBMISSION_DEADLINES — flat per-owner schedule', () => {
-  // The login-notification countdown reads this; both of Bob's
-  // deadlines must surface so the notification picks the nearest
-  // unpassed one rather than wedging on a stale single entry.
-  it('emits both of Bobs deadlines and Molly’s single deadline',
-    () => {
+  // PR #338 retired the midpoint deadline from Bob's guide; only the
+  // July 1st executive brief remains. Molly's single July 1st final
+  // presentation is unchanged.
+  it('emits Bob’s single executive-brief deadline and Molly’s '
+    + 'single final-presentation deadline', () => {
       const bob = SUBMISSION_DEADLINES.filter(
         (d) => d.ownerEmail === 'thaob@queens.edu')
-      expect(bob.map((d) => d.deadline).sort()).toEqual([
-        '2026-05-27',
-        '2026-07-01',
-      ])
+      expect(bob.map((d) => d.deadline)).toEqual(['2026-07-01'])
       const molly = SUBMISSION_DEADLINES.filter(
         (d) => d.ownerEmail === 'murdockm@queens.edu')
       expect(molly).toHaveLength(1)
@@ -109,7 +107,6 @@ describe('SUBMISSION_DEADLINES — flat per-owner schedule', () => {
       const bobLabels = SUBMISSION_DEADLINES
         .filter((d) => d.ownerEmail === 'thaob@queens.edu')
         .map((d) => d.label)
-        .sort()
-      expect(bobLabels).toEqual(['Executive Brief', 'Midpoint paper'])
+      expect(bobLabels).toEqual(['Executive Brief'])
     })
 })

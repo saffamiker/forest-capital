@@ -480,45 +480,6 @@ export default function Reports() {
         <DocumentGenerationPanel />
       </div>
 
-      {/* Report Writer — verified-data midpoint paper flow with the
-          AI iteration toolbar, academic review against the FNA670
-          rubric, and two-tier download gating. The /reports/writer
-          page hosts the full eleven-step workflow. */}
-      <TeamGate permission="team_member"
-        tooltip="The report writer is available to the project team">
-        <section
-          data-tour="report-writer-entry"
-          data-section-id="report-writer"
-          data-section-label="Report Writer"
-          className="card p-4 border-l-4 border-l-electric-blue">
-          <div className="flex items-start gap-3">
-            <FileText className="w-5 h-5 text-electric-blue flex-shrink-0 mt-0.5" />
-            <div className="flex-1 min-w-0">
-              <h3 className="text-white font-semibold text-sm mb-1">
-                Report Writer — Midpoint Check Paper
-              </h3>
-              <p className="text-text-secondary text-xs mb-3">
-                The eleven-step verified-data flow: stage findings,
-                source citations, validate thesis, generate draft,
-                resolve every outstanding placeholder, run final
-                check, run the academic review against the FNA670
-                rubric, and download the submission-ready .docx.
-              </p>
-              <Link
-                to="/reports/writer"
-                className={
-                  'inline-flex items-center gap-2 px-3 py-1.5 ' +
-                  'bg-electric-blue hover:bg-electric-blue/80 ' +
-                  'text-white text-xs font-medium rounded'
-                }>
-                Open Report Writer
-                <ArrowRight className="w-3 h-3" />
-              </Link>
-            </div>
-          </div>
-        </section>
-      </TeamGate>
-
       {/* Team Activity — the evidence behind the Roles & Division-of-Labor
           deliverable and the AI-use narrative, so it leads the page.
           Independent of the deliverables manifest — renders regardless of

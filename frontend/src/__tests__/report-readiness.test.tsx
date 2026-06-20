@@ -289,13 +289,11 @@ describe('ReportBlockingModal', () => {
 
 describe('DocumentGenerationPanel — readiness gate', () => {
   // The panel renders three cards with the same gating behaviour.
-  // These tests target the Generate button on the midpoint card —
-  // scoped to that specific card so the section heading "Generate
-  // Documents" and the trailing paragraph don't confuse the
-  // selector.
+  // PR #338 retired the midpoint card; the tests now target the
+  // Executive Brief card, which is the canonical generation surface.
 
-  function midpointCard(): HTMLElement {
-    return screen.getByText('Midpoint Submission Paper')
+  function briefCardEl(): HTMLElement {
+    return screen.getByText('Executive Brief')
       .closest('.card') as HTMLElement
   }
 
@@ -307,7 +305,7 @@ describe('DocumentGenerationPanel — readiness gate', () => {
       mockedAxios.get = vi.fn().mockResolvedValue({ data: BLOCKED })
       renderWithAuth(<DocumentGenerationPanel />)
       const generateBtn = await waitFor(() =>
-        within(midpointCard())
+        within(briefCardEl())
           .getByRole('button', { name: /^Generate$/ }))
       fireEvent.click(generateBtn)
       expect(await screen.findByTestId('report-blocking-modal'))
@@ -323,12 +321,12 @@ describe('DocumentGenerationPanel — readiness gate', () => {
       mockedAxios.get = vi.fn().mockResolvedValue({ data: READY })
       renderWithAuth(<DocumentGenerationPanel />)
       const generateBtn = await waitFor(() =>
-        within(midpointCard())
+        within(briefCardEl())
           .getByRole('button', { name: /^Generate$/ }))
       fireEvent.click(generateBtn)
       await waitFor(() => {
         expect(mockedAxios.post).toHaveBeenCalledWith(
-          '/api/v1/export/midpoint-paper',
+          '/api/v1/export/executive-brief',
         )
       })
       expect(screen.queryByTestId('report-blocking-modal')).toBeNull()
@@ -339,8 +337,6 @@ describe('DocumentGenerationPanel — readiness gate', () => {
       useReportReadinessStore.setState({
         readiness: READY, loading: false, fetchedAt: new Date(),
       })
-      // The panel uses axios.isAxiosError to detect — return true for
-      // the rejected object so the 422 branch runs.
       mockedAxios.isAxiosError = ((value: unknown): boolean => (
         value !== null && typeof value === 'object'
         && (value as { isAxiosError?: boolean }).isAxiosError === true
@@ -363,7 +359,7 @@ describe('DocumentGenerationPanel — readiness gate', () => {
 
       renderWithAuth(<DocumentGenerationPanel />)
       const generateBtn = await waitFor(() =>
-        within(midpointCard())
+        within(briefCardEl())
           .getByRole('button', { name: /^Generate$/ }))
       fireEvent.click(generateBtn)
 
