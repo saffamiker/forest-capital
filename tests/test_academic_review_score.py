@@ -533,3 +533,261 @@ class TestBriefModeWeightedScoring:
             "executive_summary", "methodology", "key_findings",
             "limitations", "final_recommendations", "visuals",
         }
+
+
+# ── Deck mode (PR — deck-specific rubric) ────────────────────────────────
+
+
+_DECK_VERDICT_ALL_STRONG = """\
+### 1. Opening and Central Argument (15%)
+
+**Rating:** Strong
+
+### 2. Analytical Evidence (25%)
+
+**Rating:** Strong
+
+### 3. Economic Storytelling (20%)
+
+**Rating:** Strong
+
+### 4. Live Demo and AI Methodology (20%)
+
+**Rating:** Strong
+
+### 5. Investment Recommendation (15%)
+
+**Rating:** Strong
+
+### 6. Presentation Quality (5%)
+
+**Rating:** Strong
+"""
+
+_DECK_VERDICT_ALL_DEVELOPING = _DECK_VERDICT_ALL_STRONG.replace(
+    "Strong", "Developing")
+
+
+class TestDeckModeWeightedScoring:
+    """Deck mode: six sections weighted 15/25/20/20/15/5."""
+
+    def test_all_strong_scores_8_5(self):
+        result = compute_review_score(
+            _DECK_VERDICT_ALL_STRONG, mode="deck_review")
+        assert result["sections_rated"] == 6
+        # 8.5 * (0.15+0.25+0.20+0.20+0.15+0.05) = 8.5 * 1.0 = 8.5
+        assert result["score"] == 8.5
+
+    def test_all_developing_scores_6_0(self):
+        result = compute_review_score(
+            _DECK_VERDICT_ALL_DEVELOPING, mode="deck_review")
+        assert result["sections_rated"] == 6
+        assert result["score"] == 6.0
+        assert result["advisory"] is False
+
+    def test_deck_section_keys_are_distinct_from_brief(self):
+        result = compute_review_score(
+            _DECK_VERDICT_ALL_STRONG, mode="deck_review")
+        keys = set(result["section_ratings"].keys())
+        assert keys == {
+            "opening", "analytical_evidence", "economic_storytelling",
+            "live_demo_ai", "investment_recommendation",
+            "presentation_quality",
+        }
+        # No collision with brief keys.
+        assert "executive_summary" not in keys
+        assert "final_recommendations" not in keys
+
+    def test_deck_overall_rating_reads_investment_recommendation(self):
+        """The editor pill's 'overall' rating reads the section that
+        closes the rubric -- Section 5 'Investment Recommendation'
+        for the deck, not the smaller-weight Section 6 'Presentation
+        Quality'."""
+        verdict = _DECK_VERDICT_ALL_STRONG.replace(
+            # Make presentation_quality Needs Work and confirm the
+            # overall rating still reflects investment_recommendation
+            # (which stays Strong).
+            "### 6. Presentation Quality (5%)\n\n**Rating:** Strong",
+            "### 6. Presentation Quality (5%)\n\n**Rating:** Needs Work")
+        result = compute_review_score(verdict, mode="deck_review")
+        assert result["rating"] == "Strong"
+
+    def test_deck_partial_response_falls_back_to_equal_weighted(self):
+        """A truncated deck verdict (fewer than 6 sections) must
+        score using equal-weighted averaging over whatever parsed,
+        not crash."""
+        truncated = """\
+### 1. Opening and Central Argument (15%)
+
+**Rating:** Strong
+
+### 2. Analytical Evidence (25%)
+
+**Rating:** Developing
+
+### 3. Economic Storytelling (20%)
+
+**Rating:** Needs Work
+"""
+        result = compute_review_score(truncated, mode="deck_review")
+        assert result["sections_rated"] == 3
+        # Equal-weighted: (8.5 + 6.0 + 3.5) / 3 = 6.0
+        assert result["score"] == 6.0
+
+
+# ── Appendix mode (PR — appendix-specific rubric) ────────────────────────
+
+
+_APPENDIX_VERDICT_ALL_STRONG = """\
+### 1. Data Sources and Methodology (20%)
+
+**Rating:** Strong
+
+### 2. Portfolio Construction Methodology (20%)
+
+**Rating:** Strong
+
+### 3. All Calculations and Models (25%)
+
+**Rating:** Strong
+
+### 4. Performance Metrics and Visualizations (20%)
+
+**Rating:** Strong
+
+### 5. Sensitivity and Robustness Analysis (15%)
+
+**Rating:** Strong
+"""
+
+_APPENDIX_VERDICT_ALL_DEVELOPING = _APPENDIX_VERDICT_ALL_STRONG.replace(
+    "Strong", "Developing")
+
+
+class TestAppendixModeWeightedScoring:
+    """Appendix mode: FIVE sections weighted 20/20/25/20/15."""
+
+    def test_all_strong_scores_8_5(self):
+        result = compute_review_score(
+            _APPENDIX_VERDICT_ALL_STRONG, mode="appendix_review")
+        assert result["sections_rated"] == 5
+        # 8.5 * (0.20+0.20+0.25+0.20+0.15) = 8.5 * 1.0 = 8.5
+        assert result["score"] == 8.5
+
+    def test_all_developing_scores_6_0(self):
+        result = compute_review_score(
+            _APPENDIX_VERDICT_ALL_DEVELOPING, mode="appendix_review")
+        assert result["sections_rated"] == 5
+        assert result["score"] == 6.0
+        assert result["advisory"] is False
+
+    def test_appendix_section_keys_are_distinct_from_deck(self):
+        result = compute_review_score(
+            _APPENDIX_VERDICT_ALL_STRONG, mode="appendix_review")
+        keys = set(result["section_ratings"].keys())
+        assert keys == {
+            "data_sources_methodology", "portfolio_construction",
+            "calculations_models", "performance_visuals",
+            "sensitivity_robustness",
+        }
+        # No collision with deck keys.
+        assert "opening" not in keys
+        assert "presentation_quality" not in keys
+
+    def test_appendix_mixed_weighted_sum(self):
+        """Manual weighted-sum spot check.
+        Weights: Data 0.20, Construction 0.20, Calc 0.25, Performance
+        0.20, Sensitivity 0.15.
+        Pattern: Strong / Developing / Strong / Developing / Strong.
+        Manual: 0.20*8.5 + 0.20*6.0 + 0.25*8.5 + 0.20*6.0 + 0.15*8.5
+              = 1.7 + 1.2 + 2.125 + 1.2 + 1.275
+              = 7.5 (exact)
+        """
+        verdict = _APPENDIX_VERDICT_ALL_STRONG.replace(
+            "### 2. Portfolio Construction Methodology (20%)\n\n"
+            "**Rating:** Strong",
+            "### 2. Portfolio Construction Methodology (20%)\n\n"
+            "**Rating:** Developing"
+        ).replace(
+            "### 4. Performance Metrics and Visualizations (20%)\n\n"
+            "**Rating:** Strong",
+            "### 4. Performance Metrics and Visualizations (20%)\n\n"
+            "**Rating:** Developing")
+        result = compute_review_score(verdict, mode="appendix_review")
+        assert result["sections_rated"] == 5
+        assert result["score"] == 7.5
+
+    def test_appendix_overall_rating_reads_sensitivity_robustness(self):
+        """The editor pill's 'overall' rating for the appendix
+        reflects Section 5 'Sensitivity and Robustness Analysis' --
+        the closing section of the rubric."""
+        verdict = _APPENDIX_VERDICT_ALL_STRONG.replace(
+            "### 5. Sensitivity and Robustness Analysis (15%)\n\n"
+            "**Rating:** Strong",
+            "### 5. Sensitivity and Robustness Analysis (15%)\n\n"
+            "**Rating:** Needs Work")
+        result = compute_review_score(verdict, mode="appendix_review")
+        assert result["rating"] == "Needs Work"
+
+
+# ── Backward compatibility ───────────────────────────────────────────────
+
+
+class TestBackwardCompatibility:
+    """PR #351's brief mode + the new deck/appendix modes must not
+    change behaviour for the original midpoint mode -- every existing
+    caller using the default mode keeps its current score."""
+
+    def test_midpoint_default_mode_unchanged(self):
+        # The same verdict scored as "midpoint" must equal the result
+        # of NOT supplying mode at all.
+        verdict = """\
+### 1. Data Sufficiency and Methodology
+
+**Rating:** Strong
+
+### 2. Requirements and Rubric Alignment
+
+**Rating:** Developing
+
+### 3. Deliverable Quality
+
+**Rating:** Strong
+
+### 4. Priority Areas for Further Investigation
+
+**Rating:** Developing
+
+### 5. Overall Academic Readiness
+
+**Rating:** Developing
+"""
+        no_mode = compute_review_score(verdict)
+        midpoint = compute_review_score(verdict, mode="midpoint")
+        assert no_mode == midpoint
+        # 3 Developing + 2 Strong = (3*6.0 + 2*8.5) / 5 = 7.0
+        assert no_mode["score"] == 7.0
+        assert no_mode["rating"] == "Developing"  # section 5 reading
+
+    def test_brief_review_mode_still_works_after_extension(self):
+        """PR #351's brief mode unchanged by the deck/appendix
+        extension. Score against the brief's all-Strong fixture
+        matches the original PR #351 test value."""
+        # Inlined fixture rather than importing _BRIEF_VERDICT_ALL_
+        # STRONG from this file -- pytest's CI invocation runs from
+        # backend/ and does NOT put the project root on PYTHONPATH,
+        # so `from tests.test_...` raises ModuleNotFoundError. The
+        # fixture is small enough that inlining is cleaner than
+        # wiring a conftest, and it documents the contract at the
+        # test site rather than at a distance.
+        brief_all_strong = (
+            "### 1. Executive Summary (15%)\n\n**Rating:** Strong\n\n"
+            "### 2. Methodology Overview (20%)\n\n**Rating:** Strong\n\n"
+            "### 3. Key Findings and Insights (25%)\n\n**Rating:** Strong\n\n"
+            "### 4. Limitations and Risks (15%)\n\n**Rating:** Strong\n\n"
+            "### 5. Final Recommendations (20%)\n\n**Rating:** Strong\n\n"
+            "### 6. Visuals (5%)\n\n**Rating:** Strong\n")
+        result = compute_review_score(
+            brief_all_strong, mode="brief_review")
+        assert result["score"] == 8.5
+        assert result["sections_rated"] == 6
