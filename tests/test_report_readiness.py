@@ -559,6 +559,51 @@ class TestReadinessEndpoint:
         assert body["blocking_count"] == expected
         assert body["is_ready"] is (body["blocking_count"] == 0)
 
+    def test_includes_deck_story_plan_and_script_flags(
+        self, client: TestClient,
+    ):
+        """June 21 2026 -- the readiness payload carries two deck-
+        related flags so the frontend can gate the Presentation Deck
+        regen flow and the Presentation Script download independently:
+
+          deck_story_plan_available -- True when story_plans has a
+            non-fallback row for (current_data_hash, 'deck'). Used
+            to surface the plan-derived state on the regen flow.
+          deck_script_available -- True when the same row ALSO
+            carries a non-empty full_script. Used by the Script
+            card -- a story plan can land without a script (Pass 2
+            is a separate Opus call that can fail independently),
+            and gating the card on plan availability alone would
+            let the user download a script that doesn't exist."""
+        r = client.get("/api/v1/report/readiness",
+                       headers=_auth_headers())
+        assert r.status_code == 200
+        body = r.json()
+        assert "deck_story_plan_available" in body
+        assert "deck_script_available" in body
+        # Both flags are booleans, never null. Without a cached deck
+        # in test env (no live DB), both should be False -- the
+        # fail-open path treats any read error as "not available".
+        assert isinstance(body["deck_story_plan_available"], bool)
+        assert isinstance(body["deck_script_available"], bool)
+        # Script availability implies plan availability (a script
+        # cannot exist without a plan it was generated from).
+        if body["deck_script_available"]:
+            assert body["deck_story_plan_available"]
+
+    def test_deck_status_helper_returns_false_false_on_cold_cache(self):
+        """The helper that backs the two flags must return
+        (False, False) when there is no current_data_hash or no
+        cached deck plan -- the fail-open contract every call site
+        depends on. Without a live DB in test env, both reads
+        degrade to None and the flags fall to False."""
+        import asyncio
+        from main import _deck_story_plan_status
+        plan_available, script_available = asyncio.run(
+            _deck_story_plan_status())
+        assert plan_available is False
+        assert script_available is False
+
 
 # ── Generation gate ──────────────────────────────────────────────────────────
 

@@ -940,7 +940,27 @@ def _run_pass1_with_harness(
 
 def _parse_plan_json(raw: str | None, *, log_key: str) -> dict | None:
     """Robust JSON parsing for LLM responses. Returns None on any
-    failure (the caller falls open to the deterministic plan)."""
+    failure (the caller falls open to the deterministic plan).
+
+    Mirrors the defensive parsing pattern from
+    cio_recommendation._parse_recommendation_json (PR #328):
+
+      * Regex-anchored fence strip ([```json or ```](json or ` ``` `)
+        only at leading/trailing positions -- backticks inside the
+        body are never touched.
+      * find('{') / rfind('}') extraction skips any preamble or
+        trailing prose around the JSON object.
+      * When the fence-stripped text starts with '{' but has no
+        closing brace, the response was almost certainly truncated
+        by the model's output-token ceiling. We surface that
+        diagnostic ('story_plan_*_truncated') separately from the
+        generic no-object case so a 'consider raising max_tokens'
+        signal is immediately legible in the Render logs -- rather
+        than the cryptic "Expecting ',' delimiter: line 142 column
+        8" that an unclosed string produces inside json.loads.
+      * raw_preview rides on every failure log so an operator can
+        see the response shape without re-running the pass.
+    """
     import re
     if not raw:
         return None
@@ -950,15 +970,38 @@ def _parse_plan_json(raw: str | None, *, log_key: str) -> dict | None:
     start = text.find("{")
     end = text.rfind("}")
     if start == -1 or end == -1 or end < start:
-        log.warning(f"{log_key}_no_object",
-                    raw_preview=(raw or "")[:500])
+        # Distinguish "model never returned JSON" from "model began
+        # JSON and ran out of tokens before the closing brace". The
+        # latter is an operator action item (raise max_tokens); the
+        # former is usually a system-prompt or model-availability
+        # issue.
+        if text.startswith("{") and "}" not in text:
+            log.warning(
+                f"{log_key}_truncated",
+                hint="consider raising max_tokens",
+                raw_preview=(raw or "")[:500],
+                raw_length=len(raw or ""))
+        else:
+            log.warning(f"{log_key}_no_object",
+                        raw_preview=(raw or "")[:500])
         return None
     try:
         obj = json.loads(text[start:end + 1])
     except Exception as exc:  # noqa: BLE001
+        # Same truncation diagnostic at the parse layer: the model
+        # may have emitted enough text for a stray '}' to match
+        # earlier in the body even though the outer object never
+        # closed -- json.loads then raises a delimiter error mid-
+        # object. The raw_length signal helps the operator decide
+        # whether the response was anywhere near the token ceiling.
         log.warning(f"{log_key}_parse_failed",
                     error=str(exc),
-                    raw_preview=(raw or "")[:500])
+                    hint=(
+                        "consider raising max_tokens (likely truncation)"
+                        if len(raw or "") > 4500
+                        else "JSON malformed"),
+                    raw_preview=(raw or "")[:500],
+                    raw_length=len(raw or ""))
         return None
     if not isinstance(obj, dict):
         log.warning(f"{log_key}_not_object")
@@ -1088,13 +1131,22 @@ def generate_deck_story_plan(
         "Produce the story plan as the strict JSON object specified.")
 
     # Pass 1 -- Opus arbiter wrapped in harness.
+    # June 21 2026 -- bumped from 6000 to 8000 after observing the
+    # output landing at exactly 6000 tokens and the JSON truncating
+    # mid-object (parse error: "Expecting ',' delimiter: line 142
+    # column 8"). The deck plan covers 11 slides; each slide's
+    # speaker_notes block targets 200-280 words by spec, which puts
+    # the full plan well above the previous 6000-token ceiling once
+    # the slide_bullets, numeric_anchors, and transition_to_next
+    # fields are included. The harness will retry on a parse-fail
+    # but raising the ceiling avoids the retry cost entirely.
     try:
         raw, score, attempts = _run_pass1_with_harness(
             system_prompt=_DECK_STORY_PLAN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             evaluator_prompt=STORY_PLAN_EVALUATOR_PROMPT,
             agent_id="story_plan_deck",
-            max_tokens=6000)
+            max_tokens=8000)
     except Exception as exc:  # noqa: BLE001
         log.warning("story_plan_deck_pass1_failed", error=str(exc))
         return _deterministic_deck_plan(deck_context)
