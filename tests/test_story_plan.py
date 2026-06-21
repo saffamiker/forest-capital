@@ -521,13 +521,15 @@ class TestRubricCoverageFixes:
         assert "14 points" in BRIEF_PLAN_EVALUATOR_PROMPT
         assert "9.8" in BRIEF_PLAN_EVALUATOR_PROMPT
 
-    def test_pass1_speaker_notes_carry_duration_band(self):
-        """Q2 -- the Pass-1 schema annotation pins the per-slide
-        speaker_notes word band so the Opus arbiter targets the right
-        cadence (~90-120 seconds per slide)."""
-        from tools.story_plan import _DECK_STORY_PLAN_BODY
-        assert "200-280 words" in _DECK_STORY_PLAN_BODY
-        assert "90-120 seconds" in _DECK_STORY_PLAN_BODY
+    def test_pass1b_speaker_notes_carry_duration_band(self):
+        """Q2 -- the speaker_notes word band pins the per-slide
+        cadence (~90-120 seconds per slide). Originally lived in
+        the Pass-1 body; June 21 2026 split moved it to the
+        dedicated _DECK_SPEAKER_NOTES_BODY constant so Pass 1a's
+        lean schema stays under the 4000-token ceiling."""
+        from tools.story_plan import _DECK_SPEAKER_NOTES_BODY
+        assert "200-280 words" in _DECK_SPEAKER_NOTES_BODY
+        assert "90-120 seconds" in _DECK_SPEAKER_NOTES_BODY
 
     def test_pass2_script_carries_per_slide_word_band(self):
         """Q2 -- the Pass-2 script body pins the per-slide word band
@@ -871,21 +873,22 @@ class TestPlanJsonParsing:
         assert "max_tokens" in parse_failed[1].get("hint", "")
 
 
-class TestDeckPass1MaxTokens:
-    """Pin that deck Pass 1's max_tokens budget stayed above the
-    previously-observed truncation point. June 21 2026 -- the deck
-    Pass 1 was hitting exactly 6000 output tokens and the JSON was
-    truncating mid-object (parse error: 'Expecting , delimiter: line
-    142 column 8'). Raised to 8000; this test prevents a future
-    regression that drops the ceiling back to 6000 from re-introducing
-    the truncation. The brief Pass 1's matching ceiling is pinned
-    alongside so both stay in sync."""
+class TestDeckPass1aMaxTokens:
+    """Pin that deck Pass 1a's max_tokens budget is appropriate for
+    the LEAN slide_plan schema (no speaker_notes -- those moved to
+    Pass 1b). June 21 2026 (second iteration). Pass 1 used to emit
+    speaker_notes inline and hit 8000 tokens reliably; the split
+    means Pass 1a only carries the slide_plan structure (headlines +
+    anchors + bullets + transitions) which fits comfortably in 4000
+    tokens for 11 slides. This test prevents a regression that
+    bumps Pass 1a back up to the old 8000 ceiling -- if 4000 isn't
+    enough, the right answer is to make the lean schema leaner, not
+    to bloat the budget back."""
 
-    def test_deck_pass1_max_tokens_above_6000(self, monkeypatch):
-        """The deck Pass 1 harness call must request more than 6000
-        tokens. We capture the max_tokens passed to
-        _run_pass1_with_harness and assert it exceeds the historical
-        truncation point."""
+    def test_deck_pass1a_max_tokens_is_lean(self, monkeypatch):
+        """The deck Pass 1a harness call must request <= 4000
+        tokens. Pass 1b (speaker_notes) gets a separate 5000-token
+        budget and a focused prose schema."""
         from tools import story_plan as sp
 
         captured: dict = {}
@@ -893,8 +896,8 @@ class TestDeckPass1MaxTokens:
         def _capture(**kwargs):
             captured["max_tokens"] = kwargs.get("max_tokens")
             # Raise so the function returns the deterministic
-            # fallback without continuing into Pass 2/3/4 -- we
-            # only care about the kwarg that was passed.
+            # fallback without continuing into Pass 1b/2/3/4 --
+            # we only care about the kwarg that was passed.
             raise RuntimeError("captured")
 
         monkeypatch.setattr(
@@ -902,10 +905,183 @@ class TestDeckPass1MaxTokens:
         sp.generate_deck_story_plan(
             deck_context={"validated_constants": {}},
             slide_titles=["A", "B"])
-        assert captured["max_tokens"] > 6000, (
-            f"deck Pass 1 max_tokens regressed to "
-            f"{captured['max_tokens']} -- this re-introduces the "
-            "truncation observed June 21 2026")
+        assert captured["max_tokens"] <= 4000, (
+            f"deck Pass 1a max_tokens drifted to "
+            f"{captured['max_tokens']} -- the lean schema "
+            "(no speaker_notes) should fit comfortably in 4000 "
+            "tokens for 11 slides; a budget above this signals "
+            "scope creep back into Pass 1a's schema")
+
+
+# ── Pass 1b: speaker_notes split (June 21 2026) ──────────────────────────
+
+
+class TestDeckPass1aSchemaIsLean:
+    """The Pass 1a JSON schema constant must NOT instruct the model
+    to emit speaker_notes. That's the entire point of the split --
+    Pass 1a fits in 4000 tokens because speaker_notes (3000-4000
+    tokens by themselves across 11 slides) live in Pass 1b."""
+
+    def test_pass1a_schema_omits_speaker_notes(self):
+        from tools.story_plan import _DECK_STORY_PLAN_BODY
+        # The schema sample inside the prompt is the contract;
+        # speaker_notes as a JSON key in the schema would tell the
+        # model to emit it inline (defeating the split).
+        body = _DECK_STORY_PLAN_BODY
+        # The schema block is the section inside the JSON braces.
+        # We assert speaker_notes isn't a *schema key* there -- the
+        # word may still appear in narrative explanation (and
+        # indeed the comment explains the split).
+        schema_block = body.split("{")[1].split("}")[0]
+        assert "speaker_notes" not in schema_block, (
+            "Pass 1a schema still asks the model for speaker_notes "
+            "inline -- the June 21 2026 split moved this to Pass 1b")
+
+
+class TestDeckPass1bExists:
+
+    def test_pass1b_speaker_notes_helper_is_defined(self):
+        from tools.story_plan import _generate_deck_speaker_notes
+        assert callable(_generate_deck_speaker_notes)
+
+    def test_pass1b_system_prompt_includes_live_demo_sequence(self):
+        from tools.story_plan import (
+            LIVE_DEMO_SEQUENCE, _DECK_SPEAKER_NOTES_SYSTEM_PROMPT,
+        )
+        assert LIVE_DEMO_SEQUENCE in _DECK_SPEAKER_NOTES_SYSTEM_PROMPT
+        # The constant itself must structure the 3.5-minute demo.
+        assert "analyticsdesk.app" in LIVE_DEMO_SEQUENCE
+        assert "dissenting view" in LIVE_DEMO_SEQUENCE.lower()
+
+
+class TestDeckPass1bFailOpen:
+    """Pass 1b failure must NOT block the deck. The slide_plan
+    remains intact; speaker_notes default to empty strings; the
+    per-slide Sonnet writer downstream still produces serviceable
+    notes from context."""
+
+    def test_empty_slide_plan_returns_empty_notes(self):
+        from tools.story_plan import _generate_deck_speaker_notes
+        out = _generate_deck_speaker_notes(
+            slide_plan=[], central_argument="x",
+            deck_context={}, duration_minutes=19)
+        assert out == {"speaker_notes": {}}
+
+    def test_pass1b_call_failure_returns_empty_notes(self, monkeypatch):
+        """Any exception from the underlying Opus call surfaces as
+        {"speaker_notes": {}} -- the caller then merges what's
+        returned, defaulting any missing slide to an empty string."""
+        from tools import story_plan as sp
+
+        def _raise(*args, **kwargs):
+            raise RuntimeError("opus down")
+
+        monkeypatch.setattr(
+            sp, "_parse_plan_json", lambda *a, **k: {"speaker_notes": {}})
+        # Patch the agents.base import that _generate_deck_speaker_
+        # notes makes locally.
+        import agents.base as _ab
+        monkeypatch.setattr(_ab, "call_claude", _raise)
+        out = sp._generate_deck_speaker_notes(
+            slide_plan=[{"slide_number": 1}],
+            central_argument="x",
+            deck_context={},
+            duration_minutes=19)
+        assert out == {"speaker_notes": {}}
+
+    def test_pass1b_merge_defaults_missing_slides_to_empty_string(
+        self, monkeypatch,
+    ):
+        """When Pass 1b returns notes for only some slides, the
+        merge step in generate_deck_story_plan must default any
+        slide without notes to an empty string (not None, not
+        missing)."""
+        from tools import story_plan as sp
+
+        # Stub Pass 1a -- return a 3-slide lean plan, no speaker_notes.
+        def _stub_pass1a(**kwargs):
+            return (
+                '{"central_argument": "x", "presentation_arc": "y", '
+                '"slide_plan": [{"slide_number": 1, "title": "a"}, '
+                '{"slide_number": 2, "title": "b"}, '
+                '{"slide_number": 3, "title": "c"}]}',
+                10.0, 1)
+
+        # Stub Pass 1b -- return notes for slide 1 and 3 ONLY (slide
+        # 2 is missing on purpose, to exercise the default).
+        def _stub_pass1b(**kwargs):
+            return {"speaker_notes": {"1": "notes one", "3": "notes three"}}
+
+        # Stub Grok + Gemini to no-ops so the test stays
+        # deterministic + offline.
+        monkeypatch.setattr(
+            sp, "_run_pass1_with_harness", _stub_pass1a)
+        monkeypatch.setattr(
+            sp, "_generate_deck_speaker_notes", _stub_pass1b)
+        monkeypatch.setattr(
+            sp, "_generate_anticipated_questions", lambda _s: [])
+        monkeypatch.setattr(
+            sp, "_generate_blind_spots", lambda _s: {})
+
+        plan = sp.generate_deck_story_plan(
+            deck_context={"validated_constants": {}},
+            slide_titles=["A", "B", "C"])
+        slides_by_num = {
+            s["slide_number"]: s for s in plan["slide_plan"]}
+        assert slides_by_num[1]["speaker_notes"] == "notes one"
+        # Slide 2 was missing from Pass 1b output -- must default
+        # to "" rather than crash or carry None.
+        assert slides_by_num[2]["speaker_notes"] == ""
+        assert slides_by_num[3]["speaker_notes"] == "notes three"
+
+    def test_pass1b_exception_during_merge_leaves_empty_strings(
+        self, monkeypatch,
+    ):
+        """If _generate_deck_speaker_notes itself raises, the
+        caller's try/except must default every slide's
+        speaker_notes to empty string (not leave them missing)."""
+        from tools import story_plan as sp
+
+        def _stub_pass1a(**kwargs):
+            return (
+                '{"central_argument": "x", "presentation_arc": "y", '
+                '"slide_plan": [{"slide_number": 1, "title": "a"}, '
+                '{"slide_number": 2, "title": "b"}]}',
+                10.0, 1)
+
+        def _raise(*a, **k):
+            raise RuntimeError("pass 1b explosion")
+
+        monkeypatch.setattr(
+            sp, "_run_pass1_with_harness", _stub_pass1a)
+        monkeypatch.setattr(
+            sp, "_generate_deck_speaker_notes", _raise)
+        monkeypatch.setattr(
+            sp, "_generate_anticipated_questions", lambda _s: [])
+        monkeypatch.setattr(
+            sp, "_generate_blind_spots", lambda _s: {})
+
+        plan = sp.generate_deck_story_plan(
+            deck_context={"validated_constants": {}},
+            slide_titles=["A", "B"])
+        for slide in plan["slide_plan"]:
+            assert slide["speaker_notes"] == ""
+
+
+class TestEvaluatorPromptNotesPass1bSplit:
+    """The evaluator prompt scores Pass 1a output -- which does NOT
+    contain speaker_notes. The prompt must explicitly note this so
+    a runaway evaluator doesn't penalise the absence."""
+
+    def test_evaluator_prompt_documents_speaker_notes_separation(self):
+        from tools.story_plan import STORY_PLAN_EVALUATOR_PROMPT
+        # The text doesn't need a specific phrasing; we pin that
+        # the prompt acknowledges speaker_notes are generated
+        # elsewhere so the rubric doesn't deduct for their
+        # absence in the Pass 1a output it's scoring.
+        lower = STORY_PLAN_EVALUATOR_PROMPT.lower()
+        assert "speaker_notes" in lower or "speaker notes" in lower
+        assert "pass 1b" in lower or "separate pass" in lower
 
 
 # ── Deterministic fallback ───────────────────────────────────────────────
