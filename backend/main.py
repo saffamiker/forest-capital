@@ -4078,6 +4078,31 @@ async def admin_set_submission_freeze(
     return new_config
 
 
+async def _read_latest_strategy_hash() -> str:
+    """Returns the most recent strategy_results_cache.strategy_hash
+    (e.g. 'c421fb895347f924') or "" on read failure / empty cache.
+
+    The canonical hash used by document generation + freeze
+    validation. Distinct from tools.audit_assembler.current_data_hash
+    which returns a SHA256 of platform-level row counts + max dates.
+    Extracted to a module-level helper so the submission-status
+    endpoint can be stubbed in tests without monkeypatching
+    AsyncSessionLocal."""
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return ""
+        async with AsyncSessionLocal() as session_db:  # type: ignore[union-attr]
+            row = await session_db.execute(text(
+                "SELECT strategy_hash FROM strategy_results_cache "
+                "ORDER BY computed_at DESC LIMIT 1"))
+            r = row.fetchone()
+            return str(r[0]) if r and r[0] else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 @app.get("/api/v1/admin/submission-status")
 async def admin_get_submission_status(
     session: dict = Depends(require_auth),
@@ -4107,8 +4132,7 @@ async def admin_get_submission_status(
         "submission_recommendation": str,
       }
     """
-    from tools.audit_assembler import current_data_hash
-    from tools.editor_drafts import get_current_draft
+    from tools.editor_drafts import get_current_draft_with_layer3
     from tools.submission_freeze import get_freeze_config
 
     config = await get_freeze_config()
@@ -4116,9 +4140,18 @@ async def admin_get_submission_status(
     freeze_hash = config.get("freeze_hash")
     freeze_date = config.get("freeze_date")
 
+    # June 21 2026 -- read strategy_hash from strategy_results_cache
+    # directly, NOT current_data_hash(). The latter is a SHA256 of
+    # row counts + max dates across three tables (a platform
+    # fingerprint), distinct from strategy_results_cache.strategy_hash
+    # which is the canonical hash document generation + freeze
+    # validation both cite. Same fix shape as PR #354 for the
+    # key-metrics endpoint.
     try:
-        live_hash = await current_data_hash() or ""
-    except Exception:  # noqa: BLE001
+        live_hash = await _read_latest_strategy_hash()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "submission_status_live_hash_read_failed", error=str(exc))
         live_hash = ""
 
     hash_drift = bool(freeze_active and freeze_hash
@@ -4138,8 +4171,19 @@ async def admin_get_submission_status(
     )
     frozen_documents: dict[str, dict] = {}
     for short_key, doc_type in document_keys:
+        # Switched from get_current_draft to the Layer-3 variant
+        # (June 21 2026) so the export_verification JSONB column is
+        # actually fetched -- the legacy get_current_draft uses the
+        # legacy column set and NEVER read export_verification, so
+        # `draft.get("export_verification")` below was always None
+        # and every document showed exported=False even when a draft
+        # had been exported. The layer3 helper has its own savepoint-
+        # style retry that rolls back the failed-transaction state
+        # before falling back to the legacy column set, so an
+        # aborted transaction on a column-missing first attempt
+        # doesn't break the second attempt.
         try:
-            draft = await get_current_draft(email, doc_type)
+            draft = await get_current_draft_with_layer3(email, doc_type)
         except Exception as exc:  # noqa: BLE001
             log.warning("submission_status_draft_read_failed",
                         document_type=doc_type, error=str(exc))
