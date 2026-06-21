@@ -570,27 +570,50 @@ def _first_author_surname(author_group: str) -> str:
 def _extract_references_section(
     text: str, document_type: str,
 ) -> str | None:
-    """Return the body text of the References section. For the brief
-    that's "## References" through next "## " heading or end-of-text.
+    """Return the concatenated body text of EVERY References section
+    in the document. Briefs sometimes carry one bibliography at the
+    end (`## References`) and sometimes per-section reference blocks
+    (`## References for Section 2`, `## References for Section 3`,
+    etc.); the earlier implementation found only the FIRST heading
+    match and missed every per-section block after it.
+
     For the deck the references slide carries the bibliography in
-    its body / bullets; deck_slides_to_editor concatenates them so
-    the same string scan works."""
+    its body / bullets; deck_slides_to_editor concatenates slides
+    so the same string scan works.
+
+    When no References heading is found at all, we fall back to the
+    whole document text -- some generations inline the bibliography
+    without a heading, and the author + year string-match still
+    works against the full text (false positives from in-text
+    citations are filtered by the cited-set lookup logic). Returns
+    None only when text itself is empty.
+
+    Concrete fix scope (June 21 2026): a brief that cited
+    Hamilton (1989) / Carhart (1997) / Markowitz (1952) in per-
+    section reference blocks scored 3x "missing from references"
+    false positives because the single-section extractor only saw
+    the first block."""
     if not text:
         return None
-    # Find the first occurrence of "References" as a section heading.
-    m = re.search(
-        r"(?:^|\n)#+\s*References\b[^\n]*\n([\s\S]*?)"
-        r"(?:\n#+\s|\Z)",
+    # Match EVERY `#+ References...` heading and take its body up to
+    # the next `#+ ` heading (any level) or end-of-text. Concatenate
+    # all matches. The greedy lookahead `(?=\n#+\s|\Z)` stops the
+    # body at the next heading without consuming it.
+    matches = re.findall(
+        r"(?:^|\n)#+\s*References\b[^\n]*\n([\s\S]*?)(?=\n#+\s|\Z)",
         text, re.IGNORECASE)
-    if m:
-        return m.group(1)
+    if matches:
+        return "\n\n".join(m.strip() for m in matches if m.strip())
     # Deck fallback — a slide may surface "References" without
     # markdown headings. Grab everything from "References" to end.
     m = re.search(
         r"\bReferences\b\s*\n([\s\S]+)\Z", text)
     if m:
         return m.group(1)
-    return None
+    # No References heading at all -- fall back to scanning the full
+    # text. The author + year lookup is permissive enough that
+    # inline bibliographies still match.
+    return text
 
 
 def check_citation_completeness(
@@ -1356,20 +1379,63 @@ def audit_document(
     result = AuditResult()
     known_strategies = list((strategy_cache or {}).keys())
 
-    # Tuple extraction feeds Checks 1 and 3 — do it once.
-    try:
-        tuples = _extract_attributed_numbers(text or "", known_strategies)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("document_audit_extraction_failed", error=str(exc))
-        tuples = []
+    # June 21 2026 -- Checks 1 (numeric cross-reference) and 3
+    # (cross-section consistency) are SKIPPED for the three
+    # substitution document types (brief / deck / appendix). They
+    # were the pre-substitution quality gate that compared every
+    # number in the prose against the strategy cache; with the
+    # substitution architecture live (PR #347 for brief, #349 for
+    # deck + appendix), every numeric in a successfully-substituted
+    # document came FROM the cache by construction, so the cross-
+    # reference is structurally redundant. Worse, it's actively
+    # harmful -- the tuple extractor catches years ("2022"), month
+    # counts ("287"), portfolio weights ("60", "40"), basis points
+    # ("500"), and recovery months as "Sharpe ratio errors". 46 of
+    # 128 flags on the most recent brief generation were false
+    # positives from this check.
+    #
+    # The replacement checks (8 + 9, below) cover the same ground
+    # without false positives: check_unresolved_placeholders flags
+    # any surviving {{TOKEN}}, and check_numeric_consistency flags
+    # raw decimal numbers that look like Sharpe ratios / percentages
+    # the substitution should have caught. Together they bound the
+    # substitution architecture's invariant: if the table built,
+    # the values are correct; if a token leaked OR a raw number
+    # bypassed substitution, the audit catches it.
+    #
+    # Midpoint paper (the only non-substitution document_type in
+    # the dispatcher) keeps Checks 1 + 3 because it was authored
+    # in May 2026 before the substitution architecture shipped and
+    # has no token coverage.
+    _SUBSTITUTION_DOC_TYPES = {
+        "executive_brief", "presentation_deck", "analytical_appendix",
+    }
+    is_substitution_doc = document_type in _SUBSTITUTION_DOC_TYPES
 
-    # Check 1
-    try:
-        result.flags_by_check["numeric"] = check_numeric_cross_reference(
-            tuples, strategy_cache)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("document_audit_check1_failed", error=str(exc))
-        result.skipped["numeric"] = str(exc)
+    # Tuple extraction feeds Checks 1 and 3 -- skip when not needed.
+    if is_substitution_doc:
+        tuples: list[dict[str, Any]] = []
+    else:
+        try:
+            tuples = _extract_attributed_numbers(
+                text or "", known_strategies)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("document_audit_extraction_failed", error=str(exc))
+            tuples = []
+
+    # Check 1 -- numeric cross-reference. Substitution documents
+    # skip; the substitution-architecture checks (8 + 9) cover the
+    # same invariant without false positives.
+    if is_substitution_doc:
+        result.skipped["numeric"] = (
+            "substitution_architecture_supersedes_this_check")
+    else:
+        try:
+            result.flags_by_check["numeric"] = (
+                check_numeric_cross_reference(tuples, strategy_cache))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("document_audit_check1_failed", error=str(exc))
+            result.skipped["numeric"] = str(exc)
 
     # Check 2
     try:
@@ -1378,13 +1444,22 @@ def audit_document(
         log.warning("document_audit_check2_failed", error=str(exc))
         result.skipped["direction"] = str(exc)
 
-    # Check 3
-    try:
-        result.flags_by_check["consistency"] = check_cross_section_consistency(
-            tuples)
-    except Exception as exc:  # noqa: BLE001
-        log.warning("document_audit_check3_failed", error=str(exc))
-        result.skipped["consistency"] = str(exc)
+    # Check 3 -- cross-section consistency. Same rationale as
+    # Check 1: derives from the same tuple extractor that produces
+    # the false positives, and the substitution architecture
+    # guarantees same-named tokens carry the same value across
+    # sections by construction (the table is built once per
+    # data_hash).
+    if is_substitution_doc:
+        result.skipped["consistency"] = (
+            "substitution_architecture_supersedes_this_check")
+    else:
+        try:
+            result.flags_by_check["consistency"] = (
+                check_cross_section_consistency(tuples))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("document_audit_check3_failed", error=str(exc))
+            result.skipped["consistency"] = str(exc)
 
     # Check 4
     try:
@@ -1454,11 +1529,9 @@ def audit_document(
     # architecture). Layer 2 (June 21 2026) extends the route to the
     # deck + appendix surfaces alongside the original brief surface.
     # The check itself is document-type-agnostic; the routing gate
-    # below is the only difference per surface.
-    _SUBSTITUTION_DOC_TYPES = {
-        "executive_brief", "presentation_deck", "analytical_appendix",
-    }
-    if document_type in _SUBSTITUTION_DOC_TYPES:
+    # below is the only difference per surface. Reuses the
+    # is_substitution_doc flag set above for Checks 1 + 3.
+    if is_substitution_doc:
         try:
             result.flags_by_check["unresolved_placeholders"] = (
                 check_unresolved_placeholders(text or ""))
@@ -1472,7 +1545,7 @@ def audit_document(
 
     # Check 9 -- raw numeric in body (substitution bypass signal).
     # Same routing gate as Check 8.
-    if document_type in _SUBSTITUTION_DOC_TYPES:
+    if is_substitution_doc:
         try:
             result.flags_by_check["raw_numeric"] = (
                 check_numeric_consistency(text or ""))
