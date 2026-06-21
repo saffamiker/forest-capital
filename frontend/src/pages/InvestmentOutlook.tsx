@@ -15,6 +15,7 @@
 import CIORecommendationCard from '../components/CIORecommendationCard'
 import ForwardConfidenceChart from '../components/ForwardConfidenceChart'
 import PerformanceRecordLink from '../components/PerformanceRecordLink'
+import SubmissionFreezeBanner from '../components/SubmissionFreezeBanner'
 
 export default function InvestmentOutlook() {
   return (
@@ -28,6 +29,12 @@ export default function InvestmentOutlook() {
           analytical evidence is on the Analytics page.
         </p>
       </header>
+      {/* Layer 4 -- compact freeze banner. Only renders when the
+          submission freeze is ACTIVE so the audience for the live
+          regime / CIO signal knows that document generation is
+          locked to a historical snapshot. No-op the rest of the
+          time. */}
+      <SubmissionFreezeBanner variant="compact" />
       <CIORecommendationCard />
       <ForwardConfidenceChart />
       <PerformanceRecordLink />

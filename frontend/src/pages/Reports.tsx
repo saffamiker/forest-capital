@@ -32,6 +32,7 @@ import AcademicExportModal from '../components/AcademicExportModal'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
 import KeyMetricsPanel from '../components/KeyMetricsPanel'
 import { ReportReadinessBanner } from '../components/ReportReadinessIndicator'
+import SubmissionFreezeBanner from '../components/SubmissionFreezeBanner'
 import SubmissionGuidePanel from '../components/SubmissionGuides'
 import TeamGate from '../components/TeamGate'
 import FloatingSectionNav from '../components/FloatingSectionNav'
@@ -95,6 +96,13 @@ export default function Reports() {
           <span>{error}</span>
         </div>
       )}
+
+      {/* Layer 4 -- submission freeze banner. Only renders when the
+          freeze is ACTIVE; the steady-state read returns null and
+          the banner stays out of the DOM. Sits above the readiness
+          banner because a frozen platform is a higher-priority piece
+          of context than the everyday blocker count. */}
+      <SubmissionFreezeBanner />
 
       {/* Workstream C — Report readiness banner. Reads
           /api/v1/report/readiness and renders the verdict at the top
