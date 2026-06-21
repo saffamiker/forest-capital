@@ -47,69 +47,50 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-class TestMidpointTemplateEndpoint:
-    """The June 3 deadline endpoint must produce a downloadable .docx."""
+class TestRetiredEndpointsReturn410:
+    """PR-B (June 2026) retired four endpoints whose UI surfaces were
+    removed in PR #338. Each is preserved as a 410 Gone stub so
+    existing clients receive a clear "this existed and is now gone"
+    signal rather than a 404 connection error. Each stub carries a
+    canonical_path pointing at the executive-brief endpoint, which is
+    the only generation surface that remains."""
 
-    def test_endpoint_returns_200(self, client: TestClient) -> None:
-        r = client.post("/api/reports/midpoint-template", headers=_auth_headers())
-        assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
+    def test_midpoint_template_returns_410(self, client: TestClient):
+        r = client.post(
+            "/api/reports/midpoint-template", headers=_auth_headers())
+        assert r.status_code == 410
+        body = r.json()
+        assert body["error"] == "gone"
+        assert body["canonical_path"] == (
+            "/api/v1/export/executive-brief")
+        assert "Report Writer midpoint pipeline has been retired" \
+            in body["message"]
 
-    def test_response_has_docx_media_type(self, client: TestClient) -> None:
-        r = client.post("/api/reports/midpoint-template", headers=_auth_headers())
-        content_type = r.headers.get("content-type", "")
-        # The full media type is application/vnd.openxmlformats-officedocument.wordprocessingml.document
-        assert "wordprocessingml.document" in content_type
+    def test_executive_brief_template_returns_410(
+            self, client: TestClient):
+        r = client.post(
+            "/api/reports/executive-brief-template",
+            headers=_auth_headers())
+        assert r.status_code == 410
+        body = r.json()
+        assert body["error"] == "gone"
+        assert body["canonical_path"] == (
+            "/api/v1/export/executive-brief")
+        assert "Report Writer pipeline has been retired" \
+            in body["message"]
 
-    def test_response_has_attachment_disposition(self, client: TestClient) -> None:
-        r = client.post("/api/reports/midpoint-template", headers=_auth_headers())
-        dispo = r.headers.get("content-disposition", "")
-        assert "attachment" in dispo
-        assert ".docx" in dispo
-
-    def test_filename_includes_today_iso_date(self, client: TestClient) -> None:
-        from datetime import date
-        r = client.post("/api/reports/midpoint-template", headers=_auth_headers())
-        dispo = r.headers.get("content-disposition", "")
-        # Iterative drafts must not collide in the downloads folder
-        assert date.today().isoformat() in dispo
-
-    def test_response_bytes_are_a_valid_docx(self, client: TestClient) -> None:
-        """A .docx is a ZIP archive — opening with zipfile.ZipFile asserts
-        the bytes aren't corrupt. python-docx's Document() would do the
-        same but with a heavier import; zipfile is in stdlib."""
-        r = client.post("/api/reports/midpoint-template", headers=_auth_headers())
-        with ZipFile(BytesIO(r.content)) as z:
-            # Every .docx contains word/document.xml as the body file.
-            assert "word/document.xml" in z.namelist()
-
-    def test_response_contains_ai_draft_banner_text(self, client: TestClient) -> None:
-        """The AI DRAFT banner must be embedded in the document body so the
-        warning survives PDF export and screenshots. We grep the raw
-        document.xml since the banner is plain text, not metadata."""
-        r = client.post("/api/reports/midpoint-template", headers=_auth_headers())
-        with ZipFile(BytesIO(r.content)) as z:
-            body = z.read("word/document.xml").decode("utf-8", errors="ignore")
-        # The banner is also in the header.xml; either location is sufficient
-        # to prove the warning is present in the rendered output.
-        header_xml = ""
-        with ZipFile(BytesIO(r.content)) as z:
-            for name in z.namelist():
-                if "header" in name and name.endswith(".xml"):
-                    header_xml = z.read(name).decode("utf-8", errors="ignore")
-                    break
-        combined = body + header_xml
-        assert "AI DRAFT" in combined, "AI DRAFT banner missing from rendered .docx"
-
-    def test_response_contains_four_required_sections(self, client: TestClient) -> None:
-        """The FNA 670 brief requires four sections in the midpoint paper.
-        Each section heading must appear in the rendered output. Ampersands
-        in headings are XML-escaped (& → &amp;) so we test for unambiguous
-        substrings that don't contain special characters."""
-        r = client.post("/api/reports/midpoint-template", headers=_auth_headers())
-        with ZipFile(BytesIO(r.content)) as z:
-            body = z.read("word/document.xml").decode("utf-8", errors="ignore")
-        for needle in ("Methodology", "Preliminary Results", "Roles", "Next Steps"):
-            assert needle in body, f"Required section keyword '{needle}' missing"
+    def test_council_peer_review_returns_410(
+            self, client: TestClient):
+        # Peer review used to take multipart/form-data with a file
+        # upload; the 410 stub takes nothing -- it just returns the
+        # retirement marker. Any client that still POSTs to it
+        # (file or no file) sees the same 410 response shape.
+        r = client.post(
+            "/api/council/peer-review", headers=_auth_headers())
+        assert r.status_code == 410
+        body = r.json()
+        assert body["error"] == "gone"
+        assert "Peer review has been retired" in body["message"]
 
 
 class TestReportsManifestEndpoint:
@@ -274,74 +255,6 @@ class TestAnalyticalAppendixEndpoint:
         r = client.post("/api/reports/analytical-appendix", headers=_auth_headers())
         assert r.text.strip().startswith("<!DOCTYPE html>")
         assert r.text.count("</html>") == 1
-
-
-class TestExecutiveBriefEndpoint:
-    """5-page brief — 20% of the grade. .docx with all six required
-    sections, the AI DRAFT banner, and the strategy table embedded."""
-
-    def test_endpoint_returns_200(self, client: TestClient) -> None:
-        r = client.post(
-            "/api/reports/executive-brief-template",
-            headers=_auth_headers(),
-        )
-        assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
-
-    def test_returns_docx_media_type(self, client: TestClient) -> None:
-        r = client.post(
-            "/api/reports/executive-brief-template",
-            headers=_auth_headers(),
-        )
-        assert "wordprocessingml.document" in r.headers.get("content-type", "")
-
-    def test_response_is_a_valid_docx(self, client: TestClient) -> None:
-        r = client.post(
-            "/api/reports/executive-brief-template",
-            headers=_auth_headers(),
-        )
-        with ZipFile(BytesIO(r.content)) as z:
-            assert "word/document.xml" in z.namelist()
-
-    def test_response_contains_ai_draft_banner(self, client: TestClient) -> None:
-        r = client.post(
-            "/api/reports/executive-brief-template",
-            headers=_auth_headers(),
-        )
-        with ZipFile(BytesIO(r.content)) as z:
-            body = z.read("word/document.xml").decode("utf-8", errors="ignore")
-            header_xml = ""
-            for name in z.namelist():
-                if "header" in name and name.endswith(".xml"):
-                    header_xml = z.read(name).decode("utf-8", errors="ignore")
-                    break
-        assert "AI DRAFT" in (body + header_xml)
-
-    def test_response_contains_all_six_sections(self, client: TestClient) -> None:
-        r = client.post(
-            "/api/reports/executive-brief-template",
-            headers=_auth_headers(),
-        )
-        with ZipFile(BytesIO(r.content)) as z:
-            body = z.read("word/document.xml").decode("utf-8", errors="ignore")
-        for needle in (
-            "Executive Summary",
-            "Methodology",
-            "Key Findings",
-            "Limitations",
-            "Recommendations",
-            "Charts Referenced",
-        ):
-            assert needle in body, f"Required section '{needle}' missing"
-
-    def test_filename_includes_today_iso_date(self, client: TestClient) -> None:
-        from datetime import date
-        r = client.post(
-            "/api/reports/executive-brief-template",
-            headers=_auth_headers(),
-        )
-        dispo = r.headers.get("content-disposition", "")
-        assert date.today().isoformat() in dispo
-        assert ".docx" in dispo
 
 
 class TestManifestNewGenerators:

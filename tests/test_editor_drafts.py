@@ -94,23 +94,12 @@ class TestEditorEndpointGating:
 # ── Marker helpers — pure logic ───────────────────────────────────────────────
 
 class TestEditorContentBuilders:
-    def test_midpoint_to_editor_builds_tiptap_and_text(self):
-        from tools.editor_content import midpoint_to_editor
-        cj, ct = midpoint_to_editor({
-            "methodology": "Method para.", "results": "Results para.",
-            "roles": "Roles para.", "next_steps": "Next steps para."})
-        assert cj["type"] == "doc"
-        # Four H1 section headings.
-        headings = [n for n in cj["content"] if n.get("type") == "heading"]
-        assert len(headings) == 4
-        # May 26 2026 — the six section [[BOB]] callouts were removed.
-        # The Academic Writer's prose now stands as each section's
-        # interpretation; no placeholder blocks should appear in the
-        # generated editor content. The word-count-warning [[BOB:
-        # WORD COUNT WARNING …]] is a separate transient alert and
-        # only fires when word_validation reports drift — not here.
-        assert ct.count("[[BOB:") == 0
-        assert "BOB —" not in ct  # no section callouts at all
+    # PR-B (June 2026) deleted the midpoint_to_editor adapter
+    # alongside the midpoint endpoint retirement. The corresponding
+    # test_midpoint_to_editor_builds_tiptap_and_text test is gone with
+    # it; the analytical_appendix_to_editor + executive_brief_to_editor
+    # adapters remain and are covered by tests below + by
+    # test_executive_brief_structure.py.
 
     def test_deck_to_editor_builds_sixteen_canvas_slides(self):
         from tools.editor_content import deck_to_editor
@@ -255,17 +244,11 @@ class TestDraftOnGeneration:
     # Generation is async — the endpoint returns 202 and a background
     # task creates the draft. The generation helper is exercised directly
     # (it creates the editor draft and returns its id).
-    def test_midpoint_generation_creates_a_draft(self, clean_editor_drafts):
-        if not _db_ready():
-            pytest.skip("no live database")
-        import main
-        _bytes, _fn, _media, draft_id = _run(
-            main._generate_midpoint_document("thaob@queens.edu"))
-        assert draft_id is not None
-        got = client.get(f"{DRAFTS}/{draft_id}", headers=TEAM)
-        assert got.status_code == 200
-        assert got.json()["document_type"] == "midpoint_paper"
-        assert got.json()["created_from"] == "generated"
+    #
+    # PR-B (June 2026) deleted _generate_midpoint_document; the midpoint
+    # drafts-on-generation test is gone with it. Existing midpoint
+    # drafts still open via build_editor_docx which reads from the
+    # TipTap content_json directly.
 
     def test_executive_brief_generation_creates_a_draft(
         self, clean_editor_drafts,
@@ -283,11 +266,15 @@ class TestDraftOnGeneration:
 
 
 class TestInEditorExport:
-    def test_export_docx_from_a_paper_draft(self, clean_editor_drafts):
+    # PR-B (June 2026) retired /api/v1/export/midpoint-paper; the
+    # in-editor docx-export contract is now pinned via the
+    # executive-brief endpoint (same _editor_export() implementation,
+    # different document type).
+    def test_export_docx_from_a_brief_draft(self, clean_editor_drafts):
         if not _db_ready():
             pytest.skip("no live database")
         created = client.post(DRAFTS, headers=TEAM, json={
-            "document_type": "midpoint_paper", "title": "Export draft",
+            "document_type": "executive_brief", "title": "Export draft",
             "content_json": {"type": "doc", "content": [
                 {"type": "heading", "attrs": {"level": 1},
                  "content": [{"type": "text", "text": "1. Methodology"}]},
@@ -296,7 +283,7 @@ class TestInEditorExport:
             ]},
             "content_text": "1. Methodology Body paragraph."})
         did = created.json()["id"]
-        resp = client.post("/api/v1/export/midpoint-paper", headers=TEAM,
+        resp = client.post("/api/v1/export/executive-brief", headers=TEAM,
                             json={"editor_draft_id": did})
         assert resp.status_code == 200
         # A valid .docx is a ZIP — the PK magic bytes.
@@ -327,7 +314,7 @@ class TestInEditorExport:
         assert "UAT-NOTE rehearsal line" in notes
 
     def test_export_unknown_draft_is_404(self):
-        resp = client.post("/api/v1/export/midpoint-paper", headers=TEAM,
+        resp = client.post("/api/v1/export/executive-brief", headers=TEAM,
                             json={"editor_draft_id": 999999999})
         assert resp.status_code == 404
 

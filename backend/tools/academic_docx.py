@@ -1,9 +1,9 @@
 """
 tools/academic_docx.py
 
-Assembles the two Word (.docx) deliverables — the midpoint submission
-paper and the executive brief — from a data bundle and a set of
-pre-generated narrative sections.
+Assembles the executive brief Word (.docx) deliverable from a data
+bundle and a set of pre-generated narrative sections. (PR-B June 2026
+retired build_midpoint_paper alongside the midpoint endpoint.)
 
 These builders are pure document assembly: no LLM calls, no database
 reads. The endpoint in main.py gathers the data (tools/academic_export.
@@ -16,7 +16,7 @@ Formatting follows the FNA 670 brief: 12 pt Times New Roman, double
 line spacing, 1-inch margins, page numbers in the footer, and the
 mandatory AI DRAFT banner repeated in the header of every page. The
 builder is unopinionated about page count — content length plus double
-spacing produces the ~3-page midpoint and ~5-page brief naturally.
+spacing produces the ~5-page brief naturally.
 """
 from __future__ import annotations
 
@@ -449,81 +449,6 @@ def _add_audit_disclosure_appendix(
             ["Check", "Category", "Marked by", "Marked at", "Note"],
             meth_rows,
         )
-
-
-def build_midpoint_paper(data: dict[str, Any], narratives: dict[str, str]) -> bytes:
-    """
-    The three-page midpoint submission. Four sections per the FNA 670
-    brief: Data & Methodology, Preliminary Results (with the summary-
-    statistics and regime-conditional tables embedded), Roles & Division
-    of Labor, and Next Steps & Open Questions.
-    """
-    doc = _new_document()
-
-    period = data.get("study_period", {})
-    _add_title_lines(doc, [
-        "Portfolio Intelligence System — Midpoint Submission",
-        "FNA 670 — Summer 2026",
-        "McColl School of Business",
-        date.today().strftime("%B %d, %Y"),
-    ])
-    _ai_draft_notice(doc)
-    _timestamp_line(doc)
-    _add_review_warning_box(doc)
-
-    _add_heading(doc, "1. Data and Methodology")
-    _add_body(doc, narratives.get("methodology", "[DATA PENDING]"))
-
-    # Section 2 — Preliminary Results. The Academic Writer produces
-    # the analytical interpretation directly; previously a [[BOB]]
-    # callout sat below directing the team to rewrite the section
-    # in their own voice. Removed May 26 2026 — the writer's prose
-    # IS the interpretation the rubric requires; Bob edits for
-    # voice but does not write from scratch.
-    _add_heading(doc, "2. Preliminary Results")
-    _add_body(doc, narratives.get("results", "[DATA PENDING]"))
-    h, r = table_summary_statistics(data.get("summary_statistics", []))
-    _add_table(doc, "Table 1. Summary Statistics by Asset Class", h, r)
-    h, r = table_regime_conditional(data.get("regime_conditional", []))
-    _add_table(doc, "Table 2. Regime-Conditional Performance "
-                     "(Pre- vs Post-2022)", h, r)
-
-    # Section 3 — Roles and Division of Labor. Drafted from real
-    # Team Activity counts by the academic-writer midpoint_roles
-    # task; the prose is the deliverable's roles content.
-    _add_heading(doc, "3. Roles and Division of Labor")
-    _add_body(doc, narratives.get("roles", "[DATA PENDING]"))
-
-    # Section 4 — Next Steps and Open Questions. The Academic Writer
-    # produces the priorities directly from the Academic Review
-    # verdict's investigation section.
-    _add_heading(doc, "4. Next Steps and Open Questions")
-    _add_body(doc, narratives.get("next_steps", "[DATA PENDING]"))
-
-    period_note = doc.add_paragraph()
-    period_note.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
-    note_run = period_note.add_run(
-        f"Study period: {period.get('start', '—')} to "
-        f"{period.get('end', '—')} ({period.get('n_months', 0)} monthly "
-        "observations). Benchmark: 100% S&P 500. Factor model: Carhart "
-        "four-factor (MKT-RF, SMB, HML, MOM).")
-    note_run.italic = True
-    note_run.font.name = _BODY_FONT
-    note_run.font.size = Pt(9)
-    _set_run_color(note_run, "#64748b")
-
-    # Workstream D — Audit Disclosure Appendix at the end of the body,
-    # before the submission checklist. The report-readiness gate
-    # (workstream C) guarantees every WARN has been reviewed before
-    # this code runs, so the appendix records the team's complete
-    # disclosure response.
-    _add_audit_disclosure_appendix(doc, data.get("audit_disclosures"))
-
-    _add_submission_checklist(doc)
-
-    buf = BytesIO()
-    doc.save(buf)
-    return buf.getvalue()
 
 
 def build_executive_brief(data: dict[str, Any], narratives: dict[str, str]) -> bytes:
