@@ -771,12 +771,23 @@ class TestBackwardCompatibility:
 
     def test_brief_review_mode_still_works_after_extension(self):
         """PR #351's brief mode unchanged by the deck/appendix
-        extension. Score against the same fixture matches the
-        original test value."""
-        from tests.test_academic_review_score import (  # type: ignore
-            _BRIEF_VERDICT_ALL_STRONG,
-        )
+        extension. Score against the brief's all-Strong fixture
+        matches the original PR #351 test value."""
+        # Inlined fixture rather than importing _BRIEF_VERDICT_ALL_
+        # STRONG from this file -- pytest's CI invocation runs from
+        # backend/ and does NOT put the project root on PYTHONPATH,
+        # so `from tests.test_...` raises ModuleNotFoundError. The
+        # fixture is small enough that inlining is cleaner than
+        # wiring a conftest, and it documents the contract at the
+        # test site rather than at a distance.
+        brief_all_strong = (
+            "### 1. Executive Summary (15%)\n\n**Rating:** Strong\n\n"
+            "### 2. Methodology Overview (20%)\n\n**Rating:** Strong\n\n"
+            "### 3. Key Findings and Insights (25%)\n\n**Rating:** Strong\n\n"
+            "### 4. Limitations and Risks (15%)\n\n**Rating:** Strong\n\n"
+            "### 5. Final Recommendations (20%)\n\n**Rating:** Strong\n\n"
+            "### 6. Visuals (5%)\n\n**Rating:** Strong\n")
         result = compute_review_score(
-            _BRIEF_VERDICT_ALL_STRONG, mode="brief_review")
+            brief_all_strong, mode="brief_review")
         assert result["score"] == 8.5
         assert result["sections_rated"] == 6
