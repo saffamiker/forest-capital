@@ -135,6 +135,12 @@ DOC_TYPE_LABELS: dict[str, str] = {
     # brief content with a clear label AND lets the rubric switch
     # in build_arbiter_user_message detect the brief case directly.
     "brief_review": "EXECUTIVE BRIEF",
+    # PR — deck-specific + appendix-specific rubrics (extends #351).
+    # Both surfaced because their previous routing through the
+    # midpoint rubric produced the same structural 5.5/10 floor as
+    # the brief used to.
+    "deck_review": "PRESENTATION DECK",
+    "appendix_review": "ANALYTICAL APPENDIX",
     "other": "OTHER REFERENCE DOCUMENT",
 }
 
@@ -427,7 +433,6 @@ async def _gather_analytics_snapshot() -> dict[str, Any]:
 # content is reviewed in preference to any uploaded file of that kind.
 _EDITOR_TO_REVIEW_TYPE = {
     "midpoint_paper": "midpoint_draft",
-    "presentation_deck": "presentation_slides",
     # PR — academic review brief-specific rubric. Previously "other"
     # (the catch-all) which routed the executive brief's verdict
     # through the midpoint rubric and produced a structural 5.5/10
@@ -438,6 +443,14 @@ _EDITOR_TO_REVIEW_TYPE = {
     # build_arbiter_user_message / run_arbiter_with_harness and by
     # compute_review_score's weighted-aggregate mode.
     "executive_brief": "brief_review",
+    # PR — deck-specific + appendix-specific rubrics. Previously the
+    # deck routed to "presentation_slides" (a document-type label,
+    # not a rubric) and the appendix had no routing at all, so both
+    # fell through to the midpoint rubric with the same structural
+    # 5.5/10 floor. The new values flow through the same rubric
+    # switch + weighted-aggregate mode the brief uses.
+    "presentation_deck": "deck_review",
+    "analytical_appendix": "appendix_review",
 }
 
 
@@ -1172,6 +1185,319 @@ also holds: do not invent concerns to look thorough. Read what's in
 the draft, evaluate that, stop."""
 
 
+# PR — academic review deck-specific + appendix-specific rubrics.
+# Extends PR #351 (brief rubric) to the deck and appendix. Both
+# document types previously routed through the midpoint rubric and
+# produced the same structural 5.5/10 floor — the midpoint rubric's
+# four sections (Data + Methodology / Preliminary Results / Roles /
+# Next Steps) have zero direct mapping to a finished presentation
+# deck or an analytical appendix.
+#
+# Deck rubric — six weighted sections matching the deck structure:
+#   Opening + Central Argument 15%, Analytical Evidence 25%,
+#   Economic Storytelling 20%, Live Demo + AI Methodology 20%,
+#   Investment Recommendation 15%, Presentation Quality 5%.
+#
+# Appendix rubric — five weighted sections matching the appendix
+# structure (workbook-style; no audience-facing "presentation
+# quality" surface):
+#   Data Sources + Methodology 20%, Portfolio Construction 20%,
+#   Calculations + Models 25%, Performance Metrics + Visualizations
+#   20%, Sensitivity + Robustness 15%.
+_ARBITER_INSTRUCTIONS_DECK = """=== YOUR TASK — ARBITER VERDICT (PRESENTATION DECK) ===
+You are the arbiter for the FNA 670 FINAL PRESENTATION DECK — an
+18-20 minute, 11-slide deck delivered to a mixed audience of senior
+investment professionals (Forest Capital partners) AND the FNA 670
+academic panel (Dr. Katerina Panttser). Evaluate against the DECK
+rubric (six weighted sections), not the midpoint paper rubric.
+
+CRITICAL EVALUATION POSTURE — read what IS in the current draft.
+Do not speculate, do not list things you would expect to see, do not
+flag absence of features that the team has not committed to for the
+deck. The deck does NOT contain roles / division of labor and does
+NOT close with "Next Steps and Open Questions" framing — the deck
+closes with an investment recommendation.
+
+AUDIENCE — Forest Capital partners read the deck for an investable
+conclusion; the academic panel reads it for methodological rigour.
+Both lenses matter.
+
+The verdict opens with a TWO-LINE TOP-LEVEL SUMMARY and is followed
+by six rubric sections, in this exact markdown format so the UI can
+parse it:
+
+**Academic rigour:** <Strong | Developing | Needs Work>
+**Portfolio Manager insight:** <Strong | Developing | Needs Work>
+
+  ACADEMIC RIGOUR — quantitative analysis is honest, statistical
+  caveats are disclosed, OOS results carry window definitions,
+  academic grounding is verbalised on the methodology slide.
+  Aggregate from the six sections below weighted by the deck
+  percentages (15/25/20/20/15/5).
+
+  PORTFOLIO MANAGER INSIGHT — would a Forest Capital executive
+  leave the room knowing what to do with the information? Score
+  against four PM criteria (PASS / NEEDS WORK / N/A per criterion)
+  and aggregate:
+    1. Central argument front-loaded — the PM understands the
+       investment conclusion before slide 5, not after slide 9.
+    2. Mechanism explained — the 2022 correlation break is named
+       as the cause of static-blend underperformance, not just
+       observed.
+    3. Honest about the misses — play-by-play 2-of-9 result,
+       Liberation Day underperformance, post-2022 static-blend
+       weakness all surfaced honestly.
+    4. Closing recommendation is investable — names allocation
+       guidance, conditions to revisit, regime triggers to watch.
+  3-4 PASS → Strong; 1-2 PASS → Developing; 0 PASS → Needs Work.
+
+After the two top-level lines, produce these six rubric sections.
+Each heading maps to a phase of the deck:
+
+### 1. Opening and Central Argument (15%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: slide 1 states the central investment question and answers
+it immediately with the headline quantitative result (OOS Sharpe
+1.24 vs 0.73 benchmark). The audience understands within 60 seconds
+why diversification beats 100% equity and what the evidence shows.
+The three-strategy frame (Benchmark vs Static vs Dynamic) is
+established in the opening slides.
+Developing: central argument present but not front-loaded — the
+audience must wait until slide 3+ to understand the core finding.
+Needs Work: no clear central argument in opening slides; the deck
+opens with methodology before stating what it found.
+
+### 2. Analytical Evidence (25%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: performance metrics (OOS Sharpe, max drawdown, recovery
+months) cited with explicit window definitions. The 2022
+correlation break is identified as the mechanism. Pre/post-2022
+sub-period results presented honestly INCLUDING post-2022
+underperformance. Play-by-play scorecard presented with the honest
+2-of-9 result. All figures internally consistent across slides.
+Developing: key metrics present but missing window definitions or
+sub-period breakdown; post-2022 underperformance not addressed;
+minor figure inconsistencies across slides.
+Needs Work: raw performance numbers without context or window
+definitions; no sub-period analysis; figures inconsistent across
+slides.
+
+### 3. Economic Storytelling (20%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: explains WHY regime detection improves outcomes (HMM
+identifies persistent structural states, not reactive momentum
+signals). Names Hamilton (1989) and Ang and Bekaert (2002)
+verbally on the methodology slide. The 2022 correlation inversion
+is explained mechanically (Fed tightening drove simultaneous
+equity and bond losses). The current macro environment (CPI level,
+dot plot) is contextualised against historical regimes.
+Developing: economic intuition present but superficial; regime
+switching described without explaining the mechanism; academic
+grounding absent from verbal delivery.
+Needs Work: results presented without economic explanation; no
+mechanism for why the strategy works; no academic grounding.
+
+### 4. Live Demo and AI Methodology (20%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: slide 9 demo follows a structured sequence (Investment
+Outlook live signal, Council deliberation with dissenting view,
+Reports page document generation, URL hand-off). Slide 10 honestly
+addresses what worked AND what did not (multi-model validation
+worked; LLM arithmetic limitation acknowledged; council as
+analytical engine, not product pitch). Demo and AI methodology
+together establish platform credibility without promotional
+language.
+Developing: demo present but unstructured or promotional; AI
+methodology slide present but lacks honest reflection on
+limitations.
+Needs Work: no structured demo sequence; AI methodology slide
+reads as a product pitch rather than honest academic reflection.
+
+### 5. Investment Recommendation (15%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: concluding slides state an unambiguous investment
+recommendation. Three supporting conclusions grounded in
+quantitative evidence. The condition under which the
+recommendation would be revisited is stated. Reads as a CIO
+conclusion, not an academic summary.
+Developing: recommendation present but hedged; supporting
+conclusions lack specific figures; closing slides read as
+academic summary rather than investment conclusion.
+Needs Work: no clear recommendation; deck ends with "further
+research" framing or lists next steps rather than investment
+conclusions.
+
+### 6. Presentation Quality (5%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: 18-20 minute timing discipline evident in speaker notes
+depth. Slides are visual with minimal text. Charts reference figure
+numbers. Transitions connect slides logically.
+Developing: timing likely off (speaker notes too thin or too
+dense); some slides text-heavy; charts present but not referenced.
+Needs Work: slides appear to be read verbatim; no visual
+discipline; charts absent or unreferenced.
+
+PROHIBITED PATTERNS — flag any section that contains these:
+  - "Further research would benefit from..."
+  - "Next steps include..."
+  - Roles and division of labor content (out of scope for the deck)
+  - Evaluator feedback tables or harness artifacts visible in
+    slide content
+  - OOS Sharpe figures cited without window definition
+  - Two different values for the same metric across slides
+    without window labels
+  - Promotional AI language ("cutting-edge", "revolutionary",
+    "game-changing") — academic deck, not vendor pitch
+  - Specifically: if any slide contains a markdown table with
+    headers like "Prior Issue" and "Resolution Applied", or rows
+    referencing "PM_CRITERION" labels, score that section Needs
+    Work regardless of other content quality. These are internal
+    harness artifacts that must not appear in a submitted document.
+
+VISUAL EVIDENCE — chart snapshots may be attached to your prompt.
+When you assess Section 2 (Analytical Evidence) and Section 6
+(Presentation Quality), cross-check the deck's quantitative claims
+against the visual evidence. A claim that disagrees with what is
+plainly visible on the chart is a serious methodological concern.
+When no charts are attached (cold deploy), do not refer to chart
+features; reason from the peer notes alone.
+
+Every rating is exactly one of: Strong, Developing, Needs Work. Be
+direct and actionable. Read what's in the draft, evaluate that,
+stop."""
+
+
+_ARBITER_INSTRUCTIONS_APPENDIX = """=== YOUR TASK — ARBITER VERDICT (ANALYTICAL APPENDIX) ===
+You are the arbiter for the FNA 670 ANALYTICAL APPENDIX — a
+workbook-style deliverable (35% of project grade) that documents
+every assumption, calculation, and visualisation behind the
+executive brief and presentation deck. The audience is the FNA 670
+academic panel (primary) and any portfolio manager who needs to
+independently verify the brief's claims (secondary). Evaluate
+against the APPENDIX rubric (five weighted sections), not the
+midpoint paper rubric.
+
+CRITICAL EVALUATION POSTURE — read what IS in the current draft.
+Do not speculate, do not list things you would expect to see, do
+not flag absence of features that the team has not committed to
+for the appendix. The appendix does NOT contain roles / division
+of labor and does NOT close with "Next Steps and Open Questions"
+framing. The appendix is a reference document, not a narrative.
+
+AUDIENCE — the academic panel reads the appendix to verify
+methodology; a portfolio manager reads it to check the executive
+brief's claims independently. Both lenses matter.
+
+The verdict opens with a TWO-LINE TOP-LEVEL SUMMARY and is followed
+by five rubric sections, in this exact markdown format so the UI
+can parse it:
+
+**Academic rigour:** <Strong | Developing | Needs Work>
+**Portfolio Manager insight:** <Strong | Developing | Needs Work>
+
+  ACADEMIC RIGOUR — are all calculations transparent, reproducible,
+  and grounded in documented methodology? Aggregate from the five
+  sections below weighted by the appendix percentages (20/20/25/20/15).
+
+  PORTFOLIO MANAGER INSIGHT — could a portfolio manager use this
+  appendix to independently verify every claim in the executive
+  brief? PASS / NEEDS WORK across these criteria:
+    1. Data sources and proxies fully named.
+    2. Strategy construction rules complete enough to replicate.
+    3. Calculations traceable to the underlying return series.
+    4. Sensitivity analysis disclosed (transaction costs, sample
+       windows, bootstrap intervals).
+  3-4 PASS → Strong; 1-2 PASS → Developing; 0 PASS → Needs Work.
+
+After the two top-level lines, produce these five rubric sections.
+Each heading maps to a section of the appendix:
+
+### 1. Data Sources and Methodology (20%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: data sources explicitly named (S&P 500, IG bonds via
+AGG/BND proxy, HY bonds via HYG/JNK proxy). Study period stated
+with justification (287 months, July 2002 through May 2026). All
+assumptions documented (long-only, fully invested, no cash, no
+short positions). Initialization periods for each strategy class
+stated with precise start dates.
+Developing: data sources named but proxies not specified; study
+period stated without justification; some assumptions missing.
+Needs Work: data sources vague or missing; assumptions
+undocumented; no initialization period disclosure.
+
+### 2. Portfolio Construction Methodology (20%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: all 10 strategy construction rules documented
+transparently. Static blend weights justified by Markowitz (1952)
+mean-variance theory. Dynamic blend allocation grids (BULL/BEAR/
+TRANSITION equity/IG/HY weights) stated explicitly. HMM three-
+state structure and transition matrix documented. Rebalancing
+rule (monthly evaluation, 2pp gate) disclosed with deviation from
+quarterly cadence justified.
+Developing: strategy rules present but incomplete; missing
+theoretical justification for static blend or HMM parameter
+choices.
+Needs Work: strategy rules vague; no theoretical justification;
+rebalancing rule absent.
+
+### 3. All Calculations and Models (25%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: full 10-strategy performance table with CAGR, volatility,
+Sharpe, max drawdown, recovery months, pre/post-2022 sub-period
+Sharpe. Factor loading table (Fama-French 3-factor + Carhart
+momentum). Benjamini-Hochberg FDR correction results across all
+10 strategies. OOS cost sensitivity surface (10/15/20bp).
+Bootstrap confidence intervals on post-2022 sub-period Sharpe.
+Data hash cited for reproducibility.
+Developing: most calculations present but missing one or two
+required tables; FDR correction present but not explained; factor
+attribution incomplete.
+Needs Work: calculations incomplete; key metrics missing; no FDR
+correction; no factor attribution.
+
+### 4. Performance Metrics and Visualizations (20%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: four or more charts present with APA figure numbers and
+Note captions. Each chart tied to a specific finding. Cumulative
+return, rolling correlation, efficient frontier, and OOS Sharpe
+comparison all present. Chart data traceable to the 287-month
+return series.
+Developing: charts present but missing APA formatting or figure
+numbers; fewer than four charts; charts not tied to specific
+findings.
+Needs Work: charts absent or unformatted; no figure numbers or
+captions.
+
+### 5. Sensitivity and Robustness Analysis (15%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: walk-forward sensitivity analysis showing Sharpe
+stability across sample window sizes. Transaction cost sensitivity
+(net Sharpe at 10/15/20bp). Bootstrap confidence intervals
+confirming directional results hold despite wide bands. Crisis
+period performance (2008, 2020, 2022) documented separately.
+Developing: some sensitivity analysis present but incomplete;
+missing crisis period breakdown or bootstrap intervals.
+Needs Work: no sensitivity analysis; results presented as point
+estimates only.
+
+PROHIBITED PATTERNS — flag any section that contains these:
+  - Figures not traceable to the data hash
+  - Calculations without documented assumptions
+  - Performance claims without the corresponding methodology
+    disclosure
+  - Charts without figure numbers or APA notes
+  - Sharpe ratios cited without study period definition
+  - Specifically: if any section contains a markdown table with
+    headers like "Prior Issue" and "Resolution Applied", or rows
+    referencing "PM_CRITERION" labels, score that section Needs
+    Work regardless of other content quality. These are internal
+    harness artifacts that must not appear in a submitted document.
+
+Every rating is exactly one of: Strong, Developing, Needs Work. Be
+direct and actionable. Read what's in the draft, evaluate that,
+stop."""
+
+
 # Section 6 — appended only when more than one team member has recorded
 # activity. With a single active user, assessing division of labour would
 # penalise an adoption gap rather than a real task-sharing problem.
@@ -1188,7 +1514,8 @@ claims the midpoint paper makes.>"""
 def build_arbiter_user_message(
     context_block: str, peer_responses: dict[str, str],
     multi_user: bool = False, script_review: bool = False,
-    brief_review: bool = False,
+    brief_review: bool = False, deck_review: bool = False,
+    appendix_review: bool = False,
 ) -> str:
     """Builds the arbiter's user message: the context block, every peer's
     review notes, and the verdict instructions.
@@ -1229,6 +1556,12 @@ def build_arbiter_user_message(
     elif brief_review:
         # Brief rubric is self-contained — no section-6 append.
         instructions = _ARBITER_INSTRUCTIONS_BRIEF
+    elif deck_review:
+        # Deck rubric is self-contained — no section-6 append.
+        instructions = _ARBITER_INSTRUCTIONS_DECK
+    elif appendix_review:
+        # Appendix rubric is self-contained — no section-6 append.
+        instructions = _ARBITER_INSTRUCTIONS_APPENDIX
     else:
         instructions = _ARBITER_INSTRUCTIONS
         if multi_user:
@@ -1406,6 +1739,8 @@ def run_arbiter_with_harness(
     script_review: bool = False,
     n_strategies: int | None = None,
     brief_review: bool = False,
+    deck_review: bool = False,
+    appendix_review: bool = False,
 ) -> str:
     """
     Generates the arbiter verdict IN FULL and runs it through the
@@ -1437,7 +1772,9 @@ def run_arbiter_with_harness(
     """
     user_message = build_arbiter_user_message(
         context_block, peer_responses, multi_user, script_review,
-        brief_review=brief_review)
+        brief_review=brief_review,
+        deck_review=deck_review,
+        appendix_review=appendix_review)
     if _is_test_env() or not os.getenv("ANTHROPIC_API_KEY"):
         return _mock_arbiter_text()
 
@@ -1476,7 +1813,12 @@ def run_arbiter_with_harness(
         # sections (Section 5 is "Final Recommendations", not
         # "Overall Academic Readiness") and the midpoint-shaped
         # detector + fallback would fire on every brief run.
-        if brief_review:
+        # Same logic applies to deck_review (six sections, Section
+        # 5 is "Investment Recommendation") and appendix_review
+        # (FIVE sections, Section 5 is "Sensitivity and Robustness
+        # Analysis"). The midpoint-shaped detector would mis-fire
+        # in every one of those modes.
+        if brief_review or deck_review or appendix_review:
             return result.response
         if not _verdict_has_section_5(result.response, script_review):
             # PR-LLM-2 (May 28 2026) — diagnostic logging. The previous

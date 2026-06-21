@@ -53,6 +53,30 @@ _BRIEF_SECTION_KEYS = (
     ("visuals",               "Visuals"),
 )
 
+# The deck rubric's six sections (PR — deck-specific rubric).
+# Distinct keys from the brief so a deck verdict + brief verdict
+# can sit side-by-side in storage without collisions.
+_DECK_SECTION_KEYS = (
+    ("opening",                 "Opening and Central Argument"),
+    ("analytical_evidence",     "Analytical Evidence"),
+    ("economic_storytelling",   "Economic Storytelling"),
+    ("live_demo_ai",            "Live Demo and AI Methodology"),
+    ("investment_recommendation", "Investment Recommendation"),
+    ("presentation_quality",    "Presentation Quality"),
+)
+
+# The appendix rubric's FIVE sections (PR — appendix-specific
+# rubric). One fewer than the brief/deck because the appendix is a
+# workbook-style reference deliverable, not a narrative — there's
+# no audience-facing "presentation quality" surface to score.
+_APPENDIX_SECTION_KEYS = (
+    ("data_sources_methodology",  "Data Sources and Methodology"),
+    ("portfolio_construction",    "Portfolio Construction Methodology"),
+    ("calculations_models",       "All Calculations and Models"),
+    ("performance_visuals",       "Performance Metrics and Visualizations"),
+    ("sensitivity_robustness",    "Sensitivity and Robustness Analysis"),
+)
+
 # Per-mode section weights. The midpoint rubric averages equally over
 # whatever sections parse (legacy default — backward compatible). The
 # brief rubric weights its six sections to match the brief's rubric
@@ -60,6 +84,20 @@ _BRIEF_SECTION_KEYS = (
 # Limitations 15%, Final Recommendations 20%, Visuals 5%) so a weak
 # Visuals section doesn't tank the score and Key Findings carries it.
 _BRIEF_WEIGHTS: tuple[float, ...] = (0.15, 0.20, 0.25, 0.15, 0.20, 0.05)
+
+# Deck weights -- Opening 15%, Evidence 25%, Storytelling 20%, Live
+# Demo + AI 20%, Recommendation 15%, Presentation 5%. Analytical
+# Evidence carries the largest single weight because the deck's
+# academic-panel evaluation rests primarily on the quantitative
+# rigour of what's claimed on each slide.
+_DECK_WEIGHTS: tuple[float, ...] = (0.15, 0.25, 0.20, 0.20, 0.15, 0.05)
+
+# Appendix weights -- Data + Methodology 20%, Portfolio Construction
+# 20%, Calculations + Models 25%, Performance + Visualizations 20%,
+# Sensitivity + Robustness 15%. Calculations + Models carries the
+# largest weight because the appendix exists primarily to document
+# every calculation behind the brief.
+_APPENDIX_WEIGHTS: tuple[float, ...] = (0.20, 0.20, 0.25, 0.20, 0.15)
 
 _RATING_POINTS: dict[str, float] = {
     "Strong":     8.5,
@@ -180,34 +218,55 @@ def compute_review_score(
     keys and equal-weighted averaging (legacy behaviour, every
     existing caller continues to work). "brief_review" uses the six-
     section brief rubric keys and WEIGHTED averaging by
-    _BRIEF_WEIGHTS (15/20/25/15/20/5). If the brief verdict parses to
-    a section count other than 6 (partial responses, drift), the
-    weighted path falls back to equal-weighted averaging over whatever
-    is present — defensive so a truncated brief response still
-    produces a score rather than crashing.
+    _BRIEF_WEIGHTS (15/20/25/15/20/5). "deck_review" uses the six-
+    section deck keys + _DECK_WEIGHTS (15/25/20/20/15/5).
+    "appendix_review" uses the FIVE-section appendix keys +
+    _APPENDIX_WEIGHTS (20/20/25/20/15). If any weighted mode parses
+    to a section count other than its expected length (partial
+    responses, drift), the weighted path falls back to equal-
+    weighted averaging over whatever is present — defensive so a
+    truncated response still produces a score rather than crashing.
 
     Always returns the shape — the caller treats `score is None` as
     "could not derive a score" (the arbiter returned malformed
     markdown) rather than as a failing paper.
 
     Partial responses are kept verbatim. If the parser recognises 3 of
-    5 sections (or 4 of 6 in brief mode), sections_rated is 3/4 and
-    section_ratings carries those entries; the caller decides whether
-    to treat a partial result as advisory or to re-run the review.
+    5 sections (or 4 of 6 in brief/deck mode, or 3 of 5 in appendix
+    mode), sections_rated is 3/4 and section_ratings carries those
+    entries; the caller decides whether to treat a partial result as
+    advisory or to re-run the review.
     """
-    is_brief = mode == "brief_review"
-    section_keys = _BRIEF_SECTION_KEYS if is_brief else _SECTION_KEYS
+    if mode == "brief_review":
+        section_keys = _BRIEF_SECTION_KEYS
+        weights: tuple[float, ...] | None = _BRIEF_WEIGHTS
+        overall_key = "final_recommendations"
+    elif mode == "deck_review":
+        section_keys = _DECK_SECTION_KEYS
+        weights = _DECK_WEIGHTS
+        overall_key = "investment_recommendation"
+    elif mode == "appendix_review":
+        section_keys = _APPENDIX_SECTION_KEYS
+        weights = _APPENDIX_WEIGHTS
+        overall_key = "sensitivity_robustness"
+    else:
+        # "midpoint" default — equal-weighted average over whatever
+        # of the five midpoint sections parsed.
+        section_keys = _SECTION_KEYS
+        weights = None
+        overall_key = "readiness"
+
     section_ratings = _parse_section_ratings(verdict, section_keys)
 
-    # Weighted average for brief mode when all six sections parsed;
-    # equal-weighted fallback otherwise (defensive — partial brief
-    # responses must not crash and a midpoint verdict is always
-    # equal-weighted).
+    # Weighted average when the mode supplies weights AND every
+    # section parsed; equal-weighted fallback otherwise (defensive --
+    # partial weighted-mode responses must not crash and a midpoint
+    # verdict is always equal-weighted).
     score: float | None
-    if is_brief and len(section_ratings) == len(_BRIEF_WEIGHTS):
+    if weights and len(section_ratings) == len(weights):
         weighted = 0.0
         weight_sum = 0.0
-        for (key, _label), w in zip(section_keys, _BRIEF_WEIGHTS):
+        for (key, _label), w in zip(section_keys, weights):
             rating = section_ratings.get(key)
             if rating is None or rating not in _RATING_POINTS:
                 continue
@@ -222,12 +281,10 @@ def compute_review_score(
         ]
         score = round(sum(points) / len(points), 1) if points else None
 
-    # Overall rating — the last keyed section (section 5 in midpoint,
-    # section 5 "Final Recommendations" in brief, NOT section 6
-    # "Visuals" which is a 5%-weight ancillary). Preserves the
-    # historical "rating" surfacing: the editor pill's title attribute
-    # reads the closing rubric verdict, not the smallest-weight section.
-    overall_key = "readiness" if not is_brief else "final_recommendations"
+    # Overall rating — for the weighted rubrics the overall reflects
+    # the section the closing reads from (brief: Final Recommendations;
+    # deck: Investment Recommendation; appendix: Sensitivity +
+    # Robustness; midpoint: Overall Academic Readiness). Preserves the
     overall = section_ratings.get(overall_key)
     advisory = score is not None and score < ADVISORY_THRESHOLD
     # Bridge #82 — when the verdict is non-empty but zero sections
