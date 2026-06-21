@@ -30,8 +30,16 @@ export interface BriefWorkflowModalProps {
 // The six submission-checklist items rendered as interactive checkboxes.
 // Exact labels are pinned by tests so a future edit cannot quietly drop
 // or alter a rubric verification step.
+//
+// Layer 3b (June 21 2026) -- item 1 was rewritten from "Audit banner
+// shows clean" to point at the new Pre-Submission Check verdict on
+// the Reports page. The audit banner alone could clear while the
+// substitution layer's cross-deliverable / numeric-presence checks
+// caught issues unique to the export. The Verify All flow on Reports
+// runs both surfaces together, so the checklist now references the
+// single canonical pre-submission verdict.
 const CHECKLIST_ITEMS: readonly string[] = [
-  'Audit banner shows clean (or all flags resolved)',
+  'Pre-Submission Check shows green (all deliverables verified)',
   'All seven citations present in body and References',
   'All six sections within word count targets',
   'Rebalancing disclosure accurate (monthly / 2pp)',
@@ -222,6 +230,17 @@ export function BriefWorkflowModal(
             Note: the audit re-runs on export to catch any issues
             introduced during editing.
           </p>
+          <Step n="12" heading="Run Pre-Submission Check">
+            Back on the Reports page, click{' '}
+            <span className="font-semibold text-electric">
+              Verify All for Submission
+            </span>{' '}
+            to confirm every numeric figure in the brief, deck, and
+            appendix still matches the platform analytics cache. A
+            green verdict is the final go-ahead; an amber or red
+            verdict surfaces the document and figure to reopen and
+            fix before submission.
+          </Step>
         </Section>
 
         {/* ── Interactive submission checklist ────────────────── */}
