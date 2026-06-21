@@ -3945,6 +3945,243 @@ async def admin_test_alert(
     return send_test_alert()
 
 
+# ── Layer 4: submission freeze ───────────────────────────────────────────────
+# Locks document generation to a frozen data_hash for the FNA 670
+# submission deadline (June 30 2026). Live platform reads (CIO card,
+# regime detector, Investment Outlook, daily digest) continue calling
+# current_data_hash() directly so the July 1 presentation shows live
+# signals. See backend/tools/submission_freeze.py for the operational
+# runbook (the curl invocations the operator runs on submission day).
+
+@app.post("/api/v1/admin/submission-freeze")
+async def admin_set_submission_freeze(
+    body: dict,
+    session: dict = Depends(require_permission("manage_users")),
+):
+    """Activate or deactivate the submission freeze.
+
+    Body shape:
+      {"active": true,  "freeze_hash": "c421fb89..."}  -- ON
+      {"active": false}                                -- OFF
+
+    On activate: validates freeze_hash matches a strategy_results_cache
+    row before flipping (a typo'd hash would otherwise silently lock
+    documents against a non-existent cache key, producing empty
+    substitution tables on every generation).
+
+    Sysadmin-only (manage_users permission, same gate every other
+    destructive admin endpoint uses).
+    """
+    from tools.submission_freeze import set_freeze_config
+
+    active = bool(body.get("active"))
+    freeze_hash = body.get("freeze_hash")
+
+    if active:
+        if not freeze_hash or not isinstance(freeze_hash, str):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "freeze_hash is required when activating the "
+                    "submission freeze. Supply the data_hash from "
+                    "strategy_results_cache the documents were "
+                    "generated against."),
+            )
+        # Validate the hash exists in strategy_results_cache. A typo
+        # caught HERE costs the operator one HTTP round-trip; the
+        # same typo caught at generation time costs an entire
+        # document re-generation under the wrong frozen hash.
+        try:
+            from sqlalchemy import text
+            from database import AsyncSessionLocal as _DB
+            if _DB is not None:
+                async with _DB() as s:
+                    row = await s.execute(
+                        text(
+                            "SELECT 1 FROM strategy_results_cache "
+                            "WHERE strategy_hash = :h LIMIT 1"),
+                        {"h": freeze_hash},
+                    )
+                    if row.fetchone() is None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"freeze_hash {freeze_hash[:8]}... "
+                                "not found in strategy_results_cache. "
+                                "Run a generation pass first so the "
+                                "cache row exists, then activate the "
+                                "freeze against the resulting hash."),
+                        )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "submission_freeze_hash_validation_skipped",
+                error=str(exc),
+                note="DB unreachable -- activating without validation")
+
+    try:
+        new_config = await set_freeze_config(
+            active=active,
+            freeze_hash=freeze_hash if active else None,
+            activated_by=session.get("email"),
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    return new_config
+
+
+@app.get("/api/v1/admin/submission-status")
+async def admin_get_submission_status(
+    session: dict = Depends(require_auth),
+):
+    """Reports the submission-readiness verdict: the freeze state, the
+    drift between the frozen hash and the live hash, and the per-
+    document export+verification state for the calling user.
+
+    Available to any authenticated user (read-only) so Bob and Molly
+    can see whether the freeze is on without needing sysadmin
+    permissions. The activation/deactivation endpoint is sysadmin-only.
+
+    Shape:
+      {
+        "freeze_active": bool,
+        "freeze_hash": str | None,
+        "freeze_date": str | None,
+        "current_live_hash": str,
+        "hash_drift": bool,
+        "frozen_documents": {
+          "brief":    {"generated", "exported", "export_verified",
+                        "editor_draft_id"},
+          "deck":     {...},
+          "appendix": {...},
+        },
+        "submission_ready": bool,
+        "submission_recommendation": str,
+      }
+    """
+    from tools.audit_assembler import current_data_hash
+    from tools.editor_drafts import get_current_draft
+    from tools.submission_freeze import get_freeze_config
+
+    config = await get_freeze_config()
+    freeze_active = bool(config.get("active"))
+    freeze_hash = config.get("freeze_hash")
+    freeze_date = config.get("freeze_date")
+
+    try:
+        live_hash = await current_data_hash() or ""
+    except Exception:  # noqa: BLE001
+        live_hash = ""
+
+    hash_drift = bool(freeze_active and freeze_hash
+                      and live_hash and freeze_hash != live_hash)
+
+    # Per-document state for the calling user. We read editor_drafts
+    # because that's where the generated draft lands; once the user
+    # exports it the export_verification JSONB (Layer 3a) carries the
+    # verification result. The get_current_draft return shape is
+    # version-compatible across Layer 3a -- on pre-3a deploys the
+    # export_verification key is simply absent.
+    email = session.get("email") or ""
+    document_keys = (
+        ("brief", "executive_brief"),
+        ("deck", "presentation_deck"),
+        ("appendix", "analytical_appendix"),
+    )
+    frozen_documents: dict[str, dict] = {}
+    for short_key, doc_type in document_keys:
+        try:
+            draft = await get_current_draft(email, doc_type)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("submission_status_draft_read_failed",
+                        document_type=doc_type, error=str(exc))
+            draft = None
+
+        if not draft:
+            frozen_documents[short_key] = {
+                "generated": False,
+                "exported": False,
+                "export_verified": None,
+                "editor_draft_id": None,
+            }
+            continue
+
+        # export_verification is a Layer 3a column -- pre-3a drafts
+        # simply lack the key. Treat "missing" as "not yet exported"
+        # rather than "exported but unverified" so the readiness
+        # verdict is conservative on pre-3a deploys.
+        ev: Any = None
+        try:
+            ev = draft.get("export_verification")
+        except Exception:  # noqa: BLE001
+            ev = None
+        exported = ev is not None and ev != {}
+        export_verified: bool | None = None
+        if exported and isinstance(ev, dict):
+            passed = ev.get("passed")
+            if isinstance(passed, bool):
+                export_verified = passed
+
+        frozen_documents[short_key] = {
+            "generated": True,
+            "exported": bool(exported),
+            "export_verified": export_verified,
+            "editor_draft_id": str(draft.get("id"))
+            if draft.get("id") is not None else None,
+        }
+
+    # Readiness verdict + recommendation -- the plain-English sentence
+    # the Reports page surfaces in the freeze banner.
+    all_generated = all(d["generated"] for d in frozen_documents.values())
+    all_exported = all(d["exported"] for d in frozen_documents.values())
+    all_verified = all(
+        d["export_verified"] is True for d in frozen_documents.values())
+
+    submission_ready = bool(
+        freeze_active and all_generated and all_exported
+        and all_verified and not hash_drift)
+
+    def _missing(predicate) -> str:
+        names = [k for k, d in frozen_documents.items() if not predicate(d)]
+        return ", ".join(names) if names else ""
+
+    if not freeze_active:
+        recommendation = (
+            "Activate the submission freeze after generating and "
+            "verifying all deliverables.")
+    elif not all_generated:
+        recommendation = (
+            f"Generate {_missing(lambda d: d['generated'])} "
+            "before submitting.")
+    elif not all_exported:
+        recommendation = (
+            f"Export {_missing(lambda d: d['exported'])} "
+            "before submitting.")
+    elif not all_verified:
+        recommendation = (
+            "Run Pre-Submission Check to verify all deliverables "
+            "against the cache.")
+    else:
+        recommendation = (
+            "All deliverables verified and freeze active. Safe to "
+            "submit.")
+
+    return {
+        "freeze_active": freeze_active,
+        "freeze_hash": freeze_hash,
+        "freeze_date": freeze_date,
+        "current_live_hash": live_hash,
+        "hash_drift": hash_drift,
+        "frozen_documents": frozen_documents,
+        "submission_ready": submission_ready,
+        "submission_recommendation": recommendation,
+    }
+
+
 @app.get("/api/v1/admin/team-activity/merge-commit-authors")
 async def get_merge_commit_authors_diagnostic(
     session: dict = Depends(require_sysadmin),
@@ -11351,9 +11588,18 @@ async def _generate_brief_document(
             from tools.audit_assembler import current_data_hash
             from tools.cio_recommendation import get_latest_recommendation
             from tools.numeric_substitution import get_substitution_table
+            from tools.submission_freeze import get_effective_data_hash
             constants = (data.get("validated_constants") or {}) or {}
             rolling = data.get("rolling_correlation") or {}
-            data_hash = await current_data_hash()
+            # Layer 4 -- the submission freeze. When active, document
+            # generation reads the strategy_results_cache at the
+            # frozen hash so exported deliverables never drift from
+            # what was submitted. Live platform reads (Investment
+            # Outlook, CIO card, daily digest, regime detector) still
+            # call current_data_hash() directly -- the freeze
+            # isolates document generation only.
+            live_hash = await current_data_hash()
+            data_hash = await get_effective_data_hash(live_hash)
             cio_row = await get_latest_recommendation()
             substitution_table = get_substitution_table(
                 data_hash or "",
@@ -11684,7 +11930,14 @@ async def _generate_appendix_document(
                 OOS_SHARPE_BENCHMARK,
                 CORRELATION_PRE_2022, CORRELATION_POST_2022,
             )
-            data_hash = await current_data_hash()
+            from tools.submission_freeze import get_effective_data_hash
+            # Layer 4 -- submission freeze (see _generate_brief_document
+            # for the rationale). Live platform reads call
+            # current_data_hash() directly; document generation
+            # routes through get_effective_data_hash so the appendix
+            # locks to the frozen hash on submission day.
+            live_hash = await current_data_hash()
+            data_hash = await get_effective_data_hash(live_hash)
             cio_row = await get_latest_recommendation()
             substitution_table = get_substitution_table(
                 data_hash or "",
@@ -12520,7 +12773,14 @@ async def _generate_deck_document(
                 OOS_SHARPE_BENCHMARK,
                 CORRELATION_PRE_2022, CORRELATION_POST_2022,
             )
-            data_hash = await current_data_hash()
+            from tools.submission_freeze import get_effective_data_hash
+            # Layer 4 -- submission freeze (see _generate_brief_document
+            # for the rationale). Live platform reads call
+            # current_data_hash() directly; deck generation routes
+            # through get_effective_data_hash so the slides lock to
+            # the frozen hash on submission day.
+            live_hash = await current_data_hash()
+            data_hash = await get_effective_data_hash(live_hash)
             cio_row = await get_latest_recommendation()
             substitution_table = get_substitution_table(
                 data_hash or "",
