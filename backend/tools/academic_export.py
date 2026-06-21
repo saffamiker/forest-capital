@@ -548,7 +548,7 @@ def harness_narrative(
 
     try:
         from agents.academic_writer import _SYSTEM_PROMPT
-        from agents.base import SONNET_MODEL, WEB_SEARCH_TOOL, call_claude
+        from agents.base import SONNET_MODEL, call_claude
         from agents.evaluator_prompts import (
             academic_export_evaluator_pm_prompt,
             academic_review_peer_evaluator_prompt,
@@ -620,11 +620,34 @@ def harness_narrative(
         # the residual flag to Bob in the editor banner.
         from tools.document_audit import is_content_truncated
 
+        # June 21 2026 -- WEB_SEARCH_TOOL removed from the section
+        # writer. The writer used to call out to Anthropic's
+        # server-side web_search (max_uses=3) per section, which:
+        #   1. Bloated the model's input context with the scraped
+        #      page bodies (server-side, but the model still saw
+        #      them and reasoned over them), eating into the output
+        #      budget before prose even started.
+        #   2. Drove the writer to spend output tokens formatting
+        #      URLs and DOIs inline, which then pushed the
+        #      References block past the per-section ceiling --
+        #      the production symptom that fired
+        #      section_content_truncated_unrecoverable on Section
+        #      3 (key_findings) + Section 6 (visuals).
+        # The registry at data/references.json already carries
+        # every citation the writer's system prompt historically
+        # web-searched for. With web search gone, the writer cites
+        # from the registry only -- the system prompt's CITATIONS
+        # block was updated in parallel so this is a coordinated
+        # change, not a contradiction with the prompt's
+        # instructions.
+        #
+        # If a future section legitimately needs to cite something
+        # not in the registry, the right answer is to add it to
+        # data/references.json -- not to re-enable web search.
         def _call_sonnet(prompt: str, tok_budget: int) -> str:
             return call_claude(
                 SONNET_MODEL, _SYSTEM_PROMPT, prompt,
                 max_tokens=tok_budget,
-                tools=[WEB_SEARCH_TOOL],
                 visual_context=visual_context,
                 trigger="document_export_narrative")
 
