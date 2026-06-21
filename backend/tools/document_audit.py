@@ -198,6 +198,11 @@ class AuditResult:
             # PR #336 -- brief-only checks.
             "required_citations": [],
             "section_word_count": [],
+            # June 21 2026 -- numeric substitution architecture checks
+            # (brief only in this layer; deck + appendix wire in
+            # Layer-2 PR alongside their substitution call-sites).
+            "unresolved_placeholders": [],
+            "raw_numeric": [],
         })
     skipped: dict[str, str] = field(default_factory=dict)  # check_name → reason
 
@@ -213,6 +218,10 @@ class AuditResult:
                 self.flags_by_check.get("required_citations", [])),
             "section_word_count": len(
                 self.flags_by_check.get("section_word_count", [])),
+            "unresolved_placeholders": len(
+                self.flags_by_check.get("unresolved_placeholders", [])),
+            "raw_numeric": len(
+                self.flags_by_check.get("raw_numeric", [])),
             "total": sum(len(v) for v in self.flags_by_check.values()),
         }
 
@@ -790,6 +799,118 @@ _REQUIRED_CITATION_PATTERNS: dict[str, tuple[tuple[str, ...], str]] = {
 }
 
 
+# ── CHECK 8 — Unresolved placeholders (substitution architecture) ──────
+#
+# The numeric-substitution architecture (June 21 2026) replaces raw
+# numeric figures in the Sonnet output with {{TOKEN}} placeholders
+# that the platform substitutes against the verified strategy cache
+# before the evaluator sees the prose. A surviving {{...}} token in
+# the final document means the writer invented a token name the
+# substitution table didn't anticipate. That's a high-severity
+# operator signal: either add the token to
+# tools.numeric_substitution.build_substitution_table or rewrite
+# the section to use an existing token.
+
+
+def check_unresolved_placeholders(
+    content_text: str,
+) -> list[dict[str, Any]]:
+    """Returns one flag per distinct unresolved {{TOKEN}}. Empty
+    output is the green state. Fail-open: a missing import or any
+    other error leaves the dispatcher with `skipped[...]` -- the
+    rest of the audit still runs."""
+    try:
+        from tools.numeric_substitution import unresolved_placeholders
+    except Exception:
+        return []
+    flags: list[dict[str, Any]] = []
+    for token in unresolved_placeholders(content_text):
+        flags.append({
+            "type":     "unresolved_placeholder",
+            "token":    token,
+            "severity": "high",
+            "message": (
+                f"Unresolved placeholder {token} in document body. "
+                "This token was emitted by the Sonnet writer but is "
+                "not in the substitution table. Either add it to "
+                "tools.numeric_substitution.build_substitution_table "
+                "(if the figure exists in the cache) or rewrite the "
+                "section to use an existing token. A document with "
+                "any unresolved placeholder must NOT be submitted."),
+        })
+    return flags
+
+
+# ── CHECK 9 — Raw numeric in body (substitution architecture) ──────────
+#
+# A complementary signal to check_unresolved_placeholders: the
+# writer emitted a raw decimal figure (e.g. "1.24") despite the
+# placeholder guide's "use {{OOS_SHARPE_BLEND}} not the raw number"
+# instruction. The pattern is conservative -- only Sharpe/correlation-
+# shaped decimals get flagged, and only outside currency/date
+# contexts (a year "2026", a dollar amount "$1.24", a section number
+# "5.1" are all exempt). Medium severity: the value MAY be correct
+# but was sourced from the model's prior knowledge rather than the
+# cache, which is what the substitution architecture eliminates.
+
+# Captures "0.NN" or "1.NN" decimals that look like Sharpe ratios
+# or correlation values. 2-3 trailing digits keeps the pattern
+# tight (a "0.5" or "1.2345" is unlikely to be a misplaced metric).
+_RAW_NUMERIC_PATTERN = re.compile(
+    r"(?<![\$\d/.])\b([01]\.\d{2,3})\b(?![/.\d%])",
+)
+
+
+def check_numeric_consistency(
+    content_text: str,
+) -> list[dict[str, Any]]:
+    """Returns one flag per distinct raw decimal figure in the body
+    that fits the Sharpe/correlation shape. Empty output is the
+    green state.
+
+    The intent is NOT to forbid every literal number in prose --
+    it's to catch the specific failure mode where the writer wrote
+    a Sharpe ratio inline (bypassing the substitution architecture)
+    instead of using the {{OOS_SHARPE_BLEND}} / {{BENCHMARK_SHARPE}}
+    tokens. A flagged value might be correct, but its provenance
+    bypassed the cache. The operator decides whether to accept
+    (mark resolved) or rewrite the line.
+
+    Currency ($1.24), section numbers (5.1, 5.2), and dates (2026)
+    are exempt -- the regex uses lookarounds to skip them."""
+    flags: list[dict[str, Any]] = []
+    if not content_text:
+        return flags
+    seen: set[str] = set()
+    for match in _RAW_NUMERIC_PATTERN.finditer(content_text):
+        value = match.group(1)
+        if value in seen:
+            continue
+        seen.add(value)
+        # Capture ~40 chars of surrounding context for the flag
+        # message so the operator can locate the line without
+        # grepping the document themselves.
+        start = max(0, match.start() - 20)
+        end = min(len(content_text), match.end() + 20)
+        snippet = content_text[start:end].replace("\n", " ").strip()
+        flags.append({
+            "type":     "raw_numeric_found",
+            "value":    value,
+            "severity": "medium",
+            "context":  snippet,
+            "message": (
+                f"Raw decimal {value!r} in document body (context: "
+                f"\"{snippet}\"). The substitution architecture "
+                "expects every Sharpe / correlation value to come "
+                "from a {{TOKEN}} that's resolved against the cache. "
+                "Either replace with the appropriate token from "
+                "tools.numeric_substitution.build_substitution_table "
+                "or confirm this is a non-metric figure (date, "
+                "section number, etc) and mark resolved."),
+        })
+    return flags
+
+
 def check_required_citations(
     content_text: str, document_type: str,
 ) -> list[dict[str, Any]]:
@@ -1109,6 +1230,32 @@ def audit_document(
             result.skipped["section_word_count"] = str(exc)
     else:
         result.skipped["section_word_count"] = "not_a_brief"
+
+    # Check 8 -- unresolved {{TOKEN}} placeholders (substitution
+    # architecture, June 21 2026). Brief only for now; deck +
+    # appendix call-site integration ships in Layer-2 PR.
+    if document_type == "executive_brief":
+        try:
+            result.flags_by_check["unresolved_placeholders"] = (
+                check_unresolved_placeholders(text or ""))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "document_audit_check8_failed", error=str(exc))
+            result.skipped["unresolved_placeholders"] = str(exc)
+    else:
+        result.skipped["unresolved_placeholders"] = "not_a_brief"
+
+    # Check 9 -- raw numeric in body (substitution bypass signal).
+    if document_type == "executive_brief":
+        try:
+            result.flags_by_check["raw_numeric"] = (
+                check_numeric_consistency(text or ""))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "document_audit_check9_failed", error=str(exc))
+            result.skipped["raw_numeric"] = str(exc)
+    else:
+        result.skipped["raw_numeric"] = "not_a_brief"
 
     log.info(
         "document_audit_complete",
