@@ -834,6 +834,115 @@ class TestNumericChecksSkippedForSubstitutionDocs:
         assert result.flag_counts["numeric"] == 0
 
 
+class TestIsContentTruncated:
+    """June 21 2026 -- detects mid-generation truncation. Used by
+    the harness self-healing retry inside harness_narrative AND by
+    the audit dispatcher's section_truncated check. Short content
+    is conservatively accepted (under 50 chars never flags) so a
+    deliberate one-liner doesn't false-positive."""
+
+    def test_open_placeholder_token_truncated(self):
+        from tools.document_audit import is_content_truncated
+        text = (
+            "Padding to push the length over the 50-char floor so the "
+            "short-content guard doesn't fire. The rolling_correlation "
+            "chart shows two series over the full {{")
+        assert is_content_truncated(text) is True
+
+    def test_truncated_url_doi_prefix(self):
+        from tools.document_audit import is_content_truncated
+        text = (
+            "Padding so the short-content guard doesn't fire and the "
+            "function exercises the URL-truncation path. "
+            "https://doi.org/10.1")
+        assert is_content_truncated(text) is True
+
+    def test_mid_sentence_apostrophe_truncation(self):
+        # The exact production symptom from Section 3.
+        from tools.document_audit import is_content_truncated
+        text = (
+            "Padding to push the length over the 50-char floor so the "
+            "guard accepts the input. During the 2008-2009 crisis, "
+            "Regime Switching's")
+        assert is_content_truncated(text) is True
+
+    def test_clean_completion_not_truncated(self):
+        from tools.document_audit import is_content_truncated
+        text = (
+            "Padding to push the length over the 50-char floor so the "
+            "guard accepts the input. The recommendation is stated "
+            "without qualification.")
+        assert is_content_truncated(text) is False
+
+    def test_quoted_completion_not_truncated(self):
+        from tools.document_audit import is_content_truncated
+        text = (
+            "Padding to push the length over the 50-char floor so the "
+            "guard accepts the input. The CIO stated, 'The blend "
+            "outperforms.'")
+        assert is_content_truncated(text) is False
+
+    def test_markdown_closer_after_terminator_not_truncated(self):
+        from tools.document_audit import is_content_truncated
+        text = (
+            "Padding to push the length over the 50-char floor so the "
+            "guard accepts the input. **The blend outperforms.**")
+        assert is_content_truncated(text) is False
+
+    def test_short_content_never_flags(self):
+        from tools.document_audit import is_content_truncated
+        # Under the 50-char floor -- the function returns False even
+        # for a clearly mid-word ending.
+        assert is_content_truncated("Mid-word truncat") is False
+
+    def test_empty_content_returns_false(self):
+        from tools.document_audit import is_content_truncated
+        assert is_content_truncated("") is False
+        assert is_content_truncated(None) is False  # type: ignore[arg-type]
+
+
+class TestSectionTruncationDispatcher:
+    """The audit dispatcher wires check_section_truncation for
+    brief documents and skips other surfaces. Pin both shapes."""
+
+    def _brief(self, sections: dict) -> str:
+        return "\n\n".join(
+            f"## {name}\n\n{body}" for name, body in sections.items())
+
+    def test_dispatcher_flags_truncated_brief_section(self):
+        from tools.document_audit import audit_document
+        text = self._brief({
+            "Executive Summary": (
+                "A regime-conditional blend outperforms the 100% "
+                "equity benchmark over the post-2022 window."),
+            "Key Findings and Insights": (
+                "Padding to clear the 50-char floor on the truncation "
+                "detector. During the 2008-2009 crisis, Regime "
+                "Switching's"),
+        })
+        result = audit_document(
+            text, "executive_brief", strategy_cache={})
+        flags = result.flags_by_check.get("section_truncated", [])
+        assert len(flags) == 1
+        # The brief section splitter normalises section heading
+        # names to the canonical short forms tracked by
+        # _BRIEF_SECTION_WORD_TARGETS ("Key Findings" not "Key
+        # Findings and Insights" -- the longer form would be a
+        # heading variant the splitter accepts via the canonical
+        # alternation, but the dict key is the short canonical).
+        assert "Key Findings" in flags[0]["section"]
+        assert flags[0]["severity"] == "high"
+
+    def test_dispatcher_skips_for_non_brief(self):
+        from tools.document_audit import audit_document
+        for doc_type in (
+                "presentation_deck", "analytical_appendix",
+                "midpoint_paper"):
+            result = audit_document(
+                "any content", doc_type, strategy_cache={})
+            assert "section_truncated" in result.skipped
+
+
 class TestCitationCompletenessConcatenatesAllReferenceBlocks:
     """June 21 2026 -- _extract_references_section used to find
     only the FIRST `## References` heading and grab from there to

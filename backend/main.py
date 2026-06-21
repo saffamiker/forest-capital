@@ -10745,10 +10745,20 @@ async def _generate_narratives(
             out[spec["key"]] = spec.get(
                 "pending", f"{DATA_PENDING} — source data unavailable.")
             continue
+        kwargs: dict[str, Any] = {
+            "n_strategies": n_strategies,
+            "substitution_table": substitution_table,
+        }
+        # June 21 2026 -- per-spec max_tokens override. The two
+        # longest brief sections (key_findings ~550 words,
+        # visuals 4 chart paragraphs) were truncating mid-
+        # sentence at the default 1500. The spec dict carries an
+        # optional max_tokens that flows through to call_claude.
+        if "max_tokens" in spec:
+            kwargs["max_tokens"] = spec["max_tokens"]
         jobs.append((spec["key"], asyncio.to_thread(
             harness_narrative, spec["agent_id"], spec["task"], spec["context"],
-            n_strategies=n_strategies,
-            substitution_table=substitution_table)))
+            **kwargs)))
     if jobs:
         results = await asyncio.gather(*[j for _, j in jobs],
                                        return_exceptions=True)
@@ -11366,7 +11376,15 @@ _BRIEF_TONE_RULES_BASE = (
     "  - Plain financial English. No technical platform language.\n"
     "  - No data hashes in the body text — those belong in the "
     "appendix.\n"
-    "  - No em dashes (project-wide prose rule)."
+    "  - No em dashes (project-wide prose rule).\n"
+    "\nSENTENCE COMPLETION (HARD CONSTRAINT):\n"
+    "You must complete every sentence you begin. If you are running "
+    "long, end the current paragraph cleanly rather than starting a "
+    "new one. NEVER end mid-sentence or mid-word. The section must "
+    "end with a complete sentence followed by terminating punctuation "
+    "(period, question mark, or exclamation point). A truncated "
+    "section will be flagged by the post-generation audit and "
+    "blocks publication."
 )
 
 # The composite tone-rules string actually threaded into every
@@ -11530,6 +11548,12 @@ async def _generate_brief_document(
              "context": {"study_period": data["study_period"]}},
             {"key": "key_findings", "available": avail, "pending": pending,
              "agent_id": "brief_key_findings",
+             # June 21 2026 -- bumped from the default 1500. Section
+             # 3 targets 550 words of dense prose with the locked
+             # academic figures + inline citations + [[VERIFY]]
+             # markers; production runs were truncating mid-sentence
+             # at 1500 tokens. 2500 gives comfortable headroom.
+             "max_tokens": 2500,
              "task": (
                  "Write Section 3: KEY FINDINGS AND INSIGHTS. Approximately "
                  "550 words. Compare exactly THREE strategies: the 100% "
@@ -11652,6 +11676,11 @@ async def _generate_brief_document(
                          "study_period": data["study_period"]}},
             {"key": "visuals", "available": True,
              "agent_id": "brief_visuals",
+             # June 21 2026 -- bumped from the default 1500. Section
+             # 6 covers four chart entries each with a captioned
+             # paragraph + APA note; production runs were truncating
+             # mid-token on chart #4. 2500 gives comfortable headroom.
+             "max_tokens": 2500,
              "task": (
                  "Write Section 6: VISUALS TO DEMONSTRATE THE INSIGHTS. "
                  "Approximately 250 words. A captioned roster of the "

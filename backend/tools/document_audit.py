@@ -1278,6 +1278,171 @@ def check_section_word_counts(
     return flags
 
 
+# Sentinel chars permitted to follow a sentence-terminating
+# punctuation mark at the end of a section. Closing markdown (`*`,
+# `_`), closing brackets (`)`, `]`, `}`, `>`), and closing quotes
+# all qualify as "trailing punctuation after a complete sentence."
+_TRAILING_CLOSERS = set("*_`)]}>'\"’”'")
+_SENTENCE_TERMINATORS = set(".?!")
+# Tokens that signal a URL was truncated mid-prefix. Matched after
+# rstrip + lowercasing so e.g. "https://doi.org/10.1" looks
+# unterminated because it ends on a partial DOI fragment.
+_URL_TRUNCATION_SUFFIXES = (
+    "http", "https", "doi", ".org", ".com", ".io", ".gov", ".edu",
+    ".1", ".2", ".3", ".4", ".5", ".6", ".7", ".8", ".9", ".0",
+)
+
+
+def is_content_truncated(content: str) -> bool:
+    """Returns True when the content appears to have been cut off
+    mid-generation. Used in two places (June 21 2026):
+
+      1. Inside harness_narrative as a self-healing-retry trigger:
+         a truncated first attempt fires a re-call with a higher
+         max_tokens budget. Two retries max; fail-open thereafter.
+      2. Inside the brief audit dispatcher (check_section_truncation
+         below) as a safety-net flag for any section that survives
+         the in-flight retry and still arrives truncated.
+
+    Truncation signals (any one fires):
+      - Open placeholder token: "{{" without a matching "}}"
+      - Mid-URL prefix: ends on "http" / "doi" / ".org" / etc.
+      - Mid-word: last non-whitespace char is alphanumeric (no
+        terminator immediately preceding the trailing word, and
+        no whitespace separator)
+      - No terminator in the last 200 chars (long trailing run
+        of prose with no period / ? / ! at all)
+
+    Conservative on very short content (<50 chars): returns False
+    so a deliberate one-liner doesn't false-flag."""
+    if not content or len(content) < 50:
+        return False
+    stripped = content.rstrip()
+    if not stripped:
+        return False
+    # Open placeholder token -- the writer started a {{TOKEN}} and
+    # ran out of budget before closing it.
+    last_open = stripped.rfind("{{")
+    if last_open >= 0 and "}}" not in stripped[last_open:]:
+        return True
+    # Mid-URL prefix -- the writer started a URL and the trailing
+    # characters look like a partial scheme / domain / DOI fragment.
+    low = stripped.lower()
+    if any(low.endswith(suf) for suf in _URL_TRUNCATION_SUFFIXES):
+        # But a real sentence ending in ".1" -- e.g. a section
+        # number -- could false-flag. Demand the previous char is
+        # NOT whitespace AND not a sentence terminator either, so
+        # only true mid-URL fragments fire.
+        prev_idx = len(stripped) - 1
+        # Walk back to find the start of the trailing token.
+        while prev_idx > 0 and not stripped[prev_idx - 1].isspace():
+            prev_idx -= 1
+        trailing_token = stripped[prev_idx:].lower()
+        # If the trailing token contains a "/" or "." it looks like
+        # a URL fragment. Plain integers ("Section 5.1.") would have
+        # a terminator already and bail via the strip-closers path
+        # in _check_terminator below.
+        if "/" in trailing_token or trailing_token.count(".") >= 2:
+            return True
+        if trailing_token in {"http", "https", "doi"}:
+            return True
+    # Mid-word -- the last non-whitespace char is alphanumeric
+    # AND not preceded by a sentence terminator AND not just a
+    # numeric trailing the way an embedded number would.
+    # Strip trailing markdown closers + brackets first so e.g.
+    # "(Hamilton, 1989)." reads as terminator (a closing paren
+    # AFTER the period passes through this stripping path).
+    s = stripped
+    while s and s[-1] in _TRAILING_CLOSERS:
+        s = s[:-1].rstrip()
+    if not s:
+        return False
+    if s[-1] in _SENTENCE_TERMINATORS:
+        return False
+    # Last char is alphanumeric and not a terminator -- this is a
+    # mid-word truncation.
+    if s[-1].isalnum() or s[-1] == "'":
+        # Apostrophes signal a clipped contraction like
+        # "Switching's" -- the production symptom from Section 3.
+        return True
+    # Otherwise: ends with some non-terminator punctuation (a
+    # comma, a colon, a hyphen). If the LAST 200 chars contain no
+    # terminator at all, treat as truncated; otherwise let it pass
+    # (a sentence ended with `--` or similar is unusual but not
+    # necessarily truncated).
+    last_chunk = s[-200:]
+    if not any(c in _SENTENCE_TERMINATORS for c in last_chunk):
+        return True
+    return False
+
+
+def _is_completed_sentence(body: str) -> bool:
+    """Backward-compatible wrapper -- equivalent to
+    `not is_content_truncated(body)` but with the original
+    permissive contract: empty/short bodies are treated as
+    incomplete. Used by tests that pin the older semantics; new
+    callers should use is_content_truncated directly."""
+    if not body:
+        return False
+    s = body.rstrip()
+    if not s:
+        return False
+    while s and s[-1] in _TRAILING_CLOSERS:
+        s = s[:-1].rstrip()
+        if not s:
+            return False
+    return s[-1] in _SENTENCE_TERMINATORS
+
+
+# Brief-only. The deck + appendix paths use their own per-slide /
+# per-section dispatchers that don't share this split helper.
+def check_section_truncation(
+    content_text: str, document_type: str,
+) -> list[dict[str, Any]]:
+    """June 21 2026 -- a section that ends mid-sentence is a sign
+    the Sonnet writer ran out of token budget. Flags any brief
+    section whose body's last non-whitespace character is NOT a
+    sentence terminator (`.`, `?`, `!`) after stripping trailing
+    markdown / brackets / quotes.
+
+    Medium severity: the section content is incomplete and needs
+    regeneration or expansion before submission. Pair with the
+    section_content_truncated structured log emitted by the
+    generator wiring -- the log surfaces the last 50 chars for
+    debugging, the audit flag surfaces the same to the editor UI
+    so the human reviewer can see the issue without inspecting
+    Render logs.
+
+    Skipped silently for non-brief document types (the deck /
+    appendix per-section writers don't share the same split-by-
+    heading shape; their truncation checks live with their own
+    dispatchers when added). Empty output is the green state."""
+    if document_type != "executive_brief":
+        return []
+    if not content_text:
+        return []
+    sections = _split_brief_by_section(content_text)
+    flags: list[dict[str, Any]] = []
+    for canonical, body in sections.items():
+        if not is_content_truncated(body):
+            continue
+        last_chars = (body or "").rstrip()[-80:]
+        flags.append({
+            "type":       "section_truncated",
+            "section":    canonical,
+            "severity":   "high",
+            "last_chars": last_chars,
+            "message": (
+                f"{canonical} section appears truncated. The Sonnet "
+                "writer's in-flight self-healing retry (up to two "
+                "attempts at +1000 / +2000 max_tokens) did not "
+                "produce a complete section -- regenerate manually "
+                "or raise the spec's max_tokens above the second "
+                f"retry ceiling. Last 80 chars: \"{last_chars}\""),
+        })
+    return flags
+
+
 def _split_brief_by_section(text: str) -> dict[str, str]:
     """Match each canonical section heading case-insensitively and
     extract the body text up to the next recognised heading.
@@ -1555,6 +1720,29 @@ def audit_document(
             result.skipped["raw_numeric"] = str(exc)
     else:
         result.skipped["raw_numeric"] = "not_a_substitution_document"
+
+    # Check 10 -- section truncation (brief only, June 21 2026).
+    # Detects when a section's body ends mid-sentence -- the symptom
+    # of the Sonnet writer hitting max_tokens. The companion fix is
+    # the per-spec max_tokens override in main.py for the two
+    # longest brief sections; this audit check is the safety net
+    # for future sections that hit the same ceiling.
+    if document_type == "executive_brief":
+        try:
+            section_trunc_flags = check_section_truncation(
+                text or "", document_type)
+            result.flags_by_check["section_truncated"] = section_trunc_flags
+            for f in section_trunc_flags:
+                log.warning(
+                    "section_content_truncated",
+                    section=f.get("section"),
+                    last_chars=f.get("last_chars"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "document_audit_check10_failed", error=str(exc))
+            result.skipped["section_truncated"] = str(exc)
+    else:
+        result.skipped["section_truncated"] = "not_a_brief"
 
     log.info(
         "document_audit_complete",
