@@ -7511,44 +7511,80 @@ async def report_readiness(
         statistical: { unreviewed_warnings, unreviewed_failures },
         methodology: { unresolved_warnings, unresolved_failures },
         checked_at: ISO timestamp,
-        deck_story_plan_available: bool,   (June 21 2026)
+        deck_story_plan_available: bool,   (June 21 2026, PR #343)
+        deck_script_available: bool,       (June 21 2026, PR #346)
       }
 
     deck_story_plan_available -- true when story_plans has a real
     (non-fallback) row for (current_data_hash, document_type='deck').
-    The Presentation Script export card on the Reports page uses
-    this to flip between an enabled "Download Script" button and a
-    disabled "Generate Deck First" state. Computed inline here so
-    the frontend has one round-trip on page load.
+    Used to surface the plan-derived state on the deck regen flow.
+
+    deck_script_available -- true when the same row ALSO carries a
+    non-empty full_script. The Presentation Script card flips its
+    button state on this flag because Pass 2 (full_script) is a
+    separate Opus call from Pass 1 (slide_plan) and can fail
+    independently -- a plan_available=True / script_available=False
+    state happens when slide_plan landed but the script call timed
+    out or hit a transient API error. Treating the two as the same
+    signal would let the user download a script that doesn't exist.
+
+    Both flags computed inline here so the frontend has one round-
+    trip on page load.
     """
     from tools.report_readiness import compute_readiness
 
     verdict = await compute_readiness()
-    verdict["deck_story_plan_available"] = await _deck_story_plan_available()
+    plan_available, script_available = (
+        await _deck_story_plan_status())
+    verdict["deck_story_plan_available"] = plan_available
+    verdict["deck_script_available"] = script_available
     return verdict
 
 
-async def _deck_story_plan_available() -> bool:
-    """True iff story_plans has a non-fallback row keyed by
-    (current_data_hash, 'deck'). Fail-open: any error -> False, the
-    UI just falls back to the disabled 'Generate Deck First' state."""
+async def _deck_story_plan_status() -> tuple[bool, bool]:
+    """Returns (plan_available, script_available) for the cached deck
+    story plan. Both flags read from a single get_cached_story_plan
+    call so the readiness response stays one round-trip.
+
+    plan_available is True when story_plans has a non-fallback row
+    keyed by (current_data_hash, 'deck'). The frontend uses this to
+    enable surfaces that need the locked slide_plan (the Presentation
+    Deck regenerate flow, future plan-only exports).
+
+    script_available is True when the same row ALSO carries a
+    non-empty full_script. The Presentation Script card flips its
+    button state on this flag because Pass 2 (full_script) is a
+    separate Opus call from Pass 1 (slide_plan) and can fail
+    independently -- a plan_available=True / script_available=False
+    state happens when slide_plan landed but the script call timed
+    out or hit a transient API error. Treating the two as the same
+    signal would let the user download a script that doesn't exist.
+
+    Fail-open: any error returns (False, False) and the script card
+    stays in the disabled 'Generate Deck First' state.
+
+    Supersedes the single-flag _deck_story_plan_available() helper
+    that landed with PR #343; this PR's rebase replaced it with the
+    two-flag tuple variant per the PR-body coordination plan."""
     try:
         from tools.audit_assembler import current_data_hash
         from tools.story_plan import get_cached_story_plan
         data_hash = await current_data_hash()
         if not data_hash:
-            return False
+            return False, False
         plan = await get_cached_story_plan(data_hash, "deck")
         if not plan:
-            return False
-        # Fallback rows are persisted under the same key but flagged
-        # via _model -- treat them as 'not yet generated' so the UI
-        # nudges the user to regenerate the deck rather than letting
-        # them download a script built around a fallback outline.
-        return plan.get("_model") != "deterministic_fallback"
+            return False, False
+        plan_available = plan.get("_model") != "deterministic_fallback"
+        if not plan_available:
+            return False, False
+        script_text = plan.get("full_script") or ""
+        script_available = bool(script_text and script_text.strip())
+        return True, script_available
     except Exception as exc:  # noqa: BLE001
-        log.warning("deck_story_plan_check_failed", error=str(exc))
-        return False
+        log.warning("deck_story_plan_status_check_failed",
+                    error=str(exc))
+        return False, False
 
 
 @app.post("/api/v1/cache/invalidate")

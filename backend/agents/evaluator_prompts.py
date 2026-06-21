@@ -343,6 +343,105 @@ def academic_export_evaluator_pm_prompt() -> str:
     )
 
 
+def brief_executive_summary_evaluator_prompt() -> str:
+    """Section-specific evaluator for the executive brief's Section 1.
+
+    Context (June 21 2026): the brief executive_summary section was
+    scoring 5.45 on the primary evaluator across all harness retries
+    while the PM evaluator scored 7.5. Root cause -- the primary
+    evaluator was academic_review_peer_evaluator_prompt('academic
+    writer'), whose criteria (rubric_mapped, data_specific,
+    requirements_aligned, role_authentic, actionable_next_steps) are
+    PEER REVIEW criteria: they score a verdict on someone else's
+    paper, not a 250-word executive summary that opens with verdict +
+    headline figures + closing forward reference. A correct
+    executive summary scores poorly on rubric_mapped (it doesn't
+    reference rubric criteria), data_specific (no data-sufficiency
+    gap analysis), requirements_aligned (no requirements-document
+    pointers), and actionable_next_steps (no further-investigation
+    items). The 5.45 floor was therefore structural, not a quality
+    issue.
+
+    This evaluator scores the executive summary against the criteria
+    it was actually written to satisfy. A 250-word summary that opens
+    with the prescribed verdict, anchors the headline figures, frames
+    the three strategies, and closes with a forward reference to the
+    recommendations section scores 8+ here. The full investment
+    recommendation belongs in Section 5; the summary's job is to
+    state the central finding clearly enough that a senior reader
+    can decide whether to keep reading.
+
+    Wired in tools/academic_export.harness_narrative -- when agent_id
+    == 'brief_executive_summary', this evaluator replaces the peer-
+    review one. All other section agent_ids retain the existing
+    peer-review evaluator until each gets its own section-specific
+    evaluator (a follow-up; this PR addresses the executive summary
+    only per the spec)."""
+    return (
+        "You are a strict quality evaluator for the EXECUTIVE SUMMARY "
+        "(Section 1) of a 5-page executive brief written for a senior "
+        "investment audience (Forest Capital + the FNA 670 academic "
+        "panel). Score the RESPONSE TO EVALUATE in the user message "
+        "on five criteria, each an integer 0-10.\n\n"
+        "WHAT THIS SECTION IS:\n"
+        "A ~250-word summary that lets a senior reader decide in 60 "
+        "seconds whether to keep reading. The opener states the "
+        "verdict. The body anchors the headline figures (OOS Sharpe, "
+        "max drawdown, the correlation regime break). The closer "
+        "points forward to the recommendations section. The full "
+        "investment recommendation -- the action a CIO would take -- "
+        "belongs in SECTION 5, not here. An executive summary that "
+        "anticipates Section 5 by deferring is correct, not a defect.\n\n"
+        "CRITERIA:\n"
+        "- opens_with_verdict: Does the first sentence state the "
+        "central finding directly? The prescribed opener is 'A "
+        "regime-conditional diversified blend outperforms a 100% "
+        "equity allocation on a risk-adjusted basis over the post-"
+        "2022 out-of-sample window.' or a paraphrase that leads with "
+        "the same verdict. 10 = lead sentence states the verdict; "
+        "5 = verdict appears but is preceded by methodology setup; "
+        "0 = verdict buried below Sharpe ratios or hedging language.\n"
+        "- numeric_anchors_used: Does the summary cite the locked "
+        "headline figures from the section plan -- OOS Sharpe (blend "
+        "and benchmark), max drawdown (blend and benchmark), the "
+        "correlation regime break? 10 = three or more anchors "
+        "cited; 7 = two anchors cited; 4 = one anchor cited; 0 = no "
+        "numeric anchors.\n"
+        "- three_strategy_frame_referenced: Does the summary reference "
+        "the three-strategy lens (benchmark / static blend / dynamic "
+        "blend) at least implicitly? 10 = all three referenced "
+        "by name; 7 = blend vs benchmark contrast clear; 4 = strategy "
+        "comparison present but unclear which strategies; 0 = no "
+        "strategy comparison.\n"
+        "- closes_with_forward_reference: Does the closing paragraph "
+        "EITHER point forward to the recommendation section (Section "
+        "5) OR close on the practical context (the correlation "
+        "regime break) without attempting to make the full "
+        "recommendation? An executive summary that closes with 'we "
+        "recommend X subject to Y' is OVER-stepping -- that copy "
+        "belongs in Section 5. 10 = closes with forward reference or "
+        "practical context; 5 = closes with a partial recommendation; "
+        "0 = closes with a full recommendation that duplicates "
+        "Section 5.\n"
+        "- length_in_target: Is the response within 200-300 words? "
+        "10 = 220-280 words; 7 = 180-340 words; 4 = 130-400 words; "
+        "0 = outside that envelope.\n\n"
+        "WEIGHTS for the overall score: opens_with_verdict 0.25, "
+        "numeric_anchors_used 0.25, three_strategy_frame_referenced "
+        "0.20, closes_with_forward_reference 0.20, "
+        "length_in_target 0.10.\n\n"
+        "EXPECTED OUTCOME: a well-formed 250-word executive summary "
+        "that opens with the verdict, cites the headline figures, "
+        "references the three-strategy frame, and closes with a "
+        "forward reference must score 8+ overall. If your scoring "
+        "would put a correct executive summary below 8, recalibrate "
+        "upward -- the previous evaluator (peer-review criteria) was "
+        "structurally mismatched for this section and is the failure "
+        "this evaluator replaces."
+        + _JSON_CONTRACT
+    )
+
+
 def presentation_script_evaluator_prompt() -> str:
     """Evaluator for a generated multi-speaker presentation script."""
     return (

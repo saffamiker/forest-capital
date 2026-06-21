@@ -543,12 +543,33 @@ def harness_narrative(
         from agents.evaluator_prompts import (
             academic_export_evaluator_pm_prompt,
             academic_review_peer_evaluator_prompt,
+            brief_executive_summary_evaluator_prompt,
         )
         from agents.harness import GeneratorEvaluatorHarness
         from tools.chart_vision import (
             DOCUMENT_GENERATION_CHARTS, get_charts_for_context,
             snapshots_dir_exists,
         )
+
+        # June 21 2026 -- the brief executive_summary section was
+        # scoring 5.45 across 3 harness retries on the primary
+        # evaluator while the PM evaluator scored 7.5. Root cause:
+        # academic_review_peer_evaluator_prompt's criteria score a
+        # PEER REVIEW VERDICT (rubric_mapped, data_specific,
+        # requirements_aligned, actionable_next_steps), not a written
+        # document section. A correct executive summary scores
+        # structurally poorly on those criteria. The dedicated
+        # brief_executive_summary_evaluator_prompt scores against
+        # the criteria the section was actually written to satisfy
+        # (opens_with_verdict, numeric_anchors_used,
+        # three_strategy_frame_referenced, closes_with_forward_
+        # reference, length_in_target). All other section agent_ids
+        # retain the original peer-review evaluator until each gets
+        # its own section-specific evaluator (follow-up scope).
+        primary_evaluator = (
+            brief_executive_summary_evaluator_prompt()
+            if agent_id == "brief_executive_summary"
+            else academic_review_peer_evaluator_prompt("academic writer"))
 
         # DOCUMENT_GENERATION_CHARTS snapshots — the academic writer
         # reasons about regime + factor + drawdown visuals when drafting
@@ -579,7 +600,7 @@ def harness_narrative(
                 tools=[WEB_SEARCH_TOOL],
                 visual_context=visual_context,
                 trigger="document_export_narrative"),
-            evaluator_prompt=academic_review_peer_evaluator_prompt("academic writer"),
+            evaluator_prompt=primary_evaluator,
             # Audience-aware second pass — every document section
             # (midpoint paper, executive brief, deck narrative) is also
             # scored against the PM rubric. The harness retries when

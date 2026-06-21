@@ -621,6 +621,125 @@ class TestAppendixFramingPrelude:
                "interpretation" in _APPENDIX_FRAMING_PRELUDE
 
 
+class TestBriefExecutiveSummaryEvaluator:
+    """June 21 2026 -- the brief executive_summary section was
+    scoring 5.45 on the primary evaluator across all 3 attempts. Root
+    cause: academic_review_peer_evaluator_prompt's criteria
+    (rubric_mapped, data_specific, requirements_aligned,
+    actionable_next_steps) score a PEER REVIEW VERDICT, not a written
+    document section. A correct executive summary scores structurally
+    poorly on those criteria. brief_executive_summary_evaluator_prompt
+    replaces it for this section only, scoring against criteria the
+    section was actually written to satisfy."""
+
+    def test_evaluator_prompt_pins_five_section_appropriate_criteria(self):
+        from agents.evaluator_prompts import (
+            brief_executive_summary_evaluator_prompt,
+        )
+        prompt = brief_executive_summary_evaluator_prompt()
+        for criterion in (
+            "opens_with_verdict",
+            "numeric_anchors_used",
+            "three_strategy_frame_referenced",
+            "closes_with_forward_reference",
+            "length_in_target",
+        ):
+            assert criterion in prompt, (
+                f"executive summary evaluator missing criterion: {criterion}")
+        # The criteria that DO NOT apply must be absent so a future
+        # edit can't quietly re-introduce the peer-review framing.
+        for peer_criterion in (
+            "rubric_mapped", "data_specific",
+            "requirements_aligned", "actionable_next_steps",
+        ):
+            assert peer_criterion not in prompt, (
+                f"peer-review criterion leaked into the executive "
+                f"summary evaluator: {peer_criterion}")
+
+    def test_evaluator_calls_out_that_full_recommendation_is_section_5(self):
+        """The load-bearing instruction: a correct executive summary
+        defers the full recommendation to Section 5. Without this
+        guidance the evaluator could mis-penalise the closing copy
+        for not making the full investment recommendation."""
+        from agents.evaluator_prompts import (
+            brief_executive_summary_evaluator_prompt,
+        )
+        prompt = brief_executive_summary_evaluator_prompt()
+        assert "SECTION 5" in prompt
+        # The forward-reference criterion must explain that a full
+        # recommendation in the closing is OVER-STEPPING, not the goal.
+        assert "OVER-stepping" in prompt
+        # The 'must score 8+' guidance is the canonical instruction
+        # the spec called out -- pin it verbatim.
+        assert "must score 8+ overall" in prompt
+
+    def test_harness_routes_brief_executive_summary_to_new_evaluator(
+        self, monkeypatch,
+    ):
+        """The harness_narrative call site must pick
+        brief_executive_summary_evaluator_prompt when agent_id ==
+        'brief_executive_summary'. Other agent_ids retain the original
+        peer-review evaluator (other sections aren't in this PR's
+        scope -- pinned so a future caller doesn't have to re-derive
+        the contract)."""
+        import os
+        # The test-env short-circuit returns DATA_PENDING before any
+        # evaluator wiring -- bypass that branch by patching the
+        # environment check the function reads.
+        from tools import academic_export
+
+        captured: dict = {}
+
+        class _StubResult:
+            response = ""
+
+        class _StubHarness:
+            def run(self, *, evaluator_prompt, **kwargs):
+                captured["evaluator"] = evaluator_prompt
+                captured["agent_id"] = kwargs.get("agent_id")
+                return _StubResult()
+
+        monkeypatch.setattr(academic_export, "ENVIRONMENT", "production")
+        monkeypatch.setattr(
+            "agents.harness.GeneratorEvaluatorHarness",
+            lambda: _StubHarness())
+
+        # Defang every downstream import the function performs so the
+        # call reaches the harness wiring without hitting an LLM.
+        import sys
+        from unittest.mock import MagicMock
+        for mod in ("agents.academic_writer", "agents.base",
+                    "tools.chart_vision", "tools.strategy_context"):
+            sys.modules.setdefault(mod, MagicMock())
+        monkeypatch.setattr(
+            "agents.base.call_claude", lambda *a, **k: "",
+            raising=False)
+        # Patch chart-vision so snapshots_dir_exists short-circuits.
+        sys.modules["tools.chart_vision"].snapshots_dir_exists = (
+            lambda: False)
+
+        # Trigger with the executive summary agent_id; the new
+        # evaluator must land in the harness.run call.
+        academic_export.harness_narrative(
+            "brief_executive_summary", task="x", context={})
+        from agents.evaluator_prompts import (
+            brief_executive_summary_evaluator_prompt,
+        )
+        assert captured["agent_id"] == "brief_executive_summary"
+        assert captured["evaluator"] == \
+            brief_executive_summary_evaluator_prompt()
+
+        # And the OTHER agent_ids keep the original peer-review evaluator.
+        academic_export.harness_narrative(
+            "brief_methodology", task="x", context={})
+        from agents.evaluator_prompts import (
+            academic_review_peer_evaluator_prompt,
+        )
+        assert captured["agent_id"] == "brief_methodology"
+        assert captured["evaluator"] == \
+            academic_review_peer_evaluator_prompt("academic writer")
+
+
 class TestEvaluatorPrompts:
     """Both Pass 1 evaluator prompts must pin the rubric so a future
     refactor doesn't quietly drop a criterion."""
@@ -692,6 +811,101 @@ class TestPlanJsonParsing:
         from tools.story_plan import _parse_plan_json
         # An array at root is not a valid plan shape.
         assert _parse_plan_json("[1, 2, 3]", log_key="t") is None
+
+    def test_truncation_logs_specific_diagnostic(self, monkeypatch):
+        """June 21 2026 -- a truncated response (opens with '{', never
+        gets a closing brace) must log story_plan_*_truncated with a
+        'consider raising max_tokens' hint, not the generic _no_object.
+        The hint is the load-bearing signal for the operator -- without
+        it the cryptic 'Expecting , delimiter' error from json.loads
+        sends the operator chasing a non-existent JSON-shape bug.
+
+        We patch the module-level log.warning directly to capture the
+        event name + structured kwargs -- more reliable than depending
+        on structlog's output routing, which varies based on test
+        ordering and config side-effects from other imports."""
+        from tools import story_plan as sp
+        calls: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            calls.append((event, kwargs))
+
+        monkeypatch.setattr(sp.log, "warning", _capture)
+        # An object that began but never closed -- the canonical
+        # truncation shape an LLM emits when it hits max_tokens.
+        raw = '{"central_argument": "x", "slide_plan": [{"slide_number": 1'
+        out = sp._parse_plan_json(raw, log_key="story_plan_deck_pass1")
+        assert out is None
+        events = [c[0] for c in calls]
+        assert "story_plan_deck_pass1_truncated" in events, (
+            f"expected truncation diagnostic; got events: {events}")
+        # The hint kwarg surfaces the operator-actionable message.
+        truncated = next(c for c in calls
+                         if c[0] == "story_plan_deck_pass1_truncated")
+        assert "max_tokens" in truncated[1].get("hint", "")
+
+    def test_long_parse_failure_hints_at_max_tokens(self, monkeypatch):
+        """A long raw_length on a parse failure also surfaces the
+        max_tokens hint -- the case where the body contains stray
+        braces that match (so find/rfind succeed) but json.loads
+        still fails because an unclosed string ran past the ceiling."""
+        from tools import story_plan as sp
+        calls: list[tuple[str, dict]] = []
+
+        def _capture(event, **kwargs):
+            calls.append((event, kwargs))
+
+        monkeypatch.setattr(sp.log, "warning", _capture)
+        # 5000+ chars of content that does NOT parse as JSON. Picking
+        # a length above the 4500 threshold the parser uses to
+        # distinguish 'malformed' from 'truncated'.
+        raw = '{"a": "' + ("x" * 5000) + ',"b": "}'  # unclosed string + stray }
+        sp._parse_plan_json(raw, log_key="story_plan_deck_pass1")
+        events = [c[0] for c in calls]
+        assert "story_plan_deck_pass1_parse_failed" in events, (
+            f"expected parse_failed diagnostic; got events: {events}")
+        # The hint must mention max_tokens / truncation when the body
+        # is long; for shorter bodies it would say 'JSON malformed'.
+        parse_failed = next(c for c in calls
+                            if c[0] == "story_plan_deck_pass1_parse_failed")
+        assert "max_tokens" in parse_failed[1].get("hint", "")
+
+
+class TestDeckPass1MaxTokens:
+    """Pin that deck Pass 1's max_tokens budget stayed above the
+    previously-observed truncation point. June 21 2026 -- the deck
+    Pass 1 was hitting exactly 6000 output tokens and the JSON was
+    truncating mid-object (parse error: 'Expecting , delimiter: line
+    142 column 8'). Raised to 8000; this test prevents a future
+    regression that drops the ceiling back to 6000 from re-introducing
+    the truncation. The brief Pass 1's matching ceiling is pinned
+    alongside so both stay in sync."""
+
+    def test_deck_pass1_max_tokens_above_6000(self, monkeypatch):
+        """The deck Pass 1 harness call must request more than 6000
+        tokens. We capture the max_tokens passed to
+        _run_pass1_with_harness and assert it exceeds the historical
+        truncation point."""
+        from tools import story_plan as sp
+
+        captured: dict = {}
+
+        def _capture(**kwargs):
+            captured["max_tokens"] = kwargs.get("max_tokens")
+            # Raise so the function returns the deterministic
+            # fallback without continuing into Pass 2/3/4 -- we
+            # only care about the kwarg that was passed.
+            raise RuntimeError("captured")
+
+        monkeypatch.setattr(
+            sp, "_run_pass1_with_harness", _capture)
+        sp.generate_deck_story_plan(
+            deck_context={"validated_constants": {}},
+            slide_titles=["A", "B"])
+        assert captured["max_tokens"] > 6000, (
+            f"deck Pass 1 max_tokens regressed to "
+            f"{captured['max_tokens']} -- this re-introduces the "
+            "truncation observed June 21 2026")
 
 
 # ── Deterministic fallback ───────────────────────────────────────────────
