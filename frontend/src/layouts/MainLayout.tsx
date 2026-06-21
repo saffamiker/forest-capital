@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Users, ShieldCheck, Settings, HelpCircle, BarChart3,
-  Activity, FileText, LineChart, Menu, X, LogOut, ClipboardCheck,
+  Activity, FileText, LineChart, Menu, X, LogOut,
   TrendingUp, Sun, Moon,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -14,8 +14,6 @@ import { useBrand, BRANDS } from '../context/BrandContext'
 import { useUI } from '../context/UIContext'
 import type { UIMode } from '../context/UIContext'
 import { useQAStore } from '../stores/qaStore'
-import { useReportWriterStore } from '../stores/reportWriterStore'
-import { Loader2, CheckCircle, XCircle } from 'lucide-react'
 import QAStatusBadge from '../components/QAStatusBadge'
 import LearnModeToggle from '../components/LearnModeToggle'
 import AdvisorPanel from '../components/AdvisorPanel'
@@ -58,11 +56,6 @@ const NAV_GROUPS: NavGroup[] = [
       { to: '/council',     label: 'Council',     icon: Users },
       { to: '/performance-record', label: 'Performance Record', icon: TrendingUp },
       { to: '/qa',          label: 'QA Audit',    icon: ShieldCheck },
-      // ── May 23 2026 — item 7. Peer Review surfaces two flows:
-      // (A) upload another team's midpoint paper for a structured
-      // review script, and (B) generate a mock-panel Q&A prep
-      // sheet against the team's own current draft.
-      { to: '/peer-review', label: 'Peer Review', icon: ClipboardCheck },
     ],
   },
   {
@@ -451,7 +444,6 @@ export default function MainLayout() {
             >
               <Icon className="w-3.5 h-3.5" />
               {label}
-              {to === '/reports' ? <ReportWriterBadge /> : null}
             </NavLink>
           ))}
         </nav>
@@ -637,45 +629,3 @@ export default function MainLayout() {
 }
 
 
-/**
- * Tiny inline badge sitting next to the Reports nav item. Renders
- * the report-writer pipeline status (running / complete / failed)
- * so Bob can navigate away from /reports/writer during a long run
- * and still see at a glance whether the draft is ready.
- *
- * Drawn from the reportWriterStore (Zustand) which the
- * /reports/writer page sets on every state transition. Idle state
- * renders nothing.
- */
-function ReportWriterBadge() {
-  const { badge, badgeDetail } = useReportWriterStore()
-  if (badge === 'idle') return null
-  if (badge === 'running') {
-    return (
-      <span
-        data-testid="report-writer-badge-running"
-        title={badgeDetail || 'Report writer pipeline running'}
-        className="ml-1 inline-flex">
-        <Loader2 className="w-3 h-3 animate-spin text-electric-blue" />
-      </span>
-    )
-  }
-  if (badge === 'complete') {
-    return (
-      <span
-        data-testid="report-writer-badge-complete"
-        title={badgeDetail || 'Report writer draft ready'}
-        className="ml-1 inline-flex">
-        <CheckCircle className="w-3 h-3 text-green-400" />
-      </span>
-    )
-  }
-  return (
-    <span
-      data-testid="report-writer-badge-failed"
-      title={badgeDetail || 'Report writer pipeline failed'}
-      className="ml-1 inline-flex">
-      <XCircle className="w-3 h-3 text-red-400" />
-    </span>
-  )
-}

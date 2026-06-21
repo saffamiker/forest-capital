@@ -131,15 +131,17 @@ describe('DocumentGenerationPanel — async generation', () => {
   })
 
   it('resumes an in-progress job found on page load', async () => {
+    // PR #338 retired the midpoint card; the brief card is the
+    // resume target now.
     mockedAxios.get.mockResolvedValue({
       data: { jobs: [{
-        job_id: 'j-mid', document_type: 'midpoint_paper',
+        job_id: 'j-brief-resume', document_type: 'executive_brief',
         status: 'running', draft_id: null, download_url: null, error: null,
       }] } })
     renderPanel(<DocumentGenerationPanel />)
-    const midCard = await screen.findByText('Midpoint Submission Paper')
+    const briefCardEl = await screen.findByText('Executive Brief')
     await waitFor(() => expect(
-      within(midCard.closest('.card') as HTMLElement)
+      within(briefCardEl.closest('.card') as HTMLElement)
         .getByText(/Generating your/)).toBeInTheDocument())
   })
 
@@ -253,17 +255,13 @@ describe('DocumentGenerationPanel — async generation', () => {
 
 describe('DocumentGenerationPanel — Brief Workflow guide', () => {
   it('renders the Info button on the Executive Brief card and not on '
-    + 'the others', () => {
+    + 'the deck card', () => {
+      // PR #338 retired the midpoint card; only brief + deck +
+      // appendix remain. The info button stays brief-only.
       renderPanel(<DocumentGenerationPanel />)
-      // The brief card carries the info button.
       const briefInfo = within(briefCard()).getByTestId(
         'brief-workflow-info-button')
       expect(briefInfo).toBeInTheDocument()
-      // The midpoint + deck cards do NOT carry the info button.
-      const midpointCard = screen.getByText('Midpoint Submission Paper')
-        .closest('.card') as HTMLElement
-      expect(within(midpointCard).queryByTestId(
-        'brief-workflow-info-button')).not.toBeInTheDocument()
       const deckCard = screen.getByText('Final Presentation Deck')
         .closest('.card') as HTMLElement
       expect(within(deckCard).queryByTestId(

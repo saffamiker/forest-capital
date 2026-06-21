@@ -2,16 +2,20 @@
  * SubmissionGuidePanel — the deliverable submission guide, opened from a
  * button in the Reports header.
  *
- * Guide 1 (Bob) covers his TWO submission deadlines — the May 27th
- * midpoint paper and the July 1st executive brief. Guide 2 (Molly)
- * covers the July 1st final presentation, with a note about the
- * July 3rd panel presentation (where all three team members present
- * together). Each guide leads with one countdown chip per deadline.
+ * Guide 1 (Bob) covers the July 1st executive brief submission. Guide 2
+ * (Molly) covers the July 1st final presentation, with a note about
+ * the July 3rd panel presentation (where all three team members
+ * present together). Each guide leads with one countdown chip per
+ * deadline.
  *
  * The panel shows the guide relevant to the signed-in user — Bob sees
  * Guide 1, Molly sees Guide 2, everyone else (Michael included) sees
- * both. June 3rd is a peer-review cohort event (not a submission
- * deadline) and is not surfaced as a countdown here.
+ * both.
+ *
+ * PR #338 (June 19 2026) — the midpoint paper has been submitted and
+ * the legacy /reports/writer pipeline retired; this guide no longer
+ * carries the midpoint sub-deliverable. The peer-review cohort event
+ * (June 3rd) has passed and is no longer referenced here.
  */
 import { X, ChevronDown, ChevronRight } from 'lucide-react'
 import { useState } from 'react'
@@ -26,10 +30,10 @@ const TRACKING_NOTE =
   + 'evidence. Make it count.'
 
 // May 28 2026 — shared audit-gate callout. The report-readiness gate
-// (workstream C) refuses to generate a midpoint paper, executive brief,
-// or final presentation deck while any audit WARN finding is
-// unreviewed. Both guides surface this at the top so the team sees
-// the gate before the first Generate click rather than after a 422.
+// (workstream C) refuses to generate the executive brief or final
+// presentation deck while any audit WARN finding is unreviewed. Both
+// guides surface this at the top so the team sees the gate before
+// the first Generate click rather than after a 422.
 const AUDIT_GATE_NOTE =
   'Before generating any report: navigate to the QA Audit tab and '
   + 'ensure every WARN finding is either Acknowledged or Marked as '
@@ -62,96 +66,15 @@ interface Guide {
 const GUIDES: Guide[] = [
   {
     id: 'guide-1',
-    title: 'Guide 1 — Bob: Midpoint Paper + Executive Brief',
+    title: 'Guide 1 — Bob: Executive Brief',
     owner: 'Bob',
     ownerEmail: 'thaob@queens.edu',
     deadlines: [
-      { date: '2026-05-27', label: 'Midpoint paper',  noun: 'submission' },
       { date: '2026-07-01', label: 'Executive Brief', noun: 'submission' },
     ],
     steps: [
-      // ── Midpoint paper (May 27th) ──────────────────────────────────
-      { step: 'Open the Reports screen and find Generate Documents.' },
-      { step: 'Generate the Midpoint Submission Paper.' },
-      {
-        // May 28 2026 — audit body summary + appendix awareness.
-        step: 'Verify the audit content in the generated paper.',
-        detail: [
-          'The generated midpoint paper includes a Quality Assurance '
-            + 'paragraph in the methodology section and a full Audit '
-            + 'Disclosure Appendix at the end. Both are assembled '
-            + 'automatically from live audit data — verify the counts '
-            + 'are correct before submitting.',
-        ],
-      },
-      {
-        step: 'Generate and open your draft in the editor.',
-        detail: ['Click Open in Editor after generation.'],
-      },
-      {
-        step: 'Work through your draft.',
-        detail: [
-          'Resolve every amber data marker — verify each value against '
-            + 'the Analytics page.',
-          'Complete every BOB callout — these are the sections where '
-            + 'your own analysis is required.',
-          'Use the Writing Assistant panel to ask about any finding you '
-            + 'are unsure of.',
-        ],
-      },
-      {
-        // May 28 2026 — Academic Review primary location is now the QA
-        // Audit page (PR #152). The editor's Writing Assistant panel
-        // still surfaces an inline trigger but is no longer canonical.
-        step: 'Run Academic Review from the QA Audit page (primary).',
-        detail: [
-          'Navigate to the QA Audit tab — the Academic Review panel is '
-            + 'the canonical location.',
-          'The editor Writing Assistant panel also surfaces an inline '
-            + 'Run Academic Review trigger as a convenience.',
-          'Read every section verdict; improve the Needs Work sections.',
-          'Re-run until no section shows Needs Work.',
-        ],
-      },
-      {
-        // May 28 2026 — QA Audit disclosure workflow. The report-
-        // readiness gate (workstream C) refuses to generate while any
-        // WARN is unreviewed; the team must clear every finding here.
-        step: 'QA Audit review: clear every audit warning.',
-        detail: [
-          'Navigate to the QA Audit tab.',
-          'Acknowledge or Mark as Intentional every WARN finding with '
-            + 'a disclosure note of at least 20 characters.',
-          'All findings must show green before the report gate clears.',
-          'Use Edit to update a note, Revoke to restart a decision.',
-        ],
-      },
-      {
-        step: 'Save a named version.',
-        detail: ['Click Save Version and label it "Final submission".'],
-      },
-      {
-        // May 28 2026 — verify the audit appendix carries the team's
-        // reviewed disclosures BEFORE the final export. An empty
-        // appendix means the QA Audit review step was skipped; the
-        // team should return to the audit tab.
-        step: 'Verify the Audit Disclosure Appendix.',
-        detail: [
-          'Open the generated document and scroll to the Audit '
-            + 'Disclosure Appendix at the end.',
-          'Confirm it carries the team\'s reviewed disclosures — '
-            + 'reviewer email, timestamp, and note for every '
-            + 'acknowledged warning.',
-          'If the appendix is empty, return to QA Audit and complete '
-            + 'the disclosure review.',
-          'Statistical audit PDF: download from the QA Audit panel '
-            + 'and include it in the Analytical Appendix submission. '
-            + 'It carries a Warnings and Disclosures section listing '
-            + 'every WARN with reviewer identity, timestamp, and note.',
-        ],
-      },
-      { step: 'Export DOCX and submit the midpoint paper by May 27th.' },
       // ── Executive brief (July 1st) ─────────────────────────────────
+      { step: 'Open the Reports screen and find Generate Documents.' },
       {
         step: 'Generate your Executive Brief.',
         detail: [

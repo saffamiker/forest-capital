@@ -27,18 +27,13 @@ interface TaskSet {
   tasks: string[]
 }
 
-const TASKS: Record<EditorDocumentType, TaskSet> = {
-  midpoint_paper: {
-    owner: 'BOB',
-    note: TRACKING_NOTE,
-    tasks: [
-      'Resolve every amber marker (verify the data points)',
-      'Complete every BOB callout (add your own analysis)',
-      'Run Academic Review and reach no Needs Work sections',
-      'Save a named version before submitting',
-      'Export DOCX for submission',
-    ],
-  },
+// PR #338 -- the midpoint_paper member of EditorDocumentType is
+// preserved for back-compat (historical drafts still open in the
+// editor) but the UI surface is retired. The Partial type lets the
+// callout silently render nothing when documentType === 'midpoint_paper'
+// (see the early-return guard below) without forcing this dict to
+// carry a stale task list.
+const TASKS: Partial<Record<EditorDocumentType, TaskSet>> = {
   executive_brief: {
     owner: 'BOB',
     note: TRACKING_NOTE,
@@ -103,6 +98,7 @@ export default function EditorTasksCallout({ documentType, draftId }: Props) {
 
   if (dismissed) return null
   const set = TASKS[documentType]
+  if (!set) return null
 
   return (
     <div className="m-3 rounded border border-warning/40 bg-warning/10 p-3">

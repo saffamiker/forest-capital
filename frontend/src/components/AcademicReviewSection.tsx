@@ -277,8 +277,8 @@ export default function AcademicReviewSection() {
             </h3>
             {phase === 'idle' && !hasResult && (
               <p className="text-muted text-xs mt-1 leading-relaxed">
-                Five-section peer review of the portfolio research by
-                the Council's academic advisor panel — a
+                Five-section academic-review pass on the portfolio
+                research by the Council's academic advisor panel — a
                 rubric-mapped verdict (Strong / Developing /
                 Needs Work). Run it before each deadline to see
                 exactly where the project stands.

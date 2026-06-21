@@ -16,7 +16,6 @@ import {
 } from '../lib/generationJobs'
 
 const TYPE_LABEL: Record<string, string> = {
-  midpoint_paper: 'midpoint paper',
   executive_brief: 'executive brief',
   presentation_deck: 'presentation deck',
 }

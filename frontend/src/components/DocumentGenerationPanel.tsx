@@ -38,16 +38,6 @@ interface DocSpec {
 
 const DOCS: DocSpec[] = [
   {
-    id: 'midpoint',
-    documentType: 'midpoint_paper',
-    title: 'Midpoint Submission Paper',
-    description:
-      'Three-page academic paper formatted to midpoint requirements. '
-      + 'Double-spaced, 12pt, ready to refine in the editor.',
-    endpoint: '/api/v1/export/midpoint-paper',
-    icon: FileText,
-  },
-  {
     id: 'brief',
     documentType: 'executive_brief',
     title: 'Executive Brief',
