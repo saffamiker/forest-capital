@@ -773,33 +773,50 @@ async def _section_warm_history() -> DigestSection:
 #
 # Per-strategy weights live in strategy_results_cache.results_json[s]:
 #   avg_equity_weight   float in [0, 1]
-#   avg_bond_weight     float in [0, 1]   ← COMBINED (IG + HY), no split today
-#
-# Per CLAUDE.md the bond figure is one number; the per-strategy IG/HY tilt
-# isn't persisted to the cache. The digest spec asks for three asset columns
-# (Equity / IG / HY) but rather than guess a tilt at the digest layer we
-# show Equity / Bonds with a footnote so the reader knows the bond split
-# is downstream of strategy choice, not a separate axis. A follow-up can
-# add per-strategy IG/HY decomposition if the backtester starts emitting it.
+#   avg_bond_weight     float in [0, 1]   ← combined IG + HY
+#   avg_ig_weight       float in [0, 1]   ← IG component (PR #315 backfill)
+#   avg_hy_weight       float in [0, 1]   ← HY component (PR #315 backfill)
 #
 # Portfolio total row is the weighted average of each asset share across
 # the strategy weights, summing to 100% with a small rounding tolerance.
+#
+# June 21 2026 reconciliation -- the table and the CIO line below it used
+# to read from different blend sources (forward_projection.blend_weights
+# here vs regime_blends.blends[regime] in the CIO line), yielding ~1.4pp
+# equity discrepancies. Both now read from the same CIO-overlay source
+# (regime_blends.blends[regime]) and the table calls
+# compute_implied_asset_allocation() for the portfolio total so the table
+# total ALWAYS matches the line. The IG/HY columns surface when the
+# strategy cache rows carry the new fields; the table falls back to a
+# combined Bonds column row-by-row when those fields are absent. The
+# footnote only fires for the fallback rows.
 
 
 async def _section_implied_asset_allocation() -> DigestSection:
-    """Reads the live blend (per-strategy weights from analytics_metrics_cache
-    `forward_projection`, fail-open to strategy_results_cache.avg_*_weight
-    directly when forward_projection is cold) and the per-strategy asset
-    weights from strategy_results_cache. Renders a table: strategy + weight
-    + equity% + bonds% per non-zero strategy + a portfolio total row.
+    """Reads the live regime's blend (per-strategy weights from
+    `regime_blends.blends[regime]` — the same source the CIO recommendation
+    line uses) and the per-strategy asset weights from strategy_results_cache.
+    Renders a table: strategy + weight + equity% + IG bonds% + HY bonds%
+    per non-zero strategy + a portfolio total row.
 
-    The implied portfolio-level shares answer the question 'after the live
-    blend, what fraction of capital sits in equity vs bonds?' — not what
-    each strategy's average exposure was in isolation. Both reads are
-    fail-open: a cold cache renders a 'no live blend' placeholder rather
-    than skipping the section, so the reader knows the cron fired."""
+    Per-strategy IG/HY columns surface when the strategy cache carries
+    avg_ig_weight + avg_hy_weight (PR #315 backfill). When a row predates
+    the backfill, the IG/HY cells degrade to a single combined Bonds value
+    for that row and the footnote calls out which rows fell back.
+
+    The implied portfolio-level shares answer 'after the live blend, what
+    fraction of capital sits in equity vs IG vs HY?' — and MUST match the
+    "Current implied allocation" line in the CIO recommendation section.
+    Both share `compute_implied_asset_allocation` so the totals are pinned
+    to the same computation, not two parallel weighted sums that can drift.
+
+    All reads are fail-open: a cold cache renders a 'no live blend'
+    placeholder rather than skipping the section, so the reader knows the
+    cron fired."""
     try:
         from tools.cache import get_latest_strategy_cache
+        from tools.cio_recommendation import (
+            compute_implied_asset_allocation, get_latest_recommendation)
         from tools.precomputed_analytics import get_latest_metric
     except Exception as exc:  # noqa: BLE001
         log.warning("digest_asset_allocation_imports_failed", error=str(exc))
@@ -807,16 +824,33 @@ async def _section_implied_asset_allocation() -> DigestSection:
                               "  Section unavailable.")
 
     try:
-        # Live blend weights: prefer the cached forward_projection
-        # (the probability-weighted blend the platform serves) over
-        # raw strategy_results_cache, which carries only average per-
-        # strategy exposures and doesn't reflect the live regime read.
-        forward = await get_latest_metric("forward_projection") or {}
-        blend_weights = forward.get("blend_weights") or {}
+        # Live blend: the regime-conditional blend the CIO overlay uses,
+        # which is also what the "Current implied allocation" line below
+        # consumes. Reading the same source guarantees the table total
+        # row matches the line.
+        rb_row = await get_latest_metric("regime_blends") or {}
+        rb_blends = (rb_row or {}).get("blends") or {}
     except Exception as exc:  # noqa: BLE001
-        log.warning("digest_asset_allocation_forward_read_failed",
+        log.warning("digest_asset_allocation_regime_blends_read_failed",
                     error=str(exc))
-        blend_weights = {}
+        rb_blends = {}
+
+    # Live regime: same source the CIO recommendation line uses
+    # (get_latest_recommendation -> rec.regime or rec.confidence.regime)
+    # so the table reads the SAME blend the line below it reports.
+    regime: str | None = None
+    try:
+        rec = await get_latest_recommendation()
+        if rec:
+            confidence = rec.get("confidence") or {}
+            regime_raw = (
+                rec.get("regime") or confidence.get("regime") or "")
+            regime = regime_raw.upper() if regime_raw else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("digest_asset_allocation_cio_regime_read_failed",
+                    error=str(exc))
+
+    blend_weights = rb_blends.get(regime) if regime else None
 
     try:
         strategies = await get_latest_strategy_cache() or {}
@@ -828,81 +862,200 @@ async def _section_implied_asset_allocation() -> DigestSection:
     if not blend_weights or not strategies:
         return _empty_section(
             "Implied asset allocation",
-            "  No live blend available — the forward_projection cache "
-            "is cold or the strategy cache is empty.")
+            "  No live blend available — the regime_blends cache is "
+            "cold, the regime is unknown, or the strategy cache is "
+            "empty.")
 
-    # Filter to non-zero strategies, sort by weight descending.
-    rows: list[tuple[str, float, float, float]] = []
+    # Filter to non-zero strategies, sort by weight descending. Each row
+    # tracks whether the IG/HY split was available so the renderer can
+    # fall back to a combined Bonds value for that row only.
+    rows: list[dict[str, Any]] = []
     for strategy, weight in sorted(
             blend_weights.items(), key=lambda kv: -float(kv[1] or 0)):
-        w = float(weight or 0)
+        try:
+            w = float(weight or 0)
+        except (TypeError, ValueError):
+            continue
         if w <= 0:
             continue
         s = strategies.get(strategy) or {}
-        eq = float(s.get("avg_equity_weight") or 0)
-        bd = float(s.get("avg_bond_weight") or 0)
-        rows.append((strategy, w, eq, bd))
+        try:
+            eq = float(s.get("avg_equity_weight") or 0)
+            bd = float(s.get("avg_bond_weight") or 0)
+        except (TypeError, ValueError):
+            continue
+        ig_raw = s.get("avg_ig_weight")
+        hy_raw = s.get("avg_hy_weight")
+        ig: float | None = None
+        hy: float | None = None
+        if ig_raw is not None and hy_raw is not None:
+            try:
+                ig = float(ig_raw)
+                hy = float(hy_raw)
+            except (TypeError, ValueError):
+                ig = None
+                hy = None
+        rows.append({
+            "name": strategy, "w": w, "eq": eq, "bd": bd,
+            "ig": ig, "hy": hy})
 
     if not rows:
         return _empty_section(
             "Implied asset allocation",
             "  All strategy weights are zero — nothing to allocate.")
 
-    # Portfolio total — weighted sum of each asset share by strategy
-    # weight. With a fully-invested blend (sum w_i ≈ 1) and fully-
-    # invested strategies (eq_i + bd_i ≈ 1) the totals also sum to ~1.
-    total_eq = sum(w * eq for _, w, eq, _ in rows)
-    total_bd = sum(w * bd for _, w, _, bd in rows)
+    # Portfolio total — delegated to compute_implied_asset_allocation
+    # so the table total MUST equal the "Current implied allocation"
+    # line, modulo the same rounding both consumers apply (the line
+    # also formats to 1 decimal).
+    implied = await compute_implied_asset_allocation(blend_weights) or {}
+    total_eq = float(implied.get("equity_pct") or 0)
+    total_bd = float(implied.get("bond_pct") or 0)
+    total_ig_raw = implied.get("ig_bond_pct")
+    total_hy_raw = implied.get("hy_bond_pct")
+    has_total_ig_hy = (
+        isinstance(total_ig_raw, (int, float))
+        and isinstance(total_hy_raw, (int, float)))
+    total_ig = float(total_ig_raw or 0)
+    total_hy = float(total_hy_raw or 0)
+
+    # Per-row fallback marker: rows missing avg_ig_weight render the
+    # combined Bonds column; the others render the split columns.
+    any_row_fell_back = any(r["ig"] is None for r in rows)
+    fall_back_to_combined = (
+        any_row_fell_back or not has_total_ig_hy)
 
     # HTML table — same inline style register as the other digest sections.
-    html_rows = "".join(
-        f"<tr><td style='padding:2px 6px;color:#cbd5e1'>{name}</td>"
-        f"<td style='padding:2px 6px;text-align:right;color:#cbd5e1'>"
-        f"{w * 100:.1f}%</td>"
-        f"<td style='padding:2px 6px;text-align:right;color:#94a3b8'>"
-        f"{eq * 100:.1f}%</td>"
-        f"<td style='padding:2px 6px;text-align:right;color:#94a3b8'>"
-        f"{bd * 100:.1f}%</td></tr>"
-        for name, w, eq, bd in rows)
-    html = (
-        f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
-        f"Implied asset allocation</h3>"
-        f"<table style='border-collapse:collapse;font-size:12px;"
-        f"margin-bottom:6px'>"
-        f"<thead><tr>"
-        f"<th style='padding:2px 6px;text-align:left;color:#94a3b8'>Strategy</th>"
-        f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>Weight</th>"
-        f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>Equity</th>"
-        f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>Bonds</th>"
-        f"</tr></thead>"
-        f"<tbody>{html_rows}"
-        f"<tr style='border-top:1px solid #334155'>"
-        f"<td style='padding:4px 6px;color:#fbbf24'><b>Portfolio total</b></td>"
-        f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
-        f"<b>100.0%</b></td>"
-        f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
-        f"<b>{total_eq * 100:.1f}%</b></td>"
-        f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
-        f"<b>{total_bd * 100:.1f}%</b></td></tr>"
-        f"</tbody></table>"
-        f"<div style='font-size:10px;color:#64748b'>"
-        f"Bonds column is combined investment-grade + high-yield; the "
-        f"per-strategy IG/HY tilt is not persisted to the strategy cache."
-        f"</div>")
+    # Columns adapt: when IG/HY are available, render five columns
+    # (Strategy / Weight / Equity / IG Bonds / HY Bonds). When even one
+    # row lacks the split, drop back to the four-column layout
+    # (Strategy / Weight / Equity / Bonds) so the table reads cleanly
+    # without per-row column merges. The footnote calls out the fallback.
+    def _fmt_pct(v: float) -> str:
+        return f"{v * 100:.1f}%"
 
-    text_lines = [
-        "IMPLIED ASSET ALLOCATION",
-        "  Strategy            Weight    Equity     Bonds",
-    ]
-    for name, w, eq, bd in rows:
+    if fall_back_to_combined:
+        html_rows = "".join(
+            f"<tr><td style='padding:2px 6px;color:#cbd5e1'>"
+            f"{r['name']}</td>"
+            f"<td style='padding:2px 6px;text-align:right;color:#cbd5e1'>"
+            f"{_fmt_pct(r['w'])}</td>"
+            f"<td style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"{_fmt_pct(r['eq'])}</td>"
+            f"<td style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"{_fmt_pct(r['bd'])}</td></tr>"
+            for r in rows)
+        html = (
+            f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
+            f"Implied asset allocation</h3>"
+            f"<table style='border-collapse:collapse;font-size:12px;"
+            f"margin-bottom:6px'>"
+            f"<thead><tr>"
+            f"<th style='padding:2px 6px;text-align:left;color:#94a3b8'>"
+            f"Strategy</th>"
+            f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"Weight</th>"
+            f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"Equity</th>"
+            f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"Bonds</th>"
+            f"</tr></thead>"
+            f"<tbody>{html_rows}"
+            f"<tr style='border-top:1px solid #334155'>"
+            f"<td style='padding:4px 6px;color:#fbbf24'>"
+            f"<b>Portfolio total</b></td>"
+            f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
+            f"<b>100.0%</b></td>"
+            f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
+            f"<b>{_fmt_pct(total_eq)}</b></td>"
+            f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
+            f"<b>{_fmt_pct(total_bd)}</b></td></tr>"
+            f"</tbody></table>"
+            f"<div style='font-size:10px;color:#64748b'>"
+            f"Bonds column is combined investment-grade + high-yield; "
+            f"the per-strategy IG/HY tilt is not persisted to the "
+            f"strategy cache for one or more rows in the live blend."
+            f"</div>")
+        text_lines = [
+            "IMPLIED ASSET ALLOCATION",
+            "  Strategy            Weight    Equity     Bonds",
+        ]
+        for r in rows:
+            text_lines.append(
+                f"  {r['name']:<18}  {r['w'] * 100:>5.1f}%   "
+                f"{r['eq'] * 100:>5.1f}%   {r['bd'] * 100:>5.1f}%")
         text_lines.append(
-            f"  {name:<18}  {w * 100:>5.1f}%   {eq * 100:>5.1f}%   "
-            f"{bd * 100:>5.1f}%")
-    text_lines.append(
-        f"  {'PORTFOLIO TOTAL':<18}  100.0%   {total_eq * 100:>5.1f}%   "
-        f"{total_bd * 100:>5.1f}%")
-    text_lines.append(
-        "  (Bonds = IG + HY combined; per-strategy split not persisted.)")
+            f"  {'PORTFOLIO TOTAL':<18}  100.0%   "
+            f"{total_eq * 100:>5.1f}%   {total_bd * 100:>5.1f}%")
+        text_lines.append(
+            "  (Bonds = IG + HY combined; per-strategy split not "
+            "persisted for one or more rows.)")
+    else:
+        # Five-column split-bonds layout. Per-row IG/HY are guaranteed
+        # populated because any_row_fell_back is False here.
+        html_rows = "".join(
+            f"<tr><td style='padding:2px 6px;color:#cbd5e1'>"
+            f"{r['name']}</td>"
+            f"<td style='padding:2px 6px;text-align:right;color:#cbd5e1'>"
+            f"{_fmt_pct(r['w'])}</td>"
+            f"<td style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"{_fmt_pct(r['eq'])}</td>"
+            f"<td style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"{_fmt_pct(r['ig'])}</td>"
+            f"<td style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"{_fmt_pct(r['hy'])}</td></tr>"
+            for r in rows)
+        html = (
+            f"<h3 style='color:#cbd5e1;margin:0 0 8px 0;font-size:14px'>"
+            f"Implied asset allocation</h3>"
+            f"<table style='border-collapse:collapse;font-size:12px;"
+            f"margin-bottom:6px'>"
+            f"<thead><tr>"
+            f"<th style='padding:2px 6px;text-align:left;color:#94a3b8'>"
+            f"Strategy</th>"
+            f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"Weight</th>"
+            f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"Equity</th>"
+            f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"IG Bonds</th>"
+            f"<th style='padding:2px 6px;text-align:right;color:#94a3b8'>"
+            f"HY Bonds</th>"
+            f"</tr></thead>"
+            f"<tbody>{html_rows}"
+            f"<tr style='border-top:1px solid #334155'>"
+            f"<td style='padding:4px 6px;color:#fbbf24'>"
+            f"<b>Portfolio total</b></td>"
+            f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
+            f"<b>100.0%</b></td>"
+            f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
+            f"<b>{_fmt_pct(total_eq)}</b></td>"
+            f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
+            f"<b>{_fmt_pct(total_ig)}</b></td>"
+            f"<td style='padding:4px 6px;text-align:right;color:#fbbf24'>"
+            f"<b>{_fmt_pct(total_hy)}</b></td></tr>"
+            f"</tbody></table>"
+            f"<div style='font-size:10px;color:#64748b'>"
+            f"Bonds split into investment-grade (IG) and high-yield "
+            f"(HY) components. Portfolio total reflects live blend "
+            f"weights applied to strategy allocations."
+            f"</div>")
+        text_lines = [
+            "IMPLIED ASSET ALLOCATION",
+            "  Strategy            Weight    Equity   IG Bonds  HY Bonds",
+        ]
+        for r in rows:
+            text_lines.append(
+                f"  {r['name']:<18}  {r['w'] * 100:>5.1f}%   "
+                f"{r['eq'] * 100:>5.1f}%   {(r['ig'] or 0) * 100:>5.1f}%   "
+                f"{(r['hy'] or 0) * 100:>5.1f}%")
+        text_lines.append(
+            f"  {'PORTFOLIO TOTAL':<18}  100.0%   "
+            f"{total_eq * 100:>5.1f}%   {total_ig * 100:>5.1f}%   "
+            f"{total_hy * 100:>5.1f}%")
+        text_lines.append(
+            "  (Bonds split into IG and HY; portfolio total reflects "
+            "live blend weights applied to strategy allocations.)")
     text = "\n".join(text_lines) + "\n"
 
     return DigestSection(

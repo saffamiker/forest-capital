@@ -307,6 +307,157 @@ async def test_implied_asset_allocation_renders_placeholder_on_cold_cache():
     assert s.text.strip()
 
 
+# ── June 21 2026 — table/line reconciliation (#322) ──────────────────────
+#
+# The implied asset allocation TABLE and the "Current implied allocation"
+# LINE in the CIO recommendation section used to read from different
+# blend sources (forward_projection.blend_weights vs
+# regime_blends.blends[regime]), producing ~1.4pp equity discrepancies.
+# Both now share regime_blends.blends[regime] + compute_implied_asset_
+# allocation so the table portfolio total MUST equal the line. The
+# tests below pin the IG/HY columns + the per-row fallback + the
+# portfolio-total parity + the footnote conditional.
+
+_FAKE_BLENDS = {"BULL": {"S1": 0.6, "S2": 0.4}}
+_FAKE_STRATEGIES_FULL_SPLIT = {
+    "S1": {"avg_equity_weight": 0.85, "avg_bond_weight": 0.15,
+           "avg_ig_weight": 0.10, "avg_hy_weight": 0.05},
+    "S2": {"avg_equity_weight": 0.70, "avg_bond_weight": 0.30,
+           "avg_ig_weight": 0.25, "avg_hy_weight": 0.05},
+}
+_FAKE_STRATEGIES_PARTIAL_SPLIT = {
+    # S1 carries the PR #315 fields; S2 predates the backfill --
+    # exercises the per-row fallback path.
+    "S1": {"avg_equity_weight": 0.85, "avg_bond_weight": 0.15,
+           "avg_ig_weight": 0.10, "avg_hy_weight": 0.05},
+    "S2": {"avg_equity_weight": 0.70, "avg_bond_weight": 0.30},
+}
+
+
+def _patch_digest_sources(
+    monkeypatch, *, strategies, blends=_FAKE_BLENDS, regime="BULL",
+):
+    """Patch every read the table makes so it sees the supplied mock
+    state. Same patches apply to compute_implied_asset_allocation (it
+    reads the strategy cache) so the table total and the helper agree
+    on the exact same inputs."""
+    from tools import email_digest, cio_recommendation, cache, \
+        precomputed_analytics
+
+    async def _fake_strategies():
+        return strategies
+
+    async def _fake_metric(kind):
+        if kind == "regime_blends":
+            return {"blends": blends}
+        return {}
+
+    async def _fake_recommendation():
+        return {"regime": regime, "confidence": {"regime": regime}}
+
+    monkeypatch.setattr(
+        cache, "get_latest_strategy_cache", _fake_strategies)
+    monkeypatch.setattr(
+        precomputed_analytics, "get_latest_metric", _fake_metric)
+    monkeypatch.setattr(
+        cio_recommendation, "get_latest_recommendation",
+        _fake_recommendation)
+    # compute_implied_asset_allocation reads via tools.cache too --
+    # the strategies patch above already covers it.
+    return email_digest
+
+
+@pytest.mark.asyncio
+async def test_implied_asset_allocation_renders_ig_hy_split_columns(
+    monkeypatch,
+):
+    """When every strategy in the live blend carries avg_ig_weight +
+    avg_hy_weight the table renders five columns (Strategy / Weight /
+    Equity / IG Bonds / HY Bonds) and the updated footnote fires."""
+    _patch_digest_sources(
+        monkeypatch, strategies=_FAKE_STRATEGIES_FULL_SPLIT)
+    s = await _section_implied_asset_allocation()
+    assert "IG Bonds" in s.html
+    assert "HY Bonds" in s.html
+    assert "IG Bonds" in s.text
+    assert "HY Bonds" in s.text
+    # New (non-stale) footnote when IG/HY are surfacing.
+    assert "investment-grade (IG) and high-yield (HY)" in s.html
+    # Stale footnote must NOT be present.
+    assert "per-strategy IG/HY tilt is not persisted" not in s.html
+
+
+@pytest.mark.asyncio
+async def test_implied_asset_allocation_falls_back_when_split_missing(
+    monkeypatch,
+):
+    """When at least one strategy in the live blend lacks
+    avg_ig_weight / avg_hy_weight the table falls back to the four-
+    column combined-Bonds layout and the original footnote (now
+    qualified with 'for one or more rows') fires. No crash."""
+    _patch_digest_sources(
+        monkeypatch, strategies=_FAKE_STRATEGIES_PARTIAL_SPLIT)
+    s = await _section_implied_asset_allocation()
+    # Four-column layout: no IG/HY column headers.
+    assert "IG Bonds" not in s.html
+    assert "HY Bonds" not in s.html
+    # Combined Bonds column still present.
+    assert ">Bonds<" in s.html
+    # Qualified fallback footnote -- not a stale generic one.
+    assert "combined investment-grade + high-yield" in s.html
+    assert "for one or more rows" in s.html
+
+
+@pytest.mark.asyncio
+async def test_implied_asset_allocation_portfolio_total_matches_cio_line(
+    monkeypatch,
+):
+    """Both the table portfolio total and the CIO line consume
+    compute_implied_asset_allocation on the same regime_blends + the
+    same strategy cache, so the rendered equity / IG / HY percentages
+    must be byte-identical. This is the load-bearing reconciliation
+    test for the June 21 2026 bug -- if they ever drift again, this
+    fires."""
+    from tools.cio_recommendation import compute_implied_asset_allocation
+
+    _patch_digest_sources(
+        monkeypatch, strategies=_FAKE_STRATEGIES_FULL_SPLIT)
+
+    table = await _section_implied_asset_allocation()
+    implied = await compute_implied_asset_allocation(
+        _FAKE_BLENDS["BULL"])
+
+    # The line formats with the exact same _fmt_pct (1 decimal). Build
+    # the same string the CIO line would render and assert the table
+    # total row carries it verbatim.
+    eq_str = f"{float(implied['equity_pct']) * 100:.1f}%"
+    ig_str = f"{float(implied['ig_bond_pct']) * 100:.1f}%"
+    hy_str = f"{float(implied['hy_bond_pct']) * 100:.1f}%"
+    # The portfolio total row carries each as <b>...</b> -- match the
+    # rendered cell content directly.
+    assert f"<b>{eq_str}</b>" in table.html
+    assert f"<b>{ig_str}</b>" in table.html
+    assert f"<b>{hy_str}</b>" in table.html
+
+
+@pytest.mark.asyncio
+async def test_implied_asset_allocation_stale_footnote_absent_when_split_renders(
+    monkeypatch,
+):
+    """The pre-#315 footnote (which claimed the IG/HY tilt is not
+    persisted to the strategy cache) is incorrect now that the cache
+    holds avg_ig_weight + avg_hy_weight. When the split columns
+    render, neither the old stand-alone footnote nor any subset of
+    its load-bearing phrase ('not persisted to the strategy cache')
+    may appear."""
+    _patch_digest_sources(
+        monkeypatch, strategies=_FAKE_STRATEGIES_FULL_SPLIT)
+    s = await _section_implied_asset_allocation()
+    assert "IG Bonds" in s.html and "HY Bonds" in s.html
+    assert "not persisted to the strategy cache" not in s.html
+    assert "not persisted to the strategy cache" not in s.text
+
+
 @pytest.mark.asyncio
 async def test_latest_cio_recommendation_renders_placeholder_on_cold_cache():
     """Without a populated cio_recommendations table the section still
