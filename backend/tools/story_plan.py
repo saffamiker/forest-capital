@@ -432,9 +432,15 @@ for this criterion.
 4. SLIDE ECONOMY (0-2)
    Are slides lean -- one headline assertion, one visual reference, zero \
 to two bullets maximum? A plan where slide_bullets contains more than \
-two items per slide, or where speaker_notes content has leaked into \
-slide_bullets, scores 1 maximum. Slides carry the assertion; the script \
-carries the argument.
+two items per slide scores 1 maximum. Slides carry the assertion; the \
+script carries the argument.
+
+NOTE on speaker_notes: a separate Pass 1b generates the per-slide \
+speaker_notes conditioned on this slide_plan. The plan you are \
+scoring here does NOT contain speaker_notes -- do not penalise their \
+absence. Score against the structural fields the plan does carry: \
+headline, key_visual, numeric_anchors, slide_bullets, \
+transition_to_next.
 
 5. HONEST LIMITATIONS (0-2)
    Does the plan surface the 2-of-9 value-add events result and the \
@@ -593,7 +599,12 @@ round beyond two decimal places, or substitute figures from prior \
 knowledge. Numeric accuracy will be verified against the source cache \
 after generation.
 
-Output schema (return ONLY this JSON object):
+Output schema (return ONLY this JSON object). NOTE: speaker_notes \
+are intentionally OMITTED from this schema. A subsequent Opus pass \
+generates the per-slide speaker_notes conditioned on this locked \
+slide_plan -- splitting the work keeps this pass under the 4000-\
+token ceiling and lets the speaker_notes pass spend more tokens per \
+slide on prose quality.
 {
   "central_argument": "<one-sentence thesis>",
   "presentation_arc": "<two-to-three-sentence narrative thread>",
@@ -605,11 +616,96 @@ Output schema (return ONLY this JSON object):
       "key_visual": "<chart or table name -- one of the platform visuals>",
       "numeric_anchors": {"metric_name": <value>, ...},
       "slide_bullets": ["<bullet>", ...],
-      "speaker_notes": "<paragraph the presenter speaks; target 200-280 words = ~90-120 seconds of spoken content; the 11 slides must sum to 18-20 minutes>",
       "transition_to_next": "<one sentence linking to next slide>"
     }
   ]
 }"""
+
+
+# Pass 1b -- speaker_notes generation. June 21 2026 split.
+# Pass 1 used to emit speaker_notes inline in every slide entry; the
+# 11 x ~200-280-word notes consumed 3000-4000 tokens by themselves and
+# reliably pushed the Pass 1 JSON output past the 8000-token ceiling
+# (truncating mid-object and falling back to the deterministic plan).
+# The split lets Pass 1a stay lean (slide_plan structure) and lets
+# Pass 1b spend its full budget on prose quality for the speaker notes
+# without competing with the structural schema for tokens.
+LIVE_DEMO_SEQUENCE = """\
+Slide 9 is the AnalyticsDesk live demo. The speaker_notes for slide 9 \
+must structure the 3.5-minute demo as a four-step sequence:
+
+  Step 1 -- Open analyticsdesk.app and navigate to the Investment \
+Outlook page. Show the live regime detection (BULL / TRANSITION / \
+BEAR) with the HMM probability, the current blend recommendation, \
+and the "why this regime" explanation. Time: ~50 seconds.
+
+  Step 2 -- Open the Council Output panel. Show the five council \
+agents (Strategy / Risk Manager / Quant / Historian / Devil's \
+Advocate), the generator-evaluator harness, and call out the \
+Risk Manager's dissenting view on the current recommendation. \
+Time: ~50 seconds.
+
+  Step 3 -- Navigate to the Reports page. Show the document \
+generation cards (Executive Brief, Presentation Deck, Analytical \
+Appendix) and demonstrate that this deck, the brief on the panel's \
+desk, and the appendix all derive from the same numeric cache. \
+Time: ~50 seconds.
+
+  Step 4 -- Hand-off back to the deck. Say "URL is \
+analyticsdesk.app, the panel has access during deliberation." \
+Time: ~20 seconds.
+
+Tone: confident, conversational, evidence-based. Do not over-hedge \
+the live demo -- if a step fails on the live site, acknowledge \
+briefly and move on rather than abandoning the demo."""
+
+
+_DECK_SPEAKER_NOTES_BODY = """\
+You write the per-slide speaker_notes for an 18-20 minute investment \
+presentation, conditioned on a pre-locked slide_plan. Output ONLY \
+strict JSON, no markdown fences, no preamble.
+
+The slide_plan structure -- headlines, key_visuals, numeric_anchors, \
+slide_bullets, transition_to_next -- is LOCKED. Your job is to write \
+the spoken-word notes the presenter delivers while each slide is on \
+screen. Notes target 200-280 words per slide = ~90-120 seconds of \
+spoken content; the 11 slides must sum to 18-20 minutes of speaking \
+time when totalled.
+
+Each slide's speaker_notes must:
+  * Lead with the slide's headline assertion expressed in spoken form
+  * Walk the audience through the key_visual (what the chart shows, \
+what the numbers anchor)
+  * Bridge to the next slide via the transition_to_next sentence
+  * Use ONLY values present in the slide's numeric_anchors -- no \
+new figures introduced
+  * Cite academic grounding verbally where appropriate (Hamilton \
+1989 for HMM; Ang and Bekaert 2002 for regime-conditional \
+allocation) on the methodology slide
+
+CRITICAL: numeric_anchors are the ONLY numbers permitted in the \
+speaker_notes. Quoting a figure not in the anchors block for a slide \
+is a contract violation.
+
+Output schema (return ONLY this JSON object). Keys are slide_number \
+as strings, "1" through the total slide count. Every slide in the \
+input slide_plan must have a corresponding key in the output:
+{
+  "speaker_notes": {
+    "1": "<200-280 word speaker notes for slide 1>",
+    "2": "<200-280 word speaker notes for slide 2>",
+    ...
+  }
+}"""
+
+
+_DECK_SPEAKER_NOTES_SYSTEM_PROMPT = (
+    THREE_STRATEGY_FRAME + "\n\n"
+    + CENTRAL_QUESTION_AND_ANSWER + "\n\n"
+    + INVESTABLE_CONCLUSION_GUARD + "\n\n"
+    + STATIC_ALLOCATION_JUSTIFICATION + "\n\n"
+    + LIVE_DEMO_SEQUENCE + "\n\n"
+    + _DECK_SPEAKER_NOTES_BODY)
 
 
 # Composite deck Pass-1 system prompt -- midpoint-feedback constraints
@@ -1033,6 +1129,56 @@ def _parse_plan_json(raw: str | None, *, log_key: str) -> dict | None:
     return obj
 
 
+# ── Pass 1b: Opus speaker_notes (June 21 2026 split) ─────────────────────
+
+
+def _generate_deck_speaker_notes(
+    *,
+    slide_plan: list[dict],
+    central_argument: str,
+    deck_context: dict[str, Any],
+    duration_minutes: int = 19,
+) -> dict[str, Any]:
+    """Pass 1b -- generates the per-slide speaker_notes conditioned
+    on the locked Pass 1a slide_plan. Returns
+    {"speaker_notes": {"1": "...", "2": "..."}} on success or
+    {"speaker_notes": {}} on any failure. Fail-open: the caller
+    merges what's returned, defaulting any missing slide to an
+    empty string."""
+    if not slide_plan:
+        return {"speaker_notes": {}}
+    try:
+        from agents.base import OPUS_MODEL, call_claude
+        user_prompt = (
+            "LOCKED SLIDE PLAN:\n"
+            f"{json.dumps(slide_plan, indent=2, default=str)}\n\n"
+            f"CENTRAL ARGUMENT: {central_argument}\n"
+            f"DURATION: {duration_minutes} minutes\n\n"
+            "DECK CONTEXT (validated constants the speaker notes "
+            "must source numeric anchors from):\n"
+            f"{json.dumps(deck_context, indent=2, default=str)}\n\n"
+            "Produce per-slide speaker_notes as the strict JSON "
+            "object specified. Every slide_number present in the "
+            "LOCKED SLIDE PLAN must have a corresponding key in "
+            "the output (as a string, e.g. \"1\", \"2\", ...).")
+        raw = call_claude(
+            OPUS_MODEL, _DECK_SPEAKER_NOTES_SYSTEM_PROMPT,
+            user_prompt,
+            max_tokens=5000,
+            trigger="story_plan_deck_pass1b")
+        parsed = _parse_plan_json(
+            raw, log_key="story_plan_deck_pass1b")
+        if not parsed or not parsed.get("speaker_notes"):
+            log.warning("story_plan_deck_pass1b_invalid",
+                        raw_preview=(raw or "")[:500])
+            return {"speaker_notes": {}}
+        return parsed
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plan_deck_pass1b_call_failed",
+                    error=str(exc))
+        return {"speaker_notes": {}}
+
+
 # ── Pass 3: Grok contrarian -- anticipated questions ─────────────────────
 
 
@@ -1154,23 +1300,23 @@ def generate_deck_story_plan(
         f"DURATION: {duration_minutes} minutes\n\n"
         "Produce the story plan as the strict JSON object specified.")
 
-    # Pass 1 -- Opus arbiter wrapped in harness.
-    # June 21 2026 -- bumped from 6000 to 8000 after observing the
-    # output landing at exactly 6000 tokens and the JSON truncating
-    # mid-object (parse error: "Expecting ',' delimiter: line 142
-    # column 8"). The deck plan covers 11 slides; each slide's
-    # speaker_notes block targets 200-280 words by spec, which puts
-    # the full plan well above the previous 6000-token ceiling once
-    # the slide_bullets, numeric_anchors, and transition_to_next
-    # fields are included. The harness will retry on a parse-fail
-    # but raising the ceiling avoids the retry cost entirely.
+    # Pass 1a -- Opus arbiter wrapped in harness. June 21 2026 split.
+    # Pass 1 used to emit speaker_notes inline in every slide entry;
+    # the 11 x ~200-280-word notes consumed 3000-4000 tokens by
+    # themselves and reliably pushed the JSON output past the
+    # 8000-token ceiling (truncating mid-object: "Expecting ','
+    # delimiter: line 183"). Pass 1a now emits the lean slide_plan
+    # structure only (no speaker_notes); Pass 1b below generates
+    # the per-slide speaker_notes conditioned on the locked
+    # slide_plan. Pass 1a's lean schema comfortably fits in 4000
+    # tokens for 11 slides.
     try:
         raw, score, attempts = _run_pass1_with_harness(
             system_prompt=_DECK_STORY_PLAN_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             evaluator_prompt=STORY_PLAN_EVALUATOR_PROMPT,
             agent_id="story_plan_deck",
-            max_tokens=8000)
+            max_tokens=4000)
     except Exception as exc:  # noqa: BLE001
         log.warning("story_plan_deck_pass1_failed", error=str(exc))
         return _deterministic_deck_plan(deck_context)
@@ -1185,6 +1331,37 @@ def generate_deck_story_plan(
              attempts=attempts,
              final_score=score)
     pass1["_model"] = "claude-opus-4-7"
+
+    # Pass 1b -- Opus speaker_notes generation conditioned on Pass 1a.
+    # Fail-open: on any failure the speaker_notes default to empty
+    # strings and the slide rendering pass continues. The per-slide
+    # Sonnet writers downstream will still produce serviceable
+    # speaker notes from context; missing story-plan notes degrade
+    # quality but do not block deck generation.
+    try:
+        notes_obj = _generate_deck_speaker_notes(
+            slide_plan=pass1.get("slide_plan") or [],
+            central_argument=pass1.get("central_argument") or "",
+            deck_context=deck_context,
+            duration_minutes=duration_minutes)
+        speaker_notes_by_slide = (notes_obj or {}).get(
+            "speaker_notes") or {}
+        # Merge speaker_notes back into the slide_plan so the cached
+        # plan_json shape is identical to the pre-split layout --
+        # downstream consumers (per-slide Sonnet injection, PPTX
+        # speaker-notes writer) require no changes.
+        for slide in pass1.get("slide_plan") or []:
+            sn_key = str(slide.get("slide_number"))
+            slide["speaker_notes"] = speaker_notes_by_slide.get(
+                sn_key, "")
+        log.info("story_plan_deck_pass1b_merged",
+                 n_slides=len(pass1.get("slide_plan") or []),
+                 n_notes=len(speaker_notes_by_slide))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plan_deck_pass1b_failed",
+                    error=str(exc))
+        for slide in pass1.get("slide_plan") or []:
+            slide.setdefault("speaker_notes", "")
 
     # Pass 2 -- Opus full script.
     try:
