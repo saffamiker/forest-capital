@@ -608,13 +608,56 @@ def harness_narrative(
         # downstream caller / .docx assembler) only ever sees
         # substituted text -- structurally impossible to evaluate or
         # render the raw {{TOKEN}} placeholders.
-        def _substituting_generator(prompt: str) -> str:
-            raw = call_claude(
+        #
+        # June 21 2026 -- self-healing truncation retry. After each
+        # Sonnet call, the response is checked with
+        # tools.document_audit.is_content_truncated. If truncated
+        # (open {{TOKEN, mid-URL, mid-word, no terminator in last
+        # 200 chars), re-call with max_tokens + 1000. Repeat once
+        # more at max_tokens + 2000. Fail-open after two retries --
+        # a truncated section is better than a blocked generation;
+        # the downstream check_section_truncation audit surfaces
+        # the residual flag to Bob in the editor banner.
+        from tools.document_audit import is_content_truncated
+
+        def _call_sonnet(prompt: str, tok_budget: int) -> str:
+            return call_claude(
                 SONNET_MODEL, _SYSTEM_PROMPT, prompt,
-                max_tokens=max_tokens,
+                max_tokens=tok_budget,
                 tools=[WEB_SEARCH_TOOL],
                 visual_context=visual_context,
                 trigger="document_export_narrative")
+
+        def _substituting_generator(prompt: str) -> str:
+            raw = _call_sonnet(prompt, max_tokens)
+            # Self-healing retry loop. Two attempts at +1000 / +2000
+            # tokens before giving up.
+            if is_content_truncated(raw):
+                retry_budget = max_tokens + 1000
+                log.warning(
+                    "section_content_truncated",
+                    agent_id=agent_id,
+                    current_max_tokens=max_tokens,
+                    retry_max_tokens=retry_budget,
+                    last_chars=raw[-100:])
+                raw = _call_sonnet(prompt, retry_budget)
+                if is_content_truncated(raw):
+                    retry_budget_2 = max_tokens + 2000
+                    log.warning(
+                        "section_content_truncated_retry2",
+                        agent_id=agent_id,
+                        retry_max_tokens=retry_budget_2,
+                        last_chars=raw[-100:])
+                    raw = _call_sonnet(prompt, retry_budget_2)
+                    if is_content_truncated(raw):
+                        log.error(
+                            "section_content_truncated_unrecoverable",
+                            agent_id=agent_id,
+                            last_chars=raw[-100:],
+                            message=(
+                                "Section still truncated after two "
+                                "retries. Accepting truncated output "
+                                "rather than blocking generation."))
             if substitution_table is None:
                 return raw
             from tools.numeric_substitution import apply_substitutions
