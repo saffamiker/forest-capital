@@ -290,6 +290,86 @@ def build_substitution_table(
         "{{STUDY_END}}": study_end,
         "{{DATA_HASH}}": (data_hash or "")[:8] or "—",
     }
+
+    # ── Deck-specific tokens (Layer 2, June 21 2026) ────────────────────
+    #
+    # The deck uses tokens beyond the brief's three-strategy lens:
+    # the play-by-play scorecard, transaction-cost sensitivity, live
+    # watch points (VIX / yield curve / credit spread / equity trend
+    # / ESS), and live blend composition. Many of these fields don't
+    # live on the strategy cache today (they're computed on demand by
+    # the regime / FRED / ESS pipelines); when the cache key is
+    # absent the format_* helpers return em dashes, so the deck
+    # renders cleanly even on a cold environment that doesn't carry
+    # the live signal yet. The tokens are added here even when the
+    # cache fields don't yet exist so the placeholder guide stays
+    # accurate -- the operator can backfill the cache fields later
+    # without touching this table.
+    table.update({
+        # Play-by-play scorecard. Defaults match the academic_deck
+        # constants (PLAY_BY_PLAY_ADD_VALUE = 2, PLAY_BY_PLAY_EVENTS
+        # = 9) so a cold cache still renders the canonical numbers.
+        "{{PLAY_BY_PLAY_VALUE_ADD}}": str(
+            strategy_cache.get("play_by_play_value_add", 2)),
+        "{{PLAY_BY_PLAY_TOTAL}}": str(
+            strategy_cache.get("play_by_play_total", 9)),
+
+        # Turnover + net-of-cost Sharpe sensitivity. Pulled from the
+        # regime row (annualized_turnover is the canonical key the
+        # backtester emits) and from top-level cache fields populated
+        # by the cost-sensitivity job.
+        "{{REGIME_SWITCHING_TURNOVER}}": format_pct(
+            regime.get("annualized_turnover")),
+        "{{NET_SHARPE_10BP}}": format_sharpe(
+            strategy_cache.get("net_sharpe_10bp")),
+        "{{NET_SHARPE_15BP}}": format_sharpe(
+            strategy_cache.get("net_sharpe_15bp")),
+        "{{NET_SHARPE_20BP}}": format_sharpe(
+            strategy_cache.get("net_sharpe_20bp")),
+
+        # Tail risk (deck slide 5 references CVaR explicitly).
+        "{{CVAR_99_BENCHMARK}}": format_pct(
+            benchmark.get("cvar_99_annualized")),
+
+        # Live watch points (Slide 7 macro context). VIX / OAS / yield
+        # curve / equity trend are populated by the regime_signals_cache
+        # warm path; ESS by the ESS computation in cio_recommendation.
+        # When cold, the str() fallback prevents a KeyError but renders
+        # an em dash for the operator to spot.
+        "{{VIX_CURRENT}}": str(
+            strategy_cache.get("vix_current") or "—"),
+        "{{CREDIT_SPREAD_CURRENT}}": str(
+            strategy_cache.get("hy_oas_current") or "—"),
+        "{{YIELD_CURVE_CURRENT}}": str(
+            strategy_cache.get("yield_curve_current") or "—"),
+        "{{EQUITY_TREND_CURRENT}}": format_pct(
+            strategy_cache.get("equity_trend_current")),
+        "{{ESS_CURRENT}}": str(
+            strategy_cache.get("kish_ess") or "—"),
+
+        # Live blend composition (slide 7 + slide 11). The CIO row
+        # carries blend_weights as a dict {strategy -> weight}; we
+        # surface the three brief-side strategies explicitly so the
+        # deck slide can quote each weight by name.
+        "{{BLEND_REGIME_SWITCHING_WT}}": format_pct(
+            (cio.get("blend_weights") or {}).get("REGIME_SWITCHING")
+            or cio.get("blend_regime_switching")),
+        "{{BLEND_BENCHMARK_WT}}": format_pct(
+            (cio.get("blend_weights") or {}).get("BENCHMARK")
+            or cio.get("blend_benchmark")),
+        "{{BLEND_CLASSIC_6040_WT}}": format_pct(
+            (cio.get("blend_weights") or {}).get("CLASSIC_60_40")
+            or cio.get("blend_classic_6040")),
+
+        # Strategy count. Falls back to the visible cache size when
+        # not explicitly persisted.
+        "{{N_STRATEGIES}}": str(
+            strategy_cache.get("n_strategies")
+            or sum(1 for v in strategy_cache.values()
+                   if isinstance(v, dict) and "sharpe_ratio" in v)
+            or 10),
+    })
+
     return table
 
 

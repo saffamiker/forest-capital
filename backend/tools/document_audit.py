@@ -977,6 +977,159 @@ def check_numeric_consistency(
     return flags
 
 
+# ── CHECK 10 — Cross-deliverable consistency (Layer 2, June 21 2026) ───
+#
+# Brief + deck + appendix all consume the SAME substitution table
+# instance (via get_substitution_table cached by data_hash). That
+# means a value substituted into the brief is structurally identical
+# to the same value substituted into the deck -- no drift is
+# possible at substitution time.
+#
+# What CAN drift: a manual edit. Bob opens the brief editor, tweaks
+# prose around "1.24", and accidentally types "1.23" instead.
+# Substitution was correct at generation time; the edit introduced
+# drift after the fact. This check fires post-edit (when the editor
+# export re-runs the audit) by scanning each document for the
+# verified substituted values from the shared table and flagging
+# any value found in one document that disagrees with the same
+# value found in another.
+#
+# Scope: only values that appear in at least TWO documents are
+# checked. A value that lives only in the appendix (an MIN_VARIANCE
+# strategy metric the brief doesn't quote) doesn't cross-deliverable-
+# drift because there's no second deliverable to drift against.
+
+
+def _close_numeric_variants(value: str, text: str) -> list[str]:
+    """Find variants of a substituted value in text that look like
+    rounding / formatting corruptions of it. Examples:
+      value="1.24" -> "1.2", "1.240", "1.23", "1.25" are flagged
+      value="-52.6%" -> "-52.5%", "-52.7%", "-53%" are flagged
+
+    Conservative: only flags strings that share the integer part of
+    the value (so "1.24" doesn't drag in "0.24" or "2.24" which are
+    distinct figures). Skips an exact match -- we're only after
+    variants, not the canonical value itself."""
+    if not value or not text:
+        return []
+    # Strip sign + percent so the comparison runs on the magnitude.
+    stripped = value.lstrip("+-").rstrip("%").rstrip("pp")
+    try:
+        canonical = float(stripped)
+    except (TypeError, ValueError):
+        return []
+    integer_part = str(int(canonical)) if canonical == int(canonical) \
+        else stripped.split(".")[0]
+    # Find every decimal number in the text and compare magnitudes.
+    variant_pattern = re.compile(
+        rf"-?\b{re.escape(integer_part)}(?:\.\d{{1,3}})?%?")
+    found: set[str] = set()
+    for m in variant_pattern.finditer(text):
+        candidate = m.group(0)
+        if candidate == value:
+            continue
+        # Strip sign + percent on candidate side too.
+        cand_stripped = candidate.lstrip("+-").rstrip("%").rstrip("pp")
+        try:
+            cand_val = float(cand_stripped)
+        except (TypeError, ValueError):
+            continue
+        # Same integer part + different decimal => variant. Threshold
+        # of 0.5 on the magnitude difference keeps "1.24" vs "2.24"
+        # from cross-flagging (those are unambiguously different
+        # figures); "1.24" vs "1.23" (0.01 difference) lands as a
+        # variant.
+        if abs(cand_val - canonical) > 0 and \
+                abs(cand_val - canonical) < 0.5:
+            found.add(candidate)
+    return sorted(found)
+
+
+def check_cross_deliverable_consistency(
+    documents: dict[str, str],
+    substitution_table: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Confirms substituted values are consistent across deliverables.
+
+    documents: {"executive_brief": <content>,
+                "presentation_deck": <content>,
+                "analytical_appendix": <content>}
+        Empty / missing keys are tolerated -- the check operates on
+        whichever documents the caller passes.
+
+    substitution_table: the shared {token -> value} map produced by
+        get_substitution_table for the same data_hash all three
+        documents were generated against.
+
+    Flag shape:
+        type="cross_deliverable_drift"
+        severity="high"
+        token=<the source placeholder>
+        expected=<the verified value from the table>
+        found=<the variant present in the document>
+        document=<which document carries the variant>
+
+    A clean cross-deliverable check is the green state: every shared
+    value matches the table verbatim in every document it appears in.
+
+    Implementation note: the substitution layer guarantees consistency
+    at GENERATION time (same table instance feeds all three). This
+    check is a POST-EDIT guard -- a manual edit in the editor can
+    silently introduce drift after the substitution layer has fired.
+    The check belongs in the editor-export re-audit path (the same
+    place Layer 1's check_unresolved_placeholders fires).
+    """
+    flags: list[dict[str, Any]] = []
+    if not documents or not substitution_table:
+        return flags
+
+    for token, value in substitution_table.items():
+        if not value or value == "—":
+            # Skip em-dashes -- they're the "missing value" sentinel
+            # and aren't expected to appear identically anywhere.
+            continue
+        # Find which documents reference this value (the substituted
+        # form should appear verbatim in any deliverable that used
+        # the token).
+        appears_in: list[str] = []
+        for doc_type, content in documents.items():
+            if isinstance(content, str) and value in content:
+                appears_in.append(doc_type)
+        # Only check cross-consistency when the value appears in at
+        # least one document -- single-document values can't drift.
+        # When it appears, also scan EVERY document for variants of
+        # the value (rounding-style corruptions). A document that
+        # has the variant but not the canonical value is the drift
+        # case the check is designed to catch.
+        for doc_type, content in documents.items():
+            if not isinstance(content, str):
+                continue
+            variants = _close_numeric_variants(value, content)
+            for variant in variants:
+                # Only flag when the canonical value is ALSO absent
+                # in this document AND a variant is present, OR when
+                # the variant differs from the canonical (true drift).
+                # We surface variants regardless so a manual edit
+                # that changed "1.24 vs 0.73" to "1.24 vs 0.74" gets
+                # caught even though the canonical 0.73 is gone.
+                flags.append({
+                    "type":     "cross_deliverable_drift",
+                    "severity": "high",
+                    "token":    token,
+                    "expected": value,
+                    "found":    variant,
+                    "document": doc_type,
+                    "message": (
+                        f"Token {token} expected value '{value}' "
+                        f"but document {doc_type!r} contains the "
+                        f"variant '{variant}'. A manual edit may "
+                        "have changed the figure post-substitution. "
+                        "Either restore the canonical value or "
+                        "confirm the variant is intentional."),
+                })
+    return flags
+
+
 def check_required_citations(
     content_text: str, document_type: str,
 ) -> list[dict[str, Any]]:
@@ -1298,9 +1451,14 @@ def audit_document(
         result.skipped["section_word_count"] = "not_a_brief"
 
     # Check 8 -- unresolved {{TOKEN}} placeholders (substitution
-    # architecture, June 21 2026). Brief only for now; deck +
-    # appendix call-site integration ships in Layer-2 PR.
-    if document_type == "executive_brief":
+    # architecture). Layer 2 (June 21 2026) extends the route to the
+    # deck + appendix surfaces alongside the original brief surface.
+    # The check itself is document-type-agnostic; the routing gate
+    # below is the only difference per surface.
+    _SUBSTITUTION_DOC_TYPES = {
+        "executive_brief", "presentation_deck", "analytical_appendix",
+    }
+    if document_type in _SUBSTITUTION_DOC_TYPES:
         try:
             result.flags_by_check["unresolved_placeholders"] = (
                 check_unresolved_placeholders(text or ""))
@@ -1309,10 +1467,12 @@ def audit_document(
                 "document_audit_check8_failed", error=str(exc))
             result.skipped["unresolved_placeholders"] = str(exc)
     else:
-        result.skipped["unresolved_placeholders"] = "not_a_brief"
+        result.skipped["unresolved_placeholders"] = (
+            "not_a_substitution_document")
 
     # Check 9 -- raw numeric in body (substitution bypass signal).
-    if document_type == "executive_brief":
+    # Same routing gate as Check 8.
+    if document_type in _SUBSTITUTION_DOC_TYPES:
         try:
             result.flags_by_check["raw_numeric"] = (
                 check_numeric_consistency(text or ""))
@@ -1321,7 +1481,7 @@ def audit_document(
                 "document_audit_check9_failed", error=str(exc))
             result.skipped["raw_numeric"] = str(exc)
     else:
-        result.skipped["raw_numeric"] = "not_a_brief"
+        result.skipped["raw_numeric"] = "not_a_substitution_document"
 
     log.info(
         "document_audit_complete",

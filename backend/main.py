@@ -11296,6 +11296,60 @@ async def _generate_appendix_document(
         pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
                    "dashboard once, then regenerate this appendix.")
 
+        # Layer 2 (June 21 2026) -- build the substitution table once
+        # per appendix-generation job. Same per-data_hash cache the
+        # brief + deck use, so a metric appearing in any of the three
+        # documents is byte-identical by construction. include_per_
+        # strategy=True (the default) is critical here: the appendix
+        # is the surface that needs the dynamic {{STRATEGY_NAME_*}}
+        # tokens for all 10 strategies.
+        substitution_table: dict[str, str] | None = None
+        try:
+            from tools.audit_assembler import current_data_hash
+            from tools.cio_recommendation import (
+                get_latest_recommendation,
+            )
+            from tools.numeric_substitution import (
+                get_substitution_table,
+            )
+            from tools.academic_deck import (
+                OOS_SHARPE_REGIME_CONDITIONAL,
+                OOS_SHARPE_BENCHMARK,
+                CORRELATION_PRE_2022, CORRELATION_POST_2022,
+            )
+            data_hash = await current_data_hash()
+            cio_row = await get_latest_recommendation()
+            substitution_table = get_substitution_table(
+                data_hash or "",
+                data.get("strategy_results") or {},
+                cio_row,
+                oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
+                oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
+                post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                study_months=(data.get("study_period") or {}).get(
+                    "n_months"))
+            log.info("substitution_table_built",
+                     document_type="analytical_appendix",
+                     data_hash=(data_hash or "")[:8],
+                     tokens_available=len(substitution_table))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("substitution_table_build_failed",
+                        document_type="analytical_appendix",
+                        error=str(exc))
+
+        # Layer 2 -- prepend the substitution placeholder guide to
+        # each appendix section task so the Sonnet writer uses
+        # {{TOKEN}} markers instead of raw figures. The appendix-
+        # specific extension teaches the {{STRATEGY_NAME_METRIC}}
+        # convention for the 10-strategy surface.
+        appendix_guide = ""
+        if substitution_table is not None:
+            appendix_guide = (
+                _NUMERIC_PLACEHOLDER_GUIDE
+                + _APPENDIX_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION
+                + "\n")
+
         specs = [
             {
                 "key": key,
@@ -11307,7 +11361,11 @@ async def _generate_appendix_document(
                 # full 10-strategy coverage is appropriate here --
                 # but the audience and economic-intuition layers
                 # do (see _APPENDIX_FRAMING_PRELUDE above).
-                "task": _APPENDIX_FRAMING_PRELUDE + task,
+                # Layer 2 (June 21) -- the substitution placeholder
+                # guide is prepended ahead of the framing prelude.
+                "task": (
+                    appendix_guide
+                    + _APPENDIX_FRAMING_PRELUDE + task),
                 "context": {"study_period": data.get("study_period")},
                 "available": avail,
                 "pending": pending,
@@ -11316,7 +11374,28 @@ async def _generate_appendix_document(
         ]
         narratives = await _generate_narratives(
             _apply_draft_caveats(specs),
-            n_strategies=len(data.get("strategy_results") or {}))
+            n_strategies=len(data.get("strategy_results") or {}),
+            substitution_table=substitution_table)
+
+        # Per-document substitution-complete telemetry. Same shape the
+        # brief + deck writers emit at end of generation.
+        if substitution_table is not None:
+            try:
+                from tools.numeric_substitution import (
+                    unresolved_placeholders,
+                )
+                joined_text = "\n".join(narratives.values())
+                unresolved = unresolved_placeholders(joined_text)
+                log.info("substitution_complete",
+                         document_type="analytical_appendix",
+                         tokens_available=len(substitution_table),
+                         unresolved_placeholders=unresolved,
+                         unresolved_count=len(unresolved))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("substitution_summary_failed",
+                            document_type="analytical_appendix",
+                            error=str(exc))
+
         docx_bytes = await asyncio.to_thread(
             build_analytical_appendix, data, narratives)
 
@@ -11771,9 +11850,59 @@ _DECK_SLIDE_SYSTEM_PROMPT = (
 )
 
 
+def _substitute_slide_content(
+    parsed: dict, substitution_table: dict[str, str] | None,
+    *, slide_number: int,
+) -> dict:
+    """Apply the substitution table to every {{TOKEN}}-bearing field
+    in a parsed deck slide dict. Operates on string fields (title,
+    headline, speaker_notes) and on list-of-string fields (bullets).
+    Mutates and returns the dict.
+
+    No-op when substitution_table is None -- preserves the pre-Layer-2
+    behaviour for any caller that hasn't been wired through yet.
+
+    The substitution log captures the per-slide tokens replaced so
+    Render logs show 'numeric_substitution_applied
+    document_type=deck slide_number=3 tokens_replaced=[...]' per
+    slide -- the same telemetry shape harness_narrative emits for
+    the brief section writer."""
+    if substitution_table is None:
+        return parsed
+    from tools.numeric_substitution import apply_substitutions
+
+    replaced_all: set[str] = set()
+    for key in ("title", "headline", "speaker_notes"):
+        if isinstance(parsed.get(key), str):
+            new_value, replaced = apply_substitutions(
+                parsed[key], substitution_table)
+            parsed[key] = new_value
+            replaced_all.update(replaced)
+    if isinstance(parsed.get("bullets"), list):
+        new_bullets: list[str] = []
+        for bullet in parsed["bullets"]:
+            if isinstance(bullet, str):
+                new_bullet, replaced = apply_substitutions(
+                    bullet, substitution_table)
+                new_bullets.append(new_bullet)
+                replaced_all.update(replaced)
+            else:
+                new_bullets.append(bullet)
+        parsed["bullets"] = new_bullets
+
+    if replaced_all:
+        log.info("numeric_substitution_applied",
+                 document_type="presentation_deck",
+                 slide_number=slide_number,
+                 tokens_replaced=sorted(replaced_all),
+                 count=len(replaced_all))
+    return parsed
+
+
 def _generate_one_deck_slide(
     slide_number: int, context: dict, n_strategies: int,
     *, slide_plan_entry: dict | None = None,
+    substitution_table: dict[str, str] | None = None,
 ) -> dict | None:
     """Bridge #98 / #100 -- generate ONE deck slide via a DIRECT Sonnet
     call (no harness, no evaluator, no Gemini, no Opus arbiter). Sync;
@@ -11843,9 +11972,21 @@ def _generate_one_deck_slide(
             "invent numbers. Do not change the headline. Do not add "
             "bullets beyond those listed. Write [DATA PENDING] for any "
             "value not in numeric_anchors.")
+    # Layer 2 (June 21 2026) -- prepend the substitution placeholder
+    # guide so the per-slide Sonnet writer uses {{TOKEN}} markers
+    # instead of raw figures. The platform substitutes verified
+    # cache values on the parsed slide dict after the call returns
+    # (_substitute_slide_content). No-op when no substitution_table
+    # is supplied (caller hasn't been wired through yet).
+    placeholder_guide = ""
+    if substitution_table is not None:
+        placeholder_guide = (
+            _NUMERIC_PLACEHOLDER_GUIDE
+            + _DECK_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION
+            + "\n")
     user_message = (
-        f"{prompt}{plan_block}\n\nCONTEXT (numbers to cite, do not "
-        f"invent):\n{ctx_str}")
+        f"{placeholder_guide}{prompt}{plan_block}\n\nCONTEXT "
+        f"(numbers to cite, do not invent):\n{ctx_str}")
 
     for attempt in (1, 2):
         try:
@@ -11872,6 +12013,15 @@ def _generate_one_deck_slide(
             ) and slide_plan_entry["speaker_notes"].strip():
                 parsed["speaker_notes"] = (
                     slide_plan_entry["speaker_notes"])
+            # Layer 2 (June 21 2026) -- run the substitution table
+            # across every {{TOKEN}}-bearing field on the parsed
+            # slide (title, headline, speaker_notes, bullets). The
+            # locked plan's speaker_notes may also carry placeholders
+            # (the Pass-1 arbiter could emit a token in the notes); a
+            # second pass post-override resolves any that landed via
+            # that path. No-op when substitution_table is None.
+            parsed = _substitute_slide_content(
+                parsed, substitution_table, slide_number=slide_number)
             return parsed
 
         log.warning("deck_slide_parse_failed",
@@ -11980,6 +12130,50 @@ async def _generate_deck_document(
         slide_plan = await _resolve_story_plan_slide_entries(
             data, n_strategies, list(SLIDE_TITLES))
 
+        # Layer 2 (June 21 2026) -- build the substitution table once
+        # per generation job and thread it through every per-slide
+        # call. Same table the brief uses (same data_hash) so a value
+        # appearing in both the brief and the deck is byte-identical
+        # by construction. Fail-open: any error returns None and the
+        # per-slide path runs without substitution (the slide writer
+        # then emits raw figures, which the post-gen audit's
+        # check_unresolved_placeholders + check_numeric_consistency
+        # flag as it would today).
+        substitution_table: dict[str, str] | None = None
+        try:
+            from tools.audit_assembler import current_data_hash
+            from tools.cio_recommendation import (
+                get_latest_recommendation,
+            )
+            from tools.numeric_substitution import (
+                get_substitution_table,
+            )
+            from tools.academic_deck import (
+                OOS_SHARPE_REGIME_CONDITIONAL,
+                OOS_SHARPE_BENCHMARK,
+                CORRELATION_PRE_2022, CORRELATION_POST_2022,
+            )
+            data_hash = await current_data_hash()
+            cio_row = await get_latest_recommendation()
+            substitution_table = get_substitution_table(
+                data_hash or "",
+                data.get("strategy_results") or {},
+                cio_row,
+                oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
+                oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
+                post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                study_months=(data.get("study_period") or {}).get(
+                    "n_months"))
+            log.info("substitution_table_built",
+                     document_type="presentation_deck",
+                     data_hash=(data_hash or "")[:8],
+                     tokens_available=len(substitution_table))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("substitution_table_build_failed",
+                        document_type="presentation_deck",
+                        error=str(exc))
+
         slides: list[dict] = []
         for n in range(1, DECK_SLIDE_COUNT + 1):
             # Index by slide_number explicitly so a partial plan (e.g.
@@ -11993,13 +12187,47 @@ async def _generate_deck_document(
             slide = await asyncio.to_thread(
                 _generate_one_deck_slide,
                 n, per_slide_ctx, n_strategies,
-                slide_plan_entry=entry)
+                slide_plan_entry=entry,
+                substitution_table=substitution_table)
             if slide is not None:
                 slides.append(slide)
             # A None slide is left out -- _normalize_slides inside
             # build_presentation_deck (called by _finalize_deck) fills
             # the missing slot with the canonical title + [DATA PENDING]
             # bullet. A SINGLE slide failure no longer downs the deck.
+
+        # Per-deck substitution-complete telemetry. Same shape the brief
+        # writer emits at end of section generation -- operators read
+        # both lines in Render logs to confirm the determinism layer
+        # fired across the document.
+        if substitution_table is not None:
+            try:
+                from tools.numeric_substitution import (
+                    unresolved_placeholders,
+                )
+                # Stitch every slide's text fields into one blob for
+                # the audit summary -- the dispatcher will do its own
+                # finer-grained scan on the rendered editor draft.
+                blob_parts: list[str] = []
+                for sl in slides:
+                    for k in ("title", "headline", "speaker_notes"):
+                        if isinstance(sl.get(k), str):
+                            blob_parts.append(sl[k])
+                    if isinstance(sl.get("bullets"), list):
+                        blob_parts.extend(
+                            b for b in sl["bullets"]
+                            if isinstance(b, str))
+                unresolved = unresolved_placeholders(
+                    "\n".join(blob_parts))
+                log.info("substitution_complete",
+                         document_type="presentation_deck",
+                         tokens_available=len(substitution_table),
+                         unresolved_placeholders=unresolved,
+                         unresolved_count=len(unresolved))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("substitution_summary_failed",
+                            document_type="presentation_deck",
+                            error=str(exc))
 
         return await _finalize_deck(
             slides, data, blend_weights, blend_series, email)
@@ -12141,6 +12369,72 @@ _NUMERIC_PLACEHOLDER_GUIDE = (
     "post-generation audit flags any surviving {{TOKEN}} as an "
     "unresolved_placeholder; if your token name isn't in the table "
     "above, it will surface as an audit failure.\n\n"
+)
+
+
+# June 21 2026 -- Layer 2 deck extension. Appended to
+# _NUMERIC_PLACEHOLDER_GUIDE for deck slide prompts so the per-slide
+# Sonnet writer sees the deck-specific token vocabulary alongside the
+# shared brief tokens. The deck-only tokens cover slide content the
+# brief never needs (play-by-play scorecard, live macro watch points,
+# net-of-cost Sharpe sensitivity, live blend composition by name).
+_DECK_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION = (
+    "\nDECK-SPECIFIC PLACEHOLDERS:\n"
+    "  {{PLAY_BY_PLAY_VALUE_ADD}} -- events where signal added value "
+    "(integer)\n"
+    "  {{PLAY_BY_PLAY_TOTAL}} -- total tracked events\n"
+    "  {{REGIME_SWITCHING_TURNOVER}} -- annualized turnover %\n"
+    "  {{NET_SHARPE_10BP}} / {{NET_SHARPE_15BP}} / {{NET_SHARPE_20BP}}"
+    " -- net Sharpe after transaction costs at 10/15/20 bps\n"
+    "  {{CVAR_99_BENCHMARK}} -- benchmark 99% CVaR\n"
+    "  {{VIX_CURRENT}} -- current VIX level\n"
+    "  {{CREDIT_SPREAD_CURRENT}} -- current HY OAS\n"
+    "  {{YIELD_CURVE_CURRENT}} -- 10Y-2Y spread\n"
+    "  {{EQUITY_TREND_CURRENT}} -- 3-month equity trend\n"
+    "  {{ESS_CURRENT}} -- Kish ESS (regime-detection reliability)\n"
+    "  {{BLEND_REGIME_SWITCHING_WT}} -- live blend weight for the "
+    "regime-switching strategy\n"
+    "  {{BLEND_BENCHMARK_WT}} -- live blend weight for the benchmark\n"
+    "  {{BLEND_CLASSIC_6040_WT}} -- live blend weight for 60/40\n"
+    "  {{N_STRATEGIES}} -- total strategies evaluated (10)\n"
+    "\n"
+)
+
+
+# June 21 2026 -- Layer 2 appendix extension. Appended to
+# _NUMERIC_PLACEHOLDER_GUIDE for appendix section prompts. The
+# appendix shows all 10 strategies (not the three-strategy
+# simplification), so it needs per-strategy tokens. Rather than
+# enumerate all 50 tokens (10 strategies x 5 metrics), the guide
+# teaches the pattern: {{STRATEGY_NAME_METRIC}} where the strategy
+# name is the canonical cache key (uppercase + underscores) and
+# the metric suffix is one of the five tracked.
+_APPENDIX_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION = (
+    "\nAPPENDIX-SPECIFIC PLACEHOLDERS:\n"
+    "The appendix shows ALL 10 strategies (not the three-strategy "
+    "simplification used in the brief / deck). Use strategy-specific "
+    "tokens for every performance figure:\n"
+    "\n"
+    "  {{STRATEGY_NAME_SHARPE}} -- full-period Sharpe ratio\n"
+    "  {{STRATEGY_NAME_MAX_DD}} -- maximum drawdown (negative %)\n"
+    "  {{STRATEGY_NAME_CAGR}} -- annualised return (%)\n"
+    "  {{STRATEGY_NAME_VOLATILITY}} -- annualised volatility (%)\n"
+    "  {{STRATEGY_NAME_RECOVERY}} -- drawdown recovery (months)\n"
+    "\n"
+    "Where STRATEGY_NAME is one of:\n"
+    "  BENCHMARK, REGIME_SWITCHING, CLASSIC_60_40, MIN_VARIANCE,\n"
+    "  RISK_PARITY, VOL_TARGETING, MAX_SHARPE_ROLLING,\n"
+    "  MOMENTUM_ROTATION, EQUAL_WEIGHT, MAX_DIVERSIFICATION\n"
+    "\n"
+    "Examples: {{REGIME_SWITCHING_SHARPE}}, {{MIN_VARIANCE_MAX_DD}}, "
+    "{{BENCHMARK_CAGR}}, {{RISK_PARITY_RECOVERY}}.\n"
+    "\n"
+    "Never write a raw performance figure for any strategy. The "
+    "platform substitutes verified cache values after generation, "
+    "and a {{STRATEGY_NAME_METRIC}} that doesn't match an actual "
+    "strategy in the cache will surface as an unresolved_placeholder "
+    "audit flag.\n"
+    "\n"
 )
 
 
