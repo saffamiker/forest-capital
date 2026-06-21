@@ -15,7 +15,8 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, FileSpreadsheet, Presentation, Download, Loader2, AlertCircle,
-  CheckCircle, PenLine, RefreshCw, X, Info, Mic,
+  CheckCircle, PenLine, RefreshCw, X, Info, Mic, ShieldCheck, ShieldAlert,
+  ShieldX,
 } from 'lucide-react'
 import TeamGate from './TeamGate'
 import {
@@ -26,6 +27,9 @@ import {
   ReportBlockingModal, useReportReadinessGate,
 } from './ReportReadinessIndicator'
 import { BriefWorkflowModal } from './BriefWorkflowModal'
+import {
+  useReportReadinessStore, type ExportVerificationStatus,
+} from '../stores/reportReadinessStore'
 
 interface DocSpec {
   id: string
@@ -34,6 +38,73 @@ interface DocSpec {
   description: string
   endpoint: string
   icon: typeof FileText
+}
+
+
+/**
+ * ExportVerificationPill -- Layer 3b (June 21 2026).
+ *
+ * Compact status pill rendered near each document card header. Reads
+ * from useReportReadinessStore's export_verification field (populated
+ * server-side on /api/v1/report/readiness). Four states:
+ *
+ *   verified     -> green "Export verified" pill
+ *   warned       -> amber "Regenerate recommended" pill
+ *   failed       -> red "Issues found" pill
+ *   not_exported -> muted grey "Not yet exported" text (no pill)
+ *
+ * Returns null when the store has no readiness payload yet so the
+ * card chrome doesn't flicker between an empty slot and a pill on
+ * first mount.
+ */
+function ExportVerificationPill(
+  { status }: { status: ExportVerificationStatus | null },
+) {
+  if (status === null) return null
+  if (status === 'verified') {
+    return (
+      <span
+        data-testid="export-verification-pill-verified"
+        className="inline-flex items-center gap-1 px-1.5 py-0.5
+                   rounded text-2xs font-medium bg-success/15
+                   border border-success/40 text-success">
+        <ShieldCheck className="w-3 h-3" />
+        Export verified
+      </span>
+    )
+  }
+  if (status === 'warned') {
+    return (
+      <span
+        data-testid="export-verification-pill-warned"
+        className="inline-flex items-center gap-1 px-1.5 py-0.5
+                   rounded text-2xs font-medium bg-amber-500/15
+                   border border-amber-500/40 text-amber-200">
+        <ShieldAlert className="w-3 h-3" />
+        Regenerate recommended
+      </span>
+    )
+  }
+  if (status === 'failed') {
+    return (
+      <span
+        data-testid="export-verification-pill-failed"
+        className="inline-flex items-center gap-1 px-1.5 py-0.5
+                   rounded text-2xs font-medium bg-danger/15
+                   border border-danger/40 text-danger">
+        <ShieldX className="w-3 h-3" />
+        Issues found
+      </span>
+    )
+  }
+  // not_exported
+  return (
+    <span
+      data-testid="export-verification-pill-not-exported"
+      className="text-2xs text-muted">
+      Not yet exported
+    </span>
+  )
 }
 
 const DOCS: DocSpec[] = [
@@ -242,6 +313,14 @@ export default function DocumentGenerationPanel() {
   // a 422 the modal also opens from the response detail (defence in
   // depth against a stale `is_ready` value).
   const readinessGate = useReportReadinessGate()
+  // Layer 3b (June 21 2026) -- read the per-document
+  // export_verification map from the readiness store so each card
+  // can render its pill. Pulled separately from useReportReadinessGate
+  // so a stale store still surfaces the gate state for the
+  // generation buttons while the pill stays in the neutral "not
+  // exported" state.
+  const exportVerification = useReportReadinessStore(
+    (s) => s.readiness?.export_verification ?? null)
   const [blockingModal, setBlockingModal] = useState<{
     open: boolean; blockers: string[]; message?: string;
     coldCaches?: string[]
@@ -381,8 +460,16 @@ export default function DocumentGenerationPanel() {
             || job?.status === 'running' || postingId === doc.id
           const error = errors[doc.id]
           const ts = generatedAt[doc.id]
+          const verificationStatus: ExportVerificationStatus | null = (
+            exportVerification
+              ? (exportVerification[
+                  doc.documentType as
+                    'executive_brief' | 'presentation_deck'
+                      | 'analytical_appendix'] ?? 'not_exported')
+              : null)
           return (
-            <div key={doc.id} className="card p-4 flex flex-col gap-3">
+            <div key={doc.id} className="card p-4 flex flex-col gap-3"
+                 data-testid={`document-card-${doc.id}`}>
               <div className="flex items-start gap-3">
                 <div className="w-9 h-9 rounded flex items-center justify-center
                                 shrink-0 bg-electric/10 text-electric">
@@ -406,6 +493,14 @@ export default function DocumentGenerationPanel() {
                         <Info className="w-4 h-4" />
                       </button>
                     )}
+                  </div>
+                  {/* Layer 3b -- export verification pill (green /
+                      amber / red / muted-not-exported) sits below
+                      the title so it never collides with the Info
+                      button on the brief card. */}
+                  <div className="mt-1"
+                       data-testid={`export-verification-${doc.id}`}>
+                    <ExportVerificationPill status={verificationStatus} />
                   </div>
                   <p className="text-muted text-xs mt-1 leading-relaxed">
                     {doc.description}

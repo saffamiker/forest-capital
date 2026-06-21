@@ -194,6 +194,53 @@ async def get_current_draft(
         return None
 
 
+async def get_current_draft_with_layer3(
+    owner_email: str, document_type: str,
+) -> dict[str, Any] | None:
+    """Layer 3b (June 21 2026) -- get_current_draft variant that
+    includes the Layer-3 columns (value_manifest, export_verification,
+    data_hash). Used by /api/v1/report/readiness to surface per-
+    document export_verification status to the Reports page badges.
+
+    Falls back gracefully on pre-Layer-3 schemas: a SELECT against
+    the LAYER3 column set on a database that hasn't run migration
+    057 raises, and the helper retries with the legacy column set so
+    the readiness endpoint keeps responding rather than 500ing. The
+    frontend badge then shows the neutral 'Not yet exported' state
+    because export_verification will be None."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            try:
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS_LAYER3} FROM editor_drafts "
+                    "WHERE owner_email = :e AND document_type = :t "
+                    "AND is_current = true AND is_deleted = false "
+                    "ORDER BY updated_at DESC LIMIT 1"),
+                    {"e": owner_email, "t": document_type})
+                found = row.fetchone()
+                return _draft_row(found) if found else None
+            except Exception:  # noqa: BLE001
+                # Pre-Layer-3 schema -- retry with the legacy column
+                # set so the readiness endpoint keeps working on a
+                # database that hasn't run migration 057 yet.
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                    "WHERE owner_email = :e AND document_type = :t "
+                    "AND is_current = true AND is_deleted = false "
+                    "ORDER BY updated_at DESC LIMIT 1"),
+                    {"e": owner_email, "t": document_type})
+                found = row.fetchone()
+                return _draft_row(found) if found else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_get_current_draft_layer3_failed", error=str(exc))
+        return None
+
+
 async def create_draft(
     document_type: str, owner_email: str, title: str,
     content_json: Any, content_text: str | None,

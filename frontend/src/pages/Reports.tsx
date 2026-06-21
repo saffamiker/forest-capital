@@ -31,6 +31,7 @@ import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
 import KeyMetricsPanel from '../components/KeyMetricsPanel'
+import PreSubmissionCheckPanel from '../components/PreSubmissionCheckPanel'
 import { ReportReadinessBanner } from '../components/ReportReadinessIndicator'
 import SubmissionFreezeBanner from '../components/SubmissionFreezeBanner'
 import SubmissionGuidePanel from '../components/SubmissionGuides'
@@ -114,6 +115,19 @@ export default function Reports() {
         data-section-id="report-readiness"
         data-section-label="Submission Readiness">
         <ReportReadinessBanner />
+      </div>
+
+      {/* Layer 3b (June 21 2026) -- Pre-submission verification check.
+          One-click button that fires POST /api/v1/export/verify-all
+          and renders an inline result tile (green ready / amber
+          needs-attention / red blocked) so the team can confirm cache
+          + draft alignment before submitting. Sits above the
+          generation cards so the verification verdict is on screen
+          when Bob and Molly reach for the export buttons. */}
+      <div
+        data-section-id="pre-submission-check"
+        data-section-label="Pre-Submission Check">
+        <PreSubmissionCheckPanel />
       </div>
 
       {/* Generate Documents — one-click first-draft .docx / .pptx of the

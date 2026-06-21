@@ -7954,7 +7954,74 @@ async def report_readiness(
         await _deck_story_plan_status())
     verdict["deck_story_plan_available"] = plan_available
     verdict["deck_script_available"] = script_available
+    # Layer 3b (June 21 2026) -- per-document export_verification
+    # status. Computes a {brief, deck, appendix -> verified/warned/
+    # failed/not_exported} dict from the latest editor draft's
+    # export_verification JSONB column. Drives the status pill
+    # rendered next to each document card on the Reports page. Read
+    # from the same authed user the GET is scoped to. Fail-open:
+    # any error returns {* -> 'not_exported'} so the badges stay
+    # neutral rather than 500ing the readiness endpoint.
+    verdict["export_verification"] = (
+        await _export_verification_status(session.get("email", "")))
     return verdict
+
+
+async def _export_verification_status(
+    email: str,
+) -> dict[str, str]:
+    """Layer 3b (June 21 2026) -- per-document export_verification
+    status for the Reports-page card badges. Reads the latest editor
+    draft's export_verification JSONB column (populated at
+    /api/v1/export/verify-all time and at each in-editor export by
+    Layer 3a's _editor_export). Returns one of:
+
+      verified     -- last export passed verification, no warnings
+      warned       -- last export had a warning (e.g. stale data hash)
+      failed       -- last export had errors (missing/corrupted values)
+      not_exported -- no draft exists, or the draft has no
+                      export_verification column set yet
+
+    Fail-open: any DB / module-load error returns all-not-exported so
+    the readiness endpoint never 500s on a Layer-3-uninstalled
+    environment."""
+    out: dict[str, str] = {
+        "executive_brief": "not_exported",
+        "presentation_deck": "not_exported",
+        "analytical_appendix": "not_exported",
+    }
+    if not email:
+        return out
+    try:
+        from tools.editor_drafts import get_current_draft_with_layer3
+    except Exception as exc:  # noqa: BLE001
+        log.warning("export_verification_status_import_failed",
+                    error=str(exc))
+        return out
+
+    for doc_type in (
+            "executive_brief", "presentation_deck",
+            "analytical_appendix"):
+        try:
+            draft = await get_current_draft_with_layer3(email, doc_type)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "export_verification_draft_read_failed",
+                document_type=doc_type, error=str(exc))
+            continue
+        if not draft:
+            continue
+        ev = draft.get("export_verification") or None
+        if not ev:
+            continue
+        # ev is the verify_export_against_cache return shape.
+        if ev.get("errors"):
+            out[doc_type] = "failed"
+        elif ev.get("warnings") or ev.get("skipped"):
+            out[doc_type] = "warned"
+        else:
+            out[doc_type] = "verified"
+    return out
 
 
 async def _deck_story_plan_status() -> tuple[bool, bool]:
@@ -11646,8 +11713,18 @@ async def _generate_brief_document(
             except Exception as exc:  # noqa: BLE001
                 log.warning("substitution_summary_failed",
                             error=str(exc))
+        # Layer 3b (June 21 2026) -- pass the substitution_table through
+        # so Section 6 chart captions can resolve {{DATA_HASH}} /
+        # {{PRE_2022_EQ_IG_CORR}} / {{OOS_SHARPE_BLEND}} against the
+        # verified cache values. verification_result is None at
+        # generation time (the receipt page shows "Not yet verified" so
+        # the page slot is structurally stable -- export-time
+        # verification rebuilds the brief from the editor draft via
+        # _editor_export, where the verification dict IS available).
         docx_bytes = await asyncio.to_thread(
-            build_executive_brief, data, narratives)
+            build_executive_brief, data, narratives,
+            substitution_table=substitution_table,
+            verification_result=None)
 
         # Load the generated content into an editor draft so the frontend
         # can open it directly in the editor — the same pattern as the
@@ -12036,6 +12113,43 @@ async def _generate_appendix_document(
                 content_json, content_text, created_from="generated")
             if draft is not None:
                 draft_id = draft["id"]
+
+            # Layer 3b (June 21 2026) -- persist the value manifest +
+            # generation data_hash on the appendix draft so
+            # /api/v1/export/verify-all has an authoritative reference
+            # for every numeric value the substitution table produced.
+            # Mirrors the brief block in _generate_brief_document.
+            if draft_id is not None and substitution_table is not None:
+                try:
+                    from tools.audit_assembler import (
+                        current_data_hash as _cur_hash,
+                    )
+                    from tools.editor_drafts import (
+                        update_value_manifest as _update_manifest,
+                    )
+                    from tools.numeric_substitution import (
+                        build_value_manifest,
+                    )
+                    from datetime import datetime as _dt
+                    from datetime import timezone as _tz
+                    _hash_for_manifest = await _cur_hash() or ""
+                    manifest = build_value_manifest(
+                        substitution_table,
+                        data_hash=_hash_for_manifest[:64],
+                        generated_at=_dt.now(_tz.utc).isoformat())
+                    await _update_manifest(
+                        draft_id, manifest,
+                        data_hash=_hash_for_manifest[:64] or None)
+                    log.info(
+                        "value_manifest_persisted",
+                        document_type="analytical_appendix",
+                        draft_id=draft_id,
+                        n_values=len(manifest))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "value_manifest_persist_failed",
+                        document_type="analytical_appendix",
+                        error=str(exc))
         except Exception as exc:  # noqa: BLE001
             log.warning("analytical_appendix_draft_create_failed",
                         error=str(exc))
@@ -12666,12 +12780,20 @@ async def _finalize_deck(
     blend_weights: dict,
     blend_series: list,
     email: str,
+    substitution_table: dict[str, str] | None = None,
 ) -> tuple[bytes, str, str, int | None]:
     """Bridge #95 — shared between the async-job and SSE paths. Given
     the assembled per-slide dicts, renders charts + builds pptx +
     creates the editor draft + writes audit metrics. Returns
     (file bytes, filename, media type, editor draft id). Every
-    degradation (cold chart, draft-create failure) is non-fatal."""
+    degradation (cold chart, draft-create failure) is non-fatal.
+
+    Layer 3b (June 21 2026) -- when substitution_table is supplied,
+    persists the value manifest + generation data_hash on the deck
+    draft so /api/v1/export/verify-all has an authoritative reference
+    for every numeric value the substitution table produced. Mirrors
+    the brief block in _generate_brief_document. Fail-open: a manifest
+    write failure logs and is non-fatal."""
     import asyncio
     from datetime import date
 
@@ -12700,6 +12822,39 @@ async def _finalize_deck(
             draft_id = draft["id"]
         await _write_audit_metrics(
             "presentation_deck", email, draft_id, audit_warnings)
+
+        # Layer 3b -- persist value manifest for deck drafts.
+        if draft_id is not None and substitution_table is not None:
+            try:
+                from tools.audit_assembler import (
+                    current_data_hash as _cur_hash,
+                )
+                from tools.editor_drafts import (
+                    update_value_manifest as _update_manifest,
+                )
+                from tools.numeric_substitution import (
+                    build_value_manifest,
+                )
+                from datetime import datetime as _dt
+                from datetime import timezone as _tz
+                _hash_for_manifest = await _cur_hash() or ""
+                manifest = build_value_manifest(
+                    substitution_table,
+                    data_hash=_hash_for_manifest[:64],
+                    generated_at=_dt.now(_tz.utc).isoformat())
+                await _update_manifest(
+                    draft_id, manifest,
+                    data_hash=_hash_for_manifest[:64] or None)
+                log.info(
+                    "value_manifest_persisted",
+                    document_type="presentation_deck",
+                    draft_id=draft_id,
+                    n_values=len(manifest))
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "value_manifest_persist_failed",
+                    document_type="presentation_deck",
+                    error=str(exc))
     except Exception as exc:  # noqa: BLE001
         log.warning("deck_draft_create_failed", error=str(exc))
 
@@ -12857,7 +13012,8 @@ async def _generate_deck_document(
                             error=str(exc))
 
         return await _finalize_deck(
-            slides, data, blend_weights, blend_series, email)
+            slides, data, blend_weights, blend_series, email,
+            substitution_table=substitution_table)
     except Exception as exc:  # noqa: BLE001
         log.error("presentation_deck_generation_error", error=str(exc))
         raise
