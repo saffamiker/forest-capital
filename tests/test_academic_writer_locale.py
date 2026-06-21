@@ -178,3 +178,66 @@ class TestStyleRuleset:
         assert "BOB" in prompt
         assert "pre-populated" in prompt.lower() \
             or "pre populated" in prompt.lower()
+
+
+class TestWebSearchDisabled:
+    """June 21 2026 -- web search removed from the brief / deck /
+    appendix narrative writer. The writer used to web-search per
+    section (Anthropic's server-side web_search, max_uses=3),
+    bloating input context and burning output budget on URL/DOI
+    formatting -- which fired
+    section_content_truncated_unrecoverable on Sections 3 + 6.
+    The platform's curated registry at data/references.json
+    already carries every academic citation the writer
+    historically searched for; the registry is now the only
+    permitted source."""
+
+    def test_system_prompt_disables_web_search(self):
+        # The CITATIONS block must explicitly say DO NOT web-search.
+        prompt = aw._SYSTEM_PROMPT
+        assert "DO NOT web" in prompt
+        # And the old "search for and include at least one supporting
+        # academic citation" instruction must be gone.
+        assert "search for and include at least one" not in prompt
+
+    def test_absolute_prohibitions_no_longer_mention_web_search(self):
+        # The ABSOLUTE PROHIBITIONS clause used to read "Never cite a
+        # source unless it is in the provided references list OR you
+        # have verified it via the web_search tool". The "OR you have
+        # verified it via the web_search tool" escape hatch is gone.
+        prompt = aw._SYSTEM_PROMPT
+        assert "verified it via the web_search tool" not in prompt
+        # The replacement must say web search is disabled.
+        assert "Web search is disabled" in prompt
+
+    def test_citations_block_lists_registry_keys(self):
+        # The new CITATIONS block must enumerate at least the seven
+        # core hardcoded papers the project depends on so the writer
+        # knows what's available without inspecting references.json.
+        prompt = aw._SYSTEM_PROMPT
+        assert "Hamilton (1989)" in prompt
+        assert "Carhart (1997)" in prompt
+        assert "Markowitz (1952)" in prompt
+        assert "Harvey, Liu, and Zhu (2016)" in prompt
+
+    def test_harness_narrative_does_not_pass_web_search_tool(self):
+        # The Sonnet call inside harness_narrative must NOT pass
+        # tools=[WEB_SEARCH_TOOL]. Source inspection is sufficient:
+        # the only path is the _call_sonnet closure inside
+        # harness_narrative, and any future regression that re-adds
+        # the tool would show up as a literal token in the source.
+        # The removal comment is allowed to reference the symbol so
+        # the next reader can grep their way back.
+        import inspect
+        from tools import academic_export
+        src = inspect.getsource(academic_export.harness_narrative)
+        assert "tools=[WEB_SEARCH_TOOL]" not in src
+        # WEB_SEARCH_TOOL may appear in a comment documenting the
+        # removal -- pin only that the ACTIVE wiring is gone.
+        active_tokens = [
+            line for line in src.splitlines()
+            if "WEB_SEARCH_TOOL" in line and not line.strip().startswith("#")
+        ]
+        assert not active_tokens, (
+            f"Unexpected active references to WEB_SEARCH_TOOL: "
+            f"{active_tokens}")
