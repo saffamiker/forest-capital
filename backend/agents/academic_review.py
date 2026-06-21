@@ -127,6 +127,14 @@ DOC_TYPE_LABELS: dict[str, str] = {
     "midpoint_draft": "MIDPOINT DRAFT",
     "presentation_slides": "PRESENTATION SLIDES",
     "presentation_script": "PRESENTATION SCRIPT",
+    # PR — academic review brief-specific rubric. The executive brief
+    # used to land under "other" (the catch-all) which rendered fine
+    # but routed the rubric through the midpoint instructions and
+    # produced a 5.5/10 scoring floor. Promoting brief_review to a
+    # first-class document type lets the context block surface the
+    # brief content with a clear label AND lets the rubric switch
+    # in build_arbiter_user_message detect the brief case directly.
+    "brief_review": "EXECUTIVE BRIEF",
     "other": "OTHER REFERENCE DOCUMENT",
 }
 
@@ -420,7 +428,16 @@ async def _gather_analytics_snapshot() -> dict[str, Any]:
 _EDITOR_TO_REVIEW_TYPE = {
     "midpoint_paper": "midpoint_draft",
     "presentation_deck": "presentation_slides",
-    "executive_brief": "other",
+    # PR — academic review brief-specific rubric. Previously "other"
+    # (the catch-all) which routed the executive brief's verdict
+    # through the midpoint rubric and produced a structural 5.5/10
+    # floor — the brief's Section 5 (Final Recommendations) scored
+    # Needs Work mechanically because the midpoint rubric expects
+    # "Next Steps and Open Questions" framing. The new "brief_review"
+    # value is consumed by the rubric switch in
+    # build_arbiter_user_message / run_arbiter_with_harness and by
+    # compute_review_score's weighted-aggregate mode.
+    "executive_brief": "brief_review",
 }
 
 
@@ -973,6 +990,187 @@ Every rating is exactly one of: Strong, Needs Work, Incomplete. Be
 direct and actionable — the team is preparing a graded delivery, so
 generic encouragement is not useful."""
 
+# Brief-specific rubric — used when Academic Review runs against an
+# executive_brief editor draft. The default rubric evaluates the
+# MIDPOINT paper (4 sections: Data & Methodology / Preliminary Results
+# / Roles / Next Steps). Applying that against the executive brief
+# scored Section 5 (Final Recommendations) Needs Work mechanically
+# because it is deliberately framed as investment conclusions, not
+# "Next Steps and Open Questions" (PR #344's INVESTABLE_CONCLUSION_GUARD).
+# That mismatch produced a structural 5.5/10 scoring floor on every
+# brief review. This rubric replaces the four midpoint sections with
+# the SIX brief sections, weighted by the brief's section budget so
+# Key Findings (25%) and Methodology (20%) carry the verdict and a
+# weak Visuals (5%) does not tank the score.
+_ARBITER_INSTRUCTIONS_BRIEF = """=== YOUR TASK — ARBITER VERDICT (EXECUTIVE BRIEF) ===
+You are the arbiter for the FNA 670 EXECUTIVE BRIEF submission — a
+short investment brief written for a senior investment audience AND
+graded by the FNA 670 academic panel. Evaluate against the BRIEF
+rubric (six weighted sections), not the midpoint paper rubric.
+
+CRITICAL EVALUATION POSTURE — read what IS in the current draft.
+Do not speculate, do not list things you would expect to see, do not
+flag absence of features that the team has not committed to for the
+brief. The brief is a senior-audience deliverable; it does NOT contain
+roles / division of labor (that lived in the midpoint paper) and does
+NOT contain "Next Steps and Open Questions" framing (the brief
+deliberately closes with investable Final Recommendations).
+
+AUDIENCE — the brief is read by a senior investment audience first
+(portfolio managers, allocators) and graded by the FNA 670 academic
+panel second. Both lenses matter: investment substance for the PM
+read, methodological rigour for the academic panel.
+
+The verdict opens with a TWO-LINE TOP-LEVEL SUMMARY and is followed by
+six rubric sections, in this exact markdown format so the UI can
+parse it:
+
+**Academic rigour:** <Strong | Developing | Needs Work>
+**Portfolio Manager insight:** <Strong | Developing | Needs Work>
+
+The two top-level lines summarise the brief through two lenses:
+
+  ACADEMIC RIGOUR — methodology disclosed correctly, statistical
+  results presented honestly, data provenance clear, citations
+  accurate. Aggregate from the six sections below, weighted by the
+  brief percentages (15/20/25/15/20/5).
+
+  PORTFOLIO MANAGER INSIGHT — does the brief tell a PM something they
+  did not already know? Score against these five PM criteria
+  (PASS / NEEDS WORK / N/A per criterion) and aggregate:
+    1. Insight beyond the obvious — a non-obvious finding,
+       contradiction, or signal that challenges conventional wisdom.
+    2. The 2022 break — mechanism (inflation, Fed policy, duration
+       repricing), not just observation.
+    3. Actionable signal identification — names specific signals or
+       allocations and why they have predictive power.
+    4. Contradictions acknowledged and pressed — tensions between
+       findings explained, not smoothed over.
+    5. So what / explicit implication — every major finding followed
+       by what a PM should do, conclude, or watch for.
+  4-5 PASS → Strong; 2-3 PASS → Developing; 0-1 PASS → Needs Work.
+
+After the two top-level lines, produce these six rubric sections.
+Each heading maps DIRECTLY to a section in the brief; assess ONLY
+what the corresponding section in the draft contains:
+
+### 1. Executive Summary (15%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: opens with a clear thesis the PM can act on, names the central
+finding (the 2022 regime break) in plain language, and previews the
+recommendation. One tight paragraph or short bullet set.
+Developing: thesis is present but soft; key finding mentioned without
+its mechanism; recommendation hinted at but not stated.
+Needs Work: no thesis, generic framing, or recommendation absent.
+
+### 2. Methodology Overview (20%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: names the three-asset universe, the monthly observation window,
+the statistical methods actually used (FDR correction, deflated Sharpe,
+CPCV, block bootstrap) in plain language a PM can follow, and
+acknowledges the three-layer independent statistical audit.
+Developing: methods named but one or more skipped, or jargon used
+without unpacking, or audit not cited.
+Needs Work: methodology block missing, methods misnamed, or audit
+omitted from a brief that materially depends on it.
+
+### 3. Key Findings and Insights (25%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: the 2022 equity-bond correlation regime break is quantified
+with pre/post values (approximately -0.05 and +0.61) AND connected to
+strategy performance differences; the FDR result (zero strategies
+significant at q < 0.005) is presented honestly as methodological
+discipline; at least one non-obvious insight surfaces with a "so what"
+for the PM.
+Developing: 2022 break mentioned without pre/post values, or FDR
+result soft-pedalled, or insights stated without PM-actionable
+framing.
+Needs Work: central finding absent, FDR result misrepresented as a
+positive significance finding, or section reads as a numeric dump
+without interpretation.
+
+### 4. Limitations and Risks (15%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: data window limitations, the FDR-stringency tradeoff,
+regime-dependence risk, and the single-asset-class scope are all
+named with specific PM-relevant implications (what could break the
+conclusion).
+Developing: limitations named generically or only one or two of the
+above covered.
+Needs Work: section absent, or limitations framed as boilerplate
+disclaimers without PM-relevant implications.
+
+### 5. Final Recommendations (20%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: concrete, investable conclusions framed as allocation
+guidance, risk-budget changes, or regime-conditional triggers a PM
+can implement. Each recommendation tied back to a finding in
+Section 3. NOT framed as "further research would benefit from..." or
+"next steps include..." — those phrasings belong in an academic paper,
+not an executive brief. This section deliberately closes the brief on
+investable conclusions; PR #344's INVESTABLE_CONCLUSION_GUARD enforces
+the framing in generation.
+Developing: recommendations are present but soft or generic, or one
+recommendation reads as a research roadmap rather than an investment
+conclusion.
+Needs Work: recommendations absent, OR framed entirely as "next
+steps" / "further research" language (which is the wrong genre).
+
+### 6. Visuals (5%)
+**Rating:** <Strong | Developing | Needs Work>
+Strong: the brief embeds or references the supporting charts that
+substantiate its claims (rolling correlation, cumulative returns,
+significance journey, drawdown periods) and each chart caption ties
+the visual to the finding it supports.
+Developing: charts present but undercaptioned, or visuals referenced
+in text without being embedded.
+Needs Work: no visuals at all in a deliverable that depends on
+quantitative claims.
+
+PROHIBITED PATTERNS — flag any section that contains these:
+  - "Further research would benefit from..."
+  - "Next steps include..."
+  - Roles and division of labor content (the brief is not the
+    midpoint paper — roles content is out of scope here)
+  - Evaluator feedback tables or harness artifacts visible in section
+    content (the brief is the deliverable, not the build log)
+  - OOS Sharpe figures cited without window definition (a PM cannot
+    interpret a Sharpe number without the window it was computed over)
+  - Two different values for the same metric in different sections
+    without explicit window labeling (e.g. one Sharpe in Section 3 and
+    a different Sharpe in Section 5 with no note that the windows
+    differ — this reads as an internal inconsistency to the PM)
+  - Specifically: if any section contains a markdown table with
+    headers like "Prior Issue" and "Resolution Applied", or rows
+    referencing "PM_CRITERION" labels, score that section Needs Work
+    regardless of other content quality. These are internal harness
+    artifacts that must not appear in a submitted document.
+
+VISUAL EVIDENCE — chart snapshots may be attached to your prompt:
+rolling_correlation, cumulative_returns, regime_signals, factor_loadings,
+drawdown_periods, significance_journey, oos_performance. When you
+assess Section 3 (Key Findings) and Section 6 (Visuals), cross-check
+the brief's quantitative claims against the visual evidence. A claim
+that disagrees with what is plainly visible on the chart is a serious
+methodological concern. When no charts are attached (cold deploy), do
+not refer to chart features; reason from the peer notes alone.
+
+THE CENTRAL FINDING — the most important analytical finding in this
+project is the 2022 equity-bond correlation regime break. A brief
+that does not quantify it with actual pre/post values (approximately
+-0.05 and +0.61) and connect it to a PM-actionable allocation
+implication is materially incomplete. The FDR correction result (zero
+strategies significant at q < 0.005) must be present and correctly
+interpreted as methodological honesty under a strict threshold — a
+brief that frames it as a positive significance finding is a
+methodological disclosure failure.
+
+Every rating is exactly one of: Strong, Developing, Needs Work. Be
+direct and actionable. The team is preparing a graded submission on a
+short clock — generic encouragement is not useful. But the converse
+also holds: do not invent concerns to look thorough. Read what's in
+the draft, evaluate that, stop."""
+
 
 # Section 6 — appended only when more than one team member has recorded
 # activity. With a single active user, assessing division of labour would
@@ -990,6 +1188,7 @@ claims the midpoint paper makes.>"""
 def build_arbiter_user_message(
     context_block: str, peer_responses: dict[str, str],
     multi_user: bool = False, script_review: bool = False,
+    brief_review: bool = False,
 ) -> str:
     """Builds the arbiter's user message: the context block, every peer's
     review notes, and the verdict instructions.
@@ -1003,7 +1202,21 @@ def build_arbiter_user_message(
     NOT applied in script mode — a script's verdict stays focused on
     delivery readiness, not team engagement.
 
-    multi_user — only consulted in the default (written) review mode.
+    brief_review — when True (an executive_brief editor draft is the
+    target), the brief-specific rubric is used. The brief rubric
+    evaluates the SIX brief sections (Executive Summary / Methodology /
+    Key Findings / Limitations / Final Recommendations / Visuals) with
+    section weights (15/20/25/15/20/5), and explicitly skips the
+    "Next Steps" framing that scored Final Recommendations Needs Work
+    mechanically under the midpoint rubric. Section 6 (division of
+    labour) is NOT applied in brief mode — the brief is a senior-
+    audience deliverable, not a team-effort progress report.
+
+    script_review takes precedence over brief_review when both flag
+    True (a script of a brief is unusual; routing the script rubric
+    is the more defensible default).
+
+    multi_user — only consulted in the default (midpoint) review mode.
     """
     parts = [context_block, "", "=== PEER REVIEW NOTES ==="]
     for agent_id, text in peer_responses.items():
@@ -1013,6 +1226,9 @@ def build_arbiter_user_message(
     if script_review:
         # Script rubric is self-contained — no section-6 append.
         instructions = _ARBITER_INSTRUCTIONS_SCRIPT
+    elif brief_review:
+        # Brief rubric is self-contained — no section-6 append.
+        instructions = _ARBITER_INSTRUCTIONS_BRIEF
     else:
         instructions = _ARBITER_INSTRUCTIONS
         if multi_user:
@@ -1189,6 +1405,7 @@ def run_arbiter_with_harness(
     multi_user: bool = False,
     script_review: bool = False,
     n_strategies: int | None = None,
+    brief_review: bool = False,
 ) -> str:
     """
     Generates the arbiter verdict IN FULL and runs it through the
@@ -1202,6 +1419,15 @@ def run_arbiter_with_harness(
     and the evaluation categories move from written-submission criteria
     to spoken-delivery criteria.
 
+    brief_review — when True, the brief-specific rubric is used. The
+    verdict produces SIX rubric sections (Executive Summary /
+    Methodology / Key Findings / Limitations / Final Recommendations /
+    Visuals) weighted 15/20/25/15/20/5. The Section-5 detector +
+    fallback (built for the midpoint rubric's "Overall Academic
+    Readiness" section) is skipped in brief mode — Section 5 of the
+    brief rubric is "Final Recommendations" and the brief carries six
+    sections, so the midpoint-shaped detector would fire on every run.
+
     The verdict is generated in full (non-streaming) before the endpoint
     streams it, so a failed attempt is never shown to the client — only
     the accepted verdict is streamed. Synchronous (the harness is sync);
@@ -1210,7 +1436,8 @@ def run_arbiter_with_harness(
     deterministic mock verdict rather than raising.
     """
     user_message = build_arbiter_user_message(
-        context_block, peer_responses, multi_user, script_review)
+        context_block, peer_responses, multi_user, script_review,
+        brief_review=brief_review)
     if _is_test_env() or not os.getenv("ANTHROPIC_API_KEY"):
         return _mock_arbiter_text()
 
@@ -1244,6 +1471,13 @@ def run_arbiter_with_harness(
         # append a fallback assembled from the four present section
         # ratings. The user sees five sections every time; UAT
         # #128/#125 cannot reappear.
+        #
+        # Skipped in brief_review mode — the brief rubric has SIX
+        # sections (Section 5 is "Final Recommendations", not
+        # "Overall Academic Readiness") and the midpoint-shaped
+        # detector + fallback would fire on every brief run.
+        if brief_review:
+            return result.response
         if not _verdict_has_section_5(result.response, script_review):
             # PR-LLM-2 (May 28 2026) — diagnostic logging. The previous
             # log line carried only the length and attempts; future
