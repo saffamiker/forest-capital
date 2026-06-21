@@ -94,7 +94,12 @@ class TestRetiredEndpointsReturn410:
 
 
 class TestReportsManifestEndpoint:
-    """The manifest powers the Reports screen card grid."""
+    """The manifest used to drive a card grid on the Reports page;
+    that grid was a shadow pipeline (each card called a non-story-
+    plan endpoint) and was removed. The manifest survives as a
+    programmatic enumeration of the deliverables surface -- the
+    canonical generation path lives at /api/v1/export/* and the
+    DocumentGenerationPanel reads those endpoints directly."""
 
     def test_manifest_returns_200(self, client: TestClient) -> None:
         r = client.get("/api/reports/manifest", headers=_auth_headers())
@@ -106,21 +111,55 @@ class TestReportsManifestEndpoint:
         assert "owner_bob" in body
         assert "owner_molly" in body
 
-    def test_manifest_lists_midpoint_as_available(self, client: TestClient) -> None:
-        """Midpoint is the only Priority-1 deliverable. The Reports screen
-        depends on this status field to know which Generate button to enable."""
+    def test_manifest_omits_retired_card_ids(
+            self, client: TestClient) -> None:
+        """The midpoint_template + executive_brief cards were
+        retired alongside the Reports card grid. The endpoints they
+        pointed at are 410 Gone (PR-B). The cards must not reappear
+        in the manifest -- if they did, a future caller might wire a
+        new UI to them and the click would 410."""
         r = client.get("/api/reports/manifest", headers=_auth_headers())
         body = r.json()
-        midpoint = next(
-            (c for c in body["owner_bob"] if c["id"] == "midpoint_template"),
+        bob_ids = {c["id"] for c in body["owner_bob"]}
+        molly_ids = {c["id"] for c in body["owner_molly"]}
+        assert "midpoint_template" not in bob_ids
+        assert "executive_brief" not in bob_ids
+        assert "presentation_deck" not in molly_ids
+        assert "qa_preparation" not in molly_ids
+
+    def test_manifest_retains_analytical_appendix(
+            self, client: TestClient) -> None:
+        """The analytical-appendix endpoint is the only one with no
+        v1/export equivalent, so the manifest card is the canonical
+        programmatic pointer to it."""
+        r = client.get("/api/reports/manifest", headers=_auth_headers())
+        body = r.json()
+        appendix = next(
+            (c for c in body["owner_bob"] if c["id"] == "analytical_appendix"),
             None,
         )
-        assert midpoint is not None, "midpoint_template missing from manifest"
-        assert midpoint["status"] == "available"
-        assert midpoint["endpoint"] == "/api/reports/midpoint-template"
+        assert appendix is not None
+        assert appendix["status"] == "available"
+        assert appendix["endpoint"] == "/api/reports/analytical-appendix"
+
+    def test_manifest_retains_storyboard_draft(
+            self, client: TestClient) -> None:
+        """The storyboard editor at /reports/storyboard remains as a
+        deliberate Molly surface; the manifest card is its
+        programmatic pointer."""
+        r = client.get("/api/reports/manifest", headers=_auth_headers())
+        body = r.json()
+        storyboard = next(
+            (c for c in body["owner_molly"]
+             if c["id"] == "storyboard_draft"),
+            None,
+        )
+        assert storyboard is not None
+        assert storyboard["endpoint"] == "/api/documents/storyboard/draft"
 
     def test_each_card_has_required_keys(self, client: TestClient) -> None:
-        """Frontend DeliverableCard reads these keys — protect the contract."""
+        """A surviving card must carry the keys a programmatic caller
+        needs (id, endpoint, method, etc) -- protect that contract."""
         r = client.get("/api/reports/manifest", headers=_auth_headers())
         body = r.json()
         required = {"id", "title", "description", "endpoint", "method",
@@ -128,7 +167,8 @@ class TestReportsManifestEndpoint:
         for group in (body["owner_bob"], body["owner_molly"]):
             for card in group:
                 missing = required - set(card.keys())
-                assert not missing, f"Card '{card.get('id')}' missing keys: {missing}"
+                assert not missing, (
+                    f"Card '{card.get('id')}' missing keys: {missing}")
 
 
 class TestDocxGeneratorUnit:
@@ -258,20 +298,14 @@ class TestAnalyticalAppendixEndpoint:
 
 
 class TestManifestNewGenerators:
-    """The two new generators must appear in the manifest with
-    status='available' so the Reports screen renders the Generate buttons
-    rather than the disabled 'Planned' state."""
-
-    def test_executive_brief_is_available(self, client: TestClient) -> None:
-        r = client.get("/api/reports/manifest", headers=_auth_headers())
-        body = r.json()
-        card = next(
-            (c for c in body["owner_bob"] if c["id"] == "executive_brief"),
-            None,
-        )
-        assert card is not None
-        assert card["status"] == "available"
-        assert card["endpoint"] == "/api/reports/executive-brief-template"
+    """The executive_brief manifest entry was retired alongside the
+    Reports card grid (June 21 2026) -- it pointed at the legacy
+    /api/reports/executive-brief-template endpoint which is now 410
+    Gone (PR-B). The canonical brief generation surface lives at
+    POST /api/v1/export/executive-brief; the DocumentGenerationPanel
+    reads that endpoint directly, not via the manifest. The
+    analytical_appendix entry survives because it has no v1/export
+    equivalent."""
 
     def test_analytical_appendix_is_available(self, client: TestClient) -> None:
         r = client.get("/api/reports/manifest", headers=_auth_headers())
