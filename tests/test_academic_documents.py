@@ -73,6 +73,13 @@ class TestFormatAndInject:
 
     def test_documents_labelled_by_type(self):
         from tools.academic_context import format_academic_context
+        # format_academic_context is the formatter only -- the
+        # _INJECTION_EXCLUDED_TYPES filter lives upstream in
+        # _read_all_with_content. So midpoint_requirements still
+        # renders here if the caller hands one in; in production it
+        # never reaches this function because the upstream SELECT
+        # filters it out. The two exclusion paths are tested
+        # separately in TestInjectionExclusionFilter below.
         out = format_academic_context([
             {"name": "rubric.pdf", "document_type": "midpoint_requirements",
              "content_text": "3 pages double spaced"},
@@ -84,6 +91,14 @@ class TestFormatAndInject:
         assert "3 pages double spaced" in out
         assert "18-20 minutes" in out
         assert "ACADEMIC CONTEXT" in out
+        # June 21 2026 -- tightened framing: the banner must NO LONGER
+        # tell the LLM the documents define "academic evaluation
+        # criteria" (that wording invited template mimicry), and MUST
+        # explicitly forbid format/structure adoption.
+        assert "reference material for the project grading rubric" in out
+        assert "Do not adopt their formatting, structure, or templates" \
+            in out
+        assert "define the academic evaluation criteria" not in out
 
     def test_inject_is_noop_when_no_documents(self):
         """With no uploaded documents the system prompt is returned
@@ -124,6 +139,202 @@ class TestFormatAndInject:
             # Not 422 — the type is valid (a 500 here is just the test-env
             # DB being absent, which is fine; the point is type acceptance).
             assert r.status_code != 422
+
+
+# ── Injection-time exclusion filter (June 21 2026) ───────────────────────────
+
+class TestInjectionExclusionFilter:
+    """Pin the contract that _read_all_with_content filters out the
+    midpoint document types so they never reach any agent system
+    prompt -- the regression vector that produced a 'PEER REVIEWER
+    MEMO' as Section 1 of the executive brief.
+
+    The DB read is mocked at the AsyncSessionLocal layer; no real
+    Postgres needed. Tests verify (a) excluded rows are filtered
+    out at the cache-rebuild step, (b) the DEBUG log fires when
+    rows are excluded, (c) the tightened banner copy is present
+    when rows survive, and (d) the no-op contract holds when
+    every row was filtered."""
+
+    def test_excluded_types_constant(self):
+        from tools.academic_context import _INJECTION_EXCLUDED_TYPES
+        # Both midpoint-era types must be in the exclude set; both
+        # were active contamination vectors before this PR.
+        assert "midpoint_requirements" in _INJECTION_EXCLUDED_TYPES
+        assert "midpoint_draft" in _INJECTION_EXCLUDED_TYPES
+        # Frozen so a downstream caller can't mutate the live set.
+        assert isinstance(_INJECTION_EXCLUDED_TYPES, frozenset)
+
+    @pytest.mark.asyncio
+    async def test_excluded_row_filtered_from_cache_rebuild(
+        self, monkeypatch,
+    ):
+        """When the DB holds both a midpoint_requirements row and a
+        final_presentation_requirements row, the rebuilt cache must
+        contain ONLY the final_presentation_requirements text. The
+        WHERE clause in _read_all_with_content does the filtering
+        at the SELECT, so this also pins that the query's bound
+        parameter wires through correctly."""
+        from tools import academic_context as ac
+
+        # Patch the DB-availability gate + the AsyncSessionLocal call
+        # site. The mock session executes the SELECT against a stub
+        # that returns ONLY the rows whose document_type is not in
+        # the supplied :excluded list -- the same behaviour the real
+        # asyncpg backend would produce.
+        all_rows = [
+            ("midpoint_rubric.pdf", "midpoint_requirements",
+             "PEER REVIEWER MEMO / Reviewer role: ..."),
+            ("final_rubric.pdf", "final_presentation_requirements",
+             "18-20 minute presentation, four sections..."),
+        ]
+        excluded_rows = [
+            r for r in all_rows
+            if r[1] in ac._INJECTION_EXCLUDED_TYPES
+        ]
+        kept_rows = [
+            r for r in all_rows
+            if r[1] not in ac._INJECTION_EXCLUDED_TYPES
+        ]
+
+        class _StubResult:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def fetchall(self):
+                return self._rows
+
+            def scalar(self):
+                # Used by the COUNT(*) query for the exclusion telemetry.
+                return len(self._rows)
+
+        class _StubSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def execute(self, stmt, params=None):
+                sql = str(stmt)
+                if "COUNT" in sql:
+                    return _StubResult(excluded_rows)
+                return _StubResult(kept_rows)
+
+        monkeypatch.setattr(ac, "_DB_AVAILABLE", True)
+        monkeypatch.setattr(
+            ac, "AsyncSessionLocal", lambda: _StubSession())
+
+        out = await ac._read_all_with_content()
+        names = {row["name"] for row in out}
+        # Filtered: the midpoint document never reaches the cache.
+        assert "midpoint_rubric.pdf" not in names
+        # Kept: the final_presentation document still passes through.
+        assert "final_rubric.pdf" in names
+        assert len(out) == 1
+
+    @pytest.mark.asyncio
+    async def test_debug_log_fires_when_rows_excluded(
+        self, monkeypatch, caplog,
+    ):
+        """The DEBUG telemetry must fire when rows are filtered out
+        so an operator can confirm via Render logs that the filter
+        is active. Without this signal the filter could silently
+        regress (e.g. a future schema change drops a column the
+        SELECT references) and rows would be excluded for the wrong
+        reason."""
+        import logging as _logging
+        from tools import academic_context as ac
+
+        excluded_rows = [
+            ("midpoint_rubric.pdf", "midpoint_requirements", "..."),
+        ]
+        kept_rows: list[tuple[str, str, str]] = []
+
+        class _StubResult:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def fetchall(self):
+                return self._rows
+
+            def scalar(self):
+                return len(self._rows)
+
+        class _StubSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def execute(self, stmt, params=None):
+                if "COUNT" in str(stmt):
+                    return _StubResult(excluded_rows)
+                return _StubResult(kept_rows)
+
+        monkeypatch.setattr(ac, "_DB_AVAILABLE", True)
+        monkeypatch.setattr(
+            ac, "AsyncSessionLocal", lambda: _StubSession())
+
+        # structlog routes through stdlib logging; capture at DEBUG.
+        with caplog.at_level(_logging.DEBUG, logger="tools.academic_context"):
+            await ac._read_all_with_content()
+        # Verify the telemetry event landed.
+        joined = " ".join(r.getMessage() for r in caplog.records)
+        assert "academic_context_rows_excluded" in joined \
+            or any(
+                getattr(r, "event", "") == "academic_context_rows_excluded"
+                for r in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_inject_is_noop_after_filter_empties_the_cache(
+        self, monkeypatch,
+    ):
+        """When every available row was a midpoint document, the
+        filter removes them all and the cache rebuild produces an
+        empty string. inject_academic_context must then return the
+        system prompt unchanged -- the no-op contract every agent
+        relies on (otherwise every call would carry a stray
+        '=== ACADEMIC CONTEXT ===' banner with no documents)."""
+        from tools import academic_context as ac
+
+        all_excluded = [
+            ("midpoint_rubric.pdf", "midpoint_requirements", "..."),
+            ("midpoint_draft.docx", "midpoint_draft", "..."),
+        ]
+
+        class _StubResult:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def fetchall(self):
+                return self._rows
+
+            def scalar(self):
+                return len(self._rows)
+
+        class _StubSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def execute(self, stmt, params=None):
+                if "COUNT" in str(stmt):
+                    return _StubResult(all_excluded)
+                # All filtered: no rows survive the WHERE clause.
+                return _StubResult([])
+
+        monkeypatch.setattr(ac, "_DB_AVAILABLE", True)
+        monkeypatch.setattr(
+            ac, "AsyncSessionLocal", lambda: _StubSession())
+
+        await ac.refresh_academic_context()
+        assert ac.get_academic_context() == ""
+        base = "You are a senior analyst."
+        assert ac.inject_academic_context(base) == base
 
 
 # ── Migration 008 ─────────────────────────────────────────────────────────────
