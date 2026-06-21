@@ -309,6 +309,30 @@ PROHIBITED PHRASES (replace with direct alternatives):
    "It could be argued that..." -> "The evidence shows..."
    "One limitation is that..." -> "The model cannot..."
 
+LOSS METRIC LANGUAGE:
+CVaR and VaR are LOSS metrics -- a more-negative value means a \
+larger loss. The English superlatives "highest" / "lowest" / "best" \
+/ "worst" are AMBIGUOUS when paired with these metrics ("highest \
+CVaR" could mean the largest-magnitude loss OR the least-negative \
+value; the reader cannot tell). The post-generation document audit \
+flags any superlative ("highest", "lowest", "best", "worst", "most \
+severe", "least severe") paired with a loss metric -- so use \
+magnitude language instead.
+   PROHIBITED: "the highest CVaR among the strategies"
+   PROHIBITED: "the best VaR in the cohort"
+   PROHIBITED: "the lowest tail risk" (ambiguous: smallest-magnitude
+                or most-negative?)
+   PROHIBITED: "the worst CVaR in the cohort" (also flags -- "worst"
+                is in the superlative set the audit scans for)
+   RIGHT for the most-negative value: "the largest tail risk", \
+                                       "the largest CVaR magnitude"
+   RIGHT for the least-negative value: "the smallest tail risk", \
+                                        "the smallest CVaR magnitude"
+The same guidance applies to "drawdown" and "volatility" -- they're \
+loss-magnitude metrics; describe direction in magnitude language \
+("largest drawdown") rather than superlative language ("highest \
+drawdown") to avoid the audit flag.
+
 NATURAL WRITING REQUIREMENT:
 The brief must read as written by a senior analyst, not generated \
 by a language model. Avoid patterns that signal AI authorship to an \

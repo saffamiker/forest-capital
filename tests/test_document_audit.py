@@ -260,6 +260,63 @@ class TestLabelDirection:
         flags = check_label_direction(text)
         assert flags == []
 
+    def test_highest_var_flagged(self):
+        """June 21 2026 -- "highest VaR" is ambiguous (largest-loss
+        OR least-negative?) and must flag just like "highest CVaR"."""
+        text = "Equity has the highest VaR of any strategy."
+        flags = check_label_direction(text)
+        assert len(flags) >= 1
+        codes = [(f["superlative"], f["metric"]) for f in flags]
+        assert ("highest", "var_95") in codes
+
+    def test_best_cvar_flagged(self):
+        """'best CVaR' is ambiguous in the same way -- which direction
+        is 'best' for a loss metric? Flag for review."""
+        text = "Risk Parity has the best CVaR among the candidates."
+        flags = check_label_direction(text)
+        assert len(flags) >= 1
+        codes = [(f["superlative"], f["metric"]) for f in flags]
+        assert ("best", "cvar_95") in codes
+
+    def test_largest_tail_risk_passes(self):
+        """The EXECUTIVE_VOICE_REQUIREMENT prompt teaches the writer
+        to use 'largest tail risk' / 'smallest tail risk' rather than
+        'highest' / 'lowest'. 'largest' is NOT in the superlative
+        scan set, so unambiguous magnitude language passes cleanly --
+        confirming the audit doesn't false-positive on the
+        recommended alternative phrasing."""
+        text = "Equity carries the largest tail risk of the three."
+        flags = check_label_direction(text)
+        assert flags == []
+
+    def test_largest_cvar_magnitude_passes(self):
+        """Magnitude language ('largest CVaR magnitude') is the
+        recommended alternative. 'largest' is not in the audit's
+        superlative set, so the phrase passes cleanly."""
+        text = "Equity carries the largest CVaR magnitude of the three."
+        flags = check_label_direction(text)
+        assert flags == []
+
+
+class TestExecutiveVoiceLossMetricGuidance:
+    """June 21 2026 -- EXECUTIVE_VOICE_REQUIREMENT gained a LOSS
+    METRIC LANGUAGE block that teaches the brief Sonnet writer to
+    use 'largest tail risk' / 'smallest tail risk' rather than
+    'highest CVaR' / 'lowest CVaR' (the latter trigger the
+    check_label_direction audit flag because the direction is
+    ambiguous on a loss metric)."""
+
+    def test_loss_metric_guidance_present_in_constant(self):
+        from tools.story_plan import EXECUTIVE_VOICE_REQUIREMENT
+        assert "LOSS METRIC LANGUAGE" in EXECUTIVE_VOICE_REQUIREMENT
+        # The two recommended alternatives the writer should reach for.
+        assert "largest tail risk" in EXECUTIVE_VOICE_REQUIREMENT
+        assert "smallest tail risk" in EXECUTIVE_VOICE_REQUIREMENT
+        # The PROHIBITED examples must surface so the writer sees the
+        # exact pattern that triggers the audit flag.
+        assert "highest CVaR" in EXECUTIVE_VOICE_REQUIREMENT
+        assert "best VaR" in EXECUTIVE_VOICE_REQUIREMENT
+
 
 # ── CHECK 3 — Cross-section consistency ───────────────────────────────────
 
@@ -348,6 +405,81 @@ class TestCitationCompleteness:
         flags, skip = check_citation_completeness(text, "executive_brief")
         assert skip is None
         assert flags == []
+
+    def test_parenthetical_multi_author_single_unit(self):
+        """June 21 2026 fix -- (Harvey, Liu, & Zhu, 2016) must be
+        treated as ONE citation indexed by FIRST author surname per
+        APA convention, not as three separate citations (one per
+        named author). The previous extractor either missed the
+        parenthetical pattern entirely (under-counted citations) or
+        a secondary scan split the comma-separated authors into
+        three independent (author, year) tuples and flagged the
+        second + third for missing References entries that didn't
+        exist as standalone surnames."""
+        text = (
+            "We follow (Harvey, Liu, & Zhu, 2016) for the multiple-"
+            "testing correction.\n\n"
+            "## References\n\n"
+            "Harvey, C. R., Liu, Y., & Zhu, H. (2016). ... and the "
+            "cross-section of expected returns. Review of Financial "
+            "Studies, 29(1), 5-68.\n"
+        )
+        flags, skip = check_citation_completeness(
+            text, "executive_brief")
+        assert skip is None
+        assert flags == [], (
+            f"expected zero flags for multi-author parenthetical "
+            f"citation indexed by Harvey; got {flags}")
+
+    def test_parenthetical_two_author_single_unit(self):
+        """Two-author parenthetical: same first-author lookup rule
+        applies. (Harvey & Liu, 2016) -> index by Harvey."""
+        text = (
+            "Per (Harvey & Liu, 2016), the multiple-testing problem "
+            "is acute.\n\n"
+            "## References\n\n"
+            "Harvey, C. R., & Liu, Y. (2016). Lucky factors. "
+            "Working Paper.\n"
+        )
+        flags, skip = check_citation_completeness(
+            text, "executive_brief")
+        assert skip is None
+        assert flags == []
+
+    def test_parenthetical_single_author(self):
+        """The simplest parenthetical: (Sharpe, 1994). Previously
+        only the narrative form 'Sharpe (1994)' was captured;
+        parenthetical-only citations were silently dropped."""
+        text = (
+            "The Sharpe ratio is well-established (Sharpe, 1994).\n\n"
+            "## References\n\n"
+            "Sharpe, W. F. (1994). The Sharpe Ratio. JPM.\n"
+        )
+        flags, skip = check_citation_completeness(
+            text, "executive_brief")
+        assert skip is None
+        assert flags == []
+
+    def test_parenthetical_multi_author_flags_missing_first_author(self):
+        """If the first author's surname is NOT in References, the
+        flag fires (the spec contract: APA indexes by first author;
+        a missing first-author entry IS a missing-reference error
+        even when the second / third authors happen to appear
+        elsewhere in the refs)."""
+        text = (
+            "Per (Bailey, Lopez, & Prado, 2018), Sharpe ratios are "
+            "inflated.\n\n"
+            "## References\n\n"
+            "Lopez, M. (2018). Some other paper. Journal of X.\n"
+        )
+        flags, skip = check_citation_completeness(
+            text, "executive_brief")
+        assert skip is None
+        # Should flag for Bailey (the first author), not for Lopez
+        # or Prado individually.
+        assert len(flags) == 1
+        assert flags[0]["author"] == "Bailey"
+        assert flags[0]["year"] == "2018"
 
 
 # ── Dispatcher ───────────────────────────────────────────────────────────

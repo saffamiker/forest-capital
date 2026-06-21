@@ -515,9 +515,56 @@ def check_cross_section_consistency(
 # ── CHECK 4 — Citation completeness ───────────────────────────────────────
 
 
+# Narrative-style: "Harvey (2016)", "Lopez et al. (2018)". The author
+# name sits OUTSIDE the parens; the year is INSIDE. Captures the
+# author run before the opening paren.
 _CITATION_RE = re.compile(
     r"\b([A-Z][A-Za-z\-]+(?:\s+et\s+al\.?)?)\s*\((\d{4})\)"
 )
+
+
+# Parenthetical-style: "(Harvey, 2016)", "(Harvey & Liu, 2016)",
+# "(Harvey, Liu, & Zhu, 2016)", "(Harvey, Liu, Zhu, & Brown, 2016)".
+# The author run + year both sit INSIDE one paren pair. Captures the
+# entire author run as group 1 and the year as group 2 so the caller
+# can index the citation by its FIRST author surname (the APA
+# convention: cite by first author, reference by first author).
+#
+# Previously this pattern wasn't matched at all -- only the narrative
+# form was extracted -- so a brief that used parenthetical multi-
+# author citations had its citations missing from the dispatcher's
+# coverage check. June 21 2026 fix.
+_PAREN_CITATION_RE = re.compile(
+    r"\(([A-Z][A-Za-z\-]+"               # first author surname
+    r"(?:,?\s+(?:&|and)\s+[A-Z][A-Za-z\-]+)?"  # & SecondAuthor (2-author)
+    r"(?:,\s+[A-Z][A-Za-z\-]+)*"         # , Author3, Author4, ...
+    r"(?:,?\s+(?:&|and)\s+[A-Z][A-Za-z\-]+)?"  # & LastAuthor (3+ authors)
+    r"(?:\s+et\s+al\.?)?"                # or "et al."
+    r"),\s+(\d{4})\)"                    # , YYYY)
+)
+
+
+def _first_author_surname(author_group: str) -> str:
+    """Extract the first author surname from a captured citation
+    group. Handles every shape the regexes capture:
+      "Harvey"                          -> "Harvey"
+      "Harvey et al."                   -> "Harvey"
+      "Harvey & Liu"                    -> "Harvey"
+      "Harvey, Liu, & Zhu"              -> "Harvey"
+      "Harvey, Liu, Zhu, & Brown"       -> "Harvey"
+
+    APA practice: multi-author citations are indexed by first author
+    in the References section. This helper centralises that contract
+    so both regex paths (narrative + parenthetical) use the same
+    lookup rule."""
+    token = author_group.strip()
+    # Strip trailing "et al." first so it doesn't pollute the split.
+    token = re.sub(
+        r"\s+et\s+al\.?$", "", token, flags=re.IGNORECASE).strip()
+    # Split on the first separator -- comma OR ampersand OR "and".
+    # Whichever comes first wins.
+    parts = re.split(r"\s*[,&]\s*|\s+and\s+", token, maxsplit=1)
+    return parts[0].strip() if parts else token
 
 
 def _extract_references_section(
@@ -552,7 +599,22 @@ def check_citation_completeness(
     """Returns (flags, skip_reason). Skip reason set when the
     References section couldn't be located (deck without a refs
     slide, etc.) — the caller records it as "skipped" rather than
-    silently dropping the check."""
+    silently dropping the check.
+
+    Citation extraction handles BOTH narrative-style and
+    parenthetical-style citations (June 21 2026 fix):
+      Narrative:        "Harvey (2016) shows ..."
+      Parenthetical:    "(Harvey, 2016)"
+      Multi-author:     "(Harvey, Liu, & Zhu, 2016)"
+
+    Multi-author citations are indexed by FIRST author surname per
+    APA convention -- the lookup against the References section uses
+    only the first author. Before this fix, the narrative regex
+    missed the parenthetical form entirely, so a brief that used
+    parenthetical multi-author citations had its citation coverage
+    silently under-counted (and Bob's section that cited
+    "(Harvey, Liu, & Zhu, 2016)" produced spurious flags for
+    "Liu" / "Zhu" through the secondary scan)."""
     if not text:
         return [], None
     references_body = _extract_references_section(text, document_type)
@@ -560,14 +622,18 @@ def check_citation_completeness(
         return [], "no References section found"
     refs_lc = references_body.lower()
     cited: set[tuple[str, str]] = set()
+    # Narrative-style citations -- author run sits OUTSIDE the paren.
     for m in _CITATION_RE.finditer(text):
-        author = m.group(1).strip()
-        # Stripped of "et al." for the lookup so "Lopez et al. (2018)"
-        # in-text matches "Lopez, M. ... (2018)" in refs.
-        author_root = re.sub(
-            r"\s+et\s+al\.?$", "", author, flags=re.IGNORECASE).strip()
-        if author_root:
-            cited.add((author_root, m.group(2)))
+        author = _first_author_surname(m.group(1))
+        if author:
+            cited.add((author, m.group(2)))
+    # Parenthetical-style citations -- entire (author run, year)
+    # sits INSIDE one paren pair. Treat each match as a SINGLE
+    # citation; the first-author surname is the lookup key.
+    for m in _PAREN_CITATION_RE.finditer(text):
+        author = _first_author_surname(m.group(1))
+        if author:
+            cited.add((author, m.group(2)))
     flags: list[dict[str, Any]] = []
     for author, year in sorted(cited):
         present = (author.lower() in refs_lc) and (year in refs_lc)
