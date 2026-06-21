@@ -31,6 +31,8 @@ Create Date: 2026-06-19
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
@@ -104,8 +106,18 @@ def upgrade() -> None:
         # to PICK A FREE VERSION: v=56 is already taken by an earlier
         # migration; the next free slot after migration 055 (v=75)
         # is v=76.
+        #
+        # June 21 2026 -- the second half of #331. released_at was
+        # being bound as sa.text("now()") which produces a TextClause
+        # object, not a datetime. asyncpg expects datetime instances
+        # for TIMESTAMPTZ columns and would re-raise the same
+        # transaction-killing type error on production despite the
+        # integer-version fix. datetime.now(timezone.utc) matches what
+        # every other migration that INSERTs a changelog row uses
+        # (see 055_audit_findings_locked_disclosure for the canonical
+        # pattern).
         v=76,
-        rel=sa.text("now()"),
+        rel=datetime.now(timezone.utc),
         t="Story-plan cache for deck and brief",
         d="A shared structured outline keyed by data_hash + document_type. "
           "Locks numeric anchors and the central argument so the per-slide "
