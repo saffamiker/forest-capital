@@ -5849,9 +5849,12 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
 
     # Rubric switch — read once at the top of the handler so a future
     # gather_review_context refactor can also consume it. Only the literal
-    # string "presentation_script" enables the script rubric.
-    script_review = (
-        request.query_params.get("document_type") == "presentation_script")
+    # string "presentation_script" enables the script rubric; the
+    # literal "executive_brief" enables the brief-specific rubric (PR
+    # — brief-specific rubric, replaces the midpoint 5.5/10 floor).
+    document_type_q = request.query_params.get("document_type")
+    script_review = document_type_q == "presentation_script"
+    brief_review = document_type_q == "executive_brief"
 
     async def event_stream():
         try:
@@ -5889,7 +5892,7 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             # The loading state on the frontend covers the evaluation wait.
             arbiter_text = await asyncio.to_thread(
                 run_arbiter_with_harness, context_block, peer_responses,
-                multi_user, script_review, n_strategies)
+                multi_user, script_review, n_strategies, brief_review)
             for chunk in chunk_arbiter_text(arbiter_text):
                 yield _sse("arbiter_chunk", text=chunk)
             log.info("academic_review_arbiter_complete",
@@ -10777,10 +10780,19 @@ async def _run_auto_academic_review(
         n_strategies = ctx["analytics"].get("strategy_count")
         peer_responses = await run_peer_fan_out(
             context_block, multi_user, n_strategies)
+        # PR — brief-specific rubric. When the auto-fire targets an
+        # executive_brief draft, route the arbiter through the brief
+        # rubric (six weighted sections) and score the verdict with
+        # mode="brief_review" so the editor pill reflects the brief's
+        # weighted aggregate rather than the midpoint's equal-weight
+        # 5.5/10 floor.
+        is_brief = document_type == "executive_brief"
         arbiter_text = await asyncio.to_thread(
             run_arbiter_with_harness, context_block, peer_responses,
-            multi_user, False, n_strategies)
-        scored = compute_review_score(arbiter_text)
+            multi_user, False, n_strategies, is_brief)
+        scored = compute_review_score(
+            arbiter_text,
+            mode="brief_review" if is_brief else "midpoint")
         agents = list(peer_responses.keys()) + ["academic_advisor"]
         metadata: dict[str, Any] = {
             "draft_id": draft_id,

@@ -290,3 +290,246 @@ class TestParseErrorFlag:
         result = compute_review_score(_VERDICT_MIXED)
         assert result["sections_rated"] == 5
         assert result["parse_error"] is False
+
+
+# ── Brief mode (PR — academic review brief-specific rubric) ──────────
+#
+# The midpoint rubric averages equally over five parsed sections. The
+# brief rubric weights its six sections (15/20/25/15/20/5) so a weak
+# Visuals doesn't tank the score and Key Findings carries it. Default
+# mode="midpoint" preserves backward compatibility — every existing
+# caller (audit_engine.py, the manual review path) continues to work.
+
+_BRIEF_VERDICT_ALL_STRONG = """\
+### 1. Executive Summary (15%)
+
+**Rating:** Strong
+
+Clear thesis…
+
+### 2. Methodology Overview (20%)
+
+**Rating:** Strong
+
+Three-asset universe…
+
+### 3. Key Findings and Insights (25%)
+
+**Rating:** Strong
+
+The 2022 break…
+
+### 4. Limitations and Risks (15%)
+
+**Rating:** Strong
+
+Data window…
+
+### 5. Final Recommendations (20%)
+
+**Rating:** Strong
+
+Allocation guidance…
+
+### 6. Visuals (5%)
+
+**Rating:** Strong
+
+Charts embedded…
+"""
+
+_BRIEF_VERDICT_ALL_DEVELOPING = """\
+### 1. Executive Summary (15%)
+
+**Rating:** Developing
+
+### 2. Methodology Overview (20%)
+
+**Rating:** Developing
+
+### 3. Key Findings and Insights (25%)
+
+**Rating:** Developing
+
+### 4. Limitations and Risks (15%)
+
+**Rating:** Developing
+
+### 5. Final Recommendations (20%)
+
+**Rating:** Developing
+
+### 6. Visuals (5%)
+
+**Rating:** Developing
+"""
+
+
+class TestBriefModeWeightedScoring:
+    """Brief mode: six sections weighted 15/20/25/15/20/5."""
+
+    def test_all_strong_scores_8_5(self):
+        result = compute_review_score(
+            _BRIEF_VERDICT_ALL_STRONG, mode="brief_review")
+        assert result["sections_rated"] == 6
+        # 8.5 * (0.15+0.20+0.25+0.15+0.20+0.05) = 8.5 * 1.0 = 8.5
+        assert result["score"] == 8.5
+
+    def test_all_developing_scores_6_0(self):
+        result = compute_review_score(
+            _BRIEF_VERDICT_ALL_DEVELOPING, mode="brief_review")
+        assert result["sections_rated"] == 6
+        # 6.0 * 1.0 = 6.0 — boundary of the advisory threshold.
+        assert result["score"] == 6.0
+        assert result["advisory"] is False  # equal to, not below
+
+    def test_mixed_brief_ratings_use_weighted_sum(self):
+        """Mixed ratings — manual weighted sum check pins the weights.
+
+        Weights: Exec 0.15, Meth 0.20, Find 0.25, Lim 0.15, Final 0.20, Vis 0.05.
+        Pattern: Developing / Strong / Developing / Strong / Strong / Developing.
+        Manual: 0.15*6.0 + 0.20*8.5 + 0.25*6.0 + 0.15*8.5 + 0.20*8.5 + 0.05*6.0
+              = 0.9 + 1.7 + 1.5 + 1.275 + 1.7 + 0.3
+              = 7.375 → rounded to 7.4
+        """
+        verdict = """\
+### 1. Executive Summary (15%)
+
+**Rating:** Developing
+
+### 2. Methodology Overview (20%)
+
+**Rating:** Strong
+
+### 3. Key Findings and Insights (25%)
+
+**Rating:** Developing
+
+### 4. Limitations and Risks (15%)
+
+**Rating:** Strong
+
+### 5. Final Recommendations (20%)
+
+**Rating:** Strong
+
+### 6. Visuals (5%)
+
+**Rating:** Developing
+"""
+        result = compute_review_score(verdict, mode="brief_review")
+        assert result["sections_rated"] == 6
+        # Manual weighted sum: 7.375 → 7.4 after rounding.
+        assert result["score"] == 7.4
+
+    def test_brief_mode_with_mismatched_section_count_falls_back_to_equal_weighting(self):
+        """Defensive: partial responses (4 of 6 sections) must NOT
+        crash. The brief-weights path is skipped when the parsed
+        section count doesn't match 6; the fallback equal-weighted
+        average over the present sections produces the score."""
+        verdict = """\
+### 1. Executive Summary (15%)
+
+**Rating:** Strong
+
+### 2. Methodology Overview (20%)
+
+**Rating:** Developing
+
+### 3. Key Findings and Insights (25%)
+
+**Rating:** Strong
+
+### 4. Limitations and Risks (15%)
+
+**Rating:** Developing
+"""
+        result = compute_review_score(verdict, mode="brief_review")
+        # Four sections parsed (5 and 6 missing).
+        assert result["sections_rated"] == 4
+        # Equal-weighted average over the four present:
+        # (8.5 + 6.0 + 8.5 + 6.0) / 4 = 7.25 → 7.2 after rounding.
+        # The CALL DID NOT CRASH — that's the defensive guarantee.
+        assert result["score"] is not None
+        assert result["score"] == 7.2
+
+    def test_default_midpoint_mode_preserves_backward_compatibility(self):
+        """Backward compat: a midpoint-shaped 4-section verdict
+        scored in default (midpoint) mode returns the same equal-
+        weighted average as before this PR. Every existing caller
+        (audit_engine.py + main.py's manual review path) calls
+        compute_review_score(verdict) with no mode kwarg — they must
+        keep returning the same values."""
+        verdict = """\
+### 1. Data Sufficiency and Methodology
+
+**Rating:** Strong
+
+### 2. Requirements and Rubric Alignment
+
+**Rating:** Developing
+
+### 3. Deliverable Quality
+
+**Rating:** Strong
+
+### 4. Priority Areas for Further Investigation
+
+**Rating:** Developing
+"""
+        # No mode → defaults to "midpoint" → equal-weighted average.
+        default_result = compute_review_score(verdict)
+        # Explicit "midpoint" mode → same answer.
+        midpoint_result = compute_review_score(verdict, mode="midpoint")
+        # (8.5 + 6.0 + 8.5 + 6.0) / 4 = 7.25 → 7.2 after rounding.
+        assert default_result["score"] == 7.2
+        assert midpoint_result["score"] == 7.2
+        assert default_result == midpoint_result
+
+    def test_brief_mode_surfaces_final_recommendations_as_overall_rating(self):
+        """The 'rating' field surfaces the closing rubric verdict —
+        Section 5 (Final Recommendations) for the brief rubric, not
+        Section 6 (Visuals) which is the 5%-weight ancillary."""
+        verdict = """\
+### 1. Executive Summary (15%)
+
+**Rating:** Strong
+
+### 2. Methodology Overview (20%)
+
+**Rating:** Strong
+
+### 3. Key Findings and Insights (25%)
+
+**Rating:** Strong
+
+### 4. Limitations and Risks (15%)
+
+**Rating:** Strong
+
+### 5. Final Recommendations (20%)
+
+**Rating:** Developing
+
+### 6. Visuals (5%)
+
+**Rating:** Strong
+"""
+        result = compute_review_score(verdict, mode="brief_review")
+        # Overall reads from Final Recommendations (Section 5), not
+        # Visuals (Section 6).
+        assert result["rating"] == "Developing"
+
+    def test_brief_mode_uses_brief_section_keys(self):
+        """The brief mode parses section ratings into the BRIEF
+        section keys (executive_summary, methodology, key_findings,
+        limitations, final_recommendations, visuals) — distinct from
+        the midpoint keys so a brief verdict and a midpoint verdict
+        can sit side-by-side without collision."""
+        result = compute_review_score(
+            _BRIEF_VERDICT_ALL_STRONG, mode="brief_review")
+        keys = set(result["section_ratings"].keys())
+        assert keys == {
+            "executive_summary", "methodology", "key_findings",
+            "limitations", "final_recommendations", "visuals",
+        }
