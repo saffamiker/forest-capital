@@ -1227,9 +1227,10 @@ async def get_strategy_cache_key_metrics(
     available=False with an empty metrics dict + a message; the
     panel renders a "cache not yet warm" placeholder."""
     try:
-        from tools.audit_assembler import current_data_hash
         from tools.cache import get_latest_strategy_cache
-        from tools.cio_recommendation import get_latest_recommendation
+        from tools.cio_recommendation import (
+            compute_implied_asset_allocation, get_latest_recommendation,
+        )
         from tools.numeric_substitution import (
             format_corr, format_pct, format_sharpe,
             format_months_from_days,
@@ -1241,11 +1242,33 @@ async def get_strategy_cache_key_metrics(
             "computed_at": None,
             "message": "Cache helpers unavailable."}
 
+    # Read strategy_hash + computed_at directly from
+    # strategy_results_cache. The earlier version read
+    # current_data_hash() (a SHA256 of row counts + max dates
+    # across three tables) which is a LIGHTWEIGHT FINGERPRINT --
+    # NOT the strategy_results_cache.strategy_hash. They're two
+    # different hashes by design; the brief / deck / digest all
+    # cite the strategy_hash (c421fb89...), so the panel must
+    # match for consistency. Fix: read the canonical strategy hash
+    # directly from the cache row.
+    strategy_hash: str = ""
+    strategy_computed_at: str | None = None
     try:
-        data_hash = await current_data_hash()
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is not None:
+            async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+                row = await session.execute(text(
+                    "SELECT strategy_hash, computed_at "
+                    "FROM strategy_results_cache "
+                    "ORDER BY computed_at DESC LIMIT 1"))
+                r = row.fetchone()
+                if r:
+                    strategy_hash = str(r[0] or "")
+                    strategy_computed_at = (
+                        str(r[1]) if r[1] else None)
     except Exception as exc:  # noqa: BLE001
-        log.warning("key_metrics_hash_failed", error=str(exc))
-        data_hash = ""
+        log.warning("key_metrics_hash_read_failed", error=str(exc))
 
     try:
         strategy_cache = await get_latest_strategy_cache() or {}
@@ -1259,11 +1282,26 @@ async def get_strategy_cache_key_metrics(
         log.warning("key_metrics_cio_failed", error=str(exc))
         cio_row = {}
 
+    # Compute the implied asset allocation from the live blend
+    # weights. The CIO row carries `blend_weights` but not the
+    # equity/IG/HY decomposition; `compute_implied_asset_allocation`
+    # multiplies blend_weights x strategy_cache avg_equity_weight /
+    # avg_ig_weight / avg_hy_weight to produce the live split.
+    # Returns {equity_pct, ig_bond_pct, hy_bond_pct, bond_pct,
+    # cash_pct} as fractions in [0, 1].
+    implied: dict = {}
+    try:
+        if cio_row.get("blend_weights"):
+            implied = await compute_implied_asset_allocation(
+                cio_row.get("blend_weights")) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("key_metrics_implied_alloc_failed", error=str(exc))
+
     if not strategy_cache:
         return {
-            "data_hash": (data_hash or "")[:8],
+            "data_hash": strategy_hash[:8] or "—",
             "available": False, "metrics": {},
-            "computed_at": None,
+            "computed_at": strategy_computed_at,
             "message": (
                 "Strategy cache is empty -- run the backtester or "
                 "warm the cache first.")}
@@ -1350,21 +1388,27 @@ async def get_strategy_cache_key_metrics(
                  else cio_row.get("confidence")),
              "source": "cio_recommendation.confidence"},
             {"label": "Current blend equity",
-             "value": format_pct(cio_row.get("implied_equity")),
-             "source": "cio_recommendation.implied_equity"},
+             "value": format_pct(implied.get("equity_pct")),
+             "source": (
+                 "compute_implied_asset_allocation("
+                 "cio.blend_weights).equity_pct")},
             {"label": "Current blend IG bonds",
-             "value": format_pct(cio_row.get("implied_ig")),
-             "source": "cio_recommendation.implied_ig"},
+             "value": format_pct(implied.get("ig_bond_pct")),
+             "source": (
+                 "compute_implied_asset_allocation("
+                 "cio.blend_weights).ig_bond_pct")},
             {"label": "Current blend HY bonds",
-             "value": format_pct(cio_row.get("implied_hy")),
-             "source": "cio_recommendation.implied_hy"},
+             "value": format_pct(implied.get("hy_bond_pct")),
+             "source": (
+                 "compute_implied_asset_allocation("
+                 "cio.blend_weights).hy_bond_pct")},
         ],
     }
 
     return {
-        "data_hash":   (data_hash or "")[:8] or "—",
+        "data_hash":   strategy_hash[:8] or "—",
         "available":   True,
-        "computed_at": cio_row.get("computed_at"),
+        "computed_at": strategy_computed_at,
         "metrics":     metrics,
     }
 
@@ -11337,12 +11381,23 @@ async def _generate_brief_document(
         substitution_table: dict[str, str] | None = None
         try:
             from tools.audit_assembler import current_data_hash
-            from tools.cio_recommendation import get_latest_recommendation
+            from tools.cio_recommendation import (
+                compute_implied_asset_allocation, get_latest_recommendation,
+            )
             from tools.numeric_substitution import get_substitution_table
             constants = (data.get("validated_constants") or {}) or {}
             rolling = data.get("rolling_correlation") or {}
             data_hash = await current_data_hash()
             cio_row = await get_latest_recommendation()
+            # CURRENT_*_PCT tokens need the implied asset
+            # allocation -- compute once from the CIO blend weights.
+            implied_alloc: dict | None = None
+            try:
+                if cio_row and cio_row.get("blend_weights"):
+                    implied_alloc = await compute_implied_asset_allocation(
+                        cio_row.get("blend_weights"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("brief_implied_alloc_failed", error=str(_exc))
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -11354,7 +11409,8 @@ async def _generate_brief_document(
                 pre_2022_eq_ig_correlation=rolling.get("pre_2022"),
                 post_2022_eq_ig_correlation=rolling.get("post_2022"),
                 study_months=(data.get("study_period") or {}).get(
-                    "n_months"))
+                    "n_months"),
+                implied_allocation=implied_alloc)
             log.info("substitution_table_built",
                      document_type="executive_brief",
                      data_hash=(data_hash or "")[:8],
@@ -11662,7 +11718,7 @@ async def _generate_appendix_document(
         try:
             from tools.audit_assembler import current_data_hash
             from tools.cio_recommendation import (
-                get_latest_recommendation,
+                compute_implied_asset_allocation, get_latest_recommendation,
             )
             from tools.numeric_substitution import (
                 get_substitution_table,
@@ -11674,6 +11730,13 @@ async def _generate_appendix_document(
             )
             data_hash = await current_data_hash()
             cio_row = await get_latest_recommendation()
+            implied_alloc: dict | None = None
+            try:
+                if cio_row and cio_row.get("blend_weights"):
+                    implied_alloc = await compute_implied_asset_allocation(
+                        cio_row.get("blend_weights"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("appendix_implied_alloc_failed", error=str(_exc))
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -11683,7 +11746,8 @@ async def _generate_appendix_document(
                 pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
                 post_2022_eq_ig_correlation=CORRELATION_POST_2022,
                 study_months=(data.get("study_period") or {}).get(
-                    "n_months"))
+                    "n_months"),
+                implied_allocation=implied_alloc)
             log.info("substitution_table_built",
                      document_type="analytical_appendix",
                      data_hash=(data_hash or "")[:8],
@@ -12498,7 +12562,7 @@ async def _generate_deck_document(
         try:
             from tools.audit_assembler import current_data_hash
             from tools.cio_recommendation import (
-                get_latest_recommendation,
+                compute_implied_asset_allocation, get_latest_recommendation,
             )
             from tools.numeric_substitution import (
                 get_substitution_table,
@@ -12510,6 +12574,13 @@ async def _generate_deck_document(
             )
             data_hash = await current_data_hash()
             cio_row = await get_latest_recommendation()
+            implied_alloc: dict | None = None
+            try:
+                if cio_row and cio_row.get("blend_weights"):
+                    implied_alloc = await compute_implied_asset_allocation(
+                        cio_row.get("blend_weights"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("deck_implied_alloc_failed", error=str(_exc))
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -12519,7 +12590,8 @@ async def _generate_deck_document(
                 pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
                 post_2022_eq_ig_correlation=CORRELATION_POST_2022,
                 study_months=(data.get("study_period") or {}).get(
-                    "n_months"))
+                    "n_months"),
+                implied_allocation=implied_alloc)
             log.info("substitution_table_built",
                      document_type="presentation_deck",
                      data_hash=(data_hash or "")[:8],

@@ -192,6 +192,45 @@ class TestBuildSubstitutionTable:
         # The derived improvement must also degrade rather than crash.
         assert table["{{OOS_SHARPE_IMPROVEMENT_PCT}}"] == "—"
 
+    def test_current_pct_tokens_resolve_from_implied_allocation(self):
+        """The CURRENT_*_PCT tokens used to read non-existent
+        cio.implied_equity / .implied_ig / .implied_hy fields, so
+        they silently resolved to em dashes everywhere -- the
+        substitution table never carried real values for these
+        even though the upstream compute helper had them. Fixed
+        June 21 2026 by reading from the explicit implied_
+        allocation kwarg the caller computes via
+        compute_implied_asset_allocation(cio.blend_weights)."""
+        from tools.numeric_substitution import build_substitution_table
+        table = build_substitution_table(
+            _fake_cache(), _fake_cio(),
+            data_hash="x",
+            implied_allocation={
+                "equity_pct": 0.789,
+                "ig_bond_pct": 0.184,
+                "hy_bond_pct": 0.012,
+                "bond_pct": 0.196,
+                "cash_pct": 0.015,
+            },
+        )
+        assert table["{{CURRENT_EQUITY_PCT}}"] == "78.9%"
+        assert table["{{CURRENT_IG_PCT}}"] == "18.4%"
+        assert table["{{CURRENT_HY_PCT}}"] == "1.2%"
+
+    def test_current_pct_tokens_em_dash_when_alloc_missing(self):
+        """No implied_allocation supplied -- the tokens degrade
+        cleanly rather than crashing. Mirrors the existing em-dash
+        fallback for other missing kwargs."""
+        from tools.numeric_substitution import build_substitution_table
+        table = build_substitution_table(
+            _fake_cache(), _fake_cio(),
+            data_hash="x",
+            # implied_allocation intentionally omitted
+        )
+        assert table["{{CURRENT_EQUITY_PCT}}"] == "—"
+        assert table["{{CURRENT_IG_PCT}}"] == "—"
+        assert table["{{CURRENT_HY_PCT}}"] == "—"
+
 
 class TestPerStrategyDynamicTokens:
 
