@@ -178,6 +178,115 @@ class TestEvaluatorCriterion6:
         assert "9.8" in BRIEF_PLAN_EVALUATOR_PROMPT
 
 
+class TestExecutiveVoiceRequirement:
+    """June 21 2026 -- EXECUTIVE_VOICE_REQUIREMENT threads memo voice
+    into the brief Pass 1 prompt AND the per-section Sonnet specs.
+    Pins the constant's load-bearing content + verifies it composes
+    into both call sites + confirms BRIEF_PLAN_EVALUATOR_PROMPT
+    flags the prohibited academic phrases."""
+
+    def test_constant_exists_with_voice_rules(self):
+        from tools.story_plan import EXECUTIVE_VOICE_REQUIREMENT
+        # Header + audience targeting.
+        assert "VOICE AND AUDIENCE REQUIREMENT" \
+            in EXECUTIVE_VOICE_REQUIREMENT
+        assert "senior investment professional addressing a CIO" \
+            in EXECUTIVE_VOICE_REQUIREMENT
+        # The six memo-voice rules each surface a load-bearing phrase.
+        assert "Lead every section with the conclusion" \
+            in EXECUTIVE_VOICE_REQUIREMENT
+        assert "Translate every metric into a business consequence" \
+            in EXECUTIVE_VOICE_REQUIREMENT
+        assert "2022 drawdown as the emotional anchor" \
+            in EXECUTIVE_VOICE_REQUIREMENT
+        assert "Make the recommendation unambiguous" \
+            in EXECUTIVE_VOICE_REQUIREMENT
+        assert "Keep sentences short" in EXECUTIVE_VOICE_REQUIREMENT
+        assert "Never use passive voice" in EXECUTIVE_VOICE_REQUIREMENT
+
+    def test_constant_lists_prohibited_phrases(self):
+        from tools.story_plan import EXECUTIVE_VOICE_REQUIREMENT
+        # Each prohibited phrase from the spec must appear so a
+        # downstream caller (Sonnet section writer, the evaluator)
+        # can lean on the verbatim text rather than re-inventing
+        # the list.
+        for phrase in (
+            "It is worth noting that",
+            "Further research would benefit from",
+            "The results suggest",
+            "It could be argued that",
+            "One limitation is that",
+        ):
+            assert phrase in EXECUTIVE_VOICE_REQUIREMENT, (
+                f"prohibited phrase missing from constant: {phrase}")
+
+    def test_threaded_into_brief_pass1_system_prompt(self):
+        from tools.story_plan import (
+            EXECUTIVE_VOICE_REQUIREMENT,
+            _BRIEF_SECTION_PLAN_SYSTEM_PROMPT,
+        )
+        assert EXECUTIVE_VOICE_REQUIREMENT \
+            in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+        # Original schema body (the six rubric sections) survives.
+        assert "executive_summary" in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+        assert "section_plan" in _BRIEF_SECTION_PLAN_SYSTEM_PROMPT
+
+    def test_threaded_into_per_section_spec_injector(self):
+        """_inject_brief_section_plan in main.py prepends the
+        executive-voice rules to each per-section Sonnet task so the
+        downstream writer sees the rules even though its conversation
+        is independent of the Pass-1 system prompt."""
+        import main
+        from tools.story_plan import EXECUTIVE_VOICE_REQUIREMENT
+        section_plan = {
+            "executive_summary": {
+                "key_message": "Diversification works.",
+                "numeric_anchors": {"oos_sharpe": 1.24},
+                "target_length_words": 200,
+            },
+        }
+        specs = [{"key": "executive_summary", "task": "Original task"}]
+        out = main._inject_brief_section_plan(specs, section_plan)
+        assert EXECUTIVE_VOICE_REQUIREMENT in out[0]["task"]
+        # The locked plan + the original task both survive.
+        assert "Diversification works." in out[0]["task"]
+        assert "Original task" in out[0]["task"]
+
+    def test_not_threaded_into_deck_prompts(self):
+        """Per spec, the deck has its own audience calibration via
+        _SCRIPT_AUDIENCE_CALIBRATION and must NOT receive the
+        executive-voice rules (deck and brief target different
+        audiences and the deck's calibration is already calibrated)."""
+        from tools.story_plan import (
+            EXECUTIVE_VOICE_REQUIREMENT,
+            _DECK_STORY_PLAN_SYSTEM_PROMPT,
+            _DECK_FULL_SCRIPT_SYSTEM_PROMPT,
+        )
+        assert EXECUTIVE_VOICE_REQUIREMENT \
+            not in _DECK_STORY_PLAN_SYSTEM_PROMPT
+        assert EXECUTIVE_VOICE_REQUIREMENT \
+            not in _DECK_FULL_SCRIPT_SYSTEM_PROMPT
+
+    def test_brief_evaluator_flags_prohibited_phrases(self):
+        from tools.story_plan import BRIEF_PLAN_EVALUATOR_PROMPT
+        # Criterion 4 (SENIOR AUDIENCE CALIBRATION) now lists the
+        # specific phrases that knock 0.5 points each and the
+        # methodology-first leading rule that zeros the criterion.
+        assert "prohibited academic phrases" \
+            in BRIEF_PLAN_EVALUATOR_PROMPT
+        for phrase in (
+            "it is worth noting", "further research",
+            "results suggest", "it could be argued",
+            "one limitation is",
+        ):
+            assert phrase in BRIEF_PLAN_EVALUATOR_PROMPT, (
+                f"evaluator missing prohibited phrase: {phrase}")
+        assert "reduces this criterion by 0.5 points" \
+            in BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "leads with methodology rather than conclusion" \
+            in BRIEF_PLAN_EVALUATOR_PROMPT
+
+
 class TestRubricCoverageFixes:
     """PR #335 -- the rubric-coverage audit (Q2-Q5) identified four
     structural gaps: per-slide duration anchoring (Q2), static

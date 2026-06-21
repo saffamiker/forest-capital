@@ -12098,9 +12098,21 @@ def _inject_brief_section_plan(
     specs: list[dict], section_plan: dict,
 ) -> list[dict]:
     """Prepend each spec's task with the locked section plan entry
-    for that spec's key. The injection is a no-op for any spec whose
-    key has no entry in the plan (defensive against a partial plan)."""
+    for that spec's key plus the executive-voice + anti-AI writing
+    rules (EXECUTIVE_VOICE_REQUIREMENT, threaded in June 21 2026).
+    The injection is a no-op for any spec whose key has no entry in
+    the plan (defensive against a partial plan).
+
+    Why thread EXECUTIVE_VOICE_REQUIREMENT here too instead of only
+    in the Pass-1 system prompt: each per-section Sonnet call is its
+    own conversation -- the system prompt + the spec.task. The Pass-1
+    arbiter writes the locked plan, but the per-section writer does
+    not see Pass 1's system prompt. Without the voice rules in
+    spec.task, Sonnet drifts back to its measured academic default
+    even with a memo-voice key_message in front of it.
+    """
     import json as _json
+    from tools.story_plan import EXECUTIVE_VOICE_REQUIREMENT
 
     out: list[dict] = []
     for spec in specs:
@@ -12118,10 +12130,10 @@ def _inject_brief_section_plan(
             f"{_json.dumps(anchors, indent=4, default=str)}\n"
             f"  Target length: {entry.get('target_length_words', '')}"
             " words\n\n"
-            "  Write in the voice of a senior investment memo. Ground "
-            "every claim in the numeric anchors. Do not add sections "
-            "not in the rubric. Do not frame recommendations as next "
-            "steps -- frame them as investment conclusions.\n\n")
+            + EXECUTIVE_VOICE_REQUIREMENT + "\n\n"
+            "  Ground every claim in the numeric anchors. Do not add "
+            "sections not in the rubric. Do not frame recommendations "
+            "as next steps -- frame them as investment conclusions.\n\n")
         new_spec = dict(spec)
         new_spec["task"] = block + str(spec.get("task", ""))
         out.append(new_spec)

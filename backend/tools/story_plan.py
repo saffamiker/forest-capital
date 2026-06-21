@@ -248,6 +248,69 @@ section alone (Hamilton 1989, Markowitz 1952, and Sharpe 1994 at \
 minimum)."""
 
 
+# June 21 2026 -- the FNA 670 rubric describes the executive brief as
+# "a written report intended for a senior investment audience." Dr.
+# Panttser's midpoint feedback flagged the output as "too academic"
+# and lacking "investable conclusions". The story plan Pass 1 (Opus)
+# produces a locked section plan with the right argument, but the six
+# per-section Sonnet calls write academically by default unless
+# explicitly instructed otherwise. This constant threads into both
+# the Pass-1 prompt (so the locked plan itself uses executive framing
+# in key_message) AND the per-section Sonnet prompts (so the rendered
+# prose holds the same voice). NOT applied to the deck -- the deck has
+# its own audience calibration via _SCRIPT_AUDIENCE_CALIBRATION.
+EXECUTIVE_VOICE_REQUIREMENT = """\
+VOICE AND AUDIENCE REQUIREMENT:
+This brief is written for Forest Capital executives and the FNA 670 \
+academic panel. Write in the voice of a senior investment \
+professional addressing a CIO, not a student addressing a professor.
+
+EXECUTIVE MEMO VOICE RULES:
+1. Lead every section with the conclusion, not the methodology. A \
+C-suite reader decides in the first sentence whether to keep reading.
+   WRONG: "This section examines whether diversification improves \
+risk-adjusted returns by analyzing..."
+   RIGHT: "Diversification works. The regime-conditional blend \
+outperforms 100% equity on every risk-adjusted metric across the \
+full sample and the out-of-sample validation period."
+
+2. Translate every metric into a business consequence.
+   WRONG: "The OOS Sharpe ratio of 1.24 exceeds the benchmark Sharpe \
+of 0.73."
+   RIGHT: "The blend generates 70% more return per unit of risk than \
+the S&P 500 in the out-of-sample period -- a period the model never \
+saw during training."
+
+3. Use the 2022 drawdown as the emotional anchor. Forest Capital \
+executives lived through a year where 100% equity lost 52.6% at its \
+worst. The brief should reference this directly: "In 2022, a 100% \
+equity portfolio lost more than half its value at peak drawdown. The \
+regime-conditional blend reduced that exposure by 51% through \
+systematic defensive repositioning."
+
+4. Make the recommendation unambiguous. Do not hedge the conclusion \
+with "subject to further analysis" or "pending additional data." The \
+analysis is complete. The recommendation is clear.
+   RIGHT: "We recommend adopting regime-conditional dynamic allocation \
+as Forest Capital's core portfolio framework, subject to the constraint \
+relaxation noted in the limitations section."
+
+5. Keep sentences short. One idea per sentence. Executive readers \
+scan. Dense paragraphs with subordinate clauses lose them.
+
+6. Never use passive voice in the recommendations section. "It was \
+found that..." is academic. "The analysis demonstrates..." is \
+executive.
+
+PROHIBITED PHRASES (replace with direct alternatives):
+   "It is worth noting that..." -> state it directly
+   "Further research would benefit from..." -> omit
+   "The results suggest..." -> "The results show..."
+   "It could be argued that..." -> "The evidence shows..."
+   "One limitation is that..." -> "The model cannot..."
+"""
+
+
 # ── Evaluator prompts (Pass 1, both document types) ──────────────────────
 
 STORY_PLAN_EVALUATOR_PROMPT = """\
@@ -342,6 +405,12 @@ period, number of strategies, rebalancing frequency.
 direct, evidence-based, not over-hedged? A plan whose key_message \
 fields read like a student report rather than an investment memo \
 scores 1 maximum.
+   Check for prohibited academic phrases: "it is worth noting", \
+"further research", "results suggest", "it could be argued", "one \
+limitation is". Each prohibited phrase found in the section plan's \
+key_message fields reduces this criterion by 0.5 points. A \
+key_message that leads with methodology rather than conclusion \
+scores 0 on this criterion.
 
 5. LIMITATIONS HONESTY (0-2)
    Does the limitations section plan surface the 2-of-9 value-add \
@@ -592,12 +661,19 @@ Output schema:
 # as the deck Pass-1 prompt above; the framing constants establish the
 # rubric the Opus arbiter and the downstream BRIEF_PLAN_EVALUATOR_PROMPT
 # both enforce.
+#
+# EXECUTIVE_VOICE_REQUIREMENT (June 21 2026) is composed in so the
+# locked section_plan's key_message fields themselves carry the memo
+# voice. Without this, the Sonnet downstream pass receives a key_message
+# written in academic register and just paraphrases it -- the per-section
+# voice injection alone can't fully recover.
 _BRIEF_SECTION_PLAN_SYSTEM_PROMPT = (
     THREE_STRATEGY_FRAME + "\n\n"
     + CENTRAL_QUESTION_AND_ANSWER + "\n\n"
     + INVESTABLE_CONCLUSION_GUARD + "\n\n"
     + STATIC_ALLOCATION_JUSTIFICATION + "\n\n"
     + ACADEMIC_GROUNDING_REQUIREMENT + "\n\n"
+    + EXECUTIVE_VOICE_REQUIREMENT + "\n\n"
     + _BRIEF_SECTION_PLAN_BODY)
 
 
