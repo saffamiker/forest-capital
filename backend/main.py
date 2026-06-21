@@ -10668,17 +10668,33 @@ _CAVEAT_STATS = (
 )
 
 
-def _apply_draft_caveats(specs: list[dict]) -> list[dict]:
+def _apply_draft_caveats(
+    specs: list[dict], document_type: str | None = None,
+) -> list[dict]:
     """
     Appends the citation- and statistic-verification caveats to each
     section task prompt. Idempotent per form — a task that already
     carries the [[VERIFY CITATION]] or [[VERIFY:]] instruction is not
     given a second, conflicting copy (the midpoint methodology and
     results tasks already carry the statistic marker).
+
+    June 21 2026 -- the [[VERIFY CITATION]] caveat is skipped for
+    document_type='executive_brief'. The brief writer cites only
+    from data/references.json (web search disabled in PR #362; the
+    registry is the only permitted source); every citation is
+    pre-verified by construction. Injecting the caveat still drove
+    the writer to mark every citation with [[VERIFY CITATION:
+    ...]] blocks that then surfaced as submission blockers in
+    the audit. The statistic caveat ([[VERIFY: ...]] markers for
+    uncertain numerics) is retained because numerics can still
+    drift between the writer's prose and the locked cache values
+    -- the substitution architecture catches most, the marker
+    flow catches the rest.
     """
+    skip_citation_caveat = document_type == "executive_brief"
     for spec in specs:
         task = spec.get("task", "")
-        if "[[VERIFY CITATION" not in task:
+        if not skip_citation_caveat and "[[VERIFY CITATION" not in task:
             task += _CAVEAT_CITATION
         if "[[VERIFY:" not in task:
             task += _CAVEAT_STATS
@@ -11254,13 +11270,49 @@ def _schedule_auto_academic_review(
     real Anthropic calls, and the contract tests check the endpoint
     shape, not the review wiring). Otherwise spawns a task on the
     loop and stashes a strong reference so the GC doesn't reclaim
-    the coroutine mid-run."""
+    the coroutine mid-run.
+
+    June 21 2026 -- auto-fire DISABLED for every document type.
+    The five in-scope deliverables (executive brief, presentation
+    deck, presentation script, analytical appendix, Jupyter
+    notebook) do not consume the academic-review output as part of
+    their workflows. Each generation was firing ~8-10 LLM calls
+    (7 peer agents + arbiter with up to 3 retries) purely to
+    populate the editor pill + the IN02 attestation row -- both
+    surfaces are still reachable via the manual SSE endpoint at
+    POST /api/council/academic-review.
+    Midpoint paper is past its deadline (May 27) and no longer
+    generated. The allow-list below is empty by design; the
+    function stays in place so a future opt-in is a one-line
+    additive change rather than re-plumbing.
+
+    IN02 attestation dependency: the QA audit panel's IN02 check
+    requires an academic_review row in agent_interactions within
+    the last 14 days. Operators (Bob / Molly) must click "Run
+    Academic Review" in the editor at least once during the
+    submission window to keep IN02 PASS. The auto-fire was
+    satisfying this implicitly; the manual click satisfies it
+    explicitly. See PR body for the operator-action note."""
     import asyncio
     if not draft_id:
         return
     if os.getenv("ENVIRONMENT") == "test":
         return
-    if document_type not in ("midpoint_paper", "executive_brief"):
+    # Allow-list is intentionally empty -- no document type
+    # auto-fires the academic review. The branch below is
+    # structurally preserved so a future opt-in (e.g. add
+    # "midpoint_paper" back if a future course reuses the
+    # midpoint check) is a one-line edit. Log the skip so the
+    # operator can confirm the gate is doing what's intended.
+    auto_fire_document_types: set[str] = set()
+    if document_type not in auto_fire_document_types:
+        log.info(
+            "auto_academic_review_skipped_by_design",
+            draft_id=draft_id, document_type=document_type,
+            note=(
+                "auto-fire disabled June 21 2026; run Academic "
+                "Review manually before submission to populate "
+                "IN02 attestation"))
         return
     try:
         task = asyncio.create_task(
@@ -11551,6 +11603,15 @@ async def _generate_brief_document(
                                  "post_2022")}}},
             {"key": "methodology", "available": True,
              "agent_id": "brief_methodology",
+             # June 21 2026 -- bumped from the default 1500.
+             # Methodology cites four foundational papers (Hamilton
+             # 1989, Carhart 1997, Ang and Bekaert 2002, Markowitz
+             # 1952); four full APA References entries + 350 words
+             # of prose + the placeholder guide reliably push past
+             # 1500. PR #361's retry would still catch it but
+             # giving the section headroom up front avoids the
+             # retry cost.
+             "max_tokens": 2500,
              "task": (
                  "Write Section 2: METHODOLOGY OVERVIEW. Approximately "
                  "350 words across TWO PARAGRAPHS MAXIMUM (allowing a "
@@ -11604,11 +11665,15 @@ async def _generate_brief_document(
                  "equity benchmark, the best static diversifier (pull the "
                  "name from summary_statistics), and the dynamic regime-"
                  "aware blend.\n\n"
-                 "Key figures to cite (locked academic figures, do NOT "
-                 "update from any newer dataset):\n"
-                 "  - Drawdown -52.6% (benchmark) vs -25.3% (blend)\n"
-                 "  - OOS Sharpe 0.86 (blend) vs 0.43 (benchmark)\n"
-                 "  - 40-month post-2022 out-of-sample window\n\n"
+                 "Key figures to cite -- USE THE PLACEHOLDER TOKENS BELOW, "
+                 "not the raw numbers. The platform substitutes the locked "
+                 "academic values from the cache after generation:\n"
+                 "  - Drawdown {{BENCHMARK_MAX_DD}} (benchmark) vs "
+                 "{{REGIME_SWITCHING_MAX_DD}} (blend)\n"
+                 "  - OOS Sharpe {{OOS_SHARPE_BLEND}} (blend) vs "
+                 "{{OOS_SHARPE_BENCHMARK}} (benchmark)\n"
+                 "  - {{OOS_WINDOW_MONTHS}}-month post-2022 out-of-sample "
+                 "window\n\n"
                  "Reference the platform's cumulative return chart by "
                  "name when you state the OOS Sharpe -- the chart is the "
                  "visual evidence behind the headline number. Reference "
@@ -11832,7 +11897,7 @@ async def _generate_brief_document(
                         error=str(exc))
 
         narratives = await _generate_narratives(
-            _apply_draft_caveats(specs),
+            _apply_draft_caveats(specs, document_type="executive_brief"),
             n_strategies=len(data.get("strategy_results") or {}),
             substitution_table=substitution_table)
 

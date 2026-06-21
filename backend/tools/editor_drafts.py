@@ -391,6 +391,15 @@ async def update_value_manifest(
             # value_manifest, but a pre-057 column-set still
             # works -- the inner except falls back to value-
             # manifest-only.
+            #
+            # June 21 2026 -- the inner retry must roll back the
+            # session before re-executing. PostgreSQL puts the
+            # session into an aborted-transaction state on any
+            # statement failure (e.g. UndefinedColumn on the
+            # data_hash field), and the retry on the SAME session
+            # then fails with InFailedSQLTransactionError. Same
+            # fix shape as PR #360 applied to
+            # get_current_draft_with_layer3.
             try:
                 res = await s.execute(text(
                     "UPDATE editor_drafts "
@@ -400,6 +409,13 @@ async def update_value_manifest(
                     "WHERE id = :i AND is_deleted = false"),
                     {"vm": vm, "dh": data_hash, "i": draft_id})
             except Exception:  # noqa: BLE001
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    # Rollback can fail if the session is too
+                    # broken; the outer try/except still
+                    # degrades gracefully to False below.
+                    pass
                 res = await s.execute(text(
                     "UPDATE editor_drafts "
                     "SET value_manifest = CAST(:vm AS JSONB), "
