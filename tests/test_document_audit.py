@@ -350,6 +350,170 @@ class TestCitationCompleteness:
         assert flags == []
 
 
+# ── CHECK 10 — Cross-deliverable consistency (Layer 2, June 21 2026) ───
+
+
+class TestCheckCrossDeliverableConsistency:
+    """Confirms substituted values are byte-identical across the
+    three deliverables that consume the same substitution table.
+    Substitution-time consistency is structural (same table instance
+    -> same value); this check catches MANUAL EDITS that introduce
+    drift post-generation."""
+
+    def test_clean_documents_no_flags(self):
+        """All three documents reference the same value 'verbatim'.
+        No drift, no flags."""
+        from tools.document_audit import (
+            check_cross_deliverable_consistency,
+        )
+        table = {
+            "{{OOS_SHARPE_BLEND}}": "1.24",
+            "{{OOS_SHARPE_BENCHMARK}}": "0.73",
+        }
+        documents = {
+            "executive_brief": (
+                "The blend achieved 1.24 versus 0.73 for the benchmark."),
+            "presentation_deck": (
+                "Slide 5 verdict: 1.24 OOS Sharpe vs 0.73 benchmark."),
+            "analytical_appendix": (
+                "Section H confirms 1.24 (blend) and 0.73 (benchmark)."),
+        }
+        flags = check_cross_deliverable_consistency(documents, table)
+        assert flags == []
+
+    def test_manual_edit_drift_flagged(self):
+        """Brief was edited post-substitution to say '1.23' instead
+        of '1.24'. Deck + appendix are clean. The drift in the brief
+        must flag, identifying the brief as the document carrying
+        the variant."""
+        from tools.document_audit import (
+            check_cross_deliverable_consistency,
+        )
+        table = {"{{OOS_SHARPE_BLEND}}": "1.24"}
+        documents = {
+            "executive_brief":
+                "The blend achieved 1.23 versus the benchmark.",
+            "presentation_deck":
+                "Slide 5 verdict: 1.24 OOS Sharpe.",
+        }
+        flags = check_cross_deliverable_consistency(documents, table)
+        assert len(flags) >= 1
+        # At least one flag points at the brief with the 1.23 variant.
+        brief_flags = [
+            f for f in flags
+            if f["document"] == "executive_brief"
+            and f["found"] == "1.23"]
+        assert brief_flags, (
+            f"expected a brief-side drift flag for '1.23'; got "
+            f"{flags}")
+        flag = brief_flags[0]
+        assert flag["type"] == "cross_deliverable_drift"
+        assert flag["severity"] == "high"
+        assert flag["expected"] == "1.24"
+        assert flag["token"] == "{{OOS_SHARPE_BLEND}}"
+
+    def test_em_dash_tokens_skipped(self):
+        """Em-dash values are the 'missing' sentinel and don't
+        cross-deliverable-drift. A token resolved to '—' shouldn't
+        trigger spurious flags when '—' appears in any other context."""
+        from tools.document_audit import (
+            check_cross_deliverable_consistency,
+        )
+        table = {
+            "{{VIX_CURRENT}}": "—",
+            "{{OOS_SHARPE_BLEND}}": "1.24",
+        }
+        documents = {
+            "executive_brief": "Footnote — see appendix.",
+            "presentation_deck": (
+                "OOS Sharpe 1.24 — the headline finding."),
+        }
+        flags = check_cross_deliverable_consistency(documents, table)
+        # The em-dashes in the documents must not be flagged against
+        # the {{VIX_CURRENT}} em-dash value. Any flag fired is the
+        # bug this test guards against.
+        assert flags == []
+
+    def test_distinct_integer_parts_not_cross_flagged(self):
+        """A document containing '0.24' shouldn't trigger a drift
+        flag against a token resolved to '1.24' -- the integer parts
+        differ and these are unambiguously distinct figures (the
+        scanner uses the integer prefix as a coarse gate so unrelated
+        decimals don't false-positive)."""
+        from tools.document_audit import (
+            check_cross_deliverable_consistency,
+        )
+        table = {"{{OOS_SHARPE_BLEND}}": "1.24"}
+        documents = {
+            "executive_brief": (
+                "The blend achieved 1.24. The volatility was 0.24."),
+        }
+        flags = check_cross_deliverable_consistency(documents, table)
+        # 0.24 has a different integer part from 1.24, so no flag.
+        assert flags == []
+
+    def test_empty_documents_returns_empty(self):
+        from tools.document_audit import (
+            check_cross_deliverable_consistency,
+        )
+        assert check_cross_deliverable_consistency(
+            {}, {"{{OOS_SHARPE_BLEND}}": "1.24"}) == []
+        assert check_cross_deliverable_consistency(
+            {"executive_brief": "text"}, {}) == []
+
+
+class TestDispatcherRoutingForSubstitutionChecks:
+    """Layer 2 extends the placeholder + raw-numeric checks beyond
+    the brief surface. Confirms the dispatcher routes both checks
+    for executive_brief, presentation_deck, and analytical_appendix
+    (skips for any other document_type)."""
+
+    def test_deck_runs_placeholder_check(self):
+        """A deck document with an unresolved placeholder must flag
+        through Check 8 -- not skip silently."""
+        from tools.document_audit import audit_document
+        text = "Slide 5 says {{OOS_SHARPE_BLEND}} was the headline."
+        result = audit_document(text, "presentation_deck")
+        # Check 8 ran -- the unresolved placeholder is in the flags.
+        assert len(result.flags_by_check["unresolved_placeholders"]) >= 1
+        # The skip dict should NOT mark this check as not_a_brief.
+        assert "unresolved_placeholders" not in result.skipped
+
+    def test_deck_runs_raw_numeric_check(self):
+        """A deck document with a raw Sharpe-shaped decimal flags
+        through Check 9 (substitution-bypass signal)."""
+        from tools.document_audit import audit_document
+        text = "Slide 5: blend achieved Sharpe 1.24 versus 0.73."
+        result = audit_document(text, "presentation_deck")
+        # Each decimal is a flag; at least one of "1.24" / "0.73".
+        assert len(result.flags_by_check["raw_numeric"]) >= 1
+        assert "raw_numeric" not in result.skipped
+
+    def test_appendix_runs_placeholder_check(self):
+        from tools.document_audit import audit_document
+        text = "Section H: {{MIN_VARIANCE_SHARPE}} confirms the lens."
+        result = audit_document(text, "analytical_appendix")
+        assert len(result.flags_by_check["unresolved_placeholders"]) >= 1
+        assert "unresolved_placeholders" not in result.skipped
+
+    def test_appendix_runs_raw_numeric_check(self):
+        from tools.document_audit import audit_document
+        text = "Section H: Sharpe 1.24 confirms the lens."
+        result = audit_document(text, "analytical_appendix")
+        assert len(result.flags_by_check["raw_numeric"]) >= 1
+        assert "raw_numeric" not in result.skipped
+
+    def test_other_doc_types_still_skip(self):
+        """A document type outside the substitution surfaces (e.g.
+        the legacy midpoint_paper type) should still skip these
+        checks -- the routing gate is the explicit allowlist."""
+        from tools.document_audit import audit_document
+        text = "Random text with {{TOKEN}}."
+        result = audit_document(text, "midpoint_paper")
+        assert "unresolved_placeholders" in result.skipped
+        assert "raw_numeric" in result.skipped
+
+
 # ── Dispatcher ───────────────────────────────────────────────────────────
 
 

@@ -340,3 +340,104 @@ class TestUnresolvedPlaceholders:
         from tools.numeric_substitution import unresolved_placeholders
         assert unresolved_placeholders(
             "Plain prose, no placeholders.") == []
+
+
+# ── Layer 2: deck + appendix tokens (June 21 2026) ──────────────────────
+
+
+class TestDeckSpecificTokens:
+    """The Layer-2 extension adds deck-specific tokens to the shared
+    substitution table -- play-by-play scorecard, transaction-cost
+    sensitivity, live macro watch points, live blend composition."""
+
+    def test_play_by_play_tokens_default_to_canonical_constants(self):
+        from tools.numeric_substitution import build_substitution_table
+        table = build_substitution_table(
+            _fake_cache(), _fake_cio(), data_hash="x")
+        assert table["{{PLAY_BY_PLAY_VALUE_ADD}}"] == "2"
+        assert table["{{PLAY_BY_PLAY_TOTAL}}"] == "9"
+
+    def test_live_watch_point_tokens_em_dash_on_cold_cache(self):
+        from tools.numeric_substitution import build_substitution_table
+        table = build_substitution_table(
+            _fake_cache(), _fake_cio(), data_hash="x")
+        assert table["{{VIX_CURRENT}}"] == "—"
+        assert table["{{CREDIT_SPREAD_CURRENT}}"] == "—"
+        assert table["{{YIELD_CURVE_CURRENT}}"] == "—"
+        assert table["{{ESS_CURRENT}}"] == "—"
+        assert table["{{EQUITY_TREND_CURRENT}}"] == "—"
+
+    def test_live_watch_point_tokens_pick_up_warm_cache_values(self):
+        from tools.numeric_substitution import build_substitution_table
+        warm_cache = dict(_fake_cache())
+        warm_cache.update({
+            "vix_current": 18.44,
+            "hy_oas_current": 2.63,
+            "yield_curve_current": 0.29,
+            "equity_trend_current": 0.057,
+            "kish_ess": 164,
+        })
+        table = build_substitution_table(
+            warm_cache, _fake_cio(), data_hash="x")
+        assert table["{{VIX_CURRENT}}"] == "18.44"
+        assert table["{{CREDIT_SPREAD_CURRENT}}"] == "2.63"
+        assert table["{{ESS_CURRENT}}"] == "164"
+        assert table["{{EQUITY_TREND_CURRENT}}"] == "5.7%"
+
+    def test_blend_weight_tokens_from_cio_recommendation(self):
+        from tools.numeric_substitution import build_substitution_table
+        cio_dict_form = dict(_fake_cio())
+        cio_dict_form["blend_weights"] = {
+            "REGIME_SWITCHING": 0.60,
+            "BENCHMARK": 0.25,
+            "CLASSIC_60_40": 0.15,
+        }
+        table = build_substitution_table(
+            _fake_cache(), cio_dict_form, data_hash="x")
+        assert table["{{BLEND_REGIME_SWITCHING_WT}}"] == "60.0%"
+        assert table["{{BLEND_BENCHMARK_WT}}"] == "25.0%"
+        assert table["{{BLEND_CLASSIC_6040_WT}}"] == "15.0%"
+
+    def test_n_strategies_falls_back_to_cache_count(self):
+        from tools.numeric_substitution import build_substitution_table
+        table = build_substitution_table(
+            _fake_cache(), _fake_cio(), data_hash="x")
+        # _fake_cache has 4 strategies with sharpe_ratio set.
+        assert table["{{N_STRATEGIES}}"] == "4"
+
+    def test_n_strategies_uses_explicit_field_when_present(self):
+        from tools.numeric_substitution import build_substitution_table
+        cache_with_count = dict(_fake_cache())
+        cache_with_count["n_strategies"] = 10
+        table = build_substitution_table(
+            cache_with_count, _fake_cio(), data_hash="x")
+        assert table["{{N_STRATEGIES}}"] == "10"
+
+
+class TestSharedTableConsistency:
+    """The architectural invariant: same data_hash -> same table
+    instance, so a value substituted into one document is byte-
+    identical to the same value substituted into another. This is
+    the structural guarantee check_cross_deliverable_consistency
+    relies on at the audit layer."""
+
+    def test_brief_and_deck_see_identical_token_values(self):
+        from tools.numeric_substitution import (
+            clear_substitution_cache, get_substitution_table,
+        )
+        clear_substitution_cache()
+        brief_table = get_substitution_table(
+            "shared_hash", _fake_cache(), _fake_cio(),
+            oos_sharpe_blend=0.86, oos_sharpe_benchmark=0.43,
+            pre_2022_eq_ig_correlation=-0.05,
+            post_2022_eq_ig_correlation=0.57)
+        # Deck generation hits the same data_hash -- should serve the
+        # cached instance regardless of the kwargs passed (the cache
+        # key is the data_hash; subsequent kwargs are ignored on hit).
+        deck_table = get_substitution_table(
+            "shared_hash", _fake_cache(), _fake_cio())
+        assert brief_table is deck_table
+        assert brief_table["{{OOS_SHARPE_BLEND}}"] == \
+            deck_table["{{OOS_SHARPE_BLEND}}"]
+        assert brief_table["{{BENCHMARK_MAX_DD}}"] == \
+            deck_table["{{BENCHMARK_MAX_DD}}"]
