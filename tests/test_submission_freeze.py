@@ -374,8 +374,8 @@ class TestSubmissionStatusEndpoint:
         drafts: dict | None = None,
     ):
         from tools import submission_freeze
-        from tools import audit_assembler
         from tools import editor_drafts
+        import main as main_module
 
         drafts = drafts or {}
 
@@ -390,10 +390,17 @@ class TestSubmissionStatusEndpoint:
 
         monkeypatch.setattr(
             submission_freeze, "get_freeze_config", _config)
+        # June 21 2026 -- submission-status reads strategy_hash from
+        # strategy_results_cache directly via _read_latest_strategy_
+        # hash, NOT from tools.audit_assembler.current_data_hash.
+        # Stub the new helper so the test fixture controls live_hash
+        # without monkeypatching AsyncSessionLocal.
         monkeypatch.setattr(
-            audit_assembler, "current_data_hash", _live)
+            main_module, "_read_latest_strategy_hash", _live)
+        # June 21 2026 -- endpoint switched to the Layer-3 variant of
+        # get_current_draft so export_verification flows through.
         monkeypatch.setattr(
-            editor_drafts, "get_current_draft", _draft)
+            editor_drafts, "get_current_draft_with_layer3", _draft)
 
     def test_status_with_freeze_off_returns_expected_shape(
         self, client, monkeypatch,
@@ -534,6 +541,76 @@ class TestSubmissionStatusEndpoint:
             assert body["frozen_documents"][k]["exported"] is True
             assert body["frozen_documents"][k]["export_verified"] is True
         assert "safe to submit" in body["submission_recommendation"].lower()
+
+    def test_current_live_hash_reads_strategy_results_cache(
+        self, client, monkeypatch,
+    ):
+        """June 21 2026 -- the canonical hash for freeze validation
+        is strategy_results_cache.strategy_hash, NOT
+        current_data_hash() (a SHA256 of platform-level row counts
+        + max dates). This test pins that the endpoint reads from
+        the right source: the stubbed live hash flows through to
+        the response as current_live_hash."""
+        self._stub_helpers(
+            monkeypatch,
+            freeze_config={
+                "active": False, "freeze_hash": None,
+                "freeze_date": None,
+                "activated_by": None, "activated_at": None,
+            },
+            live_hash="c421fb895347f924")
+        resp = client.get(
+            "/api/v1/admin/submission-status",
+            headers=_auth_headers())
+        assert resp.status_code == 200
+        body = resp.json()
+        # The endpoint should surface the value our stub returned --
+        # demonstrating the read path goes through _read_latest_
+        # strategy_hash, not current_data_hash.
+        assert body["current_live_hash"] == "c421fb895347f924"
+
+    def test_endpoint_returns_200_when_draft_read_raises(
+        self, client, monkeypatch,
+    ):
+        """The draft read used to bleed transaction-aborted state
+        between per-document calls when one of the SELECTs hit a
+        pre-Layer-3 schema column-missing error. The endpoint
+        must remain 200 even if every draft read raises; per-
+        document state degrades to {generated: False} rather than
+        crashing the whole response."""
+        from tools import submission_freeze
+        from tools import editor_drafts
+        import main as main_module
+
+        async def _config():
+            return {"active": False, "freeze_hash": None,
+                    "freeze_date": None}
+
+        async def _live():
+            return "LIVE_HASH"
+
+        async def _draft_raises(email, doc_type):
+            raise RuntimeError(
+                "InFailedSQLTransactionError: simulated")
+
+        monkeypatch.setattr(
+            submission_freeze, "get_freeze_config", _config)
+        monkeypatch.setattr(
+            main_module, "_read_latest_strategy_hash", _live)
+        monkeypatch.setattr(
+            editor_drafts, "get_current_draft_with_layer3",
+            _draft_raises)
+
+        resp = client.get(
+            "/api/v1/admin/submission-status",
+            headers=_auth_headers())
+        assert resp.status_code == 200
+        body = resp.json()
+        # Every doc degrades to "not generated" rather than the
+        # endpoint 500ing.
+        for k in ("brief", "deck", "appendix"):
+            assert body["frozen_documents"][k]["generated"] is False
+            assert body["frozen_documents"][k]["exported"] is False
 
 
 # ── 4. Document generation honours the EFFECTIVE hash ────────────────────────

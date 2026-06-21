@@ -227,6 +227,19 @@ async def get_current_draft_with_layer3(
                 # Pre-Layer-3 schema -- retry with the legacy column
                 # set so the readiness endpoint keeps working on a
                 # database that hasn't run migration 057 yet.
+                # The first SELECT failed and the session is now in
+                # an aborted-transaction state; PostgreSQL refuses
+                # every subsequent statement on the same connection
+                # with InFailedSQLTransactionError until a rollback
+                # clears the state. Roll back before the legacy retry
+                # so the second SELECT actually runs.
+                try:
+                    await s.rollback()
+                except Exception:  # noqa: BLE001
+                    # Rollback itself can fail if the session is too
+                    # broken; the outer try/except still degrades
+                    # gracefully to None below.
+                    pass
                 row = await s.execute(text(
                     f"SELECT {_DRAFT_COLS} FROM editor_drafts "
                     "WHERE owner_email = :e AND document_type = :t "
