@@ -286,6 +286,56 @@ class TestExecutiveVoiceRequirement:
         assert "leads with methodology rather than conclusion" \
             in BRIEF_PLAN_EVALUATOR_PROMPT
 
+    def test_constant_contains_anti_ai_writing_rules(self):
+        """Commit 2 extends EXECUTIVE_VOICE_REQUIREMENT with the
+        NATURAL WRITING REQUIREMENT block and the eight prohibited
+        AI patterns. Spot check on the load-bearing prohibited words
+        + header to confirm the appended block is present."""
+        from tools.story_plan import EXECUTIVE_VOICE_REQUIREMENT
+        assert "NATURAL WRITING REQUIREMENT" in EXECUTIVE_VOICE_REQUIREMENT
+        assert "PROHIBITED AI WRITING PATTERNS" in EXECUTIVE_VOICE_REQUIREMENT
+        # The two highest-signal AI tells the spec calls out.
+        assert "delve into" in EXECUTIVE_VOICE_REQUIREMENT
+        assert '"leverage" (as a verb' in EXECUTIVE_VOICE_REQUIREMENT
+        # Other prohibited words must surface too -- list keeps the
+        # constant from being silently shortened in a future edit.
+        for word in (
+            '"importantly,"', '"notably,"',
+            '"a testament to"', '"game-changing"',
+            '"cutting-edge"', '"it goes without saying"',
+        ):
+            assert word in EXECUTIVE_VOICE_REQUIREMENT, (
+                f"prohibited AI word missing from constant: {word}")
+        # The eight numbered AI patterns each surface their header.
+        for pattern in (
+            "Hollow openers", "Parallel list structures",
+            "Transition signposting", "Adjective stacking",
+            "Suspiciously perfect structure", "Numeric padding",
+            "Voice consistency",
+        ):
+            assert pattern in EXECUTIVE_VOICE_REQUIREMENT, (
+                f"AI pattern missing from constant: {pattern}")
+        # The read-aloud test -- the final guidance the spec called out.
+        assert "read each paragraph aloud" in EXECUTIVE_VOICE_REQUIREMENT
+
+    def test_brief_evaluator_flags_ai_writing_patterns(self):
+        """Criterion 4 now references the AI writing patterns
+        alongside the prohibited academic phrases."""
+        from tools.story_plan import BRIEF_PLAN_EVALUATOR_PROMPT
+        assert "AI writing patterns" in BRIEF_PLAN_EVALUATOR_PROMPT
+        # Specific pattern names called out for the evaluator.
+        for token in (
+            "parallel three-item lists", "hollow opener sentences",
+            "adjective stacking",
+        ):
+            assert token in BRIEF_PLAN_EVALUATOR_PROMPT, (
+                f"evaluator missing AI pattern: {token}")
+        # The same prohibited-word set surfaces here too so the
+        # evaluator has the exact same dictionary the prompt does.
+        for word in ("leverage", "delve", "importantly", "notably"):
+            assert f'"{word}"' in BRIEF_PLAN_EVALUATOR_PROMPT, (
+                f"evaluator missing prohibited word: {word}")
+
 
 class TestRubricCoverageFixes:
     """PR #335 -- the rubric-coverage audit (Q2-Q5) identified four

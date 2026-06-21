@@ -308,6 +308,73 @@ PROHIBITED PHRASES (replace with direct alternatives):
    "The results suggest..." -> "The results show..."
    "It could be argued that..." -> "The evidence shows..."
    "One limitation is that..." -> "The model cannot..."
+
+NATURAL WRITING REQUIREMENT:
+The brief must read as written by a senior analyst, not generated \
+by a language model. Avoid patterns that signal AI authorship to an \
+experienced reader.
+
+PROHIBITED AI WRITING PATTERNS:
+
+1. Hollow openers -- never start a section or paragraph with a \
+content-free setup sentence:
+   PROHIBITED: "This section examines the performance of our \
+portfolio strategies across multiple dimensions."
+   RIGHT: Start with the finding itself.
+
+2. Parallel list structures -- avoid three-item parallel \
+constructions that read like bullet points converted to prose:
+   PROHIBITED: "The blend is robust, comprehensive, and \
+analytically rigorous."
+   RIGHT: Vary sentence structure. Not every point needs a sibling.
+
+3. Transition signposting -- avoid mechanical transitions:
+   PROHIBITED: "Having established X, we now turn to Y."
+   PROHIBITED: "Furthermore," / "Moreover," / "Additionally," at the \
+start of consecutive paragraphs.
+   RIGHT: Let the logic connect the paragraphs. If the connection \
+needs to be stated, state it in one clause, not a full sentence.
+
+4. Adjective stacking -- one precise adjective beats three vague \
+ones:
+   PROHIBITED: "robust, comprehensive, and rigorous"
+   PROHIBITED: "significant, meaningful, and material"
+   RIGHT: Pick the one word that is accurate.
+
+5. Prohibited words and phrases -- do not use:
+   "leverage" (as a verb -- use "use" or "apply")
+   "delve into"
+   "it is worth noting"
+   "importantly,"
+   "notably,"
+   "in conclusion," (at the start of the conclusion)
+   "the results suggest" (use "the results show")
+   "a testament to"
+   "game-changing"
+   "cutting-edge"
+   "in today's environment"
+   "it goes without saying"
+
+6. Suspiciously perfect structure -- real analysts do not write \
+five paragraphs of exactly equal length with exactly one main point \
+each. Vary paragraph length. Some points deserve one sentence. Some \
+deserve four.
+
+7. Numeric padding -- do not restate a number in words immediately \
+after stating it in digits:
+   PROHIBITED: "an OOS Sharpe of 1.24 -- a 70 percent improvement \
+-- representing nearly three quarters of additional risk-adjusted \
+return..."
+   RIGHT: State the number once, state its implication once, move on.
+
+8. Voice consistency -- write in first person plural throughout \
+("we recommend", "our analysis shows", "the blend we constructed"). \
+Do not switch between first person and passive voice within a \
+section.
+
+THE TEST: read each paragraph aloud. If it sounds like a press \
+release or a consulting deck, rewrite it. If it sounds like a senior \
+analyst explaining something to a colleague, it is right.
 """
 
 
@@ -411,6 +478,10 @@ limitation is". Each prohibited phrase found in the section plan's \
 key_message fields reduces this criterion by 0.5 points. A \
 key_message that leads with methodology rather than conclusion \
 scores 0 on this criterion.
+   Also flag AI writing patterns in key_message fields: parallel \
+three-item lists, hollow opener sentences, adjective stacking, the \
+words "leverage" (as verb), "delve", "importantly", "notably". \
+Each pattern found reduces criterion 4 by 0.5 points.
 
 5. LIMITATIONS HONESTY (0-2)
    Does the limitations section plan surface the 2-of-9 value-add \
