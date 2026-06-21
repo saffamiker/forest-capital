@@ -194,7 +194,13 @@ class TestBriefSectionInjection:
         for spec in out:
             assert spec["task"].startswith(
                 "SECTION PLAN (do not deviate):")
-            assert "Write in the voice of a senior investment memo" \
+            # PR-B (June 21 2026) replaced the inline "voice of a
+            # senior investment memo" one-liner with the full
+            # EXECUTIVE_VOICE_REQUIREMENT block (memo voice rules +
+            # prohibited phrases). Pin the new header so a future
+            # regression can't quietly remove it.
+            assert "VOICE AND AUDIENCE REQUIREMENT" in spec["task"]
+            assert "senior investment professional addressing a CIO" \
                 in spec["task"]
         # The original task content survives below the block.
         assert "ORIGINAL TASK A" in out[0]["task"]
