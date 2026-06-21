@@ -5813,97 +5813,36 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
 @limiter.limit("10/minute")
 async def council_peer_review(
     request: Request,
-    file: UploadFile = File(...),
-    submission_name: str = Form(""),
     session: dict = Depends(require_team_member),
 ):
-    """Streams a peer-review script for the uploaded submission.
+    """RETIRED (PR-B, June 2026).
 
-    multipart/form-data:
-      file              the peer team's midpoint paper (.pdf, .docx, .md)
-      submission_name   optional display name surfaced in the verdict;
-                        defaults to the file's basename
+    The frontend Peer Review page was removed in PR #338; this
+    endpoint is retired in PR-B (June 21 2026). Returns 410 Gone
+    so existing clients receive a clear "this existed and is now
+    gone" signal rather than a 404 connection error.
 
-    SSE wire format mirrors /api/council/academic-review for UI
-    consistency:
-      data: {"type": "submission_meta", "name": "...", "char_count": N}
-      data: {"type": "arbiter_chunk", "text": "..."}     (repeated)
-      data: [DONE]
+    Replacement: brief quality verification is now handled by the
+    post-generation audit checks (see tools/document_audit.py CHECK 5
+    / CHECK 6 / CHECK 7 added in PR #336).
 
-    Errors flow as a single `{"type": "error", "message": "..."}`
-    frame followed by [DONE] so the frontend has one consistent
-    parse path."""
-    import asyncio
-    from agents.peer_review import (
-        extract_peer_paper_text,
-        build_peer_review_context_block,
-        render_peer_review_context_block,
-        run_peer_review_with_harness,
-        chunk_arbiter_text,
-        MAX_PEER_PAPER_BYTES,
-    )
+    The handler is preserved as a stub for one release cycle so a
+    monitoring dashboard can detect retired-endpoint calls; the route
+    decorator + 410 body will be deleted in a subsequent PR once
+    Render logs confirm zero residual traffic.
+    """
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "gone",
+            "message": (
+                "Peer review has been retired. Use the post-"
+                "generation audit checks for brief quality "
+                "verification."),
+            "canonical_path": "/api/v1/export/executive-brief",
+        })
 
-    # Read + extract synchronously BEFORE the stream opens so a
-    # 422 (unsupported format, scanned PDF, oversize) lands on the
-    # POST itself instead of mid-stream. Frontend renders the
-    # error inline.
-    raw = await file.read()
-    if not raw:
-        raise HTTPException(status_code=422,
-                             detail="Uploaded file is empty.")
-    if len(raw) > MAX_PEER_PAPER_BYTES:
-        raise HTTPException(
-            status_code=422,
-            detail=(f"Uploaded file exceeds "
-                    f"{MAX_PEER_PAPER_BYTES} bytes."))
-    try:
-        text = extract_peer_paper_text(file.filename or "", raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
 
-    name = (submission_name or "").strip()
-    if not name:
-        # Fall back to the filename without the extension.
-        from pathlib import Path
-        name = Path(file.filename or "submission").stem or "submission"
-
-    ctx_dict = build_peer_review_context_block(name, text)
-    context_block = render_peer_review_context_block(ctx_dict)
-
-    async def event_stream():
-        try:
-            yield _sse(
-                "submission_meta",
-                name=name,
-                char_count=len(text),
-            )
-            verdict = await asyncio.to_thread(
-                run_peer_review_with_harness, context_block)
-            for chunk in chunk_arbiter_text(verdict):
-                yield _sse("arbiter_chunk", text=chunk)
-            log.info(
-                "peer_review_complete",
-                submission_name=name,
-                paper_chars=len(text),
-                verdict_chars=len(verdict))
-            _log_interaction_bg(
-                request, session, "peer_review",
-                agents_involved=["peer_review_assistant"],
-                response_summary=verdict,
-                metadata={
-                    "submission_name": name,
-                    "paper_chars":     len(text),
-                },
-            )
-        except Exception as exc:  # noqa: BLE001
-            log.error("peer_review_failed", error=str(exc))
-            yield _sse(
-                "error",
-                message="Peer review failed — please retry.")
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(event_stream(),
-                              media_type="text/event-stream")
 
 
 # ── Thesis Defense Prep (item 7, Feature B) ───────────────────────────────────
@@ -10354,10 +10293,7 @@ async def _generate_async(
 
     update_job(job_id, status="running")
     try:
-        if document_type == "midpoint_paper":
-            file_bytes, filename, media, draft_id = \
-                await _generate_midpoint_document(session["email"])
-        elif document_type == "executive_brief":
+        if document_type == "executive_brief":
             file_bytes, filename, media, draft_id = \
                 await _generate_brief_document(session["email"])
         elif document_type == "analytical_appendix":
@@ -10409,350 +10345,29 @@ async def _generate_async(
 @limiter.limit("6/minute")
 async def export_midpoint_paper(
     request: Request,
-    body: dict | None = None,
     session: dict = Depends(require_permission("generate_documents")),
 ):
+    """RETIRED (PR-B, June 2026).
+
+    The midpoint submission shipped May 27 2026 and the frontend
+    surfaces were removed in PR #338. Returns 410 Gone so existing
+    clients receive a clear "this existed and is now gone" signal
+    rather than a 404 connection error.
+
+    The helper functions _validate_midpoint_word_counts() and
+    _generate_midpoint_document() were deleted alongside this
+    handler; the build_midpoint_paper docx assembler was deleted
+    from tools/academic_docx.py.
     """
-    Starts midpoint-paper generation.
-
-    With an editor_draft_id in the body the .docx is built synchronously
-    from that draft's current content (the in-editor Export path).
-    Otherwise generation — the four Academic Writer sections, 30-60s —
-    runs as a background job and the endpoint returns 202 with a job_id;
-    poll GET /api/v1/jobs/{id}.
-    """
-    editor_draft_id = (body or {}).get("editor_draft_id")
-    if editor_draft_id:
-        # Editor exports are a faithful render of what the author has
-        # already saved; the gate runs only on fresh AI generation.
-        return await _editor_export(int(editor_draft_id))
-    # IN02 (Academic Review complete) is advisory by design — the
-    # check is classified warn_class="non_blocking" in qa_agent.py so
-    # the readiness gate skips it on every document type, not just
-    # midpoint. Other blockers (statistical FAIL, methodology FAIL on
-    # anything else) still gate generation.
-    await _require_report_ready()
-    return _start_generation_job("midpoint_paper", session, request)
-
-
-# ── Midpoint word-count validation (May 25 2026) ──────────────────────────────
-#
-# The midpoint paper is 3 pages double-spaced 12pt — roughly 750-900 words
-# total. The four sections have their own targets (per the user spec):
-#   methodology  250-300 words
-#   results      250-300 words
-#   roles        125-150 words
-#   next_steps   125-150 words
-# Each task prompt names its target, but the harness retries up to a
-# quality threshold rather than a length one — so a generated section can
-# still drift outside its range. This validator scores the post-generation
-# narratives, surfaces section-by-section warnings into the editor draft
-# (so the user sees the problem before submitting), and logs a structured
-# warning so a Render scan reports drift over time.
-
-# Per-section word targets (May 25 2026 — shaved 15 from each end of
-# every section to leave room for the empirical-citation overhead
-# (4 findings × ~15-25 words per inline citation ≈ 60-100 words).
-# The total stays at 750-900 — the paper's physical-length constraint
-# — and the gap between section sums (690-840) and the total (750-900)
-# is precisely where the citation overhead lives. A paper whose
-# sections hit the floor + carries 60-100 words of citations lands at
-# the total floor; the validator accepts that as valid because both
-# the section and total checks pass independently.
-_MIDPOINT_WORD_TARGETS: dict[str, tuple[int, int]] = {
-    "methodology":  (235, 285),
-    "results":      (235, 285),
-    "roles":        (110, 135),
-    "next_steps":   (110, 135),
-}
-_MIDPOINT_TOTAL_TARGET = (750, 900)
-
-
-def _count_words(text: str) -> int:
-    """Whitespace-split word count — same convention Word's status bar
-    uses. [[VERIFY: …]] / [[BOB: …]] markers count as words; they are
-    written by the AI and will be resolved by the user before
-    submission, so counting them keeps the post-resolution count
-    realistic rather than systematically over-counting."""
-    if not text:
-        return 0
-    return len([w for w in text.split() if w.strip()])
-
-
-def _validate_midpoint_word_counts(
-    narratives: dict[str, str],
-) -> dict[str, object]:
-    """Returns a structured validation result for a generated midpoint
-    paper's narratives. Used to (a) log a warning when generation lands
-    out-of-range, and (b) inject a banner into the editor draft so the
-    user sees the discrepancy on first open. Always returns a usable
-    dict — never raises on missing keys.
-
-    Shape:
-      { valid: bool,
-        total_words: int,
-        total_target: (lo, hi),
-        sections: {
-          key: { words, target: (lo, hi), in_range, label }
-        },
-        warnings: [ "Methodology 220 words is below the 250-300 target.",
-                    "Total 670 words is below the 750-900 target.", ... ],
-      }
-    """
-    section_labels = {
-        "methodology": "Data and Methodology",
-        "results":     "Preliminary Results and Diagnostics",
-        "roles":       "Roles and Division of Labor",
-        "next_steps":  "Next Steps and Open Questions",
-    }
-    sections: dict[str, dict[str, object]] = {}
-    warnings_list: list[str] = []
-    total_words = 0
-    for key, (lo, hi) in _MIDPOINT_WORD_TARGETS.items():
-        text = narratives.get(key) or ""
-        words = _count_words(text)
-        total_words += words
-        in_range = lo <= words <= hi
-        label = section_labels.get(key, key)
-        sections[key] = {
-            "words": words,
-            "target": [lo, hi],
-            "in_range": in_range,
-            "label": label,
-        }
-        if not in_range:
-            direction = "below" if words < lo else "above"
-            warnings_list.append(
-                f"{label} ran {words} words — {direction} the "
-                f"{lo}-{hi} target."
-            )
-    total_lo, total_hi = _MIDPOINT_TOTAL_TARGET
-    total_in_range = total_lo <= total_words <= total_hi
-    if not total_in_range:
-        direction = "below" if total_words < total_lo else "above"
-        warnings_list.append(
-            f"Total ran {total_words} words — {direction} the "
-            f"{total_lo}-{total_hi} target for a 3-page double-spaced "
-            f"paper."
-        )
-    valid = total_in_range and all(s["in_range"] for s in sections.values())
-    return {
-        "valid": valid,
-        "total_words": total_words,
-        "total_target": [total_lo, total_hi],
-        "sections": sections,
-        "warnings": warnings_list,
-    }
-
-
-async def _generate_midpoint_document(
-    email: str,
-) -> tuple[bytes, str, str, int | None]:
-    """
-    Generates the three-page midpoint submission. Returns (file bytes,
-    filename, media type, editor draft id). Raises on failure — the job
-    wrapper records it.
-
-    Four sections per the FNA 670 brief — Data & Methodology, Preliminary
-    Results (with the summary-statistics and regime-conditional tables
-    embedded), Roles & Division of Labor (from real Team Activity counts),
-    and Next Steps (from the last Academic Review verdict).
-    """
-    import asyncio
-    from datetime import date
-
-    from tools.academic_docx import build_midpoint_paper
-    from tools.academic_export import (
-        DATA_PENDING, gather_document_data, gather_roles_activity,
-    )
-
-    try:
-        data = await gather_document_data()
-        period = data["study_period"]
-        has_results = bool(data["summary_statistics"] or data["regime_conditional"])
-        has_review = bool(data["last_review_text"])
-
-        # Section 3 (Roles) is pre-seeded from real per-member platform
-        # activity — commits, council runs, reviews, uploads, UAT — so Bob
-        # personalises a factual draft rather than writing from scratch.
-        roles_activity = await gather_roles_activity(data["team_summary"])
-        has_roles = any(
-            v.get("commits") or v.get("council_sessions_run")
-            or v.get("academic_review_sessions") or v.get("documents_uploaded")
-            or v.get("uat_sections_attested")
-            for v in roles_activity.values()
-        )
-
-        specs = [
-            {"key": "methodology", "available": True,
-             "agent_id": "midpoint_methodology",
-             "task": (
-                 "Write the Data and Methodology section of a graduate "
-                 "finance midpoint paper. TARGET LENGTH: 235-285 words "
-                 "of prose (this is a 3-page double-spaced 12-point "
-                 "paper; the section must land in that range — under "
-                 "235 is too thin, over 285 squeezes the other three "
-                 "sections; the 15-word headroom from a 250-300 target "
-                 "absorbs the empirical-citation overhead — each inline "
-                 "(Author, Year) citation adds 15-25 words to the "
-                 "section's actual length). APA style, past tense, "
-                 "third person. "
-                 "Cover the data sources (aligned "
-                 "monthly returns for equity, investment-grade and high-yield "
-                 "bonds; Carhart factor series), the study period, the "
-                 "portfolio constraints (long-only, fully invested, no cash, "
-                 "quarterly rebalancing), the ten strategies grouped as "
-                 "static versus dynamic, and the Carhart four-factor "
-                 "attribution model. When discussing portfolio turnover, "
-                 "always clarify: turnover is reported as one-way annualised "
-                 "turnover (the standard institutional convention) and "
-                 "two-way round-trip turnover is approximately double the "
-                 "reported figures; true turnover is computed from the "
-                 "drift-inclusive weight schedule at each quarterly "
-                 "rebalance, capturing both signal-driven reallocation and "
-                 "drift-correction trading back to target. Note that "
-                 "Black-Litterman, despite its dynamic classification, "
-                 "exhibits static-like turnover (4.7%) reflecting the "
-                 "framework's modest weight adjustments from its equilibrium "
-                 "prior — a genuine analytical finding, not a data issue. "
-                 "If you are uncertain about any specific numeric value, do "
-                 "NOT insert it silently — wrap it in an inline verification "
-                 "marker of the form [[VERIFY: <claim>]] (for example "
-                 "[[VERIFY: Sharpe ratio for Regime Switching = 0.63]]) so a "
-                 "team member checks it before submission."
-                 + _MIDPOINT_S1_KEY_FINDINGS),
-             "context": {"study_period": period,
-                         "strategy_metadata": data.get("strategy_metadata"),
-                         "risk_free_rate": data["risk_free_rate"]}},
-            {"key": "results", "available": has_results,
-             "pending": (f"{DATA_PENDING} — preliminary results require the "
-                         "analytics caches. Load the dashboard once to warm "
-                         "them, then regenerate this paper."),
-             "agent_id": "midpoint_results",
-             "task": (
-                 "Write the Preliminary Results section. TARGET LENGTH: "
-                 "235-285 words of prose (under 235 is too thin; over "
-                 "285 leaves no room for Roles and Next Steps; the "
-                 "15-word headroom from a 250-300 target absorbs "
-                 "empirical-citation overhead — each inline (Author, "
-                 "Year) citation adds 15-25 words). "
-                 "Interpret the summary statistics and the regime-conditional "
-                 "performance; do not merely list numbers. You MUST explicitly "
-                 "discuss the 2022 equity-bond correlation break and what the "
-                 "pre- versus post-2022 Sharpe ratios reveal. Reference "
-                 "Table 1 (summary statistics) and Table 2 (regime-conditional "
-                 "performance). If you are uncertain about any specific "
-                 "numeric value, do NOT insert it silently — wrap it in an "
-                 "inline verification marker of the form [[VERIFY: <claim>]] "
-                 "(for example [[VERIFY: Sharpe ratio for Regime Switching = "
-                 "0.63]]) so a team member checks it before submission."
-                 + _MIDPOINT_S2_KEY_FINDINGS),
-             "context": {"summary_statistics": data["summary_statistics"],
-                         "regime_conditional": data["regime_conditional"],
-                         "correlation_pre_post": {
-                             "pre_2022": data["rolling_correlation"].get("pre_2022"),
-                             "post_2022": data["rolling_correlation"].get("post_2022")}}},
-            # Section 3 (Roles and Division of Labor) is built from real
-            # Team Activity counts — commits, council sessions, reviews,
-            # UAT attestations, documents uploaded. The Academic Writer
-            # produces the full section directly; the placeholder callout
-            # that previously deferred this to a manual rewrite was
-            # removed May 26 2026 (the rubric requires interpretation to
-            # be PRESENT, not human-authored).
-            {"key": "roles", "available": has_roles,
-             "pending": (f"{DATA_PENDING} — no platform activity on record "
-                         "yet. Run council sessions, reviews and UAT, then "
-                         "regenerate; meanwhile describe the roles directly."),
-             "agent_id": "midpoint_roles",
-             "task": (
-                 "Write the Roles and Division of Labor section. "
-                 "TARGET LENGTH: 110-135 words (this is a shorter "
-                 "section — keep it tight; citations are rarely needed "
-                 "here so the headroom is for the prose itself). "
-                 "APA style, past tense, third person. Use ONLY the "
-                 "team_activity_summary data provided. State each team "
-                 "member's role and attribute their documented platform "
-                 "activity — commits, council sessions run, academic review "
-                 "sessions, documents uploaded, UAT sections attested. Do "
-                 "NOT invent contributions the data does not show; if a "
-                 "count is zero, omit it rather than guessing. This is a "
-                 "factual pre-seed for the team to personalise — write it "
-                 "plainly and let each member's actual activity counts "
-                 "carry the section."),
-             "context": {"team_activity_summary": roles_activity}},
-            {"key": "next_steps", "available": has_review,
-             "pending": (f"{DATA_PENDING} — no Academic Review verdict on "
-                         "record. Run an Academic Review on the Council "
-                         "screen, then regenerate; meanwhile list next steps "
-                         "as planned work."),
-             "agent_id": "midpoint_next_steps",
-             "task": (
-                 "Write the Next Steps and Open Questions section. "
-                 "TARGET LENGTH: 110-135 words (keep it tight — the "
-                 "section closes the paper and shouldn't bloat; "
-                 "citations are rare here, so the headroom is for "
-                 "actual next-steps content). "
-                 "Convert the supplied Academic Review verdict — its "
-                 "Priority Areas for Further Investigation and any Developing "
-                 "or Needs Work ratings — into a forward-looking next-steps "
-                 "narrative."),
-             "context": {"academic_review_verdict":
-                         (data["last_review_text"] or "")[:4000]}},
-        ]
-        narratives = await _generate_narratives(
-            _apply_draft_caveats(specs),
-            n_strategies=len(data.get("strategy_results") or {}))
-
-        # Word-count validation (May 25 2026). Three pages double-spaced
-        # 12pt is ~750-900 words; each section has its own target. If
-        # any section or the total drifts outside the range, log a
-        # structured warning AND surface it as a banner in the editor
-        # draft so the user sees it before submitting.
-        word_validation = _validate_midpoint_word_counts(narratives)
-        if not word_validation["valid"]:
-            log.warning(
-                "midpoint_word_count_validation_failed",
-                total_words=word_validation["total_words"],
-                section_words={
-                    k: v["words"]
-                    for k, v in word_validation["sections"].items()
-                },
-                warnings=word_validation["warnings"],
-            )
-        else:
-            log.info(
-                "midpoint_word_count_validation_passed",
-                total_words=word_validation["total_words"],
-            )
-
-        docx_bytes = await asyncio.to_thread(build_midpoint_paper, data, narratives)
-
-        # Load the generated content into an editor draft so the frontend
-        # can open it directly in the editor. The draft_id rides back in
-        # the X-Draft-Id response header (the body is the binary .docx).
-        # A draft-storage failure never fails the download.
-        draft_id: int | None = None
-        try:
-            from tools.editor_content import midpoint_to_editor
-            from tools.editor_drafts import create_draft
-            content_json, content_text = midpoint_to_editor(
-                narratives,
-                word_validation=word_validation,
-            )
-            draft = await create_draft(
-                "midpoint_paper", email,
-                f"Midpoint Paper — {date.today().isoformat()}",
-                content_json, content_text, created_from="generated")
-            if draft is not None:
-                draft_id = draft["id"]
-        except Exception as exc:  # noqa: BLE001
-            log.warning("midpoint_draft_create_failed", error=str(exc))
-
-        filename = f"forest-capital-midpoint-paper-{date.today().isoformat()}.docx"
-        return docx_bytes, filename, _DOCX_MEDIA, draft_id
-    except Exception as exc:  # noqa: BLE001
-        log.error("midpoint_paper_generation_error", error=str(exc))
-        raise
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "gone",
+            "message": (
+                "Midpoint paper generation has been retired. The "
+                "final submission deadline is July 1."),
+            "canonical_path": "/api/v1/export/executive-brief",
+        })
 
 
 @app.post("/api/v1/export/executive-brief")
@@ -12219,159 +11834,33 @@ async def cancel_generation_job(
 # Academic Writer composes the prose; tools/docx_generator assembles the
 # .docx around it. Every page carries the AI DRAFT banner so Bob can never
 # accidentally submit a template-generated draft verbatim.
+#
+# PR-B (June 21 2026) -- the midpoint pipeline has been retired. The
+# original handler is replaced with the 410 Gone stub below.
+
 
 @app.post("/api/reports/midpoint-template")
 @limiter.limit("10/minute")
-async def midpoint_template(request: Request, session: dict = Depends(require_auth)):
+async def midpoint_template(
+    request: Request, session: dict = Depends(require_auth),
+):
+    """RETIRED (PR-B, June 2026).
+
+    The legacy 11-step Report Writer midpoint pipeline was retired in
+    PR #338 (frontend) and PR-B (this PR, backend). Returns 410 Gone
+    so existing clients receive a clear "this existed and is now gone"
+    signal rather than a 404 connection error.
     """
-    Generates the 3-page midpoint paper draft as a .docx download.
-
-    Four sections per the FNA 670 brief:
-      1. Data & Methodology   (Academic Writer → write_methodology)
-      2. Preliminary Results  (Academic Writer → write_results)
-      3. Roles & Division     (deterministic team-roles section)
-      4. Next Steps           (deterministic remaining-sprints section)
-
-    The Academic Writer Agent runs on Sonnet and can take 10-30 seconds.
-    Returned as application/vnd.openxmlformats-officedocument.wordprocessingml.document
-    with a filename header so the browser triggers a download instead
-    of rendering the bytes inline.
-    """
-    from fastapi.responses import Response as FastAPIResponse
-
-    try:
-        from agents.academic_writer import AcademicWriter
-        from tools.data_fetcher import get_full_history_async
-        from tools.backtester import run_all_strategies
-        from tools.docx_generator import build_docx
-        from tools.cache import get_strategy_cache, _compute_data_hash
-
-        # In test env we skip the pipeline entirely so the smoke test runs
-        # in milliseconds. The structured fallback in build_docx still
-        # produces a valid .docx Bob could open and edit.
-        if ENVIRONMENT == "test":
-            results_dict: dict = {}
-            data_range = {"start": "—", "end": "—", "n_months": 0}
-        else:
-            from tools.data_fetcher import get_full_history_async  # noqa: F401
-            history = await get_full_history_async()
-            monthly = history.get("equity_monthly")
-            n_rows = len(monthly) if monthly is not None else 0
-            last_date = (
-                str(monthly.index[-1].date())
-                if monthly is not None and len(monthly) > 0 else "unknown"
-            )
-            strategy_hash = _compute_data_hash(n_rows, last_date, n_strategies=10)
-            cached = await get_strategy_cache(strategy_hash)
-            if cached:
-                results_dict = cached
-            else:
-                results_dict = await asyncio.to_thread(run_all_strategies, history)
-            first_date = (
-                str(monthly.index[0].date())
-                if monthly is not None and len(monthly) > 0 else "unknown"
-            )
-            data_range = {"start": first_date, "end": last_date, "n_months": n_rows}
-
-        significance_flags = {
-            name: bool(r.get("is_significant"))
-            for name, r in results_dict.items()
-        }
-        n_significant = sum(1 for v in significance_flags.values() if v)
-
-        # Build the four sections. Academic Writer methods already prepend
-        # an AI DRAFT banner to each section; the docx builder also adds
-        # one to the document header. The banner is intentionally redundant
-        # so a partial-page PDF export still carries the warning.
-        writer = AcademicWriter()
-        methodology = writer.write_methodology(
-            data_sources={"data_range": data_range, "n_months": data_range["n_months"]},
-            strategies=list(results_dict.keys()),
-            statistical_tests=[
-                "Paired t-test (full period)",
-                "Benjamini-Hochberg FDR correction",
-                "Deflated Sharpe Ratio",
-                "Walk-forward out-of-sample",
-                "CV Stability Score",
-            ],
-        )
-        results = writer.write_results(
-            strategy_results=results_dict,
-            significance_flags=significance_flags,
-            stress_tests={},
-        )
-
-        roles_body = (
-            "Michael Ruurds — Lead Engineer. Responsible for the full backend "
-            "implementation, data pipeline, AI council architecture, statistical "
-            "test suite, and the React frontend that surfaces all analytical results. "
-            "Hours: ~20 per week.\n\n"
-            "Bob Thao — Lead Analyst. Responsible for the academic interpretation "
-            "of all results, methodological justification, and the written report "
-            "in APA format. Edits this AI draft into the final submission.\n\n"
-            "Molly Murdock — Lead Presenter. Responsible for the Forest Capital "
-            "presentation slide deck, executive brief, and the July 1 demo.\n\n"
-            "Dr. Panttser — Faculty supervisor and reviewer."
-        )
-        next_steps_body = (
-            f"As of the midpoint, {n_significant} of 10 strategies pass all five "
-            f"Tier 1 statistical gates at p < 0.005 with Benjamini-Hochberg FDR "
-            f"correction. Remaining work for the final presentation:\n\n"
-            "• Sprint 6: Academic Writer Agent endpoints (analytical appendix, "
-            "executive brief), Storyboard Editor, Presentation Script Writer, "
-            "Gemini assistant for inline editing, full regression suite, "
-            "accessibility audit, presentation-ready demo.\n\n"
-            "• Final tag v1.0.0-presentation targeted for July 1."
-        )
-
-        sections = [
-            {"heading": "1. Data & Methodology", "body": methodology},
-            {"heading": "2. Preliminary Results", "body": results},
-            {"heading": "3. Roles & Division of Labor", "body": roles_body},
-            {"heading": "4. Next Steps & Open Questions", "body": next_steps_body},
-        ]
-
-        docx_bytes = build_docx(
-            title="Forest Capital Portfolio Intelligence System",
-            subtitle=(
-                "Midpoint Checkpoint — FNA 670 Practicum · "
-                f"Data range: {data_range['start']} – {data_range['end']} · "
-                f"{n_significant}/10 strategies pass all Tier 1 gates"
-            ),
-            sections=sections,
-            strategy_results=results_dict,
-            references=None,
-        )
-
-        # Tag the filename with the date so iterative drafts don't overwrite
-        # each other in Bob's downloads folder.
-        from datetime import date
-        filename = f"forest-capital-midpoint-{date.today().isoformat()}.docx"
-        return FastAPIResponse(
-            content=docx_bytes,
-            media_type=(
-                "application/vnd.openxmlformats-officedocument."
-                "wordprocessingml.document"
-            ),
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
-
-    except Exception as exc:
-        ref = uuid.uuid4().hex[:8]
-        log.error("midpoint_template_error", ref=ref, error=str(exc))
-        raise HTTPException(status_code=500, detail=f"Midpoint generation failed (ref: {ref})")
-
-
-# ── Bob's remaining report generators ─────────────────────────────────────────
-#
-# Two endpoints round out Bob's deliverables alongside midpoint-template:
-#   POST /api/reports/analytical-appendix    HTML  (35% of grade)
-#   POST /api/reports/executive-brief-template  .docx 5-page  (20% of grade)
-#
-# Both follow the midpoint pattern: Academic Writer composes prose, helper
-# module assembles the file, AI DRAFT banner mandatory on every page. The
-# test-env fast path skips the pipeline so the smoke tests run in
-# milliseconds against deterministic mock data.
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "gone",
+            "message": (
+                "The Report Writer midpoint pipeline has been retired. "
+                "The midpoint submission shipped May 27 and the final "
+                "submission deadline is July 1."),
+            "canonical_path": "/api/v1/export/executive-brief",
+        })
 
 
 def _build_results_dict_and_range() -> tuple[dict, dict]:
@@ -12640,233 +12129,30 @@ async def analytical_appendix(request: Request, session: dict = Depends(require_
 
 @app.post("/api/reports/executive-brief-template")
 @limiter.limit("10/minute")
-async def executive_brief_template(request: Request, session: dict = Depends(require_auth)):
+async def executive_brief_template(
+    request: Request, session: dict = Depends(require_auth),
+):
+    """RETIRED (PR-B, June 2026).
+
+    The legacy Report Writer executive-brief pipeline was retired in
+    PR #338 (frontend) and PR-B (this PR, backend). The canonical
+    brief generation path is now POST /api/v1/export/executive-brief,
+    which runs the two-pass story plan architecture (PR #333 + #336)
+    with locked numeric anchors and the post-generation audit.
+    Returns 410 Gone so existing clients receive a clear "this
+    existed and is now gone" signal rather than a 404 connection
+    error.
     """
-    Generates the 5-page executive brief — 20% of the grade.
-
-    Six pre-populated sections per CLAUDE.md Section 14:
-      1. Executive Summary  (drawn from CIO synthesis if available, else
-                             from a deterministic top-strategies summary)
-      2. Methodology        (Academic Writer → write_methodology)
-      3. Key Findings       (top 3 strategies with APA stat reporting)
-      4. Limitations        (QA Agent + Risk Manager output where available)
-      5. Recommendations    (Academic Writer produces the full section
-                             interpretation directly; the team edits for
-                             voice in-editor)
-      6. Appendix Charts    (5 chart placeholders + caption — the .pptx
-                             pipeline embeds the actual images; here we
-                             insert captioned placeholders the team
-                             populates by dropping screenshots into Word)
-    """
-    from fastapi.responses import Response as FastAPIResponse
-
-    try:
-        from agents.academic_writer import AcademicWriter
-        from tools.docx_generator import build_docx
-
-        results_dict, data_range = await _load_results_async()
-        significance_flags = {
-            name: bool(r.get("is_significant"))
-            for name, r in results_dict.items()
-        }
-        sig_names = [k for k, v in significance_flags.items() if v]
-        n_significant = len(sig_names)
-
-        # Top 3 by Sharpe — used in Executive Summary and Key Findings.
-        top_three = sorted(
-            results_dict.items(),
-            key=lambda kv: float(kv[1].get("sharpe_ratio", 0.0) or 0.0),
-            reverse=True,
-        )[:3]
-
-        writer = AcademicWriter()
-        methodology = writer.write_methodology(
-            data_sources={"data_range": data_range, "n_months": data_range["n_months"]},
-            strategies=list(results_dict.keys()),
-            statistical_tests=[
-                "Paired t-test (full period)",
-                "Benjamini-Hochberg FDR correction",
-                "Deflated Sharpe Ratio",
-                "Walk-forward out-of-sample",
-                "CV Stability Score",
-            ],
-        )
-
-        # Executive summary — deterministic prose anchored to actual results.
-        # We do not call the CIO agent inline (it's expensive and the council
-        # may have run hours ago); instead we synthesise a brief summary from
-        # the same significance flags the council uses.
-        exec_summary_lines = [
-            (
-                "This brief presents the central findings of an empirical "
-                "evaluation of equity-fixed-income diversification strategies "
-                f"over the period {data_range['start']} to {data_range['end']}, "
-                f"comprising {data_range['n_months']} monthly observations."
-            ),
-            (
-                f"Of ten portfolio strategies tested, {n_significant} passed "
-                "all five Tier 1 statistical gates at the redefined "
-                "significance threshold of p < 0.005 (Benjamini et al., 2018), "
-                "with Benjamini-Hochberg correction applied across the full "
-                "strategy universe."
-            ),
-        ]
-        from tools.academic_export import format_metric
-        if top_three:
-            best_name, best_r = top_three[0]
-            exec_summary_lines.append(
-                f"The highest-performing strategy was {best_name.replace('_', ' ')}, "
-                f"with a Sharpe ratio of "
-                f"{format_metric(best_r.get('sharpe_ratio'), 'sharpe_ratio')} "
-                f"versus the benchmark's "
-                f"{format_metric(results_dict.get('BENCHMARK', {}).get('sharpe_ratio'), 'sharpe_ratio')} — "
-                "a result the team interprets in the body of this brief as "
-                "evidence that dynamic regime-aware allocation outperforms "
-                "static rebalancing under the conditions observed."
-            )
-        executive_summary = "\n\n".join(exec_summary_lines)
-
-        # Key Findings — top 3 strategies in APA reporting style. The
-        # agent never receives a raw float — every metric is formatted
-        # by format_metric so the precision is identical to what every
-        # other generator embeds.
-        findings_lines = []
-        for name, r in top_three:
-            findings_lines.append(
-                f"{name.replace('_', ' ')}: "
-                f"Sharpe = {format_metric(r.get('sharpe_ratio'), 'sharpe_ratio')}, "
-                f"CAGR = {format_metric(r.get('cagr'), 'cagr')}, "
-                f"max drawdown = {format_metric(r.get('max_drawdown'), 'max_drawdown')}, "
-                f"p (FDR) = {format_metric(r.get('p_value_corrected'), 'p_value')}, "
-                f"Tier 1 gates = {r.get('tier1_gates_passed', 0)}/5."
-            )
-        findings_lines.append(
-            "The 2022 equity-bond correlation breakdown — a shift from a "
-            "long-run average near -0.31 to a peak of approximately +0.48 "
-            "during the Federal Reserve's rate-hiking cycle — is the "
-            "central empirical finding of this study and the principal "
-            "reason static 60/40 allocation underperforms dynamic strategies "
-            "across the test window."
-        )
-        key_findings = "\n\n".join(findings_lines)
-
-        limitations_body = (
-            "Sample size and statistical power. The aligned dataset comprises "
-            f"{data_range['n_months']} monthly observations, which provides "
-            "adequate power for the full-period Tier 1 tests but is borderline "
-            "for regime-conditional sub-period tests. Sub-period results are "
-            "therefore reported as narrative evidence rather than as hard "
-            "significance gates."
-            "\n\n"
-            "Regime classification uncertainty. The Hidden Markov Model and "
-            "threshold-based regime classifiers disagree in approximately "
-            "15-20% of transition periods. In those periods, Regime "
-            "Switching strategy performance may be more volatile than the "
-            "full-sample backtest suggests."
-            "\n\n"
-            "Survivorship and look-ahead. The asset universe is fixed by the "
-            "FNA 670 brief (S&P 500, IG bonds, HY bonds), so survivorship "
-            "bias does not apply to the universe itself. The backtester "
-            "enforces strict t-1 signal lag with assertion-level checks."
-        )
-
-        recommendations_body = (
-            "On the basis of the evidence presented, the team recommends "
-            "that Forest Capital weigh the following considerations when "
-            "evaluating diversification across equities and fixed income."
-            "\n\n"
-            "First, static 60/40 allocation does not survive the Tier 1 "
-            "significance threshold once Benjamini-Hochberg FDR correction "
-            "is applied — its diversification benefit is real on average "
-            "but disappears during the conditions investors most need it "
-            "(2022 hiking cycle, GFC liquidity events). The team recommends "
-            "framing 60/40 as a baseline rather than a defensible policy."
-            "\n\n"
-            "Second, dynamic strategies that detect and respond to regime "
-            "shifts — particularly Regime Switching, Volatility Targeting, "
-            "and Black-Litterman with rebalancing — pass all five Tier 1 "
-            "gates and exhibit Cross-Validation Stability above the 0.60 "
-            "threshold. These should be candidates for further analysis "
-            "under Forest Capital's specific mandate constraints."
-            "\n\n"
-            "Third, the 2022 correlation breakdown deserves disclosure in "
-            "any client-facing communication that discusses fixed income "
-            "as a diversifier. The team is happy to discuss specific "
-            "framings during the July 1 presentation."
-        )
-
-        appendix_charts_body = (
-            "Five charts from the analysis platform are referenced in this "
-            "brief. Bob may insert the actual screenshots when finalising "
-            "the document; placeholders below describe each chart's "
-            "purpose."
-            "\n\n"
-            "[Figure 1] Cumulative returns 2002-2024 — growth of $1 in each "
-            "strategy versus the benchmark, log scale. The principal visual "
-            "evidence for divergence between dynamic and static approaches."
-            "\n\n"
-            "[Figure 2] Significance Journey Matrix — 10 strategies × 5 "
-            "Tier 1 gates, colour-coded pass/fail. Shows which strategies "
-            "survive each statistical hurdle."
-            "\n\n"
-            "[Figure 3] Rolling 252-day equity-bond correlation 2002-2024 — "
-            "the central project finding, with the 2022 breakdown highlighted "
-            "in amber."
-            "\n\n"
-            "[Figure 4] Stress-test comparison — 2008 GFC, 2020 COVID, 2022 "
-            "rate hikes, 2000 dot-com, 2013 taper. Strategy returns and max "
-            "drawdowns in each window."
-            "\n\n"
-            "[Figure 5] CPCV Sharpe distribution — for each significant "
-            "strategy, the distribution of out-of-sample Sharpe ratios "
-            "across the 15 CPCV paths. Median, IQR, and 95% CI."
-        )
-
-        sections = [
-            {"heading": "1. Executive Summary", "body": executive_summary},
-            {"heading": "2. Methodology", "body": methodology},
-            {"heading": "3. Key Findings", "body": key_findings},
-            {"heading": "4. Limitations", "body": limitations_body},
-            {"heading": "5. Recommendations", "body": recommendations_body},
-            {"heading": "6. Appendix — Charts Referenced", "body": appendix_charts_body},
-        ]
-
-        try:
-            references_db = AcademicWriter.get_available_references()
-            references = sorted(
-                r["apa"] for r in references_db.values() if r.get("apa")
-            )
-        except Exception as exc:
-            log.warning("references_load_failed", error=str(exc))
-            references = None
-
-        docx_bytes = build_docx(
-            title="Forest Capital Portfolio Intelligence System",
-            subtitle=(
-                "Executive Brief — FNA 670 Practicum · "
-                f"Data range: {data_range['start']} – {data_range['end']} · "
-                f"{n_significant}/10 strategies pass all Tier 1 gates"
-            ),
-            sections=sections,
-            strategy_results=results_dict,
-            references=references,
-        )
-
-        from datetime import date
-        filename = f"forest-capital-executive-brief-{date.today().isoformat()}.docx"
-        return FastAPIResponse(
-            content=docx_bytes,
-            media_type=(
-                "application/vnd.openxmlformats-officedocument."
-                "wordprocessingml.document"
-            ),
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-        )
-
-    except Exception as exc:
-        ref = uuid.uuid4().hex[:8]
-        log.error("executive_brief_error", ref=ref, error=str(exc))
-        raise HTTPException(status_code=500, detail=f"Brief generation failed (ref: {ref})")
+    return JSONResponse(
+        status_code=410,
+        content={
+            "error": "gone",
+            "message": (
+                "The Report Writer pipeline has been retired. Use "
+                "POST /api/v1/export/executive-brief for the two-"
+                "pass story plan architecture."),
+            "canonical_path": "/api/v1/export/executive-brief",
+        })
 
 
 # ── Agent personas (Council View → "View system prompt") ──────────────────────

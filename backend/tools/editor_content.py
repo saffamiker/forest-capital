@@ -58,17 +58,11 @@ def _section_blocks(
     return nodes, lines
 
 
-# Section order for the midpoint paper — (heading, narratives key,
-# trailing callout or None). All callouts removed May 26 2026; the
-# third tuple element is kept as a None placeholder so the existing
-# _section_to_nodes_and_lines unpacking continues to work and a future
-# callout could be reintroduced without a structure change.
-_MIDPOINT_SECTIONS = [
-    ("1. Data and Methodology", "methodology", None),
-    ("2. Preliminary Results", "results", None),
-    ("3. Roles and Division of Labor", "roles", None),
-    ("4. Next Steps and Open Questions", "next_steps", None),
-]
+# PR-B (June 2026) -- the _MIDPOINT_SECTIONS list + midpoint_to_editor
+# adapter were deleted alongside the midpoint endpoint retirement.
+# Historical midpoint editor drafts still open via build_editor_docx
+# (it reads from the TipTap content_json directly, not from this
+# section list).
 
 
 # Section order for the executive brief — (heading, narratives key,
@@ -418,43 +412,6 @@ def _word_count_warning_block(
     lines: list[str] = [f"[[BOB: {summary}]]", ""]
     return nodes, lines
 
-
-def midpoint_to_editor(
-    narratives: dict[str, str],
-    *,
-    word_validation: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], str]:
-    """
-    Builds the editor content for a generated midpoint paper.
-
-    Returns (content_json, content_text): a TipTap doc and its plain-text
-    projection. The four sections become H1 headings with the generated
-    prose as paragraphs. May 26 2026 — the trailing [[BOB: …]] section
-    callouts have been removed; the Academic Writer's prose stands as
-    the deliverable's interpretation. Bob edits for voice in-editor.
-
-    word_validation (May 25 2026): when supplied AND the validation
-    failed (any section or the total outside its target range), a
-    [[BOB: WORD COUNT WARNING — …]] alert is prepended to the
-    document so the user sees the drift at the top of the editor
-    rather than discovering it at submission time. This is a
-    transient quality-check alert, NOT a content placeholder — it
-    disappears when the team fixes the word counts.
-    """
-    doc_content: list[dict] = []
-    text_lines: list[str] = []
-    warn_nodes, warn_lines = _word_count_warning_block(
-        word_validation or {})
-    doc_content.extend(warn_nodes)
-    text_lines.extend(warn_lines)
-    for heading, key, callout in _MIDPOINT_SECTIONS:
-        nodes, lines = _section_blocks(
-            heading, narratives.get(key, ""), callout)
-        doc_content.extend(nodes)
-        text_lines.extend(lines)
-    content_json = {"type": "doc", "content": doc_content}
-    content_text = "\n".join(text_lines).strip()
-    return content_json, content_text
 
 
 def executive_brief_to_editor(

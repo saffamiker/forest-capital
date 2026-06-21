@@ -1,3 +1,21 @@
+# DEPRECATED -- June 2026
+# This agent was used for the FNA 670 midpoint peer review surface
+# (POST /api/council/peer-review). That endpoint was retired in
+# PR-B (June 2026) and the frontend surface was removed in PR #338.
+#
+# The defense-prep helpers in this module (build_defense_prep_context_block,
+# render_defense_prep_context_block, run_defense_prep_with_harness) are
+# still imported by main.py's /api/council/defense-prep endpoint, which
+# is NOT in the PR-B retirement scope. The peer-review-specific helpers
+# (build_peer_review_*_prompt, run_peer_review_with_harness,
+# extract_peer_paper_text, mock_peer_review_verdict) are now unreachable
+# through any documented endpoint.
+#
+# This file is preserved as reference material for the five-section
+# critique pattern (sections A-E) which may inform future self-review
+# surfaces. Do not import the peer-review-specific helpers in new code.
+# Safe to delete the peer-review helpers after July 2026 if no reuse
+# planned; the defense-prep helpers remain in active use.
 """agents/peer_review.py — Peer Review Assistant + Thesis Defense Prep.
 
 Item 7 (May 23 2026). Two related features built on the

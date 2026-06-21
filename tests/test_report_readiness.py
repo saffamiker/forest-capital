@@ -604,11 +604,15 @@ class TestGenerationGate:
 
         monkeypatch.setattr(report_readiness, "compute_readiness", _blocked)
 
-    def test_midpoint_paper_blocked_returns_422(
+    def test_executive_brief_blocked_returns_422_full_payload(
         self, monkeypatch, client: TestClient,
     ):
+        # PR-B (June 2026) retired /api/v1/export/midpoint-paper; the
+        # full structured-error payload is now pinned via the executive-
+        # brief endpoint, which uses the same _require_report_ready()
+        # gate so the contract surface is identical.
         self._seed_blockers(monkeypatch)
-        r = client.post("/api/v1/export/midpoint-paper",
+        r = client.post("/api/v1/export/executive-brief",
                         headers=_auth_headers(), json={})
         assert r.status_code == 422
         body = r.json()
@@ -648,7 +652,10 @@ class TestGenerationGate:
         on a missing draft, but it must NOT return the readiness 422
         even when blockers exist."""
         self._seed_blockers(monkeypatch)
-        r = client.post("/api/v1/export/midpoint-paper",
+        # PR-B (June 2026) retired /api/v1/export/midpoint-paper; the
+        # editor-export gate-skip is now pinned via the executive-
+        # brief endpoint (same _editor_export() implementation).
+        r = client.post("/api/v1/export/executive-brief",
                         headers=_auth_headers(),
                         json={"editor_draft_id": 99999999})
         assert r.status_code != 422
@@ -671,7 +678,9 @@ class TestGenerationGate:
             }
 
         monkeypatch.setattr(report_readiness, "compute_readiness", _ready)
-        r = client.post("/api/v1/export/midpoint-paper",
+        # PR-B (June 2026) retired /api/v1/export/midpoint-paper; the
+        # ready-state 202 path is now pinned via executive-brief.
+        r = client.post("/api/v1/export/executive-brief",
                         headers=_auth_headers(), json={})
         # 202 on success — the job is created and scheduled.
         assert r.status_code == 202
@@ -829,13 +838,10 @@ class TestUniversalIN02NonBlocking:
 
         monkeypatch.setattr(report_readiness, "compute_readiness", _verdict)
 
-    def test_midpoint_accepts_when_only_in02_would_block(
-        self, monkeypatch, client: TestClient,
-    ):
-        self._seed_in02_dropped_at_methodology(monkeypatch)
-        r = client.post("/api/v1/export/midpoint-paper",
-                        headers=_auth_headers(), json={})
-        assert r.status_code == 202
+    # PR-B (June 2026) retired /api/v1/export/midpoint-paper; the
+    # IN02 non-blocking contract is pinned via the executive-brief +
+    # presentation-deck cases below, which use the same
+    # _require_report_ready() gate.
 
     def test_executive_brief_accepts_when_only_in02_would_block(
         self, monkeypatch, client: TestClient,

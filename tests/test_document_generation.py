@@ -97,12 +97,19 @@ class TestDocumentGenerationContract:
     # CONTENT checks call the generation helpers directly — the
     # background task does not complete under Starlette's TestClient.
 
-    def test_midpoint_paper_returns_202_job(self):
+    def test_midpoint_paper_returns_410_gone_after_retirement(self):
+        # PR-B (June 2026) retired the midpoint pipeline. The endpoint
+        # is preserved as a 410 stub so existing clients receive a
+        # clear "this existed and is now gone" signal rather than a
+        # 404 connection error.
         resp = client.post(MIDPOINT, headers=SESSION_HEADERS)
-        assert resp.status_code == 202
+        assert resp.status_code == 410
         body = resp.json()
-        assert body["status"] == "pending"
-        assert body["job_id"]
+        assert body["error"] == "gone"
+        assert "Midpoint paper generation has been retired" \
+            in body["message"]
+        assert body["canonical_path"] == (
+            "/api/v1/export/executive-brief")
 
     def test_executive_brief_returns_202_job(self):
         resp = client.post(BRIEF, headers=SESSION_HEADERS)
@@ -116,32 +123,9 @@ class TestDocumentGenerationContract:
         assert resp.json()["status"] == "pending"
         assert resp.json()["job_id"]
 
-    def test_midpoint_document_is_a_valid_docx_with_headings(self):
-        import main
-        docx_bytes, filename, media, _draft = _run(
-            main._generate_midpoint_document(TEAM_EMAIL))
-        assert _DOCX_CT in media
-        assert filename.endswith(".docx")
-        text = _docx_text(docx_bytes)
-        assert "Data and Methodology" in text
-        assert "Preliminary Results" in text
-        assert "Roles and Division of Labor" in text
-        assert "Next Steps" in text
-        assert "AI DRAFT" in text          # mandatory banner
-        # May 26 2026 — the six [[BOB]] section callouts were removed.
-        # The Academic Writer's prose stands as each section's
-        # interpretation; no placeholder titles should appear.
-        for banned in (
-            "BOB — YOUR INTERPRETATION REQUIRED",
-            "BOB — PERSONALISE THIS SECTION",
-            "BOB — REVIEW AND REFINE",
-        ):
-            assert banned not in text, f"unexpected placeholder: {banned}"
-        # The submission checklist now lists only [[MOLLY]] callouts.
-        assert "[[BOB]]" not in text
-        # Cold caches in the test environment — every data-dependent
-        # section degrades to a [DATA PENDING] marker.
-        assert "[DATA PENDING]" in text
+    # PR-B (June 2026) deleted _generate_midpoint_document alongside
+    # the midpoint endpoint retirement; the corresponding docx-render
+    # smoke test is gone with it.
 
     def test_executive_brief_document_is_a_valid_docx_with_headings(self):
         """June 18 2026 -- the brief was rewritten to the FNA 670
