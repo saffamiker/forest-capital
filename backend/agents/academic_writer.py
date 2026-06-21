@@ -262,30 +262,36 @@ for or inventing one.
 
 Available citation keys -- each is a pre-verified APA-formatted entry \
 in data/references.json. Cite by the canonical (Author, Year) form \
-the registry's `apa` field implies; the post-generation audit cross-\
-checks every (Author, Year) citation against this list and flags any \
-that doesn't match.
+shown below; the post-generation audit cross-checks every (Author, \
+Year) citation against this list and flags any that doesn't match.
 
-  - Hamilton (1989)              -- HMM regime detection foundational
-  - Ang and Bekaert (2002)       -- regime-conditional asset allocation
-  - Ang and Bekaert (2004)       -- regimes affect asset allocation
-  - Carhart (1997)               -- four-factor model + persistence
-  - Markowitz (1952)             -- mean-variance portfolio theory
-  - Sharpe (1994)                -- Sharpe ratio methodology
-  - Black and Litterman (1992)   -- Black-Litterman global allocation
-  - Fama and French (1993)       -- three-factor model
-  - Harvey, Liu, and Zhu (2016)  -- FDR + cross-section of returns
-  - Bailey and Lopez de Prado (2014) -- deflated Sharpe ratio
-  - Lopez de Prado (2018)        -- backtest overfitting
-  - Prado (2018)                 -- combinatorial purged CV
+  - Ang and Bekaert (2002)               -- regime-conditional asset allocation, international diversification
+  - Ang and Bekaert (2004)               -- regimes affect asset allocation, dynamic allocation
+  - Bailey and López de Prado (2012)     -- deflated Sharpe ratio (efficient frontier formulation)
+  - Bailey and López de Prado (2014)     -- deflated Sharpe ratio (selection bias + overfitting)
+  - Benjamin et al. (2018)               -- p < 0.005 threshold proposal
+  - Benjamini and Hochberg (1995)        -- false discovery rate (FDR) correction
+  - Black and Litterman (1992)           -- Black-Litterman global allocation
+  - Brinson, Hood, and Beebower (1986)   -- performance attribution (allocation vs selection)
+  - Carhart (1997)                       -- four-factor model, momentum factor
+  - Fama and French (1993)               -- three-factor model
+  - Hamilton (1989)                      -- Hidden Markov Model regime detection foundational
+  - Hansen (2005)                        -- superior predictive ability (SPA) test
+  - Harvey and Liu (2015)                -- backtesting + multiple testing
+  - Harvey, Liu, and Zhu (2016)          -- multiple-testing problem, factor zoo
+  - Jobson and Korkie (1981)             -- Sharpe ratio significance testing
+  - López de Prado (2018)                -- CPCV, purged cross-validation, financial ML
+  - Maillard, Roncalli, and Teïletche (2010) -- risk parity, equal risk contribution
+  - Markowitz (1952)                     -- mean-variance optimization, modern portfolio theory
+  - Newey and West (1987)                -- HAC standard errors
+  - Sharpe (1994)                        -- Sharpe ratio methodology
 
-The registry is the canonical citation source for this project. If \
-your section covers a finding (2022 correlation break, FDR \
-correction, regime-switching allocation, mean-variance instability, \
-Carhart attribution), pick the matching key from the list above and \
-cite it as (Author, Year). The full APA reference is rendered by \
-the document assembler from the registry; you do not need to format \
-the reference entry yourself.
+The registry is the canonical citation source for this project. \
+When your section covers a finding that maps to one of the keys \
+above, cite that key by its (Author, Year) form exactly as listed. \
+The full APA reference is rendered by the document assembler from \
+the registry's `apa` field; you do not need to format the reference \
+entry text yourself.
 
 Include a References section at the end listing every source you \
 cited in the body, formatted in APA per the registry's `apa` field. \

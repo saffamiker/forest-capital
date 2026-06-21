@@ -731,13 +731,31 @@ class TestBriefExecutiveSummaryEvaluator:
         assert captured["evaluator"] == \
             brief_executive_summary_evaluator_prompt()
 
-        # And the OTHER agent_ids keep the original peer-review evaluator.
+        # June 21 2026 -- the five remaining brief sections
+        # (methodology, key_findings, limitations,
+        # final_recommendations, visuals) each got their own
+        # section-specific evaluator that scores against the
+        # criteria the section was actually written to satisfy.
+        # The peer-review evaluator is no longer used for any
+        # brief section.
         academic_export.harness_narrative(
             "brief_methodology", task="x", context={})
         from agents.evaluator_prompts import (
-            academic_review_peer_evaluator_prompt,
+            brief_section_evaluator_prompt,
         )
         assert captured["agent_id"] == "brief_methodology"
+        assert captured["evaluator"] == \
+            brief_section_evaluator_prompt("methodology")
+
+        # A non-brief agent_id (e.g. the council/peer path) still
+        # falls through to the peer-review evaluator -- the brief
+        # section table is opt-in by agent_id prefix.
+        academic_export.harness_narrative(
+            "midpoint_section_x", task="x", context={})
+        from agents.evaluator_prompts import (
+            academic_review_peer_evaluator_prompt,
+        )
+        assert captured["agent_id"] == "midpoint_section_x"
         assert captured["evaluator"] == \
             academic_review_peer_evaluator_prompt("academic writer")
 
