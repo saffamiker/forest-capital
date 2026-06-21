@@ -7510,15 +7510,45 @@ async def report_readiness(
         blocking_count: int,
         statistical: { unreviewed_warnings, unreviewed_failures },
         methodology: { unresolved_warnings, unresolved_failures },
-        checked_at: ISO timestamp
+        checked_at: ISO timestamp,
+        deck_story_plan_available: bool,   (June 21 2026)
       }
 
-    Auth: any authenticated user — the readiness verdict is a project
-    record visible to viewers, not a sysadmin-private surface.
+    deck_story_plan_available -- true when story_plans has a real
+    (non-fallback) row for (current_data_hash, document_type='deck').
+    The Presentation Script export card on the Reports page uses
+    this to flip between an enabled "Download Script" button and a
+    disabled "Generate Deck First" state. Computed inline here so
+    the frontend has one round-trip on page load.
     """
     from tools.report_readiness import compute_readiness
 
-    return await compute_readiness()
+    verdict = await compute_readiness()
+    verdict["deck_story_plan_available"] = await _deck_story_plan_available()
+    return verdict
+
+
+async def _deck_story_plan_available() -> bool:
+    """True iff story_plans has a non-fallback row keyed by
+    (current_data_hash, 'deck'). Fail-open: any error -> False, the
+    UI just falls back to the disabled 'Generate Deck First' state."""
+    try:
+        from tools.audit_assembler import current_data_hash
+        from tools.story_plan import get_cached_story_plan
+        data_hash = await current_data_hash()
+        if not data_hash:
+            return False
+        plan = await get_cached_story_plan(data_hash, "deck")
+        if not plan:
+            return False
+        # Fallback rows are persisted under the same key but flagged
+        # via _model -- treat them as 'not yet generated' so the UI
+        # nudges the user to regenerate the deck rather than letting
+        # them download a script built around a fallback outline.
+        return plan.get("_model") != "deterministic_fallback"
+    except Exception as exc:  # noqa: BLE001
+        log.warning("deck_story_plan_check_failed", error=str(exc))
+        return False
 
 
 @app.post("/api/v1/cache/invalidate")
@@ -11055,6 +11085,76 @@ async def export_presentation_deck(
         return await _editor_export(int(editor_draft_id))
     await _require_report_ready()
     return _start_generation_job("presentation_deck", session, request)
+
+
+@app.post("/api/v1/export/presentation-script")
+@limiter.limit("12/minute")
+async def export_presentation_script(
+    request: Request,
+    session: dict = Depends(require_permission("generate_documents")),
+):
+    """Renders the cached deck story plan's Pass 2 full_script + Pass
+    3 anticipated_questions into a Presentation Script .docx workbook.
+
+    Pure cache read + format: NO LLM call, NO database write. The
+    rate limit is set higher than the generation endpoints (12/min
+    vs 4-6/min) because the wall-clock cost is bounded by docx
+    assembly (~200ms), not multi-pass LLM generation.
+
+    Returns 404 with a clear message when the deck story plan has
+    not yet been cached (or is a deterministic_fallback) so the
+    operator knows to generate the Presentation Deck first.
+
+    The Reports page's Presentation Script card hits this endpoint
+    from a button labelled "Download Script" -- it stays disabled
+    until /api/v1/report/readiness reports
+    deck_story_plan_available=true.
+    """
+    from fastapi.responses import Response as FastAPIResponse
+    from tools.academic_docx import build_presentation_script
+    from tools.audit_assembler import current_data_hash
+    from tools.story_plan import get_cached_story_plan
+
+    try:
+        data_hash = await current_data_hash()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("presentation_script_hash_unavailable",
+                    error=str(exc))
+        data_hash = ""
+    plan = await get_cached_story_plan(data_hash, "deck") \
+        if data_hash else None
+    if not plan or plan.get("_model") == "deterministic_fallback":
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Presentation script not yet generated. Generate "
+                "the Presentation Deck first to produce the script."))
+
+    try:
+        docx_bytes = await asyncio.to_thread(
+            build_presentation_script,
+            full_script=plan.get("full_script"),
+            anticipated_questions=plan.get("anticipated_questions"),
+            computed_at=plan.get("computed_at"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        ref = uuid.uuid4().hex[:8]
+        log.error("presentation_script_render_failed",
+                  ref=ref, error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Script rendering failed (ref: {ref})")
+
+    from datetime import date
+    filename = (
+        f"forest-capital-presentation-script-"
+        f"{date.today().isoformat()}.docx")
+    return FastAPIResponse(
+        content=docx_bytes,
+        media_type=_DOCX_MEDIA,
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/api/v1/export/presentation-deck/stream")

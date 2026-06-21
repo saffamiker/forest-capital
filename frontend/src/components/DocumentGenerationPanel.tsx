@@ -15,7 +15,7 @@ import { useNavigate } from 'react-router-dom'
 import axios from 'axios'
 import {
   FileText, FileSpreadsheet, Presentation, Download, Loader2, AlertCircle,
-  CheckCircle, PenLine, RefreshCw, X, Info,
+  CheckCircle, PenLine, RefreshCw, X, Info, Mic,
 } from 'lucide-react'
 import TeamGate from './TeamGate'
 import {
@@ -93,6 +93,131 @@ function triggerDownload(blob: Blob, filename: string): void {
   a.click()
   document.body.removeChild(a)
   URL.revokeObjectURL(url)
+}
+
+
+/**
+ * PresentationScriptCard — the only card on this panel that doesn't
+ * use the async job pattern. The script is a pure cache read of
+ * story_plans (Pass 2 full_script + Pass 3 anticipated_questions)
+ * so the backend renders synchronously in ~200ms and returns the
+ * .docx directly as a blob -- no job_id, no polling.
+ *
+ * The button state mirrors deck_story_plan_available from
+ * /api/v1/report/readiness: true -> "Download Script" enabled;
+ * false / null -> "Generate Deck First" disabled with a helper line.
+ */
+function PresentationScriptCard({
+  deckPlanAvailable,
+}: { deckPlanAvailable: boolean | null }) {
+  const [downloading, setDownloading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const available = deckPlanAvailable === true
+
+  const handleDownload = async () => {
+    if (!available || downloading) return
+    setDownloading(true)
+    setError(null)
+    try {
+      const res = await axios.post(
+        '/api/v1/export/presentation-script',
+        {},
+        { responseType: 'blob' })
+      const dispo = String(res.headers['content-disposition'] ?? '')
+      const filenameMatch = /filename="?([^";]+)"?/i.exec(dispo)
+      const filename = filenameMatch?.[1]
+        ?? 'forest-capital-presentation-script.docx'
+      const contentType = String(
+        res.headers['content-type'] ?? 'application/octet-stream')
+      triggerDownload(new Blob([res.data], { type: contentType }), filename)
+    } catch (err) {
+      // The endpoint returns 404 when the deck story plan hasn't been
+      // cached yet (defence in depth -- the readiness flag should
+      // already gate the button, but a stale flag can slip through).
+      let msg = 'Download failed.'
+      if (axios.isAxiosError(err)) {
+        const status = err.response?.status
+        if (status === 404) {
+          msg = 'Deck story plan not cached yet. '
+            + 'Generate the Presentation Deck first.'
+        } else {
+          const detail = err.response?.data?.detail
+          msg = typeof detail === 'string' ? detail : err.message
+        }
+      }
+      setError(msg)
+    } finally {
+      setDownloading(false)
+    }
+  }
+
+  return (
+    <div className="card p-4 flex flex-col gap-3">
+      <div className="flex items-start gap-3">
+        <div className="w-9 h-9 rounded flex items-center justify-center
+                        shrink-0 bg-electric/10 text-electric">
+          <Mic className="w-4 h-4" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h3 className="text-white font-semibold text-sm">
+            Presentation Script
+          </h3>
+          <p className="text-muted text-xs mt-1 leading-relaxed">
+            Word-for-word presenter script for the 18-20 minute panel
+            presentation, with Grok-generated Q&A preparation. Reads
+            from the cached deck story plan -- generate the
+            Presentation Deck first.
+          </p>
+        </div>
+      </div>
+
+      <div className="text-2xs text-muted">
+        Deadline: July 3 (presentation date)
+      </div>
+
+      {available ? (
+        <TeamGate block permission="generate_documents"
+          tooltip="Document generation is available to the project team">
+          <button type="button"
+            data-testid="download-presentation-script"
+            onClick={() => void handleDownload()}
+            disabled={downloading}
+            className="w-full flex items-center justify-center gap-1.5
+                       px-3 py-2 rounded text-xs font-semibold
+                       transition-colors bg-electric text-white
+                       hover:bg-blue-500 disabled:opacity-60">
+            {downloading
+              ? <><Loader2 className="w-3 h-3 animate-spin" />
+                  Building script…</>
+              : <><Download className="w-3 h-3" /> Download Script</>}
+          </button>
+        </TeamGate>
+      ) : (
+        <div className="flex flex-col gap-1.5">
+          <button type="button"
+            data-testid="download-presentation-script"
+            disabled
+            className="w-full flex items-center justify-center gap-1.5
+                       px-3 py-2 rounded text-xs font-semibold
+                       bg-navy-700 text-muted cursor-not-allowed">
+            Generate Deck First
+          </button>
+          <p className="text-2xs text-muted leading-relaxed">
+            Generate the Presentation Deck to produce the script.
+          </p>
+        </div>
+      )}
+
+      {error && (
+        <div className="flex items-start gap-1.5 px-2 py-1.5 rounded
+                        text-2xs border border-danger/30 bg-danger/5
+                        text-danger">
+          <AlertCircle className="w-3 h-3 shrink-0 mt-0.5" />
+          <span>{error}</span>
+        </div>
+      )}
+    </div>
+  )
 }
 
 export default function DocumentGenerationPanel() {
@@ -248,7 +373,7 @@ export default function DocumentGenerationPanel() {
           First-draft deliverables · real platform data
         </span>
       </div>
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         {DOCS.map((doc) => {
           const Icon = doc.icon
           const job = jobForType(doc.documentType)
@@ -437,6 +562,14 @@ export default function DocumentGenerationPanel() {
             </div>
           )
         })}
+        {/* Presentation Script -- pure cache read of the deck story
+            plan's full_script + anticipated_questions. Sits in the
+            same grid as the three generation cards because it's
+            adjacent in the user's mental model (script for the deck),
+            but uses its own direct-download flow because there is
+            no LLM call to gate behind a job. */}
+        <PresentationScriptCard
+          deckPlanAvailable={readinessGate.deck_story_plan_available} />
       </div>
       <p className="text-2xs text-muted mt-2">
         Generated documents are first drafts for review — every file carries

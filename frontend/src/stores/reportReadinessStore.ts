@@ -58,6 +58,12 @@ export interface ReportReadiness {
   caches_warm?: boolean
   cold_caches?: string[]
   warm_status?: 'idle' | 'warming' | 'warm' | 'failed' | 'unknown'
+  // June 21 2026 — true when story_plans has a real (non-fallback)
+  // row for (current_data_hash, 'deck'). The Presentation Script
+  // card on the Reports page flips its button state on this flag:
+  // true → "Download Script" enabled; false → "Generate Deck First"
+  // disabled with a helper line.
+  deck_story_plan_available?: boolean
   checked_at: string
 }
 
