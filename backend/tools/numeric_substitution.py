@@ -141,6 +141,7 @@ def build_substitution_table(
     study_months: int | None = None,
     study_start: str = "July 2002",
     study_end: str = "May 2026",
+    implied_allocation: dict | None = None,
 ) -> dict[str, str]:
     """Build the deterministic {token -> value} substitution table
     from verified cache values.
@@ -278,9 +279,25 @@ def build_substitution_table(
             (cio.get("confidence") or {}).get("probability")
             if isinstance(cio.get("confidence"), dict)
             else cio.get("confidence")),
-        "{{CURRENT_EQUITY_PCT}}": format_pct(cio.get("implied_equity")),
-        "{{CURRENT_IG_PCT}}": format_pct(cio.get("implied_ig")),
-        "{{CURRENT_HY_PCT}}": format_pct(cio.get("implied_hy")),
+        # Implied-allocation tokens. Earlier versions of this table
+        # read `cio.implied_equity` / `cio.implied_ig` / `cio.implied_hy`
+        # -- those fields don't exist on the CIO recommendation row
+        # (the values are computed on demand via
+        # tools.cio_recommendation.compute_implied_asset_allocation
+        # against the cio_row's blend_weights). Callers now compute
+        # the allocation once and pass it in via the
+        # implied_allocation kwarg; the keys we read are the
+        # canonical ones the compute helper emits
+        # (equity_pct / ig_bond_pct / hy_bond_pct / bond_pct).
+        # Falls back to em dash when implied_allocation is None or
+        # the keys are missing -- the bug this fix replaces was that
+        # CURRENT_*_PCT silently resolved to em dashes everywhere.
+        "{{CURRENT_EQUITY_PCT}}": format_pct(
+            (implied_allocation or {}).get("equity_pct")),
+        "{{CURRENT_IG_PCT}}": format_pct(
+            (implied_allocation or {}).get("ig_bond_pct")),
+        "{{CURRENT_HY_PCT}}": format_pct(
+            (implied_allocation or {}).get("hy_bond_pct")),
 
         # ── Study period ───────────────────────────────────────────
         "{{STUDY_MONTHS}}": (
