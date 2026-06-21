@@ -432,7 +432,14 @@ async def _gather_analytics_snapshot() -> dict[str, Any]:
 # When the reviewer has a current editor draft of one of these, its live
 # content is reviewed in preference to any uploaded file of that kind.
 _EDITOR_TO_REVIEW_TYPE = {
-    "midpoint_paper": "midpoint_draft",
+    # June 21 2026 -- midpoint_paper removed. The May 27 midpoint
+    # paper deadline has passed; the editor draft remains for audit
+    # history but no longer needs to overlay into the council review
+    # context. Leaving the mapping in place caused the brief / deck /
+    # appendix review contexts to bleed midpoint_draft content into
+    # the docs_by_type slot (the academic_documents-table filter at
+    # tools/academic_context.py::_INJECTION_EXCLUDED_TYPES blocks the
+    # row-read path but the editor-draft overlay bypassed it).
     # PR — academic review brief-specific rubric. Previously "other"
     # (the catch-all) which routed the executive brief's verdict
     # through the midpoint rubric and produced a structural 5.5/10

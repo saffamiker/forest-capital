@@ -232,6 +232,82 @@ class TestBuildSubstitutionTable:
         assert table["{{CURRENT_HY_PCT}}"] == "—"
 
 
+class TestRecoveryTokenSplit:
+    """June 21 2026 -- {{*_RECOVERY}} tokens used to resolve to
+    "<n> months". Per-section writers that wrote "months" after
+    the token in prose produced the "37 months months" bug. The
+    split: {{*_RECOVERY}} is now bare integer; the new
+    {{*_RECOVERY_MONTHS}} carries the pre-formatted form."""
+
+    def test_recovery_is_number_only(self):
+        from tools.numeric_substitution import build_substitution_table
+        table = build_substitution_table(
+            _fake_cache(), _fake_cio(), data_hash="x")
+        # benchmark cache fixture: drawdown_recovery_days = 1029
+        # -> round(1029 / 21) = 49 months. format_months_only emits
+        # the integer string only.
+        assert table["{{BENCHMARK_RECOVERY}}"] == "49"
+        # regime_switching: drawdown_recovery_days = 252 -> 12.
+        assert table["{{REGIME_SWITCHING_RECOVERY}}"] == "12"
+        # classic_60_40: drawdown_recovery_days = 420 -> 20.
+        assert table["{{CLASSIC_6040_RECOVERY}}"] == "20"
+
+    def test_recovery_months_carries_units(self):
+        from tools.numeric_substitution import build_substitution_table
+        table = build_substitution_table(
+            _fake_cache(), _fake_cio(), data_hash="x")
+        assert table["{{BENCHMARK_RECOVERY_MONTHS}}"] == "49 months"
+        assert (
+            table["{{REGIME_SWITCHING_RECOVERY_MONTHS}}"] == "12 months")
+        assert table["{{CLASSIC_6040_RECOVERY_MONTHS}}"] == "20 months"
+
+    def test_recovery_substitution_does_not_double_months(self):
+        """The bug this fix prevents: a section writer using
+        {{BENCHMARK_RECOVERY}} followed by " months" in prose used
+        to produce "49 months months". With the bare-integer token
+        the same prose pattern reads cleanly as "49 months"."""
+        from tools.numeric_substitution import (
+            apply_substitutions, build_substitution_table,
+        )
+        table = build_substitution_table(
+            _fake_cache(), _fake_cio(), data_hash="x")
+        prose = "Benchmark recovered in {{BENCHMARK_RECOVERY}} months."
+        # apply_substitutions returns (text, replaced_tokens_list).
+        out_text, _ = apply_substitutions(prose, table)
+        assert out_text == "Benchmark recovered in 49 months."
+        assert "months months" not in out_text
+
+    def test_format_months_only_em_dash_on_invalid(self):
+        from tools.numeric_substitution import format_months_only
+        assert format_months_only(None) == "—"
+        assert format_months_only("abc") == "—"
+        assert format_months_only(0) == "—"
+        assert format_months_only(-1) == "—"
+
+    def test_per_strategy_loop_emits_both_recovery_variants(self):
+        """The appendix dynamic generator iterates every strategy
+        x metric -- the RECOVERY suffix split must surface both
+        {{NAME_RECOVERY}} (bare) and {{NAME_RECOVERY_MONTHS}}
+        (with units) for every strategy in the cache. Uses the
+        get_substitution_table entry-point because that's the call
+        site that runs the per-strategy loop (the appendix path);
+        the lower-level build_substitution_table emits only the
+        three brief-side hardcoded recovery tokens."""
+        from tools.numeric_substitution import (
+            clear_substitution_cache, get_substitution_table,
+        )
+        clear_substitution_cache()
+        table = get_substitution_table(
+            "x", _fake_cache(), _fake_cio())
+        # MIN_VARIANCE fixture: drawdown_recovery_days = 168 -> 8.
+        assert table["{{MIN_VARIANCE_RECOVERY}}"] == "8"
+        assert table["{{MIN_VARIANCE_RECOVERY_MONTHS}}"] == "8 months"
+        # Brief-side variants also overwritten consistently via the
+        # appendix loop -- BENCHMARK appears in both paths.
+        assert table["{{BENCHMARK_RECOVERY}}"] == "49"
+        assert table["{{BENCHMARK_RECOVERY_MONTHS}}"] == "49 months"
+
+
 class TestPerStrategyDynamicTokens:
 
     def test_every_cache_strategy_gets_five_tokens(self):

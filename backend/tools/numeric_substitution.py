@@ -104,7 +104,11 @@ def format_corr(v: Any) -> str:
 def format_months_from_days(v: Any) -> str:
     """The backtester stores recovery in DAYS but the brief reads
     MONTHS. Convert + suffix. None or non-numeric returns an em
-    dash -- never a placeholder leak."""
+    dash -- never a placeholder leak.
+
+    Returns the "<n> months" form. Pair with format_months_only
+    when the LLM writes "months" after the token in prose (the
+    "37 months months" bug from June 21 2026)."""
     try:
         days = float(v)
     except (TypeError, ValueError):
@@ -113,6 +117,22 @@ def format_months_from_days(v: Any) -> str:
         return "—"
     months = round(days / _TRADING_DAYS_PER_MONTH)
     return f"{months} months"
+
+
+def format_months_only(v: Any) -> str:
+    """The number-only companion to format_months_from_days. Used
+    by the *_RECOVERY_MONTHS tokens (June 21 2026). The split lets
+    the LLM choose between writing the bare number (and adding
+    "months" in prose) vs the pre-formatted "<n> months" string.
+    Em dash on invalid input -- never a placeholder leak."""
+    try:
+        days = float(v)
+    except (TypeError, ValueError):
+        return "—"
+    if days <= 0:
+        return "—"
+    months = round(days / _TRADING_DAYS_PER_MONTH)
+    return str(months)
 
 
 def _get_strategy(cache: dict, strategy_id: str) -> dict:
@@ -243,12 +263,28 @@ def build_substitution_table(
         "{{DD_REDUCTION_REGIME_SWITCHING}}": dd_reduction,
 
         # ── Recovery metrics ───────────────────────────────────────
+        # Two variants per strategy (June 21 2026 split):
+        #   {{*_RECOVERY}}        -> bare integer ("71"); the LLM
+        #                            writes "months" after in prose
+        #   {{*_RECOVERY_MONTHS}} -> pre-formatted ("71 months"); the
+        #                            LLM uses this when it does NOT
+        #                            want to add the unit itself
+        # The split eliminates the "71 months months" bug from before
+        # the architecture distinguished the two cases.
         "{{REGIME_SWITCHING_RECOVERY}}":
+            format_months_only(regime.get("drawdown_recovery_days")),
+        "{{REGIME_SWITCHING_RECOVERY_MONTHS}}":
             format_months_from_days(regime.get("drawdown_recovery_days")),
         "{{BENCHMARK_RECOVERY}}":
+            format_months_only(
+                benchmark.get("drawdown_recovery_days")),
+        "{{BENCHMARK_RECOVERY_MONTHS}}":
             format_months_from_days(
                 benchmark.get("drawdown_recovery_days")),
         "{{CLASSIC_6040_RECOVERY}}":
+            format_months_only(
+                classic.get("drawdown_recovery_days")),
+        "{{CLASSIC_6040_RECOVERY_MONTHS}}":
             format_months_from_days(
                 classic.get("drawdown_recovery_days")),
 
@@ -405,11 +441,18 @@ _TOKEN_RE = re.compile(r"\{\{[A-Z0-9_]+\}\}")
 # because they're shaped to the rubric's three-strategy lens.
 
 _APPENDIX_METRIC_FORMATTERS: dict[str, Any] = {
-    "SHARPE":     ("sharpe_ratio",            format_sharpe),
-    "MAX_DD":     ("max_drawdown",            format_pct),
-    "CAGR":       ("cagr",                    format_pct),
-    "VOLATILITY": ("volatility",              format_pct),
-    "RECOVERY":   ("drawdown_recovery_days",  format_months_from_days),
+    "SHARPE":         ("sharpe_ratio",            format_sharpe),
+    "MAX_DD":         ("max_drawdown",            format_pct),
+    "CAGR":           ("cagr",                    format_pct),
+    "VOLATILITY":     ("volatility",              format_pct),
+    # June 21 2026 -- RECOVERY split into bare-number + with-units
+    # variants. Mirrors the brief-side hardcoded tokens so an
+    # appendix-loop overwrite of e.g. {{BENCHMARK_RECOVERY}} keeps
+    # the bare-number contract (the prose writer adds "months"
+    # itself). RECOVERY_MONTHS supplies the pre-formatted variant
+    # for prose that does NOT want to add units.
+    "RECOVERY":       ("drawdown_recovery_days",  format_months_only),
+    "RECOVERY_MONTHS": ("drawdown_recovery_days", format_months_from_days),
 }
 
 

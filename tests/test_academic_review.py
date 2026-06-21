@@ -711,6 +711,27 @@ class TestDeckAndAppendixSpecificRubrics:
         assert (_EDITOR_TO_REVIEW_TYPE["analytical_appendix"]
                 == "appendix_review")
 
+    def test_midpoint_paper_not_overlaid_into_review_context(self):
+        """June 21 2026 -- removed "midpoint_paper" from the editor-
+        draft overlay map. The May 27 midpoint paper deadline has
+        passed; the editor draft remains for audit history but it
+        no longer bleeds into the brief / deck / appendix review
+        contexts via docs_by_type["midpoint_draft"]. The academic_
+        documents-table row filter at tools/academic_context.py::
+        _INJECTION_EXCLUDED_TYPES already blocks the row-read path
+        (midpoint_draft is in that set); this test pins the overlay-
+        bypass closure."""
+        from agents.academic_review import _EDITOR_TO_REVIEW_TYPE
+        assert "midpoint_paper" not in _EDITOR_TO_REVIEW_TYPE
+
+    def test_injection_excluded_types_includes_midpoint_draft(self):
+        """Pin the academic_documents-table filter contract --
+        midpoint_draft rows uploaded to academic_documents must
+        NEVER reach the council review context."""
+        from tools.academic_context import _INJECTION_EXCLUDED_TYPES
+        assert "midpoint_draft" in _INJECTION_EXCLUDED_TYPES
+        assert "midpoint_requirements" in _INJECTION_EXCLUDED_TYPES
+
     def test_build_arbiter_message_deck_mode_uses_deck_instructions(self):
         from agents.academic_review import (
             build_arbiter_user_message, peer_agent_ids,
