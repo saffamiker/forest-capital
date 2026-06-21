@@ -308,6 +308,12 @@ export function useReportReadinessGate() {
     is_ready: readiness?.is_ready ?? null,
     blocking_count: readiness?.blocking_count ?? 0,
     blockerLabels: labels,
+    // June 21 2026 -- surfaced from the readiness payload so the
+    // Presentation Script card can flip its button state without
+    // a second round-trip. null = unknown (endpoint failed or not
+    // loaded yet); the card falls back to the disabled state then.
+    deck_story_plan_available:
+      readiness?.deck_story_plan_available ?? null,
     reload,
   }
 }

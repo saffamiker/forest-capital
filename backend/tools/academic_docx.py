@@ -950,3 +950,265 @@ def build_analytical_appendix(
     buf = BytesIO()
     doc.save(buf)
     return buf.getvalue()
+
+
+# ── Presentation Script (June 21 2026) ───────────────────────────────────
+#
+# A rehearsal workbook that bundles the cached deck story plan's
+# full_script (Pass 2, Opus) and anticipated_questions (Pass 3, Grok)
+# into a single .docx. Pure cache read + format: no LLM call, no DB
+# write. The endpoint /api/v1/export/presentation-script reads
+# story_plans for (current_data_hash, 'deck') and hands the cached
+# plan dict to build_presentation_script -- this stays a pure
+# assembly function in the academic_docx contract.
+
+# Word-for-word script delimiter the deck Pass 2 emits. The full_script
+# blob looks like:
+#   [SLIDE 1: Does Diversification Beat 100% Equity?]
+#   <prose for slide 1>
+#
+#   [SLIDE 2: Static, Dynamic, or Benchmark?]
+#   <prose for slide 2>
+# Each marker becomes a bold sub-heading in the rendered script so the
+# presenter can flip to any slide on paper without scanning prose.
+_SLIDE_MARKER_RE = re.compile(r"^\s*\[SLIDE\s+(\d+):\s*(.+?)\]\s*$")
+
+# Hardcoded slide timings per the user spec for the 11-slide deck:
+#   slides 1-8 + 10-11 target 1.2-1.7 minutes each
+#   slide 9 (AnalyticsDesk live demo) targets 3.5 minutes
+# Sum is approximately 18-20 minutes for the panel presentation.
+_SLIDE_TIMINGS_MIN: list[tuple[int, float, str]] = [
+    (1,  1.7, ""),
+    (2,  1.5, ""),
+    (3,  1.7, ""),
+    (4,  1.7, ""),
+    (5,  1.5, ""),
+    (6,  1.5, ""),
+    (7,  1.5, ""),
+    (8,  1.2, ""),
+    (9,  3.5, "Live demo"),
+    (10, 2.0, ""),
+    (11, 1.5, ""),
+]
+
+
+def _add_script_callout(doc: Document, body: str) -> None:
+    """Light-amber callout used for the 'how to use this script'
+    block + the Grok-attribution line. Reuses the shading helper
+    + the body-font register but renders a single paragraph (not the
+    bordered table the brief uses for human-input prompts)."""
+    para = doc.add_paragraph()
+    para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+    para.paragraph_format.space_after = Pt(6)
+    run = para.add_run(body)
+    run.font.name = _BODY_FONT
+    run.font.size = Pt(11)
+    run.italic = True
+    _set_run_color(run, "#92400e")
+
+
+def _render_full_script(doc: Document, full_script: str) -> None:
+    """Walks the full_script line by line. Lines matching
+    [SLIDE N: title] become bold size-12 sub-headings on their own
+    paragraph (page-flippable on paper). Other lines flow as normal
+    body paragraphs, preserving blank-line separation."""
+    if not full_script or not full_script.strip():
+        _add_body(
+            doc,
+            "Presenter script not yet available. Ensure the deck "
+            "story plan has completed Pass 2 (Opus full-script).")
+        return
+
+    buffer: list[str] = []
+
+    def _flush_body() -> None:
+        if not buffer:
+            return
+        block = "\n".join(buffer).strip()
+        if block:
+            _add_body(doc, block)
+        buffer.clear()
+
+    for raw in full_script.splitlines():
+        marker = _SLIDE_MARKER_RE.match(raw)
+        if marker:
+            _flush_body()
+            slide_num, slide_title = marker.group(1), marker.group(2).strip()
+            heading_para = doc.add_paragraph()
+            heading_para.paragraph_format.line_spacing_rule = (
+                WD_LINE_SPACING.SINGLE)
+            heading_para.paragraph_format.space_before = Pt(12)
+            heading_para.paragraph_format.space_after = Pt(4)
+            heading_run = heading_para.add_run(
+                f"SLIDE {slide_num}: {slide_title}")
+            heading_run.bold = True
+            heading_run.font.name = _BODY_FONT
+            heading_run.font.size = Pt(13)
+            _set_run_color(heading_run, "#1e293b")
+        else:
+            buffer.append(raw)
+    _flush_body()
+
+
+def _render_anticipated_questions(
+    doc: Document, questions: list[dict] | None,
+) -> None:
+    """Walks the anticipated_questions list (Grok Pass 3 output).
+    Each entry is rendered as: difficulty badge + numbered question
+    (bold) + suggested answer (normal weight). On an empty or null
+    list, renders the spec'd fallback message instead of crashing."""
+    if not questions:
+        _add_body(
+            doc,
+            "Q&A preparation not yet available. Ensure the deck "
+            "story plan has completed all four passes.")
+        return
+
+    for idx, q in enumerate(questions, start=1):
+        if not isinstance(q, dict):
+            continue
+        question_text = str(q.get("question") or "").strip()
+        answer_text = str(
+            q.get("suggested_answer")
+            or q.get("answer") or "").strip()
+        if not question_text:
+            continue
+        difficulty_raw = str(q.get("difficulty") or "").strip().upper()
+        # Normalise to the two badges the spec calls out; anything else
+        # (LOW, EASY, blank) defaults to MEDIUM so the renderer always
+        # surfaces a badge -- the presenter scans for HARDs.
+        difficulty = "HARD" if difficulty_raw == "HARD" else "MEDIUM"
+
+        header_para = doc.add_paragraph()
+        header_para.paragraph_format.line_spacing_rule = (
+            WD_LINE_SPACING.SINGLE)
+        header_para.paragraph_format.space_before = Pt(10)
+        header_para.paragraph_format.space_after = Pt(2)
+        badge_run = header_para.add_run(f"Q{idx}  [{difficulty}]  ")
+        badge_run.bold = True
+        badge_run.font.name = _BODY_FONT
+        badge_run.font.size = Pt(11)
+        _set_run_color(
+            badge_run,
+            "#b91c1c" if difficulty == "HARD" else "#1e3a8a")
+        q_run = header_para.add_run(question_text)
+        q_run.bold = True
+        q_run.font.name = _BODY_FONT
+        q_run.font.size = Pt(12)
+
+        label_para = doc.add_paragraph()
+        label_para.paragraph_format.line_spacing_rule = (
+            WD_LINE_SPACING.SINGLE)
+        label_para.paragraph_format.space_after = Pt(2)
+        label_run = label_para.add_run("Suggested answer:")
+        label_run.italic = True
+        label_run.font.name = _BODY_FONT
+        label_run.font.size = Pt(11)
+        _set_run_color(label_run, "#475569")
+
+        _add_body(doc, answer_text)
+
+
+def _render_timing_reference(doc: Document) -> None:
+    """Four-column table: Slide | Title | Target Time | Notes. Title
+    column pulls verbatim from academic_deck.SLIDE_TITLES so the
+    reference stays in lockstep with the rendered deck."""
+    from tools.academic_deck import SLIDE_TITLES
+
+    table = doc.add_table(rows=1 + len(_SLIDE_TIMINGS_MIN), cols=4)
+    table.style = "Table Grid"
+    header_cells = table.rows[0].cells
+    for cell, label in zip(
+            header_cells,
+            ("Slide", "Title", "Target", "Notes")):
+        _shade_cell(cell, "#1e293b")
+        para = cell.paragraphs[0]
+        para.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
+        run = para.add_run(label)
+        run.bold = True
+        run.font.name = _BODY_FONT
+        run.font.size = Pt(11)
+        _set_run_color(run, "#ffffff")
+
+    for row_idx, (slide_n, mins, note) in enumerate(
+            _SLIDE_TIMINGS_MIN, start=1):
+        title = (SLIDE_TITLES[slide_n - 1]
+                 if slide_n - 1 < len(SLIDE_TITLES) else "")
+        row = table.rows[row_idx].cells
+        for cell, text in zip(
+                row,
+                (str(slide_n), title, f"{mins:.1f} min", note)):
+            para = cell.paragraphs[0]
+            para.paragraph_format.line_spacing_rule = (
+                WD_LINE_SPACING.SINGLE)
+            run = para.add_run(text)
+            run.font.name = _BODY_FONT
+            run.font.size = Pt(11)
+
+
+def build_presentation_script(
+    *,
+    full_script: str | None,
+    anticipated_questions: list[dict] | None,
+    computed_at: str | None,
+) -> bytes:
+    """Builds the Presentation Script .docx from the cached deck story
+    plan's Pass 2 output (full_script) and Pass 3 output
+    (anticipated_questions). Pure assembly: no LLM call, no DB read.
+
+    The endpoint reads story_plans WHERE (data_hash, document_type='deck')
+    and hands the cached values here. A null or empty full_script /
+    anticipated_questions degrades to a clear "not yet available"
+    note rather than producing a half-empty document.
+    """
+    doc = _new_document()
+
+    # ── Title page ──────────────────────────────────────────────────
+    today_display = date.today().strftime("%B %d, %Y")
+    prepared_line = (
+        f"Prepared: {today_display}"
+        if not computed_at else f"Prepared: {computed_at[:10]}")
+    _add_title_lines(doc, [
+        "Forest Capital — Presentation Script",
+        "FNA 670 Practicum — Queens University of Charlotte",
+        "McColl School of Business",
+        prepared_line,
+        _AI_DRAFT_BANNER_TEXT,
+    ], big_first=True)
+
+    # ── Section 1: How to use this script ───────────────────────────
+    _add_heading(doc, "HOW TO USE THIS SCRIPT")
+    _add_body(doc, (
+        "This script is the word-for-word spoken content for the "
+        "18-20 minute presentation. Each section is labelled by "
+        "slide number and title. Speaker notes in the PPTX file "
+        "match this script."))
+    _add_body(doc, (
+        "Read through the full script before rehearsing. Time each "
+        "slide section individually. Slides 1-8 and 10-11 target "
+        "1.2-1.7 minutes each. Slide 9 (live demo) targets 3.5 "
+        "minutes."))
+    _add_body(doc, (
+        "The Q&A section at the end contains the hardest questions "
+        "the panel is likely to ask, generated by the Grok "
+        "contrarian agent. Rehearse the suggested answers but use "
+        "your own words."))
+
+    # ── Section 2: Presenter Script ─────────────────────────────────
+    _add_heading(doc, "PRESENTER SCRIPT")
+    _render_full_script(doc, full_script or "")
+
+    # ── Section 3: Anticipated Q&A ──────────────────────────────────
+    _add_heading(doc, "ANTICIPATED COMMITTEE QUESTIONS")
+    _add_script_callout(doc, (
+        "Generated by Grok contrarian agent — these are the hardest "
+        "questions, not softballs."))
+    _render_anticipated_questions(doc, anticipated_questions)
+
+    # ── Section 4: Slide Timing Reference ───────────────────────────
+    _add_heading(doc, "SLIDE TIMING REFERENCE")
+    _render_timing_reference(doc)
+
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
