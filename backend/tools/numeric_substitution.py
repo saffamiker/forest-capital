@@ -537,3 +537,282 @@ def unresolved_placeholders(text: str | None) -> list[str]:
         return []
     found = _TOKEN_RE.findall(text)
     return sorted(set(found))
+
+
+# ── Layer 3 (June 21 2026) -- export-time verification ─────────────────
+#
+# The substitution architecture eliminates drift at GENERATION time.
+# Layer 3 closes the loop at EXPORT time: a manual edit in the
+# editor (Bob accidentally typing "1.23" while editing prose around
+# "1.24") would silently slip into the downloaded DOCX without this
+# layer. The export path now:
+#
+#   1. Reads the value_manifest snapshot persisted on editor_drafts
+#      at generation time (every numeric value the substitution
+#      table produced, with provenance).
+#   2. Scans the document text being exported for every manifest
+#      value. A missing value is "edited away" -- flagged. A
+#      variant ("1.2" where "1.24" expected) is "rounded away" --
+#      flagged.
+#   3. Compares the current data_hash against the generation
+#      data_hash -- stale data is a warning (not an error: the
+#      document is still internally consistent with the cache
+#      it was generated against; just the cache may have moved on).
+#
+# verify_export_against_cache returns a structured dict the
+# export handler persists on editor_drafts.export_verification
+# and surfaces in response headers (X-Verification-Status).
+# Fail-open: errors NEVER block the download. The user gets the
+# file plus a clear warning banner.
+
+
+# Numeric values worth verifying: Sharpe-shaped decimals,
+# percentages, month counts. String values (BULL/BEAR, July 2002,
+# correlation labels) are not in the manifest because they don't
+# round-corrupt -- the only drift mode for "July 2002" is a wholesale
+# rewrite, which the substitution audit catches separately.
+_NUMERIC_VALUE_RE = re.compile(
+    r"^[+-]?\d+(?:\.\d+)?(?:%|pp|\s*months?)?$"
+)
+
+
+def _is_numeric_value(value: str | None) -> bool:
+    """True if value looks like a numeric figure worth verifying.
+    Used to filter the substitution table down to the keys that
+    matter for export-time verification."""
+    if not value:
+        return False
+    return bool(_NUMERIC_VALUE_RE.match(value.strip()))
+
+
+def build_value_manifest(
+    substitution_table: dict[str, str],
+    data_hash: str,
+    generated_at: str,
+) -> dict[str, dict[str, str]]:
+    """Snapshot of every numeric value the substitution table
+    produced, keyed by the value string. Records each value's
+    provenance: source token + generation data_hash + timestamp.
+
+    Only numeric values land in the manifest -- string values
+    (BULL/BEAR, July 2002, etc) and em-dashes don't round-corrupt
+    and don't benefit from export-time presence checking.
+
+    Stored on editor_drafts.value_manifest (migration 057) at
+    generation time. Read at export time by
+    verify_export_against_cache as the authoritative reference for
+    what every number in the document should be.
+
+    Returns {value -> {token, data_hash, generated_at}}.
+    Multiple tokens resolving to the same value (e.g. two strategies
+    that happen to share a Sharpe of "0.86") collapse to one entry
+    -- the manifest just needs to know the value should appear; the
+    source token is recorded for the operator's first-encountered
+    token (last write wins in the dict comprehension)."""
+    return {
+        value: {
+            "token": token,
+            "data_hash": data_hash,
+            "generated_at": generated_at,
+        }
+        for token, value in substitution_table.items()
+        if _is_numeric_value(value)
+    }
+
+
+def _find_corrupted_variants(
+    value: str, text: str,
+) -> list[str]:
+    """Find variants of `value` in `text` that look like rounding
+    or truncation corruptions. Conservative scan:
+
+      For "1.24":
+        Plausible corruptions: "1.2" (1dp truncation), "1.240"
+          (trailing zero), "1.25" (rounded up), "1.23" (rounded
+          down)
+        Implausible: "0.24", "2.24" (different integer part --
+          unambiguously distinct figures)
+
+    Strategy: for each variant in a small bounded set, check if it
+    appears in the text. The canonical value's own presence is
+    irrelevant -- a document containing BOTH "1.24" AND "1.23"
+    (e.g. the headline + a Section 2 mis-quote) is a corruption
+    case the check catches by reporting the "1.23" variant.
+
+    Returns sorted list of distinct variants found."""
+    if not value or not text:
+        return []
+    # Strip sign + percent + pp + months suffix for the comparison.
+    stripped = value.lstrip("+-").rstrip()
+    suffix = ""
+    for suf in (" months", " month", "%", "pp"):
+        if stripped.endswith(suf):
+            suffix = suf
+            stripped = stripped[: -len(suf)].rstrip()
+            break
+    try:
+        canonical = float(stripped)
+    except (TypeError, ValueError):
+        return []
+    if canonical == 0:
+        return []
+
+    # Build the candidate variant set. Conservative: only round-style
+    # corruptions of the same integer part. "1.24" -> ["1.2", "1.3",
+    # "1.25", "1.23", "1.240"]. "52.6" -> ["52.5", "52.7", "53",
+    # "52.60"].
+    candidates: set[str] = set()
+    # 1-decimal truncation
+    candidates.add(f"{canonical:.1f}")
+    # +/- 1 in last decimal place (rounded variant)
+    decimals = stripped.split(".")[-1] if "." in stripped else ""
+    if decimals:
+        digits = len(decimals)
+        step = 10 ** -digits
+        candidates.add(f"{canonical + step:.{digits}f}")
+        candidates.add(f"{canonical - step:.{digits}f}")
+        # Trailing-zero variant
+        candidates.add(f"{canonical:.{digits + 1}f}")
+    # Integer-only truncation (for values like 52.6 -> 53)
+    candidates.add(str(round(canonical)))
+    # Remove the canonical value itself from the candidate set --
+    # only proper variants matter.
+    canonical_str_no_suffix = stripped
+    candidates.discard(canonical_str_no_suffix)
+    candidates.discard(f"{canonical:g}")
+
+    # Restore the sign + suffix on each candidate for the text scan.
+    sign = "-" if value.startswith("-") else ("+" if value.startswith("+") else "")
+    found: set[str] = set()
+    for cand in candidates:
+        # Strip a possible leading "-" the formatting may have
+        # introduced (e.g. when canonical is small negative).
+        cand_clean = cand.lstrip("-+")
+        variant = f"{sign}{cand_clean}{suffix}"
+        # Word-boundary-ish check: the variant should appear as a
+        # standalone number, not as a substring of a larger number.
+        # Use a regex with non-digit-non-dot lookarounds.
+        pattern = re.compile(
+            rf"(?<![\d.]){re.escape(variant)}(?![\d.])")
+        if pattern.search(text):
+            found.add(variant)
+    return sorted(found)
+
+
+def verify_export_against_cache(
+    content_text: str | None,
+    value_manifest: dict[str, dict[str, str]] | None,
+    current_data_hash: str,
+    generation_data_hash: str,
+    document_type: str,
+) -> dict[str, Any]:
+    """Layer 3 export-time check. Confirms the exported document
+    matches the cache the manifest was built against.
+
+    Three checks:
+      1. data_hash staleness -- WARNING (not error). The document
+         is still internally consistent with the cache it was
+         generated against; the operator just needs to know fresher
+         data may have arrived.
+      2. value presence -- ERROR. A manifest value missing from the
+         document means a manual edit (or a render-time corruption)
+         removed it. Submission-blocking.
+      3. corrupted variants -- ERROR. A "1.2" where "1.24" was
+         expected is a rounding-edit corruption.
+
+    Fail-open across the board. None / empty inputs return a
+    passed=True dict with a 'skipped' field so the export handler
+    can decide whether to surface the skip reason or treat it as a
+    pre-Layer-3 draft (no manifest, nothing to verify).
+
+    Returns:
+      {passed, warnings, errors, data_hash_match, verified_at,
+       document_type, n_values_verified, n_values_missing}
+    """
+    from datetime import datetime, timezone
+
+    warnings: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    # No manifest = pre-Layer-3 draft. The export still ships; the
+    # verification result records the skip reason so the frontend
+    # can show a neutral "Not yet verified" state instead of a
+    # spurious "Failed" badge.
+    if not value_manifest:
+        return {
+            "passed": True,
+            "warnings": [],
+            "errors": [],
+            "data_hash_match": (
+                current_data_hash == generation_data_hash),
+            "verified_at": datetime.now(timezone.utc).isoformat(),
+            "document_type": document_type,
+            "n_values_verified": 0,
+            "n_values_missing": 0,
+            "skipped": "no_value_manifest",
+        }
+
+    # Check 1: data hash staleness (WARNING, not error).
+    if current_data_hash and generation_data_hash \
+            and current_data_hash != generation_data_hash:
+        warnings.append({
+            "type": "stale_data_hash",
+            "severity": "medium",
+            "message": (
+                f"Document generated against hash "
+                f"{generation_data_hash[:8]} but current cache "
+                f"is {current_data_hash[:8]}. New data may have "
+                "arrived. Consider regenerating before "
+                "submitting."),
+        })
+
+    content = content_text or ""
+    n_verified = 0
+    n_missing = 0
+
+    # Check 2: value presence. A manifest value not in the document
+    # is "edited away" -- ERROR.
+    for value, meta in value_manifest.items():
+        if value in content:
+            n_verified += 1
+        else:
+            n_missing += 1
+            errors.append({
+                "type": "value_missing_from_export",
+                "severity": "high",
+                "token": meta.get("token"),
+                "expected_value": value,
+                "message": (
+                    f"Expected '{value}' from {meta.get('token')} "
+                    "not found in export. The value may have been "
+                    "edited or removed."),
+            })
+
+    # Check 3: corrupted variants. A "1.2" where "1.24" was expected
+    # signals a rounding-edit corruption -- ERROR.
+    for value, meta in value_manifest.items():
+        variants = _find_corrupted_variants(value, content)
+        for variant in variants:
+            errors.append({
+                "type": "value_corrupted",
+                "severity": "high",
+                "token": meta.get("token"),
+                "expected": value,
+                "found": variant,
+                "message": (
+                    f"'{value}' appears as '{variant}' in the "
+                    "export. This may be a rounding or "
+                    "formatting error introduced by a manual edit."),
+            })
+
+    return {
+        "passed": len(errors) == 0,
+        "warnings": warnings,
+        "errors": errors,
+        "data_hash_match": (
+            current_data_hash == generation_data_hash),
+        "verified_at": datetime.now(timezone.utc).isoformat(),
+        "document_type": document_type,
+        "n_values_verified": n_verified,
+        "n_values_missing": n_missing,
+    }

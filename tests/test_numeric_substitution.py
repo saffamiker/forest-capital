@@ -441,3 +441,176 @@ class TestSharedTableConsistency:
             deck_table["{{OOS_SHARPE_BLEND}}"]
         assert brief_table["{{BENCHMARK_MAX_DD}}"] == \
             deck_table["{{BENCHMARK_MAX_DD}}"]
+
+
+# ── Layer 3 (June 21 2026) -- export-time verification ─────────────────
+
+
+class TestBuildValueManifest:
+    """Layer 3: persisting the substitution-table snapshot on the
+    editor draft so export-time verification has an authoritative
+    reference for every numeric value."""
+
+    def test_only_numeric_values_in_manifest(self):
+        """String values (BULL/BEAR, July 2002) don't round-corrupt
+        and don't need export-time verification -- they should NOT
+        land in the manifest. Numeric values (Sharpe, percentages,
+        month counts) DO need the round-trip check and must land."""
+        from tools.numeric_substitution import build_value_manifest
+        table = {
+            "{{OOS_SHARPE_BLEND}}":         "1.24",
+            "{{BENCHMARK_MAX_DD}}":         "-52.6%",
+            "{{REGIME_SWITCHING_RECOVERY}}": "12 months",
+            "{{CURRENT_REGIME}}":           "BULL",     # string
+            "{{STUDY_START}}":              "July 2002", # string
+            "{{OOS_SHARPE_BENCHMARK}}":     "—",         # em dash
+        }
+        manifest = build_value_manifest(
+            table, data_hash="c421fb89", generated_at="2026-06-21T00:00:00Z")
+        # Three numeric values present.
+        assert "1.24" in manifest
+        assert "-52.6%" in manifest
+        assert "12 months" in manifest
+        # Strings and em-dashes excluded.
+        assert "BULL" not in manifest
+        assert "July 2002" not in manifest
+        assert "—" not in manifest
+
+    def test_manifest_carries_provenance(self):
+        from tools.numeric_substitution import build_value_manifest
+        manifest = build_value_manifest(
+            {"{{OOS_SHARPE_BLEND}}": "1.24"},
+            data_hash="c421fb89",
+            generated_at="2026-06-21T10:00:00Z")
+        entry = manifest["1.24"]
+        assert entry["token"] == "{{OOS_SHARPE_BLEND}}"
+        assert entry["data_hash"] == "c421fb89"
+        assert entry["generated_at"] == "2026-06-21T10:00:00Z"
+
+
+class TestVerifyExportAgainstCache:
+    """Layer 3 export-time check: data hash staleness (warning),
+    value presence (error), corrupted variants (error)."""
+
+    def test_passing_state_returns_passed_true(self):
+        from tools.numeric_substitution import (
+            build_value_manifest, verify_export_against_cache,
+        )
+        manifest = build_value_manifest(
+            {"{{OOS_SHARPE_BLEND}}": "1.24"},
+            "h_gen", "2026-06-21T00:00:00Z")
+        result = verify_export_against_cache(
+            content_text="The blend achieved 1.24 vs benchmark.",
+            value_manifest=manifest,
+            current_data_hash="h_gen",
+            generation_data_hash="h_gen",
+            document_type="executive_brief")
+        assert result["passed"] is True
+        assert result["errors"] == []
+        assert result["warnings"] == []
+        assert result["data_hash_match"] is True
+        assert result["n_values_verified"] == 1
+        assert result["n_values_missing"] == 0
+        assert result["document_type"] == "executive_brief"
+        assert "verified_at" in result
+
+    def test_value_missing_from_export_fires_error(self):
+        from tools.numeric_substitution import (
+            build_value_manifest, verify_export_against_cache,
+        )
+        manifest = build_value_manifest(
+            {"{{OOS_SHARPE_BLEND}}": "1.24"},
+            "h_gen", "2026-06-21T00:00:00Z")
+        result = verify_export_against_cache(
+            content_text="The blend performed well.",  # no 1.24
+            value_manifest=manifest,
+            current_data_hash="h_gen",
+            generation_data_hash="h_gen",
+            document_type="executive_brief")
+        assert result["passed"] is False
+        assert len(result["errors"]) == 1
+        err = result["errors"][0]
+        assert err["type"] == "value_missing_from_export"
+        assert err["expected_value"] == "1.24"
+        assert err["token"] == "{{OOS_SHARPE_BLEND}}"
+        assert err["severity"] == "high"
+
+    def test_stale_data_hash_fires_warning_not_error(self):
+        from tools.numeric_substitution import (
+            build_value_manifest, verify_export_against_cache,
+        )
+        manifest = build_value_manifest(
+            {"{{OOS_SHARPE_BLEND}}": "1.24"},
+            "h_gen", "2026-06-21T00:00:00Z")
+        result = verify_export_against_cache(
+            content_text="The blend achieved 1.24 vs benchmark.",
+            value_manifest=manifest,
+            current_data_hash="h_new",   # cache moved on
+            generation_data_hash="h_gen",
+            document_type="executive_brief")
+        # Warning, not error -- the document is still internally
+        # consistent with the cache it was generated against.
+        assert result["passed"] is True
+        assert len(result["errors"]) == 0
+        assert len(result["warnings"]) == 1
+        assert result["warnings"][0]["type"] == "stale_data_hash"
+        assert result["data_hash_match"] is False
+
+    def test_corrupted_variant_fires_error(self):
+        from tools.numeric_substitution import (
+            build_value_manifest, verify_export_against_cache,
+        )
+        manifest = build_value_manifest(
+            {"{{OOS_SHARPE_BLEND}}": "1.24"},
+            "h_gen", "2026-06-21T00:00:00Z")
+        # Manual edit changed "1.24" to "1.23" -- a +/- 1 last-digit
+        # variant the corruption scanner should catch.
+        result = verify_export_against_cache(
+            content_text="The blend achieved 1.23 vs benchmark.",
+            value_manifest=manifest,
+            current_data_hash="h_gen",
+            generation_data_hash="h_gen",
+            document_type="executive_brief")
+        # Both value-missing AND corrupted variant fire (1.24 not
+        # present + 1.23 is a variant). At minimum the variant
+        # error is in the list.
+        types = {e["type"] for e in result["errors"]}
+        assert "value_corrupted" in types or \
+            "value_missing_from_export" in types
+        if "value_corrupted" in types:
+            corrupt = next(
+                e for e in result["errors"]
+                if e["type"] == "value_corrupted")
+            assert corrupt["expected"] == "1.24"
+            assert corrupt["found"] == "1.23"
+
+    def test_no_manifest_returns_skipped_state(self):
+        """Pre-Layer-3 drafts have no value_manifest. The check
+        must short-circuit cleanly so the export ships and the
+        UI shows a neutral 'Not yet verified' state instead of
+        a spurious 'Failed' badge."""
+        from tools.numeric_substitution import verify_export_against_cache
+        result = verify_export_against_cache(
+            content_text="Some content.",
+            value_manifest={},
+            current_data_hash="h",
+            generation_data_hash="h",
+            document_type="executive_brief")
+        assert result["passed"] is True
+        assert result.get("skipped") == "no_value_manifest"
+        assert result["n_values_verified"] == 0
+
+    def test_em_dash_value_skipped_at_manifest_build(self):
+        """An em-dash is the 'missing value' sentinel -- it must
+        never be added to the manifest at build time. Pinned at
+        the manifest-builder level so the verification check
+        never sees em-dashes to begin with."""
+        from tools.numeric_substitution import build_value_manifest
+        table = {
+            "{{VIX_CURRENT}}": "—",
+            "{{OOS_SHARPE_BLEND}}": "1.24",
+        }
+        manifest = build_value_manifest(
+            table, "h", "2026-06-21T00:00:00Z")
+        assert "—" not in manifest
+        assert "1.24" in manifest

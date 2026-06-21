@@ -7763,6 +7763,228 @@ async def _deck_story_plan_status() -> tuple[bool, bool]:
         return False, False
 
 
+# ── Layer 3 (June 21 2026) -- Pre-Submission Check ──────────────────────
+
+
+@app.post("/api/v1/export/verify-all")
+async def post_verify_all_for_submission(
+    session: dict = Depends(require_auth),
+):
+    """Layer 3 pre-submission check. For each of brief, deck,
+    appendix:
+      1. Load the latest editor draft for the owner
+      2. Run verify_export_against_cache on its content_text
+      3. Also run check_cross_deliverable_consistency across
+         all three documents
+
+    Returns a structured verdict the frontend renders as a panel:
+      ready          -- all three passed, no errors, hashes match
+      needs_attention -- warnings only (e.g. stale data_hash)
+      blocked        -- any errors, or any document not generated
+
+    `submission_recommendation` is a plain-English sentence Bob
+    and Molly can read directly without parsing the structured
+    flags.
+
+    Fail-open: any helper-import error returns a "verification
+    helpers unavailable" message rather than 500ing -- the user
+    can still submit, they just don't get the pre-flight check."""
+    try:
+        from tools.audit_assembler import current_data_hash
+        from tools.document_audit import (
+            check_cross_deliverable_consistency,
+        )
+        from tools.editor_drafts import get_current_draft
+        from tools.numeric_substitution import (
+            get_substitution_table, verify_export_against_cache,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("verify_all_imports_failed", error=str(exc))
+        return {
+            "overall": "needs_attention",
+            "submission_recommendation": (
+                "Verification helpers unavailable. The submission "
+                "can still proceed but the pre-flight check did "
+                "not run."),
+            "brief": {"status": "not_generated"},
+            "deck": {"status": "not_generated"},
+            "appendix": {"status": "not_generated"},
+            "cross_deliverable": {"passed": True, "flags": []},
+        }
+
+    email = session.get("email", "")
+    try:
+        cur_hash = await current_data_hash() or ""
+    except Exception:  # noqa: BLE001
+        cur_hash = ""
+
+    async def _verify_one(doc_type: str) -> dict:
+        try:
+            draft = await get_current_draft(email, doc_type)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("verify_all_draft_read_failed",
+                        document_type=doc_type, error=str(exc))
+            draft = None
+        if not draft or not (draft.get("content_text") or "").strip():
+            return {
+                "status": "not_generated",
+                "passed": False, "errors": [], "warnings": [],
+                "data_hash_match": False,
+                "last_verified_at": None,
+            }
+        manifest = draft.get("value_manifest") or {}
+        gen_hash = draft.get("data_hash") or ""
+        result = verify_export_against_cache(
+            content_text=draft.get("content_text") or "",
+            value_manifest=manifest,
+            current_data_hash=cur_hash or gen_hash,
+            generation_data_hash=gen_hash,
+            document_type=doc_type)
+        if result.get("errors"):
+            status = "failed"
+        elif result.get("warnings"):
+            status = "warned"
+        elif result.get("skipped"):
+            status = "warned"
+        else:
+            status = "verified"
+        return {
+            "status": status,
+            "passed": result.get("passed", True),
+            "errors": result.get("errors", []),
+            "warnings": result.get("warnings", []),
+            "data_hash_match": result.get("data_hash_match", True),
+            "last_verified_at": result.get("verified_at"),
+            "skipped": result.get("skipped"),
+            "n_values_verified": result.get("n_values_verified", 0),
+        }
+
+    brief = await _verify_one("executive_brief")
+    deck = await _verify_one("presentation_deck")
+    appendix = await _verify_one("analytical_appendix")
+
+    # Cross-deliverable consistency check -- run only when at least
+    # two documents exist and we have a substitution table to compare
+    # against. The table is keyed by current data_hash; if all three
+    # documents share that hash, they used the same table at
+    # generation time (Layer 1 + Layer 2 guarantee). Drift here
+    # signals a manual edit landed post-generation.
+    cross: dict = {"passed": True, "flags": []}
+    try:
+        documents: dict[str, str] = {}
+        # Re-read draft content_text only -- the verify_one results
+        # above don't include the body text in their return shape.
+        for doc_type in (
+                "executive_brief", "presentation_deck",
+                "analytical_appendix"):
+            d = await get_current_draft(email, doc_type)
+            text = (d or {}).get("content_text") or ""
+            if text.strip():
+                documents[doc_type] = text
+        if len(documents) >= 2 and cur_hash:
+            # Use the SAME table the substitution layer used; the
+            # cache key is the data_hash so this is a hit not a
+            # rebuild on the warm path.
+            try:
+                from tools.cache import get_latest_strategy_cache
+                from tools.cio_recommendation import (
+                    get_latest_recommendation,
+                )
+                from tools.academic_deck import (
+                    OOS_SHARPE_REGIME_CONDITIONAL,
+                    OOS_SHARPE_BENCHMARK,
+                    CORRELATION_PRE_2022, CORRELATION_POST_2022,
+                )
+                strategy_cache = (
+                    await get_latest_strategy_cache() or {})
+                cio_row = await get_latest_recommendation()
+                table = get_substitution_table(
+                    cur_hash, strategy_cache, cio_row,
+                    oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
+                    oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
+                    pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
+                    post_2022_eq_ig_correlation=CORRELATION_POST_2022)
+                flags = check_cross_deliverable_consistency(
+                    documents, table)
+                cross = {
+                    "passed": len(flags) == 0, "flags": flags}
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "verify_all_cross_deliverable_failed",
+                    error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "verify_all_documents_assembly_failed",
+            error=str(exc))
+
+    # Aggregate the four results into an overall verdict.
+    per_doc = [brief, deck, appendix]
+    any_not_generated = any(
+        d["status"] == "not_generated" for d in per_doc)
+    any_failed = any(
+        d["status"] == "failed" or d.get("errors")
+        for d in per_doc) or not cross.get("passed", True)
+    any_warned = any(d["status"] == "warned" for d in per_doc)
+    if any_not_generated:
+        overall = "blocked"
+    elif any_failed:
+        overall = "blocked"
+    elif any_warned:
+        overall = "needs_attention"
+    else:
+        overall = "ready"
+
+    # Plain-English recommendation per overall verdict.
+    if overall == "ready":
+        rec = (
+            f"All three deliverables verified against cache "
+            f"{(cur_hash or '')[:8]}. Safe to submit.")
+    elif overall == "needs_attention":
+        rec = (
+            "All deliverables generated; warnings present. Review "
+            "the stale-data-hash notices and consider regenerating "
+            "before submitting.")
+    else:
+        missing = [
+            label for d, label in (
+                (brief, "brief"), (deck, "deck"),
+                (appendix, "appendix"),
+            ) if d["status"] == "not_generated"]
+        if missing:
+            rec = (
+                f"Generate {', '.join(missing)} before submitting. "
+                "All three deliverables must exist for the "
+                "pre-submission check to pass.")
+        else:
+            err_docs = [
+                label for d, label in (
+                    (brief, "brief"), (deck, "deck"),
+                    (appendix, "appendix"),
+                ) if d.get("errors") or d["status"] == "failed"]
+            if err_docs:
+                rec = (
+                    f"Verification errors found in "
+                    f"{', '.join(err_docs)}. Open the editor, "
+                    "review the flagged values, and regenerate "
+                    "if needed before submitting.")
+            elif not cross.get("passed", True):
+                rec = (
+                    "Cross-deliverable inconsistency found -- a "
+                    "value appears differently across the brief / "
+                    "deck / appendix. Reconcile before submitting.")
+            else:
+                rec = (
+                    "One or more documents failed verification. "
+                    "Open the editor to investigate.")
+
+    return {
+        "brief": brief, "deck": deck, "appendix": appendix,
+        "cross_deliverable": cross,
+        "overall": overall,
+        "submission_recommendation": rec,
+    }
+
+
 @app.post("/api/v1/cache/invalidate")
 async def cache_invalidate(
     session: dict = Depends(require_permission("manage_users")),
@@ -10295,11 +10517,105 @@ async def _editor_export(editor_draft_id: int) -> Response:
             "editor_export_audit_failed",
             draft_id=editor_draft_id, error=str(exc))
 
+    # Layer 3 (June 21 2026) -- export-time verification. Runs
+    # verify_export_against_cache against the value_manifest snapshot
+    # persisted on this draft at generation time. Catches manual
+    # edits that introduce drift (e.g. "1.24" -> "1.23") and stale
+    # data_hash (the cache has moved on since generation). Result
+    # is persisted on editor_drafts.export_verification AND surfaces
+    # in the response headers (X-Verification-Status,
+    # X-Verification-Errors, X-Verification-Warnings) so the
+    # frontend can show a status badge without a second round-trip.
+    #
+    # FAIL-OPEN: the export NEVER blocks because of verification.
+    # Errors surface as a header for the frontend; the file ships
+    # either way. The user retains agency to download a flagged
+    # document if they choose.
+    verification: dict[str, Any] = {
+        "passed": True, "warnings": [], "errors": [],
+        "skipped": "no_manifest_or_helper_unavailable",
+    }
+    try:
+        from tools.audit_assembler import current_data_hash
+        from tools.editor_drafts import (
+            get_draft_with_layer3 as _get_layer3,
+            update_export_verification as _update_verification,
+        )
+        from tools.numeric_substitution import (
+            verify_export_against_cache,
+        )
+        # Re-read the draft with the Layer-3 columns so we have
+        # value_manifest + data_hash for the verification check.
+        # Falls back to the legacy shape (value_manifest=None) on
+        # pre-migration-057 environments; verification then
+        # short-circuits cleanly.
+        layer3_draft = (
+            await _get_layer3(editor_draft_id) or draft)
+        manifest = layer3_draft.get("value_manifest") or {}
+        gen_hash = layer3_draft.get("data_hash") or ""
+        try:
+            cur_hash = await current_data_hash()
+        except Exception:  # noqa: BLE001
+            cur_hash = ""
+        verification = verify_export_against_cache(
+            content_text=draft.get("content_text") or "",
+            value_manifest=manifest,
+            current_data_hash=cur_hash or gen_hash,
+            generation_data_hash=gen_hash,
+            document_type=draft["document_type"])
+        # Persist the verification result on the draft -- frontend
+        # status badges read it on the next draft load.
+        try:
+            await _update_verification(
+                editor_draft_id, verification)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "editor_export_verification_persist_warning",
+                error=str(exc))
+        if verification.get("passed") and not verification.get(
+                "warnings"):
+            log.info("export_verification_passed",
+                     document_type=draft["document_type"],
+                     data_hash_match=verification.get(
+                         "data_hash_match", True))
+        elif verification.get("errors"):
+            log.warning(
+                "export_verification_failed",
+                document_type=draft["document_type"],
+                error_count=len(verification["errors"]),
+                errors=verification["errors"][:5])
+        else:
+            log.info(
+                "export_verification_warned",
+                document_type=draft["document_type"],
+                warning_count=len(verification.get("warnings", [])))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_export_verification_failed",
+            draft_id=editor_draft_id, error=str(exc))
+
+    # Status header value for the frontend badge: passed / warned /
+    # failed. "warned" means the verification was clean except for
+    # stale-data-hash warnings; "failed" means at least one error.
+    if verification.get("errors"):
+        status_header = "failed"
+    elif verification.get("warnings"):
+        status_header = "warned"
+    else:
+        status_header = "passed"
+
     slug = draft["document_type"].replace("_", "-")
     filename = f"forest-capital-{slug}-{date.today().isoformat()}.{ext}"
     return Response(
         content=content, media_type=media,
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Verification-Status": status_header,
+            "X-Verification-Errors": str(
+                len(verification.get("errors") or [])),
+            "X-Verification-Warnings": str(
+                len(verification.get("warnings") or [])),
+        })
 
 
 # ── Async document generation — job system ────────────────────────────────────
@@ -11105,6 +11421,45 @@ async def _generate_brief_document(
                 draft_id = draft["id"]
             await _write_audit_metrics(
                 "executive_brief", email, draft_id, audit_warnings)
+
+            # Layer 3 (June 21 2026) -- persist the value manifest +
+            # generation data_hash on the draft so export-time
+            # verification has an authoritative reference for every
+            # numeric value the substitution table produced. Layer 3
+            # of the substitution architecture closes the loop at
+            # export time: a manual edit changing "1.24" to "1.23"
+            # is caught before the file leaves the platform.
+            if draft_id is not None and substitution_table is not None:
+                try:
+                    from tools.audit_assembler import (
+                        current_data_hash as _cur_hash,
+                    )
+                    from tools.editor_drafts import (
+                        update_value_manifest as _update_manifest,
+                    )
+                    from tools.numeric_substitution import (
+                        build_value_manifest,
+                    )
+                    from datetime import datetime as _dt
+                    from datetime import timezone as _tz
+                    _hash_for_manifest = await _cur_hash() or ""
+                    manifest = build_value_manifest(
+                        substitution_table,
+                        data_hash=_hash_for_manifest[:64],
+                        generated_at=_dt.now(_tz.utc).isoformat())
+                    await _update_manifest(
+                        draft_id, manifest,
+                        data_hash=_hash_for_manifest[:64] or None)
+                    log.info(
+                        "value_manifest_persisted",
+                        document_type="executive_brief",
+                        draft_id=draft_id,
+                        n_values=len(manifest))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "value_manifest_persist_failed",
+                        document_type="executive_brief",
+                        error=str(exc))
         except Exception as exc:  # noqa: BLE001
             log.warning("executive_brief_draft_create_failed", error=str(exc))
 

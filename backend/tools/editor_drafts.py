@@ -22,10 +22,24 @@ DOCUMENT_TYPES = ("midpoint_paper", "executive_brief", "presentation_deck",
                   "presentation_script", "analytical_appendix")
 CREATED_FROM = ("generated", "uploaded", "manual")
 
+# SELECT shape -- kept on the LEGACY (pre-migration-057) column
+# set for backward compatibility with test environments + any
+# deploy where migration 057 has not yet run. The Layer-3 columns
+# (value_manifest, export_verification, data_hash) are still
+# WRITTEN via update_value_manifest / update_export_verification
+# below (those helpers already wrap the UPDATE in try/except), but
+# READING them requires a separate selector. The export-time
+# verification path in main.py reads value_manifest via
+# get_draft_with_layer3 below; the default get_draft / list_drafts
+# stay on the legacy SELECT so the existing test suite is unaffected.
 _DRAFT_COLS = (
     "id, document_type, owner_email, title, content_json, content_text, "
     "word_count, version, is_current, is_deleted, created_from, "
     "created_at, updated_at, audit_warnings"
+)
+_DRAFT_COLS_LAYER3 = (
+    _DRAFT_COLS
+    + ", value_manifest, export_verification, data_hash"
 )
 _VERSION_COLS = (
     "id, draft_id, version, content_json, content_text, word_count, "
@@ -45,7 +59,7 @@ def word_count(text: str | None) -> int:
 
 
 def _draft_row(r: Any) -> dict[str, Any]:
-    return {
+    base = {
         "id": r[0], "document_type": r[1], "owner_email": r[2],
         "title": r[3], "content_json": r[4], "content_text": r[5],
         "word_count": r[6], "version": r[7], "is_current": r[8],
@@ -54,6 +68,57 @@ def _draft_row(r: Any) -> dict[str, Any]:
         "updated_at": r[12].isoformat() if r[12] else None,
         "audit_warnings": r[13],
     }
+    # Layer 3 columns (value_manifest, export_verification,
+    # data_hash) -- only populated when the caller used the LAYER3
+    # SELECT shape. Defaults to None for the legacy SELECT so
+    # downstream consumers can `.get("value_manifest") or {}`
+    # uniformly without checking for KeyError.
+    base["value_manifest"] = r[14] if len(r) > 14 else None
+    base["export_verification"] = r[15] if len(r) > 15 else None
+    base["data_hash"] = r[16] if len(r) > 16 else None
+    return base
+
+
+async def get_draft_with_layer3(
+    draft_id: int,
+) -> dict[str, Any] | None:
+    """Layer 3 variant of get_draft -- includes value_manifest,
+    export_verification, and data_hash columns. Used by the
+    export-time verification path in _editor_export. Returns
+    None on cache miss or DB unavailable.
+
+    Falls back to the legacy SELECT (and returns the draft
+    without the Layer-3 fields) when migration 057 hasn't run --
+    so the export path continues to ship the file even on a
+    pre-Layer-3 environment, just without verification."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return None
+        async with sf() as s:
+            try:
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS_LAYER3} FROM editor_drafts "
+                    "WHERE id = :i AND is_deleted = false"),
+                    {"i": draft_id})
+                r = row.fetchone()
+                if r is None:
+                    return None
+                return _draft_row(r)
+            except Exception:  # noqa: BLE001
+                # Pre-Layer-3 schema -- retry with legacy columns.
+                # The export path tolerates None on Layer-3 fields
+                # (verification short-circuits as 'no_value_manifest').
+                row = await s.execute(text(
+                    f"SELECT {_DRAFT_COLS} FROM editor_drafts "
+                    "WHERE id = :i AND is_deleted = false"),
+                    {"i": draft_id})
+                r = row.fetchone()
+                return _draft_row(r) if r is not None else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("editor_get_draft_layer3_failed", error=str(exc))
+        return None
 
 
 def _version_row(r: Any) -> dict[str, Any]:
@@ -233,6 +298,87 @@ async def update_audit_warnings(
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "editor_update_audit_warnings_failed", error=str(exc))
+        return False
+
+
+async def update_value_manifest(
+    draft_id: int, value_manifest: dict[str, Any] | None,
+    data_hash: str | None = None,
+) -> bool:
+    """Layer 3 (June 21 2026) -- persists the substitution-table
+    value manifest on the draft at generation time. Used by the
+    brief / deck / appendix generators after the editor draft is
+    created; the manifest is the authoritative reference the
+    export-time verification reads.
+
+    Also stores the generation data_hash on the draft (if the
+    column exists -- migration 057 may have added it; the UPDATE
+    silently no-ops the data_hash field on schemas without it via
+    a try/except fallback).
+
+    Fail-open: a write failure logs and returns False; the
+    document still ships, the export-time verification just
+    won't have a manifest to verify against."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return False
+        vm = json.dumps(value_manifest) if value_manifest else None
+        async with sf() as s:
+            # Try the path that includes data_hash first. The
+            # column was added by migration 057 alongside
+            # value_manifest, but a pre-057 column-set still
+            # works -- the inner except falls back to value-
+            # manifest-only.
+            try:
+                res = await s.execute(text(
+                    "UPDATE editor_drafts "
+                    "SET value_manifest = CAST(:vm AS JSONB), "
+                    "    data_hash = :dh, "
+                    "    updated_at = now() "
+                    "WHERE id = :i AND is_deleted = false"),
+                    {"vm": vm, "dh": data_hash, "i": draft_id})
+            except Exception:  # noqa: BLE001
+                res = await s.execute(text(
+                    "UPDATE editor_drafts "
+                    "SET value_manifest = CAST(:vm AS JSONB), "
+                    "    updated_at = now() "
+                    "WHERE id = :i AND is_deleted = false"),
+                    {"vm": vm, "i": draft_id})
+            await s.commit()
+            return res.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_update_value_manifest_failed", error=str(exc))
+        return False
+
+
+async def update_export_verification(
+    draft_id: int, verification: dict[str, Any] | None,
+) -> bool:
+    """Layer 3 -- persist the verify_export_against_cache result
+    on the draft after each export. Frontend status badges read
+    this on the next draft load (no per-card round-trip needed)."""
+    try:
+        from sqlalchemy import text
+        sf = _session()
+        if sf is None:
+            return False
+        ev = json.dumps(verification) if verification else None
+        async with sf() as s:
+            res = await s.execute(text(
+                "UPDATE editor_drafts "
+                "SET export_verification = CAST(:ev AS JSONB), "
+                "    updated_at = now() "
+                "WHERE id = :i AND is_deleted = false"),
+                {"ev": ev, "i": draft_id})
+            await s.commit()
+            return res.rowcount > 0
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "editor_update_export_verification_failed",
+            error=str(exc))
         return False
 
 
