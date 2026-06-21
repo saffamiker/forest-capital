@@ -189,19 +189,22 @@ class TestBriefSectionInjection:
         }
         out = _inject_brief_section_plan(specs, section_plan)
         assert len(out) == 2
-        # Each spec's task got the SECTION PLAN block prepended ahead
-        # of the original task content.
+        # Each spec's task gets the NUMERIC_PLACEHOLDER_GUIDE
+        # prepended (June 21 2026, Layer-1 substitution PR) followed
+        # by the SECTION PLAN block + the EXECUTIVE_VOICE_REQUIREMENT
+        # block. Pin the head + check both load-bearing headers
+        # survive so a future regression can't quietly drop either.
         for spec in out:
             assert spec["task"].startswith(
-                "SECTION PLAN (do not deviate):")
-            # PR-B (June 21 2026) replaced the inline "voice of a
-            # senior investment memo" one-liner with the full
-            # EXECUTIVE_VOICE_REQUIREMENT block (memo voice rules +
-            # prohibited phrases). Pin the new header so a future
-            # regression can't quietly remove it.
+                "DETERMINISTIC FIGURES REQUIREMENT:")
+            assert "SECTION PLAN (do not deviate):" in spec["task"]
             assert "VOICE AND AUDIENCE REQUIREMENT" in spec["task"]
             assert "senior investment professional addressing a CIO" \
                 in spec["task"]
+            # The token contract is the load-bearing instruction the
+            # substitution architecture relies on -- pin the verbatim
+            # placeholder name list head.
+            assert "{{OOS_SHARPE_BLEND}}" in spec["task"]
         # The original task content survives below the block.
         assert "ORIGINAL TASK A" in out[0]["task"]
         assert "ORIGINAL TASK B" in out[1]["task"]

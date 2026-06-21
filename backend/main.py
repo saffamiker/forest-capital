@@ -1193,6 +1193,182 @@ async def get_analytics_distribution(
     )
 
 
+@app.get("/api/v1/strategy-cache/key-metrics")
+@limiter.limit("30/minute")
+async def get_strategy_cache_key_metrics(
+    request: Request,
+    session: dict = Depends(require_auth),
+):
+    """Returns the key metrics from the current strategy cache,
+    organized for the Reports-page verification panel (June 21 2026).
+
+    The panel sits below the Generate Documents cards and gives Bob
+    a one-glance way to see every figure the brief and deck must
+    match. Every value is read directly from
+    strategy_results_cache for current_data_hash + the live CIO
+    recommendation overlay -- nothing computed inline, nothing
+    sourced from the brief or deck output.
+
+    Response shape:
+      {
+        "data_hash": "c421fb89",
+        "computed_at": "2026-06-21T...",
+        "available": bool,
+        "metrics": {
+          "strategy_performance": [{"label": "...", "value": "...",
+                                    "source": "strategy_cache"}],
+          "oos_metrics": [...],
+          "correlation_regime": [...],
+          "live_signal": [...]
+        }
+      }
+
+    Fail-open: a cold cache or missing CIO row returns
+    available=False with an empty metrics dict + a message; the
+    panel renders a "cache not yet warm" placeholder."""
+    try:
+        from tools.audit_assembler import current_data_hash
+        from tools.cache import get_latest_strategy_cache
+        from tools.cio_recommendation import get_latest_recommendation
+        from tools.numeric_substitution import (
+            format_corr, format_pct, format_sharpe,
+            format_months_from_days,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("key_metrics_imports_failed", error=str(exc))
+        return {
+            "data_hash": "", "available": False, "metrics": {},
+            "computed_at": None,
+            "message": "Cache helpers unavailable."}
+
+    try:
+        data_hash = await current_data_hash()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("key_metrics_hash_failed", error=str(exc))
+        data_hash = ""
+
+    try:
+        strategy_cache = await get_latest_strategy_cache() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("key_metrics_cache_failed", error=str(exc))
+        strategy_cache = {}
+
+    try:
+        cio_row = await get_latest_recommendation() or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("key_metrics_cio_failed", error=str(exc))
+        cio_row = {}
+
+    if not strategy_cache:
+        return {
+            "data_hash": (data_hash or "")[:8],
+            "available": False, "metrics": {},
+            "computed_at": None,
+            "message": (
+                "Strategy cache is empty -- run the backtester or "
+                "warm the cache first.")}
+
+    benchmark = strategy_cache.get("BENCHMARK") or {}
+    classic = strategy_cache.get("CLASSIC_60_40") or {}
+    regime = strategy_cache.get("REGIME_SWITCHING") or {}
+
+    # Pull validated_constants from the same module the brief uses
+    # so the OOS Sharpe figures shown on the panel match what the
+    # brief substitutes for {{OOS_SHARPE_BLEND}} /
+    # {{OOS_SHARPE_BENCHMARK}}.
+    try:
+        from tools.academic_deck import (
+            OOS_SHARPE_BENCHMARK, OOS_SHARPE_REGIME_CONDITIONAL,
+            CORRELATION_PRE_2022, CORRELATION_POST_2022,
+        )
+    except Exception:  # noqa: BLE001
+        OOS_SHARPE_REGIME_CONDITIONAL = None
+        OOS_SHARPE_BENCHMARK = None
+        CORRELATION_PRE_2022 = None
+        CORRELATION_POST_2022 = None
+
+    metrics = {
+        "strategy_performance": [
+            {"label": "Benchmark (S&P 500) full-period Sharpe",
+             "value": format_sharpe(benchmark.get("sharpe_ratio")),
+             "source": "strategy_cache.BENCHMARK.sharpe_ratio"},
+            {"label": "Classic 60/40 full-period Sharpe",
+             "value": format_sharpe(classic.get("sharpe_ratio")),
+             "source": "strategy_cache.CLASSIC_60_40.sharpe_ratio"},
+            {"label": "Regime Switching full-period Sharpe",
+             "value": format_sharpe(regime.get("sharpe_ratio")),
+             "source": "strategy_cache.REGIME_SWITCHING.sharpe_ratio"},
+            {"label": "Benchmark max drawdown",
+             "value": format_pct(benchmark.get("max_drawdown")),
+             "source": "strategy_cache.BENCHMARK.max_drawdown"},
+            {"label": "Classic 60/40 max drawdown",
+             "value": format_pct(classic.get("max_drawdown")),
+             "source": "strategy_cache.CLASSIC_60_40.max_drawdown"},
+            {"label": "Regime Switching max drawdown",
+             "value": format_pct(regime.get("max_drawdown")),
+             "source": "strategy_cache.REGIME_SWITCHING.max_drawdown"},
+            {"label": "Benchmark recovery",
+             "value": format_months_from_days(
+                 benchmark.get("drawdown_recovery_days")),
+             "source": (
+                 "strategy_cache.BENCHMARK.drawdown_recovery_days")},
+            {"label": "Regime Switching recovery",
+             "value": format_months_from_days(
+                 regime.get("drawdown_recovery_days")),
+             "source": (
+                 "strategy_cache.REGIME_SWITCHING."
+                 "drawdown_recovery_days")},
+        ],
+        "oos_metrics": [
+            {"label": "OOS window",
+             "value": "January 2022 through May 2026 (53 months)",
+             "source": "academic_deck.OOS window constant"},
+            {"label": "Blend OOS Sharpe",
+             "value": format_sharpe(OOS_SHARPE_REGIME_CONDITIONAL),
+             "source": (
+                 "academic_deck.OOS_SHARPE_REGIME_CONDITIONAL")},
+            {"label": "Benchmark OOS Sharpe",
+             "value": format_sharpe(OOS_SHARPE_BENCHMARK),
+             "source": "academic_deck.OOS_SHARPE_BENCHMARK"},
+        ],
+        "correlation_regime": [
+            {"label": "Pre-2022 equity-IG correlation",
+             "value": format_corr(CORRELATION_PRE_2022),
+             "source": "academic_deck.CORRELATION_PRE_2022"},
+            {"label": "Post-2022 equity-IG correlation",
+             "value": format_corr(CORRELATION_POST_2022),
+             "source": "academic_deck.CORRELATION_POST_2022"},
+        ],
+        "live_signal": [
+            {"label": "Current regime",
+             "value": str(cio_row.get("regime") or "—"),
+             "source": "cio_recommendation.regime"},
+            {"label": "Regime confidence",
+             "value": format_pct(
+                 (cio_row.get("confidence") or {}).get("probability")
+                 if isinstance(cio_row.get("confidence"), dict)
+                 else cio_row.get("confidence")),
+             "source": "cio_recommendation.confidence"},
+            {"label": "Current blend equity",
+             "value": format_pct(cio_row.get("implied_equity")),
+             "source": "cio_recommendation.implied_equity"},
+            {"label": "Current blend IG bonds",
+             "value": format_pct(cio_row.get("implied_ig")),
+             "source": "cio_recommendation.implied_ig"},
+            {"label": "Current blend HY bonds",
+             "value": format_pct(cio_row.get("implied_hy")),
+             "source": "cio_recommendation.implied_hy"},
+        ],
+    }
+
+    return {
+        "data_hash":   (data_hash or "")[:8] or "—",
+        "available":   True,
+        "computed_at": cio_row.get("computed_at"),
+        "metrics":     metrics,
+    }
+
+
 # ── Strategy characterisations (item 9) ───────────────────────────────────────
 
 
@@ -9956,7 +10132,9 @@ _MIDPOINT_S2_KEY_FINDINGS = (
 
 
 async def _generate_narratives(
-    specs: list[dict], *, n_strategies: int | None = None,
+    specs: list[dict], *,
+    n_strategies: int | None = None,
+    substitution_table: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """
     Generates a set of narrative sections concurrently.
@@ -9972,6 +10150,13 @@ async def _generate_narratives(
     (it counts the cache, not the section). Threaded through to
     harness_narrative once per spec so the chart-vision scope sentences
     render the precise count instead of the count-omitted fallback.
+
+    substitution_table -- the {token -> value} map produced by
+    tools.numeric_substitution.get_substitution_table. When supplied,
+    threaded through to every per-section harness_narrative call so
+    the post-Sonnet text is substituted before the evaluator scores
+    it. None preserves legacy behaviour for callers that don't yet
+    pass the table (Layer-2 PR wires the deck + appendix paths).
     """
     import asyncio
 
@@ -9986,7 +10171,8 @@ async def _generate_narratives(
             continue
         jobs.append((spec["key"], asyncio.to_thread(
             harness_narrative, spec["agent_id"], spec["task"], spec["context"],
-            n_strategies=n_strategies)))
+            n_strategies=n_strategies,
+            substitution_table=substitution_table)))
     if jobs:
         results = await asyncio.gather(*[j for _, j in jobs],
                                        return_exceptions=True)
@@ -10820,9 +11006,72 @@ async def _generate_brief_document(
         section_plan = await _resolve_story_plan_brief_sections(data)
         if section_plan:
             specs = _inject_brief_section_plan(specs, section_plan)
+
+        # June 21 2026 -- numeric substitution architecture. Build
+        # the {token -> cache-value} substitution table once per
+        # data_hash and thread it through every per-section
+        # harness_narrative call. The Sonnet writer emits placeholders
+        # ({{OOS_SHARPE_BLEND}} etc); the platform substitutes
+        # verified cache values before the evaluator sees the prose
+        # and before the .docx assembler reads it. Fail-open: any
+        # error returns None and the per-section path runs without
+        # substitution (the existing audit checks still fire on the
+        # raw Sonnet output, so the failure mode is a degraded brief
+        # rather than a missing brief).
+        substitution_table: dict[str, str] | None = None
+        try:
+            from tools.audit_assembler import current_data_hash
+            from tools.cio_recommendation import get_latest_recommendation
+            from tools.numeric_substitution import get_substitution_table
+            constants = (data.get("validated_constants") or {}) or {}
+            rolling = data.get("rolling_correlation") or {}
+            data_hash = await current_data_hash()
+            cio_row = await get_latest_recommendation()
+            substitution_table = get_substitution_table(
+                data_hash or "",
+                data.get("strategy_results") or {},
+                cio_row,
+                oos_sharpe_blend=constants.get(
+                    "oos_sharpe_regime_conditional"),
+                oos_sharpe_benchmark=constants.get(
+                    "oos_sharpe_benchmark"),
+                pre_2022_eq_ig_correlation=rolling.get("pre_2022"),
+                post_2022_eq_ig_correlation=rolling.get("post_2022"),
+                study_months=(data.get("study_period") or {}).get(
+                    "n_months"))
+            log.info("substitution_table_built",
+                     document_type="executive_brief",
+                     data_hash=(data_hash or "")[:8],
+                     tokens_available=len(substitution_table))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("substitution_table_build_failed",
+                        document_type="executive_brief",
+                        error=str(exc))
+
         narratives = await _generate_narratives(
             _apply_draft_caveats(specs),
-            n_strategies=len(data.get("strategy_results") or {}))
+            n_strategies=len(data.get("strategy_results") or {}),
+            substitution_table=substitution_table)
+
+        # Substitution-architecture summary log. Operators read this
+        # in Render logs to confirm the determinism layer fired
+        # correctly. Zero unresolved_placeholders + zero raw_numerics
+        # is the green state.
+        if substitution_table is not None:
+            try:
+                from tools.numeric_substitution import (
+                    unresolved_placeholders,
+                )
+                joined_text = "\n".join(narratives.values())
+                unresolved = unresolved_placeholders(joined_text)
+                log.info("substitution_complete",
+                         document_type="executive_brief",
+                         tokens_available=len(substitution_table),
+                         unresolved_placeholders=unresolved,
+                         unresolved_count=len(unresolved))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("substitution_summary_failed",
+                            error=str(exc))
         docx_bytes = await asyncio.to_thread(
             build_executive_brief, data, narratives)
 
@@ -11845,22 +12094,74 @@ async def _resolve_story_plan_brief_sections(
     return section_plan if isinstance(section_plan, dict) else {}
 
 
+# June 21 2026 -- numeric substitution placeholder guide. Prepended
+# to every per-section task by _inject_brief_section_plan so the
+# Sonnet writer uses {{TOKEN}} placeholders instead of raw figures.
+# The platform substitutes verified cache values after generation
+# (see tools/numeric_substitution.py + the substitution wrapper in
+# tools/academic_export.harness_narrative). Tokens listed here are
+# the BRIEF-side subset of the table; deck + appendix variants ship
+# in the Layer-2 PR alongside their substitution call-sites.
+_NUMERIC_PLACEHOLDER_GUIDE = (
+    "DETERMINISTIC FIGURES REQUIREMENT:\n"
+    "Never write raw numbers for performance metrics, correlations, "
+    "or Sharpe ratios. Use these exact placeholder tokens -- the "
+    "platform substitutes verified cache values after generation.\n\n"
+    "Available placeholders (brief subset):\n"
+    "  {{OOS_SHARPE_BLEND}} -- blend out-of-sample Sharpe\n"
+    "  {{OOS_SHARPE_BENCHMARK}} -- benchmark OOS Sharpe (same window)\n"
+    "  {{OOS_SHARPE_IMPROVEMENT_PCT}} -- % improvement over benchmark\n"
+    "  {{OOS_WINDOW}} -- the OOS window date range\n"
+    "  {{OOS_WINDOW_MONTHS}} -- months in OOS window\n"
+    "  {{REGIME_SWITCHING_SHARPE}} -- full-period Sharpe\n"
+    "  {{BENCHMARK_SHARPE}} -- benchmark full-period Sharpe\n"
+    "  {{CLASSIC_6040_SHARPE}} -- 60/40 full-period Sharpe\n"
+    "  {{REGIME_SWITCHING_MAX_DD}} -- peak drawdown\n"
+    "  {{BENCHMARK_MAX_DD}} -- benchmark peak drawdown\n"
+    "  {{CLASSIC_6040_MAX_DD}} -- 60/40 peak drawdown\n"
+    "  {{DD_REDUCTION_REGIME_SWITCHING}} -- drawdown reduction (pp)\n"
+    "  {{REGIME_SWITCHING_RECOVERY}} -- recovery months\n"
+    "  {{BENCHMARK_RECOVERY}} -- benchmark recovery months\n"
+    "  {{PRE_2022_EQ_IG_CORR}} -- pre-2022 equity-IG correlation\n"
+    "  {{POST_2022_EQ_IG_CORR}} -- post-2022 equity-IG correlation\n"
+    "  {{REGIME_SWITCHING_POST2022_SHARPE}} -- post-2022 sub-period\n"
+    "  {{BENCHMARK_POST2022_SHARPE}} -- benchmark post-2022\n"
+    "  {{CURRENT_REGIME}} -- live HMM regime classification\n"
+    "  {{REGIME_CONFIDENCE}} -- posterior confidence\n"
+    "  {{CURRENT_EQUITY_PCT}} -- current implied equity weight\n"
+    "  {{STUDY_MONTHS}} -- total study period months\n"
+    "  {{STUDY_START}} / {{STUDY_END}} -- period dates\n\n"
+    "CORRECT: \"The blend achieved {{OOS_SHARPE_BLEND}} versus "
+    "{{OOS_SHARPE_BENCHMARK}} for the benchmark.\"\n"
+    "WRONG: \"The blend achieved 1.24 versus 0.73.\"\n"
+    "WRONG: \"The blend achieved approximately 1.2.\"\n"
+    "WRONG: \"[[VERIFY: confirm the OOS Sharpe figure]]\"\n\n"
+    "If you need a figure not in this list, write around it "
+    "qualitatively rather than inventing or flagging it. The "
+    "post-generation audit flags any surviving {{TOKEN}} as an "
+    "unresolved_placeholder; if your token name isn't in the table "
+    "above, it will surface as an audit failure.\n\n"
+)
+
+
 def _inject_brief_section_plan(
     specs: list[dict], section_plan: dict,
 ) -> list[dict]:
     """Prepend each spec's task with the locked section plan entry
     for that spec's key plus the executive-voice + anti-AI writing
-    rules (EXECUTIVE_VOICE_REQUIREMENT, threaded in June 21 2026).
-    The injection is a no-op for any spec whose key has no entry in
-    the plan (defensive against a partial plan).
+    rules (EXECUTIVE_VOICE_REQUIREMENT, threaded in June 21 2026)
+    plus the numeric-substitution placeholder guide (Layer-1
+    substitution PR, also June 21 2026). The injection is a no-op
+    for any spec whose key has no entry in the plan (defensive
+    against a partial plan).
 
-    Why thread EXECUTIVE_VOICE_REQUIREMENT here too instead of only
-    in the Pass-1 system prompt: each per-section Sonnet call is its
-    own conversation -- the system prompt + the spec.task. The Pass-1
-    arbiter writes the locked plan, but the per-section writer does
-    not see Pass 1's system prompt. Without the voice rules in
-    spec.task, Sonnet drifts back to its measured academic default
-    even with a memo-voice key_message in front of it.
+    Why thread EXECUTIVE_VOICE_REQUIREMENT + _NUMERIC_PLACEHOLDER_GUIDE
+    here too instead of only in the Pass-1 system prompt: each per-
+    section Sonnet call is its own conversation -- the system prompt
+    + the spec.task. The Pass-1 arbiter writes the locked plan, but
+    the per-section writer does not see Pass 1's system prompt.
+    Without the rules in spec.task, Sonnet drifts back to its
+    measured academic default + ignores the placeholder contract.
     """
     import json as _json
     from tools.story_plan import EXECUTIVE_VOICE_REQUIREMENT
@@ -11875,9 +12176,11 @@ def _inject_brief_section_plan(
             continue
         anchors = entry.get("numeric_anchors") or {}
         block = (
-            "SECTION PLAN (do not deviate):\n"
+            _NUMERIC_PLACEHOLDER_GUIDE
+            + "SECTION PLAN (do not deviate):\n"
             f"  Key message: {entry.get('key_message', '')}\n"
-            "  Numeric anchors (use ONLY these values):\n"
+            "  Numeric anchors (use ONLY these values; values may be "
+            "{{TOKEN}} placeholders that the platform substitutes):\n"
             f"{_json.dumps(anchors, indent=4, default=str)}\n"
             f"  Target length: {entry.get('target_length_words', '')}"
             " words\n\n"

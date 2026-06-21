@@ -30,6 +30,7 @@ import {
 import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
+import KeyMetricsPanel from '../components/KeyMetricsPanel'
 import { ReportReadinessBanner } from '../components/ReportReadinessIndicator'
 import SubmissionGuidePanel from '../components/SubmissionGuides'
 import TeamGate from '../components/TeamGate'
@@ -118,6 +119,13 @@ export default function Reports() {
         data-section-label="Generate Documents">
         <DocumentGenerationPanel />
       </div>
+
+      {/* Key Metrics -- Cache Verified (June 21 2026). Reads
+          /api/v1/strategy-cache/key-metrics on expand. Sits between
+          the generation cards and the team activity feed so Bob can
+          confirm any figure in his draft against the cache without
+          leaving the page. Collapsed by default. */}
+      <KeyMetricsPanel />
 
       {/* Team Activity — the evidence behind the Roles & Division-of-Labor
           deliverable and the AI-use narrative, so it leads the page.

@@ -489,6 +489,15 @@ def harness_narrative(
     # citations, with negligible cost overhead (Sonnet is per-token).
     max_tokens: int = 1500,
     n_strategies: int | None = None,
+    # June 21 2026 -- numeric substitution architecture. When the
+    # caller passes a {token -> value} table, every call_claude
+    # response is run through apply_substitutions BEFORE the harness
+    # evaluator scores it. The evaluator sees real numbers (the
+    # values the human reader will read), not raw tokens. None
+    # preserves the pre-substitution behaviour for the midpoint /
+    # appendix / deck callers that haven't been wired through yet
+    # (those wire in the Layer-2 PR).
+    substitution_table: dict[str, str] | None = None,
 ) -> str:
     """
     Generates one section of academic prose through the Academic Writer
@@ -591,15 +600,41 @@ def harness_narrative(
                      note="proceeding without visual context")
 
         harness = GeneratorEvaluatorHarness()
+
+        # Substitution wrapper around the generator. When a
+        # substitution_table is supplied, every Sonnet response is
+        # post-processed through apply_substitutions before being
+        # returned to the harness. That means the evaluator (and the
+        # downstream caller / .docx assembler) only ever sees
+        # substituted text -- structurally impossible to evaluate or
+        # render the raw {{TOKEN}} placeholders.
+        def _substituting_generator(prompt: str) -> str:
+            raw = call_claude(
+                SONNET_MODEL, _SYSTEM_PROMPT, prompt,
+                max_tokens=max_tokens,
+                tools=[WEB_SEARCH_TOOL],
+                visual_context=visual_context,
+                trigger="document_export_narrative")
+            if substitution_table is None:
+                return raw
+            from tools.numeric_substitution import apply_substitutions
+            substituted, replaced = apply_substitutions(
+                raw, substitution_table)
+            log.info("numeric_substitution_applied",
+                     agent_id=agent_id,
+                     tokens_replaced=replaced,
+                     count=len(replaced))
+            return substituted
+
+        # _substituting_generator handles BOTH the no-substitution
+        # (returns raw) and the with-substitution path -- always
+        # passing it keeps the harness.run call shape stable
+        # regardless of caller.
         result = harness.run(
             # Web search is enabled so the section can cite verified
             # external literature for its key findings (see EXTERNAL
             # CITATIONS in the academic writer's system prompt).
-            generator_fn=lambda prompt: call_claude(
-                SONNET_MODEL, _SYSTEM_PROMPT, prompt, max_tokens=max_tokens,
-                tools=[WEB_SEARCH_TOOL],
-                visual_context=visual_context,
-                trigger="document_export_narrative"),
+            generator_fn=_substituting_generator,
             evaluator_prompt=primary_evaluator,
             # Audience-aware second pass — every document section
             # (midpoint paper, executive brief, deck narrative) is also
