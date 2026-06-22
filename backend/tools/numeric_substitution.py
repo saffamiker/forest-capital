@@ -640,12 +640,21 @@ def _append_per_strategy_tokens(
             if not name:
                 continue
             upper = str(name).upper().replace(" ", "_")
+            # Field names MUST match what tools.analytics.factor_loadings
+            # actually writes -- it emits `alpha_annualized`, `mkt_rf`,
+            # `smb`, `hml`, `r_squared` (the raw statsmodels OLS
+            # parameter names, with alpha multiplied by _ANN for the
+            # annualized rate). The previous list used the conceptual
+            # names (`alpha`, `beta`, `smb_beta`, `hml_beta`) which the
+            # analytics never writes, so .get() returned None for four
+            # of five fields and the tokens rendered em-dash; only
+            # r_squared matched and resolved correctly.
             for metric_key, suffix in (
-                ("alpha",     "ALPHA"),
-                ("beta",      "BETA"),
-                ("smb_beta",  "SMB_BETA"),
-                ("hml_beta",  "HML_BETA"),
-                ("r_squared", "R_SQUARED"),
+                ("alpha_annualized", "ALPHA"),
+                ("mkt_rf",           "BETA"),
+                ("smb",              "SMB_BETA"),
+                ("hml",              "HML_BETA"),
+                ("r_squared",        "R_SQUARED"),
             ):
                 token = f"{{{{{upper}_{suffix}}}}}"
                 v = row.get(metric_key)

@@ -180,19 +180,27 @@ class TestGap2FactorLoadings:
         """Supplying factor_loadings via get_substitution_table
         emits per-strategy ALPHA / BETA / SMB_BETA / HML_BETA /
         R_SQUARED tokens. The appendix Section E table cites
-        these directly."""
+        these directly.
+
+        Field names in the input rows match what
+        tools.analytics.factor_loadings actually writes
+        (alpha_annualized / mkt_rf / smb / hml / r_squared --
+        the raw statsmodels OLS param names with _annualized
+        applied to alpha). The token resolver was previously
+        reading the conceptual names (alpha / beta / smb_beta /
+        hml_beta) which never matched real analytics output."""
         from tools.numeric_substitution import get_substitution_table
         fl_rows = [
             {
                 "strategy": "REGIME_SWITCHING",
-                "alpha": 0.0045, "beta": 0.6669,
-                "smb_beta": 0.1234, "hml_beta": -0.0567,
+                "alpha_annualized": 0.0045, "mkt_rf": 0.6669,
+                "smb": 0.1234, "hml": -0.0567,
                 "r_squared": 0.9328,
             },
             {
                 "strategy": "BENCHMARK",
-                "alpha": 0.0, "beta": 1.0,
-                "smb_beta": 0.0, "hml_beta": 0.0,
+                "alpha_annualized": 0.0, "mkt_rf": 1.0,
+                "smb": 0.0, "hml": 0.0,
                 "r_squared": 1.0,
             },
         ]
@@ -493,6 +501,50 @@ class TestGetSubstitutionTableCacheKey:
         from tools import numeric_substitution
         assert hasattr(numeric_substitution, "_CACHE_VERSION")
         assert numeric_substitution._CACHE_VERSION >= 2
+
+    def test_factor_loadings_field_names_match_analytics_output(self):
+        """Pre-fix, _append_per_strategy_tokens read row.get('alpha'),
+        row.get('beta'), row.get('smb_beta'), row.get('hml_beta').
+        But analytics.factor_loadings writes the raw statsmodels OLS
+        param names plus _annualized for alpha:
+            alpha_annualized, mkt_rf, smb, hml, r_squared
+        Only r_squared matched -- the other four tokens rendered as
+        em-dash on every document even after the cache-key fix.
+
+        This test pins the field-name contract against the actual
+        analytics output shape so a future rename in either direction
+        breaks this test rather than silently rendering em-dashes."""
+        from tools.numeric_substitution import (
+            clear_substitution_cache, get_substitution_table,
+        )
+        clear_substitution_cache()
+        # Use the exact shape that tools.analytics.factor_loadings
+        # emits (see backend/tools/analytics.py:697-728).
+        strategy_cache = {
+            "BENCHMARK": {
+                "strategy_name": "BENCHMARK",
+                "sharpe_ratio": 0.5,
+            },
+        }
+        table = get_substitution_table(
+            "h", strategy_cache, None,
+            factor_loadings=[{
+                "strategy": "BENCHMARK",
+                "model": "carhart_4factor",
+                "alpha_annualized": 0.0123,
+                "mkt_rf": 0.5500,
+                "smb": 0.1000,
+                "hml": -0.0300,
+                "r_squared": 0.9400,
+                "n_months": 287,
+            }])
+        # All five tokens should resolve to formatted 4dp decimals,
+        # NOT em-dash. Pre-fix the first four would have been em-dash.
+        assert table["{{BENCHMARK_ALPHA}}"] == "0.0123"
+        assert table["{{BENCHMARK_BETA}}"] == "0.5500"
+        assert table["{{BENCHMARK_SMB_BETA}}"] == "0.1000"
+        assert table["{{BENCHMARK_HML_BETA}}"] == "-0.0300"
+        assert table["{{BENCHMARK_R_SQUARED}}"] == "0.9400"
 
     def test_cache_key_helper_includes_version_and_fingerprint(self):
         """_cache_key returns a tuple whose first element is the

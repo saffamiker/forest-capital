@@ -10638,6 +10638,7 @@ async def get_data_reference_sheet(
     from tools.cache import (
         get_latest_strategy_cache,
         get_latest_strategy_hash,
+        get_monthly_returns,
         get_regime_cache,
     )
     from tools.cio_recommendation import (
@@ -10713,6 +10714,23 @@ async def get_data_reference_sheet(
     except Exception as exc:  # noqa: BLE001
         log.warning("data_reference_regime_cache_failed",
                     error=str(exc))
+    # June 22 2026 -- Gap C wiring. {{STUDY_MONTHS}} reads from
+    # the `study_months` kwarg; falls back to
+    # strategy_cache.get("n_observations") which the cache shape
+    # does NOT carry, so the token rendered em-dash on this
+    # endpoint. Brief / appendix / deck callsites get the count
+    # from data.study_period.n_months via gather_document_data;
+    # this endpoint reads it directly from the monthly returns
+    # length, the same source gather_document_data uses.
+    study_months_value: int | None = None
+    try:
+        monthly = await get_monthly_returns()
+        study_months_value = len((monthly or {}).get("dates") or [])
+        if study_months_value == 0:
+            study_months_value = None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_monthly_returns_failed",
+                    error=str(exc))
     # June 22 2026 (wiring fix) -- read factor loadings from the
     # academic_analytics cache payload, not from a live
     # an.factor_loadings(strategy_cache, []) call. The live
@@ -10760,6 +10778,9 @@ async def get_data_reference_sheet(
         _kwargs["oos_window_pct_of_study"] = OOS_WINDOW_PCT_OF_STUDY
     if "live_signals" in _sig.parameters:
         _kwargs["live_signals"] = live_signals
+    if "study_months" in _sig.parameters \
+            and study_months_value is not None:
+        _kwargs["study_months"] = study_months_value
     # June 22 2026 (wiring fix) -- thread the three analytics
     # metric sources so pre/post 2022 Sharpe, factor loadings,
     # and cost-sensitivity tokens resolve from the right cache.
@@ -10783,6 +10804,34 @@ async def get_data_reference_sheet(
         log.warning("data_reference_metric_sources_failed",
                     error=str(exc))
         rc_rows, fl_rows, cs_payload = [], [], None
+    # June 22 2026 -- Gap A diagnostic. After PR #379 wired the
+    # live_signals / implied_allocation / cio_row kwargs through
+    # correctly, the user reported CURRENT_*_PCT / BLEND_*_WT /
+    # VIX/CREDIT/YIELD/EQUITY_TREND_CURRENT tokens STILL rendering
+    # em-dash. This log answers in one line whether the underlying
+    # fetches actually returned data on Render or whether they
+    # came back None (cold cio_recommendations / regime_signals
+    # tables). If has_* are all False, the operator must warm the
+    # caches via admin refresh before reloading the reference
+    # sheet -- not a wiring bug.
+    log.info(
+        "data_reference_kwarg_shape",
+        has_cio_row=bool(cio_row),
+        cio_row_keys=sorted(cio_row.keys())[:10] if cio_row else [],
+        has_blend_weights=bool(
+            cio_row and cio_row.get("blend_weights")),
+        has_implied_alloc=bool(implied_alloc),
+        implied_alloc_keys=sorted(implied_alloc.keys())[:5]
+            if implied_alloc else [],
+        has_live_signals=bool(live_signals),
+        live_signals_keys=sorted(live_signals.keys())[:8]
+            if live_signals else [],
+        study_months_value=study_months_value,
+        n_rc_rows=len(rc_rows or []),
+        n_fl_rows=len(fl_rows or []),
+        cs_n_scenarios=(
+            len((cs_payload or {}).get("scenarios") or [])),
+    )
     table = get_substitution_table(
         strategy_hash, strategy_cache, cio_row, **_kwargs)
 
