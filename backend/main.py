@@ -10648,7 +10648,10 @@ async def get_data_reference_sheet(
         expand_per_strategy_appendix_metrics,
         expand_per_strategy_factor_loadings,
     )
-    from tools.numeric_substitution import get_substitution_table
+    from tools.numeric_substitution import (
+        build_substitution_table,
+        get_substitution_table,
+    )
     from tools.academic_deck import (
         OOS_SHARPE_REGIME_CONDITIONAL,
         OOS_SHARPE_BENCHMARK,
@@ -10733,8 +10736,19 @@ async def get_data_reference_sheet(
     # that PR lands. Inspect the signature once and forward only
     # the kwargs the current implementation accepts so the
     # endpoint stays 200 regardless of merge order.
+    #
+    # MUST inspect build_substitution_table, NOT get_substitution_table.
+    # The wrapper accepts the analytics kwargs only via **kwargs: Any
+    # so its `signature.parameters` dict does NOT contain
+    # `regime_conditional`, `factor_loadings`, etc. -- inspecting it
+    # would make every "in _sig.parameters" check below evaluate False
+    # and silently drop 5 kwargs (the original bug that left every
+    # token from PR #374 + the live-signals/study-pct tokens from
+    # PR #370 resolving to em-dash on the data reference sheet).
+    # build_substitution_table lists every kwarg explicitly so the
+    # signature check matches the kwargs it actually accepts.
     import inspect
-    _sig = inspect.signature(get_substitution_table)
+    _sig = inspect.signature(build_substitution_table)
     _kwargs = {
         "oos_sharpe_blend": OOS_SHARPE_REGIME_CONDITIONAL,
         "oos_sharpe_benchmark": OOS_SHARPE_BENCHMARK,
