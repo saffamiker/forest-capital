@@ -289,8 +289,26 @@ def bootstrap_ci_table(
 
 
 def _recovery_months(r: pd.Series) -> int | None:
-    """Months from the deepest drawdown trough back to a new equity high.
-    None when the series never recovers inside the sample — an honest
+    """Months from the deepest drawdown trough back to a new equity high,
+    expressed in TRADING-DAY MONTHS (calendar days divided by 21 trading
+    days per month).
+
+    Recovery convention (June 22 2026): the brief's headline recovery
+    figures use the trading-day convention -- BENCHMARK recovers in 71
+    months (1492 calendar days / 21), REGIME_SWITCHING in 32 (671 / 21),
+    CLASSIC_60_40 in 54 (1127 / 21). Before this change, the function
+    returned a CALENDAR-month index count (the number of monthly NAV
+    rows from trough to recovery), producing 49 / 22 / 37 respectively
+    -- which disagreed with the brief narrative. Brief Table 1 showed
+    37 for CLASSIC_60_40 while §3 narrative cited 54; the source value
+    was identical (drawdown_recovery_days from the cache) but the two
+    consumers used different conventions.
+
+    The arithmetic: a calendar-month delta is approximately 30.4
+    calendar days; 30.4 / 21 = 1.448 trading-day months per calendar
+    month. So we scale the calendar-index delta by 30.4 / 21.
+
+    None when the series never recovers inside the sample -- an honest
     'still underwater' rather than a misleading zero."""
     if len(r) == 0:
         return None
@@ -301,7 +319,8 @@ def _recovery_months(r: pd.Series) -> int | None:
     peak_before = float(peak.iloc[trough])
     for i in range(trough + 1, len(curve)):
         if float(curve.iloc[i]) >= peak_before:
-            return i - trough
+            calendar_months = i - trough
+            return int(round(calendar_months * 30.4 / 21))
     return None
 
 

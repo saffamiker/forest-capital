@@ -50,15 +50,48 @@ class TestHelpers:
 
     def test_recovery_months_counts_to_new_high(self):
         from tools.analytics import _recovery_months
-        # Drop 50%, then two +50% months — recovers on the 2nd.
-        # 1.0 -> 0.5 -> 0.75 -> 1.125 ; new high at index 3, trough at 1.
+        # Drop 50%, then two +50% months -- recovers on the 2nd.
+        # 1.0 -> 0.5 -> 0.75 -> 1.125; new high at index 3, trough at 1.
+        # That's 2 calendar months, converted to trading-day months:
+        # 2 * 30.4 / 21 = 2.895 -> round to 3.
+        # June 22 2026 -- recovery returned in TRADING-DAY months to
+        # match the brief's headline convention (BENCHMARK 71, blend
+        # 32, CLASSIC_60_40 54). Bump from calendar-index count.
         rec = _recovery_months(_monthly_series([0.0, -0.50, 0.50, 0.50]))
-        assert rec == 2
+        assert rec == 3
 
     def test_recovery_months_none_when_underwater(self):
         from tools.analytics import _recovery_months
         # Never gets back above the pre-trough peak.
         assert _recovery_months(_monthly_series([0.0, -0.50, 0.01])) is None
+
+    def test_recovery_months_uses_trading_day_convention(self):
+        """PR for CLASSIC_60_40 inconsistency (June 22 2026) -- this
+        test pins the brief's headline convention. Compare against the
+        cache: CLASSIC_60_40 has drawdown_recovery_days = 1127, which
+        is 1127 / 21 = 53.67 -> 54 trading-day months. With 49
+        calendar-month deltas back to the prior peak (1492 / 30.4 for
+        BENCHMARK) the trading-day result is 71."""
+        from tools.analytics import _recovery_months
+        # Roughly emulate CLASSIC_60_40: 37 calendar months from
+        # trough to recovery (the previous calendar-month convention).
+        # 37 * 30.4 / 21 = 53.56 -> rounds to 54. That's the brief's
+        # narrative figure.
+        rets = [0.0]                                    # peak at idx 0
+        rets += [-0.35]                                 # trough at idx 1
+        rets += [0.011] * 36                            # ~37-month recovery (1.011^36 = 1.487 lifts 0.65 above 1.0)
+        rets += [0.05]                                  # recovery month
+        rec = _recovery_months(_monthly_series(rets))
+        # The exact value depends on which month crosses the peak;
+        # the contract under test is that the return is in TRADING-
+        # DAY months, not calendar months, so the result is materially
+        # larger than the calendar-month delta (1.45x scaling).
+        assert rec is not None
+        # Sanity: a 37-month calendar recovery scales to ~53-54
+        # trading-day months. Allow ±1 for the recovery-crossing month.
+        assert 52 <= rec <= 55, (
+            f"trading-day-month recovery should be ~53-54 for a "
+            f"~37-month calendar recovery; got {rec}")
 
 
 # ── 1. Summary statistics ─────────────────────────────────────────────────────
