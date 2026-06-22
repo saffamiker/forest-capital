@@ -301,7 +301,11 @@ async def _section_analytics_snapshot() -> DigestSection:
     except Exception as exc:  # noqa: BLE001
         log.warning("digest_blend_weights_read_failed", error=str(exc))
 
-    # Locked academic OOS Sharpe — Dec 2025 data lock.
+    # Locked academic OOS Sharpe -- December 2025 academic
+    # submission lock. The panel defense and the brief / deck /
+    # appendix OOS headlines all reference these specific values;
+    # the Council Performance Record page shows them side by side
+    # with the live full-period figures.
     try:
         from tools.academic_deck import (
             OOS_SHARPE_REGIME_CONDITIONAL,
@@ -310,6 +314,9 @@ async def _section_analytics_snapshot() -> DigestSection:
         oos_blend = OOS_SHARPE_REGIME_CONDITIONAL
         oos_bench = OOS_SHARPE_BENCHMARK
     except Exception:  # noqa: BLE001
+        # Fallback matches the December 2025 academic submission
+        # lock so the digest stays consistent with the record on
+        # a cold deploy.
         oos_blend = 0.86
         oos_bench = 0.43
 

@@ -158,10 +158,12 @@ def build_substitution_table(
     post_2022_eq_ig_correlation: float | None = None,
     oos_window_definition: str = "January 2022 through May 2026",
     oos_window_months: int = 53,
+    oos_window_pct_of_study: float | None = None,
     study_months: int | None = None,
     study_start: str = "July 2002",
     study_end: str = "May 2026",
     implied_allocation: dict | None = None,
+    live_signals: dict | None = None,
 ) -> dict[str, str]:
     """Build the deterministic {token -> value} substitution table
     from verified cache values.
@@ -206,6 +208,11 @@ def build_substitution_table(
     classic = _get_strategy(strategy_cache, "CLASSIC_60_40")
     regime = _get_strategy(strategy_cache, "REGIME_SWITCHING")
     cio = cio_recommendation or {}
+    # June 22 2026 -- live_signals carries the regime_signals_cache
+    # payload (vix_level / credit_spread / yield_curve_slope /
+    # equity_trend / etc). Falls back to {} so the watchpoint tokens
+    # render em-dash on a cold environment rather than raising.
+    ls = live_signals or {}
 
     # OOS improvement percentage: (blend / benchmark - 1) * 100.
     # Only compute when both inputs are real numbers; otherwise the
@@ -315,6 +322,17 @@ def build_substitution_table(
             (cio.get("confidence") or {}).get("probability")
             if isinstance(cio.get("confidence"), dict)
             else cio.get("confidence")),
+
+        # ── OOS window share of full study ─────────────────────────
+        # June 22 2026 (Path A) -- prompts that hardcoded "14%"
+        # against a 40-month OOS window are now tokenized. The
+        # default OOS_WINDOW_PCT_OF_STUDY = 18.5 (53/287) when the
+        # kwarg isn't supplied so a cold cache still renders a
+        # plausible value rather than em-dash.
+        "{{OOS_WINDOW_PCT_OF_STUDY}}": (
+            f"{oos_window_pct_of_study:.1f}"
+            if isinstance(oos_window_pct_of_study, (int, float))
+            else "18.5"),
         # Implied-allocation tokens. Earlier versions of this table
         # read `cio.implied_equity` / `cio.implied_ig` / `cio.implied_hy`
         # -- those fields don't exist on the CIO recommendation row
@@ -384,21 +402,34 @@ def build_substitution_table(
         "{{CVAR_99_BENCHMARK}}": format_pct(
             benchmark.get("cvar_99_annualized")),
 
-        # Live watch points (Slide 7 macro context). VIX / OAS / yield
-        # curve / equity trend are populated by the regime_signals_cache
-        # warm path; ESS by the ESS computation in cio_recommendation.
-        # When cold, the str() fallback prevents a KeyError but renders
-        # an em dash for the operator to spot.
+        # Live watch points (Slide 7 macro context). June 22 2026 --
+        # rewired to read from the live_signals kwarg (populated by
+        # the caller from regime_signals_cache) instead of from
+        # strategy_cache. The strategy cache never carried these
+        # fields, so the previous lookups silently resolved to
+        # em-dash for every deck generation.
+        #
+        # Field-name mapping from regime_signals_cache (cache.py:670):
+        #   vix_level             -> {{VIX_CURRENT}}
+        #   credit_spread         -> {{CREDIT_SPREAD_CURRENT}}
+        #   yield_curve_slope     -> {{YIELD_CURVE_CURRENT}}
+        #   equity_trend          -> {{EQUITY_TREND_CURRENT}}
+        #
+        # ESS is NOT in regime_signals_cache -- it lives on the CIO
+        # recommendation (cio.confidence.ess). Sourced separately.
         "{{VIX_CURRENT}}": str(
-            strategy_cache.get("vix_current") or "—"),
+            ls.get("vix_level") or "—"),
         "{{CREDIT_SPREAD_CURRENT}}": str(
-            strategy_cache.get("hy_oas_current") or "—"),
+            ls.get("credit_spread") or "—"),
         "{{YIELD_CURVE_CURRENT}}": str(
-            strategy_cache.get("yield_curve_current") or "—"),
+            ls.get("yield_curve_slope") or "—"),
         "{{EQUITY_TREND_CURRENT}}": format_pct(
-            strategy_cache.get("equity_trend_current")),
+            ls.get("equity_trend")),
         "{{ESS_CURRENT}}": str(
-            strategy_cache.get("kish_ess") or "—"),
+            (cio.get("confidence") or {}).get("ess")
+            if isinstance(cio.get("confidence"), dict)
+            else cio.get("ess")
+            or "—"),
 
         # Live blend composition (slide 7 + slide 11). The CIO row
         # carries blend_weights as a dict {strategy -> weight}; we

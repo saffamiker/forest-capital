@@ -473,9 +473,16 @@ class TestDeckSpecificTokens:
         assert table["{{PLAY_BY_PLAY_TOTAL}}"] == "9"
 
     def test_live_watch_point_tokens_em_dash_on_cold_cache(self):
+        """June 22 2026 (PR A) -- the 5 watchpoint tokens read from
+        the new live_signals kwarg (populated from
+        regime_signals_cache) instead of the strategy_cache. When
+        live_signals is None AND the cio has no ess field, all
+        five resolve to em-dash."""
         from tools.numeric_substitution import build_substitution_table
+        cio_no_ess = {"regime": "BULL"}  # no confidence dict
         table = build_substitution_table(
-            _fake_cache(), _fake_cio(), data_hash="x")
+            _fake_cache(), cio_no_ess, data_hash="x",
+            live_signals=None)
         assert table["{{VIX_CURRENT}}"] == "—"
         assert table["{{CREDIT_SPREAD_CURRENT}}"] == "—"
         assert table["{{YIELD_CURVE_CURRENT}}"] == "—"
@@ -483,19 +490,28 @@ class TestDeckSpecificTokens:
         assert table["{{EQUITY_TREND_CURRENT}}"] == "—"
 
     def test_live_watch_point_tokens_pick_up_warm_cache_values(self):
+        """June 22 2026 (PR A) -- live_signals carries the
+        regime_signals_cache row. Field names are vix_level /
+        credit_spread / yield_curve_slope / equity_trend (the
+        names cache.py:670 uses). ESS comes from cio.confidence.ess
+        separately."""
         from tools.numeric_substitution import build_substitution_table
-        warm_cache = dict(_fake_cache())
-        warm_cache.update({
-            "vix_current": 18.44,
-            "hy_oas_current": 2.63,
-            "yield_curve_current": 0.29,
-            "equity_trend_current": 0.057,
-            "kish_ess": 164,
-        })
+        warm_signals = {
+            "vix_level": 18.44,
+            "credit_spread": 2.63,
+            "yield_curve_slope": 0.29,
+            "equity_trend": 0.057,
+        }
+        cio_with_ess = {
+            "regime": "BULL",
+            "confidence": {"probability": 0.974, "ess": 164},
+        }
         table = build_substitution_table(
-            warm_cache, _fake_cio(), data_hash="x")
+            _fake_cache(), cio_with_ess, data_hash="x",
+            live_signals=warm_signals)
         assert table["{{VIX_CURRENT}}"] == "18.44"
         assert table["{{CREDIT_SPREAD_CURRENT}}"] == "2.63"
+        assert table["{{YIELD_CURVE_CURRENT}}"] == "0.29"
         assert table["{{ESS_CURRENT}}"] == "164"
         assert table["{{EQUITY_TREND_CURRENT}}"] == "5.7%"
 

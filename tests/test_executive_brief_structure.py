@@ -170,14 +170,25 @@ def _runtime_main_source() -> str:
 
 
 def test_executive_summary_leads_with_verdict():
-    """§1 must open with the verdict sentence + headline figures."""
+    """§1 must open with the verdict sentence + headline figures.
+
+    June 22 2026 (PR #370) -- the literal numbers in the prompt
+    text were tokenized to {{OOS_SHARPE_BLEND}} /
+    {{OOS_SHARPE_BENCHMARK}} / {{REGIME_SWITCHING_MAX_DD}} /
+    {{BENCHMARK_MAX_DD}}. The substitution table resolves them
+    against the locked Path A values at generation time. The
+    test contract here is the SHAPE of the section's headline,
+    not the literal numbers -- pin the tokens instead so a
+    future drift back to hardcoded numbers gets flagged."""
     source = _runtime_main_source()
     assert ("A regime-conditional diversified blend outperforms a 100% "
             "equity allocation on a risk-adjusted basis") in source
-    # The OOS Sharpe headline numbers belong at the top.
-    assert "0.86" in source and "0.43" in source
-    # The drawdown headline numbers belong at the top.
-    assert "-25.3%" in source and "-52.6%" in source
+    # The OOS Sharpe headline tokens belong at the top.
+    assert ("{{OOS_SHARPE_BLEND}}" in source
+            and "{{OOS_SHARPE_BENCHMARK}}" in source)
+    # The drawdown headline tokens belong at the top.
+    assert ("{{REGIME_SWITCHING_MAX_DD}}" in source
+            and "{{BENCHMARK_MAX_DD}}" in source)
 
 
 def test_methodology_overview_is_brief():

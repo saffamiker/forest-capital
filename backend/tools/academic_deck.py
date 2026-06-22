@@ -49,38 +49,72 @@ from tools.academic_export import (
 
 log = structlog.get_logger(__name__)
 
-# ── Validated production constants (May 28 2026 deck rebuild) ─────────────────
-# These are the validated, authoritative figures for the 10-slide final deck.
-# They are injected into the generation context block so the AI never has to
-# invent them, and they backstop the slide-spec text. Performance numbers for
-# the strategy tables are NOT here — those come live from gather_document_data().
+# ── Validated production constants (June 22 2026 -- Path A revised) ──
+# These are the locked submission figures threaded through every document
+# generator (brief, appendix, deck, script). They backstop the AI prompts
+# so the writer never invents a number, and they flow through the
+# substitution layer (tools/numeric_substitution.build_substitution_table)
+# so every {{TOKEN}} in the generated prose resolves deterministically.
 #
-# ACADEMIC SUBMISSION FIGURES — locked to the December 2025 data lock.
-# DO NOT update to a more-recent dataset for any reason. The June 3
-# cohort peer review and the July 1 panel defend the submitted record;
-# replacing these figures with live performance breaks that record. The
-# live figures (Jan-May 2026 included) are surfaced separately on the
-# Performance Record page (Live Figure row); the brief and the final
-# presentation continue to quote the locked academic figures below.
-# (User directive, May 31 2026.)
-OOS_SHARPE_REGIME_CONDITIONAL = 0.8576
-OOS_SHARPE_BENCHMARK = 0.4341
-OOS_SHARPE_EQUAL_WEIGHT = 0.1264
-CORRELATION_PRE_2022 = -0.05
-CORRELATION_POST_2022 = 0.57
-PLAY_BY_PLAY_EVENTS = 9
+# OOS_SHARPE figures: LOCKED TO THE DECEMBER 2025 ACADEMIC SUBMISSION
+# ---------------------------------------------------------------------
+# Walk-forward OOS Sharpe values frozen at the December 2025 data lock.
+# These are the figures the cohort peer review (June 3) and the panel
+# (July 1 / July 3) defend on the record; the Council Performance Record
+# page on the platform shows both side by side:
+#   Academic Submission (locked Dec 2025):  blend 0.86, benchmark 0.43
+#   Live Figure (through May 2026):         blend 1.24, benchmark 0.73
+# The platform footnote is authoritative: "The submitted figures are
+# the December 2025 data lock... not used in the executive brief or
+# final presentation -- the academic submission stands as the record."
+# So the brief / deck / appendix OOS HEADLINE cites 0.86 vs 0.43.
+#
+# The live full-period Sharpes (REGIME_SWITCHING.sharpe_ratio = 0.6291,
+# BENCHMARK.sharpe_ratio = 0.5370) appear separately via the per-
+# strategy tokens ({{REGIME_SWITCHING_SHARPE}} etc.) which read from
+# the strategy cache directly -- they are NOT derived from these
+# constants and appear in the full-period performance tables only.
+#
+# History: PR #370 initially proposed Path A as "update OOS_SHARPE to
+# live full-period" (0.6291 / 0.5370). User reverted that part of the
+# proposal after surfacing the Performance Record's two-state design.
+# Keeping the OOS_SHARPE pair at the December lock preserves the
+# panel-defense alignment; the rest of Path A (max drawdown live,
+# equal-weight Sharpe live, new OOS window constants) is unchanged.
+#
+# DO NOT manually edit OOS_SHARPE_REGIME_CONDITIONAL or
+# OOS_SHARPE_BENCHMARK without an explicit decision to break the
+# December 2025 academic submission record. Updating these in
+# response to a fresh data ingestion is a SUBMISSION INTEGRITY
+# VIOLATION; the academic record defends these specific values.
+OOS_SHARPE_REGIME_CONDITIONAL = 0.8576  # Dec 2025 academic submission
+OOS_SHARPE_BENCHMARK = 0.4341          # Dec 2025 academic submission
+OOS_SHARPE_EQUAL_WEIGHT = 0.5728       # live EQUAL_WEIGHT.sharpe_ratio
+CORRELATION_PRE_2022 = -0.05           # avg of 12m rolling corr pre-2022
+CORRELATION_POST_2022 = 0.57           # avg of 12m rolling corr post-2022
+PLAY_BY_PLAY_EVENTS = 9                # rebalance_events.csv row count
 
-# June 6 2026 — additional locked figures for the 6-slide rewrite.
-# The drawdown numbers are the academic-submission max drawdowns (over
-# the full study period, December 2025 lock), benchmark vs the regime-
-# conditional blend. PLAY_BY_PLAY_ADD_VALUE is the council's value-add
-# count out of the {PLAY_BY_PLAY_EVENTS} named market events tested.
-# These are stated in the slide content directly (slide 1, slide 4)
-# and locked against the same December 2025 dataset as the Sharpe
-# figures above — DO NOT update for the panel defense.
+# Max drawdown over the full study period (Jul 2002 - May 2026).
+# BENCHMARK matches the cache exactly (rounds from -0.5256 to -0.526);
+# REGIME_SWITCHING bumped from -0.253 to -0.2974 to match the live
+# cache REGIME_SWITCHING.max_drawdown under Path A.
 MAX_DRAWDOWN_BENCHMARK = -0.526
-MAX_DRAWDOWN_REGIME_CONDITIONAL = -0.253
+MAX_DRAWDOWN_REGIME_CONDITIONAL = -0.2974
 PLAY_BY_PLAY_ADD_VALUE = 2
+
+# June 22 2026 (Path A scope) -- locked submission figures threaded
+# through validated_constants so the brief story plan resolver, the
+# deck/appendix substitution tables, and the per-section LLM prompts
+# all see them. Prompts that previously hardcoded the literal "40
+# months" / "14%" / etc. have been replaced with {{OOS_WINDOW_MONTHS}}
+# and {{OOS_WINDOW_PCT_OF_STUDY}} placeholders that resolve here.
+OOS_WINDOW_MONTHS = 53                  # Feb 2022 - May 2026 inclusive
+OOS_WINDOW_PCT_OF_STUDY = 18.5          # 53 / 287 ≈ 18.5% of full window
+CURRENT_REGIME = "BULL"                 # live HMM read at submission lock
+CURRENT_EQUITY_WEIGHT = 0.80            # BULL regime equity from
+                                        # REGIME_WEIGHTS in
+                                        # tools/backtester.py:888
+                                        # (BULL = 80% eq / 20% IG)
 
 # Regime state is LIVE-SOURCED, never a constant. The current regime, its HMM
 # posterior confidence, and the live blend weights drift as new monthly data
@@ -282,7 +316,7 @@ Message: The dynamic strategy beats the benchmark on every risk-adjusted \
 metric in the out-of-sample period. Static diversification also \
 outperforms but by less.
 Required bullets:
-- Out-of-sample period: 40+ months post-2022 correlation break. The \
+- Out-of-sample period: {{OOS_WINDOW_MONTHS}}+ months post-2022 correlation break. The \
 window the hypothesis addresses.
 - Dynamic Blend wins on every risk-adjusted metric vs the benchmark.
 - Classic 60/40 also outperforms the benchmark, but the dynamic edge is \
@@ -352,14 +386,15 @@ Guardrails: Be honest about the April 2025 miss. Cumulative returns \
 chart starts at $1.00 in 2002.
 
 Slide 6 -- Does It Hold Up Out-of-Sample?
-Message: Strategy was designed on pre-2022 data and tested on 40+ months \
+Message: Strategy was designed on pre-2022 data and tested on \
+{{OOS_WINDOW_MONTHS}}+ months \
 of post-2022 data it never saw. It beats the benchmark OOS -- this \
 addresses the overfitting concern directly.
 Required bullets:
 - Design window (in-sample): 2002 through 2021-end. The strategy was \
 calibrated on this period.
-- Test window (out-of-sample): January 2022 through the December 2025 \
-data lock -- ~40 months the strategy never saw.
+- Test window (out-of-sample): January 2022 through the May 2026 \
+data lock -- ~{{OOS_WINDOW_MONTHS}} months the strategy never saw.
 - Dynamic Blend OOS Sharpe: {{strategy_performance.regime_conditional.oos_sharpe}}.
 - Benchmark OOS Sharpe: {{strategy_performance.benchmark.oos_sharpe}}.
 - OOS performance is genuine -- the strategy parameters were NOT tuned \
@@ -370,7 +405,8 @@ Rows: Dynamic Blend, Classic 60/40, 100% Equity Benchmark. Pull both \
 columns from context.strategy_performance.
 Chart: none -- the comparison table IS the slide.
 Speaker notes: "The overfitting concern: did we tune on the same data we \
-report on? No. Pre-2022 is the design window. Post-2022 is 40+ months of \
+report on? No. Pre-2022 is the design window. Post-2022 is \
+{{OOS_WINDOW_MONTHS}}+ months of \
 genuine out-of-sample. The dynamic blend beats the benchmark on both. \
 The static 60/40 wins IS, ties OOS." Time: ~2 minutes.
 Guardrails: Address overfitting head-on. Panel WILL ask.

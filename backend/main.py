@@ -11671,7 +11671,8 @@ _BRIEF_RECOMMENDATION_STRUCTURE = (
     "the regime sample size, say so explicitly.\n"
     "4. THE LIMITATIONS: what the model cannot see. Always include all "
     "four of: the three-asset universe constraint; the post-2022 sample "
-    "size (40 months, about 14% of the full window); transaction costs "
+    "size ({{OOS_WINDOW_MONTHS}} months, about "
+    "{{OOS_WINDOW_PCT_OF_STUDY}}% of the full window); transaction costs "
     "not yet applied; and the absence of formal statistical significance "
     "(economic significance only).\n"
     "This structure meets the spirit of CFA Institute disclosure "
@@ -11743,13 +11744,16 @@ async def _generate_brief_document(
                  "adjusted basis over the post-2022 out-of-sample "
                  "window.'\n\n"
                  "Immediately follow with the headline figures in plain "
-                 "language (no preamble): OOS Sharpe 0.86 (blend) vs 0.43 "
-                 "(benchmark); maximum drawdown -25.3% (blend) vs -52.6% "
-                 "(benchmark); the regime-conditional construction held "
-                 "the bond sleeve through the 2022 equity drawdown.\n\n"
+                 "language (no preamble): OOS Sharpe {{OOS_SHARPE_BLEND}} "
+                 "(blend) vs {{OOS_SHARPE_BENCHMARK}} (benchmark); maximum "
+                 "drawdown {{REGIME_SWITCHING_MAX_DD}} (blend) vs "
+                 "{{BENCHMARK_MAX_DD}} (benchmark); the regime-conditional "
+                 "construction held the bond sleeve through the 2022 "
+                 "equity drawdown.\n\n"
                  "Close with one short paragraph naming the practical "
                  "context: the pre/post-2022 correlation break "
-                 "(approximately -0.05 -> +0.57) is the environment the "
+                 "(approximately {{PRE_2022_EQ_IG_CORR}} -> "
+                 "{{POST_2022_EQ_IG_CORR}}) is the environment the "
                  "hypothesis addresses, and the analysis below is built "
                  "on that scope. Do not introduce methodology details or "
                  "the recommendation here -- those are Sections 2 and 5."
@@ -11867,8 +11871,9 @@ async def _generate_brief_document(
                  "PROJECT scope boundary, not an architectural limit -- "
                  "the platform's HMM and transition matrix work with "
                  "any return series.\n\n"
-                 "  - SAMPLE SIZE: 40 months of post-2022 out-of-sample "
-                 "data is approximately 14% of the full study window. "
+                 "  - SAMPLE SIZE: {{OOS_WINDOW_MONTHS}} months of "
+                 "post-2022 out-of-sample data is approximately "
+                 "{{OOS_WINDOW_PCT_OF_STUDY}}% of the full study window. "
                  "Bootstrap confidence intervals on Sharpe ratios "
                  "overlap substantially across the static set, which is "
                  "WHY the regime-conditional construction is the right "
@@ -11901,14 +11906,15 @@ async def _generate_brief_document(
                  "suggestions, NOT future research. The rubric is "
                  "explicit on this distinction.\n\n"
                  "Lead with the headline conclusion sentence in this "
-                 "shape (adapt the figures to the locked academic "
-                 "values): 'Given an out-of-sample Sharpe of 0.86 for "
-                 "the regime-conditional blend versus 0.43 for the "
-                 "benchmark and a maximum drawdown of -25.3% versus "
-                 "-52.6%, we recommend that a regime-conditional "
-                 "allocation framework be considered as a core "
-                 "approach to asset allocation in the post-2022 "
-                 "environment.'\n\n"
+                 "shape -- USE THE PLACEHOLDER TOKENS, not raw numbers: "
+                 "'Given an out-of-sample Sharpe of {{OOS_SHARPE_BLEND}} "
+                 "for the regime-conditional blend versus "
+                 "{{OOS_SHARPE_BENCHMARK}} for the benchmark and a "
+                 "maximum drawdown of {{REGIME_SWITCHING_MAX_DD}} "
+                 "versus {{BENCHMARK_MAX_DD}}, we recommend that a "
+                 "regime-conditional allocation framework be "
+                 "considered as a core approach to asset allocation "
+                 "in the post-2022 environment.'\n\n"
                  "Three supporting recommendations, each grounded in a "
                  "specific finding from Section 3:\n"
                  "  1. Adopt the regime-conditional construction as the "
@@ -12035,6 +12041,24 @@ async def _generate_brief_document(
                         cio_row.get("blend_weights"))
             except Exception as _exc:  # noqa: BLE001
                 log.warning("brief_implied_alloc_failed", error=str(_exc))
+            # June 22 2026 (PR A) -- read regime_signals_cache for the
+            # 5 watchpoint tokens. 15-min TTL; falls back to em-dash
+            # inside build_substitution_table if cold. Same wiring
+            # as the deck callsite; brief sections 1/5/6 reference
+            # current_regime and equity weight.
+            live_signals: dict | None = None
+            try:
+                from tools.cache import get_regime_cache
+                live_signals = await get_regime_cache()
+                if live_signals is None:
+                    log.warning(
+                        "brief_live_signals_stale",
+                        document_type="executive_brief",
+                        note=("regime_signals_cache miss or expired -- "
+                              "watchpoint tokens will render em-dash"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("brief_live_signals_read_failed",
+                            error=str(_exc))
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -12043,11 +12067,18 @@ async def _generate_brief_document(
                     "oos_sharpe_regime_conditional"),
                 oos_sharpe_benchmark=constants.get(
                     "oos_sharpe_benchmark"),
-                pre_2022_eq_ig_correlation=rolling.get("pre_2022"),
-                post_2022_eq_ig_correlation=rolling.get("post_2022"),
+                pre_2022_eq_ig_correlation=(
+                    constants.get("correlation_pre_2022")
+                    or rolling.get("pre_2022")),
+                post_2022_eq_ig_correlation=(
+                    constants.get("correlation_post_2022")
+                    or rolling.get("post_2022")),
+                oos_window_pct_of_study=constants.get(
+                    "oos_window_pct_of_study"),
                 study_months=(data.get("study_period") or {}).get(
                     "n_months"),
-                implied_allocation=implied_alloc)
+                implied_allocation=implied_alloc,
+                live_signals=live_signals)
             log.info("substitution_table_built",
                      document_type="executive_brief",
                      data_hash=(data_hash or "")[:8],
@@ -12520,6 +12551,7 @@ async def _generate_appendix_document(
                 OOS_SHARPE_REGIME_CONDITIONAL,
                 OOS_SHARPE_BENCHMARK,
                 CORRELATION_PRE_2022, CORRELATION_POST_2022,
+                OOS_WINDOW_PCT_OF_STUDY,
             )
             from tools.submission_freeze import get_effective_data_hash
             # Layer 4 -- submission freeze (see _generate_brief_document
@@ -12537,6 +12569,23 @@ async def _generate_appendix_document(
                         cio_row.get("blend_weights"))
             except Exception as _exc:  # noqa: BLE001
                 log.warning("appendix_implied_alloc_failed", error=str(_exc))
+            # June 22 2026 (PR A) -- read regime_signals_cache. Same
+            # wiring as brief + deck callsites; the appendix's
+            # Section G (cost sensitivity + recommendation) cites
+            # the current regime + watchpoint posture.
+            live_signals: dict | None = None
+            try:
+                from tools.cache import get_regime_cache
+                live_signals = await get_regime_cache()
+                if live_signals is None:
+                    log.warning(
+                        "appendix_live_signals_stale",
+                        document_type="analytical_appendix",
+                        note=("regime_signals_cache miss or expired -- "
+                              "watchpoint tokens will render em-dash"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("appendix_live_signals_read_failed",
+                            error=str(_exc))
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -12545,9 +12594,11 @@ async def _generate_appendix_document(
                 oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
                 pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
                 post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                oos_window_pct_of_study=OOS_WINDOW_PCT_OF_STUDY,
                 study_months=(data.get("study_period") or {}).get(
                     "n_months"),
-                implied_allocation=implied_alloc)
+                implied_allocation=implied_alloc,
+                live_signals=live_signals)
             log.info("substitution_table_built",
                      document_type="analytical_appendix",
                      data_hash=(data_hash or "")[:8],
@@ -13177,6 +13228,50 @@ def _substitute_slide_content(
                 new_bullets.append(bullet)
         parsed["bullets"] = new_bullets
 
+    # June 22 2026 (PR A scope) -- walk table_data cells. The Sonnet
+    # writer puts most numeric tokens in slide table COLUMNS (the
+    # comparison table on slide 2, the IS/OOS Sharpe table on
+    # slide 6, the macro watchpoint table on slide 7, etc).
+    # Without this walk every {{TOKEN}} embedded in a header
+    # string or a row cell survives unsubstituted into the final
+    # deck content -- the root cause of the 23 unresolved
+    # placeholders reported in production.
+    #
+    # Contract: walk every string in `headers` (a list of strings)
+    # and every string cell in every row of `rows` (a list of
+    # lists). Non-string cells (None, numbers, nested dicts)
+    # pass through untouched.
+    td = parsed.get("table_data")
+    if isinstance(td, dict):
+        if isinstance(td.get("headers"), list):
+            new_headers: list = []
+            for h in td["headers"]:
+                if isinstance(h, str):
+                    new_h, replaced = apply_substitutions(
+                        h, substitution_table)
+                    new_headers.append(new_h)
+                    replaced_all.update(replaced)
+                else:
+                    new_headers.append(h)
+            td["headers"] = new_headers
+        if isinstance(td.get("rows"), list):
+            new_rows: list = []
+            for row in td["rows"]:
+                if isinstance(row, list):
+                    new_row: list = []
+                    for cell in row:
+                        if isinstance(cell, str):
+                            new_cell, replaced = apply_substitutions(
+                                cell, substitution_table)
+                            new_row.append(new_cell)
+                            replaced_all.update(replaced)
+                        else:
+                            new_row.append(cell)
+                    new_rows.append(new_row)
+                else:
+                    new_rows.append(row)
+            td["rows"] = new_rows
+
     if replaced_all:
         log.info("numeric_substitution_applied",
                  document_type="presentation_deck",
@@ -13557,6 +13652,28 @@ async def _generate_deck_document(
                         cio_row.get("blend_weights"))
             except Exception as _exc:  # noqa: BLE001
                 log.warning("deck_implied_alloc_failed", error=str(_exc))
+            # June 22 2026 (PR A) -- read regime_signals_cache for the
+            # 5 watchpoint tokens on slide 7 (VIX / yield curve /
+            # credit spread / equity trend). 15-min TTL; falls back
+            # to em-dash inside build_substitution_table if cold.
+            # Staleness check: get_regime_cache returns None when
+            # the cached row is past its expires_at; we log so the
+            # operator can spot a stale render. We do NOT block on
+            # a fresh detect call (would add 30-60s to deck gen).
+            live_signals: dict | None = None
+            try:
+                from tools.cache import get_regime_cache
+                live_signals = await get_regime_cache()
+                if live_signals is None:
+                    log.warning(
+                        "deck_live_signals_stale",
+                        document_type="presentation_deck",
+                        note=("regime_signals_cache miss or expired -- "
+                              "watchpoint tokens will render em-dash"))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning("deck_live_signals_read_failed",
+                            error=str(_exc))
+            from tools.academic_deck import OOS_WINDOW_PCT_OF_STUDY
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -13565,9 +13682,11 @@ async def _generate_deck_document(
                 oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
                 pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
                 post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                oos_window_pct_of_study=OOS_WINDOW_PCT_OF_STUDY,
                 study_months=(data.get("study_period") or {}).get(
                     "n_months"),
-                implied_allocation=implied_alloc)
+                implied_allocation=implied_alloc,
+                live_signals=live_signals)
             log.info("substitution_table_built",
                      document_type="presentation_deck",
                      data_hash=(data_hash or "")[:8],
