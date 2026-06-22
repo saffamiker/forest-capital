@@ -10635,15 +10635,16 @@ async def get_data_reference_sheet(
     from datetime import datetime, timezone
 
     from tools.audit_assembler import current_data_hash
+    import asyncio
     from tools.cache import (
         get_latest_strategy_cache,
         get_latest_strategy_hash,
         get_monthly_returns,
-        get_regime_cache,
     )
     from tools.cio_recommendation import (
         compute_implied_asset_allocation, get_latest_recommendation,
     )
+    from tools.regime_detector import detect_current_regime
     from tools.data_reference_catalog import (
         CATALOG, CATEGORY_LABELS,
         expand_per_strategy_appendix_metrics,
@@ -10709,10 +10710,18 @@ async def get_data_reference_sheet(
     except Exception as exc:  # noqa: BLE001
         log.warning("data_reference_implied_alloc_failed",
                     error=str(exc))
+    # June 22 2026 -- Gap A2 fix. The DB-backed get_regime_cache()
+    # returns None when the regime_signals_cache row is missing or
+    # expired (15-min TTL). detect_current_regime() is a live FRED
+    # read with its own 15-min in-process cache and is the
+    # guaranteed-populated source -- the live tile + landing page
+    # already use it for the same data. Wrap in asyncio.to_thread
+    # because detect_current_regime is synchronous (FRED HTTP
+    # calls); calling it in the event loop directly would block.
     try:
-        live_signals = await get_regime_cache()
+        live_signals = await asyncio.to_thread(detect_current_regime)
     except Exception as exc:  # noqa: BLE001
-        log.warning("data_reference_regime_cache_failed",
+        log.warning("data_reference_regime_detect_failed",
                     error=str(exc))
     # June 22 2026 -- Gap C wiring. {{STUDY_MONTHS}} reads from
     # the `study_months` kwarg; falls back to
