@@ -556,6 +556,36 @@ async def refresh_academic_analytics(data_hash: str) -> None:
         if not bench_series.empty:
             asset_series["BENCHMARK"] = bench_series
 
+        # June 22 2026 -- diagnostic logging to trace empty-payload
+        # bug. Bracket the analytics calls with full input + output
+        # shape so a Render log scan answers "what did the refresh
+        # receive, what did the analytics return" without inspecting
+        # any cache row.
+        sample_strategy_name = next(iter(strategies)) if strategies else None
+        sample_entry = (
+            strategies.get(sample_strategy_name)
+            if sample_strategy_name else None)
+        sample_mr = (
+            sample_entry.get("monthly_returns")
+            if isinstance(sample_entry, dict) else None)
+        log.info(
+            "precomputed_refresh_analytics_pre_call_diag",
+            data_hash=short_hash,
+            strategies_type=type(strategies).__name__,
+            strategies_keys=list(strategies)[:10]
+                if isinstance(strategies, dict) else [],
+            sample_strategy=sample_strategy_name,
+            sample_has_monthly_returns=(
+                isinstance(sample_mr, list)),
+            sample_monthly_returns_len=(
+                len(sample_mr) if isinstance(sample_mr, list) else None),
+            sample_first_mr_pair=(
+                sample_mr[0] if (isinstance(sample_mr, list) and sample_mr)
+                else None),
+            rf_type=type(rf).__name__, rf_len=len(rf),
+            ff_type=type(ff).__name__, ff_len=len(ff or []),
+        )
+
         # Compute each AN01/AN04 reduction in its own try/except so a
         # downstream failure (regression solver, regime split) is
         # caught with explicit context rather than swallowed by the
@@ -570,6 +600,14 @@ async def refresh_academic_analytics(data_hash: str) -> None:
                 data_hash=short_hash, exc_type=type(exc).__name__,
                 error=str(exc),
             )
+        log.info(
+            "precomputed_refresh_factor_loadings_returned",
+            data_hash=short_hash,
+            n_rows=len(factor_loadings_rows),
+            first_keys=(
+                sorted(factor_loadings_rows[0])[:8]
+                if factor_loadings_rows else []),
+        )
         regime_conditional_rows: list[dict] = []
         try:
             regime_conditional_rows = an.regime_conditional_performance(
@@ -580,6 +618,13 @@ async def refresh_academic_analytics(data_hash: str) -> None:
                 data_hash=short_hash, exc_type=type(exc).__name__,
                 error=str(exc),
             )
+        log.info(
+            "precomputed_refresh_regime_conditional_returned",
+            data_hash=short_hash,
+            n_rows=len(regime_conditional_rows),
+            first_strategies=[
+                r.get("strategy") for r in regime_conditional_rows[:5]],
+        )
 
         # Per-row diagnostics for the two AN01/AN04 tables — explicit
         # field-by-field visibility so a Render log scan can answer

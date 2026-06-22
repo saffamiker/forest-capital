@@ -563,8 +563,34 @@ async def refresh_oos_cost_sensitivity(data_hash: str) -> bool:
     try:
         sr = await get_latest_strategy_cache()
         monthly = await get_monthly_returns()
+        # June 22 2026 -- diagnostic logging to trace empty-payload
+        # bug. Log the input shape AND the inner-validation result
+        # so a Render log scan answers "what did refresh receive,
+        # what did out_of_sample_validation return".
+        sample_name = next(iter(sr)) if isinstance(sr, dict) else None
+        sample_mr = (
+            (sr.get(sample_name) or {}).get("monthly_returns")
+            if sample_name else None)
+        log.info(
+            "oos_cost_sensitivity_input_diag",
+            data_hash=(data_hash or "")[:8],
+            sr_type=type(sr).__name__,
+            sr_n_keys=len(sr or {}),
+            sr_first_key=sample_name,
+            sample_mr_len=(
+                len(sample_mr) if isinstance(sample_mr, list) else None),
+            monthly_n_dates=len(monthly.get("dates") or []) if monthly else 0,
+            monthly_n_equity=len(monthly.get("equity") or []) if monthly else 0,
+        )
         if not sr or not monthly or not monthly.get("equity") \
                 or not monthly.get("dates"):
+            log.warning(
+                "oos_cost_sensitivity_input_empty",
+                sr_present=bool(sr),
+                monthly_present=bool(monthly),
+                equity_present=bool(monthly.get("equity")) if monthly else False,
+                dates_present=bool(monthly.get("dates")) if monthly else False,
+            )
             return False
         idx = pd.to_datetime(monthly["dates"])
         equity = pd.Series(monthly["equity"], index=idx).sort_index()
@@ -583,6 +609,14 @@ async def refresh_oos_cost_sensitivity(data_hash: str) -> bool:
                       if v is not None}
         val = out_of_sample_validation(
             sr, hmm, return_series=True, risk_free=rf_map)
+        log.info(
+            "oos_cost_sensitivity_validation_returned",
+            error=val.get("error"),
+            n_test_months=val.get("n_test_months"),
+            n_blend_weights_monthly=len(val.get("blend_weights_monthly") or []),
+            has_oos=bool(val.get("oos")),
+            oos_keys=list((val.get("oos") or {}).keys()),
+        )
         if val.get("error"):
             log.warning("oos_cost_sensitivity_validation_failed",
                         error=val["error"])
@@ -590,12 +624,28 @@ async def refresh_oos_cost_sensitivity(data_hash: str) -> bool:
         oos = val.get("oos", {})
         rc = oos.get("regime_conditional", {})
         bench = oos.get("benchmark", {})
+        log.info(
+            "oos_cost_sensitivity_compute_inputs",
+            gross_sharpe=rc.get("sharpe"),
+            oos_vol=rc.get("vol_ann"),
+            benchmark_sharpe=bench.get("sharpe"),
+            n_test_months=val.get("n_test_months", 0),
+            n_blend_weights=len(val.get("blend_weights_monthly") or []),
+        )
         result = compute_cost_sensitivity(
             blend_weights_monthly=val.get("blend_weights_monthly", []),
             gross_sharpe=rc.get("sharpe"),
             oos_vol=rc.get("vol_ann"),
             benchmark_sharpe=bench.get("sharpe"),
             n_test_months=val.get("n_test_months", 0),
+        )
+        log.info(
+            "oos_cost_sensitivity_compute_returned",
+            n_rebalances=result.get("n_rebalances"),
+            n_scenarios=len(result.get("scenarios") or []),
+            scenarios_summary=[
+                (s.get("bps"), s.get("net_sharpe"))
+                for s in (result.get("scenarios") or [])],
         )
         # Per-event rebalancing history (date / regime / strategy weights /
         # implied asset allocation / largest asset change) cached alongside
