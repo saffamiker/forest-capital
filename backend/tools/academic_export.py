@@ -69,10 +69,16 @@ async def load_substitution_metric_sources() -> tuple[
     regime_conditional: list[dict] = []
     factor_loadings: list[dict] = []
     cost_sensitivity: dict | None = None
+    aa_present = False
+    aa_keys: list[str] = []
+    cs_present = False
+    cs_n_scenarios = 0
     try:
         from tools.precomputed_analytics import get_latest_metric
         aa = await get_latest_metric("academic_analytics")
         if isinstance(aa, dict):
+            aa_present = True
+            aa_keys = sorted(aa.keys())[:20]
             rc = aa.get("regime_conditional")
             if isinstance(rc, list):
                 regime_conditional = rc
@@ -82,10 +88,31 @@ async def load_substitution_metric_sources() -> tuple[
         cs = await get_latest_metric("oos_cost_sensitivity")
         if isinstance(cs, dict):
             cost_sensitivity = cs
+            cs_present = True
+            cs_n_scenarios = len(cs.get("scenarios") or [])
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "substitution_metric_sources_load_failed",
             error=str(exc))
+    # June 22 2026 -- diagnostic logging to trace empty-token bug.
+    # Confirms (a) academic_analytics row was retrieved and (b) the
+    # list fields we read out of it have the expected shape. A
+    # Render log scan for this event gives the "what did the helper
+    # actually return" answer without instrumenting every callsite.
+    log.info(
+        "substitution_metric_sources_loaded",
+        aa_present=aa_present, aa_keys=aa_keys,
+        rc_len=len(regime_conditional),
+        rc_first_strategy=(
+            regime_conditional[0].get("strategy")
+            if regime_conditional else None),
+        fl_len=len(factor_loadings),
+        fl_first_strategy=(
+            factor_loadings[0].get("strategy")
+            if factor_loadings else None),
+        cs_present=cs_present,
+        cs_n_scenarios=cs_n_scenarios,
+    )
     return regime_conditional, factor_loadings, cost_sensitivity
 
 

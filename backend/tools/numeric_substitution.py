@@ -704,6 +704,7 @@ def get_substitution_table(
                 table, strategy_cache,
                 factor_loadings=factor_loadings_for_append)
         return table
+    cache_hit = (not rebuild) and (data_hash in _substitution_cache)
     if rebuild or data_hash not in _substitution_cache:
         table = build_substitution_table(
             strategy_cache, cio_recommendation, data_hash, **kwargs)
@@ -712,6 +713,44 @@ def get_substitution_table(
                 table, strategy_cache,
                 factor_loadings=factor_loadings_for_append)
         _substitution_cache[data_hash] = table
+    # June 22 2026 -- diagnostic logging to trace stale-cache bug.
+    # When a stale entry sits in _substitution_cache for the
+    # current data_hash, a subsequent caller passing the new
+    # kwargs gets the OLD table back -- the new kwargs are ignored.
+    # This log emits the cache state on every call so a Render
+    # scan can confirm whether the document generators are reading
+    # a freshly-built table or a pre-PR-#374 stale one.
+    try:
+        import structlog
+        log = structlog.get_logger(__name__)
+        rc_kw = kwargs.get("regime_conditional")
+        fl_kw = kwargs.get("factor_loadings")
+        cs_kw = kwargs.get("cost_sensitivity")
+        log.info(
+            "get_substitution_table_call",
+            data_hash=(data_hash or "")[:8],
+            cache_hit=cache_hit,
+            rebuild=rebuild,
+            kwargs_rc_len=(
+                len(rc_kw) if isinstance(rc_kw, list) else None),
+            kwargs_fl_len=(
+                len(fl_kw) if isinstance(fl_kw, list) else None),
+            kwargs_cs_n_scenarios=(
+                len(cs_kw.get("scenarios") or [])
+                if isinstance(cs_kw, dict) else None),
+            table_n_tokens=len(_substitution_cache[data_hash]),
+            has_post_2022_sharpe_benchmark=(
+                "{{POST_2022_SHARPE_BENCHMARK}}"
+                in _substitution_cache[data_hash]),
+            has_alpha_benchmark=(
+                "{{ALPHA_BENCHMARK}}"
+                in _substitution_cache[data_hash]),
+            has_net_sharpe_15bps=(
+                "{{NET_SHARPE_15BPS}}"
+                in _substitution_cache[data_hash]),
+        )
+    except Exception:  # noqa: BLE001
+        pass
     return _substitution_cache[data_hash]
 
 
