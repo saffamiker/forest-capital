@@ -147,6 +147,39 @@ def _get_strategy(cache: dict, strategy_id: str) -> dict:
     return entry
 
 
+def _index_by_strategy(rows: list[dict] | None) -> dict[str, dict]:
+    """Build a {strategy_name -> row} lookup from a list of per-
+    strategy dicts. Used by the kwargs that ship payload subsets
+    from analytics_metrics_cache as lists (regime_conditional,
+    factor_loadings). Falls back to empty dict on bad input so
+    the caller can still look up by .get(name, {})."""
+    if not isinstance(rows, list):
+        return {}
+    out: dict[str, dict] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        name = r.get("strategy") or r.get("strategy_name")
+        if name:
+            out[str(name)] = r
+    return out
+
+
+def _cost_scenario(
+    cost_sensitivity: dict | None, bps: int,
+) -> dict:
+    """Pull the scenario row matching `bps` from the
+    oos_cost_sensitivity payload. The payload has a flat
+    `scenarios: [{bps, net_sharpe, vs_benchmark_pct, ...}]`
+    list, NOT a dict keyed by bps -- so we walk the list."""
+    if not isinstance(cost_sensitivity, dict):
+        return {}
+    for s in cost_sensitivity.get("scenarios") or []:
+        if isinstance(s, dict) and s.get("bps") == bps:
+            return s
+    return {}
+
+
 def build_substitution_table(
     strategy_cache: dict,
     cio_recommendation: dict | None = None,
@@ -164,6 +197,9 @@ def build_substitution_table(
     study_end: str = "May 2026",
     implied_allocation: dict | None = None,
     live_signals: dict | None = None,
+    regime_conditional: list[dict] | None = None,
+    factor_loadings: list[dict] | None = None,
+    cost_sensitivity: dict | None = None,
 ) -> dict[str, str]:
     """Build the deterministic {token -> value} substitution table
     from verified cache values.
@@ -213,6 +249,33 @@ def build_substitution_table(
     # equity_trend / etc). Falls back to {} so the watchpoint tokens
     # render em-dash on a cold environment rather than raising.
     ls = live_signals or {}
+
+    # June 22 2026 (substitution wiring fix) -- the three new kwargs
+    # carry payload subsets sourced from analytics_metrics_cache:
+    #
+    #   regime_conditional -- the list at
+    #     `academic_analytics.regime_conditional` -- per-strategy
+    #     pre_2022_sharpe / post_2022_sharpe / annualized_turnover
+    #     rows. The previous wiring read these from
+    #     strategy_cache[name].post_2022_sharpe but the strategy
+    #     cache row never carried those fields; the data lives on
+    #     the regime_conditional rows the academic_analytics
+    #     payload writes.
+    #
+    #   factor_loadings -- the list at
+    #     `academic_analytics.factor_loadings` -- per-strategy
+    #     alpha / beta / smb_beta / hml_beta / r_squared rows. Used
+    #     by _append_per_strategy_tokens for the Carhart factor
+    #     loading tokens that the appendix Section E table cites.
+    #
+    #   cost_sensitivity -- the entire payload at
+    #     `oos_cost_sensitivity` metric_kind. The previous wiring
+    #     read `strategy_cache.get("net_sharpe_10bp")` -- a top-
+    #     level cache field that doesn't exist. The data lives
+    #     here as scenarios=[{bps, net_sharpe, ...}] + top-level
+    #     gross_sharpe / oos_vol / n_rebalances.
+    rc_by_strategy = _index_by_strategy(regime_conditional)
+    cs = cost_sensitivity or {}
 
     # OOS improvement percentage: (blend / benchmark - 1) * 100.
     # Only compute when both inputs are real numbers; otherwise the
@@ -296,19 +359,29 @@ def build_substitution_table(
                 classic.get("drawdown_recovery_days")),
 
         # ── Pre/post-2022 sub-period metrics ───────────────────────
-        # These come from analytics.regime_conditional_performance,
-        # which the caller merges into the strategy dict before
-        # passing in. Falls back to em dash when missing.
+        # June 22 2026 (wiring fix) -- read from the
+        # regime_conditional kwarg (the analytics_metrics_cache
+        # `academic_analytics.regime_conditional` list). The
+        # earlier `strategy_cache[name].post_2022_sharpe` reads
+        # silently resolved to em-dash because the strategy cache
+        # row never carried these fields. Each row is keyed by
+        # `strategy` or `strategy_name`; _index_by_strategy
+        # builds the lookup.
         "{{REGIME_SWITCHING_POST2022_SHARPE}}":
-            format_sharpe(regime.get("post_2022_sharpe")),
+            format_sharpe(rc_by_strategy.get(
+                "REGIME_SWITCHING", {}).get("post_2022_sharpe")),
         "{{BENCHMARK_POST2022_SHARPE}}":
-            format_sharpe(benchmark.get("post_2022_sharpe")),
+            format_sharpe(rc_by_strategy.get(
+                "BENCHMARK", {}).get("post_2022_sharpe")),
         "{{CLASSIC_6040_POST2022_SHARPE}}":
-            format_sharpe(classic.get("post_2022_sharpe")),
+            format_sharpe(rc_by_strategy.get(
+                "CLASSIC_60_40", {}).get("post_2022_sharpe")),
         "{{REGIME_SWITCHING_PRE2022_SHARPE}}":
-            format_sharpe(regime.get("pre_2022_sharpe")),
+            format_sharpe(rc_by_strategy.get(
+                "REGIME_SWITCHING", {}).get("pre_2022_sharpe")),
         "{{BENCHMARK_PRE2022_SHARPE}}":
-            format_sharpe(benchmark.get("pre_2022_sharpe")),
+            format_sharpe(rc_by_strategy.get(
+                "BENCHMARK", {}).get("pre_2022_sharpe")),
 
         # ── Correlation regime ─────────────────────────────────────
         "{{PRE_2022_EQ_IG_CORR}}":
@@ -385,18 +458,25 @@ def build_substitution_table(
         "{{PLAY_BY_PLAY_TOTAL}}": str(
             strategy_cache.get("play_by_play_total", 9)),
 
-        # Turnover + net-of-cost Sharpe sensitivity. Pulled from the
-        # regime row (annualized_turnover is the canonical key the
-        # backtester emits) and from top-level cache fields populated
-        # by the cost-sensitivity job.
+        # Turnover + net-of-cost Sharpe sensitivity. June 22 2026
+        # (wiring fix) -- read from the cost_sensitivity kwarg
+        # (the analytics_metrics_cache `oos_cost_sensitivity`
+        # payload). The earlier strategy_cache reads were dead --
+        # the cache row never carried net_sharpe_10bp / 15bp /
+        # 20bp fields; those live in the oos_cost_sensitivity
+        # payload's scenarios list, written by
+        # refresh_oos_cost_sensitivity. Turnover lives on the
+        # regime_conditional row's annualized_turnover field.
         "{{REGIME_SWITCHING_TURNOVER}}": format_pct(
-            regime.get("annualized_turnover")),
+            rc_by_strategy.get(
+                "REGIME_SWITCHING", {}
+            ).get("annualized_turnover")),
         "{{NET_SHARPE_10BP}}": format_sharpe(
-            strategy_cache.get("net_sharpe_10bp")),
+            _cost_scenario(cs, 10).get("net_sharpe")),
         "{{NET_SHARPE_15BP}}": format_sharpe(
-            strategy_cache.get("net_sharpe_15bp")),
+            _cost_scenario(cs, 15).get("net_sharpe")),
         "{{NET_SHARPE_20BP}}": format_sharpe(
-            strategy_cache.get("net_sharpe_20bp")),
+            _cost_scenario(cs, 20).get("net_sharpe")),
 
         # Tail risk (deck slide 5 references CVaR explicitly).
         "{{CVAR_99_BENCHMARK}}": format_pct(
@@ -489,6 +569,7 @@ _APPENDIX_METRIC_FORMATTERS: dict[str, Any] = {
 
 def _append_per_strategy_tokens(
     table: dict[str, str], strategy_cache: dict,
+    factor_loadings: list[dict] | None = None,
 ) -> None:
     """Generate {{STRATEGY_NAME_METRIC}} tokens for every strategy in
     the cache. Appendix-only -- the brief never uses these because
@@ -499,7 +580,16 @@ def _append_per_strategy_tokens(
     REGIME_SWITCHING, CLASSIC_60_40, MIN_VARIANCE, ...). The token
     uses the cache key verbatim -- a strategy rename in the cache
     surfaces as a missing token rather than silent re-mapping, which
-    is the safer default."""
+    is the safer default.
+
+    June 22 2026 (wiring fix) -- when factor_loadings is supplied
+    (the `academic_analytics.factor_loadings` list), this function
+    also emits per-strategy Carhart factor-loading tokens
+    ({{<STRATEGY>_ALPHA}}, {{<STRATEGY>_BETA}}, {{<STRATEGY>_SMB_BETA}},
+    {{<STRATEGY>_HML_BETA}}, {{<STRATEGY>_R_SQUARED}}). The appendix
+    Section E table cites these tokens; the previous wiring left
+    them undefined and the audit flagged them as unresolved
+    placeholders."""
     if not isinstance(strategy_cache, dict):
         return
     for raw_name, entry in strategy_cache.items():
@@ -519,6 +609,32 @@ def _append_per_strategy_tokens(
             # is set both ways). Last-write-wins is fine because
             # both reads come from the same cache entry.
             table[token] = fmt(entry.get(cache_key))
+
+    # Carhart factor-loading tokens, one per (strategy, metric).
+    # Each metric has its own formatter -- alpha + factor betas
+    # render as 4dp decimals, r_squared as 4dp 0-1 fraction.
+    if isinstance(factor_loadings, list):
+        for row in factor_loadings:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("strategy") or row.get("strategy_name")
+            if not name:
+                continue
+            upper = str(name).upper().replace(" ", "_")
+            for metric_key, suffix in (
+                ("alpha",     "ALPHA"),
+                ("beta",      "BETA"),
+                ("smb_beta",  "SMB_BETA"),
+                ("hml_beta",  "HML_BETA"),
+                ("r_squared", "R_SQUARED"),
+            ):
+                token = f"{{{{{upper}_{suffix}}}}}"
+                v = row.get(metric_key)
+                try:
+                    table[token] = (
+                        f"{float(v):.4f}" if v is not None else "—")
+                except (TypeError, ValueError):
+                    table[token] = "—"
 
 
 # ── Per-data_hash cache (one table per generation job) ──────────────────
@@ -568,6 +684,15 @@ def get_substitution_table(
     per-strategy SHARPE/MAX_DD/CAGR/VOLATILITY/RECOVERY tokens; the
     appendix needs them, brief + deck don't but they're harmless
     extras."""
+    # The factor_loadings kwarg flows TWICE: once into
+    # build_substitution_table (no-op there today, but reserved
+    # so a future per-strategy token relies on it inside the
+    # function), and once into _append_per_strategy_tokens to
+    # emit the Carhart factor-loading tokens. Pull it out of
+    # kwargs without consuming it so build_substitution_table
+    # also gets to see it via **kwargs.
+    factor_loadings_for_append = kwargs.get("factor_loadings")
+
     if not data_hash:
         # An empty hash means data_status was unavailable -- build
         # the table inline but DON'T cache it, so the next call
@@ -575,13 +700,17 @@ def get_substitution_table(
         table = build_substitution_table(
             strategy_cache, cio_recommendation, "", **kwargs)
         if include_per_strategy:
-            _append_per_strategy_tokens(table, strategy_cache)
+            _append_per_strategy_tokens(
+                table, strategy_cache,
+                factor_loadings=factor_loadings_for_append)
         return table
     if rebuild or data_hash not in _substitution_cache:
         table = build_substitution_table(
             strategy_cache, cio_recommendation, data_hash, **kwargs)
         if include_per_strategy:
-            _append_per_strategy_tokens(table, strategy_cache)
+            _append_per_strategy_tokens(
+                table, strategy_cache,
+                factor_loadings=factor_loadings_for_append)
         _substitution_cache[data_hash] = table
     return _substitution_cache[data_hash]
 
