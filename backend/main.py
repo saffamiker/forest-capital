@@ -8439,12 +8439,23 @@ async def post_verify_all_for_submission(
                 strategy_cache = (
                     await get_latest_strategy_cache() or {})
                 cio_row = await get_latest_recommendation()
+                # June 22 2026 (wiring fix) -- same helper read
+                # as the document generators so the consistency
+                # check sees the same substituted values.
+                from tools.academic_export import (
+                    load_substitution_metric_sources,
+                )
+                rc_rows, fl_rows, cs_payload = (
+                    await load_substitution_metric_sources())
                 table = get_substitution_table(
                     cur_hash, strategy_cache, cio_row,
                     oos_sharpe_blend=OOS_SHARPE_REGIME_CONDITIONAL,
                     oos_sharpe_benchmark=OOS_SHARPE_BENCHMARK,
                     pre_2022_eq_ig_correlation=CORRELATION_PRE_2022,
-                    post_2022_eq_ig_correlation=CORRELATION_POST_2022)
+                    post_2022_eq_ig_correlation=CORRELATION_POST_2022,
+                    regime_conditional=rc_rows,
+                    factor_loadings=fl_rows,
+                    cost_sensitivity=cs_payload)
                 flags = check_cross_deliverable_consistency(
                     documents, table)
                 cross = {
@@ -10699,6 +10710,15 @@ async def get_data_reference_sheet(
     except Exception as exc:  # noqa: BLE001
         log.warning("data_reference_regime_cache_failed",
                     error=str(exc))
+    # June 22 2026 (wiring fix) -- read factor loadings from the
+    # academic_analytics cache payload, not from a live
+    # an.factor_loadings(strategy_cache, []) call. The live
+    # call passes empty FF factors and returns no rows -- the
+    # data lives in analytics_metrics_cache, written by
+    # refresh_academic_analytics. The substitution metric
+    # sources loaded below will overwrite factor_loadings_row
+    # with the cached payload (rc_rows assignment in the
+    # defensive-kwarg block).
     try:
         from tools import analytics as an
         factor_loadings_row = an.factor_loadings(
@@ -10726,6 +10746,29 @@ async def get_data_reference_sheet(
         _kwargs["oos_window_pct_of_study"] = OOS_WINDOW_PCT_OF_STUDY
     if "live_signals" in _sig.parameters:
         _kwargs["live_signals"] = live_signals
+    # June 22 2026 (wiring fix) -- thread the three analytics
+    # metric sources so pre/post 2022 Sharpe, factor loadings,
+    # and cost-sensitivity tokens resolve from the right cache.
+    # Defensive forwarding pattern matches the rest of this
+    # endpoint -- only pass kwargs the current implementation
+    # accepts, so it works regardless of merge order with other
+    # in-flight PRs that may not yet have the new signature.
+    try:
+        from tools.academic_export import (
+            load_substitution_metric_sources,
+        )
+        rc_rows, fl_rows, cs_payload = (
+            await load_substitution_metric_sources())
+        if "regime_conditional" in _sig.parameters:
+            _kwargs["regime_conditional"] = rc_rows
+        if "factor_loadings" in _sig.parameters:
+            _kwargs["factor_loadings"] = fl_rows
+        if "cost_sensitivity" in _sig.parameters:
+            _kwargs["cost_sensitivity"] = cs_payload
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_metric_sources_failed",
+                    error=str(exc))
+        rc_rows, fl_rows, cs_payload = [], [], None
     table = get_substitution_table(
         strategy_hash, strategy_cache, cio_row, **_kwargs)
 
@@ -10758,9 +10801,19 @@ async def get_data_reference_sheet(
     LOCKED_SENTINEL = "locked at submission (academic_deck.py)"
 
     # Factor-loading row lookup keyed by strategy_name.
+    # June 22 2026 (wiring fix) -- prefer the cached payload
+    # (fl_rows from load_substitution_metric_sources) over the
+    # live-compute factor_loadings_row, which is empty when the
+    # endpoint can't pass real FF factors. Falls back to the
+    # live row only when the cache is empty.
     fl_by_strategy: dict[str, dict] = {}
-    for row in factor_loadings_row:
-        name = row.get("strategy")
+    fl_source_rows = (
+        fl_rows if isinstance(fl_rows, list) and fl_rows
+        else factor_loadings_row)
+    for row in fl_source_rows:
+        if not isinstance(row, dict):
+            continue
+        name = row.get("strategy") or row.get("strategy_name")
         if name:
             fl_by_strategy[name] = row
 
@@ -12354,6 +12407,17 @@ async def _generate_brief_document(
             except Exception as _exc:  # noqa: BLE001
                 log.warning("brief_live_signals_read_failed",
                             error=str(_exc))
+            # June 22 2026 (wiring fix) -- read analytics metrics
+            # for pre/post 2022 Sharpes, factor loadings, and
+            # cost sensitivity tokens. See
+            # tools.academic_export.load_substitution_metric_sources
+            # for the source mapping.
+            from tools.academic_export import (
+                load_substitution_metric_sources,
+            )
+            regime_conditional_rows, factor_loadings_rows, \
+                cost_sensitivity_payload = (
+                    await load_substitution_metric_sources())
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -12373,7 +12437,10 @@ async def _generate_brief_document(
                 study_months=(data.get("study_period") or {}).get(
                     "n_months"),
                 implied_allocation=implied_alloc,
-                live_signals=live_signals)
+                live_signals=live_signals,
+                regime_conditional=regime_conditional_rows,
+                factor_loadings=factor_loadings_rows,
+                cost_sensitivity=cost_sensitivity_payload)
             log.info("substitution_table_built",
                      document_type="executive_brief",
                      data_hash=(data_hash or "")[:8],
@@ -12881,6 +12948,15 @@ async def _generate_appendix_document(
             except Exception as _exc:  # noqa: BLE001
                 log.warning("appendix_live_signals_read_failed",
                             error=str(_exc))
+            # June 22 2026 (wiring fix) -- read analytics metrics
+            # for pre/post 2022 Sharpes, factor loadings, and
+            # cost sensitivity tokens.
+            from tools.academic_export import (
+                load_substitution_metric_sources,
+            )
+            regime_conditional_rows, factor_loadings_rows, \
+                cost_sensitivity_payload = (
+                    await load_substitution_metric_sources())
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -12893,7 +12969,10 @@ async def _generate_appendix_document(
                 study_months=(data.get("study_period") or {}).get(
                     "n_months"),
                 implied_allocation=implied_alloc,
-                live_signals=live_signals)
+                live_signals=live_signals,
+                regime_conditional=regime_conditional_rows,
+                factor_loadings=factor_loadings_rows,
+                cost_sensitivity=cost_sensitivity_payload)
             log.info("substitution_table_built",
                      document_type="analytical_appendix",
                      data_hash=(data_hash or "")[:8],
@@ -13969,6 +14048,17 @@ async def _generate_deck_document(
                 log.warning("deck_live_signals_read_failed",
                             error=str(_exc))
             from tools.academic_deck import OOS_WINDOW_PCT_OF_STUDY
+            # June 22 2026 (wiring fix) -- read analytics metrics
+            # for pre/post 2022 Sharpes, factor loadings, and cost
+            # sensitivity tokens (slides 6, 8). Single helper call
+            # covers all three reads -- see
+            # tools.academic_export.load_substitution_metric_sources.
+            from tools.academic_export import (
+                load_substitution_metric_sources,
+            )
+            regime_conditional_rows, factor_loadings_rows, \
+                cost_sensitivity_payload = (
+                    await load_substitution_metric_sources())
             substitution_table = get_substitution_table(
                 data_hash or "",
                 data.get("strategy_results") or {},
@@ -13981,7 +14071,10 @@ async def _generate_deck_document(
                 study_months=(data.get("study_period") or {}).get(
                     "n_months"),
                 implied_allocation=implied_alloc,
-                live_signals=live_signals)
+                live_signals=live_signals,
+                regime_conditional=regime_conditional_rows,
+                factor_loadings=factor_loadings_rows,
+                cost_sensitivity=cost_sensitivity_payload)
             log.info("substitution_table_built",
                      document_type="presentation_deck",
                      data_hash=(data_hash or "")[:8],

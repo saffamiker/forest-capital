@@ -45,6 +45,50 @@ log = structlog.get_logger(__name__)
 DATA_PENDING = "[DATA PENDING]"
 
 
+async def load_substitution_metric_sources() -> tuple[
+    list[dict], list[dict], dict | None,
+]:
+    """Read the two analytics_metrics_cache metric_kinds that
+    feed the substitution table's pre/post 2022 Sharpes, Carhart
+    factor loadings, and net-of-cost Sharpe tokens.
+
+    Returns (regime_conditional, factor_loadings, cost_sensitivity)
+    -- all three from the LATEST cached row, regardless of hash
+    match. The brief / appendix / deck / data-reference-sheet
+    callsites pass these as kwargs to get_substitution_table.
+
+    Single read for both academic_analytics fields -- the payload
+    bundles regime_conditional + factor_loadings together at
+    metric_kind='academic_analytics' so one fetch covers both
+    Gap 1 (pre/post 2022 Sharpes) and Gap 2 (factor loadings).
+    Cost sensitivity is a separate metric_kind.
+
+    Fail-open: missing fields return empty lists / None so the
+    substitution table degrades to em-dashes rather than raising.
+    """
+    regime_conditional: list[dict] = []
+    factor_loadings: list[dict] = []
+    cost_sensitivity: dict | None = None
+    try:
+        from tools.precomputed_analytics import get_latest_metric
+        aa = await get_latest_metric("academic_analytics")
+        if isinstance(aa, dict):
+            rc = aa.get("regime_conditional")
+            if isinstance(rc, list):
+                regime_conditional = rc
+            fl = aa.get("factor_loadings")
+            if isinstance(fl, list):
+                factor_loadings = fl
+        cs = await get_latest_metric("oos_cost_sensitivity")
+        if isinstance(cs, dict):
+            cost_sensitivity = cs
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "substitution_metric_sources_load_failed",
+            error=str(exc))
+    return regime_conditional, factor_loadings, cost_sensitivity
+
+
 async def gather_document_data() -> dict[str, Any]:
     """
     Assembles the full data bundle the document builders consume.
