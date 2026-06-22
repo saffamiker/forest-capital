@@ -167,12 +167,16 @@ class TestBriefGroundingBlock:
         from tools.brief_grounding import brief_grounding_block
         block = brief_grounding_block(
             "The blend outperforms benchmark.")
+        # The user-locked phrasing for the NARRATIVE ANCHOR
+        # block (2026-06-21). Pinning the exact framing keeps a
+        # future PR from quietly softening the language.
         assert "BRIEF GROUNDING CONTEXT" in block
+        assert "NARRATIVE ANCHOR" in block
         assert "The blend outperforms benchmark." in block
-        # The block must instruct the model to amplify, not
-        # re-derive.
-        assert "amplify" in block.lower()
-        assert "re-derive" in block.lower() or "rederive" in block.lower()
+        # The block must instruct the model to visualize what
+        # the brief argues, not re-derive its own conclusions.
+        assert "visualizes and presents" in block
+        assert "re-derive" in block
 
     def test_empty_brief_returns_empty_block(self):
         # The composition pattern `prompt + block` is a no-op
@@ -380,10 +384,11 @@ class TestDeckAppendixGateOnMissingBrief:
 
 
 class TestDeckStoryPlanReceivesBriefText:
-    """generate_deck_story_plan(brief_text=...) prepends the
-    brief grounding block to the Pass-1 Opus system prompt. The
-    arbiter sees the FULL brief once per plan generation; the
-    per-slide writers see per-section excerpts (cheaper)."""
+    """generate_deck_story_plan(brief_text=..., appendix_text=...)
+    composes BOTH grounding blocks onto the Pass-1 Opus system
+    prompt + the GENERATION RULES closer. The arbiter sees the
+    FULL brief + FULL appendix once per plan generation; the
+    per-slide writers see per-section excerpts only (cheaper)."""
 
     def test_brief_text_landed_in_system_prompt(self, monkeypatch):
         # Capture the system_prompt passed into the harness call
@@ -402,6 +407,55 @@ class TestDeckStoryPlanReceivesBriefText:
             brief_text="UNIQUE_MARKER_brief_body_for_test")
         assert "UNIQUE_MARKER_brief_body_for_test" in captured["system_prompt"]
         assert "BRIEF GROUNDING CONTEXT" in captured["system_prompt"]
+        assert "NARRATIVE ANCHOR" in captured["system_prompt"]
+
+    def test_appendix_text_landed_in_system_prompt(self, monkeypatch):
+        # Confirm the appendix grounding block composes onto the
+        # Pass-1 prompt when appendix_text is supplied.
+        from tools import story_plan as sp
+        captured: dict = {}
+
+        def _capture(**kwargs):
+            captured["system_prompt"] = kwargs.get("system_prompt", "")
+            raise RuntimeError("captured")
+
+        monkeypatch.setattr(sp, "_run_pass1_with_harness", _capture)
+        sp.generate_deck_story_plan(
+            deck_context={"validated_constants": {}},
+            slide_titles=["A", "B"],
+            brief_text="brief body",
+            appendix_text="UNIQUE_MARKER_appendix_body_for_test")
+        assert "UNIQUE_MARKER_appendix_body_for_test" in captured["system_prompt"]
+        assert "APPENDIX GROUNDING CONTEXT" in captured["system_prompt"]
+        assert "EVIDENTIARY BACKING" in captured["system_prompt"]
+
+    def test_generation_rules_block_present_with_grounding(
+        self, monkeypatch,
+    ):
+        # When EITHER brief_text or appendix_text is supplied,
+        # the GENERATION RULES block closes the grounding
+        # section so the arbiter sees the constraints framing
+        # what to do with the upstream documents.
+        from tools import story_plan as sp
+        captured: dict = {}
+
+        def _capture(**kwargs):
+            captured["system_prompt"] = kwargs.get("system_prompt", "")
+            raise RuntimeError("captured")
+
+        monkeypatch.setattr(sp, "_run_pass1_with_harness", _capture)
+        sp.generate_deck_story_plan(
+            deck_context={"validated_constants": {}},
+            slide_titles=["A", "B"],
+            brief_text="brief body",
+            appendix_text="appendix body")
+        prompt = captured["system_prompt"]
+        assert "GENERATION RULES" in prompt
+        # Pin the slide 9/10 exclusion clause appears in the
+        # rules so the arbiter sees the carve-out alongside the
+        # grounding constraint.
+        assert "Slides 9 and 10 are excluded" in prompt
+        assert "LIVE_DEMO_SEQUENCE" in prompt
 
     def test_no_brief_text_preserves_legacy_prompt(self, monkeypatch):
         from tools import story_plan as sp
@@ -415,5 +469,170 @@ class TestDeckStoryPlanReceivesBriefText:
         sp.generate_deck_story_plan(
             deck_context={"validated_constants": {}},
             slide_titles=["A", "B"])
-        # No brief grounding block when brief_text is omitted.
-        assert "BRIEF GROUNDING CONTEXT" not in captured["system_prompt"]
+        # No grounding blocks AND no GENERATION RULES when
+        # neither upstream document is supplied (legacy path).
+        prompt = captured["system_prompt"]
+        assert "BRIEF GROUNDING CONTEXT" not in prompt
+        assert "APPENDIX GROUNDING CONTEXT" not in prompt
+        assert "GENERATION RULES" not in prompt
+
+
+# ── Appendix gate for deck generation (the second upstream doc) ──────────
+
+
+class TestDeckRequiresAppendixGate:
+    """The deck is the THIRD document in the generation order
+    (brief -> appendix -> deck). The brief gate alone is not
+    enough -- the deck Pass-1 Opus arbiter needs the appendix
+    grounding to confirm that technical claims it puts on slides
+    are traceable to the appendix's per-strategy detail.
+
+    Two 409 gates run in sequence. The brief gate fires first
+    (clearer 'start at the beginning' message); the appendix
+    gate fires only when the brief exists but the appendix
+    doesn't."""
+
+    def test_deck_raises_409_when_brief_exists_but_appendix_missing(
+        self, monkeypatch,
+    ):
+        import asyncio
+        import main as main_module
+        from fastapi import HTTPException
+
+        async def _fake_brief(_email):
+            return {
+                "content_text": "brief body",
+                "content_hash": "abc123",
+                "draft_id": 1,
+            }
+
+        async def _fake_no_appendix(_email):
+            return None
+
+        monkeypatch.setattr(
+            "tools.brief_grounding.get_brief_for_grounding",
+            _fake_brief)
+        monkeypatch.setattr(
+            "tools.brief_grounding.get_appendix_for_grounding",
+            _fake_no_appendix)
+
+        try:
+            asyncio.run(main_module._generate_deck_document(
+                "ruurdsm@queens.edu"))
+        except HTTPException as exc:
+            assert exc.status_code == 409
+            # Detail must name the appendix explicitly so Bob /
+            # Molly know which document is missing.
+            assert "analytical appendix" in (exc.detail or "").lower()
+            # And reference the canonical generation order so
+            # the user understands the constraint.
+            assert "brief" in (exc.detail or "").lower()
+            assert "appendix" in (exc.detail or "").lower()
+            assert "deck" in (exc.detail or "").lower()
+            return
+        assert False, "expected HTTPException(409)"
+
+    def test_get_appendix_for_grounding_returns_none_when_no_draft(
+        self, monkeypatch,
+    ):
+        # The grounding helper returns None when the user has no
+        # appendix draft. Same shape as get_brief_for_grounding.
+        import asyncio
+        from tools import brief_grounding as bg
+
+        async def _no_draft(_email, _doc_type):
+            return None
+
+        monkeypatch.setattr(
+            "tools.editor_drafts.get_current_draft", _no_draft)
+        out = asyncio.run(bg.get_appendix_for_grounding(
+            "ruurdsm@queens.edu"))
+        assert out is None
+
+    def test_get_appendix_for_grounding_returns_payload_when_draft_exists(
+        self, monkeypatch,
+    ):
+        import asyncio
+        from tools import brief_grounding as bg
+
+        async def _draft(_email, doc_type):
+            assert doc_type == "analytical_appendix"
+            return {
+                "id": 42,
+                "content_text": "appendix body content",
+            }
+
+        monkeypatch.setattr(
+            "tools.editor_drafts.get_current_draft", _draft)
+        out = asyncio.run(bg.get_appendix_for_grounding(
+            "ruurdsm@queens.edu"))
+        assert out is not None
+        assert out["content_text"] == "appendix body content"
+        assert out["draft_id"] == 42
+        # Hash is non-empty SHA256 prefix.
+        assert len(out["content_hash"]) == 16
+
+
+# ── 3-document cache key ─────────────────────────────────────────────────
+
+
+class TestCacheKeyWithBriefAndAppendix:
+    """The deck's cache key extends from
+    (data_hash, 'deck') to
+    (data_hash | brief_hash | appendix_hash, 'deck') so a regen
+    of EITHER upstream document auto-invalidates the cached
+    deck plan."""
+
+    def test_full_three_doc_key(self):
+        from tools.brief_grounding import (
+            cache_key_with_brief_and_appendix,
+        )
+        key = cache_key_with_brief_and_appendix(
+            "c421fb89", "brief_abc", "appendix_xyz")
+        assert key == "c421fb89|brief_abc|appendix_xyz"
+
+    def test_missing_appendix_falls_back_to_brief_only(self):
+        # A future opt-out of appendix grounding (or a transient
+        # appendix-read failure that returns "") should preserve
+        # the brief-grounded cache shape.
+        from tools.brief_grounding import (
+            cache_key_with_brief_and_appendix,
+        )
+        key = cache_key_with_brief_and_appendix(
+            "c421fb89", "brief_abc", "")
+        assert key == "c421fb89|brief_abc"
+
+    def test_missing_both_falls_back_to_data_hash_alone(self):
+        from tools.brief_grounding import (
+            cache_key_with_brief_and_appendix,
+        )
+        key = cache_key_with_brief_and_appendix(
+            "c421fb89", "", "")
+        assert key == "c421fb89"
+
+    def test_refresh_story_plan_uses_three_doc_key_for_deck(
+        self, monkeypatch,
+    ):
+        # The deck branch of refresh_story_plan uses
+        # cache_key_with_brief_and_appendix; the stored hash
+        # must include both upstream hashes.
+        import asyncio
+        from tools import story_plan as sp
+        captured: dict = {}
+
+        async def _fake_cached(storage_hash, doc_type):
+            captured["storage_hash"] = storage_hash
+            return {"_model": "claude-opus-4-7",
+                    "slide_plan": [{"slide_number": 1}]}
+
+        monkeypatch.setattr(
+            sp, "get_cached_story_plan", _fake_cached)
+        asyncio.run(sp.refresh_story_plan(
+            "c421fb89", "deck",
+            deck_context={}, slide_titles=[],
+            brief_text="brief body",
+            brief_hash="brief_abc",
+            appendix_text="appendix body",
+            appendix_hash="appendix_xyz"))
+        assert captured["storage_hash"] == (
+            "c421fb89|brief_abc|appendix_xyz")

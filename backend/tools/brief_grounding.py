@@ -220,6 +220,71 @@ async def get_brief_for_grounding(
     }
 
 
+async def get_appendix_for_grounding(
+    email: str,
+) -> dict[str, Any] | None:
+    """Fetches the user's current analytical_appendix editor
+    draft. Returns {content_text, content_hash, draft_id} when a
+    non-empty draft exists, None otherwise.
+
+    Symmetric with get_brief_for_grounding. Used by the deck
+    gate -- the deck generates THIRD after both the brief and
+    the appendix are complete, so the deck's Pass-1 Opus
+    arbiter has visibility into both:
+      - the brief (the narrative anchor; what the deck must
+        argue)
+      - the appendix (the technical detail layer; what the
+        deck can reference for supporting evidence)
+
+    None is the signal the deck gate uses to raise
+    HTTPException(409, "Generate the analytical appendix
+    first"). Fail-open at the read level.
+    """
+    try:
+        from tools.editor_drafts import get_current_draft
+        draft = await get_current_draft(email, "analytical_appendix")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "appendix_grounding_draft_read_failed", error=str(exc))
+        return None
+    if not draft:
+        return None
+    content_text = (draft.get("content_text") or "").strip()
+    if not content_text:
+        return None
+    return {
+        "content_text": content_text,
+        # Reuse brief_content_hash -- it's a generic SHA256
+        # prefix of any text. The function name is historical;
+        # the hashing contract is document-agnostic.
+        "content_hash": brief_content_hash(content_text),
+        "draft_id": draft.get("id"),
+    }
+
+
+def cache_key_with_brief_and_appendix(
+    data_hash: str, brief_hash: str | None,
+    appendix_hash: str | None,
+) -> str:
+    """Combine data_hash + brief_hash + appendix_hash into the
+    deck's three-document cache key. Used by the deck path
+    (which depends on both upstream documents) -- the appendix
+    path uses cache_key_with_brief (depends on brief only); the
+    brief uses data_hash alone (anchors itself).
+
+    Either trailing hash being empty / None preserves the
+    legacy shape for that segment -- pre-grounding deck plans
+    cached under bare data_hash remain accessible, brief-only
+    grounded plans remain accessible under (data_hash | brief_hash).
+    A future opt-out of either grounding is a one-line edit."""
+    parts = [data_hash]
+    if brief_hash:
+        parts.append(brief_hash)
+    if appendix_hash:
+        parts.append(appendix_hash)
+    return "|".join(parts)
+
+
 def _split_brief_by_section(text: str) -> dict[str, str]:
     """Match each canonical brief section heading case-
     insensitively and extract the body up to the next
@@ -282,39 +347,96 @@ def brief_section_excerpt(
 def brief_grounding_block(
     brief_text: str | None,
 ) -> str:
-    """Renders the full brief as a prompt block suitable for
-    threading into a Pass-1 Opus call. The block carries a
-    clear header so the model recognises the grounding context;
-    when brief_text is empty, returns the empty string (the
-    caller's prompt assembly skips the empty block via the
-    standard `+ block` no-op pattern).
+    """Renders the full brief as a NARRATIVE ANCHOR prompt block
+    for any downstream document's Pass-1 Opus call. Exact wording
+    locked by the user 2026-06-21 (see PR #364 commit history --
+    'narrative anchor' framing is the canonical phrasing).
 
     Used by:
       - generate_deck_story_plan(brief_text=...) for the deck
-        Pass-1 arbiter
-      - generate_appendix_section_plan(brief_text=...) for the
-        appendix's lightweight section-plan pass
+        Pass-1 arbiter (the deck is the third document; sees
+        brief AND appendix grounding blocks)
 
     Conservative budget -- the full brief is typically 2-3k
     words ~= 3-4k tokens. Added once per Pass-1 call (NOT once
-    per slide / per section), so the input-context cost is
-    bounded."""
+    per slide), so the input-context cost is bounded.
+
+    Empty / None brief_text returns "" so the composition
+    pattern (`prompt + block`) is a no-op for any caller that
+    bypasses the gate (pre-grounding behaviour preserved)."""
     if not brief_text:
         return ""
     return (
-        "\n\nBRIEF GROUNDING CONTEXT (this document must align "
-        "with the brief's framing):\n"
-        "The executive brief is the anchor document for this "
-        "submission. The brief's central argument, honest "
-        "acknowledgments, and recommendation framing are LOCKED "
-        "by the time this generation runs. Your job is to "
-        "amplify and visualize what the brief argues, NOT to "
-        "re-derive your own conclusions. Match the brief's "
-        "framing, terminology, and recommendation language "
-        "exactly where the section topic overlaps.\n\n"
-        "=== FINALIZED EXECUTIVE BRIEF ===\n"
+        "\n\nBRIEF GROUNDING CONTEXT — NARRATIVE ANCHOR\n"
+        "The following is the finalized executive brief. The deck "
+        "MUST present the same central argument, three-strategy "
+        "framing, honest acknowledgment language, and "
+        "recommendation conclusions as the brief. Do not "
+        "introduce new findings, reframe the central thesis, or "
+        "soften/strengthen claims beyond what the brief states. "
+        "The deck visualizes and presents what the brief argues "
+        "— it does not re-derive its own conclusions.\n\n"
         + brief_text.strip()
-        + "\n=== END OF BRIEF ===\n"
+        + "\n"
+    )
+
+
+def appendix_grounding_block(
+    appendix_text: str | None,
+) -> str:
+    """Renders the appendix as the EVIDENTIARY BACKING prompt
+    block for the deck's Pass-1 Opus arbiter. Exact wording
+    locked by the user 2026-06-21 (see PR #364) -- "evidentiary
+    backing" is the canonical framing for how the deck uses the
+    appendix.
+
+    Empty / None returns "" so the composition pattern is a
+    no-op when the appendix isn't supplied."""
+    if not appendix_text:
+        return ""
+    return (
+        "\n---\n\n"
+        "APPENDIX GROUNDING CONTEXT — EVIDENTIARY BACKING\n"
+        "The following is the finalized analytical appendix. The "
+        "deck may reference the technical depth and full "
+        "10-strategy coverage documented here, but does not need "
+        "to reproduce it. Use this context to ensure that any "
+        "technical claims made in the deck slides are supported "
+        "by the appendix evidence. Do not introduce analytical "
+        "conclusions from the appendix that contradict or extend "
+        "beyond what the brief states — the brief is the "
+        "authoritative narrative; the appendix is the supporting "
+        "technical record.\n\n"
+        + appendix_text.strip()
+        + "\n"
+    )
+
+
+def deck_generation_rules_block() -> str:
+    """Renders the GENERATION RULES the deck Pass-1 Opus arbiter
+    must follow. Composed AFTER brief_grounding_block and
+    appendix_grounding_block so the rules close the grounding
+    section and frame what the arbiter is allowed to do with
+    the upstream documents. Exact wording locked by the user
+    2026-06-21.
+
+    Deck-specific (mentions slides 9 + 10 explicitly). Brief and
+    appendix paths do NOT include this block."""
+    return (
+        "\n---\n\n"
+        "GENERATION RULES\n"
+        "1. Brief is the narrative anchor. Follow its argument, "
+        "framing, and conclusions precisely.\n"
+        "2. Appendix is the evidentiary backing. Use it to confirm "
+        "technical claims are supportable, not to generate new "
+        "ones.\n"
+        "3. Slides 9 and 10 are excluded from brief and appendix "
+        "grounding by design. Slide 9 follows LIVE_DEMO_SEQUENCE "
+        "only. Slide 10 covers platform methodology and is "
+        "deck-specific.\n"
+        "4. Every analytical slide must be traceable to either "
+        "the brief or the appendix. No new findings, no "
+        "unsupported claims.\n"
     )
 
 

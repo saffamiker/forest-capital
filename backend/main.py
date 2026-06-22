@@ -13156,24 +13156,40 @@ async def _generate_deck_document(
     import asyncio
 
     # June 21 2026 -- brief-as-anchor gate. The presentation deck
-    # is grounded in the finalized executive brief: same central
-    # argument, same honest-acknowledgment framing, same
-    # recommendation language. Without a brief draft on hand the
-    # deck would re-derive its own narrative from raw cache, which
-    # is the messaging-inconsistency risk this gate eliminates.
-    # 409 response surfaces inline in the editor (the frontend's
+    # is the THIRD document generated, after the executive brief
+    # (narrative anchor) and the analytical appendix (technical
+    # detail layer). Both must exist before the deck runs so its
+    # Pass-1 Opus arbiter has full visibility into the narrative
+    # the deck must argue AND the per-strategy detail it can cite
+    # for supporting evidence.
+    #
+    # Generation order: brief -> appendix -> deck.
+    #
+    # 409 responses surface inline in the editor (the frontend's
     # DocumentGenerationPanel renders detail in the per-card error
-    # slot already).
-    from tools.brief_grounding import get_brief_for_grounding
+    # slot already; see PR #364 frontend audit).
+    from tools.brief_grounding import (
+        get_appendix_for_grounding, get_brief_for_grounding,
+    )
     brief_grounding = await get_brief_for_grounding(email)
     if brief_grounding is None:
         raise HTTPException(
             status_code=409,
             detail=(
                 "Generate the executive brief before the "
-                "presentation deck. The deck is grounded in the "
-                "brief; all three deliverables (brief / deck / "
-                "appendix) must share a single narrative."))
+                "presentation deck. The deck is the third "
+                "document in the generation order "
+                "(brief -> appendix -> deck) and grounds itself "
+                "in both upstream documents."))
+    appendix_grounding = await get_appendix_for_grounding(email)
+    if appendix_grounding is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Generate the analytical appendix before the "
+                "presentation deck. The deck cites supporting "
+                "technical detail from the appendix; the "
+                "generation order is brief -> appendix -> deck."))
 
     try:
         data, blend_weights, blend_series, n_strategies = \
@@ -13191,15 +13207,17 @@ async def _generate_deck_document(
         # before -- the existing fallback already produces a complete
         # deck without the locked structural layer.
         #
-        # June 21 2026 brief grounding -- the cache key extension
-        # threads brief_content_hash so a brief regen automatically
-        # invalidates the deck story plan on the next call. The
-        # full brief text flows into the Pass-1 Opus arbiter via
-        # the brief_text kwarg.
+        # June 21 2026 brief-as-anchor + appendix-as-evidence --
+        # both upstream documents thread through to the Pass-1
+        # Opus arbiter. The cache key includes both content
+        # hashes so a regen of either upstream document
+        # auto-invalidates the cached deck plan.
         slide_plan = await _resolve_story_plan_slide_entries(
             data, n_strategies, list(SLIDE_TITLES),
             brief_text=brief_grounding["content_text"],
-            brief_hash=brief_grounding["content_hash"])
+            brief_hash=brief_grounding["content_hash"],
+            appendix_text=appendix_grounding["content_text"],
+            appendix_hash=appendix_grounding["content_hash"])
 
         # Layer 2 (June 21 2026) -- build the substitution table once
         # per generation job and thread it through every per-slide
@@ -13345,22 +13363,22 @@ async def _resolve_story_plan_slide_entries(
     *,
     brief_text: str | None = None,
     brief_hash: str | None = None,
+    appendix_text: str | None = None,
+    appendix_hash: str | None = None,
 ) -> list[dict]:
     """Cache-aware story plan retrieval for deck generation.
 
-    Reads story_plans for (current_data_hash[|brief_hash], 'deck').
+    Reads story_plans for
+    (current_data_hash[|brief_hash][|appendix_hash], 'deck').
     On a non-fallback cache hit returns the slide_plan list
     verbatim. On a cache miss fires generate_deck_story_plan() and
-    persists. Fail-open at every layer: an unreachable Opus or a
-    cold strategy cache returns an empty list and the deck renders
-    without the locked structural layer (i.e. exactly as it did
-    pre-PR-333). Logs the cache decision so an operator can see
-    hit / miss / fallback in Render logs.
+    persists. Fail-open at every layer.
 
-    June 21 2026 brief-as-anchor -- brief_text flows into the
-    Pass-1 Opus arbiter as BRIEF GROUNDING CONTEXT; brief_hash
-    extends the cache key so a brief regen automatically
-    invalidates the cached deck plan.
+    June 21 2026 brief-as-anchor + appendix-as-evidence -- both
+    upstream documents flow into the Pass-1 Opus arbiter (the
+    narrative anchor + the evidentiary backing) and both hashes
+    extend the cache key so a regen of either upstream document
+    auto-invalidates the cached deck plan.
     """
     try:
         from tools.cache import get_latest_strategy_hash
@@ -13377,7 +13395,9 @@ async def _resolve_story_plan_slide_entries(
             deck_context=_deck_per_slide_context(data),
             slide_titles=slide_titles,
             brief_text=brief_text,
-            brief_hash=brief_hash)
+            brief_hash=brief_hash,
+            appendix_text=appendix_text,
+            appendix_hash=appendix_hash)
     except Exception as exc:  # noqa: BLE001
         log.warning("deck_story_plan_refresh_failed", error=str(exc))
         return []

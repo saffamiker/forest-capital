@@ -1286,27 +1286,36 @@ def generate_deck_story_plan(
         "senior investment professionals and the FNA 670 academic panel"),
     duration_minutes: int = 19,
     brief_text: str | None = None,
+    appendix_text: str | None = None,
 ) -> dict[str, Any]:
     """The four-pass deck story plan generator. Fail-open at every
     pass: an unreachable LLM degrades to deterministic fallback but
     the deck still has SOMETHING to render.
 
-    June 21 2026 brief-as-anchor -- when brief_text is supplied,
-    the full executive brief is injected as a BRIEF GROUNDING
-    CONTEXT block into the Pass-1 Opus system prompt. The arbiter
-    uses the brief as the structural alignment layer: the deck's
-    central argument, honest-acknowledgment framing, and
-    recommendation language must match the brief's. Empty / None
-    brief_text leaves the prompt unchanged (pre-grounding
-    behaviour preserved for any legacy callers)."""
-    # Brief grounding block -- prepended to the system prompt so
-    # the arbiter sees the full brief BEFORE the deck spec /
-    # rubric / context. The block is a no-op string when
-    # brief_text is empty.
-    from tools.brief_grounding import brief_grounding_block
+    June 21 2026 brief-as-anchor -- the deck Pass-1 Opus arbiter
+    sees THREE grounding blocks composed onto the system prompt
+    in this order:
+      1. BRIEF GROUNDING CONTEXT (narrative anchor)
+      2. APPENDIX GROUNDING CONTEXT (evidentiary backing)
+      3. GENERATION RULES (slide 9 + 10 exclusion, traceability)
+    Both upstream documents must exist before the deck generates
+    (enforced by the 409 gate in main.py::_generate_deck_document);
+    empty brief_text / appendix_text leaves the corresponding
+    block as a no-op string for any legacy / test caller that
+    bypasses the gate."""
+    # Compose the three grounding blocks onto the base system
+    # prompt. Each block returns "" when its input is empty so
+    # the composition pattern is a no-op for that segment.
+    from tools.brief_grounding import (
+        appendix_grounding_block, brief_grounding_block,
+        deck_generation_rules_block,
+    )
     grounded_system_prompt = (
         _DECK_STORY_PLAN_SYSTEM_PROMPT
-        + brief_grounding_block(brief_text))
+        + brief_grounding_block(brief_text)
+        + appendix_grounding_block(appendix_text)
+        + (deck_generation_rules_block()
+           if (brief_text or appendix_text) else ""))
 
     user_prompt = (
         "CONTEXT (validated constants + per-slide data):\n"
@@ -1604,30 +1613,41 @@ async def refresh_story_plan(
     rubric_sections: list[str] | None = None,
     brief_text: str | None = None,
     brief_hash: str | None = None,
+    appendix_text: str | None = None,
+    appendix_hash: str | None = None,
 ) -> dict[str, Any]:
     """Hash-pipeline entry point. Serves from cache when a non-
-    fallback row exists at (data_hash, document_type); otherwise
+    fallback row exists at the extended storage_hash; otherwise
     runs the four-pass generator and persists. Fail-open per pass.
 
-    June 21 2026 brief-as-anchor -- when brief_hash is supplied
-    the storage cache key is extended from data_hash to
-    "{data_hash}|{brief_hash}". A brief regen produces a new
-    brief_hash which automatically invalidates the cached deck /
-    appendix plan on the next call without a manual cache flush.
+    June 21 2026 brief-as-anchor -- the storage cache key is
+    extended depending on document type:
+      - brief: data_hash alone (the brief is the anchor)
+      - appendix: data_hash | brief_hash (depends on brief)
+      - deck: data_hash | brief_hash | appendix_hash (depends
+              on both)
+    A refresh of any upstream document changes its hash and
+    auto-invalidates the cached downstream plans.
 
-    brief_text is forwarded to the deck generator as the BRIEF
-    GROUNDING CONTEXT block in its Pass-1 Opus system prompt.
-    The brief itself ignores brief_text (it IS the brief; no
-    grounding to thread). Empty / None brief_text leaves the
-    pre-grounding behaviour unchanged."""
+    brief_text + appendix_text are forwarded to the deck
+    generator as the BRIEF GROUNDING (narrative anchor) +
+    APPENDIX GROUNDING (evidentiary backing) blocks in its
+    Pass-1 Opus system prompt. Empty / None for either leaves
+    the corresponding block as a no-op string."""
     if not data_hash:
         return {"error": "no_data_hash"}
-    # Brief uses its own data_hash (it IS the anchor; not
-    # grounded in itself). Deck + appendix extend the cache key
-    # with brief_hash so a refreshed brief auto-invalidates the
-    # downstream plans.
+    # Per-document cache key extension. Order matters: the brief
+    # uses its own data_hash; the appendix depends on the brief
+    # but not on itself; the deck depends on both upstream
+    # documents.
     if document_type == "brief":
         storage_hash = data_hash
+    elif document_type == "deck":
+        from tools.brief_grounding import (
+            cache_key_with_brief_and_appendix,
+        )
+        storage_hash = cache_key_with_brief_and_appendix(
+            data_hash, brief_hash, appendix_hash)
     else:
         from tools.brief_grounding import cache_key_with_brief
         storage_hash = cache_key_with_brief(data_hash, brief_hash)
@@ -1638,7 +1658,8 @@ async def refresh_story_plan(
     if document_type == "deck":
         plan = generate_deck_story_plan(
             deck_context or {}, slide_titles or [],
-            brief_text=brief_text)
+            brief_text=brief_text,
+            appendix_text=appendix_text)
     elif document_type == "brief":
         plan = generate_brief_section_plan(
             brief_context or {}, rubric_sections or [])
