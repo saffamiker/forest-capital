@@ -62,6 +62,82 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+# ── Brief-grounding stub fixture (June 21 2026, PR #364) ──────────────────
+#
+# PR #364 added 409 gates on _generate_deck_document and
+# _generate_appendix_document requiring a brief draft (and for
+# the deck, also an appendix draft) to exist on the user's
+# account. CI runs against a fresh DB with no drafts seeded, so
+# the gates fire and the legitimate deck / appendix contract
+# tests fail.
+#
+# Fix: an autouse fixture that monkeypatches the two grounding
+# helpers to return stub payloads. The deck / appendix tests
+# don't actually need real drafts -- they exercise the
+# generator's downstream behaviour (PPTX assembly, eight-section
+# appendix shape, etc.). The stub payloads carry valid content
+# strings so the upstream Pass-1 Opus call composes a non-empty
+# system prompt; the deck Pass-1 call still hits the test-env
+# Anthropic short-circuit (which the existing tests already
+# tolerated via [DATA PENDING] fallbacks).
+#
+# The fixture is intentionally NOT applied at module scope --
+# pytest's monkeypatch fixture is function-scoped. Tests that
+# want to exercise the GATE (i.e. the brief-grounding tests in
+# test_brief_grounding.py) can stub the grounding helpers
+# directly without this fixture interfering.
+
+
+@pytest.fixture(autouse=True)
+def _stub_brief_appendix_grounding(monkeypatch):
+    """Stub brief + appendix grounding helpers so the 409 gates
+    in _generate_deck_document / _generate_appendix_document do
+    NOT fire during the document-generation contract tests. CI
+    runs against a fresh DB with no drafts seeded; the stub
+    bypasses the gate without requiring DB fixtures."""
+    async def _fake_brief(_email):
+        return {
+            "content_text": (
+                "## Executive Summary\n\nThe blend outperforms "
+                "benchmark on OOS Sharpe.\n\n"
+                "## Methodology Overview\n\nWe use HMM regime "
+                "detection.\n\n"
+                "## Key Findings and Insights\n\nDrawdown "
+                "reduction of 50% versus benchmark.\n\n"
+                "## Limitations and Risks\n\nSample size 40 "
+                "months.\n\n"
+                "## Final Recommendations\n\nWe recommend the "
+                "regime-conditional blend.\n\n"
+                "## Visuals\n\nFour charts demonstrate the "
+                "findings.\n"),
+            "content_hash": "test_brief_hash",
+            "draft_id": 1,
+        }
+
+    async def _fake_appendix(_email):
+        return {
+            "content_text": (
+                "## Data Sources and Methodology\n\nS&P 500 + "
+                "AGG + HYG.\n\n"
+                "## Portfolio Construction\n\nFull 10-strategy "
+                "rules.\n\n"
+                "## Calculations and Models\n\nFDR + Carhart + "
+                "bootstrap.\n\n"
+                "## Performance Metrics\n\n10-strategy table.\n\n"
+                "## Sensitivity and Robustness\n\n10/15/20bp "
+                "cost sensitivity.\n"),
+            "content_hash": "test_appendix_hash",
+            "draft_id": 2,
+        }
+
+    monkeypatch.setattr(
+        "tools.brief_grounding.get_brief_for_grounding",
+        _fake_brief)
+    monkeypatch.setattr(
+        "tools.brief_grounding.get_appendix_for_grounding",
+        _fake_appendix)
+
+
 def _docx_text(content: bytes) -> str:
     """All header, paragraph and table text from a .docx, for content checks."""
     doc = Document(io.BytesIO(content))
