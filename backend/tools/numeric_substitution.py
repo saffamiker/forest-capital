@@ -478,7 +478,7 @@ def build_substitution_table(
         "{{NET_SHARPE_20BP}}": format_sharpe(
             _cost_scenario(cs, 20).get("net_sharpe")),
 
-        # Tail risk (deck slide 5 references CVaR explicitly).
+        # Tail risk (deck slide 6 references CVaR explicitly).
         "{{CVAR_99_BENCHMARK}}": format_pct(
             benchmark.get("cvar_99_annualized")),
 
@@ -511,7 +511,7 @@ def build_substitution_table(
             else cio.get("ess")
             or "—"),
 
-        # Live blend composition (slide 7 + slide 11). The CIO row
+        # Live blend composition (slide 8 + slide 12). The CIO row
         # carries blend_weights as a dict {strategy -> weight}; we
         # surface the three brief-side strategies explicitly so the
         # deck slide can quote each weight by name.

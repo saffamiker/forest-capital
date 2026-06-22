@@ -1255,22 +1255,26 @@ def build_analytical_appendix(
 # presenter can flip to any slide on paper without scanning prose.
 _SLIDE_MARKER_RE = re.compile(r"^\s*\[SLIDE\s+(\d+):\s*(.+?)\]\s*$")
 
-# Hardcoded slide timings per the user spec for the 11-slide deck:
-#   slides 1-8 + 10-11 target 1.2-1.7 minutes each
-#   slide 9 (AnalyticsDesk live demo) targets 3.5 minutes
+# Hardcoded slide timings per the user spec for the 12-slide deck
+# (June 22 2026 -- agenda insert + AI/demo flip):
+#   slides 1, 3-9, 12 target 1.2-1.7 minutes each
+#   slide 2 (agenda) targets 0.5 minutes (structural walkthrough)
+#   slide 10 (AI methodology) targets 2.0 minutes
+#   slide 11 (AnalyticsDesk live demo) targets 3.5 minutes
 # Sum is approximately 18-20 minutes for the panel presentation.
 _SLIDE_TIMINGS_MIN: list[tuple[int, float, str]] = [
     (1,  1.7, ""),
-    (2,  1.5, ""),
-    (3,  1.7, ""),
+    (2,  0.5, "Agenda"),
+    (3,  1.5, ""),
     (4,  1.7, ""),
-    (5,  1.5, ""),
+    (5,  1.7, ""),
     (6,  1.5, ""),
     (7,  1.5, ""),
-    (8,  1.2, ""),
-    (9,  3.5, "Live demo"),
+    (8,  1.5, ""),
+    (9,  1.2, ""),
     (10, 2.0, ""),
-    (11, 1.5, ""),
+    (11, 3.5, "Live demo"),
+    (12, 1.5, ""),
 ]
 
 

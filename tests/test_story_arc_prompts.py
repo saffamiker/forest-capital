@@ -162,7 +162,12 @@ class TestTokenMappingBlock:
         # And the location-rules for OOS vs full-period.
         assert "section 1, the section 3 lead, and section 5" in (
             normalized)
-        assert "slides 1, 3, 6, 11" in normalized
+        # June 22 2026 (12-slide deck): OOS figures appear on
+        # slides 1, 4, 7, 12 -- the OOS headline, the risk-
+        # adjusted numbers slide, the OOS validation slide, and
+        # the closing answer. The 11-slide deck had OOS on
+        # slides 1, 3, 6, 11.
+        assert "slides 1, 4, 7, 12" in normalized
         assert 'labeled "Full-Period Sharpe"' in normalized
 
     def test_prohibition_names_both_blend_and_benchmark_pairs(self):
@@ -213,13 +218,18 @@ class TestDeckStoryPlanBody:
         assert "Do NOT substitute the full-period Sharpe" in normalized
 
     def test_presentation_arc_block_present(self):
+        """June 22 2026 (12-slide deck) -- new labels include the
+        agenda at slide 2 and the AI methodology / live demo flip
+        to slides 10/11. Old 11-slide labels (Slides 2-3, Slide 9
+        as live demo) are gone."""
         from tools.story_plan import _DECK_STORY_PLAN_BODY
         text = _DECK_STORY_PLAN_BODY
         assert "PRESENTATION ARC" in text
         for slide_label in (
-            "Slide 1:",   "Slides 2-3:", "Slides 4-5:",
-            "Slide 6:",   "Slides 7-8:", "Slide 9:",
-            "Slide 10:",  "Slide 11:",
+            "Slide 1:",    "Slide 2:",
+            "Slides 3-4:", "Slides 5-6:",
+            "Slide 7:",    "Slides 8-9:",
+            "Slide 10:",   "Slide 11:", "Slide 12:",
         ):
             assert slide_label in text
 

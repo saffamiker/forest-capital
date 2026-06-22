@@ -159,8 +159,10 @@ TOKEN MIXING PROHIBITION (non-negotiable):
   In the brief: OOS figures belong in section 1, the section 3 \
   lead, and section 5. Full-period figures belong in section 3 \
   supporting context and the section 6 visuals table only. In the \
-  deck: OOS figures on slides 1, 3, 6, 11. Full-period figures in \
-  the per-strategy table on slide 2 only, clearly labeled \
+  deck: OOS figures on slides 1, 4, 7, 12 (the OOS headline, the \
+  risk-adjusted numbers slide, the OOS validation slide, and the \
+  closing answer). Full-period figures in the per-strategy \
+  comparison table on slide 3 only, clearly labeled \
   "Full-Period Sharpe"."""
 
 
@@ -671,13 +673,16 @@ SLIDE 1 -- NON-NEGOTIABLE OPENING:
 PRESENTATION ARC (lock in the central_argument + presentation_arc \
 fields of the JSON output):
   Slide 1:    Answer + OOS proof point (0.86 vs 0.43)
-  Slides 2-3: Three-strategy framing + the numbers
-  Slides 4-5: Why it works (correlation break, drawdown)
-  Slide 6:    Full out-of-sample treatment (in-sample vs OOS)
-  Slides 7-8: Live regime + honest limitation (2 of 9)
-  Slide 9:    Live demo
-  Slide 10:   AI methodology
-  Slide 11:   Recommendation
+  Slide 2:    Agenda (structural, no data, no chart)
+  Slides 3-4: Three-strategy framing + the numbers
+  Slides 5-6: Why it works (correlation break, drawdown)
+  Slide 7:    Full out-of-sample treatment (in-sample vs OOS)
+  Slides 8-9: Macro context + honest limitation (2 of 9)
+  Slide 10:   AI methodology (BEFORE the demo -- panel needs
+              context on how the council works before watching
+              it operate live)
+  Slide 11:   AnalyticsDesk live demo
+  Slide 12:   Recommendation
 
 CRITICAL: All numeric values in numeric_anchors must come EXACTLY from \
 the validated_constants block in context. Do not estimate, interpolate, \
@@ -717,7 +722,7 @@ slide on prose quality.
 # Pass 1b spend its full budget on prose quality for the speaker notes
 # without competing with the structural schema for tokens.
 LIVE_DEMO_SEQUENCE = """\
-Slide 9 is the AnalyticsDesk live demo. The speaker_notes for slide 9 \
+Slide 11 is the AnalyticsDesk live demo. The speaker_notes for slide 11 \
 must structure the 3.5-minute demo as a four-step sequence:
 
   Step 1 -- Open analyticsdesk.app and navigate to the Investment \
@@ -793,7 +798,7 @@ slide or in any brief paragraph):
   the Council Performance Record shows 1.24 vs 0.73 (+70%) through \
   May 2026 -- the submission UNDERSTATES current performance.
 
-  For slide 1 AND slide 6, briefly note this context verbally. Frame \
+  For slide 1 AND slide 7, briefly note this context verbally. Frame \
   it as "the submission record is locked at the December figures; \
   the live figure has since improved." Do NOT say "we updated the \
   numbers" or "the figures are now better" -- the academic \

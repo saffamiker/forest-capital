@@ -150,16 +150,17 @@ _DYNAMIC_STRATEGIES = ["MOMENTUM_ROTATION", "REGIME_SWITCHING", "VOL_TARGETING",
 # builder embeds on it.
 SLIDE_TITLES = [
     "Does Diversification Beat 100% Equity?",                 # 1
-    "Static, Dynamic, or Benchmark?",                         # 2
-    "Risk-Adjusted Outperformance: The Numbers",              # 3
-    "The 2022 Break: Why Static Allocation Failed",           # 4
-    "Capital Preservation in Bear Regimes",                   # 5
-    "Does It Hold Up Out-of-Sample?",                         # 6
-    "Macro Context: Why Now Is a BEAR Regime",                # 7
-    "What the Model Gets Wrong",                              # 8
-    "AnalyticsDesk: The Platform Behind the Analysis",        # 9
-    "How We Used AI: What Worked and What Didn't",            # 10
-    "The Answer: Yes, With Conditions",                       # 11
+    "Agenda",                                                 # 2 (NEW June 22 2026)
+    "Static, Dynamic, or Benchmark?",                         # 3
+    "Risk-Adjusted Outperformance: The Numbers",              # 4
+    "The 2022 Break: Why Static Allocation Failed",           # 5
+    "Capital Preservation in Bear Regimes",                   # 6
+    "Does It Hold Up Out-of-Sample?",                         # 7
+    "Macro Context: Why Now Is a BEAR Regime",                # 8
+    "What the Model Gets Wrong",                              # 9
+    "How We Used AI: What Worked and What Didn't",            # 10 (flipped)
+    "AnalyticsDesk: The Platform Behind the Analysis",        # 11 (flipped)
+    "The Answer: Yes, With Conditions",                       # 12
 ]
 DECK_SLIDE_COUNT = len(SLIDE_TITLES)
 
@@ -167,17 +168,16 @@ DECK_SLIDE_COUNT = len(SLIDE_TITLES)
 # renderer + arguments in main._render_deck_slide_charts. Slides not listed
 # carry no chart -- the slide body renders bullets + optional table only.
 #
-# Bridge #98/#100 (June 7 2026) -- eleven-slide rebuild. Chart slots map to
-# the existing platform renderers where the shape matches:
-#   slide 4 -- rolling correlation (the 2022 break)
-#   slide 5 -- strategy comparison bars (cumulative returns proxy)
-#   slide 11 -- efficient frontier with the live blend marker
+# June 22 2026 -- 12-slide structure (agenda insert + AI/demo flip):
+#   slide 5  -- rolling correlation (the 2022 break)
+#   slide 6  -- strategy comparison bars (cumulative returns proxy)
+#   slide 12 -- efficient frontier with the live blend marker
 # Other slides carry stat cards, tables, or pure prose -- the builder
 # renders those from the slide body without a matplotlib pass.
 SLIDE_CHARTS: dict[int, str] = {
-    4: "rolling_correlation",
-    5: "strategy_comparison_oos_sharpe",
-    11: "efficient_frontier",
+    5: "rolling_correlation",
+    6: "strategy_comparison_oos_sharpe",
+    12: "efficient_frontier",
 }
 
 
@@ -238,16 +238,17 @@ STORY_ARC_SEED = """\
 This is slide {slide_number} of {total_slides} in the final FNA 670 \
 investment presentation. The story arc is:
   1. The investment question and direct answer.
-  2. Three strategies, one comparison (Static / Dynamic / Benchmark).
-  3. Risk-adjusted outperformance -- the numbers.
-  4. Why regime-switching works (the 2022 correlation break).
-  5. Capital preservation in bear regimes.
-  6. Out-of-sample validation (resolves the overfitting concern).
-  7. Macro context -- why the live signal is BEAR right now.
-  8. Limitations and honest assessment (the 3/9 play-by-play).
-  9. Live platform demo setup.
+  2. Agenda -- structural roadmap for the panel.
+  3. Three strategies, one comparison (Static / Dynamic / Benchmark).
+  4. Risk-adjusted outperformance -- the numbers.
+  5. Why regime-switching works (the 2022 correlation break).
+  6. Capital preservation in bear regimes.
+  7. Out-of-sample validation (resolves the overfitting concern).
+  8. Macro context -- why the live signal is BEAR right now.
+  9. Limitations and honest assessment (the 2/9 play-by-play).
   10. AI methodology -- what worked, what didn't.
-  11. Final recommendation.
+  11. Live platform demo (analyticsdesk.app).
+  12. Final recommendation.
 
 You are generating slide {slide_number}: "{slide_title}". Stay in arc \
 position -- do not anticipate slides ahead or re-state slides already \
@@ -260,10 +261,13 @@ covered. The panel reads the deck in order."""
 SLIDE_SPECIFICATIONS = f"""\
 SLIDE SPECIFICATIONS
 
-Bridge #98/#100 (June 7 2026) -- eleven-slide rebuild. The deck opens
-with the answer, lays evidence in slides 2-8, sets up the live demo on
-slide 9, addresses AI use explicitly on slide 10, and closes with the
-investable recommendation on slide 11.
+June 22 2026 -- 12-slide structure (agenda inserted at position 2 + AI
+methodology and live demo flipped to slides 10/11). The deck opens with
+the OOS proof point (slide 1), walks the agenda (slide 2), lays evidence
+in slides 3-9, explains AI methodology BEFORE the live demo (slide 10),
+runs the demo (slide 11), and closes with the investable recommendation
+(slide 12). The AI-before-demo order is deliberate: the panel needs
+context on how the council works before they watch it operate live.
 
 Slide 1 -- Does Diversification Beat 100% Equity?
 Message: The regime-conditional blend outperforms the 100% equity \
@@ -286,7 +290,30 @@ behind that answer." Time: ~1 minute.
 Guardrails: No more than 3 data points. Do not mention HMM, strategy \
 codes, or factor loadings on this slide. Visible answer in 5 seconds.
 
-Slide 2 -- Static, Dynamic, or Benchmark?
+Slide 2 -- Agenda
+Message: Walk the panel through the deck structure before diving into \
+evidence. This slide is purely structural -- no data, no tokens, no \
+chart -- so the audience can anchor each upcoming slide to a known \
+agenda item.
+Required bullets (six items, section labels only, no detail under each):
+- The Investment Case -- three strategies, one question
+- The Evidence -- OOS performance and drawdown
+- Why Static Failed -- the 2022 correlation break
+- Out-of-Sample Validation -- what the model never saw
+- Honest Limitations -- 2 of 9, what the model gets wrong
+- AI Methodology, Live Demo, and Recommendation
+Required table: none.
+Chart: none.
+Speaker notes: "Walk through the agenda briefly. Total presentation is \
+18-20 minutes. Panel will have questions after slide 12." \
+Time: ~30 seconds.
+Guardrails: No data, no substitution tokens, no chart on this slide. \
+Pure structure. Do not add detail bullets under each agenda item; the \
+panel sees the detail when each section lands. This slide is excluded \
+from brief grounding (SLIDES_EXCLUDED_FROM_BRIEF_GROUNDING) because it \
+is structural, not analytical.
+
+Slide 3 -- Static, Dynamic, or Benchmark?
 Message: Simplify the strategy set to three categories for the panel. \
 Static = Classic 60/40. Dynamic = Regime-conditional blend. Benchmark = \
 100% S&P 500. Everything else is supporting evidence.
@@ -311,7 +338,7 @@ analytical appendix." Time: ~1.5 minutes.
 Guardrails: Do NOT list all 10 strategies. Do NOT use codes \
 (MIN_VARIANCE, VOL_TARGETING). Use plain English on this slide only.
 
-Slide 3 -- Risk-Adjusted Outperformance: The Numbers
+Slide 4 -- Risk-Adjusted Outperformance: The Numbers
 Message: The dynamic strategy beats the benchmark on every risk-adjusted \
 metric in the out-of-sample period. Static diversification also \
 outperforms but by less.
@@ -335,7 +362,7 @@ edge is smaller. Benchmark is third on every risk-adjusted metric." \
 Time: ~2 minutes.
 Guardrails: OOS period only. Do NOT mix IS and OOS in the same table.
 
-Slide 4 -- The 2022 Break: Why Static Allocation Failed
+Slide 5 -- The 2022 Break: Why Static Allocation Failed
 Message: Pre-2022 equities and bonds were negatively correlated -- \
 diversification was a free hedge. Post-2022 the correlation flipped to \
 +0.68. Regime-conditional allocation adapts; static does not.
@@ -360,7 +387,7 @@ Guardrails: Causal story, not just numbers. No HMM technical detail. \
 Just the economic intuition: correlation broke, static suffered, regime \
 detection adapted.
 
-Slide 5 -- Capital Preservation in Bear Regimes
+Slide 6 -- Capital Preservation in Bear Regimes
 Message: The platform's edge is capital preservation when it matters most, \
 not bull-market outperformance.
 Required bullets:
@@ -385,7 +412,7 @@ not sharp reversals." Time: ~2 minutes.
 Guardrails: Be honest about the April 2025 miss. Cumulative returns \
 chart starts at $1.00 in 2002.
 
-Slide 6 -- Does It Hold Up Out-of-Sample?
+Slide 7 -- Does It Hold Up Out-of-Sample?
 Message: Strategy was designed on pre-2022 data and tested on \
 {{OOS_WINDOW_MONTHS}}+ months \
 of post-2022 data it never saw. It beats the benchmark OOS -- this \
@@ -411,7 +438,7 @@ genuine out-of-sample. The dynamic blend beats the benchmark on both. \
 The static 60/40 wins IS, ties OOS." Time: ~2 minutes.
 Guardrails: Address overfitting head-on. Panel WILL ask.
 
-Slide 7 -- Macro Context: Why Now Is a BEAR Regime
+Slide 8 -- Macro Context: Why Now Is a BEAR Regime
 Message: Connect the live platform regime signal to real macroeconomic \
 conditions. The current BEAR signal reflects specific observable factors. \
 Not a black box.
@@ -436,7 +463,7 @@ Guardrails: This slide is FOR DISCUSSION ONLY. Add the label: \
 "Live signal as of [generation date] -- for discussion, not academic \
 submission figures."
 
-Slide 8 -- What the Model Gets Wrong
+Slide 9 -- What the Model Gets Wrong
 Message: Intellectual honesty is a strength. Edge is capital preservation \
 in sustained bear regimes. NOT designed to call sharp V-shaped reversals. \
 Acknowledge explicitly.
@@ -462,31 +489,11 @@ reversals like April 2025 Liberation Day." Time: ~1.5 minutes.
 Guardrails: Do NOT spin the misses. {PLAY_BY_PLAY_ADD_VALUE}/{PLAY_BY_PLAY_EVENTS} \
 honest framing is academically stronger than cherry-picking wins.
 
-Slide 9 -- AnalyticsDesk: The Platform Behind the Analysis
-Message: Transition slide before the live demo. Set up what the panel is \
-about to see. Three things: live regime + CIO recommendation, council \
-output with dissenting view, document generation.
-Required bullets:
-- Live regime detection + CIO recommendation (Investment Outlook page).
-- Council output -- five agents, generator-evaluator harness, dissenting \
-view from the Risk Manager.
-- Document generation -- this deck, the executive brief, the analytical \
-appendix all from the same data layer.
-- URL for the panel: analyticsdesk.app.
-Required table: none.
-Chart: none -- this is a transition slide. The live browser demo follows.
-Speaker notes: "The platform is the analytical engine behind everything \
-you have seen so far. Three things to show in the live demo: regime \
-detection, the council with its dissenting view, and document \
-generation. URL is analyticsdesk.app." Time: 30 seconds (setup only -- \
-the demo itself happens on the live site).
-Guardrails: Setup slide. NO data tables. Brief. The demo is the live \
-browser pivot.
-
 Slide 10 -- How We Used AI: What Worked and What Didn't
-Message: Rubric explicitly requires discussion of AI use. Be direct. \
-The generator-evaluator council with dissenting agents is the platform \
-differentiator. Honest about what failed.
+Message: Rubric explicitly requires discussion of AI use. The panel \
+needs context on how the council works BEFORE they watch the live \
+demo on slide 11. The generator-evaluator council with dissenting \
+agents is the platform differentiator. Honest about what failed.
 Required bullets (two columns -- what worked + what we learned):
 - What worked: multi-model validation (Sonnet + Opus + Gemini + Grok), \
 regime-keyed caching, harness evaluation with the dissenting Risk Manager.
@@ -506,13 +513,36 @@ Speaker notes: "The rubric asks about AI use. We used AI critically, \
 not blindly. What worked: multi-model validation, deterministic \
 recomputation, dissenting agents that argue back. What we learned: LLM \
 arithmetic is unreliable, early prompts were sycophantic, and the \
-council is the analytical engine -- not just a writing helper." \
-Time: ~2 minutes.
+council is the analytical engine -- not just a writing helper. The \
+next slide will show this in action live." Time: ~2 minutes.
 Guardrails: Honest and reflective, not promotional. Do NOT list every \
 AI model used. The callout: "Every number in this presentation was \
 verified by deterministic Python recomputation, not LLM arithmetic."
 
-Slide 11 -- The Answer: Yes, With Conditions
+Slide 11 -- AnalyticsDesk: The Platform Behind the Analysis
+Message: Live demo. The slide-10 AI methodology context primes the \
+panel for what they are about to watch. Show three things on the \
+live platform: live regime + CIO recommendation, council output with \
+dissenting view, document generation.
+Required bullets:
+- Live regime detection + CIO recommendation (Investment Outlook page).
+- Council output -- five agents, generator-evaluator harness, dissenting \
+view from the Risk Manager.
+- Document generation -- this deck, the executive brief, the analytical \
+appendix all from the same data layer.
+- URL for the panel: analyticsdesk.app.
+Required table: none.
+Chart: none -- this is the live demo slide. The panel watches a live \
+browser walkthrough of the platform.
+Speaker notes: "The platform is the analytical engine behind everything \
+you have seen so far. You just saw how the council works in concept; \
+now you see it live. Three things to show: regime detection, the \
+council with its dissenting view, and document generation. URL is \
+analyticsdesk.app." Time: 3.5 minutes (live demo, not slide content).
+Guardrails: Live-demo slide. NO data tables. The demo is the live \
+browser pivot.
+
+Slide 12 -- The Answer: Yes, With Conditions
 Message: Return to the central question with a direct investable answer. \
 Yes diversification outperforms 100% equity -- but only when allocation \
 is regime-conditional. Static helps but is insufficient post-2022. \

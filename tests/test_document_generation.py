@@ -335,7 +335,7 @@ class TestDocumentGenerationContract:
         assert filename.endswith(".pptx")
         prs = Presentation(io.BytesIO(pptx_bytes))
         assert len(prs.slides) == DECK_SLIDE_COUNT
-        assert DECK_SLIDE_COUNT == 11
+        assert DECK_SLIDE_COUNT == 12  # June 22 2026 agenda + AI/demo flip
         # Cold caches / no matplotlib in the test env must not fail the deck.
         assert "[DATA PENDING]" in _pptx_text(pptx_bytes)
 

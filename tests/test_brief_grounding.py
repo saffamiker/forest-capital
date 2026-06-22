@@ -61,32 +61,40 @@ class TestCacheKeyWithBrief:
 
 
 class TestSlideExclusionIsExplicit:
-    """The user explicitly required slide 9 (live demo) and slide
-    10 (AI methodology) be EXCLUDED from brief excerpt threading.
-    The exclusion is a named frozenset constant + a dispatch
-    helper that consults it FIRST. This test pins both layers so
-    a future PR can't accidentally re-include the slides by
-    editing the slide-to-section map directly."""
+    """Three slides are EXCLUDED from brief excerpt threading
+    because they are structural/meta rather than analytical:
+    slide 2 (agenda), slide 10 (AI methodology), slide 11 (live
+    demo). The exclusion is a named frozenset constant + a
+    dispatch helper that consults it FIRST. This test pins both
+    layers so a future PR can't accidentally re-include the
+    slides by editing the slide-to-section map directly.
+
+    June 22 2026 (12-slide deck) -- exclusion set grew from
+    {9, 10} (11-slide deck) to {2, 10, 11} after the agenda
+    insert at position 2 and the AI methodology / live demo
+    flip to slides 10/11."""
 
     def test_excluded_slides_constant_is_grep_able_frozenset(self):
         from tools.brief_grounding import SLIDES_EXCLUDED_FROM_BRIEF_GROUNDING
         # Pin the type so a future edit can't quietly swap to a
         # mutable container.
         assert isinstance(SLIDES_EXCLUDED_FROM_BRIEF_GROUNDING, frozenset)
-        # Pin the membership so the two excluded slides are
+        # Pin the membership so all three excluded slides are
         # locked. A future PR that removes one breaks this test.
-        assert SLIDES_EXCLUDED_FROM_BRIEF_GROUNDING == frozenset({9, 10})
+        assert SLIDES_EXCLUDED_FROM_BRIEF_GROUNDING == frozenset(
+            {2, 10, 11})
 
     def test_excluded_slides_not_in_section_map(self):
         # The slide -> brief section map intentionally OMITS
-        # slides 9 and 10. Belt-and-suspenders: the dispatcher
+        # slides 2, 10, 11. Belt-and-suspenders: the dispatcher
         # ALSO checks the exclusion set first, but the map omits
         # the keys entirely so even a naive direct lookup of
-        # SLIDE_TO_BRIEF_SECTION[9] would KeyError rather than
+        # SLIDE_TO_BRIEF_SECTION[11] would KeyError rather than
         # silently return a section name.
         from tools.brief_grounding import SLIDE_TO_BRIEF_SECTION
-        assert 9 not in SLIDE_TO_BRIEF_SECTION
+        assert 2 not in SLIDE_TO_BRIEF_SECTION
         assert 10 not in SLIDE_TO_BRIEF_SECTION
+        assert 11 not in SLIDE_TO_BRIEF_SECTION
 
     def test_dispatcher_returns_none_for_excluded_slides(self):
         from tools.brief_grounding import brief_section_for_slide
@@ -95,16 +103,22 @@ class TestSlideExclusionIsExplicit:
         # writer then receives an empty brief_excerpt and
         # brief_section_block returns "" so the prompt is
         # unchanged from pre-grounding behaviour.
-        assert brief_section_for_slide(9) is None
+        # June 22 2026 -- 12-slide deck: excluded slides are 2
+        # (agenda), 10 (AI methodology), 11 (live demo).
+        assert brief_section_for_slide(2) is None
         assert brief_section_for_slide(10) is None
+        assert brief_section_for_slide(11) is None
 
     def test_dispatcher_returns_section_for_included_slides(self):
         from tools.brief_grounding import brief_section_for_slide
         # Spot-check a few mapped slides to confirm the dispatcher
         # actually returns the section for the included slides.
+        # June 22 2026 (12-slide deck): slide 5 is Key Findings
+        # (was slide 4 in the 11-slide deck); slide 12 is Final
+        # Recommendations (was slide 11).
         assert brief_section_for_slide(1) == "Executive Summary"
-        assert brief_section_for_slide(4) == "Key Findings and Insights"
-        assert brief_section_for_slide(11) == "Final Recommendations"
+        assert brief_section_for_slide(5) == "Key Findings and Insights"
+        assert brief_section_for_slide(12) == "Final Recommendations"
 
 
 class TestBriefSectionExcerpt:
@@ -198,15 +212,16 @@ class TestBriefSectionBlock:
         assert "The blend outperforms benchmark." in block
 
     def test_empty_excerpt_returns_empty_block(self):
-        # When brief_section_excerpt returned "" (slide 9 / 10
-        # excluded, or missing section), the block must compose
-        # to nothing so the writer's prompt is unchanged.
+        # When brief_section_excerpt returned "" (slide 2 agenda,
+        # slide 10 AI methodology, slide 11 live demo excluded,
+        # or missing section), the block must compose to nothing
+        # so the writer's prompt is unchanged.
         from tools.brief_grounding import brief_section_block
         assert brief_section_block("", "Executive Summary") == ""
 
     def test_none_section_returns_empty_block(self):
-        # The dispatcher returned None (slide 9 / 10 etc.); the
-        # block must short-circuit to "".
+        # The dispatcher returned None (slide 2, 10, or 11);
+        # the block must short-circuit to "".
         from tools.brief_grounding import brief_section_block
         assert brief_section_block("body", None) == ""
 
@@ -451,10 +466,12 @@ class TestDeckStoryPlanReceivesBriefText:
             appendix_text="appendix body")
         prompt = captured["system_prompt"]
         assert "GENERATION RULES" in prompt
-        # Pin the slide 9/10 exclusion clause appears in the
-        # rules so the arbiter sees the carve-out alongside the
-        # grounding constraint.
-        assert "Slides 9 and 10 are excluded" in prompt
+        # Pin the slide-exclusion clause appears in the rules so
+        # the arbiter sees the carve-out alongside the grounding
+        # constraint. June 22 2026 (12-slide deck): exclusions
+        # are slides 2 (agenda), 10 (AI methodology), 11 (live
+        # demo).
+        assert "Slides 2, 10, and 11 are excluded" in prompt
         assert "LIVE_DEMO_SEQUENCE" in prompt
 
     def test_no_brief_text_preserves_legacy_prompt(self, monkeypatch):
