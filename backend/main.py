@@ -10570,6 +10570,301 @@ def _slug_for_chart(filename: str) -> str:
     return ""
 
 
+@app.get("/api/v1/export/data-reference-sheet")
+async def get_data_reference_sheet(
+    session: dict = Depends(require_auth),
+):
+    """Data Reference Sheet -- the cross-reference tool Bob,
+    Molly, and Mike use to verify every value in the submission
+    documents against the canonical strategy cache. Read-only;
+    available to any team-member session (not admin-gated).
+
+    Returns the full catalog from
+    tools/data_reference_catalog.CATALOG with each token's
+    current value (resolved via build_substitution_table) zipped
+    in. Per-strategy appendix tokens (10 strategies x 5 metrics
+    = 50 rows) and per-strategy factor loadings (10 strategies
+    x 5 columns = 50 rows) appear in their own categories.
+
+    Response shape -- the frontend DataReferenceSheetPanel
+    consumes this directly:
+      {
+        "data_hash": "f2e87dec7dcabe71"   # strategy hash
+        "platform_fingerprint": "d0b1339e..." # the value that
+                                                appears in
+                                                document footers
+        "generated_at": "ISO-8601",
+        "categories": {
+          <category_key>: {
+            "label": <human-readable label>,
+            "entries": [
+              {token, label, value, source, is_locked,
+               last_verified, document_locations}, ...
+            ]
+          }, ...
+        }
+      }
+
+    The two hashes are documented in the response so a frontend
+    tooltip can explain why the document footers (showing
+    platform_fingerprint d0b1339e) differ from the strategy
+    hash the reference sheet locks to (f2e87dec). They are
+    produced by two different functions over different inputs:
+      strategy_hash       = _compute_data_hash(n_rows,
+                                               last_date,
+                                               n_strategies)
+      platform_fingerprint = current_data_hash() = sha256 of
+                                                   market data
+                                                   table state
+
+    Fail-open: any error resolving a token leaves its value
+    as None and is_locked unchanged. The panel renders em-dash
+    for None values so a cold field is visually distinct from
+    a confirmed em-dash."""
+    from datetime import datetime, timezone
+
+    from tools.audit_assembler import current_data_hash
+    from tools.cache import (
+        get_latest_strategy_cache,
+        get_latest_strategy_hash,
+        get_regime_cache,
+    )
+    from tools.cio_recommendation import (
+        compute_implied_asset_allocation, get_latest_recommendation,
+    )
+    from tools.data_reference_catalog import (
+        CATALOG, CATEGORY_LABELS,
+        expand_per_strategy_appendix_metrics,
+        expand_per_strategy_factor_loadings,
+    )
+    from tools.numeric_substitution import get_substitution_table
+    from tools.academic_deck import (
+        OOS_SHARPE_REGIME_CONDITIONAL,
+        OOS_SHARPE_BENCHMARK,
+        CORRELATION_PRE_2022, CORRELATION_POST_2022,
+    )
+    # June 22 2026 -- defensive import. OOS_WINDOW_PCT_OF_STUDY
+    # was added by PR #370 (Path A constants). When this endpoint
+    # ships on a branch that has not picked up the new constant
+    # yet, fall back to the documented value (53/287 = 18.5) so
+    # the endpoint doesn't 500. After both PRs merge the import
+    # will succeed and this fallback path becomes unreachable.
+    try:
+        from tools.academic_deck import OOS_WINDOW_PCT_OF_STUDY
+    except ImportError:
+        OOS_WINDOW_PCT_OF_STUDY = 18.5
+    _ = session  # session only used to enforce require_auth
+
+    # Pull the two hash flavours. strategy_hash is the value
+    # the substitution table is built from (locks every
+    # {{TOKEN}} to a specific data state). platform_fingerprint
+    # is the value the document footers carry -- a different
+    # function over different inputs (market data tables).
+    try:
+        strategy_hash = (await get_latest_strategy_hash()) or ""
+    except Exception:  # noqa: BLE001
+        strategy_hash = ""
+    try:
+        platform_fingerprint = (await current_data_hash()) or ""
+    except Exception:  # noqa: BLE001
+        platform_fingerprint = ""
+
+    # Build the substitution table with the same wiring the
+    # document generators use, so the reference values match
+    # what gets baked into the brief / appendix / deck.
+    strategy_cache: dict = {}
+    cio_row: dict | None = None
+    implied_alloc: dict | None = None
+    live_signals: dict | None = None
+    factor_loadings_row: list[dict] = []
+    cache_computed_at: str | None = None
+    try:
+        strategy_cache = (await get_latest_strategy_cache()) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_strategy_cache_failed",
+                    error=str(exc))
+    try:
+        cio_row = await get_latest_recommendation()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_cio_failed", error=str(exc))
+    try:
+        if cio_row and cio_row.get("blend_weights"):
+            implied_alloc = await compute_implied_asset_allocation(
+                cio_row.get("blend_weights"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_implied_alloc_failed",
+                    error=str(exc))
+    try:
+        live_signals = await get_regime_cache()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_regime_cache_failed",
+                    error=str(exc))
+    try:
+        from tools import analytics as an
+        factor_loadings_row = an.factor_loadings(
+            strategy_cache, [])
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_factor_loadings_failed",
+                    error=str(exc))
+
+    # June 22 2026 -- defensive kwarg forwarding. PR #370 added
+    # `oos_window_pct_of_study` and `live_signals` kwargs to
+    # build_substitution_table; this endpoint may ship before
+    # that PR lands. Inspect the signature once and forward only
+    # the kwargs the current implementation accepts so the
+    # endpoint stays 200 regardless of merge order.
+    import inspect
+    _sig = inspect.signature(get_substitution_table)
+    _kwargs = {
+        "oos_sharpe_blend": OOS_SHARPE_REGIME_CONDITIONAL,
+        "oos_sharpe_benchmark": OOS_SHARPE_BENCHMARK,
+        "pre_2022_eq_ig_correlation": CORRELATION_PRE_2022,
+        "post_2022_eq_ig_correlation": CORRELATION_POST_2022,
+        "implied_allocation": implied_alloc,
+    }
+    if "oos_window_pct_of_study" in _sig.parameters:
+        _kwargs["oos_window_pct_of_study"] = OOS_WINDOW_PCT_OF_STUDY
+    if "live_signals" in _sig.parameters:
+        _kwargs["live_signals"] = live_signals
+    table = get_substitution_table(
+        strategy_hash, strategy_cache, cio_row, **_kwargs)
+
+    # When the cache row was last written -- per-row
+    # last_verified for is_locked=false entries. The
+    # strategy_results_cache schema carries computed_at on
+    # every row; the helper exposes it through the JSON blob.
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is not None:
+            async with AsyncSessionLocal() as s:
+                r = await s.execute(text(
+                    "SELECT computed_at FROM "
+                    "strategy_results_cache "
+                    "WHERE strategy_hash = :h LIMIT 1"),
+                    {"h": strategy_hash})
+                row = r.fetchone()
+                if row and row[0]:
+                    cache_computed_at = (
+                        row[0].isoformat()
+                        if hasattr(row[0], "isoformat")
+                        else str(row[0]))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("data_reference_computed_at_failed",
+                    error=str(exc))
+
+    # The "locked at submission" sentinel for is_locked=true
+    # entries. Bob sees this string instead of a timestamp.
+    LOCKED_SENTINEL = "locked at submission (academic_deck.py)"
+
+    # Factor-loading row lookup keyed by strategy_name.
+    fl_by_strategy: dict[str, dict] = {}
+    for row in factor_loadings_row:
+        name = row.get("strategy")
+        if name:
+            fl_by_strategy[name] = row
+
+    def _resolve_value(
+        token: str, source: str,
+    ) -> tuple[str | None, str | None]:
+        """Returns (value, last_verified). Value None -> render
+        em-dash; last_verified None means the source didn't
+        carry a timestamp."""
+        if source.startswith("data.factor_loadings."):
+            # factor_loadings.<STRATEGY>.<metric>
+            _, _, rest = source.partition(
+                "data.factor_loadings.")
+            parts = rest.split(".")
+            if len(parts) == 2:
+                strategy_name, metric_key = parts
+                row = fl_by_strategy.get(strategy_name) or {}
+                val = row.get(metric_key)
+                if val is None:
+                    return (None, cache_computed_at)
+                return (
+                    str(round(float(val), 4))
+                    if isinstance(val, (int, float))
+                    else str(val),
+                    cache_computed_at)
+        # Token-table lookup. Fall back to a cache-row computed_at
+        # for live values; the locked sentinel for academic
+        # constants.
+        value = table.get(token)
+        if value is None or value == "—":
+            return (value, None)
+        return (value, cache_computed_at)
+
+    # Walk the catalog and build the categorised response.
+    categories: dict[str, dict] = {}
+    for category_key, category_label, entries in CATALOG:
+        rendered: list[dict] = []
+        for entry in entries:
+            value, last_verified_cache = _resolve_value(
+                entry.token, entry.source)
+            last_verified = (
+                LOCKED_SENTINEL if entry.is_locked
+                else (last_verified_cache or "cache miss"))
+            rendered.append({
+                "token": entry.token,
+                "label": entry.label,
+                "value": value if value is not None else "—",
+                "source": entry.source,
+                "is_locked": entry.is_locked,
+                "last_verified": last_verified,
+                "document_locations": list(entry.document_locations),
+            })
+        categories[category_key] = {
+            "label": category_label,
+            "entries": rendered,
+        }
+
+    # Per-strategy appendix tokens (10 strategies x 5 metrics).
+    per_strategy_rows: list[dict] = []
+    for entry in expand_per_strategy_appendix_metrics():
+        value, last_verified_cache = _resolve_value(
+            entry.token, entry.source)
+        per_strategy_rows.append({
+            "token": entry.token,
+            "label": entry.label,
+            "value": value if value is not None else "—",
+            "source": entry.source,
+            "is_locked": entry.is_locked,
+            "last_verified": last_verified_cache or "cache miss",
+            "document_locations": list(entry.document_locations),
+        })
+    categories["per_strategy_appendix"] = {
+        "label": CATEGORY_LABELS["per_strategy_appendix"],
+        "entries": per_strategy_rows,
+    }
+
+    # Per-strategy factor loadings (10 strategies x 5 columns).
+    factor_rows: list[dict] = []
+    for entry in expand_per_strategy_factor_loadings():
+        value, last_verified_cache = _resolve_value(
+            entry.token, entry.source)
+        factor_rows.append({
+            "token": entry.token,
+            "label": entry.label,
+            "value": value if value is not None else "—",
+            "source": entry.source,
+            "is_locked": entry.is_locked,
+            "last_verified": last_verified_cache or "cache miss",
+            "document_locations": list(entry.document_locations),
+        })
+    categories["factor_loadings"] = {
+        "label": CATEGORY_LABELS["factor_loadings"],
+        "entries": factor_rows,
+    }
+
+    return {
+        "data_hash": strategy_hash,
+        "platform_fingerprint": platform_fingerprint,
+        "generated_at": datetime.now(
+            timezone.utc).isoformat(),
+        "categories": categories,
+    }
+
+
 @app.post("/api/v1/export/package")
 @limiter.limit("10/minute")
 async def export_package(

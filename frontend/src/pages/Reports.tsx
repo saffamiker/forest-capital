@@ -29,6 +29,7 @@ import {
 } from 'lucide-react'
 import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
+import DataReferenceSheetPanel from '../components/DataReferenceSheetPanel'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
 import KeyMetricsPanel from '../components/KeyMetricsPanel'
 import PreSubmissionCheckPanel from '../components/PreSubmissionCheckPanel'
@@ -148,6 +149,17 @@ export default function Reports() {
           confirm any figure in his draft against the cache without
           leaving the page. Collapsed by default. */}
       <KeyMetricsPanel />
+
+      {/* Data Reference Sheet (June 22 2026) -- the full
+          cross-reference of every value in the submission against
+          the strategy cache. Reads /api/v1/export/data-reference-
+          sheet on expand. Includes per-strategy metrics and Carhart
+          factor loadings (10 strategies x 5 columns each). Locked
+          constants flagged separately from live cache reads so Bob
+          knows which values could theoretically update. Download CSV
+          button exports the full table with the strategy hash baked
+          into the filename for offline cross-reference. */}
+      <DataReferenceSheetPanel />
 
       {/* Team Activity — the evidence behind the Roles & Division-of-Labor
           deliverable and the AI-use narrative, so it leads the page.
