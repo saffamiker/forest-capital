@@ -98,12 +98,70 @@ brief, and script communicate through these three strategies only."""
 
 
 CENTRAL_QUESTION_AND_ANSWER = """\
-CENTRAL QUESTION (front-load in every deliverable):
+CENTRAL QUESTION + ANSWER (front-load in every deliverable):
 The central question: does diversification improve risk-adjusted \
 performance vs 100% equity?
-The answer, supported by out-of-sample evidence:
-YES. The dynamic blend achieves an OOS Sharpe of 1.24 versus 0.73 for \
-the benchmark -- a 70% improvement -- with max drawdown reduced by 51%."""
+
+PRIMARY PROOF POINT (the answer -- lead with this):
+YES. OOS Sharpe 0.86 (blend) vs 0.43 (benchmark) over 53 months of \
+genuinely unseen post-2022 data -- a 98% improvement in risk-adjusted \
+return on data the model never trained on. These are the December \
+2025 academic submission lock figures (the panel-defense record). \
+The platform's Performance Record carries a matched Live Figure row \
+(1.24 vs 0.73, +70%) but the brief / deck / appendix use the \
+conservative submission values; the academic record stands.
+
+SECONDARY REINFORCEMENT (capital preservation):
+The blend reduced peak drawdown from -52.6% (benchmark) to -29.7% and \
+recovered in 32 trading-day months vs 71 for the benchmark. The risk-\
+adjusted advantage is not paper gain -- it is measurable capital \
+preservation through equity bear regimes.
+
+HONEST LIMITATION (do not bury -- foreground in brief section 3 and \
+deck slide 8):
+The council added value in 2 of 9 named market events (play-by-play \
+scorecard). The edge is capital preservation in sustained bear \
+regimes, NOT crisis prediction or market timing. The 2025-04 \
+"Liberation Day" reversal is a documented miss -- surface it rather \
+than hiding it.
+
+STORY ARC HIERARCHY (apply to every deliverable):
+  1. Lead with the OOS proof point. 0.86 vs 0.43 over 53 months of \
+     unseen data is THE answer to the research question. It belongs \
+     in the first sentence of the brief executive summary and on \
+     slide 1 of the deck. NOT the full-period 0.63 vs 0.54 from the \
+     live cache.
+  2. Reinforce with drawdown numbers. -29.7% vs -52.6% peak loss, \
+     32 vs 71 trading-day months recovery.
+  3. Disclose limitation honestly. 2 of 9 play-by-play value-add; \
+     capital preservation not market timing.
+  4. Close with the investment conclusion. Regime-conditional \
+     construction, retain bond sleeve, monitor monthly.
+
+TOKEN MAPPING (be explicit about which token carries which figure):
+  - {{OOS_SHARPE_BLEND}}        -> "0.86"  (December 2025 lock)
+  - {{OOS_SHARPE_BENCHMARK}}    -> "0.43"  (December 2025 lock)
+  - {{REGIME_SWITCHING_SHARPE}} -> "0.63"  (live full-period; ONLY in
+                                            per-strategy tables,
+                                            NEVER in the OOS headline)
+  - {{BENCHMARK_SHARPE}}        -> "0.54"  (live full-period;
+                                            same restriction)
+  Use OOS tokens for the headline; use per-strategy tokens in the \
+  appendix Section B comparison table only.
+
+TOKEN MIXING PROHIBITION (non-negotiable):
+  NEVER place {{OOS_SHARPE_BLEND}} (0.86) and \
+  {{REGIME_SWITCHING_SHARPE}} (0.63) in the same sentence, bullet, or \
+  table row without a clear label distinguishing OOS from full-\
+  period. A reader seeing "0.86 vs 0.63" without labels cannot tell \
+  which is the headline figure. Same applies to \
+  {{OOS_SHARPE_BENCHMARK}} (0.43) and {{BENCHMARK_SHARPE}} (0.54). \
+  In the brief: OOS figures belong in section 1, the section 3 \
+  lead, and section 5. Full-period figures belong in section 3 \
+  supporting context and the section 6 visuals table only. In the \
+  deck: OOS figures on slides 1, 3, 6, 11. Full-period figures in \
+  the per-strategy table on slide 2 only, clearly labeled \
+  "Full-Period Sharpe"."""
 
 
 INVESTABLE_CONCLUSION_GUARD = """\
@@ -590,8 +648,36 @@ the full argument; slides carry only the assertion and the visual \
 anchor. This is an executive presentation, not a report.
 
 The central question: does diversification outperform 100% equity on a \
-risk-adjusted basis? The answer must be grounded in OOS Sharpe 1.24 vs \
-0.73 benchmark, not asserted without evidence.
+risk-adjusted basis? The answer must be grounded in the December 2025 \
+academic submission OOS Sharpe figures from validated_constants: 0.86 \
+(blend) vs 0.43 (benchmark) over the 53-month post-2022 window. These \
+are the LOCKED submission figures the panel defense uses. The live \
+figures (1.24 vs 0.73) appear on the platform's Performance Record \
+but are NOT used in the deck -- the academic submission record stands.
+
+SLIDE 1 -- NON-NEGOTIABLE OPENING:
+  Slide 1's headline MUST be the OOS proof point in one visual punch. \
+  Required numeric_anchors for slide 1:
+    oos_sharpe_blend:           0.86
+    oos_sharpe_benchmark:       0.43
+    oos_sharpe_improvement_pct: 98
+    oos_window_months:          53
+  The headline assertion is the +98% risk-adjusted advantage in \
+  genuinely unseen data. Do NOT open with a methodology overview. Do \
+  NOT bury the headline. Do NOT substitute the full-period Sharpe \
+  (0.63 / 0.54) for the OOS pair on this slide. The audience sees \
+  the answer and the proof point in the first visual.
+
+PRESENTATION ARC (lock in the central_argument + presentation_arc \
+fields of the JSON output):
+  Slide 1:    Answer + OOS proof point (0.86 vs 0.43)
+  Slides 2-3: Three-strategy framing + the numbers
+  Slides 4-5: Why it works (correlation break, drawdown)
+  Slide 6:    Full out-of-sample treatment (in-sample vs OOS)
+  Slides 7-8: Live regime + honest limitation (2 of 9)
+  Slide 9:    Live demo
+  Slide 10:   AI methodology
+  Slide 11:   Recommendation
 
 CRITICAL: All numeric values in numeric_anchors must come EXACTLY from \
 the validated_constants block in context. Do not estimate, interpolate, \
@@ -699,12 +785,31 @@ input slide_plan must have a corresponding key in the output:
 }"""
 
 
+ORAL_PRESENTATION_CONTEXT = """\
+ORAL PRESENTATION CONTEXT (speaker notes only -- NEVER on a written \
+slide or in any brief paragraph):
+  The December 2025 submission figures (OOS Sharpe 0.86 vs 0.43) are \
+  the CONSERVATIVE locked record. The platform's Live Figure row on \
+  the Council Performance Record shows 1.24 vs 0.73 (+70%) through \
+  May 2026 -- the submission UNDERSTATES current performance.
+
+  For slide 1 AND slide 6, briefly note this context verbally. Frame \
+  it as "the submission record is locked at the December figures; \
+  the live figure has since improved." Do NOT say "we updated the \
+  numbers" or "the figures are now better" -- the academic \
+  submission record stands as the record. The live-figure context \
+  exists only in spoken delivery; it does NOT appear on any slide \
+  bullet, in any brief paragraph, or in the appendix. The slide \
+  headline carries the 0.86 vs 0.43 submission figures."""
+
+
 _DECK_SPEAKER_NOTES_SYSTEM_PROMPT = (
     THREE_STRATEGY_FRAME + "\n\n"
     + CENTRAL_QUESTION_AND_ANSWER + "\n\n"
     + INVESTABLE_CONCLUSION_GUARD + "\n\n"
     + STATIC_ALLOCATION_JUSTIFICATION + "\n\n"
     + LIVE_DEMO_SEQUENCE + "\n\n"
+    + ORAL_PRESENTATION_CONTEXT + "\n\n"
     + _DECK_SPEAKER_NOTES_BODY)
 
 
@@ -828,6 +933,38 @@ the per-section rendering pass.
 CRITICAL: All numeric values in numeric_anchors must come EXACTLY from \
 the validated_constants block in context. Numeric accuracy is verified \
 against the source cache after generation.
+
+EXECUTIVE SUMMARY OPENING SENTENCE (non-negotiable):
+  The executive_summary section's key_message MUST open with a \
+  sentence anchoring on the OOS proof point. Use this exact template:
+    "A regime-conditional diversified blend outperforms a 100% \
+     equity allocation on a risk-adjusted basis: out-of-sample \
+     Sharpe {{OOS_SHARPE_BLEND}} versus {{OOS_SHARPE_BENCHMARK}} \
+     over {{OOS_WINDOW_MONTHS}} months of post-2022 data the model \
+     did not see during construction."
+  Required numeric_anchors for executive_summary:
+    oos_sharpe_blend:                  0.86
+    oos_sharpe_benchmark:              0.43
+    oos_window_months:                 53
+    max_drawdown_regime_conditional:   -0.2974
+    max_drawdown_benchmark:            -0.526
+
+KEY FINDINGS (section 3) STRUCTURE:
+  Finding 1 -- THE OOS proof point. 0.86 vs 0.43 over the 53-month \
+              post-2022 window. +98% risk-adjusted advantage on data \
+              the model did not see during construction. THIS IS THE \
+              LEAD finding; it appears first in section 3's prose.
+  Finding 2 -- Drawdown reduction. -29.7% (blend) vs -52.6% \
+              (benchmark) peak, 32 vs 71 trading-day months recovery.
+  Finding 3 -- Honest limitation. 2 of 9 play-by-play value-add \
+              events; edge is capital preservation, not market timing.
+  Finding 4 (optional, last) -- Full-period Sharpe comparison \
+              (0.63 vs 0.54 over Jul 2002 - May 2026) as context \
+              for the long-run record. NOT the lead.
+  ORDER MATTERS: a reader scanning section 3 must see OOS first, then \
+  drawdown, then limitation, then full-period as supporting context. \
+  Anchoring the lead finding on the full-period figure buries the \
+  headline.
 
 Output schema:
 {
