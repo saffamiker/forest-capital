@@ -31,15 +31,27 @@ class TestPathAConstantValues:
     """Pin the Path A live-full-period values. A future PR that
     drifts these silently breaks brief / appendix consistency."""
 
-    def test_oos_sharpe_regime_conditional_matches_live_cache(self):
-        from tools.academic_deck import OOS_SHARPE_REGIME_CONDITIONAL
-        # REGIME_SWITCHING.sharpe_ratio from the f2e87dec7dcabe71
-        # cache (Jul 2002 - May 2026, 287 monthly obs).
-        assert OOS_SHARPE_REGIME_CONDITIONAL == 0.6291
+    def test_oos_sharpe_regime_conditional_locked_to_dec_2025(self):
+        """June 22 2026 revert -- OOS_SHARPE_REGIME_CONDITIONAL
+        stays at the December 2025 academic submission lock
+        (0.8576), NOT the live full-period value (0.6291). The
+        Council Performance Record's two-state design says the
+        submission record defends the December figures; the
+        live figures appear elsewhere on the platform but do
+        NOT flow into the brief / deck / appendix headlines.
 
-    def test_oos_sharpe_benchmark_matches_live_cache(self):
+        The live full-period blend Sharpe IS surfaced -- via
+        {{REGIME_SWITCHING_SHARPE}} reading directly from the
+        strategy cache -- but that's the full-period token, not
+        the OOS headline."""
+        from tools.academic_deck import OOS_SHARPE_REGIME_CONDITIONAL
+        assert OOS_SHARPE_REGIME_CONDITIONAL == 0.8576
+
+    def test_oos_sharpe_benchmark_locked_to_dec_2025(self):
+        """Same revert -- the OOS benchmark Sharpe stays at the
+        December 2025 academic submission lock (0.4341)."""
         from tools.academic_deck import OOS_SHARPE_BENCHMARK
-        assert OOS_SHARPE_BENCHMARK == 0.5370
+        assert OOS_SHARPE_BENCHMARK == 0.4341
 
     def test_oos_sharpe_equal_weight_matches_live_cache(self):
         from tools.academic_deck import OOS_SHARPE_EQUAL_WEIGHT

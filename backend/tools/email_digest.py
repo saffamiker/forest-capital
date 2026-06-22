@@ -301,11 +301,11 @@ async def _section_analytics_snapshot() -> DigestSection:
     except Exception as exc:  # noqa: BLE001
         log.warning("digest_blend_weights_read_failed", error=str(exc))
 
-    # Locked academic OOS Sharpe — June 22 2026, live full-period
-    # values from the strategy cache at hash f2e87dec7dcabe71
-    # (Path A). The earlier December 2025 lock values (0.86 / 0.43)
-    # drifted from the live cache; Path A re-aligned constants with
-    # the appendix tables to match submission integrity.
+    # Locked academic OOS Sharpe -- December 2025 academic
+    # submission lock. The panel defense and the brief / deck /
+    # appendix OOS headlines all reference these specific values;
+    # the Council Performance Record page shows them side by side
+    # with the live full-period figures.
     try:
         from tools.academic_deck import (
             OOS_SHARPE_REGIME_CONDITIONAL,
@@ -314,10 +314,11 @@ async def _section_analytics_snapshot() -> DigestSection:
         oos_blend = OOS_SHARPE_REGIME_CONDITIONAL
         oos_bench = OOS_SHARPE_BENCHMARK
     except Exception:  # noqa: BLE001
-        # Fallback values match the Path A live cache values --
-        # NOT the December 2025 lock that was removed.
-        oos_blend = 0.63
-        oos_bench = 0.54
+        # Fallback matches the December 2025 academic submission
+        # lock so the digest stays consistent with the record on
+        # a cold deploy.
+        oos_blend = 0.86
+        oos_bench = 0.43
 
     conf_str = (f" ({regime_conf:.0%})" if regime_conf is not None else "")
     weights_lines_html: list[str] = []

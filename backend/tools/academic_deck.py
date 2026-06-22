@@ -49,30 +49,47 @@ from tools.academic_export import (
 
 log = structlog.get_logger(__name__)
 
-# ── Validated production constants (June 22 2026 -- Path A live values) ──
+# ── Validated production constants (June 22 2026 -- Path A revised) ──
 # These are the locked submission figures threaded through every document
 # generator (brief, appendix, deck, script). They backstop the AI prompts
 # so the writer never invents a number, and they flow through the
 # substitution layer (tools/numeric_substitution.build_substitution_table)
 # so every {{TOKEN}} in the generated prose resolves deterministically.
 #
-# PATH A -- LIVE FULL-PERIOD VALUES FROM THE STRATEGY CACHE
-# Locked to the strategy_results_cache at hash f2e87dec7dcabe71 (the
-# canonical 287-monthly-observation freeze, Jul 2002 - May 2026).
-# These match the appendix-table values so the brief and the appendix
-# cite identical Sharpe figures. The earlier December 2025 lock values
-# (0.8576 / 0.4341 / 0.1264 / -0.253) drifted from the live cache when
-# the data window extended through May 2026; the May 31 2026 directive
-# to "DO NOT update" was reversed June 22 2026 after the live-vs-locked
-# disagreement between the brief narrative and the appendix tables was
-# diagnosed as a submission integrity issue.
+# OOS_SHARPE figures: LOCKED TO THE DECEMBER 2025 ACADEMIC SUBMISSION
+# ---------------------------------------------------------------------
+# Walk-forward OOS Sharpe values frozen at the December 2025 data lock.
+# These are the figures the cohort peer review (June 3) and the panel
+# (July 1 / July 3) defend on the record; the Council Performance Record
+# page on the platform shows both side by side:
+#   Academic Submission (locked Dec 2025):  blend 0.86, benchmark 0.43
+#   Live Figure (through May 2026):         blend 1.24, benchmark 0.73
+# The platform footnote is authoritative: "The submitted figures are
+# the December 2025 data lock... not used in the executive brief or
+# final presentation -- the academic submission stands as the record."
+# So the brief / deck / appendix OOS HEADLINE cites 0.86 vs 0.43.
 #
-# DO NOT manually edit these to match an earlier dataset state without
-# regenerating the brief + appendix + deck against the same cache --
-# the three documents must always agree on the numbers they cite.
-OOS_SHARPE_REGIME_CONDITIONAL = 0.6291  # REGIME_SWITCHING.sharpe_ratio
-OOS_SHARPE_BENCHMARK = 0.5370          # BENCHMARK.sharpe_ratio
-OOS_SHARPE_EQUAL_WEIGHT = 0.5728       # EQUAL_WEIGHT.sharpe_ratio
+# The live full-period Sharpes (REGIME_SWITCHING.sharpe_ratio = 0.6291,
+# BENCHMARK.sharpe_ratio = 0.5370) appear separately via the per-
+# strategy tokens ({{REGIME_SWITCHING_SHARPE}} etc.) which read from
+# the strategy cache directly -- they are NOT derived from these
+# constants and appear in the full-period performance tables only.
+#
+# History: PR #370 initially proposed Path A as "update OOS_SHARPE to
+# live full-period" (0.6291 / 0.5370). User reverted that part of the
+# proposal after surfacing the Performance Record's two-state design.
+# Keeping the OOS_SHARPE pair at the December lock preserves the
+# panel-defense alignment; the rest of Path A (max drawdown live,
+# equal-weight Sharpe live, new OOS window constants) is unchanged.
+#
+# DO NOT manually edit OOS_SHARPE_REGIME_CONDITIONAL or
+# OOS_SHARPE_BENCHMARK without an explicit decision to break the
+# December 2025 academic submission record. Updating these in
+# response to a fresh data ingestion is a SUBMISSION INTEGRITY
+# VIOLATION; the academic record defends these specific values.
+OOS_SHARPE_REGIME_CONDITIONAL = 0.8576  # Dec 2025 academic submission
+OOS_SHARPE_BENCHMARK = 0.4341          # Dec 2025 academic submission
+OOS_SHARPE_EQUAL_WEIGHT = 0.5728       # live EQUAL_WEIGHT.sharpe_ratio
 CORRELATION_PRE_2022 = -0.05           # avg of 12m rolling corr pre-2022
 CORRELATION_POST_2022 = 0.57           # avg of 12m rolling corr post-2022
 PLAY_BY_PLAY_EVENTS = 9                # rebalance_events.csv row count
