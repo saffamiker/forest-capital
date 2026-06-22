@@ -180,6 +180,42 @@ def _stub_brief_appendix_grounding(monkeypatch):
     # the function, so the monkeypatch at the import name is
     # sufficient.
 
+    # June 22 2026 (hash-match strictness PR) -- the appendix
+    # pre-flight gate now ALSO computes the canonical strategy
+    # hash via _compute_data_hash(n_rows, last_date, 10) and
+    # verifies strategy_results_cache + each analytics metric
+    # carries a row AT THAT HASH. Stub the inputs so the gate
+    # passes for these document-generation contract tests
+    # (which exercise downstream behaviour, not the gate).
+    import pandas as pd
+
+    async def _fake_history_async():
+        dates = pd.date_range(
+            end="2026-05-31", periods=287, freq="ME")
+        equity = pd.Series([1.0] * 287, index=dates)
+        return {"equity_monthly": equity}
+
+    monkeypatch.setattr(
+        "tools.data_fetcher.get_full_history_async",
+        _fake_history_async)
+
+    async def _fake_strategy_cache(_h):
+        return {"STUB": {"sharpe_ratio": 0.5}}
+
+    async def _fake_metric_by_hash(kind, _h):
+        if kind == "academic_analytics":
+            return {"bootstrap_ci_sharpe": [{"strategy": "STUB"}],
+                    "factor_loadings": [{"strategy": "STUB"}]}
+        if kind == "oos_cost_sensitivity":
+            return {"net_sharpe_15bp": 0.5}
+        return None
+
+    monkeypatch.setattr(
+        "tools.cache.get_strategy_cache", _fake_strategy_cache)
+    monkeypatch.setattr(
+        "tools.precomputed_analytics.get_metric_by_hash",
+        _fake_metric_by_hash)
+
 
 def _docx_text(content: bytes) -> str:
     """All header, paragraph and table text from a .docx, for content checks."""

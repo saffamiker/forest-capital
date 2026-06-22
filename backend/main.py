@@ -12390,45 +12390,115 @@ async def _generate_appendix_document(
         pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
                    "dashboard once, then regenerate this appendix.")
 
-        # June 21 2026 -- pre-flight cache gate. The appendix's
-        # graded sections (B, C, D, E, G) all depend on cache
-        # fields populated by upstream compute runs (the
-        # backtester + refresh_academic_analytics +
-        # refresh_oos_cost_sensitivity chain). Generating the
-        # appendix against an empty cache produces misleading
-        # output (descriptive prose with empty tables) AND wastes
-        # generation budget. 409 with the missing-field list so
-        # the operator runs POST /api/v1/admin/refresh-appendix-
-        # caches before retrying.
+        # June 22 2026 -- HASH-MATCHED pre-flight cache gate. The
+        # appendix's graded sections (B, C, D, E, G) depend on
+        # cache fields populated by the backtester +
+        # refresh_academic_analytics + refresh_oos_cost_sensitivity
+        # chain. PR #365's original gate accepted ANY non-empty
+        # cache row as "warm" -- including stale-hash rows from
+        # a previous data state. That let the appendix render
+        # against data the brief's narrative didn't see.
+        #
+        # The corrected gate computes the canonical CURRENT
+        # strategy hash via _compute_data_hash(n_rows, last_date,
+        # n_strategies=10) and verifies EACH source carries a row
+        # at that exact hash. A stale-hash row counts as missing.
+        # The 409 detail surfaces the actual mismatch (expected
+        # hash, what's in the cache) so the operator knows whether
+        # the chain ran or just one component.
         missing_cache_fields: list[str] = []
-        if not (data.get("strategy_results") or {}):
+        canonical_hash = ""
+        try:
+            from tools.cache import (
+                _compute_data_hash, get_strategy_cache,
+            )
+            from tools.data_fetcher import get_full_history_async
+            from tools.precomputed_analytics import get_metric_by_hash
+            from tools.regime_meta_validation import (
+                _COST_METRIC_KIND,
+            )
+            history = await get_full_history_async()
+            monthly = history.get("equity_monthly")
+            n_rows = len(monthly) if monthly is not None else 0
+            last_date = (
+                str(monthly.index[-1].date())
+                if monthly is not None and n_rows > 0
+                else "unknown")
+            canonical_hash = _compute_data_hash(
+                n_rows, last_date, n_strategies=10)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "appendix_canonical_hash_compute_failed",
+                error=str(exc))
+
+        if canonical_hash:
+            # Section B/C source -- strategy_results_cache row at
+            # the canonical hash.
+            try:
+                sr_row = await get_strategy_cache(canonical_hash)
+            except Exception:  # noqa: BLE001
+                sr_row = None
+            if not sr_row:
+                missing_cache_fields.append(
+                    f"strategy_results_cache (no row at hash "
+                    f"{canonical_hash} -- Section B/C source)")
+
+            # Section D source -- academic_analytics metric AT
+            # the canonical hash. The metric payload also carries
+            # factor_loadings (Section E), so a single hit covers
+            # both. A row at a DIFFERENT hash counts as missing.
+            try:
+                aa = await get_metric_by_hash(
+                    "academic_analytics", canonical_hash)
+            except Exception:  # noqa: BLE001
+                aa = None
+            if not (aa or {}).get("bootstrap_ci_sharpe"):
+                missing_cache_fields.append(
+                    f"bootstrap_ci_sharpe (no academic_analytics "
+                    f"row at hash {canonical_hash} -- Section D "
+                    f"source)")
+            if not (aa or {}).get("factor_loadings"):
+                missing_cache_fields.append(
+                    f"factor_loadings (no academic_analytics row "
+                    f"at hash {canonical_hash} -- Section E "
+                    f"source)")
+
+            # Section G source -- cost_sensitivity metric at
+            # canonical hash.
+            try:
+                cs = await get_metric_by_hash(
+                    _COST_METRIC_KIND, canonical_hash)
+            except Exception:  # noqa: BLE001
+                cs = None
+            if not cs:
+                missing_cache_fields.append(
+                    f"cost_sensitivity (no oos_cost_sensitivity "
+                    f"row at hash {canonical_hash} -- Section G "
+                    f"source)")
+        else:
+            # Couldn't compute the canonical hash -- treat as a
+            # hard cold-cache state, same as the legacy gate.
             missing_cache_fields.append(
-                "strategy_results (Section B/C source -- "
-                "run the backtester)")
-        if not (data.get("bootstrap_ci_sharpe") or []):
-            missing_cache_fields.append(
-                "bootstrap_ci_sharpe (Section D source -- "
-                "run refresh_academic_analytics)")
-        if not (data.get("factor_loadings") or []):
-            missing_cache_fields.append(
-                "factor_loadings (Section E source -- "
-                "run refresh_academic_analytics)")
-        if data.get("cost_sensitivity") is None:
-            missing_cache_fields.append(
-                "cost_sensitivity (Section G source -- "
-                "run refresh_oos_cost_sensitivity)")
+                "canonical hash unavailable (full data history "
+                "unreadable -- check market_data_monthly + "
+                "ff_factors_monthly)")
+
         if missing_cache_fields:
             raise HTTPException(
                 status_code=409,
                 detail=(
-                    "Analytics caches are not warm for the "
-                    "current data hash. Missing fields: "
+                    f"Analytics caches are not warm at the "
+                    f"canonical current strategy hash "
+                    f"({canonical_hash or 'unavailable'}). "
+                    "Missing or stale: "
                     + "; ".join(missing_cache_fields)
-                    + ". Generating the appendix against an "
-                    "empty cache produces misleading output. "
-                    "Run POST /api/v1/admin/refresh-appendix-"
-                    "caches to populate the cache chain, then "
-                    "retry."))
+                    + ". A stale-hash row counts as missing -- "
+                    "the appendix must render at the hash that "
+                    "matches the live market data, not a "
+                    "previous data state. Run POST /api/v1/"
+                    "admin/refresh-appendix-caches to populate "
+                    "the cache chain at the canonical hash, "
+                    "then retry."))
 
         # Layer 2 (June 21 2026) -- build the substitution table once
         # per appendix-generation job. Same per-data_hash cache the
