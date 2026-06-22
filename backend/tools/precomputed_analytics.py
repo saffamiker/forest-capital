@@ -139,6 +139,48 @@ async def set_metric(
                     metric_kind=metric_kind, error=str(exc))
 
 
+async def get_metric_by_hash(
+    metric_kind: str, data_hash: str,
+) -> dict[str, Any] | None:
+    """Returns the analytics_metrics_cache payload for a SPECIFIC
+    (metric_kind, data_hash) pair, or None when no row matches.
+
+    Used by the appendix pre-flight cache gate (June 22 2026) to
+    verify that bootstrap_ci_sharpe / factor_loadings /
+    cost_sensitivity have been refreshed at the canonical current
+    strategy hash. The previous gate used get_latest_metric which
+    returns the most recent row regardless of hash -- it accepted
+    a stale-hash row as "warm cache" and let the appendix render
+    against data the brief's narrative didn't see. This hash-
+    matched helper closes that gap.
+
+    Returns the payload dict on hit, None on miss or DB unavailable.
+    Fail-open at the read level."""
+    if not data_hash:
+        return None
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is None:
+            return None
+        async with AsyncSessionLocal() as session:
+            row = await session.execute(text(
+                "SELECT payload FROM analytics_metrics_cache "
+                "WHERE metric_kind = :k AND data_hash = :h "
+                "ORDER BY computed_at DESC LIMIT 1"
+            ), {"k": metric_kind, "h": data_hash})
+            found = row.fetchone()
+            if not found:
+                return None
+            return dict(found[0]) if found[0] else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "get_metric_by_hash_failed",
+            metric_kind=metric_kind, data_hash=data_hash[:8],
+            error=str(exc))
+        return None
+
+
 async def get_latest_metric(metric_kind: str) -> dict[str, Any] | None:
     """Returns the most-recently-written row for a metric_kind,
     regardless of data_hash. Used by the cold-deploy fallback when
