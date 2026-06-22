@@ -355,13 +355,19 @@ class TestIssue5CaveatsGatedByDocumentType:
         # still drift; the marker flow catches those).
         assert "[[VERIFY:" in task
 
-    def test_non_brief_specs_still_get_citation_caveat(self):
-        # midpoint_paper / deck / appendix all still get the
-        # citation caveat -- the brief is the only surface
-        # that's been locked to the registry.
+    def test_non_brief_non_appendix_specs_still_get_citation_caveat(self):
+        # June 21 2026 -- the citation caveat is now skipped for
+        # BOTH executive_brief (PR #363) AND analytical_appendix
+        # (this PR), since both cite from data/references.json
+        # (registry-only contract). The deck per-slide writer
+        # doesn't go through _apply_draft_caveats today (its path
+        # is _generate_one_deck_slide, not _generate_narratives),
+        # so the deck branch is irrelevant. midpoint_paper / None
+        # / any unrecognised document_type still get the caveat.
         from main import _apply_draft_caveats
         for doc_type in (None, "midpoint_paper",
-                         "presentation_deck", "analytical_appendix"):
+                         "presentation_deck",  # deck stays caveat-ed
+                         "presentation_script"):
             spec = {
                 "key": "section_x", "task": "Write Section X."}
             out = _apply_draft_caveats(
@@ -369,6 +375,21 @@ class TestIssue5CaveatsGatedByDocumentType:
             assert "[[VERIFY CITATION" in out[0]["task"], (
                 f"citation caveat must still appear for "
                 f"document_type={doc_type!r}")
+
+    def test_appendix_specs_skip_citation_caveat(self):
+        # June 21 2026 -- appendix added to the skip list. The
+        # appendix writer cites only from data/references.json
+        # (same contract as the brief), so [[VERIFY CITATION]]
+        # markers are an audit blocker without value. Side
+        # effect: the editor's marker-counting progress meter
+        # no longer reports 0% completion for appendix sections.
+        from main import _apply_draft_caveats
+        spec = {"key": "section_x", "task": "Write Section X."}
+        out = _apply_draft_caveats(
+            [spec], document_type="analytical_appendix")
+        assert "[[VERIFY CITATION" not in out[0]["task"]
+        # Statistics caveat still appended.
+        assert "[[VERIFY:" in out[0]["task"]
 
     def test_idempotent_when_task_already_has_caveat(self):
         # Same as the legacy behaviour -- a task that ALREADY

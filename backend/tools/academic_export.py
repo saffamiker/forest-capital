@@ -29,6 +29,7 @@ Every generated document is a FIRST DRAFT for Bob to refine. The
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from typing import Any
 
@@ -474,6 +475,66 @@ def academic_doc_present(academic_docs: list[dict], document_type: str) -> bool:
     return any(d.get("document_type") == document_type for d in academic_docs)
 
 
+# Issue 2 (June 21 2026, Option 2) -- post-pass story-plan violation
+# retry threshold. When a brief section's prose emits more than this
+# many numbers outside its locked anchors set (and not in the
+# strategy cache and not year-like in citation parens), the
+# harness_narrative path re-calls the generator ONCE with explicit
+# feedback. Set generously: a section with 1-2 stray numbers may
+# still be fine (the post-generation audit flags individually). A
+# section with 3+ stray numbers is a writer-drift signal.
+_STORY_PLAN_VIOLATION_RETRY_THRESHOLD = 3
+
+
+# Matches the same numeric pattern the document_audit's story-plan
+# check uses. Decimal with optional %, sign, comma thousands. Kept
+# local so this module doesn't take a runtime dependency on the
+# audit module's regex.
+_STORY_PLAN_NUMBER_RE = re.compile(
+    r"(?<![A-Za-z_])([-+]?\d{1,3}(?:,\d{3})*"
+    r"(?:\.\d+)?%?|\d+\.\d+%?)")
+_STORY_PLAN_TOLERANCE = 0.01
+
+
+def _count_unauthorized_numbers(
+    prose: str,
+    anchor_values: list[float],
+) -> list[str]:
+    """Returns the list of token strings in prose that are NOT in
+    the anchor_values set (within _STORY_PLAN_TOLERANCE) and NOT
+    year-like in citation parens. Used by harness_narrative's
+    post-pass check; mirrors the logic in
+    document_audit.check_brief_story_plan_violations but on a
+    per-section scope.
+
+    Empty list = no unauthorized numbers -> no retry needed."""
+    if not prose or not anchor_values:
+        return []
+    found: list[str] = []
+    seen: set[float] = set()
+    for m in _STORY_PLAN_NUMBER_RE.finditer(prose):
+        tok = m.group(1)
+        try:
+            val = float(tok.replace(",", "").replace("%", ""))
+        except ValueError:
+            continue
+        # Skip citation-year numbers in parens ("(1989)").
+        prev_char = (prose[m.start() - 1] if m.start() > 0 else "")
+        is_year_like = (
+            "." not in tok and "%" not in tok
+            and 1900 <= val <= 2100)
+        if prev_char == "(" and is_year_like:
+            continue
+        if val in seen:
+            continue
+        if any(abs(val - a) <= _STORY_PLAN_TOLERANCE
+               for a in anchor_values):
+            continue
+        seen.add(val)
+        found.append(tok)
+    return found
+
+
 def harness_narrative(
     agent_id: str,
     task: str,
@@ -498,6 +559,18 @@ def harness_narrative(
     # appendix / deck callers that haven't been wired through yet
     # (those wire in the Layer-2 PR).
     substitution_table: dict[str, str] | None = None,
+    # June 21 2026 -- Issue 2 (Option 2): post-pass story-plan
+    # violation check. When the caller supplies the section's
+    # locked numeric_anchors, after harness.run() returns the
+    # function scans the final prose for unauthorized numbers
+    # (numbers not in anchors, not in cache, not year-like in
+    # citation parens). If the count exceeds
+    # _STORY_PLAN_VIOLATION_RETRY_THRESHOLD, the function does
+    # ONE additional generator call with explicit "unauthorized
+    # numbers: X, Y, Z" feedback. Accepts the second-call
+    # output if cleaner. Fail-open: any error in the check
+    # leaves the original prose unchanged.
+    numeric_anchors: dict[str, Any] | None = None,
 ) -> str:
     """
     Generates one section of academic prose through the Academic Writer
@@ -731,7 +804,76 @@ def harness_narrative(
             context=ctx_str,
             agent_id=agent_id,
         )
-        return _strip_banner(result.response) or (
+        final_text = _strip_banner(result.response) or ""
+
+        # Issue 2 (June 21 2026, Option 2) -- post-pass story-plan
+        # violation check. When numeric_anchors are supplied, scan
+        # the final prose for unauthorized numbers. If count
+        # exceeds the threshold, re-call the generator ONCE with
+        # explicit feedback listing the offending tokens. Use
+        # whichever output has fewer violations. Fail-open: any
+        # error in the check leaves the original prose unchanged.
+        try:
+            if numeric_anchors and final_text:
+                anchor_values: list[float] = []
+                for v in numeric_anchors.values():
+                    try:
+                        anchor_values.append(float(v))
+                    except (TypeError, ValueError):
+                        continue
+                if anchor_values:
+                    bad = _count_unauthorized_numbers(
+                        final_text, anchor_values)
+                    if len(bad) >= _STORY_PLAN_VIOLATION_RETRY_THRESHOLD:
+                        log.info(
+                            "harness_story_plan_violation_retry",
+                            agent_id=agent_id,
+                            violation_count=len(bad),
+                            offending_tokens=bad[:10])
+                        feedback_prompt = (
+                            user_message
+                            + "\n\nREGENERATION FEEDBACK -- "
+                            "STORY PLAN VIOLATIONS:\n"
+                            "Your previous draft emitted the "
+                            "following numbers that are NOT in "
+                            "this section's locked numeric_anchors "
+                            "and are NOT in the strategy cache:\n  "
+                            + ", ".join(bad[:10])
+                            + "\n\nRegenerate the section. Every "
+                            "number you emit must EITHER match "
+                            "one of the locked anchors above OR "
+                            "be a {{TOKEN}} placeholder from the "
+                            "substitution table. Remove any "
+                            "unauthorized number entirely; do "
+                            "not paraphrase it into prose. Years "
+                            "in citation parens "
+                            "((Hamilton, 1989)) are permitted "
+                            "and do not count as violations.")
+                        retry_text = _substituting_generator(
+                            feedback_prompt)
+                        retry_clean = _strip_banner(retry_text) or ""
+                        retry_bad = _count_unauthorized_numbers(
+                            retry_clean, anchor_values)
+                        if (retry_clean
+                                and len(retry_bad) < len(bad)):
+                            log.info(
+                                "harness_story_plan_retry_accepted",
+                                agent_id=agent_id,
+                                original_violations=len(bad),
+                                retry_violations=len(retry_bad))
+                            final_text = retry_clean
+                        else:
+                            log.info(
+                                "harness_story_plan_retry_rejected",
+                                agent_id=agent_id,
+                                original_violations=len(bad),
+                                retry_violations=len(retry_bad))
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(
+                "harness_story_plan_check_failed",
+                agent_id=agent_id, error=str(_exc))
+
+        return final_text or (
             f"{DATA_PENDING} — narrative generation returned no content."
         )
     except Exception as exc:  # noqa: BLE001

@@ -293,11 +293,19 @@ The full APA reference is rendered by the document assembler from \
 the registry's `apa` field; you do not need to format the reference \
 entry text yourself.
 
-Include a References section at the end listing every source you \
-cited in the body, formatted in APA per the registry's `apa` field. \
-The post-generation audit flags any in-text citation missing from \
-the References section and any References entry not cited in the \
-body.
+REFERENCES PLACEMENT (June 21 2026, brief compression):
+After EACH section that cites academic papers, include a brief \
+"References" subsection at the end of THAT section listing ONLY \
+the citations used in that section, formatted in APA per the \
+registry's `apa` field. Do NOT emit a single end-of-document \
+References block that consolidates citations from every section -- \
+the per-section blocks are smaller (each section typically cites \
+2-4 papers), keep the brief within its 5-page double-spaced page \
+budget, and let a reader verify a citation without scrolling away \
+from the section it appeared in. The post-generation audit \
+concatenates per-section References blocks before checking citation \
+completeness (PR #359), so an entry in any per-section block \
+satisfies the in-text citation check.
 
 TEAM ACTIVITY DATA:
 When a team activity summary is supplied in the input, you have access to
