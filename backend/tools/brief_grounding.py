@@ -38,9 +38,9 @@ CONTRACT
 
   SLIDE_TO_BRIEF_SECTION
     Mapping of deck slide_number -> brief canonical section
-    name. Slides that have no brief counterpart (slide 9 live
-    demo, slide 10 AI methodology) map to None and the
-    per-slide writer receives no excerpt.
+    name. Slides that have no brief counterpart (slide 2 agenda,
+    slide 10 AI methodology, slide 11 live demo) map to None and
+    the per-slide writer receives no excerpt.
 
   APPENDIX_TO_BRIEF_SECTION
     Mapping of appendix section_key -> brief canonical section
@@ -71,29 +71,44 @@ log = structlog.get_logger(__name__)
 # Slides explicitly EXCLUDED from brief excerpt threading. Named
 # constant rather than an implicit None lookup so the exclusion
 # is grep-able and any future PR that accidentally re-includes a
-# slide breaks a pinned test. Slide 9 is the LIVE_DEMO_SEQUENCE
-# (platform UX walkthrough); slide 10 is AI methodology /
-# platform meta-narrative. Neither has a brief counterpart and
-# threading brief text into either would dilute their function.
-SLIDES_EXCLUDED_FROM_BRIEF_GROUNDING: frozenset[int] = frozenset({9, 10})
+# slide breaks a pinned test.
+#
+# June 22 2026 -- 12-slide deck (agenda inserted at position 2,
+# AI methodology and live demo flipped). Three structural-not-
+# analytical slides are excluded:
+#   slide 2  -- Agenda (purely structural; no data, no claims)
+#   slide 10 -- How We Used AI (platform meta-narrative)
+#   slide 11 -- AnalyticsDesk Live Demo (LIVE_DEMO_SEQUENCE;
+#               platform UX walkthrough)
+# None has a brief counterpart and threading brief text into any
+# of them would dilute their function.
+SLIDES_EXCLUDED_FROM_BRIEF_GROUNDING: frozenset[int] = frozenset(
+    {2, 10, 11})
 
 
 # Deck slide -> brief section, for slides that DO map to a brief
 # section. Slides in SLIDES_EXCLUDED_FROM_BRIEF_GROUNDING above
 # are NOT listed here; the dispatcher checks the exclusion set
 # first before consulting this map.
+#
+# June 22 2026 -- 12-slide deck renumber. Old slide N -> new slide:
+#   1 unchanged | (2 NEW = agenda, excluded) | 2 -> 3 | 3 -> 4 |
+#   4 -> 5 | 5 -> 6 | 6 -> 7 | 7 -> 8 | 8 -> 9 | (10 -> 10, AI
+#   methodology stayed via flip, excluded) | (9 -> 11, live demo
+#   moved via flip, excluded) | 11 -> 12.
 SLIDE_TO_BRIEF_SECTION: dict[int, str] = {
-    1: "Executive Summary",         # opener
-    2: "Methodology Overview",      # three-strategy frame setup
-    3: "Methodology Overview",      # HMM + OOS window
-    4: "Key Findings and Insights",  # cumulative return
-    5: "Key Findings and Insights",  # regime correlation break
-    6: "Key Findings and Insights",  # play-by-play
-    7: "Key Findings and Insights",  # post-2022 OOS Sharpe
-    8: "Limitations and Risks",     # honest acknowledgments
-    # 9 -- EXCLUDED (LIVE_DEMO_SEQUENCE; see exclusion set above)
+    1: "Executive Summary",         # OOS proof opener
+    # 2 -- EXCLUDED (Agenda; see exclusion set above)
+    3: "Methodology Overview",      # three-strategy frame setup
+    4: "Methodology Overview",      # HMM + OOS window
+    5: "Key Findings and Insights",  # cumulative return
+    6: "Key Findings and Insights",  # regime correlation break
+    7: "Key Findings and Insights",  # play-by-play
+    8: "Key Findings and Insights",  # post-2022 OOS Sharpe
+    9: "Limitations and Risks",     # honest acknowledgments
     # 10 -- EXCLUDED (AI methodology; see exclusion set above)
-    11: "Final Recommendations",    # closing investable conclusion
+    # 11 -- EXCLUDED (LIVE_DEMO_SEQUENCE; see exclusion set above)
+    12: "Final Recommendations",    # closing investable conclusion
 }
 
 
@@ -327,7 +342,8 @@ def brief_section_excerpt(
     and per-section writers in the deck and appendix to align
     framing without dragging the entire brief into every Sonnet
     call. Returns the empty string when section_name is None
-    (slide 9, slide 10, certain appendix sections), when
+    (slide 2 agenda, slide 10 AI methodology, slide 11 live
+    demo, certain appendix sections), when
     brief_text is empty, or when the splitter doesn't find the
     section heading. Fail-open: the writer continues without
     the excerpt; the deeper Pass-1 grounding (full brief in the
@@ -430,10 +446,11 @@ def deck_generation_rules_block() -> str:
         "2. Appendix is the evidentiary backing. Use it to confirm "
         "technical claims are supportable, not to generate new "
         "ones.\n"
-        "3. Slides 9 and 10 are excluded from brief and appendix "
-        "grounding by design. Slide 9 follows LIVE_DEMO_SEQUENCE "
-        "only. Slide 10 covers platform methodology and is "
-        "deck-specific.\n"
+        "3. Slides 2, 10, and 11 are excluded from brief and "
+        "appendix grounding by design. Slide 2 is the agenda "
+        "(purely structural, no data). Slide 10 covers AI "
+        "methodology and is deck-specific. Slide 11 follows "
+        "LIVE_DEMO_SEQUENCE only.\n"
         "4. Every analytical slide must be traceable to either "
         "the brief or the appendix. No new findings, no "
         "unsupported claims.\n"
@@ -445,10 +462,11 @@ def brief_section_block(
 ) -> str:
     """Renders a per-section brief excerpt as a prompt block for
     per-slide / per-section writers. Returns the empty string
-    when there's no excerpt to inject (slide 9, slide 10,
-    appendix sections without a brief counterpart, or a missing
-    section in the splitter output). Fail-open: an empty block
-    leaves the writer's prompt unchanged."""
+    when there's no excerpt to inject (slide 2 agenda, slide 10
+    AI methodology, slide 11 live demo, appendix sections
+    without a brief counterpart, or a missing section in the
+    splitter output). Fail-open: an empty block leaves the
+    writer's prompt unchanged."""
     if not section_excerpt or not section_name:
         return ""
     return (

@@ -114,14 +114,20 @@ _BRIEF_S4 = "Brief §4 Limitations"
 _BRIEF_S5 = "Brief §5 Final Recommendations"
 _BRIEF_S6 = "Brief §6 Visuals"
 
-_DECK_S1 = "Deck slide 1 (verdict)"
-_DECK_S2 = "Deck slide 2 (strategy categories)"
-_DECK_S3 = "Deck slide 3 (the numbers)"
-_DECK_S4 = "Deck slide 4 (2022 break)"
-_DECK_S5 = "Deck slide 5 (drawdown)"
-_DECK_S6 = "Deck slide 6 (OOS)"
-_DECK_S7 = "Deck slide 7 (macro watchpoints)"
-_DECK_S11 = "Deck slide 11 (closing answer)"
+# June 22 2026 -- 12-slide deck (agenda inserted at position 2 +
+# AI methodology / live demo flipped to slides 10/11). Variable
+# names track the NEW slide numbers so the catalog is self-
+# documenting. Slide 2 (agenda) and slides 10/11 (AI methodology
+# + live demo) are structural, not analytical -- no token
+# references point to them, so no _DECK_S2/S10/S11 constants.
+_DECK_S1  = "Deck slide 1 (verdict)"
+_DECK_S3  = "Deck slide 3 (strategy categories)"
+_DECK_S4  = "Deck slide 4 (the numbers)"
+_DECK_S5  = "Deck slide 5 (2022 break)"
+_DECK_S6  = "Deck slide 6 (drawdown)"
+_DECK_S7  = "Deck slide 7 (OOS)"
+_DECK_S8  = "Deck slide 8 (macro watchpoints)"
+_DECK_S12 = "Deck slide 12 (closing answer)"
 
 _APP_A = "Appendix §A Data sources"
 _APP_B = "Appendix §B Full strategy performance"
@@ -172,7 +178,7 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             source="academic_deck.OOS_WINDOW_MONTHS",
             is_locked=True,
             document_locations=(
-                _BRIEF_S3, _BRIEF_S4, _DECK_S6, _APP_C)),
+                _BRIEF_S3, _BRIEF_S4, _DECK_S7, _APP_C)),
         TokenEntry(
             token="{{OOS_WINDOW_PCT_OF_STUDY}}",
             label="OOS window as % of full study",
@@ -184,7 +190,7 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             label="OOS window definition (text)",
             source="academic_deck (constant)",
             is_locked=True,
-            document_locations=(_BRIEF_S2, _DECK_S6)),
+            document_locations=(_BRIEF_S2, _DECK_S7)),
     )),
 
     # ── Full-period performance --------------------------------------
@@ -196,7 +202,7 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             is_locked=True,
             document_locations=(
                 _BRIEF_S1, _BRIEF_S3, _BRIEF_S5,
-                _DECK_S1, _DECK_S3, _DECK_S6,
+                _DECK_S1, _DECK_S4, _DECK_S7,
                 _APP_B)),
         TokenEntry(
             token="{{OOS_SHARPE_BENCHMARK}}",
@@ -205,32 +211,32 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             is_locked=True,
             document_locations=(
                 _BRIEF_S1, _BRIEF_S3, _BRIEF_S5,
-                _DECK_S1, _DECK_S3, _DECK_S6,
+                _DECK_S1, _DECK_S4, _DECK_S7,
                 _APP_B)),
         TokenEntry(
             token="{{OOS_SHARPE_IMPROVEMENT_PCT}}",
             label="Blend Sharpe vs benchmark (%)",
             source="derived: blend/benchmark - 1",
             is_locked=True,
-            document_locations=(_BRIEF_S1, _DECK_S3)),
+            document_locations=(_BRIEF_S1, _DECK_S4)),
         TokenEntry(
             token="{{REGIME_SWITCHING_SHARPE}}",
             label="Blend full-period Sharpe (cache)",
             source="strategy_cache.REGIME_SWITCHING.sharpe_ratio",
             is_locked=False,
-            document_locations=(_APP_B, _DECK_S3)),
+            document_locations=(_APP_B, _DECK_S4)),
         TokenEntry(
             token="{{BENCHMARK_SHARPE}}",
             label="Benchmark full-period Sharpe (cache)",
             source="strategy_cache.BENCHMARK.sharpe_ratio",
             is_locked=False,
-            document_locations=(_APP_B, _DECK_S3)),
+            document_locations=(_APP_B, _DECK_S4)),
         TokenEntry(
             token="{{CLASSIC_6040_SHARPE}}",
             label="Classic 60/40 full-period Sharpe (cache)",
             source="strategy_cache.CLASSIC_60_40.sharpe_ratio",
             is_locked=False,
-            document_locations=(_APP_B, _DECK_S2, _DECK_S3)),
+            document_locations=(_APP_B, _DECK_S3, _DECK_S4)),
     )),
 
     # ── Pre/post 2022 ------------------------------------------------
@@ -240,31 +246,31 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             label="Blend post-2022 Sharpe",
             source="regime_conditional.REGIME_SWITCHING.post_2022_sharpe",
             is_locked=False,
-            document_locations=(_APP_B, _APP_G, _DECK_S6)),
+            document_locations=(_APP_B, _APP_G, _DECK_S7)),
         TokenEntry(
             token="{{BENCHMARK_POST2022_SHARPE}}",
             label="Benchmark post-2022 Sharpe",
             source="regime_conditional.BENCHMARK.post_2022_sharpe",
             is_locked=False,
-            document_locations=(_APP_B, _APP_G, _DECK_S6)),
+            document_locations=(_APP_B, _APP_G, _DECK_S7)),
         TokenEntry(
             token="{{CLASSIC_6040_POST2022_SHARPE}}",
             label="Classic 60/40 post-2022 Sharpe",
             source="regime_conditional.CLASSIC_60_40.post_2022_sharpe",
             is_locked=False,
-            document_locations=(_APP_B, _DECK_S6)),
+            document_locations=(_APP_B, _DECK_S7)),
         TokenEntry(
             token="{{REGIME_SWITCHING_PRE2022_SHARPE}}",
             label="Blend pre-2022 Sharpe (in-sample)",
             source="regime_conditional.REGIME_SWITCHING.pre_2022_sharpe",
             is_locked=False,
-            document_locations=(_DECK_S6,)),
+            document_locations=(_DECK_S7,)),
         TokenEntry(
             token="{{BENCHMARK_PRE2022_SHARPE}}",
             label="Benchmark pre-2022 Sharpe (in-sample)",
             source="regime_conditional.BENCHMARK.pre_2022_sharpe",
             is_locked=False,
-            document_locations=(_DECK_S6,)),
+            document_locations=(_DECK_S7,)),
     )),
 
     # ── Drawdown / recovery ------------------------------------------
@@ -276,7 +282,7 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             is_locked=True,
             document_locations=(
                 _BRIEF_S1, _BRIEF_S3, _BRIEF_S5,
-                _DECK_S1, _DECK_S5, _APP_F)),
+                _DECK_S1, _DECK_S6, _APP_F)),
         TokenEntry(
             token="{{BENCHMARK_MAX_DD}}",
             label="Benchmark maximum drawdown",
@@ -284,19 +290,19 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             is_locked=True,
             document_locations=(
                 _BRIEF_S1, _BRIEF_S3, _BRIEF_S5,
-                _DECK_S1, _DECK_S5, _APP_F)),
+                _DECK_S1, _DECK_S6, _APP_F)),
         TokenEntry(
             token="{{CLASSIC_6040_MAX_DD}}",
             label="Classic 60/40 maximum drawdown",
             source="strategy_cache.CLASSIC_60_40.max_drawdown",
             is_locked=False,
-            document_locations=(_DECK_S5, _APP_F)),
+            document_locations=(_DECK_S6, _APP_F)),
         TokenEntry(
             token="{{DD_REDUCTION_REGIME_SWITCHING}}",
             label="Blend DD reduction vs benchmark (pp)",
             source="derived: |bench_dd| - |blend_dd|",
             is_locked=True,
-            document_locations=(_DECK_S5,)),
+            document_locations=(_DECK_S6,)),
         TokenEntry(
             token="{{REGIME_SWITCHING_RECOVERY}}",
             label="Blend recovery (trading-day months)",
@@ -342,13 +348,13 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             label="Equity-IG correlation, pre-2022 (rolling avg)",
             source="academic_deck.CORRELATION_PRE_2022",
             is_locked=True,
-            document_locations=(_BRIEF_S1, _BRIEF_S6, _DECK_S4)),
+            document_locations=(_BRIEF_S1, _BRIEF_S6, _DECK_S5)),
         TokenEntry(
             token="{{POST_2022_EQ_IG_CORR}}",
             label="Equity-IG correlation, post-2022 (rolling avg)",
             source="academic_deck.CORRELATION_POST_2022",
             is_locked=True,
-            document_locations=(_BRIEF_S1, _BRIEF_S6, _DECK_S4)),
+            document_locations=(_BRIEF_S1, _BRIEF_S6, _DECK_S5)),
     )),
 
     # ── Live regime / allocation -------------------------------------
@@ -358,79 +364,79 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             label="Current regime classification",
             source="cio_recommendation.regime",
             is_locked=False,
-            document_locations=(_BRIEF_S5, _DECK_S7, _DECK_S11)),
+            document_locations=(_BRIEF_S5, _DECK_S8, _DECK_S12)),
         TokenEntry(
             token="{{REGIME_CONFIDENCE}}",
             label="Current regime confidence",
             source="cio_recommendation.confidence.probability",
             is_locked=False,
-            document_locations=(_DECK_S7,)),
+            document_locations=(_DECK_S8,)),
         TokenEntry(
             token="{{CURRENT_EQUITY_PCT}}",
             label="Implied equity allocation (live blend)",
             source="implied_allocation.equity_pct",
             is_locked=False,
-            document_locations=(_BRIEF_S5, _DECK_S11)),
+            document_locations=(_BRIEF_S5, _DECK_S12)),
         TokenEntry(
             token="{{CURRENT_IG_PCT}}",
             label="Implied IG bond allocation",
             source="implied_allocation.ig_bond_pct",
             is_locked=False,
-            document_locations=(_DECK_S11,)),
+            document_locations=(_DECK_S12,)),
         TokenEntry(
             token="{{CURRENT_HY_PCT}}",
             label="Implied HY bond allocation",
             source="implied_allocation.hy_bond_pct",
             is_locked=False,
-            document_locations=(_DECK_S11,)),
+            document_locations=(_DECK_S12,)),
         TokenEntry(
             token="{{BLEND_REGIME_SWITCHING_WT}}",
             label="Live blend weight: REGIME_SWITCHING",
             source="cio_recommendation.blend_weights.REGIME_SWITCHING",
             is_locked=False,
-            document_locations=(_DECK_S11,)),
+            document_locations=(_DECK_S12,)),
         TokenEntry(
             token="{{BLEND_BENCHMARK_WT}}",
             label="Live blend weight: BENCHMARK",
             source="cio_recommendation.blend_weights.BENCHMARK",
             is_locked=False,
-            document_locations=(_DECK_S11,)),
+            document_locations=(_DECK_S12,)),
         TokenEntry(
             token="{{BLEND_CLASSIC_6040_WT}}",
             label="Live blend weight: CLASSIC_60_40",
             source="cio_recommendation.blend_weights.CLASSIC_60_40",
             is_locked=False,
-            document_locations=(_DECK_S11,)),
+            document_locations=(_DECK_S12,)),
         TokenEntry(
             token="{{VIX_CURRENT}}",
             label="VIX level (live macro signal)",
             source="regime_signals_cache.vix_level",
             is_locked=False,
-            document_locations=(_DECK_S7,)),
+            document_locations=(_DECK_S8,)),
         TokenEntry(
             token="{{CREDIT_SPREAD_CURRENT}}",
             label="HY credit spread (live)",
             source="regime_signals_cache.credit_spread",
             is_locked=False,
-            document_locations=(_DECK_S7,)),
+            document_locations=(_DECK_S8,)),
         TokenEntry(
             token="{{YIELD_CURVE_CURRENT}}",
             label="Yield curve slope (live)",
             source="regime_signals_cache.yield_curve_slope",
             is_locked=False,
-            document_locations=(_DECK_S7,)),
+            document_locations=(_DECK_S8,)),
         TokenEntry(
             token="{{EQUITY_TREND_CURRENT}}",
             label="Equity trend (live)",
             source="regime_signals_cache.equity_trend",
             is_locked=False,
-            document_locations=(_DECK_S7,)),
+            document_locations=(_DECK_S8,)),
         TokenEntry(
             token="{{ESS_CURRENT}}",
             label="Effective sample size (Kish, live)",
             source="cio_recommendation.confidence.ess",
             is_locked=False,
-            document_locations=(_DECK_S7,)),
+            document_locations=(_DECK_S8,)),
     )),
 
     # ── Cost sensitivity ---------------------------------------------
@@ -469,14 +475,14 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             source="academic_deck.PLAY_BY_PLAY_ADD_VALUE",
             is_locked=True,
             document_locations=(
-                _BRIEF_S3, _BRIEF_S5, _DECK_S4)),
+                _BRIEF_S3, _BRIEF_S5, _DECK_S5)),
         TokenEntry(
             token="{{PLAY_BY_PLAY_TOTAL}}",
             label="Total rebalance events tested",
             source="academic_deck.PLAY_BY_PLAY_EVENTS",
             is_locked=True,
             document_locations=(
-                _BRIEF_S3, _BRIEF_S5, _DECK_S4)),
+                _BRIEF_S3, _BRIEF_S5, _DECK_S5)),
     )),
 
     # ── Tail risk -----------------------------------------------------
@@ -486,7 +492,7 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             label="Benchmark CVaR @ 99% (annualized)",
             source="strategy_cache.BENCHMARK.cvar_99_annualized",
             is_locked=False,
-            document_locations=(_DECK_S5,)),
+            document_locations=(_DECK_S6,)),
     )),
 )
 
