@@ -231,18 +231,24 @@ def deck_to_editor(
 # that has one. Keys are slide_number; values are chart_key strings the
 # /api/v1/charts/available endpoint recognises. Slides absent from the
 # map carry NO chart element -- the slide is bullets / table only.
+#
+# June 22 2026 -- shifted for the 12-slide deck (agenda inserted at
+# position 2 + AI methodology / live demo flipped to slides 10/11). Each
+# chart slide bumped by +1 due to the agenda; the closing-slide chart
+# bumped by +1 for the same reason.
 DECK_SLIDE_CHART_KEYS: dict[int, str] = {
-    # 1: stat card only -- the answer up front, no chart.
-    # 2: three-column comparison card -- table-style, no chart.
-    3: "rolling_sharpe",            # risk-adjusted comparison
-    4: "rolling_correlation",       # the 2022 break
-    5: "cumulative_returns",        # capital preservation history
-    6: "oos_performance",           # walk-forward / OOS evidence
-    7: "regime_signals",            # live regime read context
-    # 8: play-by-play scorecard -- table, no chart.
-    # 9: transition slide -- no chart.
+    # 1: stat card only -- the OOS proof answer up front, no chart.
+    # 2: agenda -- structural roadmap, no chart.
+    # 3: three-column comparison card -- table-style, no chart.
+    4: "rolling_sharpe",            # risk-adjusted comparison (was slide 3)
+    5: "rolling_correlation",       # the 2022 break          (was slide 4)
+    6: "cumulative_returns",        # capital preservation     (was slide 5)
+    7: "oos_performance",           # walk-forward / OOS       (was slide 6)
+    8: "regime_signals",            # live regime read         (was slide 7)
+    # 9: play-by-play scorecard -- table, no chart.
     # 10: AI methodology two-column bullets -- no chart.
-    11: "risk_return",              # efficient-frontier proxy + live blend
+    # 11: live demo (analyticsdesk.app) -- no chart.
+    12: "risk_return",              # efficient-frontier (was slide 11)
 }
 
 
