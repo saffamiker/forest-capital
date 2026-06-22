@@ -182,6 +182,66 @@ class TestAgendaSlideNoChart:
         }
 
 
+# ── Slide 8 -- Macro Context title tokenization ──────────────────────────
+
+
+class TestSlide8MacroContextTitleTokenized:
+    """Slide 8 (Macro Context) title carries the {{CURRENT_REGIME}}
+    token so the slide title updates dynamically with the live HMM
+    classification. The substitution layer resolves the token at
+    generation time -- a 2026-06-22 generation under a BULL read
+    renders 'Macro Context: Live Regime Signal -- BULL'; a future
+    regeneration under BEAR would render '... BEAR' without any
+    code change. Previously the title was hardcoded
+    'Macro Context: Why Now Is a BEAR Regime' which would have
+    been factually wrong on any BULL/TRANSITION regeneration."""
+
+    def test_slide_8_title_carries_current_regime_token(self):
+        from tools.academic_deck import SLIDE_TITLES
+        title = SLIDE_TITLES[7]  # zero-indexed; slide 8
+        assert "{{CURRENT_REGIME}}" in title
+        # And the human-readable framing.
+        assert "Live Regime Signal" in title
+
+    def test_slide_8_spec_header_matches_title(self):
+        """The marker line in SLIDE_SPECIFICATIONS must match the
+        SLIDE_TITLES entry exactly so _slice_slide_spec finds the
+        right block."""
+        from tools.academic_deck import _slice_slide_spec
+        spec = _slice_slide_spec(8)
+        assert (
+            "Slide 8 -- Macro Context: Live Regime Signal -- "
+            "{{CURRENT_REGIME}}") in spec
+
+    def test_slide_8_spec_instructs_llm_to_keep_token_literal(self):
+        """The slide spec must instruct the LLM to reproduce the
+        title VERBATIM, including the {{CURRENT_REGIME}} marker.
+        Without that explicit instruction the LLM might try to
+        substitute the regime label itself based on the deck
+        context block."""
+        from tools.academic_deck import _slice_slide_spec
+        spec = _slice_slide_spec(8)
+        assert "reproduce the title VERBATIM" in spec
+        assert "Do NOT substitute the regime label yourself" in spec
+
+    def test_slide_8_speaker_notes_have_molly_review_directive(self):
+        """The speaker notes must carry a presenter-review note
+        instructing Molly to refresh stale contextual event
+        references before the July 1 panel. The watchpoint values
+        are live but the narrative context is from generation
+        time."""
+        from tools.academic_deck import _slice_slide_spec
+        spec = _slice_slide_spec(8)
+        assert "PRESENTER REVIEW -- Molly" in spec
+        assert "July 1 panel" in spec
+        assert "contextual event references" in spec
+        # The "live values vs static context" distinction is
+        # the conceptual core of the directive -- pin it
+        # explicitly.
+        assert "watchpoint VALUES are live" in spec
+        assert "NARRATIVE CONTEXT" in spec
+
+
 # ── Timing budget ────────────────────────────────────────────────────────
 
 

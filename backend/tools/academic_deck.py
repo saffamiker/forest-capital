@@ -156,7 +156,7 @@ SLIDE_TITLES = [
     "The 2022 Break: Why Static Allocation Failed",           # 5
     "Capital Preservation in Bear Regimes",                   # 6
     "Does It Hold Up Out-of-Sample?",                         # 7
-    "Macro Context: Why Now Is a BEAR Regime",                # 8
+    "Macro Context: Live Regime Signal -- {{CURRENT_REGIME}}",  # 8
     "What the Model Gets Wrong",                              # 9
     "How We Used AI: What Worked and What Didn't",            # 10 (flipped)
     "AnalyticsDesk: The Platform Behind the Analysis",        # 11 (flipped)
@@ -438,10 +438,17 @@ genuine out-of-sample. The dynamic blend beats the benchmark on both. \
 The static 60/40 wins IS, ties OOS." Time: ~2 minutes.
 Guardrails: Address overfitting head-on. Panel WILL ask.
 
-Slide 8 -- Macro Context: Why Now Is a BEAR Regime
+Slide 8 -- Macro Context: Live Regime Signal -- {{{{CURRENT_REGIME}}}}
 Message: Connect the live platform regime signal to real macroeconomic \
-conditions. The current BEAR signal reflects specific observable factors. \
-Not a black box.
+conditions. The current regime classification reflects specific \
+observable factors -- not a black box.
+
+Title contract: reproduce the title VERBATIM in your JSON, including \
+the {{{{CURRENT_REGIME}}}} placeholder. Do NOT substitute the regime \
+label yourself -- the platform's substitution layer resolves the token \
+to the live HMM read at generation time so a future regeneration with \
+a new regime classification automatically updates the slide title.
+
 Required bullets:
 - Live regime: {{current_regime}} ({{regime_confidence}}). The signal \
 updates as macro conditions shift.
@@ -456,9 +463,17 @@ context lacks a watch-tile, write [DATA PENDING] in that row.
 Chart: none -- the watchpoint tile grid carries the slide.
 Speaker notes: "The live regime read updates as macro conditions move. \
 Here is what the platform is reading right now. {{current_regime}} -- \
-{{regime_confidence}}. This is the only slide in the deck with live data; \
-the rest are the December 2025 academic-submission figures." \
-Time: ~2 minutes.
+{{regime_confidence}}. This is the only slide in the deck with live \
+data; the rest are the December 2025 academic-submission figures. \
+[PRESENTER REVIEW -- Molly: before the July 1 panel, review the \
+contextual event references on this slide (Fed meeting dates, \
+geopolitical events, specific macro data points cited in the \
+watchpoint descriptions) and update any that are stale. The \
+watchpoint VALUES are live and self-updating via the substitution \
+layer, but the NARRATIVE CONTEXT around them is from generation \
+time -- a 2026-06-22 generation that references the \"recent FOMC \
+decision\" will still say that on the July 1 panel even if a newer \
+meeting has happened by then.]" Time: ~2 minutes.
 Guardrails: This slide is FOR DISCUSSION ONLY. Add the label: \
 "Live signal as of [generation date] -- for discussion, not academic \
 submission figures."
