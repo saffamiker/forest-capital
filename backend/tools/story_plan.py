@@ -1339,12 +1339,27 @@ def generate_deck_story_plan(
     # slide_plan. Pass 1a's lean schema comfortably fits in 4000
     # tokens for 11 slides.
     try:
+        # June 22 2026 -- raised from 4000 to 6000. The deck has 11
+        # slides vs the brief's 6 sections; an 11-slide JSON plan was
+        # routinely truncating at 4000 tokens. Production log signal:
+        # story_plan_deck_pass1_parse_failed with hint "consider
+        # raising max_tokens (likely truncation)" -- the Opus output
+        # hit 4000 mid-slide and the JSON parse failed. System fell
+        # back to _deterministic_deck_plan, which means the deck
+        # story plan was never cached, which means the script gate
+        # checking for a valid cached plan rejected the deck draft
+        # ("Generate Deck First" symptom on the script card even
+        # though a deck draft existed).
+        #
+        # 6000 matches the brief story plan's ceiling at line 1465
+        # and gives headroom for 11 slides + the locked numeric
+        # anchors per slide.
         raw, score, attempts = _run_pass1_with_harness(
             system_prompt=grounded_system_prompt,
             user_prompt=user_prompt,
             evaluator_prompt=STORY_PLAN_EVALUATOR_PROMPT,
             agent_id="story_plan_deck",
-            max_tokens=4000)
+            max_tokens=6000)
     except Exception as exc:  # noqa: BLE001
         log.warning("story_plan_deck_pass1_failed", error=str(exc))
         return _deterministic_deck_plan(deck_context)

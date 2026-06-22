@@ -892,21 +892,30 @@ class TestPlanJsonParsing:
 
 
 class TestDeckPass1aMaxTokens:
-    """Pin that deck Pass 1a's max_tokens budget is appropriate for
-    the LEAN slide_plan schema (no speaker_notes -- those moved to
-    Pass 1b). June 21 2026 (second iteration). Pass 1 used to emit
-    speaker_notes inline and hit 8000 tokens reliably; the split
-    means Pass 1a only carries the slide_plan structure (headlines +
-    anchors + bullets + transitions) which fits comfortably in 4000
-    tokens for 11 slides. This test prevents a regression that
-    bumps Pass 1a back up to the old 8000 ceiling -- if 4000 isn't
-    enough, the right answer is to make the lean schema leaner, not
-    to bloat the budget back."""
+    """Pin that deck Pass 1a's max_tokens budget matches the brief
+    story plan's ceiling. June 22 2026 -- raised the deck ceiling
+    from 4000 to 6000 after production logs showed
+    story_plan_deck_pass1_parse_failed with the
+    "consider raising max_tokens (likely truncation)" hint. The
+    original 4000 was set on the assumption that the LEAN slide_plan
+    schema (no speaker_notes, those moved to Pass 1b) would fit
+    comfortably; in practice the 11-slide JSON output was hitting
+    the ceiling mid-slide and the parse was failing, which fell
+    back to the deterministic plan and broke the script gate
+    (the script card stays on "Generate Deck First" without a
+    valid cached plan even when a deck draft exists).
+    The brief story plan uses 6000 -- this test pins the deck to
+    the same ceiling. A future PR that wants to LOWER it should
+    only do so after the schema actually gets leaner (e.g. trim
+    bullets, drop transition_to_next, etc.)."""
 
-    def test_deck_pass1a_max_tokens_is_lean(self, monkeypatch):
-        """The deck Pass 1a harness call must request <= 4000
-        tokens. Pass 1b (speaker_notes) gets a separate 5000-token
-        budget and a focused prose schema."""
+    def test_deck_pass1a_max_tokens_matches_brief_ceiling(
+        self, monkeypatch,
+    ):
+        """The deck Pass 1a harness call must request <= 6000
+        tokens (the brief story plan's ceiling). Pass 1b
+        (speaker_notes) gets a separate 5000-token budget and a
+        focused prose schema."""
         from tools import story_plan as sp
 
         captured: dict = {}
@@ -923,12 +932,15 @@ class TestDeckPass1aMaxTokens:
         sp.generate_deck_story_plan(
             deck_context={"validated_constants": {}},
             slide_titles=["A", "B"])
-        assert captured["max_tokens"] <= 4000, (
-            f"deck Pass 1a max_tokens drifted to "
-            f"{captured['max_tokens']} -- the lean schema "
-            "(no speaker_notes) should fit comfortably in 4000 "
-            "tokens for 11 slides; a budget above this signals "
-            "scope creep back into Pass 1a's schema")
+        # Pinned at 6000 -- bumped from 4000 on June 22 2026 to
+        # match the brief ceiling and stop the production
+        # truncation. A test that lets this drift back to 4000
+        # would re-introduce the bug.
+        assert captured["max_tokens"] == 6000, (
+            f"deck Pass 1a max_tokens is "
+            f"{captured['max_tokens']} -- expected 6000 to match "
+            "the brief story plan's ceiling. June 22 2026 raised "
+            "from 4000 after production logs showed truncation.")
 
 
 # ── Pass 1b: speaker_notes split (June 21 2026) ──────────────────────────
