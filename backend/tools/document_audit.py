@@ -1222,13 +1222,21 @@ def check_required_citations(
 # disclosure). Mins are generous to avoid false positives on short
 # but rubric-complete sections; maxes pin the upper end so the brief
 # does not bloat past the 5-page double-spaced ceiling.
+# June 21 2026 -- upper bands tightened to fit a 5-page double-
+# spaced page budget. Prior bands summed to 1730-2370 upper; user
+# observed 2733 words in production, 37% over the page budget.
+# Combined with the References-to-per-section-blocks change in
+# agents/academic_writer.py (saves ~80-150 words off the trailing
+# block), the new bands sum to 1740-2210 upper. Tightening is
+# upper-only -- lower bands stay constant so a tight section
+# isn't penalised; required content is preserved.
 _BRIEF_SECTION_WORD_TARGETS: dict[str, tuple[int, int]] = {
-    "Executive Summary":     (200, 300),
-    "Methodology":           (300, 400),
-    "Key Findings":          (480, 620),
-    "Limitations":           (250, 350),
-    "Final Recommendations": (300, 400),
-    "Visuals":               (200, 300),
+    "Executive Summary":     (200, 280),  # was 200-300
+    "Methodology":           (300, 380),  # was 300-400
+    "Key Findings":          (480, 580),  # was 480-620
+    "Limitations":           (250, 330),  # was 250-350
+    "Final Recommendations": (300, 380),  # was 300-400
+    "Visuals":               (210, 260),  # was 200-300
 }
 
 

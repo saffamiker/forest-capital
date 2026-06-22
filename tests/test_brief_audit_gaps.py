@@ -199,7 +199,9 @@ class TestSectionWordCountCheck:
         assert f["section"] == "Methodology"
         assert f["word_count"] == 100
         assert f["target_min"] == 300
-        assert f["target_max"] == 400
+        # Upper band tightened June 21 2026 (was 400) for 5-page
+        # DS budget. See _BRIEF_SECTION_WORD_TARGETS comment.
+        assert f["target_max"] == 380
 
     def test_above_max_flags(self):
         from tools.document_audit import check_section_word_counts

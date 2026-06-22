@@ -137,6 +137,49 @@ def _stub_brief_appendix_grounding(monkeypatch):
         "tools.brief_grounding.get_appendix_for_grounding",
         _fake_appendix)
 
+    # June 21 2026 (PR #365) -- pre-flight cache gate on appendix
+    # generation 409s when strategy_results / bootstrap_ci_sharpe /
+    # factor_loadings / cost_sensitivity are empty. CI has cold
+    # caches so the gate fires and the legitimate appendix
+    # content tests fail with 409 instead of producing the
+    # artifact. Stub the data-gather fn so the gate sees populated
+    # caches; downstream behaviour (8-section assembly,
+    # reproducibility line, editor-draft creation) still
+    # exercises against the [DATA PENDING] fallbacks where the
+    # generators haven't been stubbed.
+    async def _fake_appendix_data():
+        return {
+            "available": True,
+            "study_period": {"start": "2002-07-31",
+                             "end": "2026-05-31",
+                             "n_months": 287},
+            "summary_statistics": [],
+            "regime_conditional": [],
+            "drawdown_comparison": [],
+            "factor_loadings": [{"strategy": "STUB"}],
+            "cumulative_returns": {},
+            "rolling_correlation": {},
+            "strategy_results": {"STUB": {"sharpe_ratio": 0.5}},
+            "strategy_metadata": {},
+            "risk_free_rate": None,
+            "team_summary": {},
+            "last_review_text": None,
+            "academic_docs": [],
+            "audit_disclosures": None,
+            "bootstrap_ci_sharpe": [{"strategy": "STUB"}],
+            "crisis_performance": None,
+            "cost_sensitivity": {"net_sharpe_15bp": 0.5},
+            "invariant_summary": None,
+            "data_hash": "test_hash_for_appendix_fixture",
+        }
+
+    monkeypatch.setattr(
+        "tools.academic_export.gather_analytical_appendix_data",
+        _fake_appendix_data)
+    # The appendix call site re-imports from the same path inside
+    # the function, so the monkeypatch at the import name is
+    # sufficient.
+
 
 def _docx_text(content: bytes) -> str:
     """All header, paragraph and table text from a .docx, for content checks."""

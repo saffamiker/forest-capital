@@ -3400,6 +3400,149 @@ async def post_clear_story_plans(
             detail=f"clear_story_plans_failed: {exc}")
 
 
+@app.post("/api/v1/admin/refresh-appendix-caches")
+async def post_refresh_appendix_caches(
+    session: dict = Depends(require_team_member),
+):
+    """June 21 2026 -- the appendix's graded sections (B, C, D,
+    E, G) depend on three upstream cache populations:
+      1. strategy_results_cache (backtester run) -- Sections B,
+         C, E source
+      2. academic_analytics metric (refresh_academic_analytics)
+         -- Section D's bootstrap_ci_sharpe AND Section E's
+         factor_loadings
+      3. oos_cost_sensitivity metric
+         (refresh_oos_cost_sensitivity) -- Section G
+
+    Before this endpoint, the operator had to ssh to the Render
+    shell and trigger each compute manually. This endpoint runs
+    the chain in sequence so the appendix's pre-flight cache
+    gate (HTTPException 409 when any field is empty) can be
+    cleared from the admin UI / a single curl call.
+
+    Returns a per-step status report. Each step is wrapped
+    individually so a partial failure (e.g. the backtester
+    succeeds but academic_analytics refresh fails) still surfaces
+    which steps completed.
+
+    Sequencing matters: the backtester populates
+    strategy_results_cache + computes the canonical strategy_hash;
+    refresh_academic_analytics + refresh_oos_cost_sensitivity
+    both read that hash + write keyed to it. Running them out of
+    order against a stale hash produces orphan cache rows."""
+    import asyncio
+    if ENVIRONMENT == "test":
+        return {
+            "ok": True,
+            "note": "test environment -- compute chain skipped",
+            "steps": [],
+        }
+    steps: list[dict] = []
+    strategy_hash: str | None = None
+
+    # Step 1 -- backtester run + strategy_results_cache write.
+    try:
+        from tools.backtester import run_all_strategies
+        from tools.cache import (
+            _compute_data_hash, set_strategy_cache,
+        )
+        from tools.data_fetcher import get_full_history_async
+        history = await get_full_history_async()
+        monthly = history.get("equity_monthly")
+        n_rows = len(monthly) if monthly is not None else 0
+        last_date = (
+            str(monthly.index[-1].date())
+            if monthly is not None and len(monthly) > 0
+            else "unknown")
+        strategy_hash = _compute_data_hash(
+            n_rows, last_date, n_strategies=10)
+        results_dict = await asyncio.to_thread(
+            run_all_strategies, history)
+        await set_strategy_cache(
+            strategy_hash, results_dict, n_observations=n_rows,
+            risk_free_monthly=history.get("risk_free_monthly"))
+        steps.append({
+            "step": "backtester",
+            "ok": True,
+            "strategy_hash": strategy_hash,
+            "n_strategies": len(results_dict),
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "admin_refresh_appendix_caches_backtester_failed",
+            error=str(exc))
+        steps.append({
+            "step": "backtester",
+            "ok": False,
+            "error": str(exc),
+        })
+        # Backtester failure short-circuits the chain --
+        # downstream metrics need the strategy_hash that step 1
+        # produces.
+        raise HTTPException(
+            status_code=500,
+            detail={"steps": steps,
+                    "blocked_at": "backtester"})
+
+    # Step 2 -- academic_analytics refresh (bootstrap_ci_sharpe
+    # + factor_loadings).
+    try:
+        from tools.precomputed_analytics import (
+            refresh_academic_analytics,
+        )
+        await refresh_academic_analytics(strategy_hash)
+        steps.append({
+            "step": "refresh_academic_analytics",
+            "ok": True,
+            "data_hash": strategy_hash,
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "admin_refresh_appendix_caches_academic_failed",
+            error=str(exc))
+        steps.append({
+            "step": "refresh_academic_analytics",
+            "ok": False,
+            "error": str(exc),
+        })
+        # Do NOT short-circuit -- cost sensitivity is
+        # independent; surfacing both failures is more useful
+        # than masking the second one.
+
+    # Step 3 -- OOS cost sensitivity refresh.
+    try:
+        from tools.regime_meta_validation import (
+            refresh_oos_cost_sensitivity,
+        )
+        ok = await refresh_oos_cost_sensitivity(strategy_hash)
+        steps.append({
+            "step": "refresh_oos_cost_sensitivity",
+            "ok": bool(ok),
+            "data_hash": strategy_hash,
+        })
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "admin_refresh_appendix_caches_cost_sens_failed",
+            error=str(exc))
+        steps.append({
+            "step": "refresh_oos_cost_sensitivity",
+            "ok": False,
+            "error": str(exc),
+        })
+
+    all_ok = all(step.get("ok") for step in steps)
+    log.info(
+        "admin_refresh_appendix_caches_complete",
+        all_ok=all_ok,
+        strategy_hash=strategy_hash,
+        actor=session.get("email"))
+    return {
+        "ok": all_ok,
+        "strategy_hash": strategy_hash,
+        "steps": steps,
+    }
+
+
 @app.post("/api/v1/admin/warm-analytics-cache")
 async def post_warm_analytics_cache(
     session: dict = Depends(require_team_member),
@@ -10679,19 +10822,26 @@ def _apply_draft_caveats(
     results tasks already carry the statistic marker).
 
     June 21 2026 -- the [[VERIFY CITATION]] caveat is skipped for
-    document_type='executive_brief'. The brief writer cites only
-    from data/references.json (web search disabled in PR #362; the
-    registry is the only permitted source); every citation is
-    pre-verified by construction. Injecting the caveat still drove
-    the writer to mark every citation with [[VERIFY CITATION:
-    ...]] blocks that then surfaced as submission blockers in
-    the audit. The statistic caveat ([[VERIFY: ...]] markers for
-    uncertain numerics) is retained because numerics can still
-    drift between the writer's prose and the locked cache values
-    -- the substitution architecture catches most, the marker
-    flow catches the rest.
+    document_type='executive_brief' (PR #363) AND for
+    document_type='analytical_appendix' (this PR). Both writers
+    cite only from data/references.json (web search disabled in
+    PR #362; the registry is the only permitted source); every
+    citation is pre-verified by construction. Injecting the
+    caveat still drove the writers to mark every citation with
+    [[VERIFY CITATION: ...]] blocks that surfaced as submission
+    blockers in the audit AND fed the editor's marker-counting
+    progress meter (sections C/D/E/G showed 0% completion in
+    production despite carrying full prose, because the
+    citation markers stayed unresolved).
+
+    The statistic caveat ([[VERIFY: ...]] markers for uncertain
+    numerics) is retained for ALL document types because
+    numerics can still drift between the writer's prose and the
+    locked cache values -- the substitution architecture
+    catches most, the marker flow catches the rest.
     """
-    skip_citation_caveat = document_type == "executive_brief"
+    skip_citation_caveat = document_type in (
+        "executive_brief", "analytical_appendix")
     for spec in specs:
         task = spec.get("task", "")
         if not skip_citation_caveat and "[[VERIFY CITATION" not in task:
@@ -10816,6 +10966,17 @@ async def _generate_narratives(
         # optional max_tokens that flows through to call_claude.
         if "max_tokens" in spec:
             kwargs["max_tokens"] = spec["max_tokens"]
+        # June 21 2026 -- per-section anchor allow-list. When the
+        # spec carries a numeric_anchors dict (brief sections via
+        # _inject_brief_section_plan), it flows through to
+        # harness_narrative's post-pass story-plan-violation
+        # check. The check re-runs the generator ONCE more with
+        # explicit "unauthorized numbers: X, Y, Z" feedback when
+        # the first draft emits too many numbers outside the
+        # anchor set. See Issue 2 in the post-regen audit
+        # (Option 2: harness retry on flag count).
+        if "numeric_anchors" in spec:
+            kwargs["numeric_anchors"] = spec["numeric_anchors"]
         jobs.append((spec["key"], asyncio.to_thread(
             harness_narrative, spec["agent_id"], spec["task"], spec["context"],
             **kwargs)))
@@ -12083,6 +12244,27 @@ _APPENDIX_FRAMING_PRELUDE = (
 # prepended to each task at dispatch time so a future section
 # addition automatically inherits the audience + economic-intuition
 # contract.
+# June 21 2026 -- HARD word-count cap appended to every appendix
+# section task. The brief alignment excerpt added in PR #364 was
+# driving the narrative agent to expand prose to mirror the brief
+# (~430 words/section observed in production vs. 100-130 word
+# target = 3x overshoot). The cap is appended to every task so
+# the writer sees the constraint AFTER any framing the brief
+# excerpt introduces.
+_APPENDIX_WORD_CAP_INSTRUCTION = (
+    "\n\nHARD WORD LIMIT (non-negotiable):\n"
+    "Your narrative intro for this section MUST NOT exceed 130 "
+    "words. The brief excerpt above (if any) is for ALIGNMENT "
+    "CONTEXT ONLY -- it tells you what the brief argues so your "
+    "intro can match the framing. It does NOT expand the scope of "
+    "your output. The table that follows the intro is the primary "
+    "content of this section; the intro's job is to introduce the "
+    "table in 100-130 words, period. Do NOT expand to mirror the "
+    "depth of the brief excerpt. Do NOT reproduce the brief's "
+    "argument in full. A section over 130 words will be flagged "
+    "and require regeneration.")
+
+
 _APPENDIX_NARRATIVE_TASKS = {
     "appendix_a": (
         "Write a 100-130 word introduction to Section A: Data and "
@@ -12208,6 +12390,46 @@ async def _generate_appendix_document(
         pending = (f"{DATA_PENDING} — analytics caches not warm. Load the "
                    "dashboard once, then regenerate this appendix.")
 
+        # June 21 2026 -- pre-flight cache gate. The appendix's
+        # graded sections (B, C, D, E, G) all depend on cache
+        # fields populated by upstream compute runs (the
+        # backtester + refresh_academic_analytics +
+        # refresh_oos_cost_sensitivity chain). Generating the
+        # appendix against an empty cache produces misleading
+        # output (descriptive prose with empty tables) AND wastes
+        # generation budget. 409 with the missing-field list so
+        # the operator runs POST /api/v1/admin/refresh-appendix-
+        # caches before retrying.
+        missing_cache_fields: list[str] = []
+        if not (data.get("strategy_results") or {}):
+            missing_cache_fields.append(
+                "strategy_results (Section B/C source -- "
+                "run the backtester)")
+        if not (data.get("bootstrap_ci_sharpe") or []):
+            missing_cache_fields.append(
+                "bootstrap_ci_sharpe (Section D source -- "
+                "run refresh_academic_analytics)")
+        if not (data.get("factor_loadings") or []):
+            missing_cache_fields.append(
+                "factor_loadings (Section E source -- "
+                "run refresh_academic_analytics)")
+        if data.get("cost_sensitivity") is None:
+            missing_cache_fields.append(
+                "cost_sensitivity (Section G source -- "
+                "run refresh_oos_cost_sensitivity)")
+        if missing_cache_fields:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Analytics caches are not warm for the "
+                    "current data hash. Missing fields: "
+                    + "; ".join(missing_cache_fields)
+                    + ". Generating the appendix against an "
+                    "empty cache produces misleading output. "
+                    "Run POST /api/v1/admin/refresh-appendix-"
+                    "caches to populate the cache chain, then "
+                    "retry."))
+
         # Layer 2 (June 21 2026) -- build the substitution table once
         # per appendix-generation job. Same per-data_hash cache the
         # brief + deck use, so a metric appearing in any of the three
@@ -12313,10 +12535,16 @@ async def _generate_appendix_document(
                 # June 21 2026 brief-as-anchor -- per-section brief
                 # alignment excerpt (no-op for appendix-only
                 # sections per APPENDIX_TO_BRIEF_SECTION).
+                # Word cap appended AFTER the brief excerpt so the
+                # writer sees the constraint last (and remembers it
+                # while writing). PR #364 (brief alignment) was
+                # driving the agent to expand prose to mirror the
+                # brief; this cap is the explicit counter-instruction.
                 "task": (
                     appendix_guide
                     + _APPENDIX_FRAMING_PRELUDE + task
-                    + section_brief_blocks.get(key, "")),
+                    + section_brief_blocks.get(key, "")
+                    + _APPENDIX_WORD_CAP_INSTRUCTION),
                 "context": {"study_period": data.get("study_period")},
                 "available": avail,
                 "pending": pending,
@@ -12324,7 +12552,8 @@ async def _generate_appendix_document(
             for key, task in _APPENDIX_NARRATIVE_TASKS.items()
         ]
         narratives = await _generate_narratives(
-            _apply_draft_caveats(specs),
+            _apply_draft_caveats(
+                specs, document_type="analytical_appendix"),
             n_strategies=len(data.get("strategy_results") or {}),
             substitution_table=substitution_table)
 
@@ -13628,6 +13857,13 @@ def _inject_brief_section_plan(
             "as next steps -- frame them as investment conclusions.\n\n")
         new_spec = dict(spec)
         new_spec["task"] = block + str(spec.get("task", ""))
+        # June 21 2026 -- thread the section's anchor allow-list
+        # onto the spec so harness_narrative's post-pass
+        # story-plan-violation check can read it and retry the
+        # writer ONCE with explicit feedback when unauthorized
+        # numbers leak in. See Issue 2 (post-regen audit, Option
+        # 2 -- harness retry on flag count).
+        new_spec["numeric_anchors"] = anchors
         out.append(new_spec)
     return out
 
