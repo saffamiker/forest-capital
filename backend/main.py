@@ -12187,6 +12187,21 @@ async def _generate_appendix_document(
         DATA_PENDING, gather_analytical_appendix_data,
     )
 
+    # June 21 2026 -- brief-as-anchor gate. The analytical appendix
+    # supports what the brief argues; without a brief on hand it
+    # would generate independently from raw cache and risk
+    # framing drift. 409 surfaces inline in the editor.
+    from tools.brief_grounding import get_brief_for_grounding
+    brief_grounding = await get_brief_for_grounding(email)
+    if brief_grounding is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Generate the executive brief before the "
+                "analytical appendix. The appendix supports the "
+                "brief's claims; all three deliverables (brief / "
+                "deck / appendix) must share a single narrative."))
+
     try:
         data = await gather_analytical_appendix_data()
         avail = data["available"]
@@ -12262,6 +12277,26 @@ async def _generate_appendix_document(
                 + _APPENDIX_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION
                 + "\n")
 
+        # June 21 2026 brief-as-anchor -- precompute per-appendix-
+        # section brief excerpts. APPENDIX_TO_BRIEF_SECTION
+        # maps each appendix section_key to a brief section
+        # (or None for appendix-specific sections like
+        # portfolio_construction that have no brief counterpart).
+        # brief_section_excerpt returns "" for None / missing
+        # mappings so the resulting block is a no-op string.
+        from tools.brief_grounding import (
+            APPENDIX_TO_BRIEF_SECTION, brief_section_block,
+            brief_section_excerpt,
+        )
+        brief_text = brief_grounding["content_text"]
+        section_brief_blocks: dict[str, str] = {}
+        for key in _APPENDIX_NARRATIVE_TASKS.keys():
+            agent_id = f"appendix_{key.split('_', 1)[1]}"
+            brief_section = APPENDIX_TO_BRIEF_SECTION.get(agent_id)
+            excerpt = brief_section_excerpt(brief_text, brief_section)
+            section_brief_blocks[key] = brief_section_block(
+                excerpt, brief_section)
+
         specs = [
             {
                 "key": key,
@@ -12275,9 +12310,13 @@ async def _generate_appendix_document(
                 # do (see _APPENDIX_FRAMING_PRELUDE above).
                 # Layer 2 (June 21) -- the substitution placeholder
                 # guide is prepended ahead of the framing prelude.
+                # June 21 2026 brief-as-anchor -- per-section brief
+                # alignment excerpt (no-op for appendix-only
+                # sections per APPENDIX_TO_BRIEF_SECTION).
                 "task": (
                     appendix_guide
-                    + _APPENDIX_FRAMING_PRELUDE + task),
+                    + _APPENDIX_FRAMING_PRELUDE + task
+                    + section_brief_blocks.get(key, "")),
                 "context": {"study_period": data.get("study_period")},
                 "available": avail,
                 "pending": pending,
@@ -12852,6 +12891,7 @@ def _generate_one_deck_slide(
     slide_number: int, context: dict, n_strategies: int,
     *, slide_plan_entry: dict | None = None,
     substitution_table: dict[str, str] | None = None,
+    brief_excerpt: str = "",
 ) -> dict | None:
     """Bridge #98 / #100 -- generate ONE deck slide via a DIRECT Sonnet
     call (no harness, no evaluator, no Gemini, no Opus arbiter). Sync;
@@ -12933,8 +12973,21 @@ def _generate_one_deck_slide(
             _NUMERIC_PLACEHOLDER_GUIDE
             + _DECK_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION
             + "\n")
+    # June 21 2026 brief-as-anchor -- per-slide brief excerpt
+    # threading. Slides 9 (live demo) and 10 (AI methodology) are
+    # explicitly excluded by brief_section_for_slide; the caller
+    # passes brief_excerpt="" for those slides. brief_section_block
+    # is a no-op string when brief_excerpt is empty so this
+    # composes cleanly without conditional branches here.
+    from tools.brief_grounding import (
+        SLIDE_TO_BRIEF_SECTION, brief_section_block,
+    )
+    brief_alignment_block = brief_section_block(
+        brief_excerpt,
+        SLIDE_TO_BRIEF_SECTION.get(slide_number))
     user_message = (
-        f"{placeholder_guide}{prompt}{plan_block}\n\nCONTEXT "
+        f"{placeholder_guide}{prompt}{plan_block}"
+        f"{brief_alignment_block}\n\nCONTEXT "
         f"(numbers to cite, do not invent):\n{ctx_str}")
 
     for attempt in (1, 2):
@@ -13102,6 +13155,26 @@ async def _generate_deck_document(
     """
     import asyncio
 
+    # June 21 2026 -- brief-as-anchor gate. The presentation deck
+    # is grounded in the finalized executive brief: same central
+    # argument, same honest-acknowledgment framing, same
+    # recommendation language. Without a brief draft on hand the
+    # deck would re-derive its own narrative from raw cache, which
+    # is the messaging-inconsistency risk this gate eliminates.
+    # 409 response surfaces inline in the editor (the frontend's
+    # DocumentGenerationPanel renders detail in the per-card error
+    # slot already).
+    from tools.brief_grounding import get_brief_for_grounding
+    brief_grounding = await get_brief_for_grounding(email)
+    if brief_grounding is None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Generate the executive brief before the "
+                "presentation deck. The deck is grounded in the "
+                "brief; all three deliverables (brief / deck / "
+                "appendix) must share a single narrative."))
+
     try:
         data, blend_weights, blend_series, n_strategies = \
             await _build_deck_context(email)
@@ -13117,8 +13190,16 @@ async def _generate_deck_document(
         # an empty list and slide generation proceeds exactly as
         # before -- the existing fallback already produces a complete
         # deck without the locked structural layer.
+        #
+        # June 21 2026 brief grounding -- the cache key extension
+        # threads brief_content_hash so a brief regen automatically
+        # invalidates the deck story plan on the next call. The
+        # full brief text flows into the Pass-1 Opus arbiter via
+        # the brief_text kwarg.
         slide_plan = await _resolve_story_plan_slide_entries(
-            data, n_strategies, list(SLIDE_TITLES))
+            data, n_strategies, list(SLIDE_TITLES),
+            brief_text=brief_grounding["content_text"],
+            brief_hash=brief_grounding["content_hash"])
 
         # Layer 2 (June 21 2026) -- build the substitution table once
         # per generation job and thread it through every per-slide
@@ -13179,6 +13260,22 @@ async def _generate_deck_document(
                         document_type="presentation_deck",
                         error=str(exc))
 
+        # June 21 2026 brief grounding -- precompute the per-slide
+        # brief excerpt map ONCE so the inner loop just looks up
+        # by slide_number. brief_section_for_slide is the single
+        # dispatch point that honours SLIDES_EXCLUDED_FROM_BRIEF_
+        # GROUNDING (slide 9 + slide 10); calling it here ensures
+        # the exclusion can't be accidentally bypassed by the
+        # inner loop's logic.
+        from tools.brief_grounding import (
+            brief_section_excerpt, brief_section_for_slide,
+        )
+        slide_brief_excerpts: dict[int, str] = {}
+        for n in range(1, DECK_SLIDE_COUNT + 1):
+            section_name = brief_section_for_slide(n)
+            slide_brief_excerpts[n] = brief_section_excerpt(
+                brief_grounding["content_text"], section_name)
+
         slides: list[dict] = []
         for n in range(1, DECK_SLIDE_COUNT + 1):
             # Index by slide_number explicitly so a partial plan (e.g.
@@ -13193,7 +13290,8 @@ async def _generate_deck_document(
                 _generate_one_deck_slide,
                 n, per_slide_ctx, n_strategies,
                 slide_plan_entry=entry,
-                substitution_table=substitution_table)
+                substitution_table=substitution_table,
+                brief_excerpt=slide_brief_excerpts.get(n, ""))
             if slide is not None:
                 slides.append(slide)
             # A None slide is left out -- _normalize_slides inside
@@ -13244,16 +13342,25 @@ async def _generate_deck_document(
 
 async def _resolve_story_plan_slide_entries(
     data: dict, n_strategies: int, slide_titles: list[str],
+    *,
+    brief_text: str | None = None,
+    brief_hash: str | None = None,
 ) -> list[dict]:
     """Cache-aware story plan retrieval for deck generation.
 
-    Reads story_plans for (current_data_hash, 'deck'). On a non-fallback
-    cache hit returns the slide_plan list verbatim. On a cache miss
-    fires generate_deck_story_plan() and persists. Fail-open at every
-    layer: an unreachable Opus or a cold strategy cache returns an
-    empty list and the deck renders without the locked structural
-    layer (i.e. exactly as it did pre-PR-333). Logs the cache decision
-    so an operator can see hit / miss / fallback in Render logs.
+    Reads story_plans for (current_data_hash[|brief_hash], 'deck').
+    On a non-fallback cache hit returns the slide_plan list
+    verbatim. On a cache miss fires generate_deck_story_plan() and
+    persists. Fail-open at every layer: an unreachable Opus or a
+    cold strategy cache returns an empty list and the deck renders
+    without the locked structural layer (i.e. exactly as it did
+    pre-PR-333). Logs the cache decision so an operator can see
+    hit / miss / fallback in Render logs.
+
+    June 21 2026 brief-as-anchor -- brief_text flows into the
+    Pass-1 Opus arbiter as BRIEF GROUNDING CONTEXT; brief_hash
+    extends the cache key so a brief regen automatically
+    invalidates the cached deck plan.
     """
     try:
         from tools.cache import get_latest_strategy_hash
@@ -13268,7 +13375,9 @@ async def _resolve_story_plan_slide_entries(
         plan = await sp.refresh_story_plan(
             data_hash, "deck",
             deck_context=_deck_per_slide_context(data),
-            slide_titles=slide_titles)
+            slide_titles=slide_titles,
+            brief_text=brief_text,
+            brief_hash=brief_hash)
     except Exception as exc:  # noqa: BLE001
         log.warning("deck_story_plan_refresh_failed", error=str(exc))
         return []

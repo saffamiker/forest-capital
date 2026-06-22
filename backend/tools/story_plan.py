@@ -1285,10 +1285,29 @@ def generate_deck_story_plan(
     audience: str = (
         "senior investment professionals and the FNA 670 academic panel"),
     duration_minutes: int = 19,
+    brief_text: str | None = None,
 ) -> dict[str, Any]:
     """The four-pass deck story plan generator. Fail-open at every
     pass: an unreachable LLM degrades to deterministic fallback but
-    the deck still has SOMETHING to render."""
+    the deck still has SOMETHING to render.
+
+    June 21 2026 brief-as-anchor -- when brief_text is supplied,
+    the full executive brief is injected as a BRIEF GROUNDING
+    CONTEXT block into the Pass-1 Opus system prompt. The arbiter
+    uses the brief as the structural alignment layer: the deck's
+    central argument, honest-acknowledgment framing, and
+    recommendation language must match the brief's. Empty / None
+    brief_text leaves the prompt unchanged (pre-grounding
+    behaviour preserved for any legacy callers)."""
+    # Brief grounding block -- prepended to the system prompt so
+    # the arbiter sees the full brief BEFORE the deck spec /
+    # rubric / context. The block is a no-op string when
+    # brief_text is empty.
+    from tools.brief_grounding import brief_grounding_block
+    grounded_system_prompt = (
+        _DECK_STORY_PLAN_SYSTEM_PROMPT
+        + brief_grounding_block(brief_text))
+
     user_prompt = (
         "CONTEXT (validated constants + per-slide data):\n"
         f"{json.dumps(deck_context, indent=2, default=str)}\n\n"
@@ -1312,7 +1331,7 @@ def generate_deck_story_plan(
     # tokens for 11 slides.
     try:
         raw, score, attempts = _run_pass1_with_harness(
-            system_prompt=_DECK_STORY_PLAN_SYSTEM_PROMPT,
+            system_prompt=grounded_system_prompt,
             user_prompt=user_prompt,
             evaluator_prompt=STORY_PLAN_EVALUATOR_PROMPT,
             agent_id="story_plan_deck",
@@ -1583,24 +1602,58 @@ async def refresh_story_plan(
     brief_context: dict[str, Any] | None = None,
     slide_titles: list[str] | None = None,
     rubric_sections: list[str] | None = None,
+    brief_text: str | None = None,
+    brief_hash: str | None = None,
 ) -> dict[str, Any]:
     """Hash-pipeline entry point. Serves from cache when a non-
     fallback row exists at (data_hash, document_type); otherwise
-    runs the four-pass generator and persists. Fail-open per pass."""
+    runs the four-pass generator and persists. Fail-open per pass.
+
+    June 21 2026 brief-as-anchor -- when brief_hash is supplied
+    the storage cache key is extended from data_hash to
+    "{data_hash}|{brief_hash}". A brief regen produces a new
+    brief_hash which automatically invalidates the cached deck /
+    appendix plan on the next call without a manual cache flush.
+
+    brief_text is forwarded to the deck generator as the BRIEF
+    GROUNDING CONTEXT block in its Pass-1 Opus system prompt.
+    The brief itself ignores brief_text (it IS the brief; no
+    grounding to thread). Empty / None brief_text leaves the
+    pre-grounding behaviour unchanged."""
     if not data_hash:
         return {"error": "no_data_hash"}
-    cached = await get_cached_story_plan(data_hash, document_type)
+    # Brief uses its own data_hash (it IS the anchor; not
+    # grounded in itself). Deck + appendix extend the cache key
+    # with brief_hash so a refreshed brief auto-invalidates the
+    # downstream plans.
+    if document_type == "brief":
+        storage_hash = data_hash
+    else:
+        from tools.brief_grounding import cache_key_with_brief
+        storage_hash = cache_key_with_brief(data_hash, brief_hash)
+    cached = await get_cached_story_plan(storage_hash, document_type)
     if cached and cached.get("_model") != _DETERMINISTIC:
         cached["cache"] = "hit"
         return cached
     if document_type == "deck":
         plan = generate_deck_story_plan(
-            deck_context or {}, slide_titles or [])
+            deck_context or {}, slide_titles or [],
+            brief_text=brief_text)
     elif document_type == "brief":
         plan = generate_brief_section_plan(
             brief_context or {}, rubric_sections or [])
     else:
+        # Appendix does NOT take a story-plan Opus pass -- the
+        # appendix is workbook-shaped (8 independent sections,
+        # no narrative arc to lock). Brief grounding for the
+        # appendix is wired directly into per-section task
+        # prompts in main.py::_generate_appendix_document via
+        # APPENDIX_TO_BRIEF_SECTION + brief_section_excerpt. The
+        # storage_hash extension above still gives appendix
+        # callers cache-aware retrieval; the value returned here
+        # is the legacy "unknown_document_type" branch so any
+        # future appendix story-plan addition is opt-in.
         return {"error": f"unknown_document_type:{document_type}"}
-    await persist_story_plan(data_hash, document_type, plan)
+    await persist_story_plan(storage_hash, document_type, plan)
     plan["cache"] = "miss"
     return plan
