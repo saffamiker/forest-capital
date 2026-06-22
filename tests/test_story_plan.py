@@ -51,14 +51,23 @@ class TestMidpointFeedbackFraming:
 
     def test_central_question_and_answer_constant(self):
         from tools.story_plan import CENTRAL_QUESTION_AND_ANSWER
-        # The verbatim question + the answer with quantified evidence.
+        # The verbatim question + the answer with quantified
+        # evidence.
+        #
+        # June 22 2026 (story-arc PR) -- the primary proof point
+        # was switched from the live figures (1.24 vs 0.73,
+        # +70%) to the December 2025 academic submission lock
+        # (0.86 vs 0.43, +98% over 53 months). The live
+        # figures are still mentioned in the block as the
+        # Performance Record context but they are not the
+        # lead-with answer; that role belongs to the
+        # submission-lock figures the panel defends.
         assert "diversification improve risk-adjusted performance" \
             in CENTRAL_QUESTION_AND_ANSWER
-        assert "OOS Sharpe of 1.24 versus 0.73" \
+        assert "OOS Sharpe 0.86 (blend) vs 0.43 (benchmark)" \
             in CENTRAL_QUESTION_AND_ANSWER
-        assert "70% improvement" in CENTRAL_QUESTION_AND_ANSWER
-        assert "max drawdown reduced by 51%" \
-            in CENTRAL_QUESTION_AND_ANSWER
+        assert "98% improvement" in CENTRAL_QUESTION_AND_ANSWER
+        assert "53 months" in CENTRAL_QUESTION_AND_ANSWER
 
     def test_investable_conclusion_guard_constant(self):
         from tools.story_plan import INVESTABLE_CONCLUSION_GUARD
