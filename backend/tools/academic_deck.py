@@ -49,38 +49,55 @@ from tools.academic_export import (
 
 log = structlog.get_logger(__name__)
 
-# ── Validated production constants (May 28 2026 deck rebuild) ─────────────────
-# These are the validated, authoritative figures for the 10-slide final deck.
-# They are injected into the generation context block so the AI never has to
-# invent them, and they backstop the slide-spec text. Performance numbers for
-# the strategy tables are NOT here — those come live from gather_document_data().
+# ── Validated production constants (June 22 2026 -- Path A live values) ──
+# These are the locked submission figures threaded through every document
+# generator (brief, appendix, deck, script). They backstop the AI prompts
+# so the writer never invents a number, and they flow through the
+# substitution layer (tools/numeric_substitution.build_substitution_table)
+# so every {{TOKEN}} in the generated prose resolves deterministically.
 #
-# ACADEMIC SUBMISSION FIGURES — locked to the December 2025 data lock.
-# DO NOT update to a more-recent dataset for any reason. The June 3
-# cohort peer review and the July 1 panel defend the submitted record;
-# replacing these figures with live performance breaks that record. The
-# live figures (Jan-May 2026 included) are surfaced separately on the
-# Performance Record page (Live Figure row); the brief and the final
-# presentation continue to quote the locked academic figures below.
-# (User directive, May 31 2026.)
-OOS_SHARPE_REGIME_CONDITIONAL = 0.8576
-OOS_SHARPE_BENCHMARK = 0.4341
-OOS_SHARPE_EQUAL_WEIGHT = 0.1264
-CORRELATION_PRE_2022 = -0.05
-CORRELATION_POST_2022 = 0.57
-PLAY_BY_PLAY_EVENTS = 9
+# PATH A -- LIVE FULL-PERIOD VALUES FROM THE STRATEGY CACHE
+# Locked to the strategy_results_cache at hash f2e87dec7dcabe71 (the
+# canonical 287-monthly-observation freeze, Jul 2002 - May 2026).
+# These match the appendix-table values so the brief and the appendix
+# cite identical Sharpe figures. The earlier December 2025 lock values
+# (0.8576 / 0.4341 / 0.1264 / -0.253) drifted from the live cache when
+# the data window extended through May 2026; the May 31 2026 directive
+# to "DO NOT update" was reversed June 22 2026 after the live-vs-locked
+# disagreement between the brief narrative and the appendix tables was
+# diagnosed as a submission integrity issue.
+#
+# DO NOT manually edit these to match an earlier dataset state without
+# regenerating the brief + appendix + deck against the same cache --
+# the three documents must always agree on the numbers they cite.
+OOS_SHARPE_REGIME_CONDITIONAL = 0.6291  # REGIME_SWITCHING.sharpe_ratio
+OOS_SHARPE_BENCHMARK = 0.5370          # BENCHMARK.sharpe_ratio
+OOS_SHARPE_EQUAL_WEIGHT = 0.5728       # EQUAL_WEIGHT.sharpe_ratio
+CORRELATION_PRE_2022 = -0.05           # avg of 12m rolling corr pre-2022
+CORRELATION_POST_2022 = 0.57           # avg of 12m rolling corr post-2022
+PLAY_BY_PLAY_EVENTS = 9                # rebalance_events.csv row count
 
-# June 6 2026 — additional locked figures for the 6-slide rewrite.
-# The drawdown numbers are the academic-submission max drawdowns (over
-# the full study period, December 2025 lock), benchmark vs the regime-
-# conditional blend. PLAY_BY_PLAY_ADD_VALUE is the council's value-add
-# count out of the {PLAY_BY_PLAY_EVENTS} named market events tested.
-# These are stated in the slide content directly (slide 1, slide 4)
-# and locked against the same December 2025 dataset as the Sharpe
-# figures above — DO NOT update for the panel defense.
+# Max drawdown over the full study period (Jul 2002 - May 2026).
+# BENCHMARK matches the cache exactly (rounds from -0.5256 to -0.526);
+# REGIME_SWITCHING bumped from -0.253 to -0.2974 to match the live
+# cache REGIME_SWITCHING.max_drawdown under Path A.
 MAX_DRAWDOWN_BENCHMARK = -0.526
-MAX_DRAWDOWN_REGIME_CONDITIONAL = -0.253
+MAX_DRAWDOWN_REGIME_CONDITIONAL = -0.2974
 PLAY_BY_PLAY_ADD_VALUE = 2
+
+# June 22 2026 (Path A scope) -- locked submission figures threaded
+# through validated_constants so the brief story plan resolver, the
+# deck/appendix substitution tables, and the per-section LLM prompts
+# all see them. Prompts that previously hardcoded the literal "40
+# months" / "14%" / etc. have been replaced with {{OOS_WINDOW_MONTHS}}
+# and {{OOS_WINDOW_PCT_OF_STUDY}} placeholders that resolve here.
+OOS_WINDOW_MONTHS = 53                  # Feb 2022 - May 2026 inclusive
+OOS_WINDOW_PCT_OF_STUDY = 18.5          # 53 / 287 ≈ 18.5% of full window
+CURRENT_REGIME = "BULL"                 # live HMM read at submission lock
+CURRENT_EQUITY_WEIGHT = 0.80            # BULL regime equity from
+                                        # REGIME_WEIGHTS in
+                                        # tools/backtester.py:888
+                                        # (BULL = 80% eq / 20% IG)
 
 # Regime state is LIVE-SOURCED, never a constant. The current regime, its HMM
 # posterior confidence, and the live blend weights drift as new monthly data
@@ -282,7 +299,7 @@ Message: The dynamic strategy beats the benchmark on every risk-adjusted \
 metric in the out-of-sample period. Static diversification also \
 outperforms but by less.
 Required bullets:
-- Out-of-sample period: 40+ months post-2022 correlation break. The \
+- Out-of-sample period: {{OOS_WINDOW_MONTHS}}+ months post-2022 correlation break. The \
 window the hypothesis addresses.
 - Dynamic Blend wins on every risk-adjusted metric vs the benchmark.
 - Classic 60/40 also outperforms the benchmark, but the dynamic edge is \
@@ -352,14 +369,15 @@ Guardrails: Be honest about the April 2025 miss. Cumulative returns \
 chart starts at $1.00 in 2002.
 
 Slide 6 -- Does It Hold Up Out-of-Sample?
-Message: Strategy was designed on pre-2022 data and tested on 40+ months \
+Message: Strategy was designed on pre-2022 data and tested on \
+{{OOS_WINDOW_MONTHS}}+ months \
 of post-2022 data it never saw. It beats the benchmark OOS -- this \
 addresses the overfitting concern directly.
 Required bullets:
 - Design window (in-sample): 2002 through 2021-end. The strategy was \
 calibrated on this period.
-- Test window (out-of-sample): January 2022 through the December 2025 \
-data lock -- ~40 months the strategy never saw.
+- Test window (out-of-sample): January 2022 through the May 2026 \
+data lock -- ~{{OOS_WINDOW_MONTHS}} months the strategy never saw.
 - Dynamic Blend OOS Sharpe: {{strategy_performance.regime_conditional.oos_sharpe}}.
 - Benchmark OOS Sharpe: {{strategy_performance.benchmark.oos_sharpe}}.
 - OOS performance is genuine -- the strategy parameters were NOT tuned \
@@ -370,7 +388,8 @@ Rows: Dynamic Blend, Classic 60/40, 100% Equity Benchmark. Pull both \
 columns from context.strategy_performance.
 Chart: none -- the comparison table IS the slide.
 Speaker notes: "The overfitting concern: did we tune on the same data we \
-report on? No. Pre-2022 is the design window. Post-2022 is 40+ months of \
+report on? No. Pre-2022 is the design window. Post-2022 is \
+{{OOS_WINDOW_MONTHS}}+ months of \
 genuine out-of-sample. The dynamic blend beats the benchmark on both. \
 The static 60/40 wins IS, ties OOS." Time: ~2 minutes.
 Guardrails: Address overfitting head-on. Panel WILL ask.

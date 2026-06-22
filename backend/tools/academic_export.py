@@ -122,6 +122,68 @@ async def gather_document_data() -> dict[str, Any]:
                 raw = str(ff[-1].get("yyyymm", "")).strip()
                 ff_end = (f"{raw[:4]}-{raw[4:6]}" if len(raw) == 6 else raw)
 
+            regime_conditional_rows = an.regime_conditional_performance(
+                strategies, rf)
+            # June 22 2026 (PR A scope) -- merge per-strategy
+            # pre_2022 / post_2022 Sharpe figures back into the
+            # strategy dict so the substitution table reads find
+            # them. The {{REGIME_SWITCHING_POST2022_SHARPE}} and
+            # {{BENCHMARK_POST2022_SHARPE}} tokens previously
+            # resolved to em-dash because these fields live on
+            # regime_conditional rows, not on the strategy
+            # entries themselves.
+            for row in regime_conditional_rows:
+                strategy_name = row.get("strategy")
+                if (not strategy_name
+                        or strategy_name not in strategies):
+                    continue
+                if isinstance(strategies[strategy_name], dict):
+                    if "post_2022_sharpe" in row:
+                        strategies[strategy_name][
+                            "post_2022_sharpe"] = (
+                            row["post_2022_sharpe"])
+                    if "pre_2022_sharpe" in row:
+                        strategies[strategy_name][
+                            "pre_2022_sharpe"] = (
+                            row["pre_2022_sharpe"])
+
+            # June 22 2026 (PR A scope) -- validated_constants block.
+            # Threaded through every document generator so the story
+            # plan resolver and the substitution table all see the
+            # same locked figures. Reads from academic_deck.py so
+            # Path A constant updates propagate to every consumer
+            # without a parallel edit. Before this block existed,
+            # the brief story plan saw an empty constants dict and
+            # the per-section Sonnet writer emitted "--" placeholders
+            # where the locked numbers should have appeared.
+            from tools.academic_deck import (
+                CORRELATION_POST_2022, CORRELATION_PRE_2022,
+                CURRENT_EQUITY_WEIGHT, CURRENT_REGIME,
+                MAX_DRAWDOWN_BENCHMARK,
+                MAX_DRAWDOWN_REGIME_CONDITIONAL,
+                OOS_SHARPE_BENCHMARK, OOS_SHARPE_EQUAL_WEIGHT,
+                OOS_SHARPE_REGIME_CONDITIONAL,
+                OOS_WINDOW_MONTHS, OOS_WINDOW_PCT_OF_STUDY,
+                PLAY_BY_PLAY_ADD_VALUE, PLAY_BY_PLAY_EVENTS,
+            )
+            validated_constants = {
+                "oos_sharpe_regime_conditional":
+                    OOS_SHARPE_REGIME_CONDITIONAL,
+                "oos_sharpe_benchmark":      OOS_SHARPE_BENCHMARK,
+                "oos_sharpe_equal_weight":   OOS_SHARPE_EQUAL_WEIGHT,
+                "correlation_pre_2022":      CORRELATION_PRE_2022,
+                "correlation_post_2022":     CORRELATION_POST_2022,
+                "max_drawdown_benchmark":    MAX_DRAWDOWN_BENCHMARK,
+                "max_drawdown_regime_conditional":
+                    MAX_DRAWDOWN_REGIME_CONDITIONAL,
+                "play_by_play_events":       PLAY_BY_PLAY_EVENTS,
+                "play_by_play_add_value":    PLAY_BY_PLAY_ADD_VALUE,
+                "oos_window_months":         OOS_WINDOW_MONTHS,
+                "oos_window_pct_of_study":   OOS_WINDOW_PCT_OF_STUDY,
+                "current_regime":            CURRENT_REGIME,
+                "current_equity_weight":     CURRENT_EQUITY_WEIGHT,
+            }
+
             bundle.update({
                 "available": True,
                 "study_period": {
@@ -131,7 +193,7 @@ async def gather_document_data() -> dict[str, Any]:
                     "ff_factors_end": ff_end,
                 },
                 "summary_statistics": an.summary_statistics(asset_series, rf),
-                "regime_conditional": an.regime_conditional_performance(strategies, rf),
+                "regime_conditional": regime_conditional_rows,
                 "drawdown_comparison": an.drawdown_comparison(strategies),
                 "factor_loadings": an.factor_loadings(strategies, ff or []),
                 "cumulative_returns": an.cumulative_returns(strategies),
@@ -141,6 +203,7 @@ async def gather_document_data() -> dict[str, Any]:
                 "risk_free_rate": (
                     round(sum(rf_list) / len(rf_list) * 12, 4) if rf_list else None
                 ),
+                "validated_constants": validated_constants,
             })
     except Exception as exc:  # noqa: BLE001
         log.warning("academic_export_analytics_failed", error=str(exc))
