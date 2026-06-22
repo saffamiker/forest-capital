@@ -64,6 +64,25 @@ from typing import Any
 _TRADING_DAYS_PER_MONTH = 21
 
 
+# Bump this integer when build_substitution_table's kwargs signature
+# changes in a way that affects WHICH tokens the table emits. The
+# get_substitution_table cache key encodes this version, so a deploy
+# that bumps it forces every entry from the prior version to miss --
+# even if the data_hash is unchanged. Without this, a process whose
+# in-memory _substitution_cache was populated BEFORE the new kwargs
+# became available will serve a stale token-less table for the rest
+# of its lifetime.
+#
+# History:
+#   v1 -- original; cache key was just data_hash
+#   v2 -- June 22 2026; PR #374 added regime_conditional /
+#         factor_loadings / cost_sensitivity kwargs. Cache key
+#         now also encodes which of those are populated, and a
+#         version bump ensures pre-#374 entries miss on first
+#         post-deploy request.
+_CACHE_VERSION = 2
+
+
 def format_sharpe(v: Any) -> str:
     """Sharpe-ratio formatter. 2dp. None / non-numeric returns an
     em dash so the substitution still happens (an em dash in the
@@ -647,13 +666,60 @@ def _append_per_strategy_tokens(
 # every section call would still work, but caching makes the
 # substitution-audit-log token counts comparable across deliverables.
 #
-# Process-wide dict, NOT per-request -- the data_hash is the
-# invalidation key. When data ticks over, the new hash builds a new
-# table; the old entry sticks around until the process restarts
+# Process-wide dict, NOT per-request. The cache key is a tuple:
+#   (_CACHE_VERSION, data_hash,
+#    bool(regime_conditional), bool(factor_loadings),
+#    bool(cost_sensitivity))
+#
+# WHY THE TUPLE KEY (June 22 2026 -- PR addressing the stale-cache
+# wiring bug on PR #374's new kwargs):
+#
+#   When data ticks over, the new hash builds a new table; the old
+#   entry sticks around until the process restarts.
+#
+#   The bool-of-kwargs fingerprint exists because PR #374 added the
+#   regime_conditional / factor_loadings / cost_sensitivity kwargs
+#   that emit additional tokens. If a pre-PR-#374 caller hit
+#   get_substitution_table first (warmup, an early verify check,
+#   etc.), the table cached under bare data_hash would have lacked
+#   those tokens. Subsequent callers passing the new kwargs would
+#   hit that stale entry and get the OLD token-less table -- the
+#   new kwargs were silently ignored.
+#
+#   With the bool fingerprint in the key, a call with the new
+#   kwargs MISSES any entry built without them, forcing a fresh
+#   build that emits the new tokens.
+#
+#   _CACHE_VERSION layers on top: a deploy that bumps the version
+#   number invalidates every entry from the prior version, even if
+#   the bool fingerprint matches -- belt-and-suspenders for the
+#   moment a new kwarg slot lands.
+#
 # (the strategy_results_cache itself is the source of truth and
 # can grow without bound; we trim later if memory becomes an issue).
 
-_substitution_cache: dict[str, dict[str, str]] = {}
+_substitution_cache: dict[tuple, dict[str, str]] = {}
+
+
+def _cache_key(
+    data_hash: str, kwargs: dict,
+) -> tuple[int, str, bool, bool, bool]:
+    """Compose the composite cache key for get_substitution_table.
+
+    Returns (version, data_hash, has_regime_conditional,
+    has_factor_loadings, has_cost_sensitivity). bool() is used
+    instead of length so callers passing an empty list still get
+    distinct treatment from callers passing None -- but two callers
+    passing non-empty lists land on the same key (the data_hash
+    plus the analytics_metrics_cache version handle deeper content
+    invalidation)."""
+    return (
+        _CACHE_VERSION,
+        data_hash,
+        bool(kwargs.get("regime_conditional")),
+        bool(kwargs.get("factor_loadings")),
+        bool(kwargs.get("cost_sensitivity")),
+    )
 
 
 def get_substitution_table(
@@ -704,15 +770,16 @@ def get_substitution_table(
                 table, strategy_cache,
                 factor_loadings=factor_loadings_for_append)
         return table
-    if rebuild or data_hash not in _substitution_cache:
+    key = _cache_key(data_hash, kwargs)
+    if rebuild or key not in _substitution_cache:
         table = build_substitution_table(
             strategy_cache, cio_recommendation, data_hash, **kwargs)
         if include_per_strategy:
             _append_per_strategy_tokens(
                 table, strategy_cache,
                 factor_loadings=factor_loadings_for_append)
-        _substitution_cache[data_hash] = table
-    return _substitution_cache[data_hash]
+        _substitution_cache[key] = table
+    return _substitution_cache[key]
 
 
 def clear_substitution_cache() -> None:

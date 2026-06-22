@@ -330,3 +330,187 @@ class TestLoadSubstitutionMetricSources:
         assert rc == []
         assert fl == []
         assert cs is None
+
+
+# ── Cache-key bool fingerprint (the actual root-cause fix) ──────────────
+
+
+class TestGetSubstitutionTableCacheKey:
+    """Pre-fix, _substitution_cache was keyed on data_hash alone.
+    A pre-PR-#374 caller that hit get_substitution_table BEFORE
+    the new rc/fl/cs kwargs became available would cache a
+    token-less table. Subsequent callers passing the new kwargs
+    would hit that stale entry and get the old table back -- the
+    new kwargs were silently ignored, and tokens like
+    {{BENCHMARK_POST2022_SHARPE}}, {{BENCHMARK_ALPHA}}, and
+    {{NET_SHARPE_15BP}} stayed unresolved on the documents.
+
+    The fix extends the cache key to
+    (_CACHE_VERSION, data_hash,
+     bool(regime_conditional), bool(factor_loadings),
+     bool(cost_sensitivity))
+    so a call with the new kwargs MISSES any entry built without
+    them and rebuilds fresh."""
+
+    def test_call_with_new_kwargs_rebuilds_after_call_without(self):
+        """The canonical regression: pre-fix this test would have
+        failed because the second call would return the cached
+        table from the first call.
+
+        The token actually checked here is the per-strategy
+        BENCHMARK_POST2022_SHARPE emitted by
+        _append_per_strategy_tokens from the regime_conditional
+        rows. When the kwarg is absent the per-strategy helper
+        gets factor_loadings=None and emits an em-dash; when
+        present it emits the formatted Sharpe."""
+        from tools.numeric_substitution import (
+            clear_substitution_cache, get_substitution_table,
+        )
+        clear_substitution_cache()
+        # 1. First call WITHOUT the new kwargs -- caches an entry
+        # whose BENCHMARK_POST2022_SHARPE is the em-dash fallback.
+        table_no_kwargs = get_substitution_table(
+            "hash-X", {"BENCHMARK": {}}, None,
+            oos_sharpe_blend=0.86)
+        assert table_no_kwargs.get(
+            "{{BENCHMARK_POST2022_SHARPE}}") == "—"
+        # 2. Second call WITH the new kwargs at SAME data_hash.
+        # Pre-fix: cache hit, returns the em-dash table.
+        # Post-fix: cache miss (bool fingerprint differs), rebuilds.
+        table_with_kwargs = get_substitution_table(
+            "hash-X", {
+                "BENCHMARK": {
+                    "strategy_name": "BENCHMARK",
+                    "monthly_returns": [
+                        ["2022-01-31", 0.01], ["2022-02-28", 0.02]],
+                },
+            }, None,
+            oos_sharpe_blend=0.86,
+            regime_conditional=[{
+                "strategy": "BENCHMARK",
+                "post_2022_sharpe": 0.43,
+                "pre_2022_sharpe": 0.72,
+            }])
+        assert table_with_kwargs.get(
+            "{{BENCHMARK_POST2022_SHARPE}}") == "0.43"
+        assert table_with_kwargs is not table_no_kwargs
+
+    def test_factor_loadings_kwarg_invalidates_independently(self):
+        """factor_loadings has its own slot in the cache key
+        fingerprint, so a call WITH factor_loadings must rebuild
+        even if regime_conditional is unchanged.
+
+        The token actually checked here is BENCHMARK_ALPHA, one
+        of the Carhart-loading tokens
+        _append_per_strategy_tokens emits when factor_loadings
+        is supplied."""
+        from tools.numeric_substitution import (
+            clear_substitution_cache, get_substitution_table,
+        )
+        clear_substitution_cache()
+        strategy_cache = {
+            "BENCHMARK": {
+                "strategy_name": "BENCHMARK",
+                "monthly_returns": [
+                    ["2022-01-31", 0.01], ["2022-02-28", 0.02]],
+            },
+        }
+        table_a = get_substitution_table(
+            "hash-Y", strategy_cache, None,
+            regime_conditional=[{
+                "strategy": "BENCHMARK",
+                "post_2022_sharpe": 0.43}])
+        # Without factor_loadings kwarg, the Carhart tokens are
+        # absent from the table entirely -- a pre-fix cache hit
+        # on the second call would inherit the same missing-token
+        # state.
+        assert "{{BENCHMARK_ALPHA}}" not in table_a
+        table_b = get_substitution_table(
+            "hash-Y", strategy_cache, None,
+            regime_conditional=[{
+                "strategy": "BENCHMARK",
+                "post_2022_sharpe": 0.43}],
+            factor_loadings=[{
+                "strategy": "BENCHMARK",
+                "alpha_annualized": 0.012,
+                "mkt_rf": 0.55,
+                "smb": 0.10,
+                "hml": -0.03,
+                "r_squared": 0.94}])
+        assert "{{BENCHMARK_ALPHA}}" in table_b
+        assert table_b is not table_a
+
+    def test_cost_sensitivity_kwarg_invalidates_independently(self):
+        """cost_sensitivity has its own slot in the cache key
+        fingerprint. The token NET_SHARPE_15BP comes from the
+        cost_sensitivity scenarios payload."""
+        from tools.numeric_substitution import (
+            clear_substitution_cache, get_substitution_table,
+        )
+        clear_substitution_cache()
+        table_a = get_substitution_table(
+            "hash-Z", {"BENCHMARK": {}}, None)
+        assert table_a.get("{{NET_SHARPE_15BP}}") == "—"
+        table_b = get_substitution_table(
+            "hash-Z", {"BENCHMARK": {}}, None,
+            cost_sensitivity={
+                "scenarios": [
+                    {"bps": 10, "net_sharpe": 0.84,
+                     "vs_benchmark_pct": 0.95},
+                    {"bps": 15, "net_sharpe": 0.82,
+                     "vs_benchmark_pct": 0.91},
+                    {"bps": 20, "net_sharpe": 0.80,
+                     "vs_benchmark_pct": 0.86},
+                ],
+            })
+        assert table_b.get("{{NET_SHARPE_15BP}}") == "0.82"
+        assert table_b is not table_a
+
+    def test_same_kwargs_shape_still_hits_cache(self):
+        """The fix must not break the cache's reason-for-being.
+        Two calls with the SAME data_hash and the SAME kwarg
+        presence pattern should return the same dict instance --
+        that's how cross_deliverable_consistency_check sees
+        byte-identical tokens across brief / appendix / deck."""
+        from tools.numeric_substitution import (
+            clear_substitution_cache, get_substitution_table,
+        )
+        clear_substitution_cache()
+        rc_rows = [{
+            "strategy": "BENCHMARK", "post_2022_sharpe": 0.43}]
+        table_1 = get_substitution_table(
+            "hash-W", {"BENCHMARK": {}}, None,
+            regime_conditional=rc_rows)
+        table_2 = get_substitution_table(
+            "hash-W", {"BENCHMARK": {}}, None,
+            regime_conditional=rc_rows)
+        assert table_1 is table_2
+
+    def test_cache_version_constant_is_exported(self):
+        """_CACHE_VERSION should be module-level so a follow-up PR
+        bumping it is a single-line diff. Pin it >= 2 so a future
+        revert doesn't silently re-introduce the bug."""
+        from tools import numeric_substitution
+        assert hasattr(numeric_substitution, "_CACHE_VERSION")
+        assert numeric_substitution._CACHE_VERSION >= 2
+
+    def test_cache_key_helper_includes_version_and_fingerprint(self):
+        """_cache_key returns a tuple whose first element is the
+        version constant and whose tail is the three bools."""
+        from tools.numeric_substitution import _cache_key
+        key_empty = _cache_key("hash-A", {})
+        assert key_empty == (2, "hash-A", False, False, False)
+        key_all = _cache_key("hash-A", {
+            "regime_conditional": [{"strategy": "BENCHMARK"}],
+            "factor_loadings": [{"strategy": "BENCHMARK"}],
+            "cost_sensitivity": {"scenarios": [{"bps": 10}]},
+        })
+        assert key_all == (2, "hash-A", True, True, True)
+        # An empty list / empty dict counts as falsy -- that's
+        # intentional, the data wasn't really there.
+        key_empty_lists = _cache_key("hash-A", {
+            "regime_conditional": [],
+            "factor_loadings": [],
+            "cost_sensitivity": {},
+        })
+        assert key_empty_lists == (2, "hash-A", False, False, False)
