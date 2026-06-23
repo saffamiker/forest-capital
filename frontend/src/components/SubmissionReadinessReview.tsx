@@ -54,6 +54,10 @@ import type { EditorDocumentType } from '../types/editor'
 
 
 const DOC_LABELS: Record<EditorDocumentType, string> = {
+  // midpoint_paper is retired post-May 27 but remains in the
+  // EditorDocumentType union for historical drafts. Include here so
+  // tsc --noEmit (Vercel build) accepts the exhaustive Record.
+  midpoint_paper:      'Midpoint Paper',
   executive_brief:     'Executive Brief',
   presentation_deck:   'Final Presentation Deck',
   analytical_appendix: 'Analytical Appendix',
