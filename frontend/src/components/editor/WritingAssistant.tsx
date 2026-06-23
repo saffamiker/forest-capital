@@ -19,6 +19,7 @@ import {
   GraduationCap, Loader2, Send, AlertTriangle, Sparkles,
 } from 'lucide-react'
 
+import AuditExportButton from '../AuditExportButton'
 import CriticFindingsPanel from '../CriticFindingsPanel'
 import Markdown from '../Markdown'
 
@@ -249,6 +250,18 @@ export default function WritingAssistant({
         debateId={slice?.result?.debateId ?? null}
         fixProposals={slice?.result?.fixProposals ?? {}}
         documentType={documentType} />
+
+      {/* Concern 7m-iv -- per-doc audit trail export. Compact
+          single-button mode; exports this doc's audit chain only.
+          midpoint_paper is retired and not an audit export scope --
+          skip the button for that one historical type. */}
+      {documentType && documentType !== 'midpoint_paper' && (
+        <div className="border-t border-border pt-3">
+          <AuditExportButton
+            mode="single"
+            documentType={documentType} />
+        </div>
+      )}
 
 
       {/* AI writing chat */}

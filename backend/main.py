@@ -12618,6 +12618,343 @@ async def export_midpoint_paper(
         })
 
 
+# ── Concern 7m: audit chain export ────────────────────────────
+
+
+async def _assemble_audit_payload(
+    document_type: str,
+) -> dict[str, Any]:
+    """Assembles the structured audit chain for the given scope.
+
+    Joins council_debates + editor_drafts so the rounds list is
+    ordered chronologically and each round links to its
+    source_draft + resulting_draft. Concern 7m-i shape.
+
+    document_type='full_package' returns rows where context is
+    'academic_review' AND document_type is 'full_package'.
+    Otherwise returns rows for the specific doc_type.
+    """
+    payload: dict[str, Any] = {
+        "document_type": document_type,
+        "data_hash": "",
+        "generated_at": (
+            __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc).isoformat()),
+        "rounds": [],
+        "final_draft": None,
+        "summary": {
+            "total_rounds": 0,
+            "total_fatal_raised": 0,
+            "total_fatal_addressed": 0,
+            "total_fatal_rebutted": 0,
+            "total_major_raised": 0,
+            "total_major_addressed": 0,
+            "total_major_rebutted": 0,
+            "total_fixes_applied": 0,
+            "manual_edits_made": False,
+        },
+    }
+    if ENVIRONMENT == "test":
+        return payload
+    try:
+        from sqlalchemy import text
+        from database import (
+            AsyncSessionLocal,  # type: ignore[attr-defined]
+        )
+        if AsyncSessionLocal is None:
+            return payload
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "SELECT id, context, document_type, critic_model, "
+                "critic_findings, fatal_count, major_count, "
+                "minor_count, peer_responses, arbiter_resolution, "
+                "was_addressed, counter_arguments, fix_proposals, "
+                "fix_applied, fix_applied_at, new_draft_id, "
+                "source_draft_id, parent_debate_id, data_hash, "
+                "created_at "
+                "FROM council_debates "
+                "WHERE document_type = :t "
+                "ORDER BY created_at ASC"),
+                {"t": document_type})
+            rows = r.fetchall()
+        round_idx = 0
+        for row in rows:
+            round_idx += 1
+            (
+                rid, ctx, dt, model, findings, fatal, major, minor,
+                peers, arbiter, addressed, counters,
+                proposals, applied, applied_at, new_id, source_id,
+                parent_id, dh, created,
+            ) = row
+            payload["rounds"].append({
+                "round": round_idx,
+                "debate_id": rid,
+                "context": ctx,
+                "data_hash": dh,
+                "created_at": (
+                    created.isoformat() if created else None),
+                "source_draft_id": source_id,
+                "parent_debate_id": parent_id,
+                "critic_findings": {
+                    "fatal_count": fatal,
+                    "major_count": major,
+                    "minor_count": minor,
+                    "findings": findings or [],
+                    "model": model,
+                },
+                "council_response": arbiter or "",
+                "counter_arguments": counters or [],
+                "fix_proposals": proposals or [],
+                "fix_applied": bool(applied),
+                "fix_applied_at": (
+                    applied_at.isoformat() if applied_at else None),
+                "resulting_draft_id": new_id,
+            })
+            payload["summary"]["total_fatal_raised"] += int(
+                fatal or 0)
+            payload["summary"]["total_major_raised"] += int(
+                major or 0)
+            for i, addr in enumerate(addressed or []):
+                f = (findings or [])[i] if (
+                    findings and i < len(findings)) else {}
+                sev = str(f.get("severity") or "").capitalize()
+                if addr:
+                    if sev == "Fatal":
+                        payload["summary"][
+                            "total_fatal_addressed"] += 1
+                    elif sev == "Major":
+                        payload["summary"][
+                            "total_major_addressed"] += 1
+            for ca in (counters or []):
+                sev = (
+                    str((ca.get("finding") or {})
+                        .get("severity") or "").capitalize())
+                if sev == "Fatal":
+                    payload["summary"][
+                        "total_fatal_rebutted"] += 1
+                elif sev == "Major":
+                    payload["summary"][
+                        "total_major_rebutted"] += 1
+            if applied:
+                payload["summary"]["total_fixes_applied"] += 1
+            if dh and not payload["data_hash"]:
+                payload["data_hash"] = dh
+        payload["summary"]["total_rounds"] = round_idx
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_export_assembly_failed", error=str(exc))
+    return payload
+
+
+@app.get("/api/v1/documents/audit-export")
+@limiter.limit("10/minute")
+async def get_audit_export(
+    request: Request,
+    document_type: str = "full_package",
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7m-i. Returns the full audit chain for the requested
+    scope as structured JSON. Joins council_debates rows ordered by
+    created_at; each round carries critic_findings, council_response,
+    counter_arguments, fix_proposals, and (when fix was applied) the
+    resulting_draft_id link.
+
+    document_type=full_package -- cross-document review chain.
+    document_type=<editor type> -- per-doc chain.
+    """
+    if document_type not in (
+            "full_package", "executive_brief",
+            "presentation_deck", "analytical_appendix",
+            "presentation_script"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "document_type must be full_package or one of the "
+                "four editor doc types"))
+    return await _assemble_audit_payload(document_type)
+
+
+@app.post("/api/v1/documents/audit-export/docx")
+@limiter.limit("6/minute")
+async def post_audit_export_docx(
+    request: Request,
+    document_type: str = "full_package",
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7m-ii. Same payload as the JSON endpoint, rendered
+    as a formatted .docx file download.
+
+    The DOCX uses python-docx (same library the brief / appendix
+    rendering chain already uses -- no new dependency). Structure:
+
+      Title + subtitle + data hash header
+      Executive summary table
+      Per-round sections (critic findings table, council response
+      block, fix-applied row)
+      Counter-arguments on record (all rebuttals across all rounds)
+      Revision history table
+      Data integrity footer
+    """
+    if document_type not in (
+            "full_package", "executive_brief",
+            "presentation_deck", "analytical_appendix",
+            "presentation_script"):
+        raise HTTPException(
+            status_code=422, detail="invalid document_type")
+    payload = await _assemble_audit_payload(document_type)
+
+    if ENVIRONMENT == "test":
+        return {"ok": True, "rounds": 0, "test_environment": True}
+
+    try:
+        from docx import Document
+        from docx.shared import Pt
+        from io import BytesIO
+        from datetime import date as _date
+        doc = Document()
+        # Title
+        doc.add_heading(
+            "Forest Capital -- Adversarial Review Audit Trail",
+            level=0)
+        sub = doc.add_paragraph(
+            "FNA 670 | McColl School of Business | "
+            "Queens University of Charlotte")
+        sub.runs[0].italic = True
+        doc.add_paragraph(
+            f"Data hash: {payload.get('data_hash') or '(none)'} "
+            f"| Generated: {_date.today().isoformat()}")
+
+        summary = payload.get("summary") or {}
+        doc.add_heading("Executive Summary", level=1)
+        t = doc.add_table(rows=1, cols=2)
+        t.style = "Light Grid Accent 1"
+        t.rows[0].cells[0].text = "Metric"
+        t.rows[0].cells[1].text = "Value"
+        for label, key in [
+            ("Rounds",                "total_rounds"),
+            ("Fatal raised",          "total_fatal_raised"),
+            ("Fatal addressed",       "total_fatal_addressed"),
+            ("Fatal rebutted",        "total_fatal_rebutted"),
+            ("Major raised",          "total_major_raised"),
+            ("Major addressed",       "total_major_addressed"),
+            ("Major rebutted",        "total_major_rebutted"),
+            ("Fixes applied",         "total_fixes_applied"),
+        ]:
+            row = t.add_row().cells
+            row[0].text = label
+            row[1].text = str(summary.get(key, 0))
+
+        for r in payload.get("rounds") or []:
+            doc.add_heading(
+                f"Round {r['round']} -- {r['created_at'] or ''}",
+                level=1)
+            cf = r.get("critic_findings") or {}
+            doc.add_paragraph(
+                f"Source draft id: {r.get('source_draft_id')}")
+            doc.add_paragraph(
+                f"Model: {cf.get('model', 'unknown')}  |  "
+                f"Fatal {cf.get('fatal_count', 0)}  /  "
+                f"Major {cf.get('major_count', 0)}  /  "
+                f"Minor {cf.get('minor_count', 0)}")
+            findings = cf.get("findings") or []
+            if findings:
+                doc.add_heading(
+                    "Adversarial Critic Findings", level=2)
+                tbl = doc.add_table(rows=1, cols=5)
+                tbl.style = "Light Grid Accent 1"
+                hdr = tbl.rows[0].cells
+                hdr[0].text = "Severity"
+                hdr[1].text = "Category"
+                hdr[2].text = "Location"
+                hdr[3].text = "Description"
+                hdr[4].text = "Raised by"
+                for f in findings:
+                    row = tbl.add_row().cells
+                    row[0].text = str(f.get("severity") or "")
+                    row[1].text = str(f.get("category") or "")
+                    row[2].text = str(f.get("location") or "")
+                    row[3].text = str(f.get("description") or "")
+                    row[4].text = str(f.get("raised_by") or "")
+            response_text = r.get("council_response") or ""
+            if response_text.strip():
+                doc.add_heading("Council Response", level=2)
+                doc.add_paragraph(response_text)
+            if r.get("fix_applied"):
+                doc.add_heading("Fix Applied", level=2)
+                doc.add_paragraph(
+                    f"Resulting draft id: "
+                    f"{r.get('resulting_draft_id')}")
+                doc.add_paragraph(
+                    f"Applied at: "
+                    f"{r.get('fix_applied_at') or ''}")
+
+        # Counter-arguments on record -- aggregated across rounds.
+        all_counters: list[dict[str, Any]] = []
+        for r in payload.get("rounds") or []:
+            all_counters.extend(r.get("counter_arguments") or [])
+        if all_counters:
+            doc.add_heading(
+                "Counter-Arguments on Record", level=1)
+            doc.add_paragraph(
+                "The following critic findings were reviewed and "
+                "intentionally not addressed based on the council's "
+                "rebuttal -- these are documented rebuttals showing "
+                "the team considered and responded to the critique.")
+            for ca in all_counters:
+                f = ca.get("finding") or {}
+                doc.add_heading(
+                    f"{f.get('severity', '')} "
+                    f"{f.get('category', '')} -- "
+                    f"{f.get('location', '')}", level=2)
+                doc.add_paragraph(
+                    f"Critic raised: {f.get('description', '')}")
+                doc.add_paragraph(
+                    f"Council response: {ca.get('rebuttal', '')}")
+                doc.add_paragraph(
+                    f"Model source: "
+                    f"{ca.get('model_source', 'unknown')}")
+
+        # Data integrity footer
+        doc.add_heading("Data Integrity", level=1)
+        doc.add_paragraph(
+            f"Canonical data hash: "
+            f"{payload.get('data_hash') or '(none)'}")
+        doc.add_paragraph(
+            "All figures in submitted documents verified against "
+            "this hash via the verify-all endpoint.")
+
+        # Bump default font size for legibility.
+        for p in doc.paragraphs:
+            for run in p.runs:
+                if not run.font.size:
+                    run.font.size = Pt(10)
+
+        buf = BytesIO()
+        doc.save(buf)
+        body = buf.getvalue()
+        from fastapi.responses import Response as _Resp
+        filename = (
+            f"forest_capital_audit_trail_{document_type}_"
+            f"{_date.today().isoformat()}.docx")
+        return _Resp(
+            content=body,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"),
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"{filename}\""),
+            })
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_export_docx_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"DOCX render failed: {exc}")
+
+
 # ── Concern 7k-iii + 7k-viii: apply-fix + propose-fix endpoints ──
 
 @app.post("/api/v1/documents/propose-fix")
