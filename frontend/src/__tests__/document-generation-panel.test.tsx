@@ -275,18 +275,63 @@ describe('DocumentGenerationPanel — async generation', () => {
 })
 
 describe('DocumentGenerationPanel — Brief Workflow guide', () => {
-  it('renders the Info button on the Executive Brief card and not on '
-    + 'the deck card', () => {
-      // PR #338 retired the midpoint card; only brief + deck +
-      // appendix remain. The info button stays brief-only.
+  it('renders an Info button on the Executive Brief, Deck, and '
+    + 'Appendix cards (June 23 2026 -- per-doc workflow guides)',
+    () => {
+      // June 23 2026 -- Deck + Appendix gained their own workflow
+      // guides. The brief stays at brief-workflow-info-button;
+      // the deck + appendix get deck-workflow-info-button and
+      // appendix-workflow-info-button respectively.
       renderPanel(<DocumentGenerationPanel />)
       const briefInfo = within(briefCard()).getByTestId(
         'brief-workflow-info-button')
       expect(briefInfo).toBeInTheDocument()
+
       const deckCard = screen.getByText('Final Presentation Deck')
         .closest('.card') as HTMLElement
+      // The brief info button must NOT be on the deck card.
       expect(within(deckCard).queryByTestId(
         'brief-workflow-info-button')).not.toBeInTheDocument()
+      // The deck has its OWN info button.
+      expect(within(deckCard).getByTestId(
+        'deck-workflow-info-button')).toBeInTheDocument()
+
+      const appendixCard = screen.getByText('Analytical Appendix')
+        .closest('.card') as HTMLElement
+      expect(within(appendixCard).getByTestId(
+        'appendix-workflow-info-button')).toBeInTheDocument()
+    })
+
+  it('clicking the Deck Info button opens the Deck workflow modal',
+    () => {
+      renderPanel(<DocumentGenerationPanel />)
+      expect(screen.queryByTestId('deck-workflow-modal'))
+        .not.toBeInTheDocument()
+      const deckCard = screen.getByText('Final Presentation Deck')
+        .closest('.card') as HTMLElement
+      fireEvent.click(within(deckCard).getByTestId(
+        'deck-workflow-info-button'))
+      expect(screen.getByTestId('deck-workflow-modal'))
+        .toBeInTheDocument()
+      expect(screen.getByText(
+        /How to Build the Final Presentation Deck/i))
+        .toBeInTheDocument()
+    })
+
+  it('clicking the Appendix Info button opens the Appendix '
+    + 'workflow modal', () => {
+      renderPanel(<DocumentGenerationPanel />)
+      expect(screen.queryByTestId('appendix-workflow-modal'))
+        .not.toBeInTheDocument()
+      const appendixCard = screen.getByText('Analytical Appendix')
+        .closest('.card') as HTMLElement
+      fireEvent.click(within(appendixCard).getByTestId(
+        'appendix-workflow-info-button'))
+      expect(screen.getByTestId('appendix-workflow-modal'))
+        .toBeInTheDocument()
+      expect(screen.getByText(
+        /How to Build the Analytical Appendix/i))
+        .toBeInTheDocument()
     })
 
   it('renders the persistent helper text below the brief description',

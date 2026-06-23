@@ -29,6 +29,8 @@ import {
   ReportBlockingModal, useReportReadinessGate,
 } from './ReportReadinessIndicator'
 import { BriefWorkflowModal } from './BriefWorkflowModal'
+import { DeckWorkflowModal } from './DeckWorkflowModal'
+import { AppendixWorkflowModal } from './AppendixWorkflowModal'
 import {
   useReportReadinessStore, type ExportVerificationStatus,
 } from '../stores/reportReadinessStore'
@@ -306,6 +308,13 @@ export default function DocumentGenerationPanel() {
   // a step-by-step workflow guide. State is local to the panel; the
   // modal re-mounts itself on open so the checklist resets each time.
   const [briefGuideOpen, setBriefGuideOpen] = useState(false)
+  // June 23 2026 -- per-doc workflow guides. Deck + Appendix now
+  // have their own modals; the Info icon on each tile opens the
+  // appropriate one. The four cards in DOCS may grow later; per-
+  // type state keys the guide open/closed independently so opening
+  // the Deck guide doesn't reset a half-read Brief guide.
+  const [deckGuideOpen, setDeckGuideOpen] = useState(false)
+  const [appendixGuideOpen, setAppendixGuideOpen] = useState(false)
   // Job ids whose completion has already been written to "last generated".
   const recorded = useRef<Set<string>>(new Set())
   // Workstream C report gate. The hook loads /api/v1/report/readiness
@@ -536,12 +545,40 @@ export default function DocumentGenerationPanel() {
                     <h3 className="text-white font-semibold text-sm">
                       {doc.title}
                     </h3>
+                    {/* June 23 2026 -- Info icons for all three
+                        documented tiles (brief / deck / appendix).
+                        The script tile has no info icon yet -- a
+                        separate guide is queued for that surface. */}
                     {doc.documentType === 'executive_brief' && (
                       <button
                         type="button"
                         onClick={() => setBriefGuideOpen(true)}
                         data-testid="brief-workflow-info-button"
                         aria-label="How to build the executive brief"
+                        className="shrink-0 text-muted hover:text-electric
+                                   transition-colors"
+                        title="Step-by-step guide">
+                        <Info className="w-4 h-4" />
+                      </button>
+                    )}
+                    {doc.documentType === 'presentation_deck' && (
+                      <button
+                        type="button"
+                        onClick={() => setDeckGuideOpen(true)}
+                        data-testid="deck-workflow-info-button"
+                        aria-label="How to build the final presentation deck"
+                        className="shrink-0 text-muted hover:text-electric
+                                   transition-colors"
+                        title="Step-by-step guide">
+                        <Info className="w-4 h-4" />
+                      </button>
+                    )}
+                    {doc.documentType === 'analytical_appendix' && (
+                      <button
+                        type="button"
+                        onClick={() => setAppendixGuideOpen(true)}
+                        data-testid="appendix-workflow-info-button"
+                        aria-label="How to build the analytical appendix"
                         className="shrink-0 text-muted hover:text-electric
                                    transition-colors"
                         title="Step-by-step guide">
@@ -760,6 +797,12 @@ export default function DocumentGenerationPanel() {
       <BriefWorkflowModal
         open={briefGuideOpen}
         onClose={() => setBriefGuideOpen(false)} />
+      <DeckWorkflowModal
+        open={deckGuideOpen}
+        onClose={() => setDeckGuideOpen(false)} />
+      <AppendixWorkflowModal
+        open={appendixGuideOpen}
+        onClose={() => setAppendixGuideOpen(false)} />
       <BriefRegenConfirmModal
         open={briefRegenConfirm.open}
         onCancel={() => setBriefRegenConfirm(

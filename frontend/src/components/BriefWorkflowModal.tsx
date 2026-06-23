@@ -44,6 +44,7 @@ const CHECKLIST_ITEMS: readonly string[] = [
   'All six sections within word count targets',
   'Rebalancing disclosure accurate (monthly / 2pp)',
   'Final recommendations framed as investment conclusions',
+  'Brief Review shows no Needs Work findings',
   '.docx downloaded and reviewed in Word before upload',
 ] as const
 
@@ -125,10 +126,15 @@ export function BriefWorkflowModal(
           </Step>
           <Step n="2" heading="Clear stale story plan (if needed)">
             If the brief prompt has been updated since your last
-            generation, a stale story plan may be cached. Ask Mike to
-            run the cache clear command, or use the admin panel if
-            available. Skip this step if this is your first
-            generation.
+            generation, clear the story plan before generating. From
+            the Admin panel, go to Settings &gt; Admin &gt; Clear
+            Story Plans and clear the executive_brief plan. Skip
+            this step if this is your first generation.
+            <p className="mt-1 text-2xs text-muted italic">
+              Note: generating a new brief automatically clears the
+              deck, appendix, and script story plans -- you do not
+              need to clear those manually.
+            </p>
           </Step>
         </Section>
 
@@ -217,6 +223,15 @@ export function BriefWorkflowModal(
           <Step n="10" heading="Edit and save">
             Make any corrections in the editor. Save before
             exporting.
+          </Step>
+          <Step n="10b" heading="Run Brief Review">
+            Click &quot;Review Brief&quot; in the editor&apos;s
+            Writing Assistant panel to run a focused academic
+            review of the brief against the panel-defense rubric.
+            Address any Needs Work findings before exporting. This
+            is separate from the Cross-Document Review on QA Hub,
+            which should only be run after all deliverables are
+            complete.
           </Step>
         </Section>
 
