@@ -28,6 +28,7 @@ import axios from 'axios'
 import {
   ChevronDown, ChevronRight, AlertCircle, Loader2,
   Lock, Activity, Download, Info,
+  CheckCircle2, XCircle,
 } from 'lucide-react'
 
 
@@ -51,6 +52,42 @@ interface DataReferenceResponse {
   platform_fingerprint:  string
   generated_at:          string
   categories:            Record<string, DataReferenceCategory>
+}
+
+
+// June 22 2026 -- validation shape, fetched in parallel from
+// /api/v1/export/data-reference-sheet/validate. The summary bar
+// at the top of the panel reads from `summary`; each row's
+// status pill / expanded diff reads from a Map<token,
+// ValidationResult> built from `results`.
+type ValidationStatus = 'pass' | 'fail' | 'warning' | 'skipped'
+
+interface ValidationResult {
+  token:            string
+  label:            string
+  reference_value:  string | null
+  source_value:     string | null
+  source_endpoint:  string
+  status:           ValidationStatus
+  delta:            string | null
+  note:             string | null
+  cache_freshness:  string | null
+}
+
+interface ValidationSummary {
+  total:    number
+  passed:   number
+  failed:   number
+  warning:  number
+  skipped:  number
+}
+
+interface ValidationResponse {
+  data_hash:     string
+  validated_at:  string
+  summary:       ValidationSummary
+  results:       ValidationResult[]
+  error?:        string
 }
 
 
@@ -134,6 +171,70 @@ function downloadCsv(data: DataReferenceResponse): void {
 }
 
 
+// Status pill rendered next to every reference-sheet row. Shape
+// matches the legend in the summary bar: green check / red X /
+// amber warning / grey lock / spinner while loading.
+function ValidationPill({
+  result, loading,
+}: {
+  result: ValidationResult | undefined
+  loading: boolean
+}): React.ReactElement {
+  if (!result) {
+    if (loading) {
+      return (
+        <Loader2
+          data-testid="validation-pill-loading"
+          className="w-3 h-3 text-muted animate-spin inline" />
+      )
+    }
+    return <span className="text-2xs text-muted">—</span>
+  }
+  const title = (
+    result.note
+    || result.delta
+    || (result.cache_freshness
+        ? 'source row written '
+          + new Date(result.cache_freshness).toLocaleString()
+        : ''))
+  if (result.status === 'pass') {
+    return (
+      <CheckCircle2
+        data-testid="validation-pill-pass"
+        className="w-3.5 h-3.5 text-success inline"
+        aria-label="pass"
+        {...(title ? { title } : {})} />
+    )
+  }
+  if (result.status === 'fail') {
+    return (
+      <XCircle
+        data-testid="validation-pill-fail"
+        className="w-3.5 h-3.5 text-danger inline"
+        aria-label="fail"
+        {...(title ? { title } : {})} />
+    )
+  }
+  if (result.status === 'warning') {
+    return (
+      <AlertCircle
+        data-testid="validation-pill-warning"
+        className="w-3.5 h-3.5 text-warning inline"
+        aria-label="warning"
+        {...(title ? { title } : {})} />
+    )
+  }
+  // skipped -- locked constant or no validator
+  return (
+    <Lock
+      data-testid="validation-pill-skipped"
+      className="w-3 h-3 text-muted inline"
+      aria-label="skipped"
+      {...(title ? { title } : {})} />
+  )
+}
+
+
 export default function DataReferenceSheetPanel() {
   const [expanded, setExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
@@ -143,33 +244,71 @@ export default function DataReferenceSheetPanel() {
   const [openCategories, setOpenCategories] = useState<
     Record<string, boolean>>({})
   const [hashTooltipOpen, setHashTooltipOpen] = useState(false)
+  // June 22 2026 -- cross-reference validation. Fired in parallel
+  // with the sheet fetch on first expand; rendered as a summary
+  // bar at the top of the panel + per-row status pills. The two
+  // fetches are decoupled -- token values render the moment the
+  // sheet fetch returns, validation results overlay when ready.
+  const [validation, setValidation] =
+    useState<ValidationResponse | null>(null)
+  const [validationLoading, setValidationLoading] = useState(false)
+  const [validationError, setValidationError] = useState<
+    string | null>(null)
 
-  const fetchSheet = async () => {
-    if (data || loading) return
-    setLoading(true)
-    setError(null)
-    try {
-      const res = await axios.get<DataReferenceResponse>(
-        '/api/v1/export/data-reference-sheet')
-      setData(res.data)
-      // Default-expand every category that has entries.
-      const open: Record<string, boolean> = {}
-      for (const key of CATEGORY_ORDER) {
-        if (res.data.categories[key]) open[key] = true
-      }
-      setOpenCategories(open)
-    } catch (err) {
-      const msg = axios.isAxiosError(err)
-        ? (err.response?.data?.detail ?? err.message)
-        : 'Failed to load data reference sheet'
-      setError(String(msg))
-    } finally {
-      setLoading(false)
+  // O(1) lookup from token -> validation result; built once when
+  // validation arrives so the per-row render doesn't scan the
+  // 153-item list each pass.
+  const validationByToken: Map<string, ValidationResult> = (() => {
+    const m = new Map<string, ValidationResult>()
+    if (!validation) return m
+    for (const r of validation.results) m.set(r.token, r)
+    return m
+  })()
+
+  const fetchBoth = async () => {
+    if ((data || loading) && (validation || validationLoading)) return
+    if (!data && !loading) {
+      setLoading(true)
+      setError(null)
+      void axios
+        .get<DataReferenceResponse>(
+          '/api/v1/export/data-reference-sheet')
+        .then((res) => {
+          setData(res.data)
+          // Default-expand every category that has entries.
+          const open: Record<string, boolean> = {}
+          for (const key of CATEGORY_ORDER) {
+            if (res.data.categories[key]) open[key] = true
+          }
+          setOpenCategories(open)
+        })
+        .catch((err) => {
+          const msg = axios.isAxiosError(err)
+            ? (err.response?.data?.detail ?? err.message)
+            : 'Failed to load data reference sheet'
+          setError(String(msg))
+        })
+        .finally(() => setLoading(false))
+    }
+    if (!validation && !validationLoading) {
+      setValidationLoading(true)
+      setValidationError(null)
+      void axios
+        .get<ValidationResponse>(
+          '/api/v1/export/data-reference-sheet/validate')
+        .then((res) => setValidation(res.data))
+        .catch((err) => {
+          const msg = axios.isAxiosError(err)
+            ? (err.response?.data?.detail ?? err.message)
+            : 'Failed to validate data reference sheet'
+          setValidationError(String(msg))
+        })
+        .finally(() => setValidationLoading(false))
     }
   }
 
   const handleToggle = () => {
-    if (!expanded) void fetchSheet()
+    if (!expanded) void fetchBoth()
     setExpanded(!expanded)
   }
 
@@ -295,7 +434,7 @@ export default function DataReferenceSheetPanel() {
                 </div>
               )}
               {/* Legend: locked vs live. */}
-              <div className="text-2xs text-muted mb-4
+              <div className="text-2xs text-muted mb-2
                               flex items-center gap-4 flex-wrap">
                 <span className="flex items-center gap-1">
                   <Lock className="w-3 h-3 text-warning" />
@@ -305,6 +444,66 @@ export default function DataReferenceSheetPanel() {
                   <Activity className="w-3 h-3 text-success" />
                   Live cache read (could update)
                 </span>
+              </div>
+              {/* Validation summary bar. Renders after the
+                  /validate endpoint returns; shows skeleton +
+                  spinner while loading. Independent from the
+                  sheet fetch -- value rows below render the
+                  moment the sheet endpoint returns regardless
+                  of whether validation has completed. */}
+              <div
+                data-testid="data-reference-validation-summary"
+                className="px-3 py-2 mb-4 rounded
+                           border border-border bg-navy-700/30
+                           text-2xs flex items-center
+                           gap-4 flex-wrap">
+                {validationLoading && (
+                  <span className="flex items-center gap-1.5
+                                   text-muted">
+                    <Loader2 className="w-3 h-3 animate-spin" />
+                    Validating values against source caches…
+                  </span>
+                )}
+                {validationError && (
+                  <span className="flex items-center gap-1.5
+                                   text-danger">
+                    <AlertCircle className="w-3 h-3" />
+                    Validation unavailable: {validationError}
+                  </span>
+                )}
+                {validation && !validationError && (
+                  <>
+                    <span className="text-muted">
+                      Cross-reference:
+                    </span>
+                    <span className="flex items-center gap-1
+                                     text-success">
+                      <CheckCircle2 className="w-3 h-3" />
+                      {validation.summary.passed} passed
+                    </span>
+                    <span className="flex items-center gap-1
+                                     text-danger">
+                      <XCircle className="w-3 h-3" />
+                      {validation.summary.failed} failed
+                    </span>
+                    {validation.summary.warning > 0 && (
+                      <span className="flex items-center gap-1
+                                       text-warning">
+                        <AlertCircle className="w-3 h-3" />
+                        {validation.summary.warning} warning
+                      </span>
+                    )}
+                    <span className="flex items-center gap-1
+                                     text-muted">
+                      <Lock className="w-3 h-3" />
+                      {validation.summary.skipped} skipped
+                    </span>
+                    <span className="text-muted ml-auto">
+                      Validated {new Date(
+                        validation.validated_at).toLocaleString()}
+                    </span>
+                  </>
+                )}
               </div>
               {CATEGORY_ORDER.map((key) => {
                 const cat = data.categories[key]
@@ -360,65 +559,166 @@ export default function DataReferenceSheetPanel() {
                                             hidden lg:table-cell">
                                 Appears in
                               </th>
+                              <th className="py-1.5 pr-3 font-medium
+                                            text-center w-12">
+                                Check
+                              </th>
                             </tr>
                           </thead>
                           <tbody>
-                            {cat.entries.map((entry) => (
-                              <tr
-                                key={entry.token}
-                                className="border-b border-border/30">
-                                <td className="py-1.5 pr-3
-                                              align-top">
-                                  {entry.is_locked
-                                    ? <Lock
-                                        className="w-3 h-3
-                                                   text-warning
-                                                   inline" />
-                                    : <Activity
-                                        className="w-3 h-3
-                                                   text-success
-                                                   inline" />}
-                                </td>
-                                <td className="py-1.5 pr-3
-                                              align-top">
-                                  <div className="font-mono
-                                                 text-2xs
-                                                 text-electric">
-                                    {entry.token}
-                                  </div>
-                                  <div className="text-slate-300
-                                                 mt-0.5">
-                                    {entry.label}
-                                  </div>
-                                </td>
-                                <td className="py-1.5 pr-3
-                                              text-white
-                                              font-mono text-right
-                                              whitespace-nowrap
-                                              align-top">
-                                  {entry.value}
-                                </td>
-                                <td className="py-1.5 pr-3 text-muted
-                                              font-mono text-2xs
-                                              hidden md:table-cell
-                                              align-top">
-                                  {entry.source}
-                                </td>
-                                <td className="py-1.5 pr-3 text-muted
-                                              text-2xs
-                                              hidden lg:table-cell
-                                              align-top">
-                                  {entry.last_verified}
-                                </td>
-                                <td className="py-1.5 pr-3 text-muted
-                                              text-2xs
-                                              hidden lg:table-cell
-                                              align-top">
-                                  {entry.document_locations
-                                    .join('; ')}
-                                </td>
-                              </tr>
-                            ))}
+                            {cat.entries.map((entry) => {
+                              const v = validationByToken
+                                .get(entry.token)
+                              const showExpandedFail = (
+                                v && v.status === 'fail')
+                              const rowClass = showExpandedFail
+                                ? ('border-b border-danger/40 '
+                                   + 'bg-danger/5')
+                                : 'border-b border-border/30'
+                              return (
+                                <>
+                                  <tr
+                                    key={entry.token}
+                                    className={rowClass}
+                                    data-testid={
+                                      'data-ref-row-'
+                                      + entry.token.replace(
+                                        /[{}]/g, '')}>
+                                    <td className="py-1.5 pr-3
+                                                  align-top">
+                                      {entry.is_locked
+                                        ? <Lock
+                                            className="w-3 h-3
+                                                       text-warning
+                                                       inline" />
+                                        : <Activity
+                                            className="w-3 h-3
+                                                       text-success
+                                                       inline" />}
+                                    </td>
+                                    <td className="py-1.5 pr-3
+                                                  align-top">
+                                      <div className="font-mono
+                                                     text-2xs
+                                                     text-electric">
+                                        {entry.token}
+                                      </div>
+                                      <div className="text-slate-300
+                                                     mt-0.5">
+                                        {entry.label}
+                                      </div>
+                                    </td>
+                                    <td className="py-1.5 pr-3
+                                                  text-white
+                                                  font-mono
+                                                  text-right
+                                                  whitespace-nowrap
+                                                  align-top">
+                                      {entry.value}
+                                    </td>
+                                    <td className="py-1.5 pr-3
+                                                  text-muted
+                                                  font-mono text-2xs
+                                                  hidden md:table-cell
+                                                  align-top">
+                                      {entry.source}
+                                    </td>
+                                    <td className="py-1.5 pr-3
+                                                  text-muted
+                                                  text-2xs
+                                                  hidden lg:table-cell
+                                                  align-top">
+                                      {entry.last_verified}
+                                    </td>
+                                    <td className="py-1.5 pr-3
+                                                  text-muted
+                                                  text-2xs
+                                                  hidden lg:table-cell
+                                                  align-top">
+                                      {entry.document_locations
+                                        .join('; ')}
+                                    </td>
+                                    <td className="py-1.5 pr-3
+                                                  text-center
+                                                  align-top">
+                                      <ValidationPill
+                                        result={v}
+                                        loading={validationLoading}
+                                      />
+                                    </td>
+                                  </tr>
+                                  {showExpandedFail && v && (
+                                    <tr
+                                      key={entry.token + '-fail'}
+                                      className="border-b
+                                                border-danger/40
+                                                bg-danger/5">
+                                      <td colSpan={7}
+                                          className="px-3 pb-2
+                                                    pt-0 text-2xs">
+                                        <div className="text-danger
+                                                       font-semibold
+                                                       mb-1">
+                                          Validation failed
+                                        </div>
+                                        <div className="grid
+                                                       grid-cols-2
+                                                       md:grid-cols-4
+                                                       gap-x-4
+                                                       gap-y-1
+                                                       text-slate-300">
+                                          <div>
+                                            <span className="text-muted">
+                                              Reference:
+                                            </span>{' '}
+                                            <span className="font-mono
+                                                            text-white">
+                                              {v.reference_value
+                                                ?? '—'}
+                                            </span>
+                                          </div>
+                                          <div>
+                                            <span className="text-muted">
+                                              Source:
+                                            </span>{' '}
+                                            <span className="font-mono
+                                                            text-white">
+                                              {v.source_value
+                                                ?? '—'}
+                                            </span>
+                                          </div>
+                                          {v.delta && (
+                                            <div className="md:col-span-2">
+                                              <span className="text-muted">
+                                                Delta:
+                                              </span>{' '}
+                                              <span className="font-mono
+                                                              text-danger">
+                                                {v.delta}
+                                              </span>
+                                            </div>
+                                          )}
+                                          <div className="md:col-span-4
+                                                         text-muted
+                                                         font-mono">
+                                            {v.source_endpoint}
+                                          </div>
+                                          {v.cache_freshness && (
+                                            <div className="md:col-span-4
+                                                           text-muted">
+                                              Source row written{' '}
+                                              {new Date(
+                                                v.cache_freshness)
+                                                .toLocaleString()}
+                                            </div>
+                                          )}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </>
+                              )
+                            })}
                           </tbody>
                         </table>
                       </div>
