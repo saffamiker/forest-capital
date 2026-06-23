@@ -33,6 +33,7 @@ import {
   GraduationCap, Loader2, X, ChevronDown, ChevronRight, AlertTriangle,
 } from 'lucide-react'
 import Markdown from './Markdown'
+import CriticFindingsPanel from './CriticFindingsPanel'
 import IndependentReviewCard from './IndependentReviewCard'
 import { useIsTeamMember } from '../hooks/usePermissions'
 import { trackFeature } from '../lib/activityLogger'
@@ -431,6 +432,16 @@ export default function AcademicReviewSection() {
           SSE frame has landed. Never affects the primary score or
           gates. */}
       <IndependentReviewCard review={independentReview} />
+
+      {/* Concern 7 (revised) -- adversarial critic + debate-round
+          panel. Renders nothing if the SSE pass hasn't reached the
+          critic step yet; once the critic_findings frame lands the
+          panel surfaces the structured findings + the streamed
+          council response from debate_round_arbiter chunks. */}
+      <CriticFindingsPanel
+        criticResult={result?.criticResult ?? null}
+        debateRoundText={result?.debateRoundText ?? ''}
+        criticMinorOnly={result?.criticMinorOnly ?? false} />
 
       {/* Peer responses — supporting detail, collapsed by default. */}
       {peerEntries.length > 0 && (

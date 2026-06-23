@@ -19,6 +19,7 @@ import {
   GraduationCap, Loader2, Send, AlertTriangle, Sparkles,
 } from 'lucide-react'
 
+import CriticFindingsPanel from '../CriticFindingsPanel'
 import Markdown from '../Markdown'
 
 import {
@@ -235,6 +236,14 @@ export default function WritingAssistant({
           </div>
         )}
       </div>
+
+      {/* Concern 7 (revised) -- adversarial critic + debate-round
+          panel in compact mode for the 300px editor right rail. */}
+      <CriticFindingsPanel
+        compact
+        criticResult={slice?.result?.criticResult ?? null}
+        debateRoundText={slice?.result?.debateRoundText ?? ''}
+        criticMinorOnly={slice?.result?.criticMinorOnly ?? false} />
 
 
       {/* AI writing chat */}
