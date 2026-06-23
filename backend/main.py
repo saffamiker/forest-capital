@@ -6572,6 +6572,61 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                     "council_debates_row_written",
                     debate_id=debate_id,
                 )
+
+                # Concern 7k-i auto-fire: every Fatal finding gets a
+                # pre-populated arbiter fix proposal so the team sees
+                # an Apply Fix button on every Fatal card without
+                # waiting for a follow-up request. Majors are
+                # explicit-only (UI Propose Fix button hits
+                # /api/v1/documents/propose-fix). Best-effort -- a
+                # proposal generation failure just leaves the card
+                # without an auto-proposal; the team can still
+                # request one manually.
+                try:
+                    from agents.academic_review import (
+                        run_arbiter_fix_proposal,
+                        write_fix_proposals_to_debate,
+                    )
+                    if debate_id and critic_result \
+                            and critic_result.has_actionable:
+                        target_doc = (
+                            document_type_q or "full_package")
+                        fatal_indexes = [
+                            i for i, f in enumerate(
+                                critic_result.merged_findings)
+                            if str(f.get("severity")).strip()
+                            .capitalize() == "Fatal"]
+                        proposals = []
+                        for fi in fatal_indexes:
+                            f = (
+                                critic_result.merged_findings[fi])
+                            # Use the finding's target_document
+                            # when set (cross_document finding),
+                            # else fall back to the review scope.
+                            pdoc = (
+                                str(f.get("target_document"))
+                                if f.get("target_document")
+                                and f.get("target_document")
+                                != "cross_document"
+                                else target_doc)
+                            prop = await run_arbiter_fix_proposal(
+                                finding=f, finding_id=fi,
+                                document_type=pdoc,
+                                reviewer_email=session.get(
+                                    "email"))
+                            if prop is not None:
+                                proposals.append(prop)
+                        if proposals:
+                            await write_fix_proposals_to_debate(
+                                debate_id, proposals)
+                            log.info(
+                                "fix_proposals_auto_written",
+                                debate_id=debate_id,
+                                count=len(proposals))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "fix_proposal_auto_fire_failed",
+                        error=str(exc))
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "academic_review_critic_pipeline_failed",

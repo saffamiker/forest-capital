@@ -2815,6 +2815,308 @@ async def record_debate_round(
         return None
 
 
+# ── Arbiter fix proposal (Concern 7k-i + 7k-viii + 7l-vi) ────────────────────
+
+_ARBITER_FIX_PROPOSAL_INSTRUCTIONS = """=== FIX PROPOSAL ARBITER ===
+
+You are the arbiter of an academic council. A critic has identified
+a finding in a graduate finance practicum document. Your task is to
+propose the minimal story plan patch that would address this
+finding.
+
+Rules:
+- Propose section-level scope if the finding is isolated to one
+  section and does not affect the document's central argument or
+  methodology framing.
+- Propose document-level scope if the finding affects the central
+  argument, methodology, or a claim that appears in multiple
+  sections.
+- The patch_instruction must be a plain English directive that can
+  be injected into the story plan and understood by the section
+  writer or document generator without additional context.
+- Be surgical -- do not propose changes beyond what is needed to
+  address the specific finding.
+- Provide a rationale for the scope decision in 1-2 sentences.
+
+CROSS-DOCUMENT RULES (Concern 7l-vi):
+- When the finding's target_document is 'cross_document', identify
+  which document to patch as the target (the derivative) and
+  which is the source of truth.
+- Source-of-truth defaults:
+    Narrative claims  -> executive_brief
+    Numeric claims    -> analytical_appendix
+    Deck + script     -> derivatives (always the target to patch,
+                         never the source of truth)
+- Set source_of_truth_document and target_document accordingly.
+
+OUTPUT FORMAT:
+Return a single JSON fix proposal object only. No preamble.
+
+For per-document findings:
+{
+  "finding_id": <int -- the index into merged_findings>,
+  "target": "section" | "document",
+  "section_name": "<section or slide name if target=section,
+                   else null>",
+  "rationale": "<1-2 sentences explaining the scope choice>",
+  "patch_instruction": "<plain English instruction to inject>",
+  "severity": "Fatal" | "Major",
+  "auto_proposed": true | false
+}
+
+For cross-document findings, additionally include:
+  "target_document": "<derivative doc to patch>",
+  "source_of_truth_document": "<authoritative doc>"
+
+auto_proposed is true for Fatal severity (auto-fires during debate
+round), false for Major (team must explicitly request via
+/api/v1/documents/propose-fix)."""
+
+
+@dataclass
+class FixProposal:
+    """Concern 7k-i output shape. Carries the structured patch the
+    apply-fix endpoint applies to the story plan + the rationale the
+    confirmation modal shows the user."""
+    finding_id:               int
+    target:                   str  # "section" | "document"
+    section_name:             str | None
+    rationale:                str
+    patch_instruction:        str
+    severity:                 str  # "Fatal" | "Major"
+    auto_proposed:            bool
+    target_document:          str | None = None
+    source_of_truth_document: str | None = None
+
+
+def _parse_fix_proposal(
+    raw: str, finding_id: int, default_severity: str,
+) -> FixProposal | None:
+    """Parse the arbiter's JSON fix proposal output. Returns None on
+    any parse failure -- the caller treats that as 'no proposal
+    available; team must edit manually'."""
+    if not raw:
+        return None
+    import re as _re
+    text = raw.strip()
+    if text.startswith("```"):
+        text = _re.sub(r"^```[a-zA-Z]*\n", "", text)
+        text = _re.sub(r"\n```\s*$", "", text)
+    try:
+        parsed = json.loads(text)
+    except Exception:  # noqa: BLE001
+        try:
+            start = text.index("{")
+            end = text.rindex("}") + 1
+            parsed = json.loads(text[start:end])
+        except Exception:  # noqa: BLE001
+            return None
+    if not isinstance(parsed, dict):
+        return None
+    target = parsed.get("target")
+    if target not in ("section", "document"):
+        return None
+    return FixProposal(
+        finding_id=int(parsed.get("finding_id", finding_id)),
+        target=target,
+        section_name=parsed.get("section_name") or None,
+        rationale=str(parsed.get("rationale") or ""),
+        patch_instruction=str(parsed.get(
+            "patch_instruction") or ""),
+        severity=str(parsed.get(
+            "severity") or default_severity),
+        auto_proposed=bool(parsed.get("auto_proposed")),
+        target_document=parsed.get("target_document") or None,
+        source_of_truth_document=parsed.get(
+            "source_of_truth_document") or None,
+    )
+
+
+def _format_story_plan_excerpt(
+    story_plan: dict[str, Any] | None,
+) -> str:
+    """Concise rendering of the existing story plan for the arbiter
+    fix-proposal prompt. Full story_plans rows can be tens of KB; we
+    want the arbiter to see the central_argument + section/slide
+    names + per-unit guidance, but not the full speaker scripts."""
+    if not story_plan:
+        return "(no story plan available)"
+    parts: list[str] = []
+    ca = story_plan.get("central_argument")
+    if ca:
+        parts.append(f"Central argument: {ca}")
+    plan_json = story_plan.get("plan_json") or {}
+    sections = plan_json.get("section_plan") or plan_json.get(
+        "slide_plan") or []
+    if sections:
+        parts.append("\nSections / Slides:")
+        for s in sections:
+            if not isinstance(s, dict):
+                continue
+            name = (
+                s.get("name")
+                or s.get("title")
+                or s.get("section")
+                or s.get("slide_number"))
+            guidance = (
+                s.get("guidance") or s.get("so_what")
+                or s.get("headline") or "")
+            parts.append(f"  - {name}: {guidance}")
+    return "\n".join(parts)
+
+
+async def run_arbiter_fix_proposal(
+    *,
+    finding: dict[str, Any],
+    finding_id: int,
+    document_type: str,
+    reviewer_email: str | None = None,
+) -> FixProposal | None:
+    """Concern 7k-i / 7k-viii. Single Opus arbiter call that
+    produces the structured patch. Used in two places:
+
+      1. During the debate round, auto-fires for every Fatal
+         finding so the team sees a pre-populated proposal next to
+         the finding card (auto_proposed=true).
+      2. From POST /api/v1/documents/propose-fix when the team
+         explicitly requests a proposal for a Major finding
+         (auto_proposed=false).
+
+    Fail-open: returns None on any failure so the UI degrades to
+    'no proposal available' rather than blocking. The team can
+    still edit the document manually.
+    """
+    if _is_test_env():
+        sev = _normalise_severity(finding.get("severity"))
+        return FixProposal(
+            finding_id=finding_id,
+            target="section",
+            section_name="Methodology",
+            rationale=(
+                "Test environment -- deterministic stub. The "
+                "fix-proposal pipeline is exercised at the parse "
+                "layer; live arbiter calls are not made under "
+                "pytest."),
+            patch_instruction=(
+                "Test patch instruction for finding "
+                f"{finding_id}."),
+            severity=sev,
+            auto_proposed=(sev == "Fatal"),
+        )
+
+    # Pull the current story plan for the target document so the
+    # arbiter can scope the patch correctly. Falls back to a generic
+    # context note when the story plan is unavailable.
+    story_plan: dict[str, Any] | None = None
+    try:
+        from tools.story_plan import get_cached_story_plan
+        from tools.audit_assembler import current_data_hash
+        dh = await current_data_hash() or ""
+        if dh:
+            story_plan = await get_cached_story_plan(
+                dh, document_type)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "fix_proposal_story_plan_read_failed",
+            error=str(exc), document_type=document_type)
+
+    sev = _normalise_severity(finding.get("severity"))
+    auto = sev == "Fatal"
+
+    user_message = (
+        f"FINDING:\n{json.dumps(finding, indent=2)}\n\n"
+        f"FINDING_ID: {finding_id}\n"
+        f"DEFAULT_AUTO_PROPOSED: {str(auto).lower()}\n\n"
+        f"CURRENT STORY PLAN:\n"
+        f"{_format_story_plan_excerpt(story_plan)}\n\n"
+        f"Reviewer email: {reviewer_email or '(anonymous)'}\n"
+        f"Document type: {document_type}\n\n"
+        "Generate the JSON fix proposal per the OUTPUT FORMAT "
+        "rules in your instructions.")
+
+    try:
+        from agents.harness import GeneratorEvaluatorHarness
+        # No harness re-evaluation on fix proposals -- the output
+        # is a small JSON object; we want the raw model response
+        # parsed strictly. Call_claude directly via the harness
+        # generator-fn shape skips the secondary evaluation.
+        harness = GeneratorEvaluatorHarness(max_retries=0)
+
+        def _generate(prompt: str) -> str:
+            return call_claude(
+                ARBITER_MODEL,
+                _ARBITER_FIX_PROPOSAL_INSTRUCTIONS,
+                prompt,
+                max_tokens=1200,
+                trigger=(
+                    "academic_review_fix_proposal:"
+                    + ("auto" if auto else "manual")))
+
+        result = harness.run(
+            generator_fn=_generate,
+            evaluator_prompt=(
+                _ARBITER_FIX_PROPOSAL_INSTRUCTIONS),
+            generator_prompt=user_message,
+            context="",
+            agent_id="academic_advisor_fix_proposal",
+        )
+        return _parse_fix_proposal(
+            result.response, finding_id, sev)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "fix_proposal_generation_failed",
+            error=str(exc), document_type=document_type,
+            finding_id=finding_id)
+        return None
+
+
+async def write_fix_proposals_to_debate(
+    debate_id: int,
+    proposals: list[FixProposal],
+) -> None:
+    """Append a list of FixProposal objects to council_debates
+    .fix_proposals (JSONB array). UPSERT-style: the column starts
+    NULL, fills on the first auto-fire, and gets extended each time
+    the team requests a manual proposal via /propose-fix."""
+    if not proposals:
+        return
+    try:
+        from sqlalchemy import text
+        from database import (
+            AsyncSessionLocal,  # type: ignore[attr-defined]
+        )
+        if AsyncSessionLocal is None:
+            return
+        serialised = [
+            {
+                "finding_id": p.finding_id,
+                "target": p.target,
+                "section_name": p.section_name,
+                "rationale": p.rationale,
+                "patch_instruction": p.patch_instruction,
+                "severity": p.severity,
+                "auto_proposed": p.auto_proposed,
+                "target_document": p.target_document,
+                "source_of_truth_document": (
+                    p.source_of_truth_document),
+            }
+            for p in proposals
+        ]
+        async with AsyncSessionLocal() as s:
+            # Use jsonb_set with COALESCE so we can append even
+            # when the column starts NULL.
+            await s.execute(text(
+                "UPDATE council_debates SET "
+                "fix_proposals = COALESCE(fix_proposals, "
+                "'[]'::jsonb) || CAST(:new AS JSONB) "
+                "WHERE id = :id"),
+                {"id": debate_id, "new": json.dumps(serialised)})
+            await s.commit()
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "fix_proposal_write_failed", error=str(exc))
+
+
 # ── Document-generation debate round (Concern 7h) ──────────────────────────
 
 
