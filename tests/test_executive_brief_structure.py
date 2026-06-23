@@ -268,6 +268,76 @@ def test_final_recommendations_uses_cached_regime_fallback_disclosure():
     assert "most recent cached regime read" in source
 
 
+def test_final_recommendations_requires_locked_vs_live_framing():
+    """June 22 2026 -- §5 must instruct the writer to include a
+    framing sentence BEFORE the regime reading paragraph that
+    distinguishes the locked academic record (Sharpe / drawdown /
+    OOS figures cited above) from the live regime read + implied
+    weights that follow. Without this sentence the panel reads
+    the recommendation as a single state when it's actually two
+    layered states. The framing is verbatim-or-close-equivalent,
+    not strict literal."""
+    source = _runtime_main_source()
+    # The directive is present.
+    assert "BEFORE the regime reading" in source
+    # Key phrases from the required framing sentence.
+    assert ("analytical performance figures throughout this "
+            "brief reflect the December 2025 academic submission "
+            "record") in source
+    assert ("live platform readings at the time of generation"
+            in source)
+    # The rationale -- two layered states -- is in the spec so
+    # the writer understands WHY the sentence matters and won't
+    # paraphrase it away in a rewrite.
+    assert "two different states" in source
+
+
+def test_key_findings_warns_against_doubling_percent_on_improvement_pct():
+    """June 22 2026 -- §3 caught a production bug rendering
+    '+98%%' (doubled percent sign) when the writer cited
+    {{OOS_SHARPE_IMPROVEMENT_PCT}} + a literal '%'. The token
+    already emits the full '+98%' string (see
+    numeric_substitution.py:310: f'{sign}{abs(improvement_pct):.0f}%').
+    The §3 prompt must explicitly warn the writer not to add
+    any suffix or prefix to this token. The user-provided
+    verbatim instruction is pinned here in full."""
+    source = _runtime_main_source()
+    # Verbatim instruction text the operator specified.
+    assert ("IMPORTANT: The token {{OOS_SHARPE_IMPROVEMENT_PCT}} "
+            "already resolves to a complete formatted string "
+            "including the + prefix and % suffix") in source
+    assert ("Do NOT append any additional % character or suffix "
+            "after this token") in source
+    assert "Write it exactly as the token resolves." in source
+
+
+def test_section_g_appendix_prohibits_placeholder_and_open_items():
+    """June 22 2026 -- Section G appendix prompt was producing
+    a 'must be inserted before final submission' placeholder
+    note + a 'five open items' list alongside the actual
+    transaction cost sensitivity table. The table is generated
+    programmatically and always present; no placeholder is
+    appropriate.
+
+    No explicit instruction in the prompt asks for the
+    placeholder -- the Sonnet writer hallucinates it. The fix
+    is a NEGATIVE instruction (explicit prohibition) added to
+    the prompt."""
+    source = _runtime_main_source()
+    # The PROHIBITED CONTENT block is present in the Section G
+    # prompt.
+    assert "PROHIBITED CONTENT" in source
+    # The specific phrases the writer was hallucinating must
+    # be named explicitly so the LLM doesn't paraphrase them
+    # back in.
+    assert "must be inserted here" in source.lower() or (
+        "'must be inserted here'" in source)
+    assert "open-items list" in source
+    assert "five open items" in source.lower()
+    assert "PROGRAMMATICALLY" in source
+    assert "ALWAYS present" in source
+
+
 def test_visuals_section_lists_four_named_artifacts():
     """§6 must roster the four platform visual surfaces by name."""
     source = _runtime_main_source()
