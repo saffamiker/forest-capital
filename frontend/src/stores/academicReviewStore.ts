@@ -39,8 +39,33 @@
  */
 import { create } from 'zustand'
 
+import type { EditorDocumentType } from '../types/editor'
+
 export type AcademicReviewPhase =
   | 'idle' | 'consulting' | 'streaming' | 'done' | 'error'
+
+// June 23 2026 -- per-document review surfaces. Each editor page
+// (Brief / Deck / Appendix / Script) gets its own labeled review
+// trigger that POSTs /api/council/academic-review?document_type=X.
+// The verdict for each doc type is cached in its own slice so
+// switching between editors doesn't drop a recent verdict and a
+// stale verdict surfaces a banner. The cross-document review (no
+// query param) continues to use the top-level store fields.
+export interface PerDocumentReviewSlice {
+  result:      AcademicReviewResult | null
+  dataHash:    string | null
+  completedAt: string | null
+  phase:       AcademicReviewPhase
+  errorMsg:    string
+}
+
+export const EMPTY_PER_DOC_SLICE: PerDocumentReviewSlice = {
+  result:      null,
+  dataHash:    null,
+  completedAt: null,
+  phase:       'idle',
+  errorMsg:    '',
+}
 
 export type IndependentVerdict = 'Plausible' | 'Concerns' | 'Implausible'
 
@@ -84,6 +109,14 @@ interface AcademicReviewStore {
   phase:       AcademicReviewPhase
   errorMsg:    string
 
+  // June 23 2026 -- per-document caching, one slice per editor doc
+  // type. The keys are the four EditorDocumentType values. Empty
+  // slice = no run yet for that doc type.
+  perDocument: Record<EditorDocumentType, PerDocumentReviewSlice>
+  // Internal -- per-doc abort controllers, keyed the same way.
+  _perDocControllers:
+    Partial<Record<EditorDocumentType, AbortController>>
+
   // Internals — exposed for the cancel path; production callers use
   // the action helpers below.
   _controller: AbortController | null
@@ -109,6 +142,43 @@ interface AcademicReviewStore {
   /** Drops every cached field. The user's "Re-run" gesture: clear
    *  state, then runReview kicks a fresh fetch. */
   clear: () => void
+
+  // ── Per-document review actions ─────────────────────────────────
+  // June 23 2026. The per-document review uses the SAME
+  // /api/council/academic-review endpoint with a document_type query
+  // param that routes to the doc-specific rubric. Each per-document
+  // run lives in its own slice so the per-doc verdicts don't trample
+  // each other or the cross-document verdict.
+
+  /** Returns the slice for the given doc type. Reads default to the
+   *  EMPTY_PER_DOC_SLICE so consumers can destructure safely. */
+  getPerDoc: (docType: EditorDocumentType) => PerDocumentReviewSlice
+
+  /** Starts a per-document review. document_type is the rubric the
+   *  backend should apply. Same SSE shape as the cross-document
+   *  runReview -- only the URL and the slice that the events land in
+   *  differ. Idempotent per slice: a call while THIS doc type's
+   *  slice is mid-stream is a no-op. Other slices are unaffected. */
+  runPerDocReview: (
+    docType:      EditorDocumentType,
+    dataHash:     string | null,
+    sessionToken: string,
+  ) => Promise<void>
+
+  /** Aborts the in-flight per-doc stream for the given doc type.
+   *  Other slices keep running. */
+  cancelPerDoc: (docType: EditorDocumentType) => void
+
+  /** Drops the cached slice for the given doc type. */
+  clearPerDoc: (docType: EditorDocumentType) => void
+}
+
+
+const EMPTY_PER_DOC_MAP: Record<EditorDocumentType, PerDocumentReviewSlice> = {
+  executive_brief:     { ...EMPTY_PER_DOC_SLICE },
+  analytical_appendix: { ...EMPTY_PER_DOC_SLICE },
+  presentation_deck:   { ...EMPTY_PER_DOC_SLICE },
+  presentation_script: { ...EMPTY_PER_DOC_SLICE },
 }
 
 
@@ -120,6 +190,8 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
     phase:       'idle',
     errorMsg:    '',
     _controller: null,
+    perDocument:        { ...EMPTY_PER_DOC_MAP },
+    _perDocControllers: {},
 
     isCurrentFor: (dataHash: string | null): boolean => {
       const s = get()
@@ -289,6 +361,191 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         phase:       'idle',
         errorMsg:    '',
         _controller: null,
+      })
+    },
+
+    getPerDoc: (docType) => {
+      return get().perDocument[docType] ?? EMPTY_PER_DOC_SLICE
+    },
+
+    runPerDocReview: async (docType, dataHash, sessionToken) => {
+      // Re-entrancy guard for THIS doc type only.
+      const slice = get().perDocument[docType]
+      if (slice && (slice.phase === 'consulting'
+        || slice.phase === 'streaming')) {
+        return
+      }
+
+      const controller = new AbortController()
+      set((s) => ({
+        perDocument: {
+          ...s.perDocument,
+          [docType]: {
+            ...EMPTY_PER_DOC_SLICE,
+            phase:    'consulting',
+            dataHash,
+          },
+        },
+        _perDocControllers: {
+          ...s._perDocControllers,
+          [docType]: controller,
+        },
+      }))
+
+      try {
+        const res = await fetch(
+          `/api/council/academic-review?document_type=${
+            encodeURIComponent(docType)}`,
+          {
+            method: 'POST',
+            headers: { 'X-API-Key': sessionToken },
+            signal: controller.signal,
+          })
+        if (!res.ok || !res.body) {
+          throw new Error(`Request failed (${res.status})`)
+        }
+
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+        let arbiterText = ''
+        let peerResponses: Record<string, string> = {}
+        let independentReview: IndependentReview | null = null
+
+        const writeSlice = (partial: Partial<PerDocumentReviewSlice>):
+          void => {
+          set((s) => ({
+            perDocument: {
+              ...s.perDocument,
+              [docType]: { ...s.perDocument[docType], ...partial },
+            },
+          }))
+        }
+
+        // eslint-disable-next-line no-constant-condition
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          let sep: number
+          while ((sep = buffer.indexOf('\n\n')) !== -1) {
+            const frame = buffer.slice(0, sep).trim()
+            buffer = buffer.slice(sep + 2)
+            if (!frame.startsWith('data:')) continue
+            const payload = frame.slice(5).trim()
+            if (payload === '[DONE]') continue
+            let evt: {
+              type?:              string
+              data?:              Record<string, string>
+              text?:              string
+              message?:           string
+              verdict?:           IndependentVerdict
+              overall_reasoning?: string
+              per_finding?:       IndependentPerFinding[]
+              model?:             string
+              findings_seen?:     Record<string, string>
+            }
+            try { evt = JSON.parse(payload) } catch { continue }
+            if (evt.type === 'peer_responses') {
+              peerResponses = evt.data ?? {}
+              writeSlice({
+                phase: 'streaming',
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                },
+              })
+            } else if (evt.type === 'arbiter_chunk') {
+              arbiterText += evt.text ?? ''
+              writeSlice({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                },
+              })
+            } else if (evt.type === 'independent_review') {
+              independentReview = {
+                verdict:           evt.verdict ?? 'Concerns',
+                overall_reasoning: evt.overall_reasoning ?? '',
+                per_finding:       evt.per_finding ?? [],
+                model:             evt.model ?? 'unknown',
+                findings_seen:     evt.findings_seen ?? {},
+              }
+              writeSlice({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                },
+              })
+            } else if (evt.type === 'error') {
+              writeSlice({
+                phase:    'error',
+                errorMsg: evt.message ?? 'Per-document review failed.',
+              })
+              return
+            }
+          }
+        }
+
+        writeSlice({
+          phase:       'done',
+          result:      { arbiterText, peerResponses, independentReview },
+          completedAt: new Date().toISOString(),
+        })
+      } catch (err) {
+        if (controller.signal.aborted) {
+          set((s) => ({
+            perDocument: {
+              ...s.perDocument,
+              [docType]: {
+                ...s.perDocument[docType], phase: 'idle',
+              },
+            },
+          }))
+          return
+        }
+        set((s) => ({
+          perDocument: {
+            ...s.perDocument,
+            [docType]: {
+              ...s.perDocument[docType],
+              phase:    'error',
+              errorMsg: err instanceof Error
+                ? err.message
+                : 'Per-document review failed.',
+            },
+          },
+        }))
+      } finally {
+        set((s) => {
+          const next = { ...s._perDocControllers }
+          delete next[docType]
+          return { _perDocControllers: next }
+        })
+      }
+    },
+
+    cancelPerDoc: (docType) => {
+      const ctrl = get()._perDocControllers[docType]
+      if (ctrl) ctrl.abort()
+      set((s) => ({
+        perDocument: {
+          ...s.perDocument,
+          [docType]: { ...s.perDocument[docType], phase: 'idle' },
+        },
+      }))
+    },
+
+    clearPerDoc: (docType) => {
+      const ctrl = get()._perDocControllers[docType]
+      if (ctrl) ctrl.abort()
+      set((s) => {
+        const ctrls = { ...s._perDocControllers }
+        delete ctrls[docType]
+        return {
+          perDocument: {
+            ...s.perDocument,
+            [docType]: { ...EMPTY_PER_DOC_SLICE },
+          },
+          _perDocControllers: ctrls,
+        }
       })
     },
   }),
