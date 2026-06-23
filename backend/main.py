@@ -10635,15 +10635,16 @@ async def get_data_reference_sheet(
     from datetime import datetime, timezone
 
     from tools.audit_assembler import current_data_hash
+    import asyncio
     from tools.cache import (
         get_latest_strategy_cache,
         get_latest_strategy_hash,
         get_monthly_returns,
-        get_regime_cache,
     )
     from tools.cio_recommendation import (
         compute_implied_asset_allocation, get_latest_recommendation,
     )
+    from tools.regime_detector import detect_current_regime
     from tools.data_reference_catalog import (
         CATALOG, CATEGORY_LABELS,
         expand_per_strategy_appendix_metrics,
@@ -10709,10 +10710,21 @@ async def get_data_reference_sheet(
     except Exception as exc:  # noqa: BLE001
         log.warning("data_reference_implied_alloc_failed",
                     error=str(exc))
+    # June 22 2026 -- Gap A2 fix. tools.cache.get_regime_cache()
+    # reads from the regime_signals_cache TABLE with a 15-min TTL
+    # check; when the row is missing OR has expired, it returns
+    # None and the four watchpoint tokens (VIX/YIELD/CREDIT/
+    # EQUITY_TREND_CURRENT) render em-dash. detect_current_regime
+    # is the live FRED read with its own in-process 15-min cache
+    # -- guaranteed-populated source, returns the canonical dict
+    # shape build_substitution_table reads (vix_level /
+    # yield_curve_slope / credit_spread / equity_trend). Sync
+    # function (FRED HTTP calls), wrapped in asyncio.to_thread to
+    # keep the event loop free; same pattern as main.py:3022.
     try:
-        live_signals = await get_regime_cache()
+        live_signals = await asyncio.to_thread(detect_current_regime)
     except Exception as exc:  # noqa: BLE001
-        log.warning("data_reference_regime_cache_failed",
+        log.warning("data_reference_regime_detect_failed",
                     error=str(exc))
     # June 22 2026 -- Gap C wiring. {{STUDY_MONTHS}} reads from
     # the `study_months` kwarg; falls back to

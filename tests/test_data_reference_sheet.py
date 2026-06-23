@@ -117,16 +117,59 @@ class TestCatalogStructure:
             assert row.source.startswith("strategy_cache.")
 
     def test_per_strategy_factor_loadings_expansion_50_rows(self):
-        """10 strategies x 5 columns (alpha, beta, smb_beta,
-        hml_beta, r_squared) = 50 rows."""
+        """10 strategies x 5 columns = 50 rows. Field key names
+        in the source string MUST match what
+        tools.analytics.factor_loadings actually writes per row:
+        alpha_annualized / mkt_rf / smb / hml / r_squared. The
+        catalog source strings get parsed by main._resolve_value
+        which does row.get(metric_key) directly against the
+        analytics row -- a name mismatch silently renders em-dash
+        on every entry (the bug PR #380 fixed in the parallel
+        substitution-table path but missed in this catalog)."""
         from tools.data_reference_catalog import (
             expand_per_strategy_factor_loadings,
         )
         rows = expand_per_strategy_factor_loadings()
         assert len(rows) == 50
+        # Capture the metric segment of every source string so
+        # we can pin which field keys the resolver will read.
+        metric_keys: set[str] = set()
         for row in rows:
             assert row.is_locked is False
             assert row.source.startswith("data.factor_loadings.")
+            # Source shape: data.factor_loadings.<STRATEGY>.<metric>
+            parts = row.source.split(".")
+            assert len(parts) == 4, (
+                f"unexpected source shape: {row.source}")
+            metric_keys.add(parts[-1])
+        # The five metric keys MUST be exactly what
+        # tools.analytics.factor_loadings writes per row.
+        assert metric_keys == {
+            "alpha_annualized",
+            "mkt_rf",
+            "smb",
+            "hml",
+            "r_squared",
+        }, f"unexpected metric keys: {metric_keys}"
+
+    def test_factor_loading_metrics_match_analytics_output_shape(self):
+        """FACTOR_LOADING_METRICS keys MUST be exactly the field
+        names tools.analytics.factor_loadings actually writes.
+        Hard-pin them so a future rename in either direction
+        breaks this test rather than silently rendering em-dashes
+        across the data reference sheet's factor-loadings
+        category."""
+        from tools.data_reference_catalog import (
+            FACTOR_LOADING_METRICS,
+        )
+        keys = {k for k, _label in FACTOR_LOADING_METRICS}
+        assert keys == {
+            "alpha_annualized",
+            "mkt_rf",
+            "smb",
+            "hml",
+            "r_squared",
+        }
 
     def test_oos_window_constants_in_catalog(self):
         """The three new constants from PR A must appear in the

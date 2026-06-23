@@ -92,14 +92,28 @@ ALL_STRATEGIES: tuple[str, ...] = (
 
 
 # Factor loading metric names. Per-strategy expansion populates
-# each strategy with one row per metric. R-squared, alpha, beta
-# columns are read from data["factor_loadings"][strategy_name].
+# each strategy with one row per metric. The keys MUST match
+# what tools.analytics.factor_loadings actually writes per row:
+#   alpha_annualized -- raw statsmodels const param * _ANN
+#   mkt_rf           -- raw statsmodels mkt_rf param (market beta)
+#   smb              -- raw smb param (size beta)
+#   hml              -- raw hml param (value beta)
+#   r_squared        -- model.rsquared
+# The earlier conceptual names ("alpha", "beta", "smb_beta",
+# "hml_beta") never matched any analytics field; row.get() on
+# four-of-five fields returned None and the data reference sheet
+# rendered em-dash for every per-strategy alpha/beta entry. Only
+# r_squared resolved correctly because it was the only key that
+# matched. PR #380 fixed the parallel substitution-table path in
+# _append_per_strategy_tokens; this catalog drives a SEPARATE
+# resolver (main._resolve_value's `data.factor_loadings.<name>.<key>`
+# branch) that needed the same field-name correction.
 FACTOR_LOADING_METRICS: tuple[tuple[str, str], ...] = (
-    ("alpha",        "Carhart alpha (monthly)"),
-    ("beta",         "Market beta (mkt_rf)"),
-    ("smb_beta",     "Size beta (smb)"),
-    ("hml_beta",     "Value beta (hml)"),
-    ("r_squared",    "R-squared"),
+    ("alpha_annualized", "Carhart alpha (annualized)"),
+    ("mkt_rf",           "Market beta (mkt_rf)"),
+    ("smb",              "Size beta (SMB)"),
+    ("hml",              "Value beta (HML)"),
+    ("r_squared",        "R-squared"),
 )
 
 

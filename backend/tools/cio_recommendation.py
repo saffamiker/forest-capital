@@ -540,6 +540,23 @@ async def _regenerate_under_key(key: str) -> None:
             log.warning("cio_recommendation_regenerate_generate_failed",
                         key=key, error=rec.get("error"))
             return
+        # June 22 2026 -- merge blend_weights from the live context
+        # into rec BEFORE persistence. The rec dict produced by
+        # _deterministic_recommendation / generate_recommendation
+        # historically carried only the four-component narrative
+        # (signal / recommendation / dissenting_view / key_risk)
+        # plus confidence and limitations. blend_weights lived in
+        # the context dict and was used by the prose generator
+        # but never persisted, so the read path
+        # (get_latest_recommendation -> dict(raw_json)) returned
+        # cio_row without blend_weights and every downstream
+        # consumer (data reference sheet, document substitution
+        # for BLEND_*_WT / CURRENT_*_PCT tokens) fell through to
+        # em-dash. The live tile compensated via an overlay from
+        # get_cached_forward_projection; the read path now has
+        # the same data first-class.
+        rec = {**rec, "blend_weights":
+               built["context"].get("blend_weights") or {}}
         await _persist(key, rec, built["context"].get("regime"))
         log.info("cio_recommendation_regenerated", key=key,
                  model=rec.get("_model"))
@@ -1057,6 +1074,12 @@ async def refresh_cio_recommendation(*, force: bool = False) -> dict:
     rec = generate_recommendation(built["context"], built["macro"])
     if rec.get("error"):
         return rec
+    # June 22 2026 -- merge blend_weights into rec before persist.
+    # See _regenerate_under_key for the why; both callsites must
+    # do this so a hot-path miss AND a background regen land the
+    # same shape.
+    rec = {**rec, "blend_weights":
+           built["context"].get("blend_weights") or {}}
     await _persist(key, rec, regime)
     rec["cache"] = "miss"
     rec["data_hash"] = key
