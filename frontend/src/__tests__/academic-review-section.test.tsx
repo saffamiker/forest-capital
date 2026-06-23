@@ -117,13 +117,13 @@ describe('AcademicReviewSection — Zustand cache survives navigation', () => {
     })
     withPerms(TEAM_PERMS, <AcademicReviewSection />)
     const button = screen.getByTestId('academic-review-run')
-    expect(button.textContent).toContain('Re-run Academic Review')
+    expect(button.textContent).toContain('Re-run Cross-Document Review')
   })
 
   it('renders the Run label when no cached verdict exists', () => {
     withPerms(TEAM_PERMS, <AcademicReviewSection />)
     const button = screen.getByTestId('academic-review-run')
-    expect(button.textContent).toContain('Run Academic Review')
+    expect(button.textContent).toContain('Run Cross-Document Review')
   })
 })
 

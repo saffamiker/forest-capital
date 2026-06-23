@@ -1,10 +1,17 @@
 /**
  * WritingAssistant — the editor's right panel (300px, collapsible).
  *
- * Top: Run Academic Review — streams the council's verdict against the
- * current draft. A warning shows first if unresolved [[VERIFY]] / [[BOB]]
- * markers remain. Below: an AI chat that answers writing questions with
- * the draft's text as context (the document-assistant endpoint).
+ * Top: per-document Academic Review trigger -- the button label and
+ * the labeled results panel both rename per doc type ("Review
+ * Brief" / "Review Deck" / "Review Appendix" / "Review Script") and
+ * the POST carries a document_type query param so the backend
+ * applies the doc-specific rubric (June 23 2026). Review state lives
+ * in academicReviewStore.perDocument[docType] so switching between
+ * editors keeps the verdict cached.
+ *
+ * A warning shows first if unresolved [[VERIFY]] / [[BOB]] markers
+ * remain. Below: an AI chat that answers writing questions with the
+ * draft's text as context (the document-assistant endpoint).
  */
 import { useEffect, useRef, useState } from 'react'
 import axios from 'axios'
@@ -14,7 +21,68 @@ import {
 
 import Markdown from '../Markdown'
 
+import {
+  useAcademicReviewStore,
+} from '../../stores/academicReviewStore'
 import type { EditorDocumentType } from '../../types/editor'
+
+
+// Per-doc labels for the button + results panel + framing note. The
+// labels here drive every doc-type-specific string in this surface
+// so future renames need only edit this map.
+const REVIEW_LABELS: Record<EditorDocumentType, {
+  buttonLabel:   string
+  panelHeading:  string
+  framingNote:   string
+}> = {
+  // midpoint_paper is retired post-May 27 but stays in the type
+  // union; ship a stable label here so tsc --noEmit on Vercel
+  // builds accepts the exhaustive Record. The button still routes
+  // through document_type=midpoint_paper on the off chance an
+  // historical draft is opened.
+  midpoint_paper: {
+    buttonLabel:  'Run Academic Review',
+    panelHeading: 'Midpoint Paper Review',
+    framingNote: (
+      'Midpoint paper review (retired May 27 2026) -- the rubric '
+      + 'this evaluates against is the FNA 670 midpoint check '
+      + 'rubric, kept available for historical drafts.'),
+  },
+  executive_brief: {
+    buttonLabel:  'Review Brief',
+    panelHeading: 'Executive Brief Review',
+    framingNote: (
+      'Executive Brief review applies the six-section brief rubric '
+      + '(Executive Summary, Methodology, Key Findings, Limitations, '
+      + 'Final Recommendations, Visuals) with weights 15/20/25/15/20/5.'),
+  },
+  analytical_appendix: {
+    buttonLabel:  'Review Appendix',
+    panelHeading: 'Appendix Review',
+    framingNote: (
+      'Appendix review applies the eight-section evidentiary rubric '
+      + '(Data, Performance, Statistical Tests, Bootstrap CIs, '
+      + 'Factors, Crisis Windows, Cost Sensitivity, Audit) -- evaluates '
+      + 'rigour, completeness, and data-hash traceability.'),
+  },
+  presentation_deck: {
+    buttonLabel:  'Review Deck',
+    panelHeading: 'Deck Review',
+    framingNote: (
+      'Presentation Deck review evaluates slide flow, so-what '
+      + 'argumentation, speaker-note coverage, and demo-readiness. '
+      + 'Slide bullet density and speaker-note completeness are '
+      + 'rubric items here, not in the brief.'),
+  },
+  presentation_script: {
+    buttonLabel:  'Review Script',
+    panelHeading: 'Script Review',
+    framingNote: (
+      'Presentation Script review evaluates argument coherence, '
+      + 'audience clarity, and slide coverage. Formatting scores '
+      + 'do not apply -- a script reads aloud, not on the page.'),
+  },
+}
 
 
 
@@ -45,14 +113,24 @@ interface ChatMessage {
 export default function WritingAssistant({
   draftId, unresolvedMarkers, prefill, documentType,
 }: Props) {
-  const [reviewPhase, setReviewPhase] =
-    useState<'idle' | 'running' | 'done' | 'error'>('idle')
-  const [verdict, setVerdict] = useState('')
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [input, setInput] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
-  const abortRef = useRef<AbortController | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
+
+  // Per-document review state lives in the store. Subscribe with a
+  // selector so the panel re-renders on each SSE frame. When no
+  // documentType is supplied (which should not happen on the four
+  // canonical editors but defends test fixtures and a transient
+  // mount state) we read the global cross-document slice instead,
+  // matching the legacy behaviour.
+  const runPerDocReview = useAcademicReviewStore(
+    (s) => s.runPerDocReview)
+  const slice = useAcademicReviewStore((s) =>
+    documentType ? s.perDocument[documentType] : null)
+  const reviewPhase = slice?.phase ?? 'idle'
+  const verdict = slice?.result?.arbiterText ?? ''
+  const labels = documentType ? REVIEW_LABELS[documentType] : null
 
   // The editor's "Ask AI" action pushes a quoted passage into the input.
   useEffect(() => {
@@ -63,54 +141,9 @@ export default function WritingAssistant({
   }, [prefill?.nonce])  // eslint-disable-line react-hooks/exhaustive-deps
 
   const runReview = async () => {
-    setReviewPhase('running')
-    setVerdict('')
-    const controller = new AbortController()
-    abortRef.current = controller
-    try {
-      const token = localStorage.getItem('fc_session_token') ?? ''
-      // For a presentation_script draft, signal to the endpoint that
-      // the SCRIPT-SPECIFIC rubric should be applied — coherence /
-      // clarity / coverage / speaker differentiation, skipping the
-      // written-submission criteria (citation formatting, paragraph
-      // structure). Other document types use the default rubric.
-      const qs = documentType === 'presentation_script'
-        ? '?document_type=presentation_script' : ''
-      const res = await fetch(`/api/council/academic-review${qs}`, {
-        method: 'POST',
-        headers: { 'X-API-Key': token },
-        signal: controller.signal,
-      })
-      if (!res.ok || !res.body) throw new Error(`Request failed (${res.status})`)
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let arbiter = ''
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-        let sep: number
-        while ((sep = buffer.indexOf('\n\n')) !== -1) {
-          const frame = buffer.slice(0, sep).trim()
-          buffer = buffer.slice(sep + 2)
-          if (!frame.startsWith('data:')) continue
-          const payload = frame.slice(5).trim()
-          if (payload === '[DONE]') { setReviewPhase('done'); continue }
-          try {
-            const evt = JSON.parse(payload) as { type?: string; text?: string }
-            if (evt.type === 'arbiter_chunk' && evt.text) {
-              arbiter += evt.text
-              setVerdict(arbiter)
-            }
-          } catch { /* ignore a partial frame */ }
-        }
-      }
-      setReviewPhase('done')
-    } catch {
-      setReviewPhase('error')
-    }
+    if (!documentType) return  // see note above
+    const token = localStorage.getItem('fc_session_token') ?? ''
+    await runPerDocReview(documentType, null, token)
   }
 
   const send = async (text: string) => {
@@ -155,23 +188,30 @@ export default function WritingAssistant({
           </div>
         )}
         <button type="button" onClick={runReview}
-          disabled={reviewPhase === 'running'}
+          disabled={reviewPhase === 'consulting'
+            || reviewPhase === 'streaming'}
           data-tour="editor-academic-review"
+          data-testid={labels
+            ? `per-doc-review-button-${documentType}`
+            : 'per-doc-review-button'}
           className="w-full flex items-center justify-center gap-1.5 text-xs
                      bg-warning/15 text-warning border border-warning/40
                      rounded py-2 hover:bg-warning/25 disabled:opacity-60">
-          {reviewPhase === 'running'
+          {(reviewPhase === 'consulting' || reviewPhase === 'streaming')
             ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Consulting the council…</>
-            : <><GraduationCap className="w-3.5 h-3.5" /> Run Academic Review</>}
+            : <>
+                <GraduationCap className="w-3.5 h-3.5" />
+                {labels?.buttonLabel ?? 'Run Academic Review'}
+              </>}
         </button>
-        {documentType === 'presentation_script' && (
-          // Script-specific framing — the arbiter now applies a rubric
-          // tuned for spoken delivery. Surface what it DOES evaluate
-          // so the presenter reads the verdict correctly.
-          <p className="text-2xs text-muted mt-1.5 leading-relaxed">
-            Academic Review for presentation scripts evaluates argument
-            coherence, audience clarity, and slide coverage. Formatting
-            scores do not apply.
+        {labels && (
+          // Per-doc framing -- spec calls for a short note below
+          // the trigger that explains which rubric the verdict will
+          // score against, so the user reads the verdict in the
+          // correct interpretive frame.
+          <p className="text-2xs text-muted mt-1.5 leading-relaxed"
+            data-testid={`per-doc-review-framing-${documentType}`}>
+            {labels.framingNote}
           </p>
         )}
         {reviewPhase === 'error' && (
@@ -180,7 +220,17 @@ export default function WritingAssistant({
           </p>
         )}
         {verdict && (
-          <div className="mt-2 card p-2.5 text-xs max-h-72 overflow-y-auto">
+          <div
+            className="mt-2 card p-2.5 text-xs max-h-72 overflow-y-auto"
+            data-testid={labels
+              ? `per-doc-review-panel-${documentType}`
+              : 'per-doc-review-panel'}>
+            {labels && (
+              <h4 className="text-white font-semibold text-2xs uppercase
+                             tracking-wide mb-1.5">
+                {labels.panelHeading}
+              </h4>
+            )}
             <Markdown content={verdict} />
           </div>
         )}

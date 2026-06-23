@@ -61,7 +61,25 @@ function downloadJson(payload: unknown, filename: string): void {
 }
 
 
-export default function SlideGuidancePanel(): React.ReactElement {
+// June 23 2026 -- moved into the Final Presentation Deck tile inside
+// DocumentGenerationPanel. The outer `<section className="card">`
+// chrome was removed (the parent tile provides the frame) and an
+// `uploadDisabled` prop was added so the deck tile can disable the
+// upload button while a deck generation job is in progress (a race
+// where new guidance lands mid-build would have no effect on the
+// in-flight pipeline).
+export interface SlideGuidancePanelProps {
+  /** When true, disables the Upload guidance button with a tooltip
+   *  explaining why. Download + Reset stay enabled. */
+  uploadDisabled?:        boolean
+  uploadDisabledTooltip?: string
+}
+
+
+export default function SlideGuidancePanel(
+  { uploadDisabled = false, uploadDisabledTooltip }:
+    SlideGuidancePanelProps = {},
+): React.ReactElement {
   const [expanded, setExpanded] = useState(false)
   const [loading, setLoading] = useState(false)
   const [active, setActive] = useState<ActiveGuidanceResponse | null>(
@@ -185,8 +203,8 @@ export default function SlideGuidancePanel(): React.ReactElement {
     <section
       data-section-id="slide-guidance"
       data-section-label="Slide Guidance"
-      className="card"
-      data-testid="slide-guidance-panel">
+      data-testid="slide-guidance-panel"
+      className="mt-3 border-t border-border pt-2">
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
@@ -312,14 +330,18 @@ export default function SlideGuidancePanel(): React.ReactElement {
                 <button
                   type="button"
                   onClick={handleUploadClick}
-                  disabled={uploadBusy}
+                  disabled={uploadBusy || uploadDisabled}
                   data-testid="slide-guidance-upload"
+                  title={
+                    uploadDisabled && uploadDisabledTooltip
+                      ? uploadDisabledTooltip
+                      : undefined}
                   className="flex items-center gap-1.5 px-3 py-1.5
                              rounded border border-electric/40
                              bg-electric/10 hover:bg-electric/20
                              text-xs text-electric
                              disabled:opacity-50
-                             disabled:cursor-wait">
+                             disabled:cursor-not-allowed">
                   {uploadBusy
                     ? <Loader2 className="w-3 h-3 animate-spin" />
                     : <Upload className="w-3 h-3" />}

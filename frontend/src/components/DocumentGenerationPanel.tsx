@@ -18,6 +18,8 @@ import {
   CheckCircle, PenLine, RefreshCw, X, Info, Mic, ShieldCheck, ShieldAlert,
   ShieldX,
 } from 'lucide-react'
+import BriefRegenConfirmModal from './BriefRegenConfirmModal'
+import SlideGuidancePanel from './SlideGuidancePanel'
 import TeamGate from './TeamGate'
 import {
   useGenerationJobs, trackJob, cancelJob, dismissJob, loadExistingJobs,
@@ -27,6 +29,8 @@ import {
   ReportBlockingModal, useReportReadinessGate,
 } from './ReportReadinessIndicator'
 import { BriefWorkflowModal } from './BriefWorkflowModal'
+import { DeckWorkflowModal } from './DeckWorkflowModal'
+import { AppendixWorkflowModal } from './AppendixWorkflowModal'
 import {
   useReportReadinessStore, type ExportVerificationStatus,
 } from '../stores/reportReadinessStore'
@@ -304,6 +308,13 @@ export default function DocumentGenerationPanel() {
   // a step-by-step workflow guide. State is local to the panel; the
   // modal re-mounts itself on open so the checklist resets each time.
   const [briefGuideOpen, setBriefGuideOpen] = useState(false)
+  // June 23 2026 -- per-doc workflow guides. Deck + Appendix now
+  // have their own modals; the Info icon on each tile opens the
+  // appropriate one. The four cards in DOCS may grow later; per-
+  // type state keys the guide open/closed independently so opening
+  // the Deck guide doesn't reset a half-read Brief guide.
+  const [deckGuideOpen, setDeckGuideOpen] = useState(false)
+  const [appendixGuideOpen, setAppendixGuideOpen] = useState(false)
   // Job ids whose completion has already been written to "last generated".
   const recorded = useRef<Set<string>>(new Set())
   // Workstream C report gate. The hook loads /api/v1/report/readiness
@@ -325,6 +336,18 @@ export default function DocumentGenerationPanel() {
     open: boolean; blockers: string[]; message?: string;
     coldCaches?: string[]
   }>({ open: false, blockers: [] })
+  // June 23 2026 -- brief regen confirmation gate. The modal opens
+  // BEFORE the POST when /api/v1/story-plans/exists reports any of
+  // (deck | appendix | script) story plans currently exist. On
+  // Cancel, the POST is suppressed. On Confirm, the POST fires and
+  // the backend clears those plans at the top of
+  // _generate_brief_document. Pending: the DocSpec captured at
+  // click time so Confirm can resume the same generation flow
+  // (regenerate=true) the user originally chose.
+  const [briefRegenConfirm, setBriefRegenConfirm] = useState<{
+    open: boolean
+    pendingDoc: DocSpec | null
+  }>({ open: false, pendingDoc: null })
 
   // On mount, resume polling any in-progress jobs and surface recently
   // completed ones (e.g. generation finished while the user was away).
@@ -350,7 +373,16 @@ export default function DocumentGenerationPanel() {
     }
   }, [jobs])
 
-  const handleGenerate = async (doc: DocSpec, opts?: { regenerate?: boolean }) => {
+  const handleGenerate = async (
+    doc: DocSpec,
+    opts?: {
+      regenerate?: boolean
+      // Internal flag set by the brief-regen confirm modal's
+      // onConfirm so we skip the pre-flight + modal loop. Not part
+      // of the public API of this function.
+      _fromBriefRegenConfirm?: boolean
+    },
+  ) => {
     // Bridge #90: when the user clicks Regenerate on a card that
     // already has a complete generation, warn them the existing
     // editor draft will be superseded -- the backend creates a NEW
@@ -360,11 +392,43 @@ export default function DocumentGenerationPanel() {
     // dirty-flag for the editor, so always-confirm on Regenerate
     // is the safe default.
     if (opts?.regenerate) {
-      const ok = window.confirm(
-        `Regenerating will create a new draft and overwrite the `
-        + `current "${doc.title}" version. Any unsaved edits in the `
-        + `editor will no longer be the canonical draft. Continue?`)
-      if (!ok) return
+      // June 23 2026 -- the brief gets a dedicated modal (NOT
+      // window.confirm) that warns about the downstream story
+      // plan clear. The modal is gated on a pre-flight check:
+      // if no downstream plans exist, skip the modal entirely
+      // and proceed to Generate. Other doc types keep the
+      // generic draft-overwrite confirm via window.confirm.
+      if (doc.documentType === 'executive_brief'
+        && !opts?._fromBriefRegenConfirm) {
+        try {
+          const res = await axios.get<{
+            exists: boolean
+            types: Record<string, boolean>
+          }>('/api/v1/story-plans/exists', {
+            params: {
+              document_types:
+                'presentation_deck,'
+                + 'analytical_appendix,'
+                + 'presentation_script',
+            },
+          })
+          if (res.data.exists) {
+            setBriefRegenConfirm({ open: true, pendingDoc: doc })
+            return
+          }
+        } catch {
+          // Pre-flight failure -- fall through to Generate.
+          // The backend clear is fail-open too: if it can't run
+          // the DELETE, the brief still generates. The modal is
+          // a courtesy warning, not a hard gate.
+        }
+      } else {
+        const ok = window.confirm(
+          `Regenerating will create a new draft and overwrite the `
+          + `current "${doc.title}" version. Any unsaved edits in the `
+          + `editor will no longer be the canonical draft. Continue?`)
+        if (!ok) return
+      }
     }
     // Client-side gate — open the blocking modal without firing the
     // POST when readiness is known-blocked. is_ready === null means
@@ -481,12 +545,40 @@ export default function DocumentGenerationPanel() {
                     <h3 className="text-white font-semibold text-sm">
                       {doc.title}
                     </h3>
+                    {/* June 23 2026 -- Info icons for all three
+                        documented tiles (brief / deck / appendix).
+                        The script tile has no info icon yet -- a
+                        separate guide is queued for that surface. */}
                     {doc.documentType === 'executive_brief' && (
                       <button
                         type="button"
                         onClick={() => setBriefGuideOpen(true)}
                         data-testid="brief-workflow-info-button"
                         aria-label="How to build the executive brief"
+                        className="shrink-0 text-muted hover:text-electric
+                                   transition-colors"
+                        title="Step-by-step guide">
+                        <Info className="w-4 h-4" />
+                      </button>
+                    )}
+                    {doc.documentType === 'presentation_deck' && (
+                      <button
+                        type="button"
+                        onClick={() => setDeckGuideOpen(true)}
+                        data-testid="deck-workflow-info-button"
+                        aria-label="How to build the final presentation deck"
+                        className="shrink-0 text-muted hover:text-electric
+                                   transition-colors"
+                        title="Step-by-step guide">
+                        <Info className="w-4 h-4" />
+                      </button>
+                    )}
+                    {doc.documentType === 'analytical_appendix' && (
+                      <button
+                        type="button"
+                        onClick={() => setAppendixGuideOpen(true)}
+                        data-testid="appendix-workflow-info-button"
+                        aria-label="How to build the analytical appendix"
                         className="shrink-0 text-muted hover:text-electric
                                    transition-colors"
                         title="Step-by-step guide">
@@ -654,6 +746,29 @@ export default function DocumentGenerationPanel() {
                   </span>
                 </div>
               )}
+
+              {/* Slide Guidance (June 23 2026) -- deck-specific
+                  configuration artifact. Moved from a sibling on
+                  Reports.tsx into this tile because it is
+                  conceptually paired with deck generation: the
+                  uploaded guidance overlays SLIDE_SPECIFICATIONS
+                  defaults at deck Pass-1 time. Upload is disabled
+                  while a deck job is in progress to prevent a race
+                  where guidance lands too late to affect the
+                  in-flight pipeline. Download + Reset stay enabled
+                  (read-only / state cleanup -- no race). The
+                  TeamGate wrapper mirrors the Generate button --
+                  a viewer should not see upload controls. */}
+              {doc.documentType === 'presentation_deck' && (
+                <TeamGate
+                  block
+                  permission="generate_documents"
+                  tooltip="Slide guidance upload is available to the project team">
+                  <SlideGuidancePanel
+                    uploadDisabled={inProgress}
+                    uploadDisabledTooltip="Deck generation in progress" />
+                </TeamGate>
+              )}
             </div>
           )
         })}
@@ -682,6 +797,24 @@ export default function DocumentGenerationPanel() {
       <BriefWorkflowModal
         open={briefGuideOpen}
         onClose={() => setBriefGuideOpen(false)} />
+      <DeckWorkflowModal
+        open={deckGuideOpen}
+        onClose={() => setDeckGuideOpen(false)} />
+      <AppendixWorkflowModal
+        open={appendixGuideOpen}
+        onClose={() => setAppendixGuideOpen(false)} />
+      <BriefRegenConfirmModal
+        open={briefRegenConfirm.open}
+        onCancel={() => setBriefRegenConfirm(
+          { open: false, pendingDoc: null })}
+        onConfirm={() => {
+          const pending = briefRegenConfirm.pendingDoc
+          setBriefRegenConfirm({ open: false, pendingDoc: null })
+          if (pending) {
+            void handleGenerate(pending,
+              { regenerate: true, _fromBriefRegenConfirm: true })
+          }
+        }} />
     </section>
   )
 }

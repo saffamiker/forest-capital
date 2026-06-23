@@ -30,9 +30,9 @@ import {
 import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
 import DataReferenceSheetPanel from '../components/DataReferenceSheetPanel'
+import SubmissionReadinessReview from '../components/SubmissionReadinessReview'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
 import KeyMetricsPanel from '../components/KeyMetricsPanel'
-import SlideGuidancePanel from '../components/SlideGuidancePanel'
 import PreSubmissionCheckPanel from '../components/PreSubmissionCheckPanel'
 import { ReportReadinessBanner } from '../components/ReportReadinessIndicator'
 import SubmissionFreezeBanner from '../components/SubmissionFreezeBanner'
@@ -162,13 +162,13 @@ export default function Reports() {
           into the filename for offline cross-reference. */}
       <DataReferenceSheetPanel />
 
-      {/* Slide Guidance (June 22 2026) — per-user upload that overlays
-          slide title / so_what / max_bullets / bullet_guidance /
-          speaker_note_directive on top of the hardcoded SLIDE_SPECIFICATIONS
-          defaults at deck generation time. Configuration artifact, not a
-          generation action -- lives on Reports alongside the Data Reference
-          Sheet. */}
-      <SlideGuidancePanel />
+      {/* Submission Readiness Review (June 23 2026) -- the capstone
+          pre-submission go/no-go panel. Bundles a data cross-
+          reference + full cross-document academic review behind a
+          single button + pre-flight modal. Distinct from the QA
+          Hub's Cross-Document Review (iterative drafting tool):
+          this surface is for the FINAL check before June 30. */}
+      <SubmissionReadinessReview />
 
       {/* Team Activity — the evidence behind the Roles & Division-of-Labor
           deliverable and the AI-use narrative, so it leads the page.

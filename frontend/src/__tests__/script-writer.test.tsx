@@ -222,25 +222,33 @@ describe('DocumentEditor — script export', () => {
     expect(await screen.findByText(/min delivery/)).toBeInTheDocument()
   })
 
-  it('shows the Academic Review script note in the writing assistant',
-    async () => {
-      // The note appears below the Run Academic Review button only
-      // when the draft is a presentation_script. The wording shifted
-      // when the rubric was tuned for scripts (May 19) — it now names
-      // what the rubric DOES evaluate rather than what to disregard.
+  it('shows the script-specific review framing in the writing '
+    + 'assistant', async () => {
+      // June 23 2026 -- per-doc review surfaces. The script editor's
+      // button now reads "Review Script" and the framing note below
+      // describes the script-specific rubric (argument coherence,
+      // audience clarity, slide coverage; formatting scores not
+      // applied).
       mountEditor(scriptDraft())
       expect(await screen.findByText(
-        /Academic Review for presentation scripts evaluates/))
+        /Presentation Script review evaluates argument coherence/))
         .toBeInTheDocument()
     })
 
-  it('does NOT show the Academic Review script note for a deck draft',
+  it('shows the DECK-specific review framing for a deck draft',
     async () => {
+      // June 23 2026 -- the deck draft no longer has zero framing;
+      // it shows its own deck-specific note (slide flow, so-what,
+      // speaker-note coverage) and the button reads "Review Deck".
+      // The script-specific framing must NOT appear on the deck.
       mountEditor(deckDraft(true))
-      // The button is anchored by data-tour; the note must be absent.
-      await screen.findByRole('button', { name: /Run Academic Review/ })
+      await screen.findByRole(
+        'button', { name: /Review Deck/ })
+      expect(await screen.findByText(
+        /Presentation Deck review evaluates slide flow/))
+        .toBeInTheDocument()
       expect(screen.queryByText(
-        /Academic Review for presentation scripts evaluates/))
+        /Presentation Script review evaluates argument coherence/))
         .toBeNull()
     })
 
@@ -314,7 +322,9 @@ describe('DocumentEditor — mobile overlay treatment', () => {
     // The script editor's delivery-time pill lives inside EditorNavigator
     // — present only when the left panel is open. On mobile both panels
     // default closed, so the delivery-time text must NOT appear.
-    await screen.findByRole('button', { name: /Run Academic Review/i })
+    // June 23 2026 -- per-doc review buttons. A script draft's
+    // button reads "Review Script" now.
+    await screen.findByRole('button', { name: /Review Script/i })
       .catch(() => null)
     // Give the page one render cycle. The "Generating…" Generate-Script
     // button anchors the editor is mounted.

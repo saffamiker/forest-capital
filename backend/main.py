@@ -3400,6 +3400,53 @@ async def post_clear_story_plans(
             detail=f"clear_story_plans_failed: {exc}")
 
 
+@app.get("/api/v1/story-plans/exists")
+async def get_story_plans_exists(
+    document_types: str = "",
+    session: dict = Depends(require_auth),
+):
+    """June 23 2026 -- pre-flight check for the brief regen
+    confirmation modal. The frontend hits this endpoint BEFORE
+    POSTing /api/v1/export/executive-brief; if any downstream
+    plan exists for the listed document_types, the UI surfaces
+    a confirmation modal warning the user that those plans will
+    be cleared. If exists is false, the UI skips the modal and
+    fires Generate immediately.
+
+    Query param document_types: a comma-separated list of
+    document_type values to check. Returns {exists: bool, types:
+    {<doc_type>: bool}}.
+
+    Auth: require_auth -- anyone signed in can ask. The clear
+    itself still gates on generate_documents (it runs inside
+    _generate_brief_document, which gates on that permission).
+    """
+    types = [t.strip() for t in document_types.split(",") if t.strip()]
+    if not types:
+        return {"exists": False, "types": {}}
+    if ENVIRONMENT == "test":
+        return {"exists": False, "types": {t: False for t in types}}
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal  # type: ignore[attr-defined]
+        if AsyncSessionLocal is None:
+            return {"exists": False, "types": {t: False for t in types}}
+        async with AsyncSessionLocal() as s:
+            res = await s.execute(
+                text("SELECT document_type FROM story_plans "
+                     "WHERE document_type = ANY(:types)"),
+                {"types": types})
+            present = {row[0] for row in res.fetchall()}
+        per_type = {t: (t in present) for t in types}
+        return {"exists": any(per_type.values()), "types": per_type}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plans_exists_failed", error=str(exc))
+        # Fail-open: if the check fails, do NOT block the user.
+        # The modal will simply not fire; the user can still hit
+        # Generate. Returning exists=False matches that intent.
+        return {"exists": False, "types": {t: False for t in types}}
+
+
 @app.post("/api/v1/admin/refresh-appendix-caches")
 async def post_refresh_appendix_caches(
     session: dict = Depends(require_team_member),
@@ -8422,6 +8469,13 @@ async def post_verify_all_for_submission(
     brief = await _verify_one("executive_brief")
     deck = await _verify_one("presentation_deck")
     appendix = await _verify_one("analytical_appendix")
+    # June 23 2026 -- the script was historically skipped; the
+    # Submission Readiness Review audit identified this gap. Script
+    # generation has been writing value_manifest the whole time so
+    # the verify_export_against_cache helper works for it; the
+    # exclusion was a wiring oversight in this endpoint, not a
+    # capability gap.
+    script = await _verify_one("presentation_script")
 
     # Cross-deliverable consistency check -- run only when at least
     # two documents exist and we have a substitution table to compare
@@ -8436,7 +8490,13 @@ async def post_verify_all_for_submission(
         # above don't include the body text in their return shape.
         for doc_type in (
                 "executive_brief", "presentation_deck",
-                "analytical_appendix"):
+                "analytical_appendix",
+                # June 23 2026 -- include script in the cross-
+                # deliverable scan. Script narration paraphrases the
+                # deck's numeric anchors and a drift caused by a
+                # manual edit in the script is just as
+                # submission-blocking as one in the brief.
+                "presentation_script"):
             d = await get_current_draft(email, doc_type)
             text = (d or {}).get("content_text") or ""
             if text.strip():
@@ -8490,7 +8550,7 @@ async def post_verify_all_for_submission(
             error=str(exc))
 
     # Aggregate the four results into an overall verdict.
-    per_doc = [brief, deck, appendix]
+    per_doc = [brief, deck, appendix, script]
     any_not_generated = any(
         d["status"] == "not_generated" for d in per_doc)
     any_failed = any(
@@ -8520,18 +8580,18 @@ async def post_verify_all_for_submission(
         missing = [
             label for d, label in (
                 (brief, "brief"), (deck, "deck"),
-                (appendix, "appendix"),
+                (appendix, "appendix"), (script, "script"),
             ) if d["status"] == "not_generated"]
         if missing:
             rec = (
                 f"Generate {', '.join(missing)} before submitting. "
-                "All three deliverables must exist for the "
+                "All four deliverables must exist for the "
                 "pre-submission check to pass.")
         else:
             err_docs = [
                 label for d, label in (
                     (brief, "brief"), (deck, "deck"),
-                    (appendix, "appendix"),
+                    (appendix, "appendix"), (script, "script"),
                 ) if d.get("errors") or d["status"] == "failed"]
             if err_docs:
                 rec = (
@@ -8551,6 +8611,7 @@ async def post_verify_all_for_submission(
 
     return {
         "brief": brief, "deck": deck, "appendix": appendix,
+        "script": script,
         "cross_deliverable": cross,
         "overall": overall,
         "submission_recommendation": rec,
@@ -12498,6 +12559,34 @@ async def _generate_brief_document(
 
     from tools.academic_docx import build_executive_brief
     from tools.academic_export import DATA_PENDING, gather_document_data
+
+    # June 23 2026 -- the brief is the narrative anchor for all
+    # downstream documents (deck, appendix, script). Their story
+    # plans were grounded against the prior brief; once the brief
+    # is regenerated those plans are stale and would conflict with
+    # the new central argument. The story_plans table has no user
+    # scope (one row per data_hash + document_type, shared across
+    # the team), so the clear is global -- correct semantic: when
+    # the brief changes, the SHARED downstream plans are stale for
+    # everyone. First-gen is a no-op since those rows do not exist.
+    # Fail-open: the clear logs a warning but does NOT block brief
+    # generation if the DB delete fails.
+    try:
+        from sqlalchemy import text
+        from database import AsyncSessionLocal
+        if AsyncSessionLocal is not None:
+            async with AsyncSessionLocal() as _db:
+                await _db.execute(text(
+                    "DELETE FROM story_plans WHERE document_type IN ("
+                    "'presentation_deck', "
+                    "'analytical_appendix', "
+                    "'presentation_script')"))
+                await _db.commit()
+            log.info(
+                "Cleared downstream story plans on brief regeneration")
+    except Exception as _exc:
+        log.warning(
+            "Could not clear downstream story plans: %s", _exc)
 
     try:
         data = await gather_document_data()

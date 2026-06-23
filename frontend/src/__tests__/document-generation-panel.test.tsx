@@ -217,25 +217,46 @@ describe('DocumentGenerationPanel — async generation', () => {
     confirmSpy.mockRestore()
   })
 
-  it('Regenerate is a no-op when the user dismisses the confirm prompt (bridge #90)', async () => {
-    // Defensive: clicking Regenerate and then cancelling the confirm
-    // must NOT fire the POST. Pinning this guards against the
-    // confirm prompt being silently removed in a future refactor.
-    const confirmSpy = vi.spyOn(window, 'confirm')
-      .mockImplementation(() => false)
-    renderPanel(<DocumentGenerationPanel />)
-    trackJob({
-      job_id: 'j-brief-c', document_type: 'executive_brief',
-      status: 'complete', draft_id: 41,
-      download_url: '/api/v1/jobs/j-brief-c/download', error: null,
+  it('Brief Regenerate is a no-op when the user dismisses the '
+    + 'BriefRegenConfirmModal (June 23 2026 -- replaces the old '
+    + 'window.confirm path for the brief specifically)', async () => {
+      // The brief regen path now branches differently from other
+      // doc types: it runs a pre-flight GET to /api/v1/story-plans/exists
+      // and, when downstream plans exist, opens BriefRegenConfirmModal
+      // instead of window.confirm. Pinning the cancel branch guards
+      // against the modal being silently removed.
+      mockedAxios.get.mockImplementation((url: string) => {
+        if (url === '/api/v1/story-plans/exists') {
+          return Promise.resolve({
+            data: {
+              exists: true,
+              types: {
+                presentation_deck: true,
+                analytical_appendix: true,
+                presentation_script: false,
+              },
+            },
+          })
+        }
+        return Promise.resolve({ data: { jobs: [] } })
+      })
+      renderPanel(<DocumentGenerationPanel />)
+      trackJob({
+        job_id: 'j-brief-c', document_type: 'executive_brief',
+        status: 'complete', draft_id: 41,
+        download_url: '/api/v1/jobs/j-brief-c/download', error: null,
+      })
+      const card = briefCard()
+      const button = await within(card).findByTestId(
+        'regenerate-brief')
+      fireEvent.click(button)
+      // Modal opens on the pre-flight result.
+      const cancel = await screen.findByTestId(
+        'brief-regen-confirm-modal-cancel')
+      fireEvent.click(cancel)
+      // Cancel suppresses the POST.
+      expect(mockedAxios.post).not.toHaveBeenCalled()
     })
-    const card = briefCard()
-    const button = await within(card).findByTestId('regenerate-brief')
-    fireEvent.click(button)
-    expect(confirmSpy).toHaveBeenCalled()
-    expect(mockedAxios.post).not.toHaveBeenCalled()
-    confirmSpy.mockRestore()
-  })
 
   it('shows the error state with Try Again on a failed job', async () => {
     renderPanel(<DocumentGenerationPanel />)
@@ -254,18 +275,63 @@ describe('DocumentGenerationPanel — async generation', () => {
 })
 
 describe('DocumentGenerationPanel — Brief Workflow guide', () => {
-  it('renders the Info button on the Executive Brief card and not on '
-    + 'the deck card', () => {
-      // PR #338 retired the midpoint card; only brief + deck +
-      // appendix remain. The info button stays brief-only.
+  it('renders an Info button on the Executive Brief, Deck, and '
+    + 'Appendix cards (June 23 2026 -- per-doc workflow guides)',
+    () => {
+      // June 23 2026 -- Deck + Appendix gained their own workflow
+      // guides. The brief stays at brief-workflow-info-button;
+      // the deck + appendix get deck-workflow-info-button and
+      // appendix-workflow-info-button respectively.
       renderPanel(<DocumentGenerationPanel />)
       const briefInfo = within(briefCard()).getByTestId(
         'brief-workflow-info-button')
       expect(briefInfo).toBeInTheDocument()
+
       const deckCard = screen.getByText('Final Presentation Deck')
         .closest('.card') as HTMLElement
+      // The brief info button must NOT be on the deck card.
       expect(within(deckCard).queryByTestId(
         'brief-workflow-info-button')).not.toBeInTheDocument()
+      // The deck has its OWN info button.
+      expect(within(deckCard).getByTestId(
+        'deck-workflow-info-button')).toBeInTheDocument()
+
+      const appendixCard = screen.getByText('Analytical Appendix')
+        .closest('.card') as HTMLElement
+      expect(within(appendixCard).getByTestId(
+        'appendix-workflow-info-button')).toBeInTheDocument()
+    })
+
+  it('clicking the Deck Info button opens the Deck workflow modal',
+    () => {
+      renderPanel(<DocumentGenerationPanel />)
+      expect(screen.queryByTestId('deck-workflow-modal'))
+        .not.toBeInTheDocument()
+      const deckCard = screen.getByText('Final Presentation Deck')
+        .closest('.card') as HTMLElement
+      fireEvent.click(within(deckCard).getByTestId(
+        'deck-workflow-info-button'))
+      expect(screen.getByTestId('deck-workflow-modal'))
+        .toBeInTheDocument()
+      expect(screen.getByText(
+        /How to Build the Final Presentation Deck/i))
+        .toBeInTheDocument()
+    })
+
+  it('clicking the Appendix Info button opens the Appendix '
+    + 'workflow modal', () => {
+      renderPanel(<DocumentGenerationPanel />)
+      expect(screen.queryByTestId('appendix-workflow-modal'))
+        .not.toBeInTheDocument()
+      const appendixCard = screen.getByText('Analytical Appendix')
+        .closest('.card') as HTMLElement
+      fireEvent.click(within(appendixCard).getByTestId(
+        'appendix-workflow-info-button'))
+      expect(screen.getByTestId('appendix-workflow-modal'))
+        .toBeInTheDocument()
+      expect(screen.getByText(
+        /How to Build the Analytical Appendix/i))
+        .toBeInTheDocument()
     })
 
   it('renders the persistent helper text below the brief description',

@@ -46,6 +46,8 @@ import {
   MacroAttributionFooter,
 } from './MacroCitation'
 import { useAcademicReviewStore } from '../stores/academicReviewStore'
+import CrossDocumentReviewConfirmModal
+  from './CrossDocumentReviewConfirmModal'
 
 
 // Peer agent id → display name for the accordion. Mirrors the
@@ -224,6 +226,11 @@ export default function AcademicReviewSection() {
   const clearStore  = useAcademicReviewStore((s) => s.clear)
 
   const [peersOpen, setPeersOpen] = useState(false)
+  // June 22 2026 -- confirmation gate before the expensive cross-
+  // document pass kicks off. onRun opens the modal; onConfirmRun
+  // is the modal's onConfirm callback that actually fires the SSE
+  // POST.
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
   const running = phase === 'consulting' || phase === 'streaming'
   const hasResult = result !== null
@@ -233,6 +240,12 @@ export default function AcademicReviewSection() {
     && cachedHash !== dataHash
 
   const onRun = () => {
+    // Open the confirm modal -- DO NOT fire the SSE yet.
+    setConfirmOpen(true)
+  }
+
+  const onConfirmRun = () => {
+    setConfirmOpen(false)
     trackFeature('academic_review_trigger')
     // Re-run path: clear first, then kick a fresh run. The store's
     // runReview also clears its own internal result, so this clear
@@ -264,6 +277,10 @@ export default function AcademicReviewSection() {
 
   return (
     <div className="space-y-3">
+      <CrossDocumentReviewConfirmModal
+        open={confirmOpen}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={onConfirmRun} />
       {/* Trigger card — prominent border so the action is visible.
           Read content (verdict + peers) renders below; this card is
           the only team-gated surface. */}
@@ -273,15 +290,18 @@ export default function AcademicReviewSection() {
           <div className="min-w-0">
             <h3 className="text-white font-semibold text-sm flex items-center gap-1.5">
               <GraduationCap className="w-4 h-4 text-warning" />
-              Academic Review
+              Cross-Document Review
             </h3>
             {phase === 'idle' && !hasResult && (
               <p className="text-muted text-xs mt-1 leading-relaxed">
-                Five-section academic-review pass on the portfolio
-                research by the Council's academic advisor panel — a
-                rubric-mapped verdict (Strong / Developing /
-                Needs Work). Run it before each deadline to see
-                exactly where the project stands.
+                Full council pass across all four deliverables --
+                brief, deck, appendix, and presentation script.
+                Rubric-mapped verdict (Strong / Developing /
+                Needs Work). Resource-intensive; run as a final
+                check after every document has been generated and
+                edited. For lighter feedback on a single document,
+                each editor's Writing Assistant has its own
+                per-document review.
               </p>
             )}
             {phase === 'idle' && hasResult && (
@@ -328,7 +348,9 @@ export default function AcademicReviewSection() {
                 : <GraduationCap className="w-4 h-4" />}
               {running
                 ? 'Reviewing…'
-                : (hasResult ? 'Re-run Academic Review' : 'Run Academic Review')}
+                : (hasResult
+                  ? 'Re-run Cross-Document Review'
+                  : 'Run Cross-Document Review')}
             </TeamActionButton>
           </div>
         </div>

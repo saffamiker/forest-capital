@@ -3,8 +3,12 @@
  *
  * The Executive Brief card has an Info icon that opens a step-by-step
  * "How to Build the Executive Brief" guide. The modal includes an
- * interactive submission checklist (six items) that toggles on click
- * and unlocks a green confirmation banner when all six are checked.
+ * interactive submission checklist (eight items as of June 23
+ * 2026 -- gained the Brief Review row when the per-document review
+ * surfaces landed, then gained the Submission Readiness Review row
+ * when the capstone Reports panel landed) that toggles on click
+ * and unlocks a green confirmation banner when ALL items are
+ * checked.
  *
  * These tests pin: the Info button renders on the brief card only;
  * clicking it opens the modal; the modal title + content + all 11
@@ -85,10 +89,10 @@ describe('BriefWorkflowModal -- render + content', () => {
 
 describe('BriefWorkflowModal -- interactive submission checklist', () => {
 
-  it('renders all six checkboxes unchecked on modal open', () => {
+  it('renders all eight checkboxes unchecked on modal open', () => {
     render(
       <BriefWorkflowModal open={true} onClose={() => undefined} />)
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
       expect(screen.getByTestId(`brief-checklist-item-${i}`))
         .toBeInTheDocument()
       // No check icon visible while unchecked.
@@ -125,22 +129,22 @@ describe('BriefWorkflowModal -- interactive submission checklist', () => {
     expect(labelSpan?.className).toMatch(/line-through/)
   })
 
-  it('completion banner does NOT render until all six are checked',
+  it('completion banner does NOT render until all eight are checked',
     () => {
       render(
         <BriefWorkflowModal open={true} onClose={() => undefined} />)
-      // Check five out of six.
-      for (let i = 0; i < 5; i++) {
+      // Check seven out of eight.
+      for (let i = 0; i < 7; i++) {
         fireEvent.click(screen.getByTestId(`brief-checklist-item-${i}`))
       }
       expect(screen.queryByTestId('brief-workflow-ready-banner'))
         .not.toBeInTheDocument()
     })
 
-  it('completion banner renders when all six are checked', () => {
+  it('completion banner renders when all eight are checked', () => {
     render(
       <BriefWorkflowModal open={true} onClose={() => undefined} />)
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 8; i++) {
       fireEvent.click(screen.getByTestId(`brief-checklist-item-${i}`))
     }
     const banner = screen.getByTestId('brief-workflow-ready-banner')
