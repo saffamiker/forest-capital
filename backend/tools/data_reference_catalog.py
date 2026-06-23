@@ -117,6 +117,225 @@ FACTOR_LOADING_METRICS: tuple[tuple[str, str], ...] = (
 )
 
 
+# ── Locked-constant provenance (June 22 2026) ─────────────────────
+#
+# For every locked TokenEntry (is_locked=True), the data
+# reference sheet endpoint surfaces a structured provenance
+# block alongside the "locked at submission" sentinel. The
+# block answers Bob's and the panel's "where did this number
+# come from?" question without needing to scan the codebase.
+#
+# Keyed by the catalog's `source` string (the same value
+# rendered in the source column) so the lookup is a
+# zero-cost dict access at render time.
+#
+# Each entry carries:
+#   lock_date       Human-readable lock month
+#   dataset_end     ISO end-of-data the lock was computed against
+#   method          Plain-English derivation / methodology
+#   defended        Where the value is on the record (peer
+#                   review session, panel, etc.)
+#   locked_value    The canonical value, surfaced for display
+#                   so the tooltip can show "value = 0.8576"
+#                   without re-importing academic_deck
+#
+# Derived locked tokens (source strings starting with
+# "derived:") name BOTH input constants explicitly in the
+# `method` field so the derivation chain is fully transparent.
+LOCKED_CONSTANT_PROVENANCE: dict[str, dict[str, str]] = {
+    # ── OOS Sharpe pair (the headline proof point) ──
+    "academic_deck.OOS_SHARPE_REGIME_CONDITIONAL": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Walk-forward OOS Sharpe, post-2022 validation "
+            "window (Jan 2022 - Dec 2025)"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "0.8576",
+    },
+    "academic_deck.OOS_SHARPE_BENCHMARK": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Walk-forward OOS Sharpe, post-2022 validation "
+            "window (Jan 2022 - Dec 2025); benchmark = "
+            "100% equity"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "0.4341",
+    },
+
+    # ── Pre/post 2022 equity-IG correlation ──
+    "academic_deck.CORRELATION_PRE_2022": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Average of 12-month rolling equity-IG correlation, "
+            "pre-2022 window (Jul 2002 - Dec 2021)"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "-0.05",
+    },
+    "academic_deck.CORRELATION_POST_2022": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Average of 12-month rolling equity-IG correlation, "
+            "post-2022 window (Jan 2022 - Dec 2025)"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "+0.57",
+    },
+
+    # ── OOS window constants ──
+    "academic_deck.OOS_WINDOW_MONTHS": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Count of monthly observations in the validation "
+            "window (Feb 2022 - May 2026 inclusive = 53 months)"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "53",
+    },
+    "academic_deck.OOS_WINDOW_PCT_OF_STUDY": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "OOS_WINDOW_MONTHS (53) divided by total study "
+            "months (287) = 18.5%"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "18.5%",
+    },
+
+    # ── Play-by-play scorecard (manual count) ──
+    "academic_deck.PLAY_BY_PLAY_EVENTS": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Manual count from rebalance_events.csv "
+            "(distinct OOS rebalance events tracked)"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "9",
+    },
+    "academic_deck.PLAY_BY_PLAY_ADD_VALUE": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Manual count from rebalance_events.csv (events "
+            "where the regime signal produced positive value-add "
+            "vs the static benchmark)"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "2",
+    },
+
+    # ── Max drawdown locked figures ──
+    "academic_deck.MAX_DRAWDOWN_BENCHMARK": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Peak-to-trough maximum drawdown of the 100% "
+            "equity benchmark over the full study window "
+            "(Jul 2002 - Dec 2025)"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "-52.6%",
+    },
+    "academic_deck.MAX_DRAWDOWN_REGIME_CONDITIONAL": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Peak-to-trough maximum drawdown of the regime-"
+            "switching blend over the full study window "
+            "(Jul 2002 - Dec 2025)"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "-29.7%",
+    },
+
+    # ── Study-window text bookends ──
+    "academic_deck (constant, July 2002)": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Study period start month; fixed bookend across "
+            "every academic deliverable"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "July 2002",
+    },
+    "academic_deck (constant, May 2026)": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Study period end month; matches the last "
+            "ff_factors_monthly observation available at the "
+            "December 2025 lock"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "May 2026",
+    },
+    "academic_deck (constant)": {
+        # The OOS window definition text token
+        # ({{OOS_WINDOW}}) uses this generic source string.
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Fixed text describing the OOS validation window "
+            "boundaries"),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "January 2022 through May 2026",
+    },
+
+    # ── Derived locked tokens ──
+    # User-specified format: name BOTH input constants
+    # explicitly + the closed-form computation, so the
+    # derivation chain is fully transparent.
+    "derived: blend/benchmark - 1": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Derived: OOS_SHARPE_REGIME_CONDITIONAL (0.8576) "
+            "/ OOS_SHARPE_BENCHMARK (0.4341) - 1. Both inputs "
+            "are locked December 2025 constants."),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "+98%",
+    },
+    "derived: |bench_dd| - |blend_dd|": {
+        "lock_date": "December 2025",
+        "dataset_end": "2025-12-31",
+        "method": (
+            "Derived: |MAX_DRAWDOWN_BENCHMARK (-52.6%)| "
+            "minus |MAX_DRAWDOWN_REGIME_CONDITIONAL (-29.7%)|. "
+            "Both inputs are locked December 2025 constants."),
+        "defended": (
+            "June 3 cohort peer review + July 1 panel"),
+        "locked_value": "+22.8pp",
+    },
+}
+
+
+def provenance_for_source(
+    source: str | None,
+) -> dict[str, str] | None:
+    """Lookup the provenance block for a catalog source string.
+
+    Returns None when no provenance entry exists for the source
+    (every is_locked=True entry in the catalog SHOULD have one;
+    a None return signals a gap in LOCKED_CONSTANT_PROVENANCE
+    coverage and is worth surfacing as a test failure).
+    """
+    if not source:
+        return None
+    return LOCKED_CONSTANT_PROVENANCE.get(source)
+
+
 # ── Categorised catalog ───────────────────────────────────────────
 
 

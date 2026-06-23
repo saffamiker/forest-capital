@@ -105,7 +105,14 @@ Status = Literal["pass", "fail", "warning", "skipped"]
 class ValidationResult:
     """One row of the validation report. Mirrors what the frontend
     panel renders alongside each token: status pill, optional
-    expanded diff for failures, freshness timestamp."""
+    expanded diff for failures, freshness timestamp.
+
+    June 22 2026 -- `provenance` carries the structured lock
+    metadata (lock_date / dataset_end / method / defended /
+    locked_value) for locked constants. Populated only on
+    status=skipped entries with note="locked at submission";
+    None for every other case. The frontend renders this as a
+    tooltip on hover over the lock icon."""
     token: str
     label: str
     reference_value: str | None
@@ -115,6 +122,7 @@ class ValidationResult:
     delta: str | None = None
     note: str | None = None
     cache_freshness: str | None = None
+    provenance: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -127,6 +135,7 @@ class ValidationResult:
             "delta": self.delta,
             "note": self.note,
             "cache_freshness": self.cache_freshness,
+            "provenance": self.provenance,
         }
 
 
@@ -348,13 +357,22 @@ def _compare_floats(
 
 def _validate_locked(
     token: str, label: str, reference_value: str | None,
-    sources: Sources,
+    sources: Sources, source_string: str | None = None,
 ) -> ValidationResult:
     """Locked academic constants -- defended at panel, not
-    validated at runtime. Skip with the canonical note."""
-    return _skipped(
-        token, label, reference_value,
-        "academic_deck.py (locked)")
+    validated at runtime. Skip with the canonical note PLUS the
+    structured provenance block keyed by the catalog source
+    string (see LOCKED_CONSTANT_PROVENANCE)."""
+    from tools.data_reference_catalog import provenance_for_source
+    provenance = provenance_for_source(source_string)
+    return ValidationResult(
+        token=token, label=label,
+        reference_value=reference_value,
+        source_value=reference_value,
+        source_endpoint=(
+            source_string or "academic_deck.py (locked)"),
+        status="skipped", note=_LOCKED_NOTE,
+        cache_freshness=None, provenance=provenance)
 
 
 def _validate_strategy_metric(
@@ -363,11 +381,19 @@ def _validate_strategy_metric(
 ) -> ValidationResult:
     """{{<STRATEGY>_SHARPE}}, {{<STRATEGY>_MAX_DD}},
     {{<STRATEGY>_CAGR}}, {{<STRATEGY>_VOLATILITY}},
-    {{<STRATEGY>_RECOVERY_MONTHS}} -- read from
-    strategy_results_cache via the cache key."""
+    {{<STRATEGY>_RECOVERY}} / {{<STRATEGY>_RECOVERY_MONTHS}}
+    -- read from strategy_results_cache via the cache key.
+
+    June 22 2026 -- regex extended to match {{<STRATEGY>_RECOVERY}}
+    (no _MONTHS suffix). The catalog declares both shapes; only
+    _RECOVERY_MONTHS matched the previous regex and {{<STRATEGY>
+    _RECOVERY}} fell through to the catch-all skip. Longer
+    alternative listed first so the regex picks RECOVERY_MONTHS
+    over RECOVERY when both could match."""
     m = re.match(
         r"\{\{([A-Z_0-9]+)_"
-        r"(SHARPE|MAX_DD|CAGR|VOLATILITY|RECOVERY_MONTHS)\}\}",
+        r"(RECOVERY_MONTHS|SHARPE|MAX_DD|CAGR|VOLATILITY"
+        r"|RECOVERY)\}\}",
         token)
     if not m:
         return _skipped(
@@ -390,9 +416,17 @@ def _validate_strategy_metric(
                        _parse_pct, _PCT_TOL),
         "RECOVERY_MONTHS": ("drawdown_recovery_days", None,
                             None, None),
+        # _RECOVERY is the bare-number variant; reuses the
+        # same field but the format helpers below treat it
+        # identically to RECOVERY_MONTHS (catalog uses both
+        # interchangeably -- the format formatter in
+        # numeric_substitution.py emits either "<n> months"
+        # or "<n>" depending on the token shape).
+        "RECOVERY": ("drawdown_recovery_days", None,
+                     None, None),
     }
     cache_field, formatter, parser, tol = field_map[metric_suffix]
-    if metric_suffix == "RECOVERY_MONTHS":
+    if metric_suffix in ("RECOVERY_MONTHS", "RECOVERY"):
         # Recovery is stored as DAYS; reference renders as
         # "<n> months" via /21 trading-day convention.
         days = entry.get("drawdown_recovery_days")
@@ -792,44 +826,152 @@ def _validate_study_months(
         status="pass", cache_freshness=None)
 
 
+# ── Derived-token strategies ────────────────────────────────────────
+
+
+def _validate_dd_reduction(
+    token: str, label: str, reference_value: str | None,
+    sources: Sources,
+) -> ValidationResult:
+    """{{DD_REDUCTION_REGIME_SWITCHING}} -- recomputed from the
+    locked MAX_DRAWDOWN_* constants in academic_deck.py.
+
+    Closed-form: |MAX_DRAWDOWN_BENCHMARK| - |MAX_DRAWDOWN
+    _REGIME_CONDITIONAL|. Constants are locked at the December
+    2025 submission; this strategy reads them via getattr so
+    the comparison is exact rather than re-deriving from the
+    live strategy_cache (which would drift)."""
+    try:
+        from tools.academic_deck import (
+            MAX_DRAWDOWN_BENCHMARK,
+            MAX_DRAWDOWN_REGIME_CONDITIONAL,
+        )
+        source_float = (
+            abs(MAX_DRAWDOWN_BENCHMARK)
+            - abs(MAX_DRAWDOWN_REGIME_CONDITIONAL))
+    except Exception as exc:  # noqa: BLE001
+        return _skipped(
+            token, label, reference_value,
+            "academic_deck constants",
+            note=f"derived recompute failed: {exc}")
+    return _compare_floats(
+        token=token, label=label,
+        reference_value=reference_value,
+        source_float=source_float,
+        formatted_source=_format_pct(source_float),
+        source_endpoint=(
+            "derived: |MAX_DRAWDOWN_BENCHMARK| - "
+            "|MAX_DRAWDOWN_REGIME_CONDITIONAL|"),
+        tolerance=_PCT_TOL,
+        parser=_parse_pct,
+        cache_freshness=None)
+
+
+def _validate_oos_improvement_pct(
+    token: str, label: str, reference_value: str | None,
+    sources: Sources,
+) -> ValidationResult:
+    """{{OOS_SHARPE_IMPROVEMENT_PCT}} / {{OOS_IMPROVEMENT_PCT}}
+    -- recomputed from the locked OOS_SHARPE_* constants.
+
+    Closed-form: (OOS_SHARPE_REGIME_CONDITIONAL /
+    OOS_SHARPE_BENCHMARK) - 1. Both inputs locked at the
+    December 2025 submission."""
+    try:
+        from tools.academic_deck import (
+            OOS_SHARPE_BENCHMARK,
+            OOS_SHARPE_REGIME_CONDITIONAL,
+        )
+        source_float = (
+            OOS_SHARPE_REGIME_CONDITIONAL
+            / OOS_SHARPE_BENCHMARK
+            - 1.0)
+    except Exception as exc:  # noqa: BLE001
+        return _skipped(
+            token, label, reference_value,
+            "academic_deck constants",
+            note=f"derived recompute failed: {exc}")
+    return _compare_floats(
+        token=token, label=label,
+        reference_value=reference_value,
+        source_float=source_float,
+        formatted_source=_format_pct(source_float),
+        source_endpoint=(
+            "derived: OOS_SHARPE_REGIME_CONDITIONAL / "
+            "OOS_SHARPE_BENCHMARK - 1"),
+        tolerance=_PCT_TOL,
+        parser=_parse_pct,
+        cache_freshness=None)
+
+
+def _validate_passthrough(
+    token: str, label: str, reference_value: str | None,
+    sources: Sources,
+) -> ValidationResult:
+    """Live tokens with no registered strategy. The reference
+    value comes from the catalog read (which has already
+    resolved against the substitution table); we sanity-check
+    it -- em-dash means the substitution failed (the resolver
+    couldn't find a value), anything else means the catalog
+    successfully produced a value.
+
+    Status:
+      fail -- reference value is em-dash (or absent)
+      pass -- reference value is populated; note flags this as
+              a passthrough (no source-side cross-check)
+
+    Returns the same source_endpoint as the reference so the
+    diff column makes it clear they came from the same place."""
+    if (reference_value is None
+            or reference_value in ("—", "", "-")):
+        return ValidationResult(
+            token=token, label=label,
+            reference_value=reference_value,
+            source_value=None,
+            source_endpoint="(no validator registered)",
+            status="fail",
+            delta=(
+                "reference value is em-dash; the substitution "
+                "layer did not resolve this token"),
+            cache_freshness=None)
+    return ValidationResult(
+        token=token, label=label,
+        reference_value=reference_value,
+        source_value=reference_value,
+        source_endpoint="(no validator registered)",
+        status="pass",
+        note=(
+            "derived or unmatched token; no source-side "
+            "cross-check available -- value rendered from "
+            "the catalog read"),
+        cache_freshness=None)
+
+
 # ── Token -> strategy dispatch ──────────────────────────────────────
 
 
-_LOCKED_TOKENS: frozenset[str] = frozenset({
-    # OOS / correlation locked constants (academic_deck.py)
-    "{{OOS_SHARPE_BLEND}}",
-    "{{OOS_SHARPE_BENCHMARK}}",
-    "{{OOS_WINDOW_MONTHS}}",
-    "{{OOS_WINDOW_PCT_OF_STUDY}}",
-    "{{OOS_WINDOW}}",
-    "{{PRE_2022_EQ_IG_CORR}}",
-    "{{POST_2022_EQ_IG_CORR}}",
-    "{{PLAY_BY_PLAY_VALUE_ADD}}",
-    "{{STUDY_START}}", "{{STUDY_END}}",
-    # Per-strategy locked academic figures
-    # (academic_deck._LOCKED_PER_STRATEGY)
-    "{{REGIME_SWITCHING_MAX_DD}}",
-    "{{BENCHMARK_MAX_DD}}",
-    "{{CLASSIC_6040_MAX_DD}}",
-    "{{EQUAL_WEIGHT_MAX_DD}}",
-    "{{RISK_PARITY_MAX_DD}}",
-    "{{MIN_VARIANCE_MAX_DD}}",
-    "{{VOL_TARGETING_MAX_DD}}",
-    "{{BLACK_LITTERMAN_MAX_DD}}",
-    "{{MOMENTUM_ROTATION_MAX_DD}}",
-    "{{MAX_SHARPE_ROLLING_MAX_DD}}",
-})
-
-
-def dispatch_strategy(token: str) -> Callable[
+def dispatch_strategy(
+    token: str, is_locked: bool = False,
+) -> Callable[
     [str, str, str | None, Sources], ValidationResult,
 ]:
-    """Return the validation strategy for `token`. Locked tokens
-    short-circuit to _validate_locked; everything else routes by
-    pattern. The unknown-token fallback marks skipped with a
-    note so an unrecognised token shows up in the report
-    explicitly rather than silently passing."""
-    if token in _LOCKED_TOKENS:
+    """Return the validation strategy for `token`.
+
+    June 22 2026 refactor: `is_locked` is now THE source of
+    truth for the lock/live split. When True, the dispatcher
+    short-circuits to _validate_locked regardless of token
+    name pattern. When False, the dispatcher routes by pattern;
+    unmatched tokens fall through to _validate_passthrough
+    (NOT skipped) so live tokens always get a non-locked
+    status.
+
+    Previously the dispatcher consulted a hardcoded
+    _LOCKED_TOKENS set -- an incomplete mirror of catalog
+    truth that mis-categorised tokens like CLASSIC_6040_MAX_DD
+    as locked when the catalog marks them is_locked=False.
+    That bug is fixed by deleting the hardcoded set and
+    threading `is_locked` from the catalog walker."""
+    if is_locked:
         return _validate_locked
     if token == "{{STUDY_MONTHS}}":
         return _validate_study_months
@@ -854,19 +996,37 @@ def dispatch_strategy(token: str) -> Callable[
             "{{CURRENT_EQUITY_PCT}}", "{{CURRENT_IG_PCT}}",
             "{{CURRENT_HY_PCT}}"):
         return _validate_current_asset_pct
+    # Derived tokens: recomputed from locked constants. The
+    # token name list is short and explicit -- adding a
+    # derived token here is the trigger to also add a
+    # provenance entry in
+    # data_reference_catalog.LOCKED_CONSTANT_PROVENANCE.
+    if token == "{{DD_REDUCTION_REGIME_SWITCHING}}":
+        return _validate_dd_reduction
+    if token in (
+            "{{OOS_SHARPE_IMPROVEMENT_PCT}}",
+            "{{OOS_IMPROVEMENT_PCT}}"):
+        return _validate_oos_improvement_pct
+    # Per-strategy metric regex. Longer suffix BEFORE shorter
+    # (RECOVERY_MONTHS listed before RECOVERY) so the regex
+    # picks the longer match -- otherwise CLASSIC_6040_RECOVERY
+    # _MONTHS would route as strategy=CLASSIC_6040_RECOVERY
+    # suffix=MONTHS. Same gotcha as SMB_BETA / BETA from PR
+    # #383.
     if re.match(
             r"\{\{[A-Z_0-9]+_"
-            r"(SHARPE|MAX_DD|CAGR|VOLATILITY|RECOVERY_MONTHS)\}\}",
+            r"(RECOVERY_MONTHS|SHARPE|MAX_DD|CAGR|VOLATILITY"
+            r"|RECOVERY)\}\}",
             token):
         return _validate_strategy_metric
-    # Catalog-internal tokens (data.factor_loadings.X.Y; the
-    # category catalog doesn't go through the substitution table
-    # for these -- they're read by main._resolve_value directly)
-    # and the {{DATA_HASH}} / {{CURRENT_REGIME}} / similar
-    # text tokens that don't have a numeric source to compare
-    # against. Default to skipped.
-    return lambda t, l, r, s: _skipped(  # noqa: E731
-        t, l, r, "—", note=_NO_STRATEGY_NOTE)
+    # Live token with no explicit strategy -- passthrough.
+    # Catalog-internal tokens (data.factor_loadings.X.Y) and
+    # text-only tokens ({{DATA_HASH}}, {{CURRENT_REGIME}},
+    # etc.) all land here. The passthrough reports pass when
+    # the value is populated, fail when em-dash -- so the
+    # validator surfaces unresolved substitutions as red
+    # rather than hiding them under a grey lock.
+    return _validate_passthrough
 
 
 # ── Top-level entry point ───────────────────────────────────────────
@@ -898,12 +1058,28 @@ def validate_reference_sheet(
             token = entry.get("token")
             label = entry.get("label")
             reference_value = entry.get("value")
+            # June 22 2026 -- is_locked + source threaded into
+            # dispatch so the lock/live split mirrors the
+            # catalog truth (entry.is_locked), and the locked
+            # validator can populate provenance from the source
+            # string lookup.
+            is_locked = bool(entry.get("is_locked", False))
+            source_string = entry.get("source")
             if not isinstance(token, str):
                 continue
             try:
-                strategy = dispatch_strategy(token)
-                result = strategy(
-                    token, label, reference_value, sources)
+                strategy = dispatch_strategy(
+                    token, is_locked=is_locked)
+                if strategy is _validate_locked:
+                    # _validate_locked takes the extra source
+                    # arg for the provenance lookup; the other
+                    # strategies use the standard 4-arg shape.
+                    result = strategy(
+                        token, label, reference_value,
+                        sources, source_string=source_string)
+                else:
+                    result = strategy(
+                        token, label, reference_value, sources)
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "validator_strategy_raised",
