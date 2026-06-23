@@ -273,27 +273,95 @@ class TestGap3CostSensitivity:
         assert table["{{NET_SHARPE_15BP}}"] == "—"
         assert table["{{NET_SHARPE_20BP}}"] == "—"
 
-    def test_turnover_token_resolves_from_regime_conditional(self):
-        """Annualized turnover for REGIME_SWITCHING lives on
-        the regime_conditional row, NOT on the strategy_cache.
-        The token reads from rc_by_strategy now."""
+    def test_turnover_token_resolves_from_strategy_cache(self):
+        """June 22 2026 -- annualized turnover for REGIME_SWITCHING
+        lives on the strategy_cache row's true_turnover field (the
+        backtester's _true_turnover -- "Genuine annualised
+        portfolio turnover"). The previous source
+        regime_conditional.annualized_turnover pointed at a field
+        analytics.regime_conditional_performance never writes, so
+        the token rendered em-dash."""
         from tools.numeric_substitution import build_substitution_table
-        rc_rows = [
-            {"strategy": "REGIME_SWITCHING",
-             "annualized_turnover": 0.50},
-        ]
+        strategy_cache = {
+            "REGIME_SWITCHING": {
+                "strategy_name": "REGIME_SWITCHING",
+                "true_turnover": 0.50,
+            },
+        }
         table = build_substitution_table(
-            strategy_cache={}, cio_recommendation={},
-            regime_conditional=rc_rows)
+            strategy_cache=strategy_cache, cio_recommendation={})
         # 1dp percent format.
         assert table["{{REGIME_SWITCHING_TURNOVER}}"] == "50.0%"
 
-    def test_turnover_em_dash_when_regime_conditional_missing(self):
+    def test_turnover_em_dash_when_strategy_cache_missing_turnover(
+            self):
         from tools.numeric_substitution import build_substitution_table
         table = build_substitution_table(
-            strategy_cache={}, cio_recommendation={},
-            regime_conditional=None)
+            strategy_cache={"REGIME_SWITCHING": {}},
+            cio_recommendation={})
         assert table["{{REGIME_SWITCHING_TURNOVER}}"] == "—"
+
+    def test_turnover_em_dash_when_regime_switching_absent(self):
+        from tools.numeric_substitution import build_substitution_table
+        table = build_substitution_table(
+            strategy_cache={},
+            cio_recommendation={})
+        assert table["{{REGIME_SWITCHING_TURNOVER}}"] == "—"
+
+
+class TestCvar99BenchmarkRemoved:
+    """June 22 2026 -- {{CVAR_99_BENCHMARK}} was advertised in
+    the deck placeholder guide but cited by zero slide specs;
+    the resolver pointed at a field the strategy_cache never
+    carries. Removed entirely from catalog + placeholder guide
+    + resolver. These tests pin the removal so a future PR can't
+    silently restore the broken wiring."""
+
+    def test_token_not_in_substitution_table(self):
+        from tools.numeric_substitution import build_substitution_table
+        table = build_substitution_table(
+            strategy_cache={"BENCHMARK": {}},
+            cio_recommendation={})
+        assert "{{CVAR_99_BENCHMARK}}" not in table
+
+    def test_token_not_in_catalog(self):
+        from tools.data_reference_catalog import CATALOG
+        flat = {
+            e.token for _, _, entries in CATALOG for e in entries
+        }
+        assert "{{CVAR_99_BENCHMARK}}" not in flat
+
+    def test_tail_risk_category_removed_from_catalog(self):
+        """The catalog's tail_risk category previously held only
+        the CVAR token. Removing the entry left an empty
+        category, which the catalog-walker would skip but
+        looks like a structural defect -- the category itself
+        should be gone."""
+        from tools.data_reference_catalog import CATALOG
+        categories = {k for k, _, _ in CATALOG}
+        assert "tail_risk" not in categories
+
+    def test_token_not_in_deck_placeholder_guide(self):
+        """The deck per-slide writer reads
+        _DECK_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION; the token
+        must not be advertised to it."""
+        import inspect
+        import main
+        src = inspect.getsource(main)
+        # The guide constant must not list CVAR_99_BENCHMARK as
+        # one of the available tokens. We use a more specific
+        # match than "in src" to avoid matching the comment
+        # block explaining the removal.
+        lines = src.split("\n")
+        offending = [
+            line for line in lines
+            if "{{CVAR_99_BENCHMARK}}" in line
+            and "removed" not in line.lower()
+            and not line.strip().startswith("#")
+        ]
+        assert offending == [], (
+            "CVAR_99_BENCHMARK still advertised in a non-comment "
+            f"line: {offending}")
 
 
 # ── Integration: load_substitution_metric_sources helper ─────────────────

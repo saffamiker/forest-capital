@@ -485,11 +485,15 @@ def build_substitution_table(
         # 20bp fields; those live in the oos_cost_sensitivity
         # payload's scenarios list, written by
         # refresh_oos_cost_sensitivity. Turnover lives on the
-        # regime_conditional row's annualized_turnover field.
+        # strategy_cache row's true_turnover field (the
+        # backtester's _true_turnover -- "Genuine annualised
+        # portfolio turnover"). The previous read of
+        # regime_conditional.annualized_turnover pointed at a
+        # field analytics.regime_conditional_performance never
+        # writes, so the token rendered em-dash.
         "{{REGIME_SWITCHING_TURNOVER}}": format_pct(
-            rc_by_strategy.get(
-                "REGIME_SWITCHING", {}
-            ).get("annualized_turnover")),
+            (strategy_cache.get("REGIME_SWITCHING") or {})
+                .get("true_turnover")),
         "{{NET_SHARPE_10BP}}": format_sharpe(
             _cost_scenario(cs, 10).get("net_sharpe")),
         "{{NET_SHARPE_15BP}}": format_sharpe(
@@ -497,9 +501,15 @@ def build_substitution_table(
         "{{NET_SHARPE_20BP}}": format_sharpe(
             _cost_scenario(cs, 20).get("net_sharpe")),
 
-        # Tail risk (deck slide 6 references CVaR explicitly).
-        "{{CVAR_99_BENCHMARK}}": format_pct(
-            benchmark.get("cvar_99_annualized")),
+        # June 22 2026 -- {{CVAR_99_BENCHMARK}} removed. The
+        # previous resolver read benchmark.cvar_99_annualized,
+        # which was both the wrong field name (actual is
+        # cvar_99_annual) and the wrong cache layer (cvar lives
+        # in analytics_metrics_cache[tail_risk], not the strategy
+        # cache). The token was advertised in the deck placeholder
+        # guide but cited by zero slide specs, so removing it
+        # eliminates an unresolved-placeholder footgun. See
+        # data_reference_catalog.py for the removed catalog entry.
 
         # Live watch points (Slide 7 macro context). June 22 2026 --
         # rewired to read from the live_signals kwarg (populated by

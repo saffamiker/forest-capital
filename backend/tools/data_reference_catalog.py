@@ -458,7 +458,16 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
         TokenEntry(
             token="{{REGIME_SWITCHING_TURNOVER}}",
             label="Blend annualized turnover",
-            source="regime_conditional.REGIME_SWITCHING.annualized_turnover",
+            # June 22 2026 -- source corrected. The previous source
+            # "regime_conditional.REGIME_SWITCHING.annualized_turnover"
+            # pointed at a field that analytics.regime_conditional_
+            # performance never wrote. The actual turnover figure is
+            # the backtester's true_turnover field, written per-
+            # strategy on the strategy_results_cache row (see
+            # backtester._true_turnover -- "Genuine annualised
+            # portfolio turnover"). The token resolver now reads
+            # from there.
+            source="strategy_cache.REGIME_SWITCHING.true_turnover",
             is_locked=False,
             document_locations=(_APP_G,)),
         TokenEntry(
@@ -498,16 +507,19 @@ CATALOG: tuple[tuple[str, str, tuple[TokenEntry, ...]], ...] = (
             document_locations=(
                 _BRIEF_S3, _BRIEF_S5, _DECK_S5)),
     )),
-
-    # ── Tail risk -----------------------------------------------------
-    ("tail_risk", "Tail risk", (
-        TokenEntry(
-            token="{{CVAR_99_BENCHMARK}}",
-            label="Benchmark CVaR @ 99% (annualized)",
-            source="strategy_cache.BENCHMARK.cvar_99_annualized",
-            is_locked=False,
-            document_locations=(_DECK_S6,)),
-    )),
+    # June 22 2026 -- the "tail_risk" category previously held a
+    # single {{CVAR_99_BENCHMARK}} entry. Removed because the
+    # token was advertised in _DECK_NUMERIC_PLACEHOLDER_GUIDE
+    # _EXTENSION but cited by zero slide specs / story plan
+    # prompts / brief or appendix sections. The advertised-but-
+    # unused token was a footgun -- if the LLM organically
+    # reached for it, the substitution would fail (the resolver
+    # read strategy_cache.BENCHMARK.cvar_99_annualized which
+    # was both the wrong field name -- actual is cvar_99_annual
+    # -- and the wrong cache layer -- cvar lives in
+    # analytics_metrics_cache[tail_risk], not the strategy
+    # cache). If a future spec genuinely needs CVaR, wire up
+    # the tail_risk metric source threading then.
 )
 
 
