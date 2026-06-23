@@ -443,18 +443,56 @@ class TestStudyMonthsStrategy:
 
 class TestDispatch:
 
-    def test_locked_tokens_route_to_locked(self):
+    def test_locked_tokens_route_via_is_locked_flag(self):
+        """June 22 2026 -- dispatcher's lock/live split now
+        reads from is_locked, NOT from a hardcoded token name
+        set. Same token routes to _validate_locked or to its
+        pattern-based strategy depending on the flag."""
+        from tools.data_reference_validator import _validate_locked
+        # is_locked=True -> locked regardless of name
         for tok in (
                 "{{OOS_SHARPE_BLEND}}",
                 "{{OOS_WINDOW_MONTHS}}",
-                "{{PRE_2022_EQ_IG_CORR}}"):
-            assert dispatch_strategy(tok) is _validate_locked
+                "{{BENCHMARK_MAX_DD}}",
+                "{{CLASSIC_6040_MAX_DD}}"):
+            assert (dispatch_strategy(tok, is_locked=True)
+                    is _validate_locked)
+
+    def test_is_locked_false_routes_by_pattern(self):
+        """The same {{<STRATEGY>_MAX_DD}} token that was
+        hardcoded as locked in the old _LOCKED_TOKENS set now
+        routes to the per-strategy metric validator when the
+        catalog marks it is_locked=False (which the per-
+        strategy expansion does)."""
+        from tools.data_reference_validator import (
+            _validate_strategy_metric,
+        )
+        # is_locked=False -> per-strategy metric strategy
+        assert (
+            dispatch_strategy(
+                "{{CLASSIC_6040_MAX_DD}}", is_locked=False)
+            is _validate_strategy_metric)
+        assert (
+            dispatch_strategy(
+                "{{BENCHMARK_MAX_DD}}", is_locked=False)
+            is _validate_strategy_metric)
 
     def test_per_strategy_metric_routes(self):
         assert (dispatch_strategy("{{BENCHMARK_SHARPE}}")
                 is _validate_strategy_metric)
         assert (dispatch_strategy("{{REGIME_SWITCHING_CAGR}}")
                 is _validate_strategy_metric)
+
+    def test_recovery_suffix_routes_to_strategy_metric(self):
+        """Both {{<STRATEGY>_RECOVERY}} and {{<STRATEGY>_
+        RECOVERY_MONTHS}} match the per-strategy regex. The
+        previous regex only matched _RECOVERY_MONTHS; the
+        bare _RECOVERY fell through to passthrough."""
+        assert (dispatch_strategy("{{CLASSIC_6040_RECOVERY}}")
+                is _validate_strategy_metric)
+        assert (
+            dispatch_strategy("{{CLASSIC_6040_RECOVERY_MONTHS}}")
+            is _validate_strategy_metric)
 
     def test_regime_conditional_routes(self):
         assert (dispatch_strategy("{{BENCHMARK_POST2022_SHARPE}}")
@@ -476,15 +514,67 @@ class TestDispatch:
         assert (dispatch_strategy("{{BLEND_REGIME_SWITCHING_WT}}")
                 is _validate_blend_weight)
 
-    def test_unknown_token_routes_to_skipped_fallback(self):
-        # The fallback is a lambda, not a named function, so we
-        # call it and check the status instead of identity.
-        strategy = dispatch_strategy("{{SOMETHING_NOVEL}}")
-        result = strategy("{{SOMETHING_NOVEL}}", "novel", "0.5",
-                          Sources())
-        assert result.status == "skipped"
-        assert (result.note or "").startswith(
-            "no validator registered")
+    def test_dd_reduction_routes_to_derived_strategy(self):
+        from tools.data_reference_validator import (
+            _validate_dd_reduction,
+        )
+        assert (
+            dispatch_strategy("{{DD_REDUCTION_REGIME_SWITCHING}}")
+            is _validate_dd_reduction)
+
+    def test_oos_improvement_routes_to_derived_strategy(self):
+        from tools.data_reference_validator import (
+            _validate_oos_improvement_pct,
+        )
+        assert (
+            dispatch_strategy("{{OOS_SHARPE_IMPROVEMENT_PCT}}")
+            is _validate_oos_improvement_pct)
+        assert (
+            dispatch_strategy("{{OOS_IMPROVEMENT_PCT}}")
+            is _validate_oos_improvement_pct)
+
+    def test_unknown_token_routes_to_passthrough(self):
+        """June 22 2026 -- previously this returned a skipped
+        lambda for unknown tokens. The dispatcher now returns
+        _validate_passthrough which reports pass for populated
+        values and fail for em-dash."""
+        from tools.data_reference_validator import (
+            _validate_passthrough,
+        )
+        assert (
+            dispatch_strategy("{{SOMETHING_NOVEL}}")
+            is _validate_passthrough)
+
+    def test_passthrough_pass_on_populated_value(self):
+        from tools.data_reference_validator import (
+            _validate_passthrough,
+        )
+        result = _validate_passthrough(
+            "{{SOMETHING_NOVEL}}", "novel", "1.23",
+            Sources())
+        assert result.status == "pass"
+        assert "no source-side cross-check" in (result.note or "")
+
+    def test_passthrough_fail_on_em_dash(self):
+        from tools.data_reference_validator import (
+            _validate_passthrough,
+        )
+        result = _validate_passthrough(
+            "{{SOMETHING_NOVEL}}", "novel", "—",
+            Sources())
+        assert result.status == "fail"
+        assert "em-dash" in (result.delta or "")
+
+    def test_locked_tokens_set_is_gone(self):
+        """Revert protection: a future PR can't silently
+        restore the hardcoded _LOCKED_TOKENS set (the bug
+        this PR fixes)."""
+        from tools import data_reference_validator as drv
+        assert not hasattr(drv, "_LOCKED_TOKENS"), (
+            "_LOCKED_TOKENS hardcoded set was removed; if "
+            "you need to re-add lock routing, do it via the "
+            "is_locked flag passed to dispatch_strategy "
+            "(which reads from the catalog's entry.is_locked)")
 
 
 # ── Top-level entry point ───────────────────────────────────────────
@@ -494,16 +584,24 @@ class TestValidateReferenceSheet:
 
     def test_walks_categories_and_aggregates(self):
         # Minimal rendered shape -- one of each token type.
+        # June 22 2026 -- is_locked + source fields are
+        # now consumed by the dispatcher; the locked entry
+        # must carry them explicitly.
         rendered = {
             "study_period": {
                 "label": "Study period",
                 "entries": [
                     {"token": "{{STUDY_MONTHS}}",
                      "label": "Study months",
-                     "value": "287"},
+                     "value": "287",
+                     "is_locked": False,
+                     "source": "data.study_period.n_months"},
                     {"token": "{{STUDY_START}}",
                      "label": "Study start",
-                     "value": "July 2002"},  # locked
+                     "value": "July 2002",
+                     "is_locked": True,
+                     "source":
+                         "academic_deck (constant, July 2002)"},
                 ],
             },
             "live": {
@@ -511,7 +609,9 @@ class TestValidateReferenceSheet:
                 "entries": [
                     {"token": "{{VIX_CURRENT}}",
                      "label": "VIX",
-                     "value": "18.42"},
+                     "value": "18.42",
+                     "is_locked": False,
+                     "source": "regime_signals_cache.vix_level"},
                 ],
             },
         }
@@ -530,6 +630,11 @@ class TestValidateReferenceSheet:
             if r.token == "{{STUDY_START}}":
                 assert r.cache_freshness is None
                 assert r.status == "skipped"
+                # June 22 2026 -- locked entries now carry the
+                # structured provenance block.
+                assert r.provenance is not None
+                assert "lock_date" in r.provenance
+                assert "method" in r.provenance
 
     def test_strategy_exception_becomes_skipped_with_error_note(
             self, monkeypatch):
@@ -542,8 +647,11 @@ class TestValidateReferenceSheet:
             raise RuntimeError("simulated")
 
         # Force every dispatch to return the boom strategy.
+        # June 22 2026 -- dispatch signature is now
+        # (token, is_locked=False); the stub accepts both.
         monkeypatch.setattr(
-            drv, "dispatch_strategy", lambda _t: _boom)
+            drv, "dispatch_strategy",
+            lambda _t, **_kw: _boom)
         rendered = {
             "x": {
                 "label": "x",
@@ -635,3 +743,148 @@ class TestCacheFreshnessField:
             sources, "h")
         d = report.to_dict()
         assert "cache_freshness" in d["results"][0]
+
+
+# ── Provenance field (June 22 2026) ─────────────────────────────────
+
+
+class TestLockedProvenance:
+    """Locked-constant validation results carry a structured
+    provenance block in the ValidationResult. The frontend
+    renders it as a tooltip on hover over the lock icon."""
+
+    def test_locked_result_carries_provenance_block(self):
+        from tools.data_reference_validator import _validate_locked
+        result = _validate_locked(
+            "{{OOS_SHARPE_BLEND}}", "OOS Sharpe blend",
+            "0.86", Sources(),
+            source_string="academic_deck.OOS_SHARPE_REGIME_CONDITIONAL")
+        assert result.provenance is not None
+        # Required keys per the LOCKED_CONSTANT_PROVENANCE schema.
+        for key in (
+                "lock_date", "dataset_end", "method",
+                "defended", "locked_value"):
+            assert key in result.provenance
+
+    def test_locked_result_provenance_is_none_for_unknown_source(
+            self):
+        """A locked entry whose source string isn't in the
+        provenance dict still returns a ValidationResult --
+        provenance just lands as None. The frontend gracefully
+        handles a None provenance by suppressing the tooltip."""
+        from tools.data_reference_validator import _validate_locked
+        result = _validate_locked(
+            "{{SOMETHING_LOCKED}}", "unknown locked",
+            "abc", Sources(),
+            source_string="academic_deck.NOT_A_KNOWN_CONSTANT")
+        assert result.provenance is None
+        assert result.status == "skipped"
+
+    def test_provenance_serialises_to_dict(self):
+        from tools.data_reference_validator import _validate_locked
+        result = _validate_locked(
+            "{{OOS_SHARPE_BLEND}}", "label", "0.86",
+            Sources(),
+            source_string="academic_deck.OOS_SHARPE_REGIME_CONDITIONAL")
+        d = result.to_dict()
+        assert "provenance" in d
+        assert d["provenance"]["lock_date"] == "December 2025"
+
+    def test_every_locked_catalog_entry_has_provenance(self):
+        """Coverage map: every is_locked=True entry in the
+        CATALOG must have a corresponding entry in
+        LOCKED_CONSTANT_PROVENANCE. A gap means the frontend
+        would render the lock icon with no tooltip on that
+        token -- worth surfacing as a test failure rather than
+        a runtime surprise."""
+        from tools.data_reference_catalog import (
+            CATALOG, LOCKED_CONSTANT_PROVENANCE,
+            expand_per_strategy_appendix_metrics,
+            expand_per_strategy_factor_loadings,
+        )
+        all_locked_sources: set[str] = set()
+        for _k, _label, entries in CATALOG:
+            for e in entries:
+                if e.is_locked:
+                    all_locked_sources.add(e.source)
+        # Per-strategy expansions are is_locked=False, so they
+        # don't need provenance entries; not added to the set.
+        _ = expand_per_strategy_appendix_metrics()
+        _ = expand_per_strategy_factor_loadings()
+        # Every locked source must have a provenance entry.
+        missing = all_locked_sources - set(
+            LOCKED_CONSTANT_PROVENANCE.keys())
+        assert not missing, (
+            f"Locked catalog entries with no provenance: "
+            f"{sorted(missing)}")
+
+    def test_derived_provenance_names_input_constants(self):
+        """User-specified format: derived locked tokens'
+        method field must name BOTH input constants and the
+        closed-form computation so the derivation chain is
+        fully transparent for the panel."""
+        from tools.data_reference_catalog import (
+            LOCKED_CONSTANT_PROVENANCE,
+        )
+        # OOS improvement: blend/benchmark - 1
+        oos_imp = LOCKED_CONSTANT_PROVENANCE[
+            "derived: blend/benchmark - 1"]
+        assert "OOS_SHARPE_REGIME_CONDITIONAL" in oos_imp["method"]
+        assert "OOS_SHARPE_BENCHMARK" in oos_imp["method"]
+        assert "0.8576" in oos_imp["method"]
+        assert "0.4341" in oos_imp["method"]
+        # DD reduction: |bench_dd| - |blend_dd|
+        dd_red = LOCKED_CONSTANT_PROVENANCE[
+            "derived: |bench_dd| - |blend_dd|"]
+        assert "MAX_DRAWDOWN_BENCHMARK" in dd_red["method"]
+        assert "MAX_DRAWDOWN_REGIME_CONDITIONAL" in dd_red["method"]
+
+
+# ── Derived-token strategies (June 22 2026) ─────────────────────────
+
+
+class TestDerivedTokenStrategies:
+    """Two derived tokens get explicit strategies that
+    recompute from the locked constants and compare against
+    the reference value. Anything else still routes through
+    _validate_passthrough."""
+
+    def test_dd_reduction_pass_when_reference_matches(self):
+        from tools.data_reference_validator import (
+            _validate_dd_reduction,
+        )
+        # |52.6| - |29.7| = 22.9pp; reference renders as "+22.9%"
+        result = _validate_dd_reduction(
+            "{{DD_REDUCTION_REGIME_SWITCHING}}",
+            "DD reduction", "22.9%", Sources())
+        assert result.status == "pass"
+        assert "derived" in (result.source_endpoint or "").lower()
+
+    def test_dd_reduction_fail_on_drift(self):
+        from tools.data_reference_validator import (
+            _validate_dd_reduction,
+        )
+        result = _validate_dd_reduction(
+            "{{DD_REDUCTION_REGIME_SWITCHING}}",
+            "DD reduction", "10.0%", Sources())
+        assert result.status == "fail"
+        assert result.delta is not None
+
+    def test_oos_improvement_pass_when_reference_matches(self):
+        from tools.data_reference_validator import (
+            _validate_oos_improvement_pct,
+        )
+        # 0.8576 / 0.4341 - 1 = 0.9756 = ~97.6%
+        result = _validate_oos_improvement_pct(
+            "{{OOS_SHARPE_IMPROVEMENT_PCT}}",
+            "OOS improvement", "97.6%", Sources())
+        assert result.status == "pass"
+
+    def test_oos_improvement_fail_on_drift(self):
+        from tools.data_reference_validator import (
+            _validate_oos_improvement_pct,
+        )
+        result = _validate_oos_improvement_pct(
+            "{{OOS_SHARPE_IMPROVEMENT_PCT}}",
+            "OOS improvement", "50.0%", Sources())
+        assert result.status == "fail"

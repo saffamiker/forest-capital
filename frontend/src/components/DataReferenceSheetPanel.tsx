@@ -32,6 +32,14 @@ import {
 } from 'lucide-react'
 
 
+interface LockedProvenance {
+  lock_date:     string
+  dataset_end:   string
+  method:        string
+  defended:      string
+  locked_value:  string
+}
+
 interface DataReferenceEntry {
   token:               string
   label:               string
@@ -40,6 +48,7 @@ interface DataReferenceEntry {
   is_locked:           boolean
   last_verified:       string
   document_locations:  string[]
+  provenance?:         LockedProvenance | null
 }
 
 interface DataReferenceCategory {
@@ -168,6 +177,82 @@ function downloadCsv(data: DataReferenceResponse): void {
   link.click()
   document.body.removeChild(link)
   URL.revokeObjectURL(url)
+}
+
+
+// Lock icon with a hover-popover surfacing the locked
+// constant's provenance block (lock_date / dataset_end /
+// method / defended / locked_value). When provenance is null
+// (rare -- means the catalog source string isn't in
+// LOCKED_CONSTANT_PROVENANCE, which the backend test
+// guards against) we render a plain lock with no tooltip.
+function LockWithProvenance({
+  provenance,
+}: {
+  provenance: LockedProvenance | null
+}): React.ReactElement {
+  const [open, setOpen] = useState(false)
+  // Native title attribute provides a plain-text fallback for
+  // screen readers + non-hover devices. The styled popover
+  // adds the formatted multi-line view.
+  const titleText = provenance
+    ? (
+        `Locked: ${provenance.lock_date} data lock\n`
+        + `Source: ${provenance.locked_value}\n`
+        + `Method: ${provenance.method}\n`
+        + `Defended: ${provenance.defended}`)
+    : 'locked at submission'
+  return (
+    <span
+      data-testid="locked-provenance-icon"
+      className="relative inline-block cursor-help"
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}>
+      <Lock
+        className="w-3 h-3 text-warning inline"
+        aria-label="locked at submission"
+        {...(titleText ? { title: titleText } : {})} />
+      {provenance && open && (
+        <span
+          data-testid="locked-provenance-popover"
+          className="absolute left-4 top-0 z-30 w-72 p-3
+                     rounded border border-border
+                     bg-navy-900 text-2xs text-slate-300
+                     shadow-lg whitespace-normal
+                     normal-case font-sans tracking-normal">
+          <div className="text-warning font-semibold mb-2
+                          flex items-center gap-1">
+            <Lock className="w-3 h-3" />
+            Locked constant
+          </div>
+          <div className="space-y-1">
+            <div>
+              <span className="text-muted">Locked:</span>{' '}
+              {provenance.lock_date} data lock
+            </div>
+            <div>
+              <span className="text-muted">Value:</span>{' '}
+              <span className="font-mono text-white">
+                {provenance.locked_value}
+              </span>
+            </div>
+            <div>
+              <span className="text-muted">Dataset end:</span>{' '}
+              {provenance.dataset_end}
+            </div>
+            <div>
+              <span className="text-muted">Method:</span>{' '}
+              {provenance.method}
+            </div>
+            <div>
+              <span className="text-muted">Defended:</span>{' '}
+              {provenance.defended}
+            </div>
+          </div>
+        </span>
+      )}
+    </span>
+  )
 }
 
 
@@ -587,10 +672,10 @@ export default function DataReferenceSheetPanel() {
                                     <td className="py-1.5 pr-3
                                                   align-top">
                                       {entry.is_locked
-                                        ? <Lock
-                                            className="w-3 h-3
-                                                       text-warning
-                                                       inline" />
+                                        ? <LockWithProvenance
+                                            provenance={
+                                              entry.provenance
+                                              ?? null} />
                                         : <Activity
                                             className="w-3 h-3
                                                        text-success

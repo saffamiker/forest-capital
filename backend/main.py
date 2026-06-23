@@ -10922,6 +10922,15 @@ async def get_data_reference_sheet(
             return (value, None)
         return (value, cache_computed_at)
 
+    # June 22 2026 -- locked-constant provenance lookup. For
+    # is_locked=True entries the catalog source string keys
+    # into LOCKED_CONSTANT_PROVENANCE; the structured block
+    # ships in the entry payload so the frontend can render
+    # the multi-line tooltip on hover over the lock icon.
+    from tools.data_reference_catalog import (
+        provenance_for_source,
+    )
+
     # Walk the catalog and build the categorised response.
     categories: dict[str, dict] = {}
     for category_key, category_label, entries in CATALOG:
@@ -10932,6 +10941,9 @@ async def get_data_reference_sheet(
             last_verified = (
                 LOCKED_SENTINEL if entry.is_locked
                 else (last_verified_cache or "cache miss"))
+            provenance = (
+                provenance_for_source(entry.source)
+                if entry.is_locked else None)
             rendered.append({
                 "token": entry.token,
                 "label": entry.label,
@@ -10940,6 +10952,7 @@ async def get_data_reference_sheet(
                 "is_locked": entry.is_locked,
                 "last_verified": last_verified,
                 "document_locations": list(entry.document_locations),
+                "provenance": provenance,
             })
         categories[category_key] = {
             "label": category_label,
@@ -10959,6 +10972,10 @@ async def get_data_reference_sheet(
             "is_locked": entry.is_locked,
             "last_verified": last_verified_cache or "cache miss",
             "document_locations": list(entry.document_locations),
+            # Per-strategy expansion is is_locked=False; no
+            # provenance entry exists for these. The frontend
+            # tooltip is skipped when provenance is None.
+            "provenance": None,
         })
     categories["per_strategy_appendix"] = {
         "label": CATEGORY_LABELS["per_strategy_appendix"],
@@ -10978,6 +10995,7 @@ async def get_data_reference_sheet(
             "is_locked": entry.is_locked,
             "last_verified": last_verified_cache or "cache miss",
             "document_locations": list(entry.document_locations),
+            "provenance": None,
         })
     categories["factor_loadings"] = {
         "label": CATEGORY_LABELS["factor_loadings"],
