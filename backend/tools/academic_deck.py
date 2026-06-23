@@ -302,6 +302,21 @@ SLIDE FORMAT CONSTRAINTS (non-negotiable, apply to every slide):
 - Speaker notes carry the full explanation. The slide carries
   the signal.
 
+TOKEN FORMAT NOTE (non-negotiable, apply to every slide):
+- {{{{OOS_SHARPE_IMPROVEMENT_PCT}}}} already resolves to a complete
+  formatted string including the + prefix AND the % suffix (e.g.
+  "+98%"). Do NOT add any surrounding + or % characters around
+  this token; they duplicate the formatting already in the token
+  value. Wrong: "+{{{{OOS_SHARPE_IMPROVEMENT_PCT}}}}%" (produces
+  "++98%%"). Wrong: "{{{{OOS_SHARPE_IMPROVEMENT_PCT}}}}%" (produces
+  "+98%%"). Right: write the token alone -- "...an improvement of
+  {{{{OOS_SHARPE_IMPROVEMENT_PCT}}}}..." renders as
+  "...an improvement of +98%...".
+- The same rule applies to any *_PCT token whose value already
+  carries a built-in % suffix. If a token's name suggests it is
+  already a percentage, treat the resolved value as complete --
+  do not append additional formatting characters around it.
+
 June 22 2026 -- 12-slide structure (agenda inserted at position 2 + AI
 methodology and live demo flipped to slides 10/11). The deck opens with
 the OOS proof point (slide 1), walks the agenda (slide 2), lays evidence

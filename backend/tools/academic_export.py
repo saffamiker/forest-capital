@@ -46,14 +46,16 @@ DATA_PENDING = "[DATA PENDING]"
 
 
 async def load_substitution_metric_sources() -> tuple[
-    list[dict], list[dict], dict | None,
+    list[dict], list[dict], dict | None, dict | None,
 ]:
-    """Read the two analytics_metrics_cache metric_kinds that
-    feed the substitution table's pre/post 2022 Sharpes, Carhart
-    factor loadings, and net-of-cost Sharpe tokens.
+    """Read the analytics_metrics_cache metric_kinds that feed
+    the substitution table's pre/post 2022 Sharpes, Carhart
+    factor loadings, net-of-cost Sharpe, and crisis-window
+    drawdown tokens.
 
-    Returns (regime_conditional, factor_loadings, cost_sensitivity)
-    -- all three from the LATEST cached row, regardless of hash
+    Returns (regime_conditional, factor_loadings,
+    cost_sensitivity, crisis_performance) -- all four from the
+    LATEST cached row per metric_kind, regardless of hash
     match. The brief / appendix / deck / data-reference-sheet
     callsites pass these as kwargs to get_substitution_table.
 
@@ -61,7 +63,15 @@ async def load_substitution_metric_sources() -> tuple[
     bundles regime_conditional + factor_loadings together at
     metric_kind='academic_analytics' so one fetch covers both
     Gap 1 (pre/post 2022 Sharpes) and Gap 2 (factor loadings).
-    Cost sensitivity is a separate metric_kind.
+    Cost sensitivity is a separate metric_kind. Crisis
+    performance is its own metric_kind written by
+    refresh_diversification_metrics (precomputed_analytics.py:917)
+    and feeds the per-strategy GFC / Rate Shock 2022 drawdown
+    tokens.
+
+    June 22 2026 -- crisis_performance added as 4th return slot
+    so slides 4 and 6 stop rendering [DATA PENDING] for the
+    crisis-window cells.
 
     Fail-open: missing fields return empty lists / None so the
     substitution table degrades to em-dashes rather than raising.
@@ -69,6 +79,7 @@ async def load_substitution_metric_sources() -> tuple[
     regime_conditional: list[dict] = []
     factor_loadings: list[dict] = []
     cost_sensitivity: dict | None = None
+    crisis_performance: dict | None = None
     try:
         from tools.precomputed_analytics import get_latest_metric
         aa = await get_latest_metric("academic_analytics")
@@ -82,11 +93,16 @@ async def load_substitution_metric_sources() -> tuple[
         cs = await get_latest_metric("oos_cost_sensitivity")
         if isinstance(cs, dict):
             cost_sensitivity = cs
+        cp = await get_latest_metric("crisis_performance")
+        if isinstance(cp, dict):
+            crisis_performance = cp
     except Exception as exc:  # noqa: BLE001
         log.warning(
             "substitution_metric_sources_load_failed",
             error=str(exc))
-    return regime_conditional, factor_loadings, cost_sensitivity
+    return (
+        regime_conditional, factor_loadings,
+        cost_sensitivity, crisis_performance)
 
 
 async def gather_document_data() -> dict[str, Any]:
