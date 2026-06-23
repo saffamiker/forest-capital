@@ -1772,6 +1772,7 @@ async def refresh_story_plan(
     brief_hash: str | None = None,
     appendix_text: str | None = None,
     appendix_hash: str | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Hash-pipeline entry point. Serves from cache when a non-
     fallback row exists at the extended storage_hash; otherwise
@@ -1790,7 +1791,20 @@ async def refresh_story_plan(
     generator as the BRIEF GROUNDING (narrative anchor) +
     APPENDIX GROUNDING (evidentiary backing) blocks in its
     Pass-1 Opus system prompt. Empty / None for either leaves
-    the corresponding block as a no-op string."""
+    the corresponding block as a no-op string.
+
+    June 22 2026 -- `force` kwarg. When True, skip the cache
+    READ and always run the four-pass generator. The write
+    still happens after generation so subsequent non-forced
+    calls (warm pipeline, other reads) see the fresh row.
+
+    The deck Regenerate path passes force=True unconditionally
+    so Molly can iterate on slide guidance / locked-title
+    edits without needing the underlying data_hash /
+    brief_hash / appendix_hash to change. Brief + appendix
+    still default to force=False -- their regen surfaces are
+    rarer and the cache hit is the right behaviour when the
+    upstream data hasn't moved."""
     if not data_hash:
         return {"error": "no_data_hash"}
     # Per-document cache key extension. Order matters: the brief
@@ -1808,10 +1822,12 @@ async def refresh_story_plan(
     else:
         from tools.brief_grounding import cache_key_with_brief
         storage_hash = cache_key_with_brief(data_hash, brief_hash)
-    cached = await get_cached_story_plan(storage_hash, document_type)
-    if cached and cached.get("_model") != _DETERMINISTIC:
-        cached["cache"] = "hit"
-        return cached
+    if not force:
+        cached = await get_cached_story_plan(
+            storage_hash, document_type)
+        if cached and cached.get("_model") != _DETERMINISTIC:
+            cached["cache"] = "hit"
+            return cached
     if document_type == "deck":
         plan = generate_deck_story_plan(
             deck_context or {}, slide_titles or [],

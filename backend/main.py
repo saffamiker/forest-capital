@@ -14442,6 +14442,15 @@ async def _resolve_story_plan_slide_entries(
         return []
     try:
         from tools import story_plan as sp
+        # June 22 2026 -- force=True so every deck generation runs
+        # Pass 1 fresh. Previously the cache returned a stored plan
+        # for the current (data_hash | brief_hash | appendix_hash)
+        # composite key, which meant Regenerate on the deck reused
+        # the same plan and Molly could not iterate on slide
+        # guidance / locked-title edits without an upstream hash
+        # change. The cache WRITE still happens after generation,
+        # so non-forced callers (warm pipeline, brief/appendix
+        # cross-refs) still see the fresh row.
         plan = await sp.refresh_story_plan(
             data_hash, "deck",
             deck_context=_deck_per_slide_context(data),
@@ -14449,7 +14458,8 @@ async def _resolve_story_plan_slide_entries(
             brief_text=brief_text,
             brief_hash=brief_hash,
             appendix_text=appendix_text,
-            appendix_hash=appendix_hash)
+            appendix_hash=appendix_hash,
+            force=True)
     except Exception as exc:  # noqa: BLE001
         log.warning("deck_story_plan_refresh_failed", error=str(exc))
         return []
