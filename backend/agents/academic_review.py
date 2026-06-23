@@ -685,6 +685,256 @@ async def gather_review_context(
     }
 
 
+# ── Cascading critic context (Concern 7b + 7l-vi) ────────────────────────────
+
+
+# Plain-language labels for the four editor doc types. Distinct from
+# DOC_TYPE_LABELS (review-internal keys); the critic context uses the
+# human-facing labels so the model reads them in the prompt without
+# disambiguation.
+_CRITIC_DOC_LABELS: dict[str, str] = {
+    "executive_brief":     "Executive Brief",
+    "presentation_deck":   "Final Presentation Deck",
+    "analytical_appendix": "Analytical Appendix",
+    "presentation_script": "Presentation Script",
+}
+
+# Cascading SUPPORTING context per primary doc. Concern 7b spec:
+#   executive_brief     -> no supporting docs
+#   analytical_appendix -> brief, slimmed to first 1000 chars
+#   presentation_deck   -> brief + appendix + script, full content
+#   presentation_script -> brief + appendix + deck,   full content
+# Each entry is (doc_type, char_cap_or_None). None = full content.
+_CRITIC_SUPPORTING_MAP: dict[str, list[tuple[str, int | None]]] = {
+    "executive_brief":     [],
+    "analytical_appendix": [
+        ("executive_brief", 1000),
+    ],
+    "presentation_deck": [
+        ("executive_brief",     None),
+        ("analytical_appendix", None),
+        ("presentation_script", None),
+    ],
+    "presentation_script": [
+        ("executive_brief",     None),
+        ("analytical_appendix", None),
+        ("presentation_deck",   None),
+    ],
+}
+
+# Source-of-truth rules for cross-document findings (Change 7l-vi):
+#   narrative claims          -> executive_brief
+#   numeric / evidentiary     -> analytical_appendix
+#   deck + script             -> derivatives (always the target to
+#                                patch, never the source of truth)
+# Exposed so the fix-proposal arbiter (Change 7k-i) and the
+# cross-document UI can both reference the same mapping.
+SOURCE_OF_TRUTH_NARRATIVE = "executive_brief"
+SOURCE_OF_TRUTH_NUMERIC = "analytical_appendix"
+DERIVATIVE_DOC_TYPES = ("presentation_deck", "presentation_script")
+
+
+def _format_critic_manifest(
+    manifest: dict[str, Any] | None,
+) -> list[str]:
+    """Render a value_manifest dict as sorted 'TOKEN: value' lines."""
+    if not manifest:
+        return []
+    token_to_value: dict[str, str] = {}
+    for v, meta in manifest.items():
+        if not isinstance(meta, dict):
+            continue
+        token = meta.get("token")
+        if not token or not v:
+            continue
+        if token not in token_to_value:
+            token_to_value[token] = str(v)
+    return [f"  {tok}: {token_to_value[tok]}"
+            for tok in sorted(token_to_value)]
+
+
+def _merge_critic_manifests(
+    manifests: list[dict[str, Any] | None],
+) -> list[str]:
+    """Union of multiple value_manifest dicts -- sorted TOKEN: value
+    lines. Used when the cascading context calls for a multi-document
+    manifest (e.g. appendix merged with brief, full-package merged
+    across all four)."""
+    merged: dict[str, str] = {}
+    for m in manifests:
+        if not m:
+            continue
+        for v, meta in m.items():
+            if not isinstance(meta, dict):
+                continue
+            token = meta.get("token")
+            if not token or not v:
+                continue
+            if token not in merged:
+                merged[token] = str(v)
+    return [f"  {tok}: {merged[tok]}" for tok in sorted(merged)]
+
+
+async def _read_critic_draft(
+    reviewer_email: str | None, document_type: str,
+) -> dict[str, Any] | None:
+    """Fetch a single draft (with value_manifest) for the critic
+    context. Returns None on any failure; the caller treats missing
+    drafts as 'not generated yet' and emits a placeholder line."""
+    if not reviewer_email:
+        return None
+    try:
+        from tools.editor_drafts import (
+            get_current_draft_with_layer3,
+        )
+        return await get_current_draft_with_layer3(
+            reviewer_email, document_type)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "critic_context_draft_read_failed",
+            document_type=document_type, error=str(exc))
+        return None
+
+
+async def build_critic_context(
+    reviewer_email: str | None,
+    document_type: str | None = None,
+) -> str:
+    """
+    Assembles the adversarial-critic context block per the cascading
+    rules in Concern 7b. Returns a single string that goes into both
+    the Gemini and Grok system messages alongside the critic prompt
+    text. Concern 7b cascade summary:
+
+      executive_brief     -- brief only
+      analytical_appendix -- appendix + brief snippet, manifests
+                             merged
+      presentation_deck   -- deck + brief + appendix + script full,
+                             all four manifests merged
+      presentation_script -- script + brief + appendix + deck full,
+                             all four manifests merged
+      full_package        -- all four documents at full content, all
+                             four manifests merged
+
+    The block always includes a REVIEW SCOPE header so the critic
+    knows whether to expect supporting content or not.
+    """
+    is_full_package = document_type is None
+    primary_label = (
+        _CRITIC_DOC_LABELS.get(document_type or "", "Unknown")
+        if not is_full_package else None)
+
+    lines: list[str] = ["=== ADVERSARIAL CRITIC REVIEW CONTEXT ==="]
+    lines.append("")
+    if is_full_package:
+        lines.append(
+            "REVIEW SCOPE: Full Package -- all four deliverables")
+    else:
+        lines.append(f"REVIEW SCOPE: {primary_label}")
+
+    # Build NUMERIC REFERENCE first. The block ALWAYS appears, even
+    # when no manifest is available, so the critic prompt's
+    # "validate against NUMERIC REFERENCE" instruction always has
+    # an anchor to point at.
+    lines.append("")
+    lines.append("NUMERIC REFERENCE (authoritative cache values)")
+    lines.append(
+        "These are the ground-truth figures substituted into the "
+        "document(s) at generation time. Any claim contradicting "
+        "these is a factual error.")
+    manifest_lines: list[str] = []
+    if is_full_package:
+        # Merge all four manifests.
+        manifests = []
+        for dt in _CRITIC_DOC_LABELS:
+            d = await _read_critic_draft(reviewer_email, dt)
+            manifests.append((d or {}).get("value_manifest"))
+        manifest_lines = _merge_critic_manifests(manifests)
+    elif document_type == "executive_brief":
+        d = await _read_critic_draft(reviewer_email, document_type)
+        manifest_lines = _format_critic_manifest(
+            (d or {}).get("value_manifest"))
+    elif document_type == "analytical_appendix":
+        # Appendix corroborates the brief -- merge both manifests so
+        # numeric drift across the pair is flaggable.
+        a = await _read_critic_draft(reviewer_email, document_type)
+        b = await _read_critic_draft(
+            reviewer_email, "executive_brief")
+        manifest_lines = _merge_critic_manifests([
+            (a or {}).get("value_manifest"),
+            (b or {}).get("value_manifest"),
+        ])
+    elif document_type in (
+            "presentation_deck", "presentation_script"):
+        # Deck and script narrate the brief / appendix -- they need
+        # the full numeric surface to validate.
+        manifests = []
+        for dt in _CRITIC_DOC_LABELS:
+            d = await _read_critic_draft(reviewer_email, dt)
+            manifests.append((d or {}).get("value_manifest"))
+        manifest_lines = _merge_critic_manifests(manifests)
+    if manifest_lines:
+        lines.extend(manifest_lines)
+    else:
+        lines.append("  (no value manifest available)")
+
+    # PRIMARY DOCUMENT(S) section.
+    lines.append("")
+    if is_full_package:
+        lines.append("PRIMARY DOCUMENTS FOR REVIEW (all four):")
+        for dt, label in _CRITIC_DOC_LABELS.items():
+            d = await _read_critic_draft(reviewer_email, dt)
+            text = (d or {}).get("content_text") or ""
+            lines.append("")
+            lines.append(f"[{label}]")
+            lines.append(
+                text.strip()
+                if text.strip() else "(no draft content available)")
+    else:
+        lines.append(f"PRIMARY DOCUMENT FOR REVIEW: {primary_label}")
+        d = await _read_critic_draft(reviewer_email, document_type)
+        text = (d or {}).get("content_text") or ""
+        lines.append(
+            text.strip()
+            if text.strip() else "(no draft content available)")
+
+    # SUPPORTING CONTEXT -- only for per-doc reviews where the
+    # cascade map declares siblings.
+    if not is_full_package:
+        supporting_spec = _CRITIC_SUPPORTING_MAP.get(
+            document_type or "", [])
+        if supporting_spec:
+            lines.append("")
+            lines.append(
+                "SUPPORTING CONTEXT (for consistency checking "
+                "only -- do not grade these documents):")
+            for sib_dt, char_cap in supporting_spec:
+                sib_label = _CRITIC_DOC_LABELS[sib_dt]
+                sib_d = await _read_critic_draft(
+                    reviewer_email, sib_dt)
+                sib_text = (sib_d or {}).get("content_text") or ""
+                if char_cap is not None and len(sib_text) > char_cap:
+                    sib_text = sib_text[:char_cap] + "…"
+                lines.append("")
+                lines.append(f"[{sib_label}]")
+                lines.append(
+                    sib_text.strip()
+                    if sib_text.strip()
+                    else "(no draft content available)")
+
+    # Academic context footer -- shared across all critic invocations.
+    lines.append("")
+    lines.append("ACADEMIC CONTEXT:")
+    lines.append(
+        "Course: FNA 670, MSFA practicum, Queens University of "
+        "Charlotte / McColl School of Business")
+    lines.append(
+        "Scope: Three-asset portfolio (equities, bonds, "
+        "alternatives) with regime-conditional dynamic allocation")
+    lines.append("Submission: June 30 panel defense")
+    return "\n".join(lines)
+
+
 # ── Peer fan-out ──────────────────────────────────────────────────────────────
 
 _PEER_QUESTION_BASE = (
