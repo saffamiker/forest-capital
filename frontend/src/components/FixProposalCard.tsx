@@ -68,9 +68,10 @@ export default function FixProposalCard(
     onApplied,
   }: FixProposalCardProps,
 ): React.ReactElement | null {
-  const sev = finding.severity
-  if (sev === 'Minor') return null  // Concern 7k-v rule
-
+  // Hooks MUST be called unconditionally on every render -- the
+  // Minor early-return below would otherwise trip ESLint's
+  // react-hooks/rules-of-hooks. Concern 7k-v rule: Minor findings
+  // render no card; we return null AFTER the hook calls.
   const [localProposal, setLocalProposal] = useState<
     FixProposal | null>(proposal)
   const [expanded, setExpanded] = useState(true)
@@ -81,6 +82,9 @@ export default function FixProposalCard(
   const [applied, setApplied] = useState(false)
   const [appliedLabel, setAppliedLabel] = useState<string | null>(
     null)
+
+  const sev = finding.severity
+  if (sev === 'Minor') return null
 
   const handlePropose = async (): Promise<void> => {
     setProposingBusy(true)
