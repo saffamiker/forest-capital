@@ -1522,3 +1522,169 @@ class TestTestEnvironmentShortCircuits:
         assert out["dissenting_view"] == ""
         assert out["limitations_to_surface"] == []
         assert out["blind_spots"] == []
+
+
+# ── refresh_story_plan -- force kwarg (June 22 2026) ─────────────────
+
+
+class TestRefreshStoryPlanForce:
+    """Pre-fix, refresh_story_plan always READ from the cache
+    first and returned a non-fallback cached row verbatim. The
+    deck Regenerate path therefore reused the cached plan and
+    Molly's slide guidance / locked-title edits never surfaced
+    until an upstream hash (data_hash / brief_hash /
+    appendix_hash) changed.
+
+    The fix: force=True kwarg on refresh_story_plan SKIPS the
+    cache read and runs the generator fresh. The write still
+    happens after generation so non-forced callers still see
+    the refreshed row. The deck callsite passes force=True
+    unconditionally; brief + appendix keep force=False default.
+    """
+
+    def test_force_true_skips_cache_read(self, monkeypatch):
+        import asyncio
+        from tools import story_plan as sp
+
+        cache_reads: list[tuple[str, str]] = []
+
+        async def _track_cache_read(storage_hash, doc_type):
+            cache_reads.append((storage_hash, doc_type))
+            # Return a "valid" cached plan so the cache-hit
+            # branch WOULD return early if not for force.
+            return {"_model": "claude-opus-4-7",
+                    "slide_plan": [{"slide_number": 1}],
+                    "central_argument": "cached"}
+
+        async def _persist(*_a, **_kw):
+            return None
+
+        def _gen(*_a, **_kw):
+            return {"_model": "claude-opus-4-7",
+                    "slide_plan": [{"slide_number": 1}],
+                    "central_argument": "fresh"}
+
+        monkeypatch.setattr(
+            sp, "get_cached_story_plan", _track_cache_read)
+        monkeypatch.setattr(sp, "persist_story_plan", _persist)
+        monkeypatch.setattr(
+            sp, "generate_deck_story_plan", _gen)
+
+        result = asyncio.run(sp.refresh_story_plan(
+            "abc123", "deck",
+            deck_context={"validated_constants": {}},
+            slide_titles=["A"],
+            force=True))
+        # force=True must skip the cache read entirely.
+        assert cache_reads == []
+        # And the fresh generator's output must be returned,
+        # not the would-be cached value.
+        assert result.get("central_argument") == "fresh"
+
+    def test_force_false_default_preserves_cache_hit_semantics(
+            self, monkeypatch):
+        """The default force=False keeps today's behaviour --
+        the cache READ fires and a non-fallback row returns
+        early without running the generator."""
+        import asyncio
+        from tools import story_plan as sp
+
+        cache_reads: list[tuple[str, str]] = []
+        gen_called: dict = {"hit": False}
+
+        async def _track_cache_read(storage_hash, doc_type):
+            cache_reads.append((storage_hash, doc_type))
+            return {"_model": "claude-opus-4-7",
+                    "slide_plan": [{"slide_number": 1}],
+                    "central_argument": "cached"}
+
+        def _gen(*_a, **_kw):
+            gen_called["hit"] = True
+            return {"_model": "claude-opus-4-7"}
+
+        monkeypatch.setattr(
+            sp, "get_cached_story_plan", _track_cache_read)
+        monkeypatch.setattr(
+            sp, "generate_deck_story_plan", _gen)
+
+        result = asyncio.run(sp.refresh_story_plan(
+            "abc123", "deck",
+            deck_context={"validated_constants": {}},
+            slide_titles=["A"]))
+        # Cache read fired.
+        assert len(cache_reads) == 1
+        # Generator did NOT run (cached row returned early).
+        assert gen_called["hit"] is False
+        # And the cached value was returned.
+        assert result.get("central_argument") == "cached"
+        assert result.get("cache") == "hit"
+
+    def test_force_false_fallback_falls_through_to_generator(
+            self, monkeypatch):
+        """A cached row tagged deterministic_fallback should
+        not satisfy the cache-hit branch -- the generator
+        still runs. Pins this so a future change can't
+        accidentally serve fallback as if it were a real
+        plan."""
+        import asyncio
+        from tools import story_plan as sp
+
+        gen_called: dict = {"hit": False}
+
+        async def _cached_fallback(_h, _t):
+            return {"_model": "deterministic_fallback",
+                    "slide_plan": [{"slide_number": 1}]}
+
+        def _gen(*_a, **_kw):
+            gen_called["hit"] = True
+            return {"_model": "claude-opus-4-7",
+                    "slide_plan": [{"slide_number": 1}]}
+
+        async def _persist(*_a, **_kw):
+            return None
+
+        monkeypatch.setattr(
+            sp, "get_cached_story_plan", _cached_fallback)
+        monkeypatch.setattr(
+            sp, "generate_deck_story_plan", _gen)
+        monkeypatch.setattr(sp, "persist_story_plan", _persist)
+
+        asyncio.run(sp.refresh_story_plan(
+            "abc123", "deck",
+            deck_context={"validated_constants": {}},
+            slide_titles=["A"]))
+        # Fallback rows do NOT short-circuit -- generator ran.
+        assert gen_called["hit"] is True
+
+    def test_deck_callsite_in_main_passes_force_true(self):
+        """The deck story plan loader in main.py must pass
+        force=True so every deck generation rebuilds. Without
+        this Molly's slide guidance changes never reach the
+        per-slide writer between two successive Regenerate
+        clicks on the same data_hash."""
+        import inspect
+        import main
+        src = inspect.getsource(
+            main._resolve_story_plan_slide_entries)
+        assert "force=True" in src, (
+            "deck story plan loader must pass force=True to "
+            "refresh_story_plan -- otherwise Regenerate reuses "
+            "the cached plan and slide guidance updates never "
+            "surface")
+
+    def test_brief_callsite_keeps_force_false_default(self):
+        """The brief story plan loader should NOT force --
+        cache hits on brief regeneration are intentional (brief
+        is the narrative anchor, less iteration churn). Pin
+        this so a future copy-paste of the deck callsite doesn't
+        accidentally force brief regen too."""
+        import inspect
+        import main
+        src = inspect.getsource(
+            main._resolve_story_plan_brief_sections)
+        # The brief loader must NOT pass force=True. The kwarg
+        # is omitted entirely (defaulting to False).
+        assert "force=True" not in src, (
+            "brief story plan loader must NOT pass force=True "
+            "-- the brief is the narrative anchor and cache "
+            "hits are correct behaviour on unchanged data")
