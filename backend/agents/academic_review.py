@@ -321,12 +321,34 @@ def build_review_context_block(
     analytics: dict[str, Any], docs_by_type: dict[str, list[dict]],
     team_activity: dict[str, Any] | None = None,
     team_members: list[tuple[str, str]] | None = None,
+    target_review_type: str | None = None,
+    value_manifest: dict[str, Any] | None = None,
 ) -> str:
     """
     Renders the analytics inventory, the grouped documents and the
     team-activity summary into one structured text block injected into
     every agent prompt. Missing document types render as "(not yet
     uploaded)" — never an error.
+
+    target_review_type — June 23 2026, per-doc scoping. When supplied
+    (a value from DOC_TYPE_LABELS like "brief_review", "deck_review",
+    "appendix_review", or "presentation_script"), the documents
+    block is split into a PRIMARY DOCUMENT FOR REVIEW section (full
+    content of the target type) and a SUPPORTING CONTEXT section
+    (500-char-truncated summary of each non-target type) so the
+    arbiter has cross-reference awareness without flooding the
+    prompt. None (the cross-document default) renders every type at
+    full content under PROJECT DOCUMENTS unchanged.
+
+    value_manifest — June 23 2026, Concern 6b. When supplied (the
+    target document's editor_drafts.value_manifest snapshot, ie
+    {value: {token, data_hash, generated_at}}), a NUMERIC REFERENCE
+    block is appended after ANALYTICS INVENTORY giving the arbiter
+    the authoritative cache values that were substituted into the
+    document at generation time. Only the per-doc reviews carry a
+    target document and therefore a target manifest -- cross-doc
+    reviews intentionally skip this section (the cross-deliverable
+    consistency check covers that surface).
     """
     lines: list[str] = ["=== PROJECT CONTEXT FOR ACADEMIC REVIEW ===", ""]
 
@@ -353,19 +375,106 @@ def build_review_context_block(
         + (", ".join(comps) if comps else "(none — analytics data not yet loaded)")
     )
 
+    # — Numeric reference (Concern 6b, June 23 2026) —
+    # Authoritative cache values for the target document. The
+    # arbiter validates per-claim figures against this list; the
+    # per-document arbiter prompt (Concern 6c) instructs it to flag
+    # mismatches as HIGH severity numeric inconsistency and unknown
+    # figures as freehand-figure / manual-verification cases.
+    # Cross-document reviews intentionally skip this section -- the
+    # cross-deliverable consistency check covers that surface and a
+    # full union of every doc's manifest would flood the prompt.
+    if target_review_type and value_manifest:
+        lines.append("")
+        lines.append(
+            "NUMERIC REFERENCE "
+            "(authoritative cache values for this review)")
+        lines.append(
+            "These values were substituted into the document at "
+            "generation time. Treat any figure in the document that "
+            "contradicts these as a potential error.")
+        # value_manifest is {value -> {token, data_hash,
+        # generated_at}}. Emit one line per token in
+        # TOKEN: value form. Skip entries with missing tokens or
+        # missing values defensively -- a corrupt manifest entry
+        # should not abort the render.
+        token_to_value: dict[str, str] = {}
+        for v, meta in value_manifest.items():
+            if not isinstance(meta, dict):
+                continue
+            token = meta.get("token")
+            if not token or not v:
+                continue
+            # If two values share a token (shouldn't happen but
+            # could under a manifest-corruption edge), keep the
+            # first encountered -- the per-token list is meant to
+            # be unique.
+            if token not in token_to_value:
+                token_to_value[token] = str(v)
+        for tok in sorted(token_to_value):
+            lines.append(f"  {tok}: {token_to_value[tok]}")
+        if not token_to_value:
+            lines.append("  (manifest is empty)")
+
     # — Documents —
-    lines.append("")
-    lines.append("PROJECT DOCUMENTS")
-    for dtype, label in DOC_TYPE_LABELS.items():
-        docs = docs_by_type.get(dtype) or []
-        if not docs:
-            lines.append(f"\n[{label}]\n(not yet uploaded)")
-            continue
-        for d in docs:
-            text = (d.get("content_text") or "").strip()
-            if len(text) > _DOC_CHAR_CAP:
-                text = text[:_DOC_CHAR_CAP] + "\n…[document truncated for review]"
-            lines.append(f"\n[{label}: {d.get('name', 'document')}]\n{text}")
+    if target_review_type and target_review_type in DOC_TYPE_LABELS:
+        # Per-doc scoping: split into PRIMARY + SUPPORTING. Only the
+        # FOUR review-target types render with content -- the others
+        # (requirements docs, midpoint_draft, other) stay in the
+        # SUPPORTING block when present, since they can still inform
+        # consistency checks.
+        primary_label = DOC_TYPE_LABELS[target_review_type]
+        lines.append("")
+        lines.append(
+            f"PRIMARY DOCUMENT FOR REVIEW: {primary_label}")
+        primary_docs = docs_by_type.get(target_review_type) or []
+        if not primary_docs:
+            lines.append("(not yet uploaded)")
+        else:
+            for d in primary_docs:
+                text = (d.get("content_text") or "").strip()
+                if len(text) > _DOC_CHAR_CAP:
+                    text = (text[:_DOC_CHAR_CAP]
+                            + "\n…[document truncated for review]")
+                lines.append(
+                    f"\n[{primary_label}: "
+                    f"{d.get('name', 'document')}]\n{text}")
+        # Supporting context -- abbreviated summaries of the other
+        # types, 500 chars each so the arbiter can spot cross-doc
+        # consistency issues without paying the full content cost.
+        lines.append("")
+        lines.append("SUPPORTING CONTEXT (abbreviated)")
+        any_supporting = False
+        for dtype, label in DOC_TYPE_LABELS.items():
+            if dtype == target_review_type:
+                continue
+            docs = docs_by_type.get(dtype) or []
+            if not docs:
+                continue
+            for d in docs:
+                any_supporting = True
+                text = (d.get("content_text") or "").strip()
+                snippet = text[:500]
+                if len(text) > 500:
+                    snippet += "…"
+                lines.append(f"\n[{label}]\n{snippet}")
+        if not any_supporting:
+            lines.append("(no supporting documents present)")
+    else:
+        lines.append("")
+        lines.append("PROJECT DOCUMENTS")
+        for dtype, label in DOC_TYPE_LABELS.items():
+            docs = docs_by_type.get(dtype) or []
+            if not docs:
+                lines.append(f"\n[{label}]\n(not yet uploaded)")
+                continue
+            for d in docs:
+                text = (d.get("content_text") or "").strip()
+                if len(text) > _DOC_CHAR_CAP:
+                    text = (text[:_DOC_CHAR_CAP]
+                            + "\n…[document truncated for review]")
+                lines.append(
+                    f"\n[{label}: {d.get('name', 'document')}]\n{text}")
 
     # — Team role division context (May 28 2026) —
     # Prepended to the engagement block so the verdict reads the role
@@ -463,6 +572,7 @@ _EDITOR_TO_REVIEW_TYPE = {
 
 async def gather_review_context(
     reviewer_email: str | None = None,
+    document_type: str | None = None,
 ) -> dict[str, Any]:
     """
     Assembles the full review context: the analytics snapshot, the
@@ -473,6 +583,16 @@ async def gather_review_context(
     (tools/editor_drafts) take precedence over an uploaded academic
     document of the same kind, so Academic Review evaluates the live
     working draft rather than a stale uploaded file.
+
+    document_type — June 23 2026, per-doc scoping. When supplied
+    (a query-param value like "executive_brief" /
+    "presentation_deck" / "analytical_appendix" /
+    "presentation_script"), the assembled context block splits into
+    a PRIMARY DOCUMENT FOR REVIEW section (full content of the
+    target) plus a SUPPORTING CONTEXT section (abbreviated summaries
+    of the other deliverables). None (the cross-document default)
+    keeps the legacy behaviour: every document type at full content
+    under PROJECT DOCUMENTS.
     """
     analytics = await _gather_analytics_snapshot()
     docs: list[dict] = []
@@ -513,8 +633,38 @@ async def gather_review_context(
 
     # Project team — resolved from platform_users (fail-open to config).
     team_members = await _resolve_team_members()
+    # Map the editor's document_type (the public query-param value)
+    # to the review-internal review_type key the documents dict is
+    # keyed under. Script's editor type IS its review key, so the
+    # lookup falls through to the identity mapping there.
+    target_review_type: str | None = None
+    target_value_manifest: dict[str, Any] | None = None
+    if document_type:
+        target_review_type = _EDITOR_TO_REVIEW_TYPE.get(
+            document_type, document_type)
+        # Concern 6b -- read the target draft's value_manifest so
+        # the context block can surface the authoritative cache
+        # values to the arbiter. The Layer-3 helper returns the
+        # manifest alongside content_text; we already overlaid the
+        # draft above so this read is for the manifest only.
+        if reviewer_email:
+            try:
+                from tools.editor_drafts import (
+                    get_current_draft_with_layer3,
+                )
+                draft_l3 = await get_current_draft_with_layer3(
+                    reviewer_email, document_type)
+                if draft_l3:
+                    target_value_manifest = (
+                        draft_l3.get("value_manifest") or None)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "academic_review_value_manifest_read_failed",
+                    document_type=document_type, error=str(exc))
     block = build_review_context_block(
-        analytics, docs_by_type, team_activity, team_members)
+        analytics, docs_by_type, team_activity, team_members,
+        target_review_type=target_review_type,
+        value_manifest=target_value_manifest)
     present = [t for t, v in docs_by_type.items() if v]
     missing = [t for t, v in docs_by_type.items() if not v]
     log.info(
@@ -963,6 +1113,27 @@ primary safety net for them."""
 # downgrade from Developing → Incomplete signals the specific failure
 # mode of a script that has gaps rather than just being weak prose.)
 _ARBITER_INSTRUCTIONS_SCRIPT = """=== YOUR TASK — ARBITER VERDICT (PRESENTATION SCRIPT) ===
+
+SCOPE
+You are reviewing the Presentation Script only. The context block
+contains the full text of this document under PRIMARY DOCUMENT FOR
+REVIEW, and abbreviated summaries of the other deliverables under
+SUPPORTING CONTEXT. Evaluate ONLY the primary document against the
+rubric below. You may reference supporting context to check
+consistency but do not grade it.
+
+NUMERIC VALIDATION
+The NUMERIC REFERENCE section in the context block contains the
+authoritative cache values that were substituted into this document
+at generation time. For every numeric claim you encounter in the
+primary document:
+- If the figure appears in NUMERIC REFERENCE and matches: note it
+  as cache-verified.
+- If the figure appears in NUMERIC REFERENCE but does not match:
+  flag it as HIGH severity numeric inconsistency.
+- If the figure does NOT appear in NUMERIC REFERENCE: flag it as a
+  freehand figure requiring manual verification.
+
 You are the arbiter for a presentation script — a spoken delivery
 document, NOT a written academic submission. Integrate and WEIGH the
 peer review notes above. Produce a structured, rubric-mapped verdict
@@ -1052,6 +1223,27 @@ generic encouragement is not useful."""
 # Key Findings (25%) and Methodology (20%) carry the verdict and a
 # weak Visuals (5%) does not tank the score.
 _ARBITER_INSTRUCTIONS_BRIEF = """=== YOUR TASK — ARBITER VERDICT (EXECUTIVE BRIEF) ===
+
+SCOPE
+You are reviewing the Executive Brief only. The context block
+contains the full text of this document under PRIMARY DOCUMENT FOR
+REVIEW, and abbreviated summaries of the other deliverables under
+SUPPORTING CONTEXT. Evaluate ONLY the primary document against the
+rubric below. You may reference supporting context to check
+consistency but do not grade it.
+
+NUMERIC VALIDATION
+The NUMERIC REFERENCE section in the context block contains the
+authoritative cache values that were substituted into this document
+at generation time. For every numeric claim you encounter in the
+primary document:
+- If the figure appears in NUMERIC REFERENCE and matches: note it
+  as cache-verified.
+- If the figure appears in NUMERIC REFERENCE but does not match:
+  flag it as HIGH severity numeric inconsistency.
+- If the figure does NOT appear in NUMERIC REFERENCE: flag it as a
+  freehand figure requiring manual verification.
+
 You are the arbiter for the FNA 670 EXECUTIVE BRIEF submission — a
 short investment brief written for a senior investment audience AND
 graded by the FNA 670 academic panel. Evaluate against the BRIEF
@@ -1241,6 +1433,27 @@ the draft, evaluate that, stop."""
 #   Calculations + Models 25%, Performance Metrics + Visualizations
 #   20%, Sensitivity + Robustness 15%.
 _ARBITER_INSTRUCTIONS_DECK = """=== YOUR TASK — ARBITER VERDICT (PRESENTATION DECK) ===
+
+SCOPE
+You are reviewing the Final Presentation Deck only. The context
+block contains the full text of this document under PRIMARY
+DOCUMENT FOR REVIEW, and abbreviated summaries of the other
+deliverables under SUPPORTING CONTEXT. Evaluate ONLY the primary
+document against the rubric below. You may reference supporting
+context to check consistency but do not grade it.
+
+NUMERIC VALIDATION
+The NUMERIC REFERENCE section in the context block contains the
+authoritative cache values that were substituted into this document
+at generation time. For every numeric claim you encounter in the
+primary document:
+- If the figure appears in NUMERIC REFERENCE and matches: note it
+  as cache-verified.
+- If the figure appears in NUMERIC REFERENCE but does not match:
+  flag it as HIGH severity numeric inconsistency.
+- If the figure does NOT appear in NUMERIC REFERENCE: flag it as a
+  freehand figure requiring manual verification.
+
 You are the arbiter for the FNA 670 FINAL PRESENTATION DECK — an
 18-20 minute, 11-slide deck delivered to a mixed audience of senior
 investment professionals (Forest Capital partners) AND the FNA 670
@@ -1404,6 +1617,28 @@ stop."""
 
 
 _ARBITER_INSTRUCTIONS_APPENDIX = """=== YOUR TASK — ARBITER VERDICT (ANALYTICAL APPENDIX) ===
+
+SCOPE
+You are reviewing the Analytical Appendix only. The context block
+contains the full text of this document under PRIMARY DOCUMENT FOR
+REVIEW, and abbreviated summaries of the other deliverables under
+SUPPORTING CONTEXT. Evaluate ONLY the primary document against the
+rubric below. You may reference supporting context to check
+consistency but do not grade it.
+
+NUMERIC VALIDATION
+The NUMERIC REFERENCE section in the context block contains the
+authoritative cache values that were substituted into this document
+at generation time. For every numeric claim you encounter in the
+primary document:
+- If the figure appears in NUMERIC REFERENCE and matches: note it
+  as cache-verified.
+- If the figure appears in NUMERIC REFERENCE but does not match:
+  flag it as HIGH severity numeric inconsistency.
+- If the figure does NOT appear in NUMERIC REFERENCE: flag it as a
+  freehand figure requiring manual verification.
+
+
 You are the arbiter for the FNA 670 ANALYTICAL APPENDIX — a
 workbook-style deliverable (35% of project grade) that documents
 every assumption, calculation, and visualisation behind the

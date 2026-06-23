@@ -6382,7 +6382,8 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             start_harness_capture()
             start_usage_capture()
             ctx = await gather_review_context(
-                reviewer_email=session.get("email"))
+                reviewer_email=session.get("email"),
+                document_type=document_type_q or None)
             context_block = ctx["context_block"]
             multi_user = ctx.get("multi_user_activity", False)
             # Threaded into the chart-vision scope sentences so all-
