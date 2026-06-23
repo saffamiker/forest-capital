@@ -790,7 +790,12 @@ export default function QAHub() {
             Reviews all four deliverables together against the
             panel-defense rubric. Run this after all documents are
             generated and edited. Individual document reviews live
-            inside each editor's Writing Assistant panel.
+            inside each editor's Writing Assistant panel. For the
+            final pre-submission check, use the{' '}
+            <span className="font-semibold text-electric">
+              Submission Readiness Review
+            </span>{' '}
+            on the Reports page.
           </p>
         </div>
         <AcademicReviewSection />

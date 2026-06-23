@@ -8469,6 +8469,13 @@ async def post_verify_all_for_submission(
     brief = await _verify_one("executive_brief")
     deck = await _verify_one("presentation_deck")
     appendix = await _verify_one("analytical_appendix")
+    # June 23 2026 -- the script was historically skipped; the
+    # Submission Readiness Review audit identified this gap. Script
+    # generation has been writing value_manifest the whole time so
+    # the verify_export_against_cache helper works for it; the
+    # exclusion was a wiring oversight in this endpoint, not a
+    # capability gap.
+    script = await _verify_one("presentation_script")
 
     # Cross-deliverable consistency check -- run only when at least
     # two documents exist and we have a substitution table to compare
@@ -8483,7 +8490,13 @@ async def post_verify_all_for_submission(
         # above don't include the body text in their return shape.
         for doc_type in (
                 "executive_brief", "presentation_deck",
-                "analytical_appendix"):
+                "analytical_appendix",
+                # June 23 2026 -- include script in the cross-
+                # deliverable scan. Script narration paraphrases the
+                # deck's numeric anchors and a drift caused by a
+                # manual edit in the script is just as
+                # submission-blocking as one in the brief.
+                "presentation_script"):
             d = await get_current_draft(email, doc_type)
             text = (d or {}).get("content_text") or ""
             if text.strip():
@@ -8537,7 +8550,7 @@ async def post_verify_all_for_submission(
             error=str(exc))
 
     # Aggregate the four results into an overall verdict.
-    per_doc = [brief, deck, appendix]
+    per_doc = [brief, deck, appendix, script]
     any_not_generated = any(
         d["status"] == "not_generated" for d in per_doc)
     any_failed = any(
@@ -8567,18 +8580,18 @@ async def post_verify_all_for_submission(
         missing = [
             label for d, label in (
                 (brief, "brief"), (deck, "deck"),
-                (appendix, "appendix"),
+                (appendix, "appendix"), (script, "script"),
             ) if d["status"] == "not_generated"]
         if missing:
             rec = (
                 f"Generate {', '.join(missing)} before submitting. "
-                "All three deliverables must exist for the "
+                "All four deliverables must exist for the "
                 "pre-submission check to pass.")
         else:
             err_docs = [
                 label for d, label in (
                     (brief, "brief"), (deck, "deck"),
-                    (appendix, "appendix"),
+                    (appendix, "appendix"), (script, "script"),
                 ) if d.get("errors") or d["status"] == "failed"]
             if err_docs:
                 rec = (
@@ -8598,6 +8611,7 @@ async def post_verify_all_for_submission(
 
     return {
         "brief": brief, "deck": deck, "appendix": appendix,
+        "script": script,
         "cross_deliverable": cross,
         "overall": overall,
         "submission_recommendation": rec,

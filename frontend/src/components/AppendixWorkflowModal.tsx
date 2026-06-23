@@ -20,6 +20,7 @@ const CHECKLIST_ITEMS: readonly string[] = [
   'Data hash in footer matches Reports page hash',
   'Section G table present with no placeholder note',
   'Appendix Review shows no Needs Work findings',
+  'Submission Readiness Review on Reports page shows green',
   '.docx downloaded and reviewed before submission',
 ] as const
 

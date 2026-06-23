@@ -45,6 +45,7 @@ const CHECKLIST_ITEMS: readonly string[] = [
   'Rebalancing disclosure accurate (monthly / 2pp)',
   'Final recommendations framed as investment conclusions',
   'Brief Review shows no Needs Work findings',
+  'Submission Readiness Review on Reports page shows green',
   '.docx downloaded and reviewed in Word before upload',
 ] as const
 

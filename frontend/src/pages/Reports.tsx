@@ -30,6 +30,7 @@ import {
 import TeamActivityPanel from '../components/TeamActivityPanel'
 import AcademicExportModal from '../components/AcademicExportModal'
 import DataReferenceSheetPanel from '../components/DataReferenceSheetPanel'
+import SubmissionReadinessReview from '../components/SubmissionReadinessReview'
 import DocumentGenerationPanel from '../components/DocumentGenerationPanel'
 import KeyMetricsPanel from '../components/KeyMetricsPanel'
 import PreSubmissionCheckPanel from '../components/PreSubmissionCheckPanel'
@@ -160,6 +161,14 @@ export default function Reports() {
           button exports the full table with the strategy hash baked
           into the filename for offline cross-reference. */}
       <DataReferenceSheetPanel />
+
+      {/* Submission Readiness Review (June 23 2026) -- the capstone
+          pre-submission go/no-go panel. Bundles a data cross-
+          reference + full cross-document academic review behind a
+          single button + pre-flight modal. Distinct from the QA
+          Hub's Cross-Document Review (iterative drafting tool):
+          this surface is for the FINAL check before June 30. */}
+      <SubmissionReadinessReview />
 
       {/* Team Activity — the evidence behind the Roles & Division-of-Labor
           deliverable and the AI-use narrative, so it leads the page.

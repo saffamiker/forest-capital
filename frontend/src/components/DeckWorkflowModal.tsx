@@ -23,6 +23,7 @@ const CHECKLIST_ITEMS: readonly string[] = [
   'Speaker notes present on all slides including slide 9 demo sequence',
   'No doubled symbols on slide 1',
   'Deck Review shows no Needs Work findings',
+  'Submission Readiness Review on Reports page shows green',
   '.pptx downloaded and reviewed before submission',
 ] as const
 

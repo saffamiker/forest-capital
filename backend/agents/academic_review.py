@@ -914,7 +914,36 @@ Every rating is exactly one of: Strong, Developing, Needs Work. Be
 direct and actionable. The team is preparing a graded submission on a
 short clock — generic encouragement is not useful. But the converse
 also holds: do not invent concerns to look thorough. Read what's in
-the draft, evaluate that, stop."""
+the draft, evaluate that, stop.
+
+NON-NUMERIC CONSISTENCY CHECK
+
+In addition to the rubric above, flag any of the following that you
+detect across the four documents:
+
+- Regime label inconsistency: if the brief calls the current regime
+  BULL but the deck or script says TRANSITION or BEAR, flag it as
+  HIGH severity.
+
+- Date and period inconsistency: if one document says Q1 2022 and
+  another says Q2 2022 for the same event, flag it.
+
+- Citation year inconsistency: if Hamilton (1989) appears as
+  Hamilton (1990) in any document, flag it.
+
+- Narrative coherence: if the brief's central argument and the
+  deck's SO WHAT titles tell materially different stories, flag it.
+
+- Freehand figures: if you observe a numeric claim in any document
+  that contradicts the Key Findings figures provided in the context
+  block, flag it as a potential hallucination.
+
+Label all findings from this section as NON_NUMERIC_CONSISTENCY
+with severity HIGH or MEDIUM. These flags exist BECAUSE the data
+cross-reference pass that runs alongside this review catches
+substituted numeric tokens only; the gaps named above are exactly
+what the cross-reference cannot see, so this review is the
+primary safety net for them."""
 
 # Script-specific rubric — used when Academic Review runs against a
 # presentation_script editor draft. The default rubric evaluates a
