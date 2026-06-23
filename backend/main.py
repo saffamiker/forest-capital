@@ -14816,7 +14816,14 @@ _DECK_NUMERIC_PLACEHOLDER_GUIDE_EXTENSION = (
     "  {{REGIME_SWITCHING_TURNOVER}} -- annualized turnover %\n"
     "  {{NET_SHARPE_10BP}} / {{NET_SHARPE_15BP}} / {{NET_SHARPE_20BP}}"
     " -- net Sharpe after transaction costs at 10/15/20 bps\n"
-    "  {{CVAR_99_BENCHMARK}} -- benchmark 99% CVaR\n"
+    # June 22 2026 -- {{CVAR_99_BENCHMARK}} removed from the
+    # placeholder vocabulary. It was advertised here but cited
+    # by zero slide specs; the substitution resolver pointed at
+    # a field the strategy cache never carries, so any organic
+    # LLM use would have resolved to em-dash and tripped the
+    # unresolved-placeholder audit. If a future slide spec
+    # genuinely needs CVaR, wire up the tail_risk metric source
+    # threading + restore the line here.
     "  {{VIX_CURRENT}} -- current VIX level\n"
     "  {{CREDIT_SPREAD_CURRENT}} -- current HY OAS\n"
     "  {{YIELD_CURVE_CURRENT}} -- 10Y-2Y spread\n"
