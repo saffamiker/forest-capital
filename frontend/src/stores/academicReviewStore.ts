@@ -175,6 +175,10 @@ interface AcademicReviewStore {
 
 
 const EMPTY_PER_DOC_MAP: Record<EditorDocumentType, PerDocumentReviewSlice> = {
+  // midpoint_paper stays in EditorDocumentType post-retirement so
+  // historical drafts still type-check; seed an empty slice to keep
+  // the Record exhaustive (Vercel's tsc --noEmit catches missing keys).
+  midpoint_paper:      { ...EMPTY_PER_DOC_SLICE },
   executive_brief:     { ...EMPTY_PER_DOC_SLICE },
   analytical_appendix: { ...EMPTY_PER_DOC_SLICE },
   presentation_deck:   { ...EMPTY_PER_DOC_SLICE },
