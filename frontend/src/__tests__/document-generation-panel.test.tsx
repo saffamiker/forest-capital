@@ -217,25 +217,46 @@ describe('DocumentGenerationPanel — async generation', () => {
     confirmSpy.mockRestore()
   })
 
-  it('Regenerate is a no-op when the user dismisses the confirm prompt (bridge #90)', async () => {
-    // Defensive: clicking Regenerate and then cancelling the confirm
-    // must NOT fire the POST. Pinning this guards against the
-    // confirm prompt being silently removed in a future refactor.
-    const confirmSpy = vi.spyOn(window, 'confirm')
-      .mockImplementation(() => false)
-    renderPanel(<DocumentGenerationPanel />)
-    trackJob({
-      job_id: 'j-brief-c', document_type: 'executive_brief',
-      status: 'complete', draft_id: 41,
-      download_url: '/api/v1/jobs/j-brief-c/download', error: null,
+  it('Brief Regenerate is a no-op when the user dismisses the '
+    + 'BriefRegenConfirmModal (June 23 2026 -- replaces the old '
+    + 'window.confirm path for the brief specifically)', async () => {
+      // The brief regen path now branches differently from other
+      // doc types: it runs a pre-flight GET to /api/v1/story-plans/exists
+      // and, when downstream plans exist, opens BriefRegenConfirmModal
+      // instead of window.confirm. Pinning the cancel branch guards
+      // against the modal being silently removed.
+      mockedAxios.get.mockImplementation((url: string) => {
+        if (url === '/api/v1/story-plans/exists') {
+          return Promise.resolve({
+            data: {
+              exists: true,
+              types: {
+                presentation_deck: true,
+                analytical_appendix: true,
+                presentation_script: false,
+              },
+            },
+          })
+        }
+        return Promise.resolve({ data: { jobs: [] } })
+      })
+      renderPanel(<DocumentGenerationPanel />)
+      trackJob({
+        job_id: 'j-brief-c', document_type: 'executive_brief',
+        status: 'complete', draft_id: 41,
+        download_url: '/api/v1/jobs/j-brief-c/download', error: null,
+      })
+      const card = briefCard()
+      const button = await within(card).findByTestId(
+        'regenerate-brief')
+      fireEvent.click(button)
+      // Modal opens on the pre-flight result.
+      const cancel = await screen.findByTestId(
+        'brief-regen-confirm-modal-cancel')
+      fireEvent.click(cancel)
+      // Cancel suppresses the POST.
+      expect(mockedAxios.post).not.toHaveBeenCalled()
     })
-    const card = briefCard()
-    const button = await within(card).findByTestId('regenerate-brief')
-    fireEvent.click(button)
-    expect(confirmSpy).toHaveBeenCalled()
-    expect(mockedAxios.post).not.toHaveBeenCalled()
-    confirmSpy.mockRestore()
-  })
 
   it('shows the error state with Try Again on a failed job', async () => {
     renderPanel(<DocumentGenerationPanel />)

@@ -18,6 +18,7 @@ import {
   CheckCircle, PenLine, RefreshCw, X, Info, Mic, ShieldCheck, ShieldAlert,
   ShieldX,
 } from 'lucide-react'
+import BriefRegenConfirmModal from './BriefRegenConfirmModal'
 import SlideGuidancePanel from './SlideGuidancePanel'
 import TeamGate from './TeamGate'
 import {
@@ -326,6 +327,18 @@ export default function DocumentGenerationPanel() {
     open: boolean; blockers: string[]; message?: string;
     coldCaches?: string[]
   }>({ open: false, blockers: [] })
+  // June 23 2026 -- brief regen confirmation gate. The modal opens
+  // BEFORE the POST when /api/v1/story-plans/exists reports any of
+  // (deck | appendix | script) story plans currently exist. On
+  // Cancel, the POST is suppressed. On Confirm, the POST fires and
+  // the backend clears those plans at the top of
+  // _generate_brief_document. Pending: the DocSpec captured at
+  // click time so Confirm can resume the same generation flow
+  // (regenerate=true) the user originally chose.
+  const [briefRegenConfirm, setBriefRegenConfirm] = useState<{
+    open: boolean
+    pendingDoc: DocSpec | null
+  }>({ open: false, pendingDoc: null })
 
   // On mount, resume polling any in-progress jobs and surface recently
   // completed ones (e.g. generation finished while the user was away).
@@ -351,7 +364,16 @@ export default function DocumentGenerationPanel() {
     }
   }, [jobs])
 
-  const handleGenerate = async (doc: DocSpec, opts?: { regenerate?: boolean }) => {
+  const handleGenerate = async (
+    doc: DocSpec,
+    opts?: {
+      regenerate?: boolean
+      // Internal flag set by the brief-regen confirm modal's
+      // onConfirm so we skip the pre-flight + modal loop. Not part
+      // of the public API of this function.
+      _fromBriefRegenConfirm?: boolean
+    },
+  ) => {
     // Bridge #90: when the user clicks Regenerate on a card that
     // already has a complete generation, warn them the existing
     // editor draft will be superseded -- the backend creates a NEW
@@ -361,11 +383,43 @@ export default function DocumentGenerationPanel() {
     // dirty-flag for the editor, so always-confirm on Regenerate
     // is the safe default.
     if (opts?.regenerate) {
-      const ok = window.confirm(
-        `Regenerating will create a new draft and overwrite the `
-        + `current "${doc.title}" version. Any unsaved edits in the `
-        + `editor will no longer be the canonical draft. Continue?`)
-      if (!ok) return
+      // June 23 2026 -- the brief gets a dedicated modal (NOT
+      // window.confirm) that warns about the downstream story
+      // plan clear. The modal is gated on a pre-flight check:
+      // if no downstream plans exist, skip the modal entirely
+      // and proceed to Generate. Other doc types keep the
+      // generic draft-overwrite confirm via window.confirm.
+      if (doc.documentType === 'executive_brief'
+        && !opts?._fromBriefRegenConfirm) {
+        try {
+          const res = await axios.get<{
+            exists: boolean
+            types: Record<string, boolean>
+          }>('/api/v1/story-plans/exists', {
+            params: {
+              document_types:
+                'presentation_deck,'
+                + 'analytical_appendix,'
+                + 'presentation_script',
+            },
+          })
+          if (res.data.exists) {
+            setBriefRegenConfirm({ open: true, pendingDoc: doc })
+            return
+          }
+        } catch {
+          // Pre-flight failure -- fall through to Generate.
+          // The backend clear is fail-open too: if it can't run
+          // the DELETE, the brief still generates. The modal is
+          // a courtesy warning, not a hard gate.
+        }
+      } else {
+        const ok = window.confirm(
+          `Regenerating will create a new draft and overwrite the `
+          + `current "${doc.title}" version. Any unsaved edits in the `
+          + `editor will no longer be the canonical draft. Continue?`)
+        if (!ok) return
+      }
     }
     // Client-side gate — open the blocking modal without firing the
     // POST when readiness is known-blocked. is_ready === null means
@@ -706,6 +760,18 @@ export default function DocumentGenerationPanel() {
       <BriefWorkflowModal
         open={briefGuideOpen}
         onClose={() => setBriefGuideOpen(false)} />
+      <BriefRegenConfirmModal
+        open={briefRegenConfirm.open}
+        onCancel={() => setBriefRegenConfirm(
+          { open: false, pendingDoc: null })}
+        onConfirm={() => {
+          const pending = briefRegenConfirm.pendingDoc
+          setBriefRegenConfirm({ open: false, pendingDoc: null })
+          if (pending) {
+            void handleGenerate(pending,
+              { regenerate: true, _fromBriefRegenConfirm: true })
+          }
+        }} />
     </section>
   )
 }
