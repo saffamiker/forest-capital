@@ -8282,16 +8282,35 @@ async def _deck_story_plan_status() -> tuple[bool, bool]:
 
     Supersedes the single-flag _deck_story_plan_available() helper
     that landed with PR #343; this PR's rebase replaced it with the
-    two-flag tuple variant per the PR-body coordination plan."""
+    two-flag tuple variant per the PR-body coordination plan.
+
+    June 22 2026 -- composite-hash bug fix. The previous
+    implementation queried
+    get_cached_story_plan(data_hash, "deck") with the bare
+    current_data_hash(), but refresh_story_plan PERSISTS the deck
+    row under a composite hash via
+    cache_key_with_brief_and_appendix
+    ("<data_hash>|<brief_hash>|<appendix_hash>"). The bare-hash
+    exact-match query missed every real deck row -- the gate
+    kept the script card locked even when a fresh deck plan
+    with a populated full_script was sitting in the table.
+    Replaced with get_latest_story_plan(document_type='deck',
+    exclude_fallback=True) which queries by document_type only +
+    excludes deterministic_fallback rows at the SQL layer. The
+    gate's question is "is there a fresh non-fallback deck plan
+    with full_script?" -- "latest by computed_at" is the correct
+    answer. Hash-drift staleness remains handled at export time
+    by verify_export_against_cache."""
     try:
-        from tools.audit_assembler import current_data_hash
-        from tools.story_plan import get_cached_story_plan
-        data_hash = await current_data_hash()
-        if not data_hash:
-            return False, False
-        plan = await get_cached_story_plan(data_hash, "deck")
+        from tools.story_plan import get_latest_story_plan
+        plan = await get_latest_story_plan(
+            "deck", exclude_fallback=True)
         if not plan:
             return False, False
+        # exclude_fallback=True already filters fallback rows at
+        # the SQL layer; the defensive recheck below covers a
+        # future schema change where a row could land with
+        # model=NULL but still represent a fallback.
         plan_available = plan.get("_model") != "deterministic_fallback"
         if not plan_available:
             return False, False
