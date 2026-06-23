@@ -2509,6 +2509,312 @@ def _mock_arbiter_text() -> str:
     )
 
 
+# ── Debate-round arbiter (Concern 7f + 7g) ──────────────────────────────────
+
+_ARBITER_DEBATE_INSTRUCTIONS = """=== DEBATE ROUND ARBITER ===
+
+You are the arbiter of an academic council reviewing a graduate
+finance practicum submission. The council has completed its review.
+An adversarial critic (Gemini + Grok) has now reviewed the same
+document(s) and raised specific findings.
+
+Your task:
+
+1. For each Fatal and Major finding from the critic, assess whether
+   the council's review already addressed it, partially addressed
+   it, or missed it entirely.
+
+2. Where the council missed a valid finding, acknowledge it and
+   incorporate it into the verdict.
+
+3. Where the critic raised a finding that the council disagrees
+   with, articulate the counter-argument clearly and log it as a
+   rebuttal.
+
+4. Produce a final synthesis that reflects both the council's
+   expertise and the critic's adversarial scrutiny.
+
+OUTPUT STRUCTURE (markdown, exactly):
+
+## Response to Adversarial Critic
+
+For each Fatal/Major finding, output a block in this shape:
+
+### [Severity] [Category] -- [Location]
+Critic finding: <summary of what critic raised>
+Council assessment: ADDRESSED | PARTIALLY ADDRESSED | MISSED | REBUTTED
+Resolution: <what the final verdict says about this>
+[If REBUTTED]: Counter-argument: <why the council disagrees and
+what evidence supports the rebuttal>
+
+After every finding block, write:
+
+## Revised Overall Verdict
+
+<updated synthesis incorporating the debate round>
+
+Rules:
+- The four verdict labels (ADDRESSED / PARTIALLY ADDRESSED /
+  MISSED / REBUTTED) must appear EXACTLY as written so the
+  downstream parser can extract them.
+- REBUTTED requires a Counter-argument line.
+- Skip Minor findings -- the debate round runs only on Fatal +
+  Major. If the merged_findings list passed in contains only
+  Minor entries, emit a one-line note saying so and skip the
+  per-finding loop."""
+
+
+def run_arbiter_debate_round(
+    context_block: str,
+    peer_responses: dict[str, str],
+    critic_findings: list[dict[str, Any]],
+    multi_user: bool = False,
+    n_strategies: int | None = None,
+) -> str:
+    """Runs ONE arbiter pass that responds to the critic's Fatal +
+    Major findings. Concern 7f + 7g.
+
+    The arbiter sees:
+      - The original context_block (the full project context)
+      - The peer responses from the just-completed review (so it
+        can spot which findings the council already addressed)
+      - The critic's merged findings list (the targets to respond
+        to per the OUTPUT STRUCTURE)
+
+    Wrapped in the existing GeneratorEvaluatorHarness for
+    consistency with the primary arbiter call. Uses ARBITER_MODEL
+    + ARBITER_MAX_TOKENS.
+    """
+    if _is_test_env():
+        return (
+            "## Response to Adversarial Critic\n\n"
+            "Test environment -- debate round skipped.\n\n"
+            "## Revised Overall Verdict\n\n"
+            "No changes from the primary verdict.")
+
+    # Build the user message: peer notes + critic findings JSON.
+    findings_block = json.dumps(critic_findings, indent=2)
+    user_parts = [
+        context_block,
+        "",
+        "=== PEER REVIEW NOTES (FROM PRIMARY REVIEW) ===",
+    ]
+    for agent_id, text in peer_responses.items():
+        user_parts.append(f"\n[{agent_id}]\n{text}")
+    user_parts.extend([
+        "",
+        "=== ADVERSARIAL CRITIC FINDINGS (REQUIRES RESPONSE) ===",
+        findings_block,
+    ])
+    user_message = "\n".join(user_parts)
+
+    advisor_prompt = (
+        f"You are the academic advisor on the FNA 670 council. "
+        f"Apply the rules in the YOUR TASK section to produce the "
+        f"debate-round response.\n\n"
+        f"{_ARBITER_DEBATE_INSTRUCTIONS}")
+
+    def _generate(prompt: str) -> str:
+        return call_claude(ARBITER_MODEL, advisor_prompt, prompt,
+                           max_tokens=ARBITER_MAX_TOKENS,
+                           trigger="academic_review_debate_round")
+
+    try:
+        from agents.harness import GeneratorEvaluatorHarness
+        harness = GeneratorEvaluatorHarness()
+        result = harness.run(
+            generator_fn=_generate,
+            evaluator_prompt=(
+                _ARBITER_DEBATE_INSTRUCTIONS  # eval against the same rubric
+            ),
+            generator_prompt=user_message,
+            context=context_block[:6000],
+            agent_id="academic_advisor_debate",
+        )
+        return result.response
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "academic_review_debate_round_failed",
+            error=str(exc))
+        # Surface a structured fallback so the SSE stream still
+        # emits a usable debate_round_arbiter payload even when the
+        # harness fails. n_strategies / multi_user retained on the
+        # signature for future eval-prompt customisation.
+        void = (multi_user, n_strategies)  # noqa: F841
+        return (
+            "## Response to Adversarial Critic\n\n"
+            f"Debate round generation failed ({exc}). "
+            "The primary verdict stands; re-run the academic review "
+            "to retry the debate pass.\n\n"
+            "## Revised Overall Verdict\n\n"
+            "No changes -- primary verdict applies.")
+
+
+def parse_debate_assessments(
+    debate_text: str,
+    critic_findings: list[dict[str, Any]],
+) -> tuple[list[bool], list[dict[str, Any]]]:
+    """Walks the debate-round arbiter output and extracts a
+    was_addressed boolean per critic finding + a counter_arguments
+    list for every REBUTTED finding. The matching is positional:
+    findings in critic_findings are expected to appear in the
+    debate prose in the same Fatal-then-Major order the merge layer
+    produced, and the arbiter prompt explicitly skips Minor.
+
+    Robust to small format drift: REBUTTED detection looks for the
+    label anywhere in a per-finding block; ADDRESSED / PARTIALLY
+    ADDRESSED / MISSED similarly. Falls through to (False,
+    counter_arguments=[]) for findings the arbiter didn't address.
+    """
+    import re as _re
+    was_addressed: list[bool] = []
+    counter_arguments: list[dict[str, Any]] = []
+
+    # Split the debate text into per-finding blocks by the level-3
+    # heading marker. The Revised Overall Verdict section is a
+    # level-2 heading so it doesn't get pulled into the per-finding
+    # iteration.
+    blocks = _re.split(r"^### ", debate_text, flags=_re.MULTILINE)
+    # blocks[0] is the preamble before any ### heading; drop it.
+    finding_blocks = blocks[1:] if len(blocks) > 1 else []
+
+    # Map blocks to findings by ordinal position. Findings that
+    # aren't covered by a block default to addressed=False
+    # (treated as MISSED so the operator notices in the audit).
+    actionable_indexes = [
+        i for i, f in enumerate(critic_findings)
+        if _normalise_severity(f.get("severity")) in (
+            "Fatal", "Major")]
+    for ordinal, idx in enumerate(actionable_indexes):
+        block = finding_blocks[ordinal] if ordinal < len(
+            finding_blocks) else ""
+        rebutted = "REBUTTED" in block
+        addressed = ("ADDRESSED" in block
+                     and "PARTIALLY ADDRESSED" not in block
+                     and not rebutted)
+        partially = ("PARTIALLY ADDRESSED" in block
+                     and not rebutted)
+        was_addressed.append(
+            (addressed or partially) and not rebutted)
+        if rebutted:
+            ca_match = _re.search(
+                r"Counter-argument:\s*(.+?)(?=\n\n|\Z)",
+                block, _re.DOTALL)
+            rebuttal_text = (
+                ca_match.group(1).strip() if ca_match
+                else block.strip())
+            finding = critic_findings[idx]
+            counter_arguments.append({
+                "finding": finding,
+                "rebuttal": rebuttal_text,
+                "model_source": finding.get("raised_by", "unknown"),
+                "agreed": bool(finding.get("agreed")),
+                "logged_at": None,  # caller fills in
+            })
+    # Pad was_addressed to the full length of critic_findings so
+    # callers can zip without an out-of-bounds. Minor findings get
+    # was_addressed=True implicitly (no debate fired for them).
+    for i, f in enumerate(critic_findings):
+        sev = _normalise_severity(f.get("severity"))
+        if sev == "Minor":
+            was_addressed.insert(i, True)
+    return was_addressed, counter_arguments
+
+
+# ── Debate-round persistence (Concern 7i + 7l-i) ────────────────────────────
+
+
+async def record_debate_round(
+    *,
+    interaction_id: int | None,
+    context: str,
+    document_type: str | None,
+    critic_result: "CriticResult",
+    peer_responses: dict[str, str] | None,
+    arbiter_resolution: str | None,
+    was_addressed: list[bool] | None,
+    counter_arguments: list[dict[str, Any]] | None,
+    data_hash: str | None,
+    source_draft_id: int | None = None,
+    parent_debate_id: int | None = None,
+) -> int | None:
+    """Inserts one row into council_debates and returns its id (or
+    None on DB-unavailable / write failure). Concern 7i +
+    Concern 7l-i (multi-round chain anchors).
+
+    The arbiter_resolution + was_addressed + counter_arguments
+    arguments are nullable to support the "minor-only -- no debate
+    round fired" code path: those rows are still written for
+    completeness, with the boolean columns left at their server
+    defaults.
+    """
+    try:
+        from sqlalchemy import text
+        from database import (
+            AsyncSessionLocal,  # type: ignore[attr-defined]
+        )
+        if AsyncSessionLocal is None:
+            return None
+        critic_model = (
+            "gemini+grok" if not critic_result.partial_failure
+            else (
+                "gemini-only"
+                if critic_result.gemini_findings else "grok-only"))
+        from datetime import datetime, timezone
+        for ca in counter_arguments or []:
+            if ca.get("logged_at") is None:
+                ca["logged_at"] = (
+                    datetime.now(timezone.utc).isoformat())
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "INSERT INTO council_debates ("
+                "interaction_id, context, document_type, "
+                "critic_model, critic_findings, "
+                "fatal_count, major_count, minor_count, "
+                "peer_responses, arbiter_resolution, "
+                "was_addressed, counter_arguments, "
+                "data_hash, source_draft_id, parent_debate_id"
+                ") VALUES ("
+                ":interaction_id, :context, :document_type, "
+                ":critic_model, CAST(:critic_findings AS JSONB), "
+                ":fatal_count, :major_count, :minor_count, "
+                "CAST(:peer_responses AS JSONB), :arbiter_resolution, "
+                "CAST(:was_addressed AS JSONB), "
+                "CAST(:counter_arguments AS JSONB), "
+                ":data_hash, :source_draft_id, :parent_debate_id"
+                ") RETURNING id"),
+                {
+                    "interaction_id": interaction_id,
+                    "context": context,
+                    "document_type": document_type,
+                    "critic_model": critic_model,
+                    "critic_findings": json.dumps(
+                        critic_result.merged_findings),
+                    "fatal_count": critic_result.fatal_count,
+                    "major_count": critic_result.major_count,
+                    "minor_count": critic_result.minor_count,
+                    "peer_responses": (
+                        json.dumps(peer_responses)
+                        if peer_responses else None),
+                    "arbiter_resolution": arbiter_resolution,
+                    "was_addressed": (
+                        json.dumps(was_addressed)
+                        if was_addressed is not None else None),
+                    "counter_arguments": (
+                        json.dumps(counter_arguments)
+                        if counter_arguments else None),
+                    "data_hash": data_hash,
+                    "source_draft_id": source_draft_id,
+                    "parent_debate_id": parent_debate_id,
+                })
+            row = r.fetchone()
+            await s.commit()
+            return int(row[0]) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("record_debate_round_failed", error=str(exc))
+        return None
+
+
 def chunk_arbiter_text(text: str) -> list[str]:
     """Splits the completed verdict into word-group chunks so the SSE
     consumer still sees the verdict arrive progressively."""
