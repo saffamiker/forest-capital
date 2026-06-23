@@ -11164,6 +11164,150 @@ async def validate_data_reference_sheet(
     return report.to_dict()
 
 
+# ── Slide guidance (June 22 2026) ───────────────────────────────────
+
+
+@app.get("/api/v1/deck/slide-guidance/template")
+async def get_slide_guidance_template(
+    session: dict = Depends(require_auth),
+):
+    """Download the default slide guidance template as JSON.
+
+    Molly opens this in any text editor, edits the string values
+    only, saves, and uploads via POST /api/v1/deck/slide-guidance.
+    The template is generated from the current SLIDE_TITLES + the
+    canonical default so_what / max_bullets / bullet_guidance /
+    speaker_note_directive per slide. Every uploaded file MUST
+    have been derived from a downloaded template -- the rigid
+    validator rejects any deviation in field set or value type.
+    """
+    from tools.deck_slide_guidance import build_default_template
+    _ = session  # auth-only
+    return build_default_template()
+
+
+@app.post("/api/v1/deck/slide-guidance")
+async def post_slide_guidance(
+    file: UploadFile = File(...),
+    session: dict = Depends(require_auth),
+):
+    """Upload a slide guidance JSON file for the authenticated
+    user. Per-user storage: only one active guidance row per
+    owner_email. Prior active row is deactivated atomically
+    when this one is accepted.
+
+    Validation rules (enforced in validate_guidance):
+      - Exact key set (no missing, no extras)
+      - All values strings
+      - All 12 slide numbers present
+      - version + generated_from match template
+      - String length limits per field
+      - max_bullets is a numeric string in [0, 3]
+
+    On validation failure returns 422 with the exact field path
+    that failed and a plain English error message.
+    """
+    import json as _json
+    from tools.deck_slide_guidance import (
+        set_active_guidance, validate_guidance,
+    )
+    owner_email = session.get("email") or ""
+    if not owner_email:
+        raise HTTPException(
+            status_code=401, detail="no_session_email")
+    try:
+        raw = await file.read()
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=400,
+            detail=f"failed to read uploaded file: {exc}")
+    try:
+        payload = _json.loads(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        raise HTTPException(
+            status_code=422,
+            detail="uploaded file is not valid UTF-8")
+    except _json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=f"uploaded file is not valid JSON: {exc.msg} "
+                   f"at line {exc.lineno}, column {exc.colno}")
+    clean, error = validate_guidance(payload)
+    if error or clean is None:
+        raise HTTPException(status_code=422, detail=error)
+    result = await set_active_guidance(owner_email, clean)
+    if not result.get("ok"):
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "failed to persist guidance: "
+                f"{result.get('error') or 'unknown error'}"))
+    log.info(
+        "deck_slide_guidance_uploaded",
+        owner_email=owner_email,
+        version=clean.get("version"),
+        generated_from=clean.get("generated_from"),
+        uploaded_at=result.get("uploaded_at"))
+    return {
+        "ok": True,
+        "uploaded_at": result.get("uploaded_at"),
+        "version": clean.get("version"),
+        "generated_from": clean.get("generated_from"),
+    }
+
+
+@app.get("/api/v1/deck/slide-guidance")
+async def get_slide_guidance(
+    session: dict = Depends(require_auth),
+):
+    """Return the active slide guidance for the authenticated
+    user, or {active: false} when none has been uploaded.
+
+    Used by the Reports page SlideGuidancePanel to render the
+    current state + populate the "download current guidance"
+    button payload."""
+    from tools.deck_slide_guidance import get_active_guidance
+    owner_email = session.get("email") or ""
+    if not owner_email:
+        return {"active": False}
+    row = await get_active_guidance(owner_email)
+    if not row:
+        return {"active": False}
+    guidance = row.get("guidance") or {}
+    return {
+        "active": True,
+        "uploaded_at": row.get("uploaded_at"),
+        "version": guidance.get("version"),
+        "generated_from": guidance.get("generated_from"),
+        "guidance": guidance,
+    }
+
+
+@app.delete("/api/v1/deck/slide-guidance")
+async def delete_slide_guidance(
+    session: dict = Depends(require_auth),
+):
+    """Deactivate the active guidance for the authenticated user,
+    reverting deck generation to the hardcoded defaults in
+    SLIDE_SPECIFICATIONS. Idempotent -- returns ok=true even
+    when no active guidance exists."""
+    from tools.deck_slide_guidance import clear_active_guidance
+    owner_email = session.get("email") or ""
+    if not owner_email:
+        raise HTTPException(
+            status_code=401, detail="no_session_email")
+    ok = await clear_active_guidance(owner_email)
+    if not ok:
+        raise HTTPException(
+            status_code=500,
+            detail="failed to clear active guidance "
+                   "(database unreachable)")
+    log.info(
+        "deck_slide_guidance_cleared",
+        owner_email=owner_email)
+    return {"ok": True}
+
+
 @app.post("/api/v1/export/package")
 @limiter.limit("10/minute")
 async def export_package(
@@ -13991,6 +14135,30 @@ def _generate_one_deck_slide(
             "invent numbers. Do not change the headline. Do not add "
             f"bullets beyond the {max_bullets} ceiling. Write "
             "[DATA PENDING] for any value not in numeric_anchors.")
+        # June 22 2026 -- user-uploaded slide guidance override.
+        # When merge_guidance_into_slide_plan_entry seeded a
+        # _user_guidance sub-dict on the plan entry, surface those
+        # directives as an additional spec block the LLM reads.
+        # Non-overridable fields (numeric_anchors,
+        # chart_references, substitution_tokens) are NOT touched
+        # by guidance and continue to bind verbatim.
+        ug = slide_plan_entry.get("_user_guidance")
+        if isinstance(ug, dict) and ug:
+            ug_lines = ["", "USER GUIDANCE FOR THIS SLIDE "
+                            "(uploaded via the platform; treat "
+                            "as supplemental directive on top of "
+                            "the spec above):"]
+            if ug.get("so_what"):
+                ug_lines.append(
+                    f"  So-what framing: {ug['so_what']}")
+            if ug.get("bullet_guidance"):
+                ug_lines.append(
+                    f"  Bullet guidance: {ug['bullet_guidance']}")
+            if ug.get("speaker_note_directive"):
+                ug_lines.append(
+                    "  Speaker-note tone / cue: "
+                    f"{ug['speaker_note_directive']}")
+            plan_block = plan_block + "\n" + "\n".join(ug_lines)
     # Layer 2 (June 21 2026) -- prepend the substitution placeholder
     # guide so the per-slide Sonnet writer uses {{TOKEN}} markers
     # instead of raw figures. The platform substitutes verified
@@ -14362,6 +14530,36 @@ async def _generate_deck_document(
             slide_brief_excerpts[n] = brief_section_excerpt(
                 brief_grounding["content_text"], section_name)
 
+        # June 22 2026 -- slide guidance overlay. The active guidance
+        # row for the generating user (if any) overrides per-slide
+        # title / so_what / max_bullets / bullet_guidance /
+        # speaker_note_directive on top of the SLIDE_SPECIFICATIONS
+        # defaults. Non-overridable fields (numeric_anchors,
+        # chart_references, substitution_tokens) are preserved
+        # verbatim. Fail-open: no guidance row -> deck generates
+        # against the hardcoded defaults exactly as before.
+        active_guidance_payload: dict | None = None
+        try:
+            from tools.deck_slide_guidance import (
+                count_overridden_slides, get_active_guidance,
+                merge_guidance_into_slide_plan_entry,
+            )
+            row = await get_active_guidance(email)
+            if row:
+                active_guidance_payload = (
+                    row.get("guidance") or {})
+                log.info(
+                    "deck_slide_guidance_applied",
+                    owner_email=email,
+                    n_slides_overridden=count_overridden_slides(
+                        active_guidance_payload),
+                    uploaded_at=row.get("uploaded_at"),
+                    version=active_guidance_payload.get("version"))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "deck_slide_guidance_load_failed",
+                error=str(exc))
+
         slides: list[dict] = []
         for n in range(1, DECK_SLIDE_COUNT + 1):
             # Index by slide_number explicitly so a partial plan (e.g.
@@ -14372,6 +14570,16 @@ async def _generate_deck_document(
                  if isinstance(e, dict)
                  and e.get("slide_number") == n),
                 None)
+            # Overlay the active guidance on top of the plan entry
+            # before the per-slide writer reads it. merge_guidance
+            # returns the input unchanged when no guidance is
+            # active.
+            if active_guidance_payload is not None:
+                from tools.deck_slide_guidance import (
+                    merge_guidance_into_slide_plan_entry,
+                )
+                entry = merge_guidance_into_slide_plan_entry(
+                    entry, n, active_guidance_payload)
             slide = await asyncio.to_thread(
                 _generate_one_deck_slide,
                 n, per_slide_ctx, n_strategies,
