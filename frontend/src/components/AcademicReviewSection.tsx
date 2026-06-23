@@ -441,7 +441,11 @@ export default function AcademicReviewSection() {
       <CriticFindingsPanel
         criticResult={result?.criticResult ?? null}
         debateRoundText={result?.debateRoundText ?? ''}
-        criticMinorOnly={result?.criticMinorOnly ?? false} />
+        criticMinorOnly={result?.criticMinorOnly ?? false}
+        debateId={result?.debateId ?? null}
+        fixProposals={result?.fixProposals ?? {}}
+        documentType={
+          result?.criticResult?.document_scope ?? 'full_package'} />
 
       {/* Peer responses — supporting detail, collapsed by default. */}
       {peerEntries.length > 0 && (

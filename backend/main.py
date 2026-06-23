@@ -6582,6 +6582,7 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                 # proposal generation failure just leaves the card
                 # without an auto-proposal; the team can still
                 # request one manually.
+                auto_proposals: list[dict[str, Any]] = []
                 try:
                     from agents.academic_review import (
                         run_arbiter_fix_proposal,
@@ -6600,9 +6601,6 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                         for fi in fatal_indexes:
                             f = (
                                 critic_result.merged_findings[fi])
-                            # Use the finding's target_document
-                            # when set (cross_document finding),
-                            # else fall back to the review scope.
                             pdoc = (
                                 str(f.get("target_document"))
                                 if f.get("target_document")
@@ -6616,6 +6614,23 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                                     "email"))
                             if prop is not None:
                                 proposals.append(prop)
+                                auto_proposals.append({
+                                    "finding_id": prop.finding_id,
+                                    "target": prop.target,
+                                    "section_name": (
+                                        prop.section_name),
+                                    "rationale": prop.rationale,
+                                    "patch_instruction": (
+                                        prop.patch_instruction),
+                                    "severity": prop.severity,
+                                    "auto_proposed": (
+                                        prop.auto_proposed),
+                                    "target_document": (
+                                        prop.target_document),
+                                    "source_of_truth_document": (
+                                        prop.source_of_truth_document
+                                    ),
+                                })
                         if proposals:
                             await write_fix_proposals_to_debate(
                                 debate_id, proposals)
@@ -6627,6 +6642,16 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                     log.warning(
                         "fix_proposal_auto_fire_failed",
                         error=str(exc))
+
+                # Concern 7j + 7k-v -- emit the persisted-row
+                # marker frame carrying debate_id + auto-fire fix
+                # proposals so the UI can route propose-fix and
+                # apply-fix calls without a follow-up GET. Always
+                # emitted (the row is always written).
+                yield _sse(
+                    "debate_recorded",
+                    debate_id=debate_id,
+                    fix_proposals=auto_proposals)
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "academic_review_critic_pipeline_failed",

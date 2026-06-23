@@ -19,6 +19,7 @@ import RichTextEditor from '../components/editor/RichTextEditor'
 import CanvasSlideEditor from '../components/editor/CanvasSlideEditor'
 import ChartPicker from '../components/editor/ChartPicker'
 import EditorNavigator from '../components/editor/EditorNavigator'
+import DraftVersionSelector from '../components/editor/DraftVersionSelector'
 import EditorTasksCallout from '../components/editor/EditorTasksCallout'
 import AuditWarningsBanner from '../components/editor/AuditWarningsBanner'
 import PresentationPreview from '../components/editor/PresentationPreview'
@@ -723,6 +724,17 @@ export default function DocumentEditor() {
           </button>
         </div>
       </div>
+
+      {/* Concern 7k-vii + 7l-iii -- draft version selector. Shows
+          a dropdown when the user has multiple draft versions of
+          this document type (post-critic revisions create new
+          editor_drafts rows alongside the original). Renders
+          nothing for the single-version case. */}
+      {id && (
+        <DraftVersionSelector
+          documentType={draft.document_type}
+          currentDraftId={Number(id)} />
+      )}
 
       {/* Tasks callout — the tracking note + the checklist for this
           document type, dismissible per draft. */}

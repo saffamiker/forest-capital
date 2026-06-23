@@ -238,12 +238,17 @@ export default function WritingAssistant({
       </div>
 
       {/* Concern 7 (revised) -- adversarial critic + debate-round
-          panel in compact mode for the 300px editor right rail. */}
+          panel in compact mode for the 300px editor right rail.
+          Per-doc surface: documentType is the editor's doc type so
+          fix proposals route correctly. */}
       <CriticFindingsPanel
         compact
         criticResult={slice?.result?.criticResult ?? null}
         debateRoundText={slice?.result?.debateRoundText ?? ''}
-        criticMinorOnly={slice?.result?.criticMinorOnly ?? false} />
+        criticMinorOnly={slice?.result?.criticMinorOnly ?? false}
+        debateId={slice?.result?.debateId ?? null}
+        fixProposals={slice?.result?.fixProposals ?? {}}
+        documentType={documentType} />
 
 
       {/* AI writing chat */}

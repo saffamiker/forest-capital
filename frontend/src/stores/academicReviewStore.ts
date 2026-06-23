@@ -147,6 +147,25 @@ export interface AcademicReviewResult {
    *  `critic_minor_only` frame (no debate round fired but the
    *  critic still surfaced minor findings). */
   criticMinorOnly?: boolean
+  /** Concern 7k -- council_debates row id from the
+   *  `debate_recorded` SSE frame. The UI uses this to route
+   *  propose-fix and apply-fix calls. */
+  debateId?:        number | null
+  /** Concern 7k-v -- auto-fired Fatal fix proposals delivered on
+   *  the `debate_recorded` frame, keyed by finding_id. */
+  fixProposals?:    Record<number, FixProposalPayload>
+}
+
+export interface FixProposalPayload {
+  finding_id:               number
+  target:                   'section' | 'document'
+  section_name:             string | null
+  rationale:                string
+  patch_instruction:        string
+  severity:                 string
+  auto_proposed:            boolean
+  target_document?:         string | null
+  source_of_truth_document?: string | null
 }
 
 interface AcademicReviewStore {
@@ -304,6 +323,8 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         let criticResult: CriticResult | null = null
         let debateRoundText = ''
         let criticMinorOnly = false
+        let debateId: number | null = null
+        const fixProposals: Record<number, FixProposalPayload> = {}
         let phaseSeen: AcademicReviewPhase = 'consulting'
 
         // eslint-disable-next-line no-constant-condition
@@ -354,6 +375,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'arbiter_chunk') {
@@ -362,6 +384,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'independent_review') {
@@ -379,6 +402,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'critic_findings') {
@@ -406,6 +430,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'debate_round_arbiter') {
@@ -414,6 +439,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'critic_minor_only') {
@@ -422,6 +448,23 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
+                },
+              })
+            } else if (evt.type === 'debate_recorded') {
+              const e = evt as unknown as Record<string, unknown>
+              debateId = (e.debate_id as number | null) ?? null
+              const incoming = (
+                e.fix_proposals as FixProposalPayload[])
+                ?? []
+              for (const p of incoming) {
+                fixProposals[p.finding_id] = p
+              }
+              set({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'error') {
@@ -444,6 +487,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
           result:      {
             arbiterText, peerResponses, independentReview,
             criticResult, debateRoundText, criticMinorOnly,
+            debateId, fixProposals,
           },
           completedAt: new Date().toISOString(),
           _controller: null,
@@ -538,6 +582,8 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         let criticResult: CriticResult | null = null
         let debateRoundText = ''
         let criticMinorOnly = false
+        let debateId: number | null = null
+        const fixProposals: Record<number, FixProposalPayload> = {}
 
         const writeSlice = (partial: Partial<PerDocumentReviewSlice>):
           void => {
@@ -590,6 +636,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'arbiter_chunk') {
@@ -598,6 +645,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'independent_review') {
@@ -612,6 +660,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'critic_findings') {
@@ -637,6 +686,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'debate_round_arbiter') {
@@ -645,6 +695,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'critic_minor_only') {
@@ -653,6 +704,23 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 result: {
                   arbiterText, peerResponses, independentReview,
                   criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
+                },
+              })
+            } else if (evt.type === 'debate_recorded') {
+              const e = evt as unknown as Record<string, unknown>
+              debateId = (e.debate_id as number | null) ?? null
+              const incoming = (
+                e.fix_proposals as FixProposalPayload[])
+                ?? []
+              for (const p of incoming) {
+                fixProposals[p.finding_id] = p
+              }
+              writeSlice({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'error') {
@@ -670,6 +738,7 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
           result:      {
             arbiterText, peerResponses, independentReview,
             criticResult, debateRoundText, criticMinorOnly,
+            debateId, fixProposals,
           },
           completedAt: new Date().toISOString(),
         })

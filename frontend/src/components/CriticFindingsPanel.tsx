@@ -35,6 +35,9 @@ import {
   ChevronRight, CheckCircle, Sword,
 } from 'lucide-react'
 
+import FixProposalCard, {
+  type FixProposal,
+} from './FixProposalCard'
 import Markdown from './Markdown'
 import type {
   CriticFinding, CriticResult, CriticSeverity,
@@ -57,12 +60,30 @@ export interface CriticFindingsPanelProps {
    *  panel). False for the QA Hub / Submission Readiness Review
    *  surfaces where the panel has more room. */
   compact?:        boolean
+  /** Concern 7k -- the council_debates row id the apply-fix
+   *  and propose-fix endpoints route to. Null when no debate
+   *  was recorded yet (e.g. minor-only that didn't fire a
+   *  debate, OR the debate_recorded frame hasn't landed). */
+  debateId?:       number | null
+  /** Concern 7k-v -- auto-fired Fatal fix proposals keyed by
+   *  finding_id. Empty when no auto-fire ran. */
+  fixProposals?:   Record<number, FixProposal>
+  /** Concern 7k-vi -- the document_type to scope fix calls to.
+   *  For cross-document reviews this is 'full_package'; per-doc
+   *  reviews use the doc type the SSE stream was opened for. */
+  documentType?:   string | undefined
+  /** Callback fired after a successful apply-fix POST. Parent
+   *  uses it to refresh the version selector. */
+  onFixApplied?:   ((newDraftLabel: string) => void) | undefined
 }
 
 
 export default function CriticFindingsPanel(
-  { criticResult, debateRoundText, criticMinorOnly,
-    compact = false }: CriticFindingsPanelProps,
+  {
+    criticResult, debateRoundText, criticMinorOnly,
+    compact = false, debateId = null, fixProposals = {},
+    documentType, onFixApplied,
+  }: CriticFindingsPanelProps,
 ): React.ReactElement | null {
   const [findingsOpen, setFindingsOpen] = useState(true)
   const [debateOpen, setDebateOpen] = useState(true)
@@ -205,11 +226,20 @@ export default function CriticFindingsPanel(
                       {sev} ({items.length})
                     </h4>
                     <div className="space-y-1.5">
-                      {items.map((f, i) => (
-                        <FindingCard
-                          key={`${sev}-${i}`} finding={f}
-                          compact={compact} />
-                      ))}
+                      {items.map((f, i) => {
+                        const findingId = findings.indexOf(f)
+                        return (
+                          <FindingCard
+                            key={`${sev}-${i}`} finding={f}
+                            findingId={findingId}
+                            compact={compact}
+                            debateId={debateId}
+                            documentType={documentType ?? null}
+                            proposal={
+                              fixProposals[findingId] ?? null}
+                            onFixApplied={onFixApplied} />
+                        )
+                      })}
                     </div>
                   </div>
                 )
@@ -272,8 +302,17 @@ export default function CriticFindingsPanel(
 
 
 function FindingCard(
-  { finding, compact }: {
-    finding: CriticFinding; compact: boolean
+  {
+    finding, findingId, compact, debateId, documentType,
+    proposal, onFixApplied,
+  }: {
+    finding:      CriticFinding
+    findingId:    number
+    compact:      boolean
+    debateId:     number | null
+    documentType: string | null
+    proposal:     FixProposal | null
+    onFixApplied: ((label: string) => void) | undefined
   },
 ): React.ReactElement {
   const sev: CriticSeverity = finding.severity
@@ -348,6 +387,20 @@ function FindingCard(
           </span>{' '}
           {finding.recommendation}
         </div>
+      )}
+      {/* Concern 7k-v -- Fatal cards always render the proposal
+          (auto-populated by the debate round). Major cards render
+          the Propose Fix button until the team requests one. Minor
+          cards render nothing -- minor findings are not eligible
+          for story-plan injection. */}
+      {documentType && (sev === 'Fatal' || sev === 'Major') && (
+        <FixProposalCard
+          finding={finding}
+          findingId={findingId}
+          documentType={documentType}
+          debateId={debateId}
+          proposal={proposal}
+          onApplied={onFixApplied} />
       )}
     </div>
   )
