@@ -25,7 +25,9 @@ this feature before the July 1 final.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+from dataclasses import dataclass
 from typing import Any
 
 try:
@@ -683,6 +685,654 @@ async def gather_review_context(
         "multi_user_activity": multi_user,
         "context_block": block,
     }
+
+
+# ── Cascading critic context (Concern 7b + 7l-vi) ────────────────────────────
+
+
+# Plain-language labels for the four editor doc types. Distinct from
+# DOC_TYPE_LABELS (review-internal keys); the critic context uses the
+# human-facing labels so the model reads them in the prompt without
+# disambiguation.
+_CRITIC_DOC_LABELS: dict[str, str] = {
+    "executive_brief":     "Executive Brief",
+    "presentation_deck":   "Final Presentation Deck",
+    "analytical_appendix": "Analytical Appendix",
+    "presentation_script": "Presentation Script",
+}
+
+# Cascading SUPPORTING context per primary doc. Concern 7b spec:
+#   executive_brief     -> no supporting docs
+#   analytical_appendix -> brief, slimmed to first 1000 chars
+#   presentation_deck   -> brief + appendix + script, full content
+#   presentation_script -> brief + appendix + deck,   full content
+# Each entry is (doc_type, char_cap_or_None). None = full content.
+_CRITIC_SUPPORTING_MAP: dict[str, list[tuple[str, int | None]]] = {
+    "executive_brief":     [],
+    "analytical_appendix": [
+        ("executive_brief", 1000),
+    ],
+    "presentation_deck": [
+        ("executive_brief",     None),
+        ("analytical_appendix", None),
+        ("presentation_script", None),
+    ],
+    "presentation_script": [
+        ("executive_brief",     None),
+        ("analytical_appendix", None),
+        ("presentation_deck",   None),
+    ],
+}
+
+# Source-of-truth rules for cross-document findings (Change 7l-vi):
+#   narrative claims          -> executive_brief
+#   numeric / evidentiary     -> analytical_appendix
+#   deck + script             -> derivatives (always the target to
+#                                patch, never the source of truth)
+# Exposed so the fix-proposal arbiter (Change 7k-i) and the
+# cross-document UI can both reference the same mapping.
+SOURCE_OF_TRUTH_NARRATIVE = "executive_brief"
+SOURCE_OF_TRUTH_NUMERIC = "analytical_appendix"
+DERIVATIVE_DOC_TYPES = ("presentation_deck", "presentation_script")
+
+
+def _format_critic_manifest(
+    manifest: dict[str, Any] | None,
+) -> list[str]:
+    """Render a value_manifest dict as sorted 'TOKEN: value' lines."""
+    if not manifest:
+        return []
+    token_to_value: dict[str, str] = {}
+    for v, meta in manifest.items():
+        if not isinstance(meta, dict):
+            continue
+        token = meta.get("token")
+        if not token or not v:
+            continue
+        if token not in token_to_value:
+            token_to_value[token] = str(v)
+    return [f"  {tok}: {token_to_value[tok]}"
+            for tok in sorted(token_to_value)]
+
+
+def _merge_critic_manifests(
+    manifests: list[dict[str, Any] | None],
+) -> list[str]:
+    """Union of multiple value_manifest dicts -- sorted TOKEN: value
+    lines. Used when the cascading context calls for a multi-document
+    manifest (e.g. appendix merged with brief, full-package merged
+    across all four)."""
+    merged: dict[str, str] = {}
+    for m in manifests:
+        if not m:
+            continue
+        for v, meta in m.items():
+            if not isinstance(meta, dict):
+                continue
+            token = meta.get("token")
+            if not token or not v:
+                continue
+            if token not in merged:
+                merged[token] = str(v)
+    return [f"  {tok}: {merged[tok]}" for tok in sorted(merged)]
+
+
+async def _read_critic_draft(
+    reviewer_email: str | None, document_type: str,
+) -> dict[str, Any] | None:
+    """Fetch a single draft (with value_manifest) for the critic
+    context. Returns None on any failure; the caller treats missing
+    drafts as 'not generated yet' and emits a placeholder line."""
+    if not reviewer_email:
+        return None
+    try:
+        from tools.editor_drafts import (
+            get_current_draft_with_layer3,
+        )
+        return await get_current_draft_with_layer3(
+            reviewer_email, document_type)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "critic_context_draft_read_failed",
+            document_type=document_type, error=str(exc))
+        return None
+
+
+async def build_critic_context(
+    reviewer_email: str | None,
+    document_type: str | None = None,
+) -> str:
+    """
+    Assembles the adversarial-critic context block per the cascading
+    rules in Concern 7b. Returns a single string that goes into both
+    the Gemini and Grok system messages alongside the critic prompt
+    text. Concern 7b cascade summary:
+
+      executive_brief     -- brief only
+      analytical_appendix -- appendix + brief snippet, manifests
+                             merged
+      presentation_deck   -- deck + brief + appendix + script full,
+                             all four manifests merged
+      presentation_script -- script + brief + appendix + deck full,
+                             all four manifests merged
+      full_package        -- all four documents at full content, all
+                             four manifests merged
+
+    The block always includes a REVIEW SCOPE header so the critic
+    knows whether to expect supporting content or not.
+    """
+    is_full_package = document_type is None
+    primary_label = (
+        _CRITIC_DOC_LABELS.get(document_type or "", "Unknown")
+        if not is_full_package else None)
+
+    lines: list[str] = ["=== ADVERSARIAL CRITIC REVIEW CONTEXT ==="]
+    lines.append("")
+    if is_full_package:
+        lines.append(
+            "REVIEW SCOPE: Full Package -- all four deliverables")
+    else:
+        lines.append(f"REVIEW SCOPE: {primary_label}")
+
+    # Build NUMERIC REFERENCE first. The block ALWAYS appears, even
+    # when no manifest is available, so the critic prompt's
+    # "validate against NUMERIC REFERENCE" instruction always has
+    # an anchor to point at.
+    lines.append("")
+    lines.append("NUMERIC REFERENCE (authoritative cache values)")
+    lines.append(
+        "These are the ground-truth figures substituted into the "
+        "document(s) at generation time. Any claim contradicting "
+        "these is a factual error.")
+    manifest_lines: list[str] = []
+    if is_full_package:
+        # Merge all four manifests.
+        manifests = []
+        for dt in _CRITIC_DOC_LABELS:
+            d = await _read_critic_draft(reviewer_email, dt)
+            manifests.append((d or {}).get("value_manifest"))
+        manifest_lines = _merge_critic_manifests(manifests)
+    elif document_type == "executive_brief":
+        d = await _read_critic_draft(reviewer_email, document_type)
+        manifest_lines = _format_critic_manifest(
+            (d or {}).get("value_manifest"))
+    elif document_type == "analytical_appendix":
+        # Appendix corroborates the brief -- merge both manifests so
+        # numeric drift across the pair is flaggable.
+        a = await _read_critic_draft(reviewer_email, document_type)
+        b = await _read_critic_draft(
+            reviewer_email, "executive_brief")
+        manifest_lines = _merge_critic_manifests([
+            (a or {}).get("value_manifest"),
+            (b or {}).get("value_manifest"),
+        ])
+    elif document_type in (
+            "presentation_deck", "presentation_script"):
+        # Deck and script narrate the brief / appendix -- they need
+        # the full numeric surface to validate.
+        manifests = []
+        for dt in _CRITIC_DOC_LABELS:
+            d = await _read_critic_draft(reviewer_email, dt)
+            manifests.append((d or {}).get("value_manifest"))
+        manifest_lines = _merge_critic_manifests(manifests)
+    if manifest_lines:
+        lines.extend(manifest_lines)
+    else:
+        lines.append("  (no value manifest available)")
+
+    # PRIMARY DOCUMENT(S) section.
+    lines.append("")
+    if is_full_package:
+        lines.append("PRIMARY DOCUMENTS FOR REVIEW (all four):")
+        for dt, label in _CRITIC_DOC_LABELS.items():
+            d = await _read_critic_draft(reviewer_email, dt)
+            text = (d or {}).get("content_text") or ""
+            lines.append("")
+            lines.append(f"[{label}]")
+            lines.append(
+                text.strip()
+                if text.strip() else "(no draft content available)")
+    else:
+        lines.append(f"PRIMARY DOCUMENT FOR REVIEW: {primary_label}")
+        d = await _read_critic_draft(reviewer_email, document_type)
+        text = (d or {}).get("content_text") or ""
+        lines.append(
+            text.strip()
+            if text.strip() else "(no draft content available)")
+
+    # SUPPORTING CONTEXT -- only for per-doc reviews where the
+    # cascade map declares siblings.
+    if not is_full_package:
+        supporting_spec = _CRITIC_SUPPORTING_MAP.get(
+            document_type or "", [])
+        if supporting_spec:
+            lines.append("")
+            lines.append(
+                "SUPPORTING CONTEXT (for consistency checking "
+                "only -- do not grade these documents):")
+            for sib_dt, char_cap in supporting_spec:
+                sib_label = _CRITIC_DOC_LABELS[sib_dt]
+                sib_d = await _read_critic_draft(
+                    reviewer_email, sib_dt)
+                sib_text = (sib_d or {}).get("content_text") or ""
+                if char_cap is not None and len(sib_text) > char_cap:
+                    sib_text = sib_text[:char_cap] + "…"
+                lines.append("")
+                lines.append(f"[{sib_label}]")
+                lines.append(
+                    sib_text.strip()
+                    if sib_text.strip()
+                    else "(no draft content available)")
+
+    # Academic context footer -- shared across all critic invocations.
+    lines.append("")
+    lines.append("ACADEMIC CONTEXT:")
+    lines.append(
+        "Course: FNA 670, MSFA practicum, Queens University of "
+        "Charlotte / McColl School of Business")
+    lines.append(
+        "Scope: Three-asset portfolio (equities, bonds, "
+        "alternatives) with regime-conditional dynamic allocation")
+    lines.append("Submission: June 30 panel defense")
+    return "\n".join(lines)
+
+
+# ── Adversarial critic (Concern 7c / 7d / 7e + 7l-v) ──────────────────────────
+
+# Gemini critic system prompt. Concern 7c. Harsh-but-fair framing.
+# Concern 7l-v: every finding MUST include target_document so the
+# downstream merge + fix-proposal arbiter knows whether the finding
+# is per-doc or cross-document.
+_CRITIC_PROMPT_GEMINI = (
+    "You are a harsh but fair academic critic reviewing a graduate "
+    "finance practicum submission for FNA 670 at McColl School of "
+    "Business, Queens University of Charlotte.\n\n"
+    "Your sole objective is to find every significant error, "
+    "weakness, or unsupported claim. You are not here to "
+    "encourage -- you are here to find what would cause an "
+    "experienced finance academic or investment professional to "
+    "reject or downgrade this work.\n\n"
+    "WHAT TO LOOK FOR:\n\n"
+    "Methodological: flawed backtesting logic, look-ahead bias, "
+    "survivorship bias, inappropriate benchmarks, regime detection "
+    "errors, factor model misapplication, invalid statistical "
+    "inference, OOS framing that contains in-sample data.\n\n"
+    "Factual: any numeric claim contradicting the NUMERIC REFERENCE "
+    "values. Any date, period, or citation year inconsistent across "
+    "documents.\n\n"
+    "Logical: conclusions not supported by evidence, internal "
+    "contradictions, circular reasoning, overstated certainty, "
+    "regime detection claims that appear post-hoc rationalized.\n\n"
+    "Presentational: claims without evidence, undefined jargon, "
+    "missing limitations disclosures, audience mismatch.\n\n"
+    "Citation: missing required citations, wrong years, claims "
+    "attributed to wrong authors.\n\n"
+    "Consistency (when supporting context is provided): figures, "
+    "regime labels, or conclusions that differ between the primary "
+    "document and the supporting documents.\n\n"
+    "SEVERITY:\n"
+    "Fatal -- would cause an academic panel to reject the "
+    "submission or an investment committee to dismiss the analysis. "
+    "Examples: look-ahead bias, Sharpe ratio contradicting NUMERIC "
+    "REFERENCE, missing core methodology disclosure.\n"
+    "Major -- significant weakness that would lower the grade or "
+    "raise serious questions. Examples: unsupported claim, missing "
+    "limitation, internal contradiction.\n"
+    "Minor -- should be corrected but would not sink the "
+    "submission.\n\n"
+    "OUTPUT FORMAT:\n"
+    "Return a JSON array of findings only. No preamble. Each "
+    "finding must have:\n"
+    "  severity (Fatal | Major | Minor)\n"
+    "  category (methodological | factual | logical | "
+    "presentational | citation | consistency)\n"
+    "  target_document (executive_brief | analytical_appendix | "
+    "presentation_deck | presentation_script | cross_document)\n"
+    "  document (the human-readable doc name where the issue "
+    "appears -- e.g. 'Executive Brief' or 'cross-document')\n"
+    "  location (section name, slide number, paragraph reference)\n"
+    "  description (what the error is)\n"
+    "  evidence (quote or paraphrase from the document that "
+    "demonstrates the finding)\n"
+    "  recommendation (what should be changed)\n\n"
+    "Use target_document='cross_document' only when the finding "
+    "is a consistency violation BETWEEN documents (e.g. brief "
+    "claims X, deck claims Y for the same metric). Otherwise pin "
+    "target_document to the single document that carries the "
+    "error -- this lets the fix-proposal layer decide which "
+    "document to patch.\n\n"
+    "After the JSON array write:\n"
+    "PROSE_SUMMARY: <3-5 sentence overall assessment of the "
+    "submission package's readiness>"
+)
+
+
+# Grok critic system prompt. Concern 7d. Contrarian framing with
+# attention triggers specific to finance research patterns.
+_CRITIC_PROMPT_GROK = (
+    "You are a contrarian finance professional and academic critic. "
+    "You have seen graduate practicum submissions that oversell "
+    "results, hide assumptions, and confuse backtested performance "
+    "with predictive validity. Your job is to be the skeptic -- "
+    "find what won't survive scrutiny from an experienced allocator "
+    "or rigorous academic reviewer.\n\n"
+    "Pay particular attention to:\n"
+    "- Regime detection claims that may be post-hoc rationalized\n"
+    "- Sharpe ratios and drawdown figures that seem too clean or "
+    "contradict the NUMERIC REFERENCE\n"
+    "- OOS framing that may contain in-sample data\n"
+    "- Conclusions that outrun the evidence in the methodology\n"
+    "- Sharpe ratios not deflated for multiple testing "
+    "(Lo 2002 / Harvey et al. 2016)\n\n"
+    "WHAT TO LOOK FOR:\n\n"
+    "Methodological: flawed backtesting logic, look-ahead bias, "
+    "survivorship bias, inappropriate benchmarks, regime detection "
+    "errors, factor model misapplication, invalid statistical "
+    "inference, OOS framing that contains in-sample data.\n\n"
+    "Factual: any numeric claim contradicting the NUMERIC REFERENCE "
+    "values. Any date, period, or citation year inconsistent across "
+    "documents.\n\n"
+    "Logical: conclusions not supported by evidence, internal "
+    "contradictions, circular reasoning, overstated certainty, "
+    "regime detection claims that appear post-hoc rationalized.\n\n"
+    "Presentational: claims without evidence, undefined jargon, "
+    "missing limitations disclosures, audience mismatch.\n\n"
+    "Citation: missing required citations, wrong years, claims "
+    "attributed to wrong authors.\n\n"
+    "Consistency (when supporting context is provided): figures, "
+    "regime labels, or conclusions that differ between the primary "
+    "document and the supporting documents.\n\n"
+    "SEVERITY:\n"
+    "Fatal -- would cause an academic panel to reject the "
+    "submission or an investment committee to dismiss the "
+    "analysis.\n"
+    "Major -- significant weakness that would lower the grade or "
+    "raise serious questions.\n"
+    "Minor -- should be corrected but would not sink the "
+    "submission.\n\n"
+    "OUTPUT FORMAT:\n"
+    "Return a JSON array of findings only. No preamble. Each "
+    "finding must have:\n"
+    "  severity, category, target_document, document, location, "
+    "description, evidence, recommendation\n\n"
+    "Use target_document='cross_document' only when the finding "
+    "is a consistency violation between documents.\n\n"
+    "After the JSON array write:\n"
+    "PROSE_SUMMARY: <3-5 sentence overall assessment>"
+)
+
+
+_CRITIC_MAX_TOKENS = 3000
+
+# Severity ordering for stable sorting. Concern 7e specifies
+# Fatal first, then agreed=True before agreed=False within each
+# severity tier.
+_CRITIC_SEVERITY_ORDER = {"Fatal": 0, "Major": 1, "Minor": 2}
+
+
+def _critic_parse(
+    raw: str,
+) -> tuple[list[dict[str, Any]], str, bool]:
+    """Parse a critic model's JSON-array-plus-PROSE_SUMMARY output.
+
+    Concern 7e: fault-tolerant. Returns (findings, prose, parsed_ok).
+    Empty raw or any parse failure returns ([], '', False) so the
+    merge layer can degrade gracefully when one model fails.
+    """
+    if not raw:
+        return [], "", False
+    import re as _re
+    marker = "PROSE_SUMMARY:"
+    pos = raw.lower().find(marker.lower())
+    if pos != -1:
+        json_part = raw[:pos].strip()
+        prose = raw[pos + len(marker):].strip()
+    else:
+        json_part = raw.strip()
+        prose = ""
+    if json_part.startswith("```"):
+        json_part = _re.sub(
+            r"^```[a-zA-Z]*\n", "", json_part)
+        json_part = _re.sub(r"\n```\s*$", "", json_part)
+    findings: list[dict[str, Any]] = []
+    try:
+        parsed = json.loads(json_part)
+        if isinstance(parsed, list):
+            findings = [
+                f for f in parsed if isinstance(f, dict)]
+        else:
+            return [], prose, False
+    except Exception:  # noqa: BLE001
+        try:
+            start = json_part.index("[")
+            end = json_part.rindex("]") + 1
+            parsed = json.loads(json_part[start:end])
+            if isinstance(parsed, list):
+                findings = [
+                    f for f in parsed if isinstance(f, dict)]
+            else:
+                return [], prose, False
+        except Exception:  # noqa: BLE001
+            return [], prose, False
+    return findings, prose, True
+
+
+def _normalise_severity(s: Any) -> str:
+    if not isinstance(s, str):
+        return "Minor"
+    cap = s.strip().capitalize()
+    return cap if cap in _CRITIC_SEVERITY_ORDER else "Minor"
+
+
+def _critic_signature(
+    f: dict[str, Any],
+) -> tuple[str, str, str, str]:
+    """Dedup key for merge: target_document + category + location +
+    first 4 normalised words of description. Concern 7e specifies
+    'category + location + similar description' -- adding
+    target_document as a key prevents collapsing a brief finding
+    with a deck finding that share a section name like 'Section 2'.
+    Four words tracks paraphrased descriptions ("Look-ahead bias in
+    backtest implementation" vs "Look-ahead bias in backtest
+    discovered" share the first four words) without false-collapsing
+    distinct findings."""
+    import re as _re
+    def _norm(s: Any) -> str:
+        return _re.sub(
+            r"\s+", " ", str(s or "")).strip().lower()
+    desc_words = _norm(f.get("description")).split()[:4]
+    return (
+        _norm(f.get("target_document")),
+        _norm(f.get("category")),
+        _norm(f.get("location")),
+        " ".join(desc_words),
+    )
+
+
+def _merge_critic_findings(
+    gemini: list[dict[str, Any]],
+    grok: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Merge per Concern 7e. Same (target_document, category,
+    location, first-4-words) collapses to one entry with
+    agreed=True, raised_by='both', and the harsher severity. Sort
+    by severity (Fatal first) then agreement (true first)."""
+    by_sig: dict[tuple, dict[str, Any]] = {}
+    for f in gemini:
+        sig = _critic_signature(f)
+        by_sig[sig] = {**f, "raised_by": "gemini", "agreed": False}
+    for f in grok:
+        sig = _critic_signature(f)
+        if sig in by_sig:
+            existing = by_sig[sig]
+            sev_existing = _CRITIC_SEVERITY_ORDER.get(
+                _normalise_severity(existing.get("severity")), 2)
+            sev_new = _CRITIC_SEVERITY_ORDER.get(
+                _normalise_severity(f.get("severity")), 2)
+            if sev_new < sev_existing:
+                existing["severity"] = _normalise_severity(
+                    f.get("severity"))
+            existing["agreed"] = True
+            existing["raised_by"] = "both"
+        else:
+            by_sig[sig] = {
+                **f, "raised_by": "grok", "agreed": False}
+    merged = list(by_sig.values())
+    merged.sort(key=lambda f: (
+        _CRITIC_SEVERITY_ORDER.get(
+            _normalise_severity(f.get("severity")), 2),
+        0 if f.get("agreed") else 1,
+    ))
+    return merged
+
+
+def _call_gemini_critic(context_block: str) -> str:
+    """Synchronous Gemini critic call. Returns the raw model output
+    (JSON array + PROSE_SUMMARY) or '' on any failure."""
+    if _is_test_env():
+        return ('[]\nPROSE_SUMMARY: '
+                'Test environment -- no critic findings generated.')
+    try:
+        from agents.base import call_gemini
+        return call_gemini(
+            GEMINI_MODEL,
+            _CRITIC_PROMPT_GEMINI,
+            context_block,
+            trigger="critic_review:gemini",
+            max_output_tokens=_CRITIC_MAX_TOKENS)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "critic_review_gemini_call_failed",
+            error=str(exc))
+        return ""
+
+
+def _call_grok_critic(context_block: str) -> str:
+    """Synchronous Grok critic call. Returns raw model output or ''
+    on any failure."""
+    if _is_test_env():
+        return ('[]\nPROSE_SUMMARY: '
+                'Test environment -- no critic findings generated.')
+    try:
+        from agents._xai_config import (
+            resolve_xai_config, build_headers,
+        )
+        xai = resolve_xai_config()
+        if xai is None:
+            log.warning(
+                "critic_review_grok_call_failed",
+                error="no xai config (no API key)")
+            return ""
+        import httpx
+        with httpx.Client(timeout=60.0) as client:
+            resp = client.post(
+                xai.chat_url,
+                headers=build_headers(xai.api_key, xai.provider),
+                json={
+                    "model": xai.model,
+                    "messages": [
+                        {"role": "system",
+                         "content": _CRITIC_PROMPT_GROK},
+                        {"role": "user",
+                         "content": context_block},
+                    ],
+                    "max_tokens": _CRITIC_MAX_TOKENS,
+                    "temperature": 0.5,
+                },
+            )
+            resp.raise_for_status()
+            return resp.json()[
+                "choices"][0]["message"]["content"]
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "critic_review_grok_call_failed",
+            error=str(exc))
+        return ""
+
+
+@dataclass
+class CriticResult:
+    """Concern 7e output dataclass. Both per-model raw findings AND
+    the merged list are surfaced so the UI can render Gemini-only /
+    Grok-only badges + the SSE frame can carry the structured
+    payload without re-merging client-side."""
+    gemini_findings: list[dict[str, Any]]
+    grok_findings:   list[dict[str, Any]]
+    merged_findings: list[dict[str, Any]]
+    gemini_prose:    str
+    grok_prose:      str
+    fatal_count:     int
+    major_count:     int
+    minor_count:     int
+    partial_failure: bool
+
+    @property
+    def has_actionable(self) -> bool:
+        """True when the debate round + story-plan injection
+        pipeline should fire. Minor-only findings skip the debate."""
+        return (self.fatal_count + self.major_count) > 0
+
+
+async def run_critic_review(
+    context_block: str,
+    document_type: str | None = None,  # noqa: ARG001
+) -> CriticResult:
+    """Run Gemini + Grok critics in parallel, parse + merge their
+    findings, return a CriticResult. Concern 7e.
+
+    Both helpers are synchronous (httpx + google-genai), so they're
+    spawned via asyncio.to_thread and awaited via asyncio.gather --
+    one model's latency, not two.
+
+    document_type is currently advisory: the context_block already
+    carries scope, so the critics don't need the doc type as a
+    separate input. Kept on the signature for future use (e.g.
+    differential prompts per doc type) without a public API break.
+    """
+    import asyncio as _asyncio
+
+    gemini_raw, grok_raw = await _asyncio.gather(
+        _asyncio.to_thread(_call_gemini_critic, context_block),
+        _asyncio.to_thread(_call_grok_critic,   context_block),
+    )
+
+    gemini_findings, gemini_prose, gemini_parsed = (
+        _critic_parse(gemini_raw))
+    grok_findings, grok_prose, grok_parsed = (
+        _critic_parse(grok_raw))
+
+    # partial_failure -- raised when EITHER model returned empty or
+    # un-parseable output. The merge layer still proceeds with
+    # whichever model succeeded; the UI surfaces a chip so the user
+    # knows the result is one-model-only.
+    partial_failure = (
+        (not gemini_raw or not gemini_parsed)
+        or (not grok_raw or not grok_parsed))
+
+    merged = _merge_critic_findings(
+        gemini_findings, grok_findings)
+
+    fatal = sum(
+        1 for f in merged
+        if _normalise_severity(f.get("severity")) == "Fatal")
+    major = sum(
+        1 for f in merged
+        if _normalise_severity(f.get("severity")) == "Major")
+    minor = sum(
+        1 for f in merged
+        if _normalise_severity(f.get("severity")) == "Minor")
+
+    return CriticResult(
+        gemini_findings=gemini_findings,
+        grok_findings=grok_findings,
+        merged_findings=merged,
+        gemini_prose=gemini_prose,
+        grok_prose=grok_prose,
+        fatal_count=fatal,
+        major_count=major,
+        minor_count=minor,
+        partial_failure=partial_failure,
+    )
 
 
 # ── Peer fan-out ──────────────────────────────────────────────────────────────
@@ -1857,6 +2507,312 @@ def _mock_arbiter_text() -> str:
         "### 5. Overall Academic Readiness\n**Rating:** Developing\n"
         "This is a deterministic mock verdict for the test environment."
     )
+
+
+# ── Debate-round arbiter (Concern 7f + 7g) ──────────────────────────────────
+
+_ARBITER_DEBATE_INSTRUCTIONS = """=== DEBATE ROUND ARBITER ===
+
+You are the arbiter of an academic council reviewing a graduate
+finance practicum submission. The council has completed its review.
+An adversarial critic (Gemini + Grok) has now reviewed the same
+document(s) and raised specific findings.
+
+Your task:
+
+1. For each Fatal and Major finding from the critic, assess whether
+   the council's review already addressed it, partially addressed
+   it, or missed it entirely.
+
+2. Where the council missed a valid finding, acknowledge it and
+   incorporate it into the verdict.
+
+3. Where the critic raised a finding that the council disagrees
+   with, articulate the counter-argument clearly and log it as a
+   rebuttal.
+
+4. Produce a final synthesis that reflects both the council's
+   expertise and the critic's adversarial scrutiny.
+
+OUTPUT STRUCTURE (markdown, exactly):
+
+## Response to Adversarial Critic
+
+For each Fatal/Major finding, output a block in this shape:
+
+### [Severity] [Category] -- [Location]
+Critic finding: <summary of what critic raised>
+Council assessment: ADDRESSED | PARTIALLY ADDRESSED | MISSED | REBUTTED
+Resolution: <what the final verdict says about this>
+[If REBUTTED]: Counter-argument: <why the council disagrees and
+what evidence supports the rebuttal>
+
+After every finding block, write:
+
+## Revised Overall Verdict
+
+<updated synthesis incorporating the debate round>
+
+Rules:
+- The four verdict labels (ADDRESSED / PARTIALLY ADDRESSED /
+  MISSED / REBUTTED) must appear EXACTLY as written so the
+  downstream parser can extract them.
+- REBUTTED requires a Counter-argument line.
+- Skip Minor findings -- the debate round runs only on Fatal +
+  Major. If the merged_findings list passed in contains only
+  Minor entries, emit a one-line note saying so and skip the
+  per-finding loop."""
+
+
+def run_arbiter_debate_round(
+    context_block: str,
+    peer_responses: dict[str, str],
+    critic_findings: list[dict[str, Any]],
+    multi_user: bool = False,
+    n_strategies: int | None = None,
+) -> str:
+    """Runs ONE arbiter pass that responds to the critic's Fatal +
+    Major findings. Concern 7f + 7g.
+
+    The arbiter sees:
+      - The original context_block (the full project context)
+      - The peer responses from the just-completed review (so it
+        can spot which findings the council already addressed)
+      - The critic's merged findings list (the targets to respond
+        to per the OUTPUT STRUCTURE)
+
+    Wrapped in the existing GeneratorEvaluatorHarness for
+    consistency with the primary arbiter call. Uses ARBITER_MODEL
+    + ARBITER_MAX_TOKENS.
+    """
+    if _is_test_env():
+        return (
+            "## Response to Adversarial Critic\n\n"
+            "Test environment -- debate round skipped.\n\n"
+            "## Revised Overall Verdict\n\n"
+            "No changes from the primary verdict.")
+
+    # Build the user message: peer notes + critic findings JSON.
+    findings_block = json.dumps(critic_findings, indent=2)
+    user_parts = [
+        context_block,
+        "",
+        "=== PEER REVIEW NOTES (FROM PRIMARY REVIEW) ===",
+    ]
+    for agent_id, text in peer_responses.items():
+        user_parts.append(f"\n[{agent_id}]\n{text}")
+    user_parts.extend([
+        "",
+        "=== ADVERSARIAL CRITIC FINDINGS (REQUIRES RESPONSE) ===",
+        findings_block,
+    ])
+    user_message = "\n".join(user_parts)
+
+    advisor_prompt = (
+        f"You are the academic advisor on the FNA 670 council. "
+        f"Apply the rules in the YOUR TASK section to produce the "
+        f"debate-round response.\n\n"
+        f"{_ARBITER_DEBATE_INSTRUCTIONS}")
+
+    def _generate(prompt: str) -> str:
+        return call_claude(ARBITER_MODEL, advisor_prompt, prompt,
+                           max_tokens=ARBITER_MAX_TOKENS,
+                           trigger="academic_review_debate_round")
+
+    try:
+        from agents.harness import GeneratorEvaluatorHarness
+        harness = GeneratorEvaluatorHarness()
+        result = harness.run(
+            generator_fn=_generate,
+            evaluator_prompt=(
+                _ARBITER_DEBATE_INSTRUCTIONS  # eval against the same rubric
+            ),
+            generator_prompt=user_message,
+            context=context_block[:6000],
+            agent_id="academic_advisor_debate",
+        )
+        return result.response
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "academic_review_debate_round_failed",
+            error=str(exc))
+        # Surface a structured fallback so the SSE stream still
+        # emits a usable debate_round_arbiter payload even when the
+        # harness fails. n_strategies / multi_user retained on the
+        # signature for future eval-prompt customisation.
+        void = (multi_user, n_strategies)  # noqa: F841
+        return (
+            "## Response to Adversarial Critic\n\n"
+            f"Debate round generation failed ({exc}). "
+            "The primary verdict stands; re-run the academic review "
+            "to retry the debate pass.\n\n"
+            "## Revised Overall Verdict\n\n"
+            "No changes -- primary verdict applies.")
+
+
+def parse_debate_assessments(
+    debate_text: str,
+    critic_findings: list[dict[str, Any]],
+) -> tuple[list[bool], list[dict[str, Any]]]:
+    """Walks the debate-round arbiter output and extracts a
+    was_addressed boolean per critic finding + a counter_arguments
+    list for every REBUTTED finding. The matching is positional:
+    findings in critic_findings are expected to appear in the
+    debate prose in the same Fatal-then-Major order the merge layer
+    produced, and the arbiter prompt explicitly skips Minor.
+
+    Robust to small format drift: REBUTTED detection looks for the
+    label anywhere in a per-finding block; ADDRESSED / PARTIALLY
+    ADDRESSED / MISSED similarly. Falls through to (False,
+    counter_arguments=[]) for findings the arbiter didn't address.
+    """
+    import re as _re
+    was_addressed: list[bool] = []
+    counter_arguments: list[dict[str, Any]] = []
+
+    # Split the debate text into per-finding blocks by the level-3
+    # heading marker. The Revised Overall Verdict section is a
+    # level-2 heading so it doesn't get pulled into the per-finding
+    # iteration.
+    blocks = _re.split(r"^### ", debate_text, flags=_re.MULTILINE)
+    # blocks[0] is the preamble before any ### heading; drop it.
+    finding_blocks = blocks[1:] if len(blocks) > 1 else []
+
+    # Map blocks to findings by ordinal position. Findings that
+    # aren't covered by a block default to addressed=False
+    # (treated as MISSED so the operator notices in the audit).
+    actionable_indexes = [
+        i for i, f in enumerate(critic_findings)
+        if _normalise_severity(f.get("severity")) in (
+            "Fatal", "Major")]
+    for ordinal, idx in enumerate(actionable_indexes):
+        block = finding_blocks[ordinal] if ordinal < len(
+            finding_blocks) else ""
+        rebutted = "REBUTTED" in block
+        addressed = ("ADDRESSED" in block
+                     and "PARTIALLY ADDRESSED" not in block
+                     and not rebutted)
+        partially = ("PARTIALLY ADDRESSED" in block
+                     and not rebutted)
+        was_addressed.append(
+            (addressed or partially) and not rebutted)
+        if rebutted:
+            ca_match = _re.search(
+                r"Counter-argument:\s*(.+?)(?=\n\n|\Z)",
+                block, _re.DOTALL)
+            rebuttal_text = (
+                ca_match.group(1).strip() if ca_match
+                else block.strip())
+            finding = critic_findings[idx]
+            counter_arguments.append({
+                "finding": finding,
+                "rebuttal": rebuttal_text,
+                "model_source": finding.get("raised_by", "unknown"),
+                "agreed": bool(finding.get("agreed")),
+                "logged_at": None,  # caller fills in
+            })
+    # Pad was_addressed to the full length of critic_findings so
+    # callers can zip without an out-of-bounds. Minor findings get
+    # was_addressed=True implicitly (no debate fired for them).
+    for i, f in enumerate(critic_findings):
+        sev = _normalise_severity(f.get("severity"))
+        if sev == "Minor":
+            was_addressed.insert(i, True)
+    return was_addressed, counter_arguments
+
+
+# ── Debate-round persistence (Concern 7i + 7l-i) ────────────────────────────
+
+
+async def record_debate_round(
+    *,
+    interaction_id: int | None,
+    context: str,
+    document_type: str | None,
+    critic_result: "CriticResult",
+    peer_responses: dict[str, str] | None,
+    arbiter_resolution: str | None,
+    was_addressed: list[bool] | None,
+    counter_arguments: list[dict[str, Any]] | None,
+    data_hash: str | None,
+    source_draft_id: int | None = None,
+    parent_debate_id: int | None = None,
+) -> int | None:
+    """Inserts one row into council_debates and returns its id (or
+    None on DB-unavailable / write failure). Concern 7i +
+    Concern 7l-i (multi-round chain anchors).
+
+    The arbiter_resolution + was_addressed + counter_arguments
+    arguments are nullable to support the "minor-only -- no debate
+    round fired" code path: those rows are still written for
+    completeness, with the boolean columns left at their server
+    defaults.
+    """
+    try:
+        from sqlalchemy import text
+        from database import (
+            AsyncSessionLocal,  # type: ignore[attr-defined]
+        )
+        if AsyncSessionLocal is None:
+            return None
+        critic_model = (
+            "gemini+grok" if not critic_result.partial_failure
+            else (
+                "gemini-only"
+                if critic_result.gemini_findings else "grok-only"))
+        from datetime import datetime, timezone
+        for ca in counter_arguments or []:
+            if ca.get("logged_at") is None:
+                ca["logged_at"] = (
+                    datetime.now(timezone.utc).isoformat())
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "INSERT INTO council_debates ("
+                "interaction_id, context, document_type, "
+                "critic_model, critic_findings, "
+                "fatal_count, major_count, minor_count, "
+                "peer_responses, arbiter_resolution, "
+                "was_addressed, counter_arguments, "
+                "data_hash, source_draft_id, parent_debate_id"
+                ") VALUES ("
+                ":interaction_id, :context, :document_type, "
+                ":critic_model, CAST(:critic_findings AS JSONB), "
+                ":fatal_count, :major_count, :minor_count, "
+                "CAST(:peer_responses AS JSONB), :arbiter_resolution, "
+                "CAST(:was_addressed AS JSONB), "
+                "CAST(:counter_arguments AS JSONB), "
+                ":data_hash, :source_draft_id, :parent_debate_id"
+                ") RETURNING id"),
+                {
+                    "interaction_id": interaction_id,
+                    "context": context,
+                    "document_type": document_type,
+                    "critic_model": critic_model,
+                    "critic_findings": json.dumps(
+                        critic_result.merged_findings),
+                    "fatal_count": critic_result.fatal_count,
+                    "major_count": critic_result.major_count,
+                    "minor_count": critic_result.minor_count,
+                    "peer_responses": (
+                        json.dumps(peer_responses)
+                        if peer_responses else None),
+                    "arbiter_resolution": arbiter_resolution,
+                    "was_addressed": (
+                        json.dumps(was_addressed)
+                        if was_addressed is not None else None),
+                    "counter_arguments": (
+                        json.dumps(counter_arguments)
+                        if counter_arguments else None),
+                    "data_hash": data_hash,
+                    "source_draft_id": source_draft_id,
+                    "parent_debate_id": parent_debate_id,
+                })
+            row = r.fetchone()
+            await s.commit()
+            return int(row[0]) if row else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning("record_debate_round_failed", error=str(exc))
+        return None
 
 
 def chunk_arbiter_text(text: str) -> list[str]:

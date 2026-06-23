@@ -6472,6 +6472,112 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                     findings_seen={},
                 )
 
+            # ── Adversarial critic + debate round (Concern 7g) ──
+            # Runs AFTER the primary arbiter completes. Critic
+            # findings always stream; the debate round fires only
+            # when fatal + major > 0. The council_debates row is
+            # always written -- the durable audit record covers
+            # both the "debate ran" and the "minor only -- skipped"
+            # branches.
+            critic_result = None
+            debate_text: str | None = None
+            was_addressed: list[bool] | None = None
+            counter_arguments: list[dict[str, Any]] | None = None
+            current_data_hash_str: str | None = None
+            try:
+                from agents.academic_review import (
+                    build_critic_context, run_critic_review,
+                    run_arbiter_debate_round,
+                    parse_debate_assessments,
+                    record_debate_round,
+                )
+                critic_context = await build_critic_context(
+                    reviewer_email=session.get("email"),
+                    document_type=document_type_q or None)
+                critic_result = await run_critic_review(
+                    critic_context, document_type=document_type_q)
+                # Stream the structured critic findings frame.
+                yield _sse(
+                    "critic_findings",
+                    document_scope=(
+                        document_type_q or "full_package"),
+                    gemini_findings=critic_result.gemini_findings,
+                    grok_findings=critic_result.grok_findings,
+                    merged_findings=critic_result.merged_findings,
+                    gemini_prose=critic_result.gemini_prose,
+                    grok_prose=critic_result.grok_prose,
+                    fatal_count=critic_result.fatal_count,
+                    major_count=critic_result.major_count,
+                    minor_count=critic_result.minor_count,
+                    partial_failure=critic_result.partial_failure)
+                log.info(
+                    "critic_review_complete",
+                    fatal=critic_result.fatal_count,
+                    major=critic_result.major_count,
+                    minor=critic_result.minor_count,
+                    partial=critic_result.partial_failure,
+                )
+                # Debate round gate: only fire if there's something
+                # actionable to debate. Minor-only findings are
+                # logged but skip the second arbiter call.
+                try:
+                    from tools.audit_assembler import (
+                        current_data_hash as _cur_hash,
+                    )
+                    current_data_hash_str = await _cur_hash() or ""
+                except Exception:  # noqa: BLE001
+                    current_data_hash_str = ""
+
+                if critic_result.has_actionable:
+                    debate_text = await asyncio.to_thread(
+                        run_arbiter_debate_round,
+                        context_block, peer_responses,
+                        critic_result.merged_findings,
+                        multi_user, n_strategies)
+                    for chunk in chunk_arbiter_text(debate_text):
+                        yield _sse(
+                            "debate_round_arbiter", text=chunk)
+                    was_addressed, counter_arguments = (
+                        parse_debate_assessments(
+                            debate_text,
+                            critic_result.merged_findings))
+                    log.info(
+                        "academic_review_debate_complete",
+                        debate_chars=len(debate_text),
+                        addressed=sum(
+                            1 for x in was_addressed if x),
+                        rebutted=len(counter_arguments),
+                    )
+                else:
+                    yield _sse("critic_minor_only")
+                    log.info(
+                        "academic_review_debate_skipped_minor_only",
+                        minor=critic_result.minor_count,
+                    )
+
+                # Always-write audit row -- both branches above.
+                debate_id = await record_debate_round(
+                    interaction_id=None,  # filled by _log_interaction_bg later
+                    context="academic_review",
+                    document_type=(
+                        document_type_q or "full_package"),
+                    critic_result=critic_result,
+                    peer_responses=peer_responses,
+                    arbiter_resolution=debate_text,
+                    was_addressed=was_addressed,
+                    counter_arguments=counter_arguments,
+                    data_hash=current_data_hash_str,
+                )
+                log.info(
+                    "council_debates_row_written",
+                    debate_id=debate_id,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "academic_review_critic_pipeline_failed",
+                    error=str(exc),
+                )
+
             # Team Activity — log the completed review. The overall
             # readiness rating is parsed out of the verdict; the harness
             # block aggregates the peer + arbiter quality runs.
@@ -6483,6 +6589,19 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
             harness_meta = collect_harness_metrics()
             if harness_meta:
                 review_metadata["harness"] = harness_meta
+            if critic_result is not None:
+                review_metadata["critic"] = {
+                    "fatal": critic_result.fatal_count,
+                    "major": critic_result.major_count,
+                    "minor": critic_result.minor_count,
+                    "partial_failure": (
+                        critic_result.partial_failure),
+                    "debate_round_fired": (
+                        critic_result.has_actionable),
+                }
+                if counter_arguments:
+                    review_metadata["critic"][
+                        "rebuttals_logged"] = len(counter_arguments)
             _log_interaction_bg(
                 request, session, "academic_review",
                 agents_involved=agents,
