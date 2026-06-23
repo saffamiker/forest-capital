@@ -913,18 +913,24 @@ class TestDeckPass1aMaxTokens:
     back to the deterministic plan and broke the script gate
     (the script card stays on "Generate Deck First" without a
     valid cached plan even when a deck draft exists).
-    The brief story plan uses 6000 -- this test pins the deck to
-    the same ceiling. A future PR that wants to LOWER it should
-    only do so after the schema actually gets leaner (e.g. trim
-    bullets, drop transition_to_next, etc.)."""
+    The brief story plan uses 6000; the deck started at 6000
+    too and got bumped to 8000 on June 22 2026 (this PR) to
+    cover the 12-slide expansion + the new max_bullets field +
+    the SO WHAT framing block. A future PR that wants to LOWER
+    it should only do so after the schema actually gets leaner
+    (e.g. trim bullets, drop transition_to_next, etc.)."""
 
     def test_deck_pass1a_max_tokens_matches_brief_ceiling(
         self, monkeypatch,
     ):
-        """The deck Pass 1a harness call must request <= 6000
-        tokens (the brief story plan's ceiling). Pass 1b
-        (speaker_notes) gets a separate 5000-token budget and a
-        focused prose schema."""
+        """The deck Pass 1a harness call must request 8000
+        tokens. June 22 2026: bumped from 6000 because the
+        12-slide structure + new max_bullets field per slide +
+        SO WHAT framing block push the JSON output close to
+        the 6000 boundary; a transient overrun truncates the
+        JSON mid-slide, fails the parse, and falls back to
+        _deterministic_deck_plan (which the script gate
+        rejects). Pin at 8000."""
         from tools import story_plan as sp
 
         captured: dict = {}
@@ -941,15 +947,15 @@ class TestDeckPass1aMaxTokens:
         sp.generate_deck_story_plan(
             deck_context={"validated_constants": {}},
             slide_titles=["A", "B"])
-        # Pinned at 6000 -- bumped from 4000 on June 22 2026 to
-        # match the brief ceiling and stop the production
-        # truncation. A test that lets this drift back to 4000
-        # would re-introduce the bug.
-        assert captured["max_tokens"] == 6000, (
+        # Pinned at 8000 (June 22 2026 bump from 6000 for the
+        # 12-slide deck + new schema field). A regression
+        # dropping back to 6000 risks silent truncation ->
+        # fallback -> script gate locked.
+        assert captured["max_tokens"] == 8000, (
             f"deck Pass 1a max_tokens is "
-            f"{captured['max_tokens']} -- expected 6000 to match "
-            "the brief story plan's ceiling. June 22 2026 raised "
-            "from 4000 after production logs showed truncation.")
+            f"{captured['max_tokens']} -- expected 8000 "
+            "(June 22 2026 bump from 6000 for the 12-slide "
+            "deck + new max_bullets schema field).")
 
 
 # ── Pass 1b: speaker_notes split (June 21 2026) ──────────────────────────
