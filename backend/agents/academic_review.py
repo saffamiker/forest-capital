@@ -1113,6 +1113,27 @@ primary safety net for them."""
 # downgrade from Developing → Incomplete signals the specific failure
 # mode of a script that has gaps rather than just being weak prose.)
 _ARBITER_INSTRUCTIONS_SCRIPT = """=== YOUR TASK — ARBITER VERDICT (PRESENTATION SCRIPT) ===
+
+SCOPE
+You are reviewing the Presentation Script only. The context block
+contains the full text of this document under PRIMARY DOCUMENT FOR
+REVIEW, and abbreviated summaries of the other deliverables under
+SUPPORTING CONTEXT. Evaluate ONLY the primary document against the
+rubric below. You may reference supporting context to check
+consistency but do not grade it.
+
+NUMERIC VALIDATION
+The NUMERIC REFERENCE section in the context block contains the
+authoritative cache values that were substituted into this document
+at generation time. For every numeric claim you encounter in the
+primary document:
+- If the figure appears in NUMERIC REFERENCE and matches: note it
+  as cache-verified.
+- If the figure appears in NUMERIC REFERENCE but does not match:
+  flag it as HIGH severity numeric inconsistency.
+- If the figure does NOT appear in NUMERIC REFERENCE: flag it as a
+  freehand figure requiring manual verification.
+
 You are the arbiter for a presentation script — a spoken delivery
 document, NOT a written academic submission. Integrate and WEIGH the
 peer review notes above. Produce a structured, rubric-mapped verdict
@@ -1202,6 +1223,27 @@ generic encouragement is not useful."""
 # Key Findings (25%) and Methodology (20%) carry the verdict and a
 # weak Visuals (5%) does not tank the score.
 _ARBITER_INSTRUCTIONS_BRIEF = """=== YOUR TASK — ARBITER VERDICT (EXECUTIVE BRIEF) ===
+
+SCOPE
+You are reviewing the Executive Brief only. The context block
+contains the full text of this document under PRIMARY DOCUMENT FOR
+REVIEW, and abbreviated summaries of the other deliverables under
+SUPPORTING CONTEXT. Evaluate ONLY the primary document against the
+rubric below. You may reference supporting context to check
+consistency but do not grade it.
+
+NUMERIC VALIDATION
+The NUMERIC REFERENCE section in the context block contains the
+authoritative cache values that were substituted into this document
+at generation time. For every numeric claim you encounter in the
+primary document:
+- If the figure appears in NUMERIC REFERENCE and matches: note it
+  as cache-verified.
+- If the figure appears in NUMERIC REFERENCE but does not match:
+  flag it as HIGH severity numeric inconsistency.
+- If the figure does NOT appear in NUMERIC REFERENCE: flag it as a
+  freehand figure requiring manual verification.
+
 You are the arbiter for the FNA 670 EXECUTIVE BRIEF submission — a
 short investment brief written for a senior investment audience AND
 graded by the FNA 670 academic panel. Evaluate against the BRIEF
@@ -1391,6 +1433,27 @@ the draft, evaluate that, stop."""
 #   Calculations + Models 25%, Performance Metrics + Visualizations
 #   20%, Sensitivity + Robustness 15%.
 _ARBITER_INSTRUCTIONS_DECK = """=== YOUR TASK — ARBITER VERDICT (PRESENTATION DECK) ===
+
+SCOPE
+You are reviewing the Final Presentation Deck only. The context
+block contains the full text of this document under PRIMARY
+DOCUMENT FOR REVIEW, and abbreviated summaries of the other
+deliverables under SUPPORTING CONTEXT. Evaluate ONLY the primary
+document against the rubric below. You may reference supporting
+context to check consistency but do not grade it.
+
+NUMERIC VALIDATION
+The NUMERIC REFERENCE section in the context block contains the
+authoritative cache values that were substituted into this document
+at generation time. For every numeric claim you encounter in the
+primary document:
+- If the figure appears in NUMERIC REFERENCE and matches: note it
+  as cache-verified.
+- If the figure appears in NUMERIC REFERENCE but does not match:
+  flag it as HIGH severity numeric inconsistency.
+- If the figure does NOT appear in NUMERIC REFERENCE: flag it as a
+  freehand figure requiring manual verification.
+
 You are the arbiter for the FNA 670 FINAL PRESENTATION DECK — an
 18-20 minute, 11-slide deck delivered to a mixed audience of senior
 investment professionals (Forest Capital partners) AND the FNA 670
@@ -1554,6 +1617,28 @@ stop."""
 
 
 _ARBITER_INSTRUCTIONS_APPENDIX = """=== YOUR TASK — ARBITER VERDICT (ANALYTICAL APPENDIX) ===
+
+SCOPE
+You are reviewing the Analytical Appendix only. The context block
+contains the full text of this document under PRIMARY DOCUMENT FOR
+REVIEW, and abbreviated summaries of the other deliverables under
+SUPPORTING CONTEXT. Evaluate ONLY the primary document against the
+rubric below. You may reference supporting context to check
+consistency but do not grade it.
+
+NUMERIC VALIDATION
+The NUMERIC REFERENCE section in the context block contains the
+authoritative cache values that were substituted into this document
+at generation time. For every numeric claim you encounter in the
+primary document:
+- If the figure appears in NUMERIC REFERENCE and matches: note it
+  as cache-verified.
+- If the figure appears in NUMERIC REFERENCE but does not match:
+  flag it as HIGH severity numeric inconsistency.
+- If the figure does NOT appear in NUMERIC REFERENCE: flag it as a
+  freehand figure requiring manual verification.
+
+
 You are the arbiter for the FNA 670 ANALYTICAL APPENDIX — a
 workbook-style deliverable (35% of project grade) that documents
 every assumption, calculation, and visualisation behind the
