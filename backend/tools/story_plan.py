@@ -1787,6 +1787,84 @@ async def get_cached_story_plan(
         return None
 
 
+async def get_latest_story_plan(
+    document_type: str,
+    *,
+    exclude_fallback: bool = True,
+) -> dict[str, Any] | None:
+    """Read the most recent story plan for `document_type`,
+    regardless of which `data_hash` it was stored under.
+
+    Returns the plan dict on cache hit, None on cold cache or DB
+    unavailable. Fail-open.
+
+    June 22 2026 -- added to fix the script gate. The gate at
+    main._deck_story_plan_status was querying
+    get_cached_story_plan(data_hash, "deck") with the bare
+    current_data_hash, but refresh_story_plan PERSISTS the deck
+    row under a COMPOSITE storage_hash
+    (cache_key_with_brief_and_appendix:
+        "<data_hash>|<brief_hash>|<appendix_hash>"). The bare-
+    hash exact-match query missed every real deck row, so the
+    gate kept the script card locked even when a fresh deck
+    plan with a populated full_script was sitting in the
+    table. This helper bypasses the hash key entirely -- the
+    gate's question is "is there ANY fresh non-fallback deck
+    plan with full_script?" and "latest by computed_at" is the
+    right answer to that question. Hash-drift staleness
+    remains a separate concern handled at export time by
+    verify_export_against_cache.
+
+    `exclude_fallback=True` (the default) filters out
+    `model = 'deterministic_fallback'` rows -- the script
+    gate must not serve a script built from a degraded outline.
+    Set `exclude_fallback=False` if a caller wants the
+    most-recent-period-or-fallback row.
+    """
+    if not _DB_AVAILABLE:
+        return None
+    try:
+        from sqlalchemy import text
+        async with AsyncSessionLocal() as session:  # type: ignore[union-attr]
+            where_clauses = ["document_type = :t"]
+            params: dict[str, Any] = {"t": document_type}
+            if exclude_fallback:
+                where_clauses.append(
+                    "(model IS NULL "
+                    "OR model <> 'deterministic_fallback')")
+            sql = (
+                "SELECT plan_json, full_script, "
+                "anticipated_questions, dissenting_view, "
+                "limitations_surfaced, model, computed_at, "
+                "data_hash "
+                "FROM story_plans "
+                f"WHERE {' AND '.join(where_clauses)} "
+                "ORDER BY computed_at DESC LIMIT 1")
+            row = await session.execute(text(sql), params)
+            r = row.fetchone()
+            if not r:
+                return None
+            plan = dict(r[0]) if r[0] else {}
+            plan["full_script"] = r[1]
+            plan["anticipated_questions"] = (
+                list(r[2]) if r[2] else [])
+            plan["dissenting_view"] = r[3] or ""
+            plan["limitations_surfaced"] = (
+                list(r[4]) if r[4] else [])
+            plan["_model"] = r[5]
+            plan["computed_at"] = str(r[6])
+            # data_hash on the row may be the composite storage
+            # hash for deck plans (data|brief|appendix); surface
+            # it so the caller can decide whether to flag drift.
+            plan["_storage_hash"] = r[7]
+            return plan
+    except Exception as exc:  # noqa: BLE001
+        log.warning("story_plan_latest_read_error",
+                    document_type=document_type,
+                    error=str(exc))
+        return None
+
+
 async def persist_story_plan(
     data_hash: str, document_type: str, plan: dict[str, Any],
 ) -> None:

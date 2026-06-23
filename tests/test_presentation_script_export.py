@@ -84,19 +84,32 @@ def _patch_cache(
     monkeypatch, *, plan: dict | None,
     data_hash: str = "test_hash_abc",
 ):
-    """Patch the two reads the endpoint makes: current_data_hash() +
-    get_cached_story_plan(). Any pattern -- present plan, missing plan,
-    deterministic_fallback plan -- is driven through this helper."""
+    """Patch the reads the endpoint + readiness gate make:
+    current_data_hash() and BOTH get_cached_story_plan() +
+    get_latest_story_plan() so the test works regardless of
+    which helper the caller landed on after PR #391 (the
+    script-gate composite-hash fix swapped the gate from
+    get_cached_story_plan to get_latest_story_plan; the
+    endpoint may still use get_cached_story_plan).
+
+    Any pattern -- present plan, missing plan,
+    deterministic_fallback plan -- is driven through this
+    helper."""
     from tools import audit_assembler, story_plan
 
     async def _fake_hash():
         return data_hash
 
-    async def _fake_plan(_hash, _doc_type):
+    async def _fake_plan(*_a, **_kw):
         return plan
 
     monkeypatch.setattr(audit_assembler, "current_data_hash", _fake_hash)
     monkeypatch.setattr(story_plan, "get_cached_story_plan", _fake_plan)
+    # June 22 2026 -- gate moved to get_latest_story_plan
+    # (queries by document_type only, no bare hash); patch
+    # both so existing tests work and the new gate is
+    # exercised without a real DB.
+    monkeypatch.setattr(story_plan, "get_latest_story_plan", _fake_plan)
 
 
 # ── Endpoint contract ──────────────────────────────────────────────────
