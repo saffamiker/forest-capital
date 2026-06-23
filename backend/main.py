@@ -10993,6 +10993,177 @@ async def get_data_reference_sheet(
     }
 
 
+@app.get("/api/v1/export/data-reference-sheet/validate")
+async def validate_data_reference_sheet(
+    session: dict = Depends(require_auth),
+):
+    """Cross-reference validator for the Data Reference Sheet.
+
+    Runs the same build as the /data-reference-sheet endpoint,
+    then for each token compares the rendered value against the
+    authoritative source (analytics_metrics_cache row, strategy
+    cache, detect_current_regime, etc) and returns a status
+    pass / fail / warning / skipped per token.
+
+    Status rules:
+      pass    -- within tolerance (0.01 for Sharpe, 0.0001 for
+                 factor loadings, 0.5pp for percentages, exact
+                 for ints / strings)
+      fail    -- beyond tolerance; result carries delta
+      warning -- pass but source row > 24h old
+      skipped -- locked constant, missing source, or no
+                 strategy registered for the token
+
+    Each result also carries cache_freshness -- the ISO
+    timestamp of the source row, null for locked constants.
+
+    Zero LLM calls. Reads warm caches only. Sub-2-second
+    typical response.
+
+    Fail-open per token: a strategy raising returns skipped
+    with note='validator_error: <msg>'; the report still
+    completes for the remaining tokens.
+    """
+    from datetime import datetime, timezone
+
+    from tools.audit_assembler import current_data_hash
+    import asyncio
+    from tools.cache import (
+        get_latest_strategy_cache,
+        get_latest_strategy_hash,
+        get_monthly_returns,
+    )
+    from tools.cio_recommendation import (
+        compute_implied_asset_allocation,
+        get_latest_recommendation,
+    )
+    from tools.data_reference_validator import (
+        Sources, validate_reference_sheet,
+    )
+    from tools.precomputed_analytics import get_latest_metric
+    from tools.regime_detector import detect_current_regime
+    _ = session  # auth-only
+
+    # Get the rendered sheet via the same handler so any future
+    # change to the sheet shape is automatically reflected here.
+    rendered = await get_data_reference_sheet(session)
+    if not isinstance(rendered, dict):
+        # The handler should always return a dict; bail out
+        # rather than crashing the validator.
+        return {
+            "data_hash": "",
+            "validated_at": datetime.now(
+                timezone.utc).isoformat(),
+            "summary": {
+                "total": 0, "passed": 0, "failed": 0,
+                "warning": 0, "skipped": 0},
+            "results": [],
+            "error": "sheet_unavailable",
+        }
+    data_hash = rendered.get("data_hash") or ""
+
+    # Pre-load every source the strategies read so we hit each
+    # cache exactly once for the whole 153-token report rather
+    # than per-token.
+    sources = Sources()
+    try:
+        sources.strategy_cache = (
+            await get_latest_strategy_cache()) or {}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_strategy_cache_failed",
+                    error=str(exc))
+    try:
+        sources.cio_row = await get_latest_recommendation()
+        if sources.cio_row:
+            sources.cio_computed_at = (
+                sources.cio_row.get("computed_at"))
+            if (sources.cio_row.get("blend_weights")):
+                try:
+                    sources.implied_alloc = (
+                        await compute_implied_asset_allocation(
+                            sources.cio_row.get("blend_weights")))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "validator_implied_alloc_failed",
+                        error=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_cio_failed", error=str(exc))
+    try:
+        sources.live_signals = await asyncio.to_thread(
+            detect_current_regime)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_live_signals_failed",
+                    error=str(exc))
+    try:
+        sources.academic_analytics = (
+            await get_latest_metric("academic_analytics"))
+        if sources.academic_analytics:
+            sources.academic_analytics_computed_at = (
+                sources.academic_analytics.get("_computed_at"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_academic_analytics_failed",
+                    error=str(exc))
+    try:
+        sources.oos_cost_sensitivity = (
+            await get_latest_metric("oos_cost_sensitivity"))
+        if sources.oos_cost_sensitivity:
+            sources.oos_cost_sensitivity_computed_at = (
+                sources.oos_cost_sensitivity.get("_computed_at"))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_oos_cost_sensitivity_failed",
+                    error=str(exc))
+    try:
+        monthly = await get_monthly_returns()
+        sources.n_monthly_months = (
+            len((monthly or {}).get("dates") or []))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("validator_monthly_returns_failed",
+                    error=str(exc))
+    try:
+        # Pull strategy cache row's computed_at for staleness
+        # checks on per-strategy metric tokens.
+        try:
+            strategy_hash = (
+                await get_latest_strategy_hash()) or ""
+        except Exception:  # noqa: BLE001
+            strategy_hash = ""
+        if strategy_hash:
+            from sqlalchemy import text
+            from database import AsyncSessionLocal
+            if AsyncSessionLocal is not None:
+                async with AsyncSessionLocal() as s:
+                    r = await s.execute(text(
+                        "SELECT computed_at FROM "
+                        "strategy_results_cache "
+                        "WHERE strategy_hash = :h LIMIT 1"),
+                        {"h": strategy_hash})
+                    row = r.fetchone()
+                    if row and row[0]:
+                        sources.strategy_cache_computed_at = (
+                            row[0].isoformat()
+                            if hasattr(row[0], "isoformat")
+                            else str(row[0]))
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "validator_strategy_cache_computed_at_failed",
+            error=str(exc))
+
+    rendered_categories = rendered.get("categories") or {}
+    report = validate_reference_sheet(
+        rendered_categories, sources, data_hash)
+    log.info(
+        "data_reference_sheet_validated",
+        data_hash=data_hash[:8] if data_hash else "",
+        total=report.summary.get("total"),
+        passed=report.summary.get("passed"),
+        failed=report.summary.get("failed"),
+        warning=report.summary.get("warning"),
+        skipped=report.summary.get("skipped"),
+        actor=session.get("email") if isinstance(session, dict)
+              else None)
+    return report.to_dict()
+
+
 @app.post("/api/v1/export/package")
 @limiter.limit("10/minute")
 async def export_package(
