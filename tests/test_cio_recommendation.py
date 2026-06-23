@@ -546,3 +546,99 @@ class TestPersistRecoveryUpsert:
             "abc123",
             {"signal": "s", "_model": "claude-sonnet-4-6"},
             "BULL")
+
+
+class TestRecCarriesBlendWeights:
+    """Pre-fix, the rec dict that _regenerate_under_key and
+    get_cio_recommendation passed to _persist contained only the
+    four-component narrative + confidence + limitations. blend_weights
+    lived in compute_context's output but was never written to
+    raw_json, so the read path returned cio_row with no blend_weights
+    and every {{BLEND_*_WT}} + {{CURRENT_*_PCT}} token rendered
+    em-dash on the data reference sheet.
+
+    These tests pin the callsite contract: every path that calls
+    _persist must merge blend_weights from built["context"] into rec
+    first, so the read path (get_latest_recommendation -> dict(raw_json))
+    surfaces it directly without needing a separate overlay."""
+
+    @pytest.mark.asyncio
+    async def test_regenerate_under_key_persists_blend_weights(
+            self, monkeypatch):
+        from tools import cio_recommendation as cio_mod
+
+        captured: dict = {"rec": None}
+
+        async def _fake_build_live_context():
+            return {
+                "context": {
+                    "regime": "BULL",
+                    "blend_weights": {
+                        "REGIME_SWITCHING": 0.5,
+                        "BENCHMARK": 0.3,
+                        "CLASSIC_60_40": 0.2,
+                    },
+                },
+                "macro": "macro text",
+            }
+
+        def _fake_generate(context, macro):
+            return {
+                "signal": "s",
+                "recommendation": "r",
+                "confidence": {"regime": "BULL"},
+                "dissenting_view": "d",
+                "key_risk": "k",
+                "limitations": ["a"],
+                "_model": "claude-sonnet-4-6",
+            }
+
+        async def _fake_persist(key, rec, regime):
+            captured["rec"] = rec
+
+        monkeypatch.setattr(
+            cio_mod, "_build_live_context", _fake_build_live_context)
+        monkeypatch.setattr(
+            cio_mod, "generate_recommendation", _fake_generate)
+        monkeypatch.setattr(cio_mod, "_persist", _fake_persist)
+
+        await cio_mod._regenerate_under_key("test_key_X")
+
+        assert captured["rec"] is not None
+        assert "blend_weights" in captured["rec"]
+        bw = captured["rec"]["blend_weights"]
+        assert bw["REGIME_SWITCHING"] == 0.5
+        assert bw["BENCHMARK"] == 0.3
+        assert bw["CLASSIC_60_40"] == 0.2
+
+    @pytest.mark.asyncio
+    async def test_regenerate_under_key_handles_missing_blend_weights(
+            self, monkeypatch):
+        """When compute_context didn't produce blend_weights (e.g.
+        the regime fit failed), persist gets an empty dict rather
+        than missing the field entirely -- the read path then sees
+        cio_row["blend_weights"] == {} which the substitution
+        layer treats as 'no blend' and renders em-dash without
+        raising."""
+        from tools import cio_recommendation as cio_mod
+        captured: dict = {"rec": None}
+
+        async def _fake_build_live_context():
+            return {"context": {"regime": "BULL"},
+                    "macro": ""}  # no blend_weights
+
+        def _fake_generate(c, m):
+            return {"signal": "s", "_model": "x"}
+
+        async def _fake_persist(k, rec, r):
+            captured["rec"] = rec
+
+        monkeypatch.setattr(
+            cio_mod, "_build_live_context", _fake_build_live_context)
+        monkeypatch.setattr(
+            cio_mod, "generate_recommendation", _fake_generate)
+        monkeypatch.setattr(cio_mod, "_persist", _fake_persist)
+
+        await cio_mod._regenerate_under_key("test_key_Y")
+
+        assert captured["rec"]["blend_weights"] == {}
