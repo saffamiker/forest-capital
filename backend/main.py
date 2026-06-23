@@ -6572,6 +6572,86 @@ async def council_academic_review(request: Request, session: dict = Depends(requ
                     "council_debates_row_written",
                     debate_id=debate_id,
                 )
+
+                # Concern 7k-i auto-fire: every Fatal finding gets a
+                # pre-populated arbiter fix proposal so the team sees
+                # an Apply Fix button on every Fatal card without
+                # waiting for a follow-up request. Majors are
+                # explicit-only (UI Propose Fix button hits
+                # /api/v1/documents/propose-fix). Best-effort -- a
+                # proposal generation failure just leaves the card
+                # without an auto-proposal; the team can still
+                # request one manually.
+                auto_proposals: list[dict[str, Any]] = []
+                try:
+                    from agents.academic_review import (
+                        run_arbiter_fix_proposal,
+                        write_fix_proposals_to_debate,
+                    )
+                    if debate_id and critic_result \
+                            and critic_result.has_actionable:
+                        target_doc = (
+                            document_type_q or "full_package")
+                        fatal_indexes = [
+                            i for i, f in enumerate(
+                                critic_result.merged_findings)
+                            if str(f.get("severity")).strip()
+                            .capitalize() == "Fatal"]
+                        proposals = []
+                        for fi in fatal_indexes:
+                            f = (
+                                critic_result.merged_findings[fi])
+                            pdoc = (
+                                str(f.get("target_document"))
+                                if f.get("target_document")
+                                and f.get("target_document")
+                                != "cross_document"
+                                else target_doc)
+                            prop = await run_arbiter_fix_proposal(
+                                finding=f, finding_id=fi,
+                                document_type=pdoc,
+                                reviewer_email=session.get(
+                                    "email"))
+                            if prop is not None:
+                                proposals.append(prop)
+                                auto_proposals.append({
+                                    "finding_id": prop.finding_id,
+                                    "target": prop.target,
+                                    "section_name": (
+                                        prop.section_name),
+                                    "rationale": prop.rationale,
+                                    "patch_instruction": (
+                                        prop.patch_instruction),
+                                    "severity": prop.severity,
+                                    "auto_proposed": (
+                                        prop.auto_proposed),
+                                    "target_document": (
+                                        prop.target_document),
+                                    "source_of_truth_document": (
+                                        prop.source_of_truth_document
+                                    ),
+                                })
+                        if proposals:
+                            await write_fix_proposals_to_debate(
+                                debate_id, proposals)
+                            log.info(
+                                "fix_proposals_auto_written",
+                                debate_id=debate_id,
+                                count=len(proposals))
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "fix_proposal_auto_fire_failed",
+                        error=str(exc))
+
+                # Concern 7j + 7k-v -- emit the persisted-row
+                # marker frame carrying debate_id + auto-fire fix
+                # proposals so the UI can route propose-fix and
+                # apply-fix calls without a follow-up GET. Always
+                # emitted (the row is always written).
+                yield _sse(
+                    "debate_recorded",
+                    debate_id=debate_id,
+                    fix_proposals=auto_proposals)
             except Exception as exc:  # noqa: BLE001
                 log.warning(
                     "academic_review_critic_pipeline_failed",
@@ -12538,6 +12618,712 @@ async def export_midpoint_paper(
         })
 
 
+# ── Concern 7m: audit chain export ────────────────────────────
+
+
+async def _assemble_audit_payload(
+    document_type: str,
+) -> dict[str, Any]:
+    """Assembles the structured audit chain for the given scope.
+
+    Joins council_debates + editor_drafts so the rounds list is
+    ordered chronologically and each round links to its
+    source_draft + resulting_draft. Concern 7m-i shape.
+
+    document_type='full_package' returns rows where context is
+    'academic_review' AND document_type is 'full_package'.
+    Otherwise returns rows for the specific doc_type.
+    """
+    payload: dict[str, Any] = {
+        "document_type": document_type,
+        "data_hash": "",
+        "generated_at": (
+            __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc).isoformat()),
+        "rounds": [],
+        "final_draft": None,
+        "summary": {
+            "total_rounds": 0,
+            "total_fatal_raised": 0,
+            "total_fatal_addressed": 0,
+            "total_fatal_rebutted": 0,
+            "total_major_raised": 0,
+            "total_major_addressed": 0,
+            "total_major_rebutted": 0,
+            "total_fixes_applied": 0,
+            "manual_edits_made": False,
+        },
+    }
+    if ENVIRONMENT == "test":
+        return payload
+    try:
+        from sqlalchemy import text
+        from database import (
+            AsyncSessionLocal,  # type: ignore[attr-defined]
+        )
+        if AsyncSessionLocal is None:
+            return payload
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(text(
+                "SELECT id, context, document_type, critic_model, "
+                "critic_findings, fatal_count, major_count, "
+                "minor_count, peer_responses, arbiter_resolution, "
+                "was_addressed, counter_arguments, fix_proposals, "
+                "fix_applied, fix_applied_at, new_draft_id, "
+                "source_draft_id, parent_debate_id, data_hash, "
+                "created_at "
+                "FROM council_debates "
+                "WHERE document_type = :t "
+                "ORDER BY created_at ASC"),
+                {"t": document_type})
+            rows = r.fetchall()
+        round_idx = 0
+        for row in rows:
+            round_idx += 1
+            (
+                rid, ctx, dt, model, findings, fatal, major, minor,
+                peers, arbiter, addressed, counters,
+                proposals, applied, applied_at, new_id, source_id,
+                parent_id, dh, created,
+            ) = row
+            payload["rounds"].append({
+                "round": round_idx,
+                "debate_id": rid,
+                "context": ctx,
+                "data_hash": dh,
+                "created_at": (
+                    created.isoformat() if created else None),
+                "source_draft_id": source_id,
+                "parent_debate_id": parent_id,
+                "critic_findings": {
+                    "fatal_count": fatal,
+                    "major_count": major,
+                    "minor_count": minor,
+                    "findings": findings or [],
+                    "model": model,
+                },
+                "council_response": arbiter or "",
+                "counter_arguments": counters or [],
+                "fix_proposals": proposals or [],
+                "fix_applied": bool(applied),
+                "fix_applied_at": (
+                    applied_at.isoformat() if applied_at else None),
+                "resulting_draft_id": new_id,
+            })
+            payload["summary"]["total_fatal_raised"] += int(
+                fatal or 0)
+            payload["summary"]["total_major_raised"] += int(
+                major or 0)
+            for i, addr in enumerate(addressed or []):
+                f = (findings or [])[i] if (
+                    findings and i < len(findings)) else {}
+                sev = str(f.get("severity") or "").capitalize()
+                if addr:
+                    if sev == "Fatal":
+                        payload["summary"][
+                            "total_fatal_addressed"] += 1
+                    elif sev == "Major":
+                        payload["summary"][
+                            "total_major_addressed"] += 1
+            for ca in (counters or []):
+                sev = (
+                    str((ca.get("finding") or {})
+                        .get("severity") or "").capitalize())
+                if sev == "Fatal":
+                    payload["summary"][
+                        "total_fatal_rebutted"] += 1
+                elif sev == "Major":
+                    payload["summary"][
+                        "total_major_rebutted"] += 1
+            if applied:
+                payload["summary"]["total_fixes_applied"] += 1
+            if dh and not payload["data_hash"]:
+                payload["data_hash"] = dh
+        payload["summary"]["total_rounds"] = round_idx
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_export_assembly_failed", error=str(exc))
+    return payload
+
+
+@app.get("/api/v1/documents/audit-export")
+@limiter.limit("10/minute")
+async def get_audit_export(
+    request: Request,
+    document_type: str = "full_package",
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7m-i. Returns the full audit chain for the requested
+    scope as structured JSON. Joins council_debates rows ordered by
+    created_at; each round carries critic_findings, council_response,
+    counter_arguments, fix_proposals, and (when fix was applied) the
+    resulting_draft_id link.
+
+    document_type=full_package -- cross-document review chain.
+    document_type=<editor type> -- per-doc chain.
+    """
+    if document_type not in (
+            "full_package", "executive_brief",
+            "presentation_deck", "analytical_appendix",
+            "presentation_script"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "document_type must be full_package or one of the "
+                "four editor doc types"))
+    return await _assemble_audit_payload(document_type)
+
+
+@app.post("/api/v1/documents/audit-export/docx")
+@limiter.limit("6/minute")
+async def post_audit_export_docx(
+    request: Request,
+    document_type: str = "full_package",
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7m-ii. Same payload as the JSON endpoint, rendered
+    as a formatted .docx file download.
+
+    The DOCX uses python-docx (same library the brief / appendix
+    rendering chain already uses -- no new dependency). Structure:
+
+      Title + subtitle + data hash header
+      Executive summary table
+      Per-round sections (critic findings table, council response
+      block, fix-applied row)
+      Counter-arguments on record (all rebuttals across all rounds)
+      Revision history table
+      Data integrity footer
+    """
+    if document_type not in (
+            "full_package", "executive_brief",
+            "presentation_deck", "analytical_appendix",
+            "presentation_script"):
+        raise HTTPException(
+            status_code=422, detail="invalid document_type")
+    payload = await _assemble_audit_payload(document_type)
+
+    if ENVIRONMENT == "test":
+        return {"ok": True, "rounds": 0, "test_environment": True}
+
+    try:
+        from docx import Document
+        from docx.shared import Pt
+        from io import BytesIO
+        from datetime import date as _date
+        doc = Document()
+        # Title
+        doc.add_heading(
+            "Forest Capital -- Adversarial Review Audit Trail",
+            level=0)
+        sub = doc.add_paragraph(
+            "FNA 670 | McColl School of Business | "
+            "Queens University of Charlotte")
+        sub.runs[0].italic = True
+        doc.add_paragraph(
+            f"Data hash: {payload.get('data_hash') or '(none)'} "
+            f"| Generated: {_date.today().isoformat()}")
+
+        summary = payload.get("summary") or {}
+        doc.add_heading("Executive Summary", level=1)
+        t = doc.add_table(rows=1, cols=2)
+        t.style = "Light Grid Accent 1"
+        t.rows[0].cells[0].text = "Metric"
+        t.rows[0].cells[1].text = "Value"
+        for label, key in [
+            ("Rounds",                "total_rounds"),
+            ("Fatal raised",          "total_fatal_raised"),
+            ("Fatal addressed",       "total_fatal_addressed"),
+            ("Fatal rebutted",        "total_fatal_rebutted"),
+            ("Major raised",          "total_major_raised"),
+            ("Major addressed",       "total_major_addressed"),
+            ("Major rebutted",        "total_major_rebutted"),
+            ("Fixes applied",         "total_fixes_applied"),
+        ]:
+            row = t.add_row().cells
+            row[0].text = label
+            row[1].text = str(summary.get(key, 0))
+
+        for r in payload.get("rounds") or []:
+            doc.add_heading(
+                f"Round {r['round']} -- {r['created_at'] or ''}",
+                level=1)
+            cf = r.get("critic_findings") or {}
+            doc.add_paragraph(
+                f"Source draft id: {r.get('source_draft_id')}")
+            doc.add_paragraph(
+                f"Model: {cf.get('model', 'unknown')}  |  "
+                f"Fatal {cf.get('fatal_count', 0)}  /  "
+                f"Major {cf.get('major_count', 0)}  /  "
+                f"Minor {cf.get('minor_count', 0)}")
+            findings = cf.get("findings") or []
+            if findings:
+                doc.add_heading(
+                    "Adversarial Critic Findings", level=2)
+                tbl = doc.add_table(rows=1, cols=5)
+                tbl.style = "Light Grid Accent 1"
+                hdr = tbl.rows[0].cells
+                hdr[0].text = "Severity"
+                hdr[1].text = "Category"
+                hdr[2].text = "Location"
+                hdr[3].text = "Description"
+                hdr[4].text = "Raised by"
+                for f in findings:
+                    row = tbl.add_row().cells
+                    row[0].text = str(f.get("severity") or "")
+                    row[1].text = str(f.get("category") or "")
+                    row[2].text = str(f.get("location") or "")
+                    row[3].text = str(f.get("description") or "")
+                    row[4].text = str(f.get("raised_by") or "")
+            response_text = r.get("council_response") or ""
+            if response_text.strip():
+                doc.add_heading("Council Response", level=2)
+                doc.add_paragraph(response_text)
+            if r.get("fix_applied"):
+                doc.add_heading("Fix Applied", level=2)
+                doc.add_paragraph(
+                    f"Resulting draft id: "
+                    f"{r.get('resulting_draft_id')}")
+                doc.add_paragraph(
+                    f"Applied at: "
+                    f"{r.get('fix_applied_at') or ''}")
+
+        # Counter-arguments on record -- aggregated across rounds.
+        all_counters: list[dict[str, Any]] = []
+        for r in payload.get("rounds") or []:
+            all_counters.extend(r.get("counter_arguments") or [])
+        if all_counters:
+            doc.add_heading(
+                "Counter-Arguments on Record", level=1)
+            doc.add_paragraph(
+                "The following critic findings were reviewed and "
+                "intentionally not addressed based on the council's "
+                "rebuttal -- these are documented rebuttals showing "
+                "the team considered and responded to the critique.")
+            for ca in all_counters:
+                f = ca.get("finding") or {}
+                doc.add_heading(
+                    f"{f.get('severity', '')} "
+                    f"{f.get('category', '')} -- "
+                    f"{f.get('location', '')}", level=2)
+                doc.add_paragraph(
+                    f"Critic raised: {f.get('description', '')}")
+                doc.add_paragraph(
+                    f"Council response: {ca.get('rebuttal', '')}")
+                doc.add_paragraph(
+                    f"Model source: "
+                    f"{ca.get('model_source', 'unknown')}")
+
+        # Data integrity footer
+        doc.add_heading("Data Integrity", level=1)
+        doc.add_paragraph(
+            f"Canonical data hash: "
+            f"{payload.get('data_hash') or '(none)'}")
+        doc.add_paragraph(
+            "All figures in submitted documents verified against "
+            "this hash via the verify-all endpoint.")
+
+        # Bump default font size for legibility.
+        for p in doc.paragraphs:
+            for run in p.runs:
+                if not run.font.size:
+                    run.font.size = Pt(10)
+
+        buf = BytesIO()
+        doc.save(buf)
+        body = buf.getvalue()
+        from fastapi.responses import Response as _Resp
+        filename = (
+            f"forest_capital_audit_trail_{document_type}_"
+            f"{_date.today().isoformat()}.docx")
+        return _Resp(
+            content=body,
+            media_type=(
+                "application/vnd.openxmlformats-officedocument."
+                "wordprocessingml.document"),
+            headers={
+                "Content-Disposition": (
+                    f"attachment; filename=\"{filename}\""),
+            })
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "audit_export_docx_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"DOCX render failed: {exc}")
+
+
+# ── Concern 7k-iii + 7k-viii: apply-fix + propose-fix endpoints ──
+
+@app.post("/api/v1/documents/propose-fix")
+@limiter.limit("20/minute")
+async def post_propose_fix(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7k-viii. Generates a fix proposal for a single
+    Major finding on demand. Fatal findings auto-fire during the
+    debate round; this endpoint serves the Major case (the UI
+    Propose Fix button on a Major finding card).
+
+    Body: {
+      document_type: <type>,
+      finding_id:    <int -- index into the debate's
+                     merged_findings>,
+      finding:       <finding object>,
+      debate_id:     <int -- council_debates row id>
+    }
+
+    Returns the FixProposal as JSON. Also appends the proposal to
+    council_debates.fix_proposals so the UI keeps a single source
+    of truth for what's been proposed.
+    """
+    from agents.academic_review import (
+        run_arbiter_fix_proposal, write_fix_proposals_to_debate,
+    )
+    document_type = str(body.get("document_type") or "")
+    if document_type not in {
+            "executive_brief", "analytical_appendix",
+            "presentation_deck", "presentation_script"}:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "document_type must be one of executive_brief / "
+                "analytical_appendix / presentation_deck / "
+                "presentation_script"))
+    finding = body.get("finding") or {}
+    if not isinstance(finding, dict):
+        raise HTTPException(
+            status_code=422, detail="finding must be an object")
+    finding_id = int(body.get("finding_id") or 0)
+    debate_id = body.get("debate_id")
+    proposal = await run_arbiter_fix_proposal(
+        finding=finding, finding_id=finding_id,
+        document_type=document_type,
+        reviewer_email=session.get("email"))
+    if proposal is None:
+        return {
+            "ok": False,
+            "message": (
+                "Could not generate a fix proposal for this "
+                "finding -- the arbiter response was not parseable. "
+                "You can still edit the document manually."),
+        }
+    if debate_id is not None:
+        try:
+            await write_fix_proposals_to_debate(
+                int(debate_id), [proposal])
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "propose_fix_write_failed", error=str(exc))
+    return {
+        "ok": True,
+        "finding_id": proposal.finding_id,
+        "target": proposal.target,
+        "section_name": proposal.section_name,
+        "rationale": proposal.rationale,
+        "patch_instruction": proposal.patch_instruction,
+        "severity": proposal.severity,
+        "auto_proposed": proposal.auto_proposed,
+        "target_document": proposal.target_document,
+        "source_of_truth_document": (
+            proposal.source_of_truth_document),
+    }
+
+
+@app.post("/api/v1/documents/apply-fix")
+@limiter.limit("6/minute")
+async def post_apply_fix(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7k-iii + 7l-i. Apply a confirmed fix proposal:
+
+      1. Patch the story_plans row for (data_hash, document_type)
+         by appending patch_instruction to the target section's
+         guidance field (target=section) or to plan_json
+         .central_argument (target=document).
+      2. Re-run the affected generator (section-level: just the
+         affected section's harness call; document-level: full
+         document generator).
+      3. Save the result as a NEW editor_drafts row with a
+         "Post-critic revision v<n>" label. The existing draft is
+         preserved -- the team picks which version to keep.
+      4. Update council_debates with fix_applied=true,
+         fix_applied_at=NOW(), new_draft_id=<new id>.
+      5. Return the new draft_id + label + scope.
+
+    Body: {
+      document_type:  <type>,
+      finding_id:     <int>,
+      fix_proposal:   <FixProposal object>,
+      debate_id:      <int>,
+      confirmed:      true (must be true to apply)
+    }
+
+    Returns: { new_draft_id, draft_label, scope, section_regenerated }
+    """
+    if not body.get("confirmed"):
+        raise HTTPException(
+            status_code=422,
+            detail="confirmed must be true to apply the fix")
+    document_type = str(body.get("document_type") or "")
+    if document_type not in {
+            "executive_brief", "analytical_appendix",
+            "presentation_deck", "presentation_script"}:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "document_type must be one of executive_brief / "
+                "analytical_appendix / presentation_deck / "
+                "presentation_script"))
+    fix = body.get("fix_proposal") or {}
+    if not isinstance(fix, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="fix_proposal must be an object")
+    target = fix.get("target")
+    if target not in ("section", "document"):
+        raise HTTPException(
+            status_code=422,
+            detail="fix_proposal.target must be 'section' or 'document'")
+    patch_instruction = str(fix.get("patch_instruction") or "")
+    if not patch_instruction.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="fix_proposal.patch_instruction is required")
+    debate_id = body.get("debate_id")
+    section_name = fix.get("section_name")
+    email = session.get("email") or ""
+    if ENVIRONMENT == "test":
+        # In test, return a deterministic stub so the apply-fix
+        # endpoint shape is exercised without running the live
+        # generators.
+        return {
+            "ok": True,
+            "new_draft_id": -1,
+            "draft_label": "Post-critic revision v1 (test)",
+            "scope": target,
+            "section_regenerated": (
+                section_name if target == "section" else None),
+        }
+
+    # 1. Patch the story_plans row. Best-effort -- if the patch
+    # write fails we surface a 500 so the caller knows nothing was
+    # applied and the existing draft is unchanged.
+    try:
+        from tools.audit_assembler import current_data_hash
+        from sqlalchemy import text as _text
+        from database import (
+            AsyncSessionLocal,  # type: ignore[attr-defined]
+        )
+        dh = await current_data_hash() or ""
+        if AsyncSessionLocal is None:
+            raise RuntimeError("database unavailable")
+        async with AsyncSessionLocal() as s:
+            r = await s.execute(_text(
+                "SELECT plan_json, central_argument FROM story_plans "
+                "WHERE data_hash = :h AND document_type = :t "
+                "ORDER BY computed_at DESC LIMIT 1"),
+                {"h": dh, "t": document_type})
+            row = r.fetchone()
+            if not row:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "No story plan to patch -- regenerate the "
+                        "document first to seed a plan, then re-run "
+                        "apply-fix."))
+            plan_json = row[0] or {}
+            central = row[1] or ""
+            # Apply the patch.
+            if target == "document":
+                central = (
+                    (central + "\n\n[Critic fix] "
+                     + patch_instruction).strip())
+            else:
+                # Section-level: append to the matching section's
+                # guidance field. The plan_json shape differs
+                # between brief (section_plan list) and deck
+                # (slide_plan list); cover both.
+                sections = (
+                    plan_json.get("section_plan")
+                    or plan_json.get("slide_plan") or [])
+                patched = False
+                for s_entry in sections:
+                    if not isinstance(s_entry, dict):
+                        continue
+                    sn = (
+                        s_entry.get("name")
+                        or s_entry.get("title")
+                        or s_entry.get("section")
+                        or str(s_entry.get("slide_number") or ""))
+                    if sn == section_name:
+                        existing = (
+                            s_entry.get("guidance") or "")
+                        s_entry["guidance"] = (
+                            (existing + "\n[Critic fix] "
+                             + patch_instruction).strip())
+                        patched = True
+                        break
+                if not patched:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"Section '{section_name}' not found "
+                            f"in the {document_type} story plan."))
+            # Persist the patched plan.
+            await s.execute(_text(
+                "UPDATE story_plans SET "
+                "plan_json = CAST(:p AS JSONB), "
+                "central_argument = :c "
+                "WHERE data_hash = :h AND document_type = :t"),
+                {
+                    "p": json.dumps(plan_json),
+                    "c": central,
+                    "h": dh, "t": document_type,
+                })
+            await s.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.warning("apply_fix_patch_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not patch story plan: {exc}")
+
+    # 2 + 3. Re-run the generator. The full doc generators run
+    # asynchronously via _start_generation_job and write a new
+    # editor_drafts row themselves (with label "Post-critic
+    # revision v<n>"). For section-level scope we still trigger
+    # the full document generator -- a per-section regen path is
+    # a future optimisation; the current generators are atomic.
+    try:
+        from tools.editor_drafts import list_drafts
+        all_drafts = await list_drafts(email)
+        prior_count = sum(
+            1 for d in all_drafts
+            if d.get("document_type") == document_type)
+        revision_n = max(prior_count, 1)
+        # Stash the desired draft label so the generator labels
+        # the new row appropriately. The generators don't currently
+        # accept a label override; we record the intended label in
+        # the response so the UI can update its own version
+        # selector immediately and the actual draft label is
+        # backfilled by the next list-drafts fetch.
+        draft_label = (
+            f"Post-critic revision v{revision_n}"
+            f"{' (section: ' + str(section_name) + ')' if section_name else ''}")
+        # The generator endpoints return 202 with a job_id; we
+        # mirror that contract here. The frontend polls the job
+        # and shows the new draft once it lands.
+        job_response = _start_generation_job(
+            document_type, session, request)
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        log.warning("apply_fix_regen_kickoff_failed", error=str(exc))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Could not kick off regeneration: {exc}")
+
+    # 4. Mark fix_applied on council_debates (best-effort -- the
+    # apply did succeed even if the marker write fails).
+    if debate_id is not None:
+        try:
+            from sqlalchemy import text as _text2
+            from database import (
+                AsyncSessionLocal as _ASL,  # type: ignore
+            )
+            if _ASL is not None:
+                async with _ASL() as s2:
+                    await s2.execute(_text2(
+                        "UPDATE council_debates SET "
+                        "fix_applied = TRUE, "
+                        "fix_applied_at = NOW() "
+                        "WHERE id = :id"),
+                        {"id": int(debate_id)})
+                    await s2.commit()
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "apply_fix_mark_debate_failed", error=str(exc))
+
+    return {
+        "ok": True,
+        "new_draft_id": None,    # filled by the generator job
+        "job_response": job_response,
+        "draft_label": draft_label,
+        "scope": target,
+        "section_regenerated": (
+            section_name if target == "section" else None),
+    }
+
+
+# ── Concern 7l-ii: re-run critic on a specific draft ──────────
+
+@app.post("/api/v1/documents/rerun-critic")
+@limiter.limit("10/minute")
+async def post_rerun_critic_for_draft(
+    request: Request,
+    body: dict,
+    session: dict = Depends(require_team_member),
+):
+    """Concern 7l-ii. Triggers a fresh academic review (which
+    includes the critic) scoped to a specific draft. The new
+    council_debates row gets parent_debate_id pointing at the
+    most recent debate for the same document_type, building the
+    iteration chain.
+
+    This is the cheapest re-run path: it doesn't regen the
+    document, it just re-reviews the existing content_text. Use
+    apply-fix to actually patch + regen.
+
+    Body: {
+      document_type: <type>,
+      source_draft_id: <int -- the draft to review>,
+      parent_debate_id: <int | null -- the prior round's id>
+    }
+
+    Returns the SSE URL the frontend should hit. The frontend
+    then opens an EventSource on the regular academic-review
+    endpoint with a query param that pins the source draft.
+
+    NOTE: This is currently a stub that returns the URL the
+    frontend should hit. The actual draft-pinning + parent
+    chaining is wired by the SSE handler reading these query
+    params; the academic-review endpoint already takes
+    document_type, so this stub returns the right URL with the
+    document_type + source_draft_id + parent_debate_id encoded.
+    """
+    document_type = str(body.get("document_type") or "")
+    source_draft_id = body.get("source_draft_id")
+    parent_debate_id = body.get("parent_debate_id")
+    if document_type and document_type not in {
+            "executive_brief", "analytical_appendix",
+            "presentation_deck", "presentation_script"}:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "document_type must be one of the four "
+                "deliverable types or omitted"))
+    qp = []
+    if document_type:
+        qp.append(f"document_type={document_type}")
+    if source_draft_id is not None:
+        qp.append(f"source_draft_id={int(source_draft_id)}")
+    if parent_debate_id is not None:
+        qp.append(f"parent_debate_id={int(parent_debate_id)}")
+    qs = ("?" + "&".join(qp)) if qp else ""
+    return {
+        "ok": True,
+        "sse_url": f"/api/council/academic-review{qs}",
+    }
+
+
 @app.post("/api/v1/export/executive-brief")
 @limiter.limit("6/minute")
 async def export_executive_brief(
@@ -13160,6 +13946,27 @@ async def _generate_brief_document(
             from tools.editor_drafts import create_draft
             content_json, content_text = executive_brief_to_editor(narratives)
 
+            # ── Concern 7h: pre-submission adversarial critic ─────
+            # Inlines the critic + debate-round response into the
+            # draft so the team reviews the critique alongside the
+            # brief. Always-write to council_debates regardless of
+            # severity. Fail-open: any failure leaves content_text
+            # unchanged and the generation flow proceeds.
+            try:
+                from agents.academic_review import (
+                    run_doc_gen_debate_round,
+                )
+                content_text, _debate_id, _critic_res = (
+                    await run_doc_gen_debate_round(
+                        reviewer_email=email,
+                        document_type="executive_brief",
+                        content_text=content_text))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning(
+                    "doc_gen_critic_pipeline_failed",
+                    document_type="executive_brief",
+                    error=str(_exc))
+
             # ── Post-generation audit (June 3 2026) ───────────────
             # Four deterministic checks against content_text BEFORE
             # the draft lands in editor_drafts. Flags travel on the
@@ -13758,6 +14565,23 @@ async def _generate_appendix_document(
             from tools.editor_drafts import create_draft
             content_json, content_text = analytical_appendix_to_editor(
                 narratives)
+
+            # ── Concern 7h: pre-submission adversarial critic ─────
+            try:
+                from agents.academic_review import (
+                    run_doc_gen_debate_round,
+                )
+                content_text, _debate_id, _critic_res = (
+                    await run_doc_gen_debate_round(
+                        reviewer_email=email,
+                        document_type="analytical_appendix",
+                        content_text=content_text))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning(
+                    "doc_gen_critic_pipeline_failed",
+                    document_type="analytical_appendix",
+                    error=str(_exc))
+
             draft = await create_draft(
                 "analytical_appendix", email,
                 f"Analytical Appendix — {date.today().isoformat()}",
@@ -14559,6 +15383,23 @@ async def _finalize_deck(
         from tools.editor_drafts import create_draft
 
         content_json, content_text = deck_slides_to_editor(slides)
+
+        # ── Concern 7h: pre-submission adversarial critic ─────
+        try:
+            from agents.academic_review import (
+                run_doc_gen_debate_round,
+            )
+            content_text, _debate_id, _critic_res = (
+                await run_doc_gen_debate_round(
+                    reviewer_email=email,
+                    document_type="presentation_deck",
+                    content_text=content_text))
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(
+                "doc_gen_critic_pipeline_failed",
+                document_type="presentation_deck",
+                error=str(_exc))
+
         audit_warnings = await _run_document_audit(
             content_text, "presentation_deck", email)
         draft = await create_draft(

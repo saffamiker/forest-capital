@@ -84,6 +84,40 @@ export interface IndependentReview {
   findings_seen:     Record<string, string>
 }
 
+// Concern 7 (revised) -- the integrated critic + debate round SSE
+// frames. critic_findings carries the structured CriticResult JSON;
+// debate_round_arbiter streams the council's response text in
+// arbiter_chunk-style chunks; critic_minor_only is an empty marker
+// frame the UI uses to render the "no debate -- minor findings only"
+// banner.
+export type CriticSeverity = 'Fatal' | 'Major' | 'Minor'
+
+export interface CriticFinding {
+  severity:        CriticSeverity
+  category?:       string
+  target_document?: string
+  document?:       string
+  location?:       string
+  description?:    string
+  evidence?:       string
+  recommendation?: string
+  agreed?:         boolean
+  raised_by?:      'gemini' | 'grok' | 'both'
+}
+
+export interface CriticResult {
+  document_scope:  string
+  gemini_findings: CriticFinding[]
+  grok_findings:   CriticFinding[]
+  merged_findings: CriticFinding[]
+  gemini_prose:    string
+  grok_prose:      string
+  fatal_count:     number
+  major_count:     number
+  minor_count:     number
+  partial_failure: boolean
+}
+
 export interface AcademicReviewResult {
   /** The full text-event-stream arbiter output as it landed. Parsed
    *  into structured sections by the rendering component via
@@ -100,6 +134,38 @@ export interface AcademicReviewResult {
    *  setters always include the field. Reader-side code defaults
    *  to null on a missing field. */
   independentReview?: IndependentReview | null
+  /** Concern 7 (revised) -- the merged critic findings payload
+   *  delivered on the `critic_findings` SSE frame. Null when the
+   *  critic step never ran (legacy review, frontend that hasn't
+   *  refreshed). */
+  criticResult?:    CriticResult | null
+  /** Concern 7 (revised) -- the debate round arbiter text streamed
+   *  on the `debate_round_arbiter` SSE frame. Empty string when
+   *  the debate round did not fire (minor-only findings). */
+  debateRoundText?: string
+  /** Concern 7 (revised) -- True when the backend emitted the
+   *  `critic_minor_only` frame (no debate round fired but the
+   *  critic still surfaced minor findings). */
+  criticMinorOnly?: boolean
+  /** Concern 7k -- council_debates row id from the
+   *  `debate_recorded` SSE frame. The UI uses this to route
+   *  propose-fix and apply-fix calls. */
+  debateId?:        number | null
+  /** Concern 7k-v -- auto-fired Fatal fix proposals delivered on
+   *  the `debate_recorded` frame, keyed by finding_id. */
+  fixProposals?:    Record<number, FixProposalPayload>
+}
+
+export interface FixProposalPayload {
+  finding_id:               number
+  target:                   'section' | 'document'
+  section_name:             string | null
+  rationale:                string
+  patch_instruction:        string
+  severity:                 string
+  auto_proposed:            boolean
+  target_document?:         string | null
+  source_of_truth_document?: string | null
 }
 
 interface AcademicReviewStore {
@@ -247,6 +313,18 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         let arbiterText = ''
         let peerResponses: Record<string, string> = {}
         let independentReview: IndependentReview | null = null
+        // Concern 7 (revised) -- streaming accumulators for the
+        // critic + debate-round SSE frames. criticResult lands as
+        // a single JSON payload on `critic_findings`. debateRoundText
+        // arrives as `debate_round_arbiter` chunks (one chunk per
+        // SSE frame, mirrors the arbiter_chunk shape). criticMinorOnly
+        // is a marker flag flipped to true by the `critic_minor_only`
+        // empty-payload frame.
+        let criticResult: CriticResult | null = null
+        let debateRoundText = ''
+        let criticMinorOnly = false
+        let debateId: number | null = null
+        const fixProposals: Record<number, FixProposalPayload> = {}
         let phaseSeen: AcademicReviewPhase = 'consulting'
 
         // eslint-disable-next-line no-constant-condition
@@ -275,6 +353,18 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
               per_finding?:       IndependentPerFinding[]
               model?:             string
               findings_seen?:     Record<string, string>
+              // Concern 7 (revised) -- critic + debate frame fields.
+              // Loose typing here -- the handler narrows below.
+              document_scope?:    string
+              gemini_findings?:   unknown[]
+              grok_findings?:     unknown[]
+              merged_findings?:   unknown[]
+              gemini_prose?:      string
+              grok_prose?:        string
+              fatal_count?:       number
+              major_count?:       number
+              minor_count?:       number
+              partial_failure?:   boolean
             }
             try { evt = JSON.parse(payload) } catch { continue }
             if (evt.type === 'peer_responses') {
@@ -284,6 +374,8 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 phase:  'streaming',
                 result: {
                   arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'arbiter_chunk') {
@@ -291,6 +383,8 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
               set({
                 result: {
                   arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'independent_review') {
@@ -307,6 +401,70 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
               set({
                 result: {
                   arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
+                },
+              })
+            } else if (evt.type === 'critic_findings') {
+              // Concern 7 (revised). Single payload carrying both
+              // models' findings + the merged list + severity counts.
+              const e = evt as unknown as Record<string, unknown>
+              criticResult = {
+                document_scope:
+                  String(e.document_scope ?? 'full_package'),
+                gemini_findings: (
+                  e.gemini_findings as CriticFinding[]) ?? [],
+                grok_findings:   (
+                  e.grok_findings as CriticFinding[]) ?? [],
+                merged_findings: (
+                  e.merged_findings as CriticFinding[]) ?? [],
+                gemini_prose:    String(e.gemini_prose ?? ''),
+                grok_prose:      String(e.grok_prose ?? ''),
+                fatal_count:     Number(e.fatal_count ?? 0),
+                major_count:     Number(e.major_count ?? 0),
+                minor_count:     Number(e.minor_count ?? 0),
+                partial_failure:
+                  Boolean(e.partial_failure),
+              }
+              set({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
+                },
+              })
+            } else if (evt.type === 'debate_round_arbiter') {
+              debateRoundText += evt.text ?? ''
+              set({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
+                },
+              })
+            } else if (evt.type === 'critic_minor_only') {
+              criticMinorOnly = true
+              set({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
+                },
+              })
+            } else if (evt.type === 'debate_recorded') {
+              const e = evt as unknown as Record<string, unknown>
+              debateId = (e.debate_id as number | null) ?? null
+              const incoming = (
+                e.fix_proposals as FixProposalPayload[])
+                ?? []
+              for (const p of incoming) {
+                fixProposals[p.finding_id] = p
+              }
+              set({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'error') {
@@ -326,7 +484,11 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         void phaseSeen  // captured for tracing only
         set({
           phase:       'done',
-          result:      { arbiterText, peerResponses, independentReview },
+          result:      {
+            arbiterText, peerResponses, independentReview,
+            criticResult, debateRoundText, criticMinorOnly,
+            debateId, fixProposals,
+          },
           completedAt: new Date().toISOString(),
           _controller: null,
         })
@@ -415,6 +577,13 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
         let arbiterText = ''
         let peerResponses: Record<string, string> = {}
         let independentReview: IndependentReview | null = null
+        // Concern 7 (revised) -- same critic + debate accumulators
+        // as the cross-document path.
+        let criticResult: CriticResult | null = null
+        let debateRoundText = ''
+        let criticMinorOnly = false
+        let debateId: number | null = null
+        const fixProposals: Record<number, FixProposalPayload> = {}
 
         const writeSlice = (partial: Partial<PerDocumentReviewSlice>):
           void => {
@@ -448,6 +617,16 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
               per_finding?:       IndependentPerFinding[]
               model?:             string
               findings_seen?:     Record<string, string>
+              document_scope?:    string
+              gemini_findings?:   unknown[]
+              grok_findings?:     unknown[]
+              merged_findings?:   unknown[]
+              gemini_prose?:      string
+              grok_prose?:        string
+              fatal_count?:       number
+              major_count?:       number
+              minor_count?:       number
+              partial_failure?:   boolean
             }
             try { evt = JSON.parse(payload) } catch { continue }
             if (evt.type === 'peer_responses') {
@@ -456,6 +635,8 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
                 phase: 'streaming',
                 result: {
                   arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'arbiter_chunk') {
@@ -463,6 +644,8 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
               writeSlice({
                 result: {
                   arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'independent_review') {
@@ -476,6 +659,68 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
               writeSlice({
                 result: {
                   arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
+                },
+              })
+            } else if (evt.type === 'critic_findings') {
+              const e = evt as unknown as Record<string, unknown>
+              criticResult = {
+                document_scope:
+                  String(e.document_scope ?? 'full_package'),
+                gemini_findings: (
+                  e.gemini_findings as CriticFinding[]) ?? [],
+                grok_findings:   (
+                  e.grok_findings as CriticFinding[]) ?? [],
+                merged_findings: (
+                  e.merged_findings as CriticFinding[]) ?? [],
+                gemini_prose:    String(e.gemini_prose ?? ''),
+                grok_prose:      String(e.grok_prose ?? ''),
+                fatal_count:     Number(e.fatal_count ?? 0),
+                major_count:     Number(e.major_count ?? 0),
+                minor_count:     Number(e.minor_count ?? 0),
+                partial_failure:
+                  Boolean(e.partial_failure),
+              }
+              writeSlice({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
+                },
+              })
+            } else if (evt.type === 'debate_round_arbiter') {
+              debateRoundText += evt.text ?? ''
+              writeSlice({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
+                },
+              })
+            } else if (evt.type === 'critic_minor_only') {
+              criticMinorOnly = true
+              writeSlice({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
+                },
+              })
+            } else if (evt.type === 'debate_recorded') {
+              const e = evt as unknown as Record<string, unknown>
+              debateId = (e.debate_id as number | null) ?? null
+              const incoming = (
+                e.fix_proposals as FixProposalPayload[])
+                ?? []
+              for (const p of incoming) {
+                fixProposals[p.finding_id] = p
+              }
+              writeSlice({
+                result: {
+                  arbiterText, peerResponses, independentReview,
+                  criticResult, debateRoundText, criticMinorOnly,
+                  debateId, fixProposals,
                 },
               })
             } else if (evt.type === 'error') {
@@ -490,7 +735,11 @@ export const useAcademicReviewStore = create<AcademicReviewStore>(
 
         writeSlice({
           phase:       'done',
-          result:      { arbiterText, peerResponses, independentReview },
+          result:      {
+            arbiterText, peerResponses, independentReview,
+            criticResult, debateRoundText, criticMinorOnly,
+            debateId, fixProposals,
+          },
           completedAt: new Date().toISOString(),
         })
       } catch (err) {

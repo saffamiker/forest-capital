@@ -42,6 +42,7 @@ import {
   AlertCircle, XCircle, AlertTriangle,
 } from 'lucide-react'
 
+import AuditExportButton from './AuditExportButton'
 import Markdown from './Markdown'
 import SubmissionReadinessReviewConfirmModal
   from './SubmissionReadinessReviewConfirmModal'
@@ -322,6 +323,10 @@ export default function SubmissionReadinessReview(): React.ReactElement {
                 Run Submission Readiness Review
               </button>
             </TeamGate>
+            {/* Concern 7m-iii -- audit trail export dropdown.
+                Renders even when no review has run; the backend
+                returns whatever rounds exist. */}
+            <AuditExportButton mode="dropdown" isTeam={isTeam} />
           </div>
 
           {/* ── Section A -- Data Cross-Reference ─────────────── */}
