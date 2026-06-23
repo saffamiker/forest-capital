@@ -13160,6 +13160,27 @@ async def _generate_brief_document(
             from tools.editor_drafts import create_draft
             content_json, content_text = executive_brief_to_editor(narratives)
 
+            # ── Concern 7h: pre-submission adversarial critic ─────
+            # Inlines the critic + debate-round response into the
+            # draft so the team reviews the critique alongside the
+            # brief. Always-write to council_debates regardless of
+            # severity. Fail-open: any failure leaves content_text
+            # unchanged and the generation flow proceeds.
+            try:
+                from agents.academic_review import (
+                    run_doc_gen_debate_round,
+                )
+                content_text, _debate_id, _critic_res = (
+                    await run_doc_gen_debate_round(
+                        reviewer_email=email,
+                        document_type="executive_brief",
+                        content_text=content_text))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning(
+                    "doc_gen_critic_pipeline_failed",
+                    document_type="executive_brief",
+                    error=str(_exc))
+
             # ── Post-generation audit (June 3 2026) ───────────────
             # Four deterministic checks against content_text BEFORE
             # the draft lands in editor_drafts. Flags travel on the
@@ -13758,6 +13779,23 @@ async def _generate_appendix_document(
             from tools.editor_drafts import create_draft
             content_json, content_text = analytical_appendix_to_editor(
                 narratives)
+
+            # ── Concern 7h: pre-submission adversarial critic ─────
+            try:
+                from agents.academic_review import (
+                    run_doc_gen_debate_round,
+                )
+                content_text, _debate_id, _critic_res = (
+                    await run_doc_gen_debate_round(
+                        reviewer_email=email,
+                        document_type="analytical_appendix",
+                        content_text=content_text))
+            except Exception as _exc:  # noqa: BLE001
+                log.warning(
+                    "doc_gen_critic_pipeline_failed",
+                    document_type="analytical_appendix",
+                    error=str(_exc))
+
             draft = await create_draft(
                 "analytical_appendix", email,
                 f"Analytical Appendix — {date.today().isoformat()}",
@@ -14559,6 +14597,23 @@ async def _finalize_deck(
         from tools.editor_drafts import create_draft
 
         content_json, content_text = deck_slides_to_editor(slides)
+
+        # ── Concern 7h: pre-submission adversarial critic ─────
+        try:
+            from agents.academic_review import (
+                run_doc_gen_debate_round,
+            )
+            content_text, _debate_id, _critic_res = (
+                await run_doc_gen_debate_round(
+                    reviewer_email=email,
+                    document_type="presentation_deck",
+                    content_text=content_text))
+        except Exception as _exc:  # noqa: BLE001
+            log.warning(
+                "doc_gen_critic_pipeline_failed",
+                document_type="presentation_deck",
+                error=str(_exc))
+
         audit_warnings = await _run_document_audit(
             content_text, "presentation_deck", email)
         draft = await create_draft(

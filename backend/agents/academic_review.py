@@ -2815,6 +2815,154 @@ async def record_debate_round(
         return None
 
 
+# ── Document-generation debate round (Concern 7h) ──────────────────────────
+
+
+_DOC_GEN_DEBATE_HEADER = (
+    "\n\n---\n\n"
+    "## Response to Adversarial Pre-Submission Review\n\n"
+    "An adversarial critic pass (Gemini + Grok) ran against this "
+    "document at generation time. The council's response below is "
+    "the same single-arbiter debate-round pass that fires during "
+    "the academic review pipeline -- inlined into the document at "
+    "assembly time so the team reviews the critique and the "
+    "response together in the editor.\n"
+)
+
+
+async def run_doc_gen_debate_round(
+    *,
+    reviewer_email: str | None,
+    document_type: str,
+    content_text: str,
+    data_hash: str | None = None,
+    source_draft_id: int | None = None,
+) -> tuple[str, int | None, "CriticResult | None"]:
+    """Concern 7h. After a document generator has assembled its
+    content_text, run the adversarial critic + (conditional) single
+    Opus debate-round arbiter pass + persist to council_debates.
+
+    Returns:
+      (content_text_with_response, council_debates_id, critic_result)
+
+    The content_text returned is the input + (if fatal+major > 0) a
+    new "## Response to Adversarial Pre-Submission Review" section
+    holding the structured findings table + the arbiter's response.
+
+    On minor-only findings: content_text is unchanged, but the
+    council_debates row IS still written.
+
+    On any failure in the critic/debate/record sequence the original
+    content_text is returned unchanged and the caller's generation
+    flow proceeds -- the pre-submission critic is advisory only.
+    """
+    try:
+        critic_context = await build_critic_context(
+            reviewer_email=reviewer_email,
+            document_type=document_type)
+        critic_result = await run_critic_review(
+            critic_context, document_type=document_type)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("doc_gen_critic_failed", error=str(exc),
+                    document_type=document_type)
+        return content_text, None, None
+
+    debate_text: str | None = None
+    was_addressed: list[bool] | None = None
+    counter_arguments: list[dict[str, Any]] | None = None
+
+    if critic_result.has_actionable:
+        # Single Opus arbiter call -- the doc-gen path skips peer
+        # fan-out for cost (the academic-review path runs the full
+        # council; doc gen runs only the debate-round arbiter on
+        # the critic findings, conditioned on the assembled
+        # document).
+        peer_responses_stub: dict[str, str] = {}
+        try:
+            debate_text = await asyncio.to_thread(
+                run_arbiter_debate_round,
+                critic_context, peer_responses_stub,
+                critic_result.merged_findings,
+                False, None)
+            was_addressed, counter_arguments = (
+                parse_debate_assessments(
+                    debate_text, critic_result.merged_findings))
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "doc_gen_debate_round_failed",
+                error=str(exc), document_type=document_type)
+            debate_text = (
+                "## Response to Adversarial Critic\n\n"
+                f"Debate round generation failed ({exc}).\n\n"
+                "## Revised Overall Verdict\n\n"
+                "No changes -- primary document stands.")
+
+    # Always-write to council_debates -- both branches.
+    debate_id = await record_debate_round(
+        interaction_id=None,
+        context="document_generation",
+        document_type=document_type,
+        critic_result=critic_result,
+        peer_responses=None,
+        arbiter_resolution=debate_text,
+        was_addressed=was_addressed,
+        counter_arguments=counter_arguments,
+        data_hash=data_hash,
+        source_draft_id=source_draft_id,
+    )
+
+    if not critic_result.has_actionable or not debate_text:
+        # Minor-only OR debate failed without text -- no inline
+        # section is appended; the council_debates row alone is the
+        # audit record.
+        return content_text, debate_id, critic_result
+
+    # Build the structured findings table + counter-args block +
+    # arbiter response, append to content_text.
+    section_parts: list[str] = [
+        _DOC_GEN_DEBATE_HEADER,
+        "",
+        "### Critic Findings",
+        "",
+        "| Severity | Category | Location | Description |",
+        "|---|---|---|---|",
+    ]
+    for f in critic_result.merged_findings:
+        sev = _normalise_severity(f.get("severity"))
+        if sev == "Minor":
+            continue  # only Fatal/Major surfaced inline
+        section_parts.append(
+            f"| {sev} | {f.get('category', '?')} | "
+            f"{f.get('location', '?')} | "
+            f"{(f.get('description') or '').replace('|', '/')} |")
+    section_parts.extend([
+        "",
+        "### Council Response",
+        "",
+        debate_text,
+    ])
+    if counter_arguments:
+        section_parts.extend([
+            "",
+            "### Counter-Arguments Logged",
+            "",
+            "The following critic findings were reviewed by the "
+            "council and intentionally not addressed in the final "
+            "draft -- the rebuttal text is the durable record of "
+            "why each was not actioned.",
+            "",
+        ])
+        for ca in counter_arguments:
+            f = ca.get("finding") or {}
+            section_parts.append(
+                f"- **{_normalise_severity(f.get('severity'))} "
+                f"{f.get('category', '?')} "
+                f"({f.get('location', '?')})** -- "
+                f"{ca.get('rebuttal', '')}")
+    appended = content_text + "\n".join(section_parts) + "\n"
+    return appended, debate_id, critic_result
+
+
 def chunk_arbiter_text(text: str) -> list[str]:
     """Splits the completed verdict into word-group chunks so the SSE
     consumer still sees the verdict arrive progressively."""
