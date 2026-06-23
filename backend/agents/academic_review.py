@@ -322,6 +322,7 @@ def build_review_context_block(
     team_activity: dict[str, Any] | None = None,
     team_members: list[tuple[str, str]] | None = None,
     target_review_type: str | None = None,
+    value_manifest: dict[str, Any] | None = None,
 ) -> str:
     """
     Renders the analytics inventory, the grouped documents and the
@@ -338,6 +339,16 @@ def build_review_context_block(
     arbiter has cross-reference awareness without flooding the
     prompt. None (the cross-document default) renders every type at
     full content under PROJECT DOCUMENTS unchanged.
+
+    value_manifest — June 23 2026, Concern 6b. When supplied (the
+    target document's editor_drafts.value_manifest snapshot, ie
+    {value: {token, data_hash, generated_at}}), a NUMERIC REFERENCE
+    block is appended after ANALYTICS INVENTORY giving the arbiter
+    the authoritative cache values that were substituted into the
+    document at generation time. Only the per-doc reviews carry a
+    target document and therefore a target manifest -- cross-doc
+    reviews intentionally skip this section (the cross-deliverable
+    consistency check covers that surface).
     """
     lines: list[str] = ["=== PROJECT CONTEXT FOR ACADEMIC REVIEW ===", ""]
 
@@ -363,6 +374,47 @@ def build_review_context_block(
         "- Analytics components available: "
         + (", ".join(comps) if comps else "(none — analytics data not yet loaded)")
     )
+
+    # — Numeric reference (Concern 6b, June 23 2026) —
+    # Authoritative cache values for the target document. The
+    # arbiter validates per-claim figures against this list; the
+    # per-document arbiter prompt (Concern 6c) instructs it to flag
+    # mismatches as HIGH severity numeric inconsistency and unknown
+    # figures as freehand-figure / manual-verification cases.
+    # Cross-document reviews intentionally skip this section -- the
+    # cross-deliverable consistency check covers that surface and a
+    # full union of every doc's manifest would flood the prompt.
+    if target_review_type and value_manifest:
+        lines.append("")
+        lines.append(
+            "NUMERIC REFERENCE "
+            "(authoritative cache values for this review)")
+        lines.append(
+            "These values were substituted into the document at "
+            "generation time. Treat any figure in the document that "
+            "contradicts these as a potential error.")
+        # value_manifest is {value -> {token, data_hash,
+        # generated_at}}. Emit one line per token in
+        # TOKEN: value form. Skip entries with missing tokens or
+        # missing values defensively -- a corrupt manifest entry
+        # should not abort the render.
+        token_to_value: dict[str, str] = {}
+        for v, meta in value_manifest.items():
+            if not isinstance(meta, dict):
+                continue
+            token = meta.get("token")
+            if not token or not v:
+                continue
+            # If two values share a token (shouldn't happen but
+            # could under a manifest-corruption edge), keep the
+            # first encountered -- the per-token list is meant to
+            # be unique.
+            if token not in token_to_value:
+                token_to_value[token] = str(v)
+        for tok in sorted(token_to_value):
+            lines.append(f"  {tok}: {token_to_value[tok]}")
+        if not token_to_value:
+            lines.append("  (manifest is empty)")
 
     # — Documents —
     if target_review_type and target_review_type in DOC_TYPE_LABELS:
@@ -586,12 +638,33 @@ async def gather_review_context(
     # keyed under. Script's editor type IS its review key, so the
     # lookup falls through to the identity mapping there.
     target_review_type: str | None = None
+    target_value_manifest: dict[str, Any] | None = None
     if document_type:
         target_review_type = _EDITOR_TO_REVIEW_TYPE.get(
             document_type, document_type)
+        # Concern 6b -- read the target draft's value_manifest so
+        # the context block can surface the authoritative cache
+        # values to the arbiter. The Layer-3 helper returns the
+        # manifest alongside content_text; we already overlaid the
+        # draft above so this read is for the manifest only.
+        if reviewer_email:
+            try:
+                from tools.editor_drafts import (
+                    get_current_draft_with_layer3,
+                )
+                draft_l3 = await get_current_draft_with_layer3(
+                    reviewer_email, document_type)
+                if draft_l3:
+                    target_value_manifest = (
+                        draft_l3.get("value_manifest") or None)
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "academic_review_value_manifest_read_failed",
+                    document_type=document_type, error=str(exc))
     block = build_review_context_block(
         analytics, docs_by_type, team_activity, team_members,
-        target_review_type=target_review_type)
+        target_review_type=target_review_type,
+        value_manifest=target_value_manifest)
     present = [t for t, v in docs_by_type.items() if v]
     missing = [t for t, v in docs_by_type.items() if not v]
     log.info(
